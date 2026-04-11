@@ -22,7 +22,6 @@ functions-framework so it can be tested without those dependencies.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from bigquery_agent_analytics import Client
@@ -30,40 +29,14 @@ from bigquery_agent_analytics import CodeEvaluator
 from bigquery_agent_analytics import LLMAsJudge
 from bigquery_agent_analytics import serialize
 from bigquery_agent_analytics import TraceFilter
+from bigquery_agent_analytics._deploy_runtime import resolve_client_options
 
 
 def build_client_from_context(
     user_defined_context: dict[str, Any],
 ) -> Client:
   """Build a Client from userDefinedContext + env vars."""
-  udc = user_defined_context
-  project_id = udc.get("project_id", os.environ.get("BQ_AGENT_PROJECT"))
-  dataset_id = udc.get("dataset_id", os.environ.get("BQ_AGENT_DATASET"))
-  table_id = udc.get(
-      "table_id",
-      os.environ.get("BQ_AGENT_TABLE", "agent_events"),
-  )
-  location = udc.get(
-      "location",
-      os.environ.get("BQ_AGENT_LOCATION", "us-central1"),
-  )
-  endpoint = udc.get("endpoint") or os.environ.get("BQ_AGENT_ENDPOINT")
-  connection_id = udc.get("connection_id") or os.environ.get(
-      "BQ_AGENT_CONNECTION_ID"
-  )
-
-  if not project_id or not dataset_id:
-    raise ValueError("project_id and dataset_id required")
-
-  return Client(
-      project_id=project_id,
-      dataset_id=dataset_id,
-      table_id=table_id,
-      location=location,
-      verify_schema=False,
-      endpoint=endpoint,
-      connection_id=connection_id,
-  )
+  return Client(**resolve_client_options(user_defined_context))
 
 
 def process_calls(

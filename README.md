@@ -1,33 +1,65 @@
 # BigQuery Agent Analytics SDK
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](pyproject.toml)
+[![CI](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/actions/workflows/ci.yml/badge.svg)](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/actions/workflows/ci.yml)
+
 An open-source Python SDK for analyzing, evaluating, and curating agent traces
 stored in BigQuery. Built on top of the
 [Agent Development Kit (ADK)](https://github.com/google/adk-python), it provides
 a consumption-layer toolkit for agent observability at scale.
 
-## Features
+## Overview
 
-- **Trace Reconstruction** -- Retrieve and visualize agent conversation DAGs
-- **Code-Based Evaluation** -- Deterministic metrics (latency, turn count,
-  error rate, token efficiency, cost)
-- **LLM-as-Judge** -- Semantic evaluation using LLM scoring (correctness,
-  hallucination, sentiment)
-- **Trajectory Matching** -- Exact, in-order, and any-order tool call matching
-- **Multi-Trial Evaluation** -- Run N trials with pass@k / pass^k metrics for
-  non-deterministic agents
-- **Grader Composition** -- Combine code + LLM graders via weighted, binary, or
-  majority strategies
-- **Eval Suite Management** -- Lifecycle management with graduation, saturation
-  detection, and balance checking
-- **Eval Quality Validation** -- Static checks for ambiguous tasks, class
-  imbalance, and suspicious thresholds
-- **Drift Detection** -- Compare golden vs production question distributions
-- **Agent Insights** -- Multi-stage pipeline for comprehensive session analysis
-- **Long-Horizon Memory** -- Cross-session context and semantic search
-- **BigQuery AI/ML Integration** -- AI.GENERATE, embeddings, anomaly detection,
-  latency forecasting
-- **Context Graph** -- Property Graph linking technical traces to business
-  entities, with GQL traversal, world-change detection, and artifact lineage
+The BigQuery Agent Analytics SDK connects your AI agent telemetry in BigQuery to
+a rich set of evaluation, observability, and analytics capabilities. It is
+designed for ML engineers, data scientists, and platform teams who run agents in
+production and need to understand agent behavior, measure quality, and detect
+regressions — all through BigQuery SQL or Python.
+
+## Key Features
+
+**Observability**
+- Trace reconstruction and DAG visualization
+- Per-event-type BigQuery views
+- Observability dashboards (SQL and BigFrames)
+
+**Evaluation**
+- Code-based metrics (latency, turn count, error rate, token efficiency, cost)
+- LLM-as-Judge scoring (correctness, hallucination, sentiment)
+- Trajectory matching (exact, in-order, any-order)
+- Multi-trial evaluation with pass@k / pass^k
+- Grader composition (weighted, binary, majority strategies)
+- Eval suite lifecycle management with graduation and saturation detection
+- Static quality validation (ambiguous tasks, class imbalance, suspicious thresholds)
+
+**AI/ML Integration**
+- BigQuery AI.GENERATE, AI.EMBED, AI.CLASSIFY
+- Anomaly detection and latency forecasting
+- Categorical (Hatteras-style) evaluation via BigFrames
+
+**Advanced Analytics**
+- Context Graph — property graph linking traces to business entities with GQL traversal
+- YAML-driven ontology extraction and materialization
+- Long-horizon cross-session memory
+- Multi-stage agent insights pipeline
+- Drift detection for golden vs production question distributions
+
+**CLI** (`bq-agent-sdk`)
+- 12+ commands for diagnostics, evaluation, and CI/CD integration
+
+**Deployment Surfaces**
+- Remote Function (BigQuery SQL via Cloud Run)
+- Python UDF scoring kernels
+- Streaming evaluation (Cloud Scheduler + Cloud Run)
+- Continuous query templates
+
+## Prerequisites
+
+- Python 3.10+
+- A Google Cloud project with BigQuery enabled
+- Agent traces stored in BigQuery via the
+  [ADK BigQuery Trace Exporter](https://github.com/google/adk-python/tree/main/contributing/extensions/bigquery_trace_exporter)
 
 ## Installation
 
@@ -57,152 +89,75 @@ trace = client.get_trace("trace-abc-123")
 trace.render()
 ```
 
-### Code-Based Evaluation
+See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
+feature.
 
-```python
-from bigquery_agent_analytics import CodeEvaluator
+## Documentation
 
-evaluator = CodeEvaluator.latency(threshold_ms=5000)
-score = evaluator.evaluate_session({
-    "session_id": "s1",
-    "avg_latency_ms": 2000,
-})
-print(score.passed)  # True
-```
-
-### Multi-Trial Evaluation
-
-```python
-from bigquery_agent_analytics import BigQueryTraceEvaluator, TrialRunner
-
-evaluator = BigQueryTraceEvaluator(
-    project_id="my-project",
-    dataset_id="analytics",
-)
-runner = TrialRunner(evaluator, num_trials=5)
-
-report = await runner.run_trials(
-    session_id="sess-123",
-    golden_trajectory=[{"tool_name": "search", "args": {}}],
-)
-print(f"pass@k: {report.pass_at_k}, pass^k: {report.pass_pow_k}")
-```
-
-### Grader Pipeline
-
-```python
-from bigquery_agent_analytics import (
-    CodeEvaluator, GraderPipeline, LLMAsJudge, WeightedStrategy,
-)
-
-pipeline = (
-    GraderPipeline(WeightedStrategy(
-        weights={"latency_evaluator": 0.3, "correctness_judge": 0.7},
-    ))
-    .add_code_grader(CodeEvaluator.latency())
-    .add_llm_grader(LLMAsJudge.correctness())
-)
-
-verdict = await pipeline.evaluate(
-    session_summary={"session_id": "s1", "avg_latency_ms": 2000},
-    trace_text="User: hello\nAgent: hi",
-    final_response="hi",
-)
-```
-
-### Eval Suite Management
-
-```python
-from bigquery_agent_analytics import EvalCategory, EvalSuite, EvalTaskDef
-
-suite = EvalSuite(name="my_agent_evals")
-suite.add_task(EvalTaskDef(
-    task_id="t1",
-    session_id="sess-123",
-    description="Test basic search",
-    expected_trajectory=[{"tool_name": "search", "args": {}}],
-))
-
-health = suite.check_health()
-print(health.warnings)
-
-# Auto-graduate stable tasks to regression
-graduated = suite.auto_graduate(pass_history, threshold_runs=10)
-```
-
-### CLI Quick Start
-
-The SDK includes a CLI for diagnostics, evaluation, and analytics:
-
-```bash
-# Health check
-bq-agent-sdk doctor --project-id=P --dataset-id=D
-
-# Retrieve a trace
-bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S
-
-# Run evaluation (CI gate with --exit-code)
-bq-agent-sdk evaluate --project-id=P --dataset-id=D \
-  --evaluator=latency --exit-code
-
-# Generate insights
-bq-agent-sdk insights --project-id=P --dataset-id=D --last=7d
-
-# All 10 commands: doctor, get-trace, evaluate, insights, drift,
-# distribution, hitl-metrics, list-traces, views create-all, views create
-```
-
-Set `BQ_AGENT_PROJECT` and `BQ_AGENT_DATASET` environment variables to
-skip `--project-id` and `--dataset-id` on every call.
-
-### Remote Function (BigQuery SQL)
-
-Deploy the SDK as a BigQuery Remote Function for SQL-native access:
-
-```bash
-cd deploy/remote_function
-./deploy.sh my-project us-central1 agent_analytics US
-```
-
-Then query from SQL (using the fully-qualified name from `register.sql`):
-
-```sql
-SELECT `my-project.agent_analytics.agent_analytics`(
-  'analyze', JSON'{"session_id": "s1"}'
-);
-SELECT `my-project.agent_analytics.agent_analytics`(
-  'evaluate', JSON'{"metric": "latency"}'
-);
-```
-
-See [SDK.md](SDK.md) for the full CLI reference, Remote Function API,
-and continuous query templates.
+| Resource | Description |
+|----------|-------------|
+| [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
+| [Design Documents](docs/README.md) | Architecture decisions and design rationale |
+| [Examples](examples/README.md) | Notebooks, SQL scripts, and demos |
+| [Deployment Guides](deploy/README.md) | Four deployment surfaces for Google Cloud |
 
 ## Architecture
 
 ```
-bigquery_agent_analytics/
-├── __init__.py              # Package exports
-├── client.py                # High-level SDK client
-├── evaluators.py            # CodeEvaluator + LLMAsJudge
-├── trace.py                 # Trace reconstruction & visualization
-├── trace_evaluator.py       # Trajectory matching & replay
-├── multi_trial.py           # Multi-trial runner + pass@k
-├── grader_pipeline.py       # Grader composition pipeline
-├── eval_suite.py            # Eval suite lifecycle management
-├── eval_validator.py        # Static validation checks
-├── feedback.py              # Drift detection & question distribution
-├── insights.py              # Multi-stage insights pipeline
-├── memory_service.py        # Long-horizon agent memory
-├── ai_ml_integration.py     # BigQuery AI/ML capabilities
-├── bigframes_evaluator.py   # BigFrames DataFrame evaluator
-├── context_graph.py         # Property Graph: BizNode extraction, GQL, world-change
-├── event_semantics.py       # Canonical event type helpers & predicates
-├── views.py                 # Per-event-type BigQuery view management
-├── cli.py                   # CLI entry point (bq-agent-sdk)
-├── formatter.py             # Output formatting (json/text/table)
-└── serialization.py         # Uniform serialization layer
+src/bigquery_agent_analytics/
+│
+├── Core
+│   ├── client.py                  # High-level SDK client
+│   ├── trace.py                   # Trace reconstruction & visualization
+│   ├── views.py                   # Per-event-type BigQuery view management
+│   ├── event_semantics.py         # Canonical event type helpers & predicates
+│   ├── serialization.py           # Uniform serialization layer
+│   └── formatter.py               # Output formatting (json/text/table)
+│
+├── Evaluation
+│   ├── evaluators.py              # CodeEvaluator + LLMAsJudge
+│   ├── trace_evaluator.py         # Trajectory matching & replay
+│   ├── multi_trial.py             # Multi-trial runner + pass@k
+│   ├── grader_pipeline.py         # Grader composition pipeline
+│   ├── eval_suite.py              # Eval suite lifecycle management
+│   └── eval_validator.py          # Static validation checks
+│
+├── AI/ML
+│   ├── ai_ml_integration.py       # BigQuery AI/ML capabilities
+│   ├── bigframes_evaluator.py     # BigFrames DataFrame evaluator
+│   ├── categorical_evaluator.py   # Hatteras categorical evaluation
+│   └── categorical_views.py       # Categorical metric views
+│
+├── Analytics
+│   ├── insights.py                # Multi-stage insights pipeline
+│   ├── feedback.py                # Drift detection & question distribution
+│   ├── context_graph.py           # Property Graph: BizNode extraction, GQL
+│   └── memory_service.py          # Long-horizon agent memory
+│
+├── Ontology
+│   ├── ontology_models.py         # Pydantic models for ontology schema
+│   ├── ontology_schema_compiler.py# YAML → compiled schema
+│   ├── ontology_graph.py          # Ontology graph construction
+│   ├── ontology_materializer.py   # Graph materialization to BigQuery
+│   ├── ontology_property_graph.py # Property graph operations
+│   └── ontology_orchestrator.py   # End-to-end ontology pipeline
+│
+└── CLI & Deploy
+    ├── cli.py                     # CLI entry point (bq-agent-sdk)
+    ├── udf_kernels.py             # Python UDF scoring kernels
+    └── udf_sql_templates.py       # UDF SQL generation
 ```
+
+## Related Projects
+
+- [Google ADK](https://github.com/google/adk-python) — Agent Development Kit
+  for building AI agents
+- [ADK BigQuery Trace Exporter](https://github.com/google/adk-python/tree/main/contributing/extensions/bigquery_trace_exporter) —
+  ADK plugin that writes agent traces to BigQuery
+- [BigQuery](https://cloud.google.com/bigquery) — Google Cloud analytics data
+  warehouse
+- [BigQuery AI Functions](https://cloud.google.com/bigquery/docs/ai-application-overview) —
+  AI.GENERATE, AI.EMBED, AI.CLASSIFY, and more
 
 ## Development
 
@@ -218,6 +173,16 @@ pyink --config pyproject.toml src/ tests/
 isort src/ tests/
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
 ## License
 
-Apache License 2.0 -- see [LICENSE](LICENSE) for details.
+Apache License 2.0 — see [LICENSE](LICENSE) for details.
+
+## Disclaimer
+
+This is not an officially supported Google product. This SDK is intended to
+demonstrate patterns for analyzing agent traces in BigQuery and is provided
+as-is.
