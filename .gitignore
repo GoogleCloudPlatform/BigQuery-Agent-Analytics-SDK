@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Local workspace metadata
+.code*/
+deploy/streaming_evaluation/.streaming_evaluation_state.json
+
+# macOS Finder metadata
+.DS_Store
+.DS_Store?
+._*
