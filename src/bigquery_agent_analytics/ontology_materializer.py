@@ -205,10 +205,18 @@ def _route_node(
     entity_spec: EntitySpec,
     session_id: str,
 ) -> dict:
-  """Convert an ``ExtractedNode`` to a row dict for ``insert_rows_json``."""
+  """Convert an ``ExtractedNode`` to a row dict for ``insert_rows_json``.
+
+  Only properties declared in the entity spec are included.  Extra
+  properties emitted by AI.GENERATE (e.g. hallucinated fields or
+  fields belonging to a different entity type) are silently dropped
+  to prevent ``insert_rows_json`` failures on non-schema columns.
+  """
+  schema_props = {p.name for p in entity_spec.properties}
   row: dict = {}
   for prop in node.properties:
-    row[prop.name] = prop.value
+    if prop.name in schema_props:
+      row[prop.name] = prop.value
   row["session_id"] = session_id
   row["extracted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
   return row
@@ -267,9 +275,12 @@ def _route_edge(
   else:
     row.update(to_keys)
 
-  # Edge properties.
+  # Edge properties — only include properties declared in the spec.
+  # Extra AI-emitted fields are dropped to prevent insert failures.
+  schema_props = {p.name for p in rel.properties}
   for prop in edge.properties:
-    row[prop.name] = prop.value
+    if prop.name in schema_props:
+      row[prop.name] = prop.value
 
   # Determine session_id for delete-scoped ownership.
   # For lineage edges with to_session_column, session_id = to_session value

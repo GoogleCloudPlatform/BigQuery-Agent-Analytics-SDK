@@ -174,9 +174,14 @@ class TestBindingSpecSessionColumns:
   """BindingSpec from_session_column / to_session_column validation."""
 
   def test_session_columns_default_none(self):
-    """Loading the existing YMGO spec yields None session columns."""
+    """V4 relationships (without session column overrides) default to None."""
     spec = _demo_spec()
-    for rel in spec.relationships:
+    # Check the original V4 relationships, not lineage rels.
+    v4_rels = [
+        r for r in spec.relationships if r.binding.from_session_column is None
+    ]
+    assert len(v4_rels) >= 1
+    for rel in v4_rels:
       assert rel.binding.from_session_column is None
       assert rel.binding.to_session_column is None
 
@@ -672,6 +677,61 @@ class TestMaterializerSessionOwnership:
     row = _route_edge(edge, rel, spec, "sess-B")
     # session_id should be set from to_session_column value.
     assert row["session_id"] == "sess-B"
+
+  def test_route_node_filters_to_schema(self):
+    """Extra AI-emitted properties not in the entity spec are dropped."""
+    from bigquery_agent_analytics.ontology_materializer import _route_node
+
+    entity = _make_entity(
+        "mako_DecisionPoint",
+        props=[
+            PropertySpec(name="decision_id", type="string"),
+            PropertySpec(name="decision_type", type="string"),
+        ],
+        keys=["decision_id"],
+        source="p.d.decision_points",
+    )
+    node = ExtractedNode(
+        node_id="s1:mako_DecisionPoint:decision_id=d1",
+        entity_name="mako_DecisionPoint",
+        labels=["mako_DecisionPoint"],
+        properties=[
+            ExtractedProperty(name="decision_id", value="d1"),
+            ExtractedProperty(name="decision_type", value="query"),
+            # These do NOT belong to this entity — AI hallucinated them.
+            ExtractedProperty(name="adUnitName", value="Homepage Banner"),
+            ExtractedProperty(name="rejection_id", value="r1"),
+        ],
+    )
+    row = _route_node(node, entity, "s1")
+    assert row["decision_id"] == "d1"
+    assert row["decision_type"] == "query"
+    assert "adUnitName" not in row
+    assert "rejection_id" not in row
+    assert "session_id" in row
+
+  def test_route_edge_filters_to_schema(self):
+    """Extra AI-emitted edge properties not in the rel spec are dropped."""
+    spec = _demo_spec()
+    rel = spec.relationships[0]  # CandidateEdge: edge_type, mako_scoreValue
+    edge = ExtractedEdge(
+        edge_id="s1:CandidateEdge:0",
+        relationship_name="CandidateEdge",
+        from_node_id="s1:mako_DecisionPoint:decision_id=d1",
+        to_node_id="s1:sup_YahooAdUnit:adUnitId=u1",
+        properties=[
+            ExtractedProperty(name="edge_type", value="SELECTED"),
+            ExtractedProperty(name="mako_scoreValue", value=0.9),
+            # Extra — does not belong to CandidateEdge schema.
+            ExtractedProperty(name="event_time", value="2026-01-01"),
+            ExtractedProperty(name="from_session_id", value="s0"),
+        ],
+    )
+    row = _route_edge(edge, rel, spec, "s1")
+    assert row["edge_type"] == "SELECTED"
+    assert row["mako_scoreValue"] == 0.9
+    assert "event_time" not in row
+    assert "from_session_id" not in row
 
 
 # ------------------------------------------------------------------ #
