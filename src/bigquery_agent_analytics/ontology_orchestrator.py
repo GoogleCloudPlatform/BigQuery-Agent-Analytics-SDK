@@ -60,6 +60,17 @@ logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 # GQL Showcase Query                                                   #
 # ------------------------------------------------------------------ #
 
+_LINEAGE_GQL_TEMPLATE = """\
+GRAPH `{graph_ref}`
+MATCH
+  ({prior_alias}:{entity_label})-[{edge_alias}:{edge_label}]->({current_alias}:{entity_label})
+{where_clause}\
+RETURN
+  {return_columns}
+ORDER BY {edge_alias}.event_time DESC
+LIMIT @result_limit
+"""
+
 _SHOWCASE_GQL_TEMPLATE = """\
 GRAPH `{graph_ref}`
 MATCH
@@ -167,6 +178,84 @@ def compile_showcase_gql(
       where_clause=where_clause,
       return_columns=",\n  ".join(return_cols),
       order_column=order_column,
+  )
+
+
+def compile_lineage_gql(
+    spec: GraphSpec,
+    project_id: str,
+    dataset_id: str,
+    relationship_name: str,
+    graph_name: Optional[str] = None,
+    session_filter: bool = True,
+) -> str:
+  """Generate a GQL lineage traversal query for cross-session edges.
+
+  Produces a ``MATCH`` query for a self-edge lineage relationship,
+  returning prior-session properties, edge metadata (changed_properties,
+  event_time), and current-session properties.
+
+  Args:
+      spec: The validated graph spec.
+      project_id: GCP project ID.
+      dataset_id: BigQuery dataset ID.
+      relationship_name: The lineage relationship to traverse.
+      graph_name: Override graph name (defaults to ``spec.name``).
+      session_filter: If True, adds a ``WHERE`` clause filtering
+          the current (destination) node by ``@session_id``.
+
+  Returns:
+      A GQL query string.
+
+  Raises:
+      ValueError: If the relationship is not found or is not a
+          self-edge (from_entity != to_entity).
+  """
+  rel_map = {r.name: r for r in spec.relationships}
+  if relationship_name not in rel_map:
+    raise ValueError(
+        f"Relationship {relationship_name!r} not found in spec. "
+        f"Available: {sorted(rel_map.keys())}."
+    )
+  rel = rel_map[relationship_name]
+  if rel.from_entity != rel.to_entity:
+    raise ValueError(
+        f"Relationship {relationship_name!r} is not a self-edge "
+        f"(from={rel.from_entity!r}, to={rel.to_entity!r}). "
+        f"Lineage GQL requires from_entity == to_entity."
+    )
+
+  entity_map = {e.name: e for e in spec.entities}
+  entity = entity_map[rel.from_entity]
+
+  name = graph_name or spec.name
+  graph_ref = f"{project_id}.{dataset_id}.{name}"
+
+  prior_alias = "prior"
+  current_alias = "current"
+  edge_alias = _short_alias(rel.name, prefix="e")
+
+  where_clause = ""
+  if session_filter:
+    where_clause = f"WHERE {current_alias}.session_id = @session_id\n"
+
+  return_cols = []
+  for prop in entity.properties:
+    return_cols.append(f"{prior_alias}.{prop.name} AS prior_{prop.name}")
+  for prop in rel.properties:
+    return_cols.append(f"{edge_alias}.{prop.name}")
+  for prop in entity.properties:
+    return_cols.append(f"{current_alias}.{prop.name} AS current_{prop.name}")
+
+  return _LINEAGE_GQL_TEMPLATE.format(
+      graph_ref=graph_ref,
+      prior_alias=prior_alias,
+      entity_label=entity.name,
+      edge_alias=edge_alias,
+      edge_label=rel.name,
+      current_alias=current_alias,
+      where_clause=where_clause,
+      return_columns=",\n  ".join(return_cols),
   )
 
 

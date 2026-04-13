@@ -188,29 +188,45 @@ def compile_edge_table_clause(
         f"materialization but not for Property Graph compilation."
     )
 
-  # Edge KEY = from_columns + to_columns + session_id (deduplicated).
-  # session_id is part of node KEY, so the edge must carry it for
-  # both SOURCE and DESTINATION references.
+  # Session key columns for SOURCE and DESTINATION endpoints.
+  # Default: edge's own session_id (V4 behavior).
+  # Override: binding.from_session_column / to_session_column (V5 lineage).
+  src_session_col = rel.binding.from_session_column or "session_id"
+  dst_session_col = rel.binding.to_session_column or "session_id"
+
+  # Edge KEY = from_columns + to_columns + session columns (deduplicated).
   edge_key_cols = list(from_cols)
   for col in to_cols:
     if col not in edge_key_cols:
       edge_key_cols.append(col)
-  if "session_id" not in edge_key_cols:
-    edge_key_cols.append("session_id")
+  for col in [src_session_col, dst_session_col, "session_id"]:
+    if col not in edge_key_cols:
+      edge_key_cols.append(col)
   edge_key_str = ", ".join(edge_key_cols)
 
-  # SOURCE KEY references the from-entity's node key (PK + session_id).
-  src_key_str = ", ".join([*from_cols, "session_id"])
+  # SOURCE KEY uses src_session_col mapped to node's session_id key.
+  src_key_str = ", ".join([*from_cols, src_session_col])
   src_ref_str = ", ".join([*src.keys.primary, "session_id"])
 
-  # DESTINATION KEY references the to-entity's node key (PK + session_id).
-  dst_key_str = ", ".join([*to_cols, "session_id"])
+  # DESTINATION KEY uses dst_session_col mapped to node's session_id key.
+  dst_key_str = ", ".join([*to_cols, dst_session_col])
   dst_ref_str = ", ".join([*tgt.keys.primary, "session_id"])
 
   # Properties: relationship-specific properties + metadata.
-  # Exclude columns already in the edge KEY (session_id is now in KEY).
+  # Exclude columns already in the edge KEY — except session column
+  # overrides, which must stay in PROPERTIES so they are queryable in
+  # GQL (BigQuery Property Graph does not auto-expose KEY columns).
   key_set = set(edge_key_cols)
-  prop_names = [p.name for p in rel.properties if p.name not in key_set]
+  session_override_cols = set()
+  if rel.binding.from_session_column:
+    session_override_cols.add(rel.binding.from_session_column)
+  if rel.binding.to_session_column:
+    session_override_cols.add(rel.binding.to_session_column)
+  prop_names = [
+      p.name
+      for p in rel.properties
+      if p.name not in key_set or p.name in session_override_cols
+  ]
   prop_names.append("extracted_at")
   props_str = ",\n        ".join(prop_names)
 

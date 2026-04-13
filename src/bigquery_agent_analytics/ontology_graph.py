@@ -40,6 +40,7 @@ Example usage::
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 from typing import Optional
@@ -54,6 +55,8 @@ from .ontology_models import ExtractedProperty
 from .ontology_models import GraphSpec
 from .ontology_schema_compiler import compile_extraction_prompt
 from .ontology_schema_compiler import compile_output_schema
+from .structured_extraction import run_structured_extractors
+from .structured_extraction import StructuredExtractor
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -87,13 +90,17 @@ WITH session_transcripts AS (
     ) AS transcript
   FROM `{project}.{dataset}.{table}` AS base
   WHERE base.session_id IN UNNEST(@session_ids)
-    AND base.event_type IN (
-      'LLM_RESPONSE',
-      'TOOL_COMPLETED',
-      'AGENT_COMPLETED',
-      'HITL_CONFIRMATION_REQUEST_COMPLETED'
+    AND (
+      base.event_type IN (
+        'LLM_RESPONSE',
+        'TOOL_COMPLETED',
+        'AGENT_COMPLETED',
+        'HITL_CONFIRMATION_REQUEST_COMPLETED'
+      )
+      OR base.span_id IN UNNEST(@partial_span_ids)
     )
     AND base.content IS NOT NULL
+    AND base.span_id NOT IN UNNEST(@excluded_span_ids)
   GROUP BY base.session_id
 )
 SELECT
@@ -133,6 +140,19 @@ WHERE base.session_id IN UNNEST(@session_ids)
     'AGENT_COMPLETED',
     'HITL_CONFIRMATION_REQUEST_COMPLETED'
   )
+  AND base.content IS NOT NULL
+ORDER BY base.timestamp ASC
+"""
+
+_FETCH_RAW_EVENTS_QUERY = """\
+SELECT
+  base.span_id,
+  base.session_id,
+  base.event_type,
+  base.timestamp,
+  TO_JSON_STRING(base.content) AS content_json
+FROM `{project}.{dataset}.{table}` AS base
+WHERE base.session_id IN UNNEST(@session_ids)
   AND base.content IS NOT NULL
 ORDER BY base.timestamp ASC
 """
@@ -346,6 +366,7 @@ class OntologyGraphManager:
       endpoint: str = "gemini-2.5-flash",
       location: Optional[str] = None,
       bq_client: Optional[bigquery.Client] = None,
+      extractors: Optional[dict[str, StructuredExtractor]] = None,
   ) -> None:
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -354,6 +375,7 @@ class OntologyGraphManager:
     self.endpoint = endpoint
     self.location = location
     self._bq_client = bq_client
+    self.extractors = extractors or {}
 
   @property
   def bq_client(self) -> bigquery.Client:
@@ -429,15 +451,124 @@ class OntologyGraphManager:
     Returns:
         An ``ExtractedGraph`` with nodes and edges.
     """
-    if use_ai_generate:
-      return self._extract_via_ai_generate(session_ids)
-    return self._extract_payloads(session_ids)
+    # Run structured extractors first if any are registered.
+    structured_nodes: list[ExtractedNode] = []
+    structured_edges: list[ExtractedEdge] = []
+    excluded_span_ids: list[str] = []
+    partial_span_ids: list[str] = []
+    partial_hint = ""
 
-  def _extract_via_ai_generate(self, session_ids: list[str]) -> ExtractedGraph:
-    """Server-side extraction using AI.GENERATE with output_schema."""
+    if self.extractors and use_ai_generate:
+      raw_events = self._fetch_raw_events(session_ids)
+      if raw_events:
+        structured_result = run_structured_extractors(
+            raw_events,
+            self.extractors,
+            self.spec,
+        )
+        structured_nodes = structured_result.nodes
+        structured_edges = structured_result.edges
+        excluded_span_ids = list(structured_result.fully_handled_span_ids)
+        partial_span_ids = list(structured_result.partially_handled_span_ids)
+
+        # Build prompt hint for partially-handled spans so the LLM
+        # focuses on unstructured content and avoids re-extracting
+        # facts already captured structurally.
+        if partial_span_ids:
+          entity_names = sorted({n.entity_name for n in structured_nodes})
+          partial_hint = (
+              "Note: the following entity types were already "
+              "extracted from structured events — focus on "
+              "unstructured content only: " + ", ".join(entity_names) + ".\n"
+          )
+
+    if use_ai_generate:
+      ai_graph = self._extract_via_ai_generate(
+          session_ids,
+          excluded_span_ids,
+          partial_span_ids,
+          partial_hint,
+      )
+    else:
+      ai_graph = self._extract_payloads(session_ids)
+
+    # Merge: structured nodes/edges + AI-extracted, dedup by node_id.
+    if structured_nodes or structured_edges:
+      seen_nodes: dict[str, ExtractedNode] = {}
+      for node in structured_nodes:
+        seen_nodes[node.node_id] = node
+      for node in ai_graph.nodes:
+        if node.node_id not in seen_nodes:
+          seen_nodes[node.node_id] = node
+      all_edges = structured_edges + ai_graph.edges
+      return ExtractedGraph(
+          name=self.spec.name,
+          nodes=list(seen_nodes.values()),
+          edges=all_edges,
+      )
+
+    return ai_graph
+
+  def _fetch_raw_events(self, session_ids: list[str]) -> list[dict]:
+    """Fetch raw events with full content for structured extraction.
+
+    Unlike ``_EXTRACT_PAYLOADS_QUERY`` (V4), this returns all event
+    types and preserves ``event_type`` and full ``content`` JSON so
+    that registered structured extractors can match on event type and
+    access typed fields.
+    """
+    query = _FETCH_RAW_EVENTS_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=self.table_id,
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter(
+                "session_ids",
+                "STRING",
+                session_ids,
+            ),
+        ]
+    )
+    try:
+      job = self.bq_client.query(query, job_config=job_config)
+      events = []
+      for row in job.result():
+        event = dict(row)
+        # Parse content_json back into a dict for extractors.
+        raw_content = event.pop("content_json", None)
+        if raw_content:
+          try:
+            event["content"] = json.loads(raw_content)
+          except (json.JSONDecodeError, TypeError):
+            event["content"] = raw_content
+        events.append(event)
+      return events
+    except Exception as e:
+      logger.warning("Failed to fetch raw events: %s", e)
+      return []
+
+  def _extract_via_ai_generate(
+      self,
+      session_ids: list[str],
+      excluded_span_ids: Optional[list[str]] = None,
+      partial_span_ids: Optional[list[str]] = None,
+      partial_hint: str = "",
+  ) -> ExtractedGraph:
+    """Server-side extraction using AI.GENERATE with output_schema.
+
+    The transcript CTE includes events matching the V4 allowlist OR
+    events whose span_id is in ``partial_span_ids`` (custom event
+    types that were partially handled by structured extractors and
+    still need LLM processing for unstructured content).
+    """
     prompt = compile_extraction_prompt(self.spec)
     schema_hint = compile_output_schema(self.spec)
-    full_prompt = prompt + "\n\nReturn a single JSON object:\n" + schema_hint
+    full_prompt = prompt
+    if partial_hint:
+      full_prompt += "\n" + partial_hint
+    full_prompt += "\n\nReturn a single JSON object:\n" + schema_hint
 
     query = _EXTRACT_ONTOLOGY_AI_QUERY.format(
         prompt=_escape_sql_literal(full_prompt),
@@ -449,7 +580,21 @@ class OntologyGraphManager:
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
-            bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
+            bigquery.ArrayQueryParameter(
+                "session_ids",
+                "STRING",
+                session_ids,
+            ),
+            bigquery.ArrayQueryParameter(
+                "excluded_span_ids",
+                "STRING",
+                excluded_span_ids or [],
+            ),
+            bigquery.ArrayQueryParameter(
+                "partial_span_ids",
+                "STRING",
+                partial_span_ids or [],
+            ),
         ]
     )
 
@@ -512,3 +657,122 @@ class OntologyGraphManager:
         name=self.spec.name,
         nodes=nodes,
     )
+
+
+# ------------------------------------------------------------------ #
+# Lineage Detection                                                    #
+# ------------------------------------------------------------------ #
+
+
+def detect_lineage_edges(
+    current_graph: ExtractedGraph,
+    current_session_id: str,
+    prior_graphs: dict[str, ExtractedGraph],
+    lineage_entity_types: list[str],
+    spec: GraphSpec,
+) -> list[ExtractedEdge]:
+  """Detect evolution edges between current and prior session graphs.
+
+  For each entity type in ``lineage_entity_types``, find nodes that
+  share the same primary key across sessions and have different
+  property values.
+
+  Args:
+      current_graph: Graph extracted from the current session.
+      current_session_id: The current session ID.
+      prior_graphs: Dict of ``{session_id: ExtractedGraph}`` for
+          prior sessions.
+      lineage_entity_types: Entity names to check for evolution.
+      spec: GraphSpec for entity key lookups.
+
+  Returns:
+      List of ``ExtractedEdge`` instances for lineage relationships.
+  """
+  entity_map = {e.name: e for e in spec.entities}
+  lineage_edges: list[ExtractedEdge] = []
+
+  for entity_name in lineage_entity_types:
+    entity_spec = entity_map.get(entity_name)
+    if entity_spec is None:
+      continue
+
+    key_cols = entity_spec.keys.primary
+
+    # Index current-session nodes by primary key values.
+    current_by_key: dict[str, ExtractedNode] = {}
+    for node in current_graph.nodes:
+      if node.entity_name != entity_name:
+        continue
+      prop_map = {p.name: p.value for p in node.properties}
+      key_vals = tuple(str(prop_map.get(k, "")) for k in key_cols)
+      key_str = ",".join(f"{k}={v}" for k, v in zip(key_cols, key_vals))
+      if key_str:
+        current_by_key[key_str] = node
+
+    # Compare against each prior session.
+    for prior_session_id, prior_graph in prior_graphs.items():
+      prior_by_key: dict[str, ExtractedNode] = {}
+      for node in prior_graph.nodes:
+        if node.entity_name != entity_name:
+          continue
+        prop_map = {p.name: p.value for p in node.properties}
+        key_vals = tuple(str(prop_map.get(k, "")) for k in key_cols)
+        key_str = ",".join(f"{k}={v}" for k, v in zip(key_cols, key_vals))
+        if key_str:
+          prior_by_key[key_str] = node
+
+      # Find shared keys with changed properties.
+      for key_str, current_node in current_by_key.items():
+        prior_node = prior_by_key.get(key_str)
+        if prior_node is None:
+          continue
+
+        current_props = {p.name: p.value for p in current_node.properties}
+        prior_props = {p.name: p.value for p in prior_node.properties}
+
+        changed = []
+        all_prop_names = set(current_props) | set(prior_props)
+        for pname in sorted(all_prop_names):
+          if pname in key_cols:
+            continue
+          if current_props.get(pname) != prior_props.get(pname):
+            changed.append(pname)
+
+        if not changed:
+          continue
+
+        rel_name = f"{entity_name}EvolvedFrom"
+        edge_id = (
+            f"{current_session_id}:{rel_name}:" f"{prior_session_id}:{key_str}"
+        )
+
+        lineage_edges.append(
+            ExtractedEdge(
+                edge_id=edge_id,
+                relationship_name=rel_name,
+                from_node_id=prior_node.node_id,
+                to_node_id=current_node.node_id,
+                properties=[
+                    ExtractedProperty(
+                        name="from_session_id",
+                        value=prior_session_id,
+                    ),
+                    ExtractedProperty(
+                        name="to_session_id",
+                        value=current_session_id,
+                    ),
+                    ExtractedProperty(
+                        name="event_time",
+                        value=datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat(),
+                    ),
+                    ExtractedProperty(
+                        name="changed_properties",
+                        value=",".join(changed),
+                    ),
+                ],
+            )
+        )
+
+  return lineage_edges

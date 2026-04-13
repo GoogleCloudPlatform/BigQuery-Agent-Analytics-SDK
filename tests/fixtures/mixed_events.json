@@ -1,0 +1,74 @@
+[
+  {
+    "session_id": "sess-1",
+    "span_id": "span-001",
+    "event_type": "BKA_DECISION",
+    "content": {
+      "decision_id": "dec-100",
+      "outcome": "APPROVED",
+      "confidence": 0.95
+    },
+    "timestamp": "2026-04-13T10:00:00Z"
+  },
+  {
+    "session_id": "sess-1",
+    "span_id": "span-002",
+    "event_type": "BKA_DECISION",
+    "content": {
+      "decision_id": "dec-101",
+      "outcome": "REJECTED",
+      "confidence": 0.40
+    },
+    "timestamp": "2026-04-13T10:01:00Z"
+  },
+  {
+    "session_id": "sess-1",
+    "span_id": "span-003",
+    "event_type": "LLM_RESPONSE",
+    "content": {
+      "text": "The ad unit meets baseline criteria."
+    },
+    "timestamp": "2026-04-13T10:02:00Z"
+  },
+  {
+    "session_id": "sess-1",
+    "span_id": "span-004",
+    "event_type": "LLM_RESPONSE",
+    "content": {
+      "text": "Candidate ranking complete for campaign alpha."
+    },
+    "timestamp": "2026-04-13T10:03:00Z"
+  },
+  {
+    "session_id": "sess-2",
+    "span_id": "span-005",
+    "event_type": "BKA_DECISION",
+    "content": {
+      "decision_id": "dec-200",
+      "outcome": "APPROVED",
+      "confidence": 0.88
+    },
+    "timestamp": "2026-04-13T11:00:00Z"
+  },
+  {
+    "session_id": "sess-2",
+    "span_id": "span-006",
+    "event_type": "LLM_RESPONSE",
+    "content": {
+      "text": "Budget verification passed."
+    },
+    "timestamp": "2026-04-13T11:01:00Z"
+  },
+  {
+    "session_id": "sess-1",
+    "span_id": "span-007",
+    "event_type": "BKA_DECISION",
+    "content": {
+      "decision_id": "dec-102",
+      "outcome": "APPROVED",
+      "confidence": 0.72,
+      "reasoning_text": "Selected due to high historical CTR and brand-safe content."
+    },
+    "timestamp": "2026-04-13T10:04:00Z"
+  }
+]

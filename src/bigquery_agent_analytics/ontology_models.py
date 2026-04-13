@@ -89,6 +89,24 @@ class BindingSpec(BaseModel):
       default=None,
       description="Join columns to the target entity.",
   )
+  from_session_column: Optional[str] = Field(
+      default=None,
+      description=(
+          "Edge column to use as session key for SOURCE endpoint. "
+          "When set, this column maps to the source node's session_id "
+          "key instead of the edge's own session_id. "
+          "Used for cross-session lineage edges."
+      ),
+  )
+  to_session_column: Optional[str] = Field(
+      default=None,
+      description=(
+          "Edge column to use as session key for DESTINATION endpoint. "
+          "When set, this column maps to the destination node's "
+          "session_id key instead of the edge's own session_id. "
+          "Used for cross-session lineage edges."
+      ),
+  )
 
 
 class EntitySpec(BaseModel):
@@ -305,6 +323,30 @@ def _validate_graph_spec(spec: GraphSpec) -> None:
               f"not in target entity {rel.to_entity!r} "
               f"primary keys {sorted(target_keys)}."
           )
+
+    # Session column override validation: both required together.
+    has_from_session = rel.binding.from_session_column is not None
+    has_to_session = rel.binding.to_session_column is not None
+    if has_from_session != has_to_session:
+      raise ValueError(
+          f"Relationship {rel.name!r}: from_session_column and "
+          f"to_session_column must both be present or both be absent."
+      )
+
+    if has_from_session:
+      rel_prop_names = {p.name for p in rel.properties}
+      if rel.binding.from_session_column not in rel_prop_names:
+        raise ValueError(
+            f"Relationship {rel.name!r}: from_session_column "
+            f"{rel.binding.from_session_column!r} not found in "
+            f"relationship properties."
+        )
+      if rel.binding.to_session_column not in rel_prop_names:
+        raise ValueError(
+            f"Relationship {rel.name!r}: to_session_column "
+            f"{rel.binding.to_session_column!r} not found in "
+            f"relationship properties."
+        )
 
 
 def load_graph_spec_from_string(

@@ -271,7 +271,14 @@ def _route_edge(
   for prop in edge.properties:
     row[prop.name] = prop.value
 
-  row["session_id"] = session_id
+  # Determine session_id for delete-scoped ownership.
+  # For lineage edges with to_session_column, session_id = to_session value
+  # so that the edge is owned by the destination session.
+  # For normal edges, session_id = the session being processed (V4 behavior).
+  if rel.binding.to_session_column and rel.binding.to_session_column in row:
+    row["session_id"] = row[rel.binding.to_session_column]
+  else:
+    row["session_id"] = session_id
   row["extracted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
   return row
 

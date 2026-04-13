@@ -449,17 +449,70 @@ except ImportError as e:
 # Ontology Orchestrator
 try:
   from .ontology_orchestrator import build_ontology_graph
+  from .ontology_orchestrator import compile_lineage_gql
   from .ontology_orchestrator import compile_showcase_gql
 
   __all__.extend(
       [
           "build_ontology_graph",
+          "compile_lineage_gql",
           "compile_showcase_gql",
       ]
   )
 except ImportError as e:
   logger.debug(
       "Could not import ontology orchestrator: %s.",
+      e,
+  )
+
+# V5: Structured Extraction
+try:
+  from .structured_extraction import extract_bka_decision_event
+  from .structured_extraction import run_structured_extractors
+  from .structured_extraction import StructuredExtractionResult
+  from .structured_extraction import StructuredExtractor
+
+  __all__.extend(
+      [
+          "StructuredExtractionResult",
+          "StructuredExtractor",
+          "extract_bka_decision_event",
+          "run_structured_extractors",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import structured extraction: %s.",
+      e,
+  )
+
+# V5: TTL Importer
+try:
+  from .ttl_importer import ttl_import
+  from .ttl_importer import ttl_resolve
+  from .ttl_importer import TTLImportResult
+
+  __all__.extend(
+      [
+          "TTLImportResult",
+          "ttl_import",
+          "ttl_resolve",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import ttl importer: %s.",
+      e,
+  )
+
+# V5: Lineage Detection
+try:
+  from .ontology_graph import detect_lineage_edges
+
+  __all__.append("detect_lineage_edges")
+except ImportError as e:
+  logger.debug(
+      "Could not import lineage detection: %s.",
       e,
   )
 

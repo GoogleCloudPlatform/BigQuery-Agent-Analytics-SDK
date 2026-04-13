@@ -953,6 +953,6 @@ class TestExtractGraph:
     call_args = mock_client.query.call_args
     job_config = call_args[1].get("job_config") or call_args[0][1]
     params = job_config.query_parameters
-    assert len(params) == 1
-    assert params[0].name == "session_ids"
-    assert params[0].values == ["sess1", "sess2"]
+    assert len(params) >= 1
+    session_param = next(p for p in params if p.name == "session_ids")
+    assert session_param.values == ["sess1", "sess2"]
