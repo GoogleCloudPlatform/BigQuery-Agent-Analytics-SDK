@@ -31,7 +31,12 @@ from typer.testing import CliRunner
 
 from ontology.cli import app
 
-
+# NOTE: Click's CliRunner merges stderr into ``result.output`` by default
+# (``mix_stderr=True``). The CLI writes errors to stderr, so all
+# error-path assertions below match against ``result.output``. If a
+# future Typer/Click upgrade flips the default or this runner is
+# constructed with ``mix_stderr=False``, switch error assertions to
+# ``result.stderr`` to keep them honest.
 _RUNNER = CliRunner()
 
 
@@ -116,7 +121,8 @@ def test_validate_invalid_ontology_json_output(tmp_path):
 
   result = _RUNNER.invoke(app, ["validate", str(spec), "--json"])
 
-  expected = textwrap.dedent(f"""\
+  expected = textwrap.dedent(
+      f"""\
       [
         {{
           "file": "{spec}",
@@ -127,7 +133,8 @@ def test_validate_invalid_ontology_json_output(tmp_path):
           "message": "Entity 'Thing': key column 'missing_col' is not a declared property."
         }}
       ]
-      """)
+      """
+  )
   assert result.exit_code == 1
   assert result.output == expected
 
@@ -153,7 +160,7 @@ def test_validate_malformed_yaml_reports_line_and_column(tmp_path):
 # --------------------------------------------------------------------- #
 
 
-def test_validate_binding_file_is_unimplemented(tmp_path):
+def test_validate_binding_file_is_deferred(tmp_path):
   spec = _write(
       tmp_path,
       "x.binding.yaml",
@@ -166,8 +173,9 @@ def test_validate_binding_file_is_unimplemented(tmp_path):
   result = _RUNNER.invoke(app, ["validate", str(spec)])
 
   expected = (
-      f"{spec}:0:0: cli-unimplemented \u2014 "
-      "Binding validation is not yet implemented in src/ontology.\n"
+      f"{spec}:0:0: cli-binding-deferred \u2014 "
+      "Binding validation is not yet implemented; only ontology files are "
+      "supported in this revision of gm validate.\n"
   )
   assert result.exit_code == 2
   assert result.output == expected
@@ -193,12 +201,36 @@ def test_validate_unknown_kind_is_usage_error(tmp_path):
   assert result.output == expected
 
 
-def test_validate_missing_file_is_usage_error(tmp_path):
+def test_validate_missing_file_emits_structured_error(tmp_path):
   missing = tmp_path / "does-not-exist.ontology.yaml"
 
   result = _RUNNER.invoke(app, ["validate", str(missing)])
 
+  expected = (
+      f"{missing}:0:0: cli-missing-file \u2014 File not found: {missing}\n"
+  )
   assert result.exit_code == 2
-  assert "does-not-exist.ontology.yaml" in result.output
+  assert result.output == expected
 
 
+def test_validate_missing_file_with_json_emits_structured_json(tmp_path):
+  missing = tmp_path / "does-not-exist.ontology.yaml"
+
+  result = _RUNNER.invoke(app, ["validate", str(missing), "--json"])
+
+  expected = textwrap.dedent(
+      f"""\
+      [
+        {{
+          "file": "{missing}",
+          "line": 0,
+          "col": 0,
+          "rule": "cli-missing-file",
+          "severity": "error",
+          "message": "File not found: {missing}"
+        }}
+      ]
+      """
+  )
+  assert result.exit_code == 2
+  assert result.output == expected
