@@ -23,6 +23,17 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [context_graph_v2_design.md](context_graph_v2_design.md) | Property Graph V2 design |
 | [context_graph_v3_design.md](context_graph_v3_design.md) | Property Graph V3 with GQL and world-change detection |
 | [ontology_graph_v4_design.md](ontology_graph_v4_design.md) | YAML-driven ontology extraction and materialization |
+| [learning_ontology_and_context_graph.md](learning_ontology_and_context_graph.md) | Learning guide for ontology and context graph |
+
+## Ontology Reference
+
+| Document | Description |
+|----------|-------------|
+| [ontology/ontology.md](ontology/ontology.md) | Ontology core design — logical ontology spec |
+| [ontology/binding.md](ontology/binding.md) | Binding design — attaching ontology to physical tables |
+| [ontology/compilation.md](ontology/compilation.md) | Compilation — resolving ontology + binding into backend DDL |
+| [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, import-owl) |
+| [ontology/owl-import.md](ontology/owl-import.md) | OWL import — converting OWL ontologies to YAML format |
 
 ## Deployment Surfaces
 
