@@ -180,9 +180,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
-
-## Disclaimer
-
-This is not an officially supported Google product. This SDK is intended to
-demonstrate patterns for analyzing agent traces in BigQuery and is provided
-as-is.
