@@ -43,9 +43,9 @@ import yaml
 from .binding_loader import load_binding
 from .binding_loader import load_binding_from_string
 from .binding_models import Binding
-from .compiler import compile_graph
-from .loader import load_ontology
-from .loader import load_ontology_from_string
+from .graph_ddl_compiler import compile_graph
+from .ontology_loader import load_ontology
+from .ontology_loader import load_ontology_from_string
 from .ontology_models import Ontology
 from .scaffold import NamingMode
 from .scaffold import scaffold

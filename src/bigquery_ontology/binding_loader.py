@@ -59,10 +59,10 @@ from .binding_models import Binding
 from .binding_models import EntityBinding
 from .binding_models import PropertyBinding
 from .binding_models import RelationshipBinding
-from .loader import _effective_keys
-from .loader import _effective_properties
-from .loader import _is_entity_subtype
-from .loader import load_ontology
+from .ontology_loader import _effective_keys
+from .ontology_loader import _effective_properties
+from .ontology_loader import _is_entity_subtype
+from .ontology_loader import load_ontology
 from .ontology_models import Entity
 from .ontology_models import Ontology
 from .ontology_models import Property

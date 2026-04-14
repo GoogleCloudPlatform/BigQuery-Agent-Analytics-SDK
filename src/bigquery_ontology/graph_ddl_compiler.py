@@ -61,11 +61,11 @@ from .ontology_models import Entity
 from .ontology_models import Ontology
 from .ontology_models import Property
 from .ontology_models import Relationship
-from .resolved_models import ResolvedEdgeTable
-from .resolved_models import ResolvedGraph
-from .resolved_models import ResolvedLabelAndProperties
-from .resolved_models import ResolvedNodeTable
-from .resolved_models import ResolvedProperty
+from .graph_ddl_models import ResolvedEdgeTable
+from .graph_ddl_models import ResolvedGraph
+from .graph_ddl_models import ResolvedLabelAndProperties
+from .graph_ddl_models import ResolvedNodeTable
+from .graph_ddl_models import ResolvedProperty
 
 
 # --------------------------------------------------------------------- #

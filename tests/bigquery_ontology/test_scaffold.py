@@ -26,7 +26,7 @@ import textwrap
 import pytest
 import yaml
 
-from bigquery_ontology.loader import load_ontology_from_string
+from bigquery_ontology.ontology_loader import load_ontology_from_string
 from bigquery_ontology.scaffold import NamingMode, scaffold
 
 
