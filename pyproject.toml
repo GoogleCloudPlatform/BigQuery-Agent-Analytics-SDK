@@ -56,6 +56,7 @@ gm = "bigquery_ontology.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bigquery_agent_analytics", "src/bigquery_ontology"]
+exclude = ["src/bigquery_ontology/docs"]
 
 [tool.pyink]
 line-length = 80
