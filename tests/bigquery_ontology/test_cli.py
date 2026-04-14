@@ -408,6 +408,26 @@ def test_validate_binding_json_output_uses_binding_rule_prefix(tmp_path):
   assert result.output == expected
 
 
+def test_validate_binding_unreadable_ontology_flag_emits_structured_json(
+    tmp_path,
+):
+  # Proves that ``--ontology`` uses ``str | None`` (not ``Path``) so
+  # Typer does not pre-validate readability and bypass ``--json``
+  # structured output.
+  binding = _write(tmp_path, "tiny.binding.yaml", _MINIMAL_BINDING)
+  unreadable = tmp_path / "locked.ontology.yaml"
+  unreadable.write_text("ontology: tiny\n", encoding="utf-8")
+  unreadable.chmod(0o000)
+
+  result = _RUNNER.invoke(
+      app,
+      ["validate", str(binding), "--ontology", str(unreadable), "--json"],
+  )
+
+  assert result.exit_code == 2
+  assert "cli-missing-ontology" in result.output
+
+
 def test_validate_unknown_kind_is_usage_error(tmp_path):
   spec = _write(
       tmp_path,

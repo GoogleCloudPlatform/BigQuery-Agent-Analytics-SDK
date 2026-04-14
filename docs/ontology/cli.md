@@ -108,17 +108,19 @@ gm validate <file>
 
 - Loader detects ontology vs binding from the top-level key.
 - **Ontology** → checked against `ontology.md` §10.
-- **Binding** → checked against `binding.md` §9. The loader also
-  attempts to locate the companion ontology (named by `ontology:` in
-  the binding, looked up as `<name>.ontology.yaml` in the same
-  directory) for cross-validation. If not found, binding validates
-  syntactically and the loader emits a warning.
+- **Binding** → checked against `binding.md` §9. The CLI locates
+  the companion ontology (named by `ontology:` in the binding,
+  looked up as `<name>.ontology.yaml` in the same directory) for
+  cross-validation. If the companion is not found, validation fails
+  with exit 2 (`cli-missing-ontology`). Use `--ontology PATH` to
+  point at a specific ontology file and skip auto-discovery.
 
 ### Flags
 
 | Flag | Purpose |
 |---|---|
 | `--json` | Structured error output (see §3). |
+| `--ontology <path>` | For binding files: path to the companion ontology. Overrides auto-discovery of `<name>.ontology.yaml` next to the binding. |
 
 On success, nothing is written to stdout.
 

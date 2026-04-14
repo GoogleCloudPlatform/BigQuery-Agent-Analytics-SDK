@@ -32,6 +32,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -183,7 +184,11 @@ def validate(
         "--json",
         help="Emit structured JSON errors on stderr.",
     ),
-    ontology_path: Path = typer.Option(
+    # Type is ``str | None`` rather than ``Path | None`` because Typer
+    # maps ``pathlib.Path`` to ``TyperPath(readable=True)``, which
+    # pre-validates readability and emits human usage text on failure —
+    # bypassing ``--json`` structured output.
+    ontology_path: str | None = typer.Option(
         None,
         "--ontology",
         help=(
@@ -213,6 +218,9 @@ def validate(
   try:
     kind = _detect_kind(text)
   except yaml.YAMLError as exc:
+    # kind is indeterminate (YAML failed before _detect_kind returned),
+    # but _collect_errors uses the generic "yaml-parse" rule for
+    # yaml.YAMLError regardless of kind, so the value is harmless.
     _emit_errors(
         _collect_errors(str(file), exc, kind="ontology"),
         as_json=json_output,
@@ -220,8 +228,9 @@ def validate(
     raise typer.Exit(code=1)
 
   if kind == "binding":
+    resolved_ontology = Path(ontology_path) if ontology_path is not None else None
     _validate_binding_file(
-        file, ontology_path=ontology_path, json_output=json_output
+        file, ontology_path=resolved_ontology, json_output=json_output
     )
     return
 
@@ -294,21 +303,26 @@ def _validate_binding_file(
   # parseable ontology name) leaves ``ontology_path`` as None; the binding
   # loader below will then surface the real shape/parse error.
   discovered_via_peek = False
+  peeked_name: str | None = None
   if ontology_path is None:
-    peeked = _peek_companion_path(text, file)
-    if peeked is not None:
-      ontology_path = peeked
+    peeked_name = _peek_ontology_name(text)
+    if peeked_name is not None:
+      ontology_path = file.parent / f"{peeked_name}.ontology.yaml"
       discovered_via_peek = True
 
   ontology = None
   if ontology_path is not None:
-    if not ontology_path.exists() or not ontology_path.is_file():
+    if (
+        not ontology_path.exists()
+        or not ontology_path.is_file()
+        or not os.access(ontology_path, os.R_OK)
+    ):
       # Auto-discovery and explicit-flag paths get distinct messages —
       # the former explains *why* we looked where we did, the latter
       # simply reports what the user asked us to open.
       if discovered_via_peek:
         message = (
-            f"Binding references ontology {_peek_ontology_name(text)!r}, "
+            f"Binding references ontology {peeked_name!r}, "
             f"but no companion ontology file found at {ontology_path}."
         )
       else:
@@ -373,20 +387,6 @@ def _validate_binding_file(
     typer.echo(f"internal error: {exc}", err=True)
     raise typer.Exit(code=3)
   # Success: nothing on stdout.
-
-
-def _peek_companion_path(binding_text: str, binding_file: Path) -> Path | None:
-  """Compute the expected companion-ontology path from the binding YAML.
-
-  Returns ``None`` on any parse failure or missing ``ontology:`` name;
-  the caller should then let the binding loader surface the real
-  shape/parse error instead of masking it with a companion-discovery
-  error.
-  """
-  name = _peek_ontology_name(binding_text)
-  if not name:
-    return None
-  return binding_file.parent / f"{name}.ontology.yaml"
 
 
 def _peek_ontology_name(binding_text: str) -> str | None:
