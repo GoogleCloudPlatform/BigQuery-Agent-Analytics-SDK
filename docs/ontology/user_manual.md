@@ -141,7 +141,7 @@ Relationships have three options for uniqueness:
 
 #### Inheritance
 
-Entities can extend other entities, inheriting their properties and keys:
+Entities can extend other entities using the `extends` field, modeling "is-a" hierarchies. A child entity inherits all of its parent's **properties** and **keys** automatically — it does not redeclare them:
 
 ```yaml
 entities:
@@ -157,6 +157,8 @@ entities:
   - name: Person
     extends: Party
     properties:
+      # Person inherits party_id, name, and keys.primary from Party.
+      # It only declares its own additional properties:
       - name: dob
         type: date
 
@@ -167,11 +169,71 @@ entities:
         type: string
 ```
 
-`Person` and `Organization` inherit `party_id` and `name` from `Party` without redeclaring them. A query matching `Party` nodes would match both.
+`Person` has three effective properties (`party_id`, `name`, `dob`) and inherits `keys.primary: [party_id]` from `Party`. It must not redeclare any of these — doing so is a validation error. The same applies to `Organization`.
 
-Relationships can also extend other relationships, but child endpoints must narrow covariantly — the child's `from`/`to` must be the same entity as, or a subtype of, the parent's.
+**What a child can do:**
+- Add new properties that do not collide with inherited ones.
+- Inherit keys from the parent without declaring its own `keys` field.
 
-**Current limitation:** The v0 compiler does not support `extends`. Ontologies with inheritance pass validation but fail at compile time.
+**What a child cannot do:**
+- Redeclare an inherited property by name (even with the same type).
+- Redeclare inherited keys (even with the same values).
+- Use multiple inheritance (only single-parent chains are supported).
+- Create circular extends chains (A extends B extends A).
+
+Only single-parent inheritance is supported — there is no multiple inheritance.
+
+**Multi-level chains** work as expected. If `GoldCustomer extends Customer extends Party`, then `GoldCustomer` inherits properties from both `Customer` and `Party`.
+
+**Relationship inheritance** works the same way for properties and keys, but adds one additional constraint: **covariant endpoint narrowing**. When a relationship extends another, its `from` and `to` endpoints must be the same entity as, or a subtype of, the parent's corresponding endpoint:
+
+```yaml
+entities:
+  - name: Account
+    keys: { primary: [account_id] }
+    properties: [{ name: account_id, type: string }]
+
+  - name: SavingsAccount
+    extends: Account
+    properties: [{ name: interest_rate, type: double }]
+
+  - name: Security
+    keys: { primary: [security_id] }
+    properties: [{ name: security_id, type: string }]
+
+  - name: Bond
+    extends: Security
+    properties: [{ name: maturity_date, type: date }]
+
+relationships:
+  # Parent: any Account can hold any Security
+  - name: HOLDS
+    from: Account
+    to: Security
+
+  # Valid: SavingsAccount ⊂ Account, Bond ⊂ Security (endpoints narrowed)
+  - name: SAVINGS_HOLDS
+    extends: HOLDS
+    from: SavingsAccount
+    to: Bond
+
+  # INVALID: would widen endpoints (Party is not a subtype of Account)
+  # - name: BAD_HOLDS
+  #   extends: HOLDS
+  #   from: Party        # error: Party does not narrow Account
+  #   to: Security
+```
+
+A child relationship also inherits its parent's cardinality. The child may omit `cardinality` (inheriting silently) or restate the exact same value, but it cannot change it. This is strict: even if the parent has no cardinality, the child may not introduce one.
+
+**Binding implications:** When you bind a child entity, you must bind **all** of its effective properties — both its own and its inherited ones. The binding's property list for `Person` must include mappings for `party_id`, `name`, and `dob`.
+
+**Compiler limitation (v0):** The ontology loader fully validates inheritance — all the rules above are enforced. However, the v0 compiler (`gm compile`) **rejects** any ontology that uses `extends`. Compilation requires choosing a "lowering strategy" for inheritance (fan-out tables, union views, label-referenced edges), and v0 explicitly defers that decision. This means:
+
+- `gm validate` on an ontology with `extends` **will succeed** (if the rules above are met).
+- `gm compile` on a binding paired with that ontology **will fail** with a `compile-validation` error.
+
+The ontology and binding models are designed to be reusable by future compilers that do support inheritance lowering.
 
 #### Metadata
 
@@ -654,6 +716,26 @@ Validates both files before compiling. Any validation error prevents DDL output.
 | `cli-unknown-kind` | File is neither ontology nor binding |
 | `cli-wrong-kind` | Compile invoked on a non-binding file |
 | `cli-output-error` | Cannot write output file |
+
+---
+
+### Inheritance Semantics
+
+This section provides a precise summary of all inheritance behavior for reference.
+
+**Scope:** Both entities and relationships support `extends`. Only single-parent inheritance is allowed. Cross-kind inheritance (entity extending relationship or vice versa) is rejected.
+
+**Property inheritance:** A child's effective property set is the union of all ancestor properties (walked from root to child) plus the child's own. If a child declares a property with the same name as an inherited one, validation fails — even if the type matches.
+
+**Key inheritance:** Keys are inherited unchanged. If any ancestor declares keys, the child must leave its own `keys` field unset. The child's effective keys are resolved by walking up the `extends` chain until keys are found. Every entity must end up with an effective `keys.primary` (directly or via inheritance).
+
+**Relationship endpoint narrowing:** A child relationship's `from` must equal or transitively extend the parent's `from`; same for `to`. "Transitively extends" means the child entity is the parent entity, or extends it, or extends something that extends it, etc.
+
+**Cardinality inheritance:** If the parent declares a cardinality, the child must either omit `cardinality` (inheriting silently) or restate the exact same value. If the parent does not declare cardinality, the child may not introduce one. This is intentionally strict.
+
+**Cycle detection:** The loader walks `extends` chains from every element and rejects any chain that revisits a name.
+
+**Compiler support:** The v0 compiler rejects all uses of `extends`. Validation accepts it; compilation does not. The error rule code is `compile-validation`.
 
 ---
 
