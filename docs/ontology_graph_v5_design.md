@@ -282,13 +282,19 @@ for ref, status in result.table_statuses.items():
 **How it works:**
 
 1. Load rows into a staging table via `load_table_from_json`
-2. `DELETE` existing session rows from the target (works reliably — no
-   streaming buffer)
+2. `DELETE` existing session rows from the target
 3. `INSERT INTO target SELECT * FROM staging`
 4. Drop the staging table
 
-Every table reports a `TableStatus` with `idempotent=True/False` so you
-know whether row counts are trustworthy.
+Because `batch_load` never calls `insert_rows_json`, it does not create
+new streaming-buffer conflicts on the target table. If the target already
+has an active streaming buffer from prior writes (e.g., a previous run
+used `write_mode="streaming"`), the `DELETE` in step 2 may still fail —
+the `TableStatus` will report `cleanup_status="delete_failed"` and
+`idempotent=False` in that case.
+
+For fully clean idempotency, use `batch_load` on fresh tables or
+scratch datasets (as the demo notebook does).
 
 ---
 
