@@ -2,9 +2,31 @@
 
 ## Overview
 
-An ontology is a logical, backend-neutral description of a domain as a property graph. It defines **entity types** (nodes), **relationship types** (edges), the **properties** they carry, which properties serve as **keys**, and optional **single-parent inheritance** between types.
+### What Is an Ontology?
 
-An ontology does not know where data physically lives. That is the job of a separate **binding** document, which maps ontology entities and properties to concrete BigQuery tables and columns.
+An **ontology** is a formal, explicit specification of a shared conceptualization of a domain. In practical terms, it defines:
+
+- **Entity types** (classes) — the kinds of things that exist in the domain (Customer, Order, Product)
+- **Properties** (attributes) — typed data each entity carries (name: string, amount: decimal)
+- **Relationships** — how entity types connect to each other (Customer *places* Order, Order *contains* Product)
+- **Constraints** — rules about uniqueness, cardinality, valid values, and type hierarchies
+
+The key distinction from a database schema is that an ontology captures **meaning**, not just structure. It answers "what does this data represent in the real world?" rather than "what columns does this table have?" This makes ontologies portable across different storage backends — the same ontology can be realized on BigQuery, Spanner, or any other data warehouse.
+
+### Why Use an Ontology?
+
+Ontologies provide several benefits for data-driven systems:
+
+- **Shared vocabulary** — teams agree on what "Account", "Transaction", or "Security" means, preventing ambiguity across systems.
+- **Backend independence** — the logical model is defined once and can be mapped to different physical storage systems without changing the model itself.
+- **Semantic grounding for AI** — ontologies constrain LLM outputs to well-typed entities and relationships, reducing hallucination and enabling structured multi-hop reasoning over knowledge graphs.
+- **Evolvable schemas** — inheritance and annotations let you extend a domain model without breaking existing definitions.
+
+### How This Project Uses Ontologies
+
+In this project, an ontology is authored as a YAML file that describes a domain as a **property graph**: entity types become nodes, relationship types become edges, and both carry typed properties. The ontology is deliberately **backend-neutral** — it defines *what* exists, never *where* the data lives.
+
+A separate **binding** document handles the physical mapping: it attaches ontology entities and properties to concrete BigQuery tables and columns.
 
 Together, the two produce executable DDL:
 
@@ -12,12 +34,14 @@ Together, the two produce executable DDL:
 ontology  +  binding  →  CREATE PROPERTY GRAPH DDL
 ```
 
+This separation means the same ontology can have multiple bindings — one per environment, backend, or data source — without duplicating the logical model.
+
 The workflow uses three artifacts:
 
 | Artifact | File convention | Purpose |
 |----------|----------------|---------|
-| Ontology | `*.ontology.yaml` | Logical graph schema (what) |
-| Binding | `*.binding.yaml` | Physical table mapping (where) |
+| Ontology | `*.ontology.yaml` | Logical graph schema (what exists) |
+| Binding | `*.binding.yaml` | Physical table mapping (where it lives) |
 | DDL | `*.sql` | BigQuery `CREATE PROPERTY GRAPH` statement |
 
 The `gm` CLI validates and compiles these files.
@@ -154,7 +178,9 @@ These types are backend-neutral. Backend-specific gaps (e.g. Spanner not support
 
 ### Keys
 
-Keys define uniqueness constraints. There are three roles:
+Keys define uniqueness constraints — they tell the system how to identify individual rows in the underlying data. Understanding keys is important because they directly affect how the compiled DDL identifies nodes and edges in the property graph.
+
+There are three roles:
 
 **`primary`** — the identity of a row.
 
@@ -205,7 +231,7 @@ keys:
 
 ### Inheritance
 
-Ontologies support single-parent inheritance via `extends`.
+Ontologies support single-parent inheritance via `extends`, modeling "is-a" relationships between types. This is the same concept as class inheritance in object-oriented programming: a child type is a more specific version of its parent.
 
 ```yaml
 entities:
@@ -223,17 +249,46 @@ entities:
     properties:
       - name: dob
         type: date
+
+  - name: Organization
+    extends: Party
+    properties:
+      - name: tax_id
+        type: string
 ```
+
+Here, `Person` and `Organization` are both kinds of `Party`. They inherit `party_id` and `name` from `Party`, and each adds its own properties. A query matching `Party` nodes would match both `Person` and `Organization` instances.
 
 **Inheritance rules:**
 
 - Entities extend entities. Relationships extend relationships. Cross-kind inheritance is not allowed.
+- Only single-parent inheritance is supported (no multiple inheritance).
 - A child inherits all properties and keys from its parent chain.
-- Redeclaring an inherited property (by name) is an error.
+- Redeclaring an inherited property (by name) is an error — the child gets it automatically.
 - Redeclaring inherited keys is an error.
 - Cyclic inheritance chains are detected and rejected.
-- For relationships: child endpoints must covariantly narrow the parent's endpoints (i.e. child's `from`/`to` must be the same entity as, or a subtype of, the parent's).
 - A child relationship may not redefine the parent's cardinality.
+
+**Covariant endpoint narrowing for relationships:**
+
+When a relationship extends another, its endpoints (`from`/`to`) must be the same entity as, or a subtype of, the parent's corresponding endpoint. This is called covariant narrowing and ensures type safety.
+
+```yaml
+relationships:
+  # Parent: any Account can hold any Security
+  - name: HOLDS
+    from: Account
+    to: Security
+
+  # Child: SavingsAccount (a subtype of Account) holds Bonds (a subtype of Security)
+  # This is valid because SavingsAccount ⊂ Account and Bond ⊂ Security
+  - name: SAVINGS_HOLDS
+    extends: HOLDS
+    from: SavingsAccount
+    to: Bond
+```
+
+The child may narrow the endpoints (use more specific types) but never widen them. This guarantees that anywhere you can use the parent relationship, the child relationship is also valid.
 
 **Current limitation:** The v0 compiler does not support `extends`. Ontologies with inheritance pass validation but fail at compile time. Inheritance lowering is planned for a future version.
 
@@ -297,7 +352,9 @@ Unknown YAML keys at any level are rejected (via Pydantic `extra="forbid"`).
 
 ## Binding YAML Specification
 
-A binding attaches a logical ontology to physical BigQuery tables and columns. One binding file describes one deployment target.
+A binding attaches a logical ontology to physical BigQuery tables and columns. It answers the question the ontology deliberately leaves open: "where does this data actually live?"
+
+One binding file describes one deployment target. This separation is intentional — the same ontology can have different bindings for different environments (dev, staging, production), different backends, or different data sources. The logical model stays the same; only the physical mapping changes.
 
 ### Top-Level Structure
 
@@ -548,9 +605,11 @@ Format: `<file>:<line>:<col>: <rule> — <message>`
 
 ## Compilation
 
+Compilation is the step that brings the ontology and binding together to produce executable SQL. The result is a BigQuery `CREATE PROPERTY GRAPH` statement that defines a queryable property graph over your existing tables — no data movement required. Once created, the property graph can be queried using GQL (Graph Query Language) for traversal, pattern matching, and path finding.
+
 ### How It Works
 
-The compiler (`compile_graph`) takes a validated ontology and binding and produces a BigQuery `CREATE PROPERTY GRAPH` DDL string. It runs in two stages:
+The compiler (`compile_graph`) takes a validated ontology and binding and produces the DDL string. It runs in two stages:
 
 **Stage 1 — Resolve.** Cross-references the ontology and binding to produce an in-memory `ResolvedGraph`:
 - Rejects `extends` (v0 does not lower inheritance).
@@ -612,6 +671,8 @@ Every edge table gets a `KEY (...)` clause in the DDL. The compiler determines t
 **Case 3 — No keys declared.** The default is one edge per endpoint pair. The KEY is `from_columns + to_columns`.
 
 ### Output Format
+
+A BigQuery property graph is a logical overlay on existing tables — it does not copy or move data. The `CREATE PROPERTY GRAPH` statement declares which tables serve as node tables and edge tables, how they connect, and what properties they expose. Once created, the graph can be queried with GQL using `GRAPH_TABLE` or `MATCH` syntax.
 
 The compiled DDL follows this structure:
 
