@@ -32,9 +32,9 @@ from __future__ import annotations
 import json
 import textwrap
 
+from pydantic import ValidationError
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from bigquery_ontology import Binding
 
