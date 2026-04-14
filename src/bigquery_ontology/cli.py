@@ -17,9 +17,11 @@
 ``gm validate`` accepts either an ontology YAML or a binding YAML and
 dispatches to the matching loader. ``gm compile`` takes a binding YAML
 and emits the corresponding ``CREATE PROPERTY GRAPH`` DDL on stdout
-(or to ``-o PATH``). Both commands resolve a binding's companion
-ontology by auto-discovering ``<name>.ontology.yaml`` next to the
-binding; ``--ontology PATH`` overrides that lookup.
+(or to ``-o PATH``). ``gm scaffold`` generates starter ``CREATE TABLE``
+DDL and a matching binding stub from an ontology. Both ``validate`` and
+``compile`` resolve a binding's companion ontology by auto-discovering
+``<name>.ontology.yaml`` next to the binding; ``--ontology PATH``
+overrides that lookup.
 
 Exit codes:
 
@@ -48,10 +50,11 @@ from .graph_ddl_compiler import compile_graph
 from .ontology_loader import load_ontology
 from .ontology_loader import load_ontology_from_string
 from .ontology_models import Ontology
+from .scaffold import scaffold
 
 app = typer.Typer(
     name="gm",
-    help="Graph-model CLI. Commands: validate, compile.",
+    help="Graph-model CLI. Commands: validate, compile, scaffold.",
     add_completion=False,
     no_args_is_help=True,
 )
@@ -436,6 +439,151 @@ def compile_command(
       raise typer.Exit(code=1)
   else:
     typer.echo(ddl, nl=False)
+
+
+# --------------------------------------------------------------------- #
+# gm scaffold                                                            #
+# --------------------------------------------------------------------- #
+
+_VALID_NAMING = {"snake", "preserve"}
+
+
+@app.command("scaffold")
+def scaffold_command(
+    ontology_path: str = typer.Option(
+        ...,
+        "--ontology",
+        help="Path to an ontology YAML file.",
+    ),
+    dataset: str = typer.Option(
+        ...,
+        "--dataset",
+        help="BigQuery dataset name for generated tables.",
+    ),
+    out: str = typer.Option(
+        ...,
+        "--out",
+        help="Output directory for table_ddl.sql and binding.yaml.",
+    ),
+    naming: str = typer.Option(
+        "snake",
+        "--naming",
+        help="Column/table naming: 'snake' (default) or 'preserve'.",
+    ),
+    project: str | None = typer.Option(
+        None,
+        "--project",
+        help="BigQuery project ID. Omit for dataset-only qualification.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON errors on stderr.",
+    ),
+) -> None:
+  """Generate starter CREATE TABLE DDL and a binding stub from an ontology.
+
+  Writes ``table_ddl.sql`` and ``binding.yaml`` to the ``--out``
+  directory. The output is user-owned — edit freely after generation.
+  The generated binding is immediately valid as input to ``gm compile``.
+  """
+  if naming not in _VALID_NAMING:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-usage",
+                "severity": "error",
+                "message": (
+                    f"Invalid --naming value {naming!r}; "
+                    f"expected one of: {', '.join(sorted(_VALID_NAMING))}."
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  ont_path = Path(ontology_path)
+  if not ont_path.exists() or not ont_path.is_file():
+    _emit_errors(
+        [
+            {
+                "file": ontology_path,
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-file",
+                "severity": "error",
+                "message": f"File not found: {ontology_path}",
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+  if not os.access(ont_path, os.R_OK):
+    _emit_errors(
+        [
+            {
+                "file": ontology_path,
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-file",
+                "severity": "error",
+                "message": f"File not readable: {ontology_path}",
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  out_path = Path(out)
+  if out_path.exists() and any(out_path.iterdir()):
+    _emit_errors(
+        [
+            {
+                "file": str(out_path),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-non-empty-dir",
+                "severity": "error",
+                "message": (
+                    f"Output directory is not empty: {out_path}. "
+                    "Delete or move its contents before running scaffold."
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    ontology = load_ontology(ont_path)
+  except (ValueError, ValidationError, yaml.YAMLError) as exc:
+    _emit_errors(
+        _collect_errors(ontology_path, exc, kind="ontology"),
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+
+  try:
+    ddl_text, binding_text = scaffold(
+        ontology, dataset=dataset, project=project, naming=naming
+    )
+  except ValueError as exc:
+    _emit_errors(
+        _collect_errors(ontology_path, exc, kind="scaffold"),
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # pragma: no cover - defensive
+    typer.echo(f"internal error: {exc}", err=True)
+    raise typer.Exit(code=3)
+
+  out_path.mkdir(parents=True, exist_ok=True)
+  (out_path / "table_ddl.sql").write_text(ddl_text, encoding="utf-8")
+  (out_path / "binding.yaml").write_text(binding_text, encoding="utf-8")
 
 
 def _validate_binding_file(
