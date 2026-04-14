@@ -713,3 +713,209 @@ def test_validate_missing_file_with_json_emits_structured_json(tmp_path):
   )
   assert result.exit_code == 2
   assert result.output == expected
+
+
+# --------------------------------------------------------------------- #
+# gm scaffold                                                            #
+# --------------------------------------------------------------------- #
+
+_SCAFFOLD_ONTOLOGY = """\
+ontology: tiny
+entities:
+  - name: Person
+    keys:
+      primary: [party_id]
+    properties:
+      - name: party_id
+        type: string
+      - name: name
+        type: string
+relationships:
+  - name: Follows
+    from: Person
+    to: Person
+    properties:
+      - name: since
+        type: date
+"""
+
+
+def test_scaffold_happy_path(tmp_path):
+  ont = _write(tmp_path, "tiny.ontology.yaml", _SCAFFOLD_ONTOLOGY)
+  out = tmp_path / "out"
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(ont),
+          "--dataset", "my_ds",
+          "--project", "my_proj",
+          "--out", str(out),
+      ],
+  )
+
+  assert result.exit_code == 0
+  assert result.output == ""
+  assert (out / "table_ddl.sql").exists()
+  assert (out / "binding.yaml").exists()
+
+  ddl = (out / "table_ddl.sql").read_text()
+  assert "CREATE TABLE `my_proj.my_ds.person`" in ddl
+  assert "CREATE TABLE `my_proj.my_ds.follows`" in ddl
+
+  import yaml as _yaml
+  doc = _yaml.safe_load((out / "binding.yaml").read_text())
+  assert doc["binding"] == "tiny-scaffold"
+  assert doc["target"]["project"] == "my_proj"
+  assert doc["target"]["dataset"] == "my_ds"
+
+
+def test_scaffold_nonempty_out_exits_2(tmp_path):
+  ont = _write(tmp_path, "tiny.ontology.yaml", _SCAFFOLD_ONTOLOGY)
+  out = tmp_path / "out"
+  out.mkdir()
+  (out / "existing.txt").write_text("old content")
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(ont),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(out),
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert "cli-nonempty-out" in result.output
+
+
+def test_scaffold_missing_ontology_exits_2(tmp_path):
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(tmp_path / "missing.yaml"),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(tmp_path / "out"),
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert "cli-missing-file" in result.output
+
+
+def test_scaffold_invalid_ontology_exits_1(tmp_path):
+  ont = _write(
+      tmp_path,
+      "bad.ontology.yaml",
+      """\
+      ontology: bad
+      entities: []
+      """,
+  )
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(ont),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(tmp_path / "out"),
+      ],
+  )
+
+  assert result.exit_code == 1
+
+
+def test_scaffold_inheritance_exits_2(tmp_path):
+  ont = _write(
+      tmp_path,
+      "inherit.ontology.yaml",
+      """\
+      ontology: inherit
+      entities:
+        - name: Base
+          keys:
+            primary: [id]
+          properties:
+            - name: id
+              type: string
+        - name: Child
+          extends: Base
+          properties: []
+      """,
+  )
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(ont),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(tmp_path / "out"),
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert "scaffold-no-inheritance" in result.output
+
+
+def test_scaffold_json_flag_on_error(tmp_path):
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(tmp_path / "missing.yaml"),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(tmp_path / "out"),
+          "--json",
+      ],
+  )
+
+  assert result.exit_code == 2
+  import json as _json
+  errors = _json.loads(result.output)
+  assert isinstance(errors, list)
+  assert errors[0]["rule"] == "cli-missing-file"
+
+
+def test_scaffold_naming_preserve(tmp_path):
+  ont = _write(
+      tmp_path,
+      "o.ontology.yaml",
+      """\
+      ontology: o
+      entities:
+        - name: MyEntity
+          keys:
+            primary: [entityId]
+          properties:
+            - name: entityId
+              type: string
+      """,
+  )
+  out = tmp_path / "out"
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology", str(ont),
+          "--dataset", "ds",
+          "--project", "proj",
+          "--out", str(out),
+          "--naming", "preserve",
+      ],
+  )
+
+  assert result.exit_code == 0
+  ddl = (out / "table_ddl.sql").read_text()
+  assert "`proj.ds.MyEntity`" in ddl
+  assert "entityId STRING NOT NULL" in ddl

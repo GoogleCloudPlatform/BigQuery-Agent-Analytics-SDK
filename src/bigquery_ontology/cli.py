@@ -47,6 +47,8 @@ from .compiler import compile_graph
 from .loader import load_ontology
 from .loader import load_ontology_from_string
 from .ontology_models import Ontology
+from .scaffold import NamingMode
+from .scaffold import scaffold
 
 app = typer.Typer(
     name="gm",
@@ -558,6 +560,137 @@ def _peek_ontology_name(binding_text: str) -> str | None:
     name = data["ontology"]
     return name if name else None
   return None
+
+
+# --------------------------------------------------------------------- #
+# gm scaffold                                                           #
+# --------------------------------------------------------------------- #
+
+
+@app.command("scaffold")
+def scaffold_command(
+    ontology_path: Path = typer.Option(
+        ...,
+        "--ontology",
+        help="Path to the ontology YAML file.",
+    ),
+    dataset: str = typer.Option(
+        ...,
+        "--dataset",
+        help="BigQuery dataset name.",
+    ),
+    project: str = typer.Option(
+        ...,
+        "--project",
+        help="BigQuery project ID.",
+    ),
+    out: Path = typer.Option(
+        ...,
+        "--out",
+        help=(
+            "Output directory for generated files. Must be empty or "
+            "non-existent; scaffold will not overwrite existing content."
+        ),
+    ),
+    naming: NamingMode = typer.Option(
+        NamingMode.SNAKE,
+        "--naming",
+        help="Naming convention applied to identifiers: snake (default) or preserve.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON errors on stderr.",
+    ),
+) -> None:
+  """Bootstrap BigQuery DDL and a binding stub from an ontology.
+
+  Writes two files to ``--out``:
+
+    table_ddl.sql  — CREATE TABLE statements for every entity and
+                     relationship in the ontology.
+    binding.yaml   — matching binding, ready for ``gm compile`` with
+                     no further edits.
+
+  The output directory must be empty or non-existent. Delete or move
+  its contents before re-running scaffold.
+  """
+  # 1. Ontology file must exist.
+  if not ontology_path.exists() or not ontology_path.is_file():
+    _emit_errors(
+        [
+            {
+                "file": str(ontology_path),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-file",
+                "severity": "error",
+                "message": f"File not found: {ontology_path}",
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  # 2. Output directory must be empty or not yet exist.
+  if out.exists() and any(out.iterdir()):
+    _emit_errors(
+        [
+            {
+                "file": str(out),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-nonempty-out",
+                "severity": "error",
+                "message": (
+                    f"Output directory {out} is not empty. "
+                    "Delete or move its contents before re-running scaffold."
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  # 3. Load and validate the ontology.
+  text = ontology_path.read_text(encoding="utf-8")
+  try:
+    ontology = load_ontology_from_string(text)
+  except (ValueError, yaml.YAMLError) as exc:
+    _emit_errors(
+        _collect_errors(str(ontology_path), exc, kind="ontology"),
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # pragma: no cover - defensive
+    typer.echo(f"internal error: {exc}", err=True)
+    raise typer.Exit(code=3)
+
+  # 4. Generate scaffold (raises ValueError for unsupported features).
+  try:
+    ddl, binding_yaml_text = scaffold(
+        ontology, dataset=dataset, project=project, naming=naming
+    )
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": str(ontology_path),
+                "line": 0,
+                "col": 0,
+                "rule": "scaffold-no-inheritance",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  # 5. Write outputs.
+  out.mkdir(parents=True, exist_ok=True)
+  (out / "table_ddl.sql").write_text(ddl, encoding="utf-8")
+  (out / "binding.yaml").write_text(binding_yaml_text, encoding="utf-8")
 
 
 def main() -> None:
