@@ -23,6 +23,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [context_graph_v2_design.md](context_graph_v2_design.md) | Property Graph V2 design |
 | [context_graph_v3_design.md](context_graph_v3_design.md) | Property Graph V3 with GQL and world-change detection |
 | [ontology_graph_v4_design.md](ontology_graph_v4_design.md) | YAML-driven ontology extraction and materialization |
+| [ontology_graph_v5_design.md](ontology_graph_v5_design.md) | V5: TTL import, mixed extraction, temporal lineage |
 | [learning_ontology_and_context_graph.md](learning_ontology_and_context_graph.md) | Learning guide for ontology and context graph |
 
 ## Ontology Reference
