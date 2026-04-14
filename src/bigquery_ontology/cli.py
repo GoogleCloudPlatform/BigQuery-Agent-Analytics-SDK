@@ -581,9 +581,25 @@ def scaffold_command(
     typer.echo(f"internal error: {exc}", err=True)
     raise typer.Exit(code=3)
 
-  out_path.mkdir(parents=True, exist_ok=True)
-  (out_path / "table_ddl.sql").write_text(ddl_text, encoding="utf-8")
-  (out_path / "binding.yaml").write_text(binding_text, encoding="utf-8")
+  try:
+    out_path.mkdir(parents=True, exist_ok=True)
+    (out_path / "table_ddl.sql").write_text(ddl_text, encoding="utf-8")
+    (out_path / "binding.yaml").write_text(binding_text, encoding="utf-8")
+  except (FileNotFoundError, PermissionError, OSError) as exc:
+    _emit_errors(
+        [
+            {
+                "file": str(out_path),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-output-error",
+                "severity": "error",
+                "message": f"Cannot write to output directory: {exc}",
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
 
 
 def _validate_binding_file(

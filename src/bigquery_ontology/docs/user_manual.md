@@ -676,9 +676,9 @@ gm scaffold --ontology PATH --dataset NAME --out DIR [--naming {snake|preserve}]
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
-| `--ontology PATH` | yes | -- | Path to the ontology YAML file. |
-| `--dataset NAME` | yes | -- | BigQuery dataset name for generated tables. |
-| `--out DIR` | yes | -- | Output directory. Must not exist or must be empty. |
+| `--ontology PATH` | yes | — | Path to the ontology YAML file. |
+| `--dataset NAME` | yes | — | BigQuery dataset name for generated tables. |
+| `--out DIR` | yes | — | Output directory. Must not exist or must be empty. |
 | `--naming` | no | `snake` | `snake` converts to snake_case; `preserve` keeps ontology names verbatim. |
 | `--project ID` | no | omitted | BigQuery project ID. When set, table names are project-qualified. |
 | `--json` | no | false | Emit structured JSON errors on stderr. |
