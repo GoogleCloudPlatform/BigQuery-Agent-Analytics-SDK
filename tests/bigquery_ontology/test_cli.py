@@ -440,6 +440,258 @@ def test_validate_missing_file_emits_structured_error(tmp_path):
   assert result.output == expected
 
 
+# --------------------------------------------------------------------- #
+# gm compile                                                             #
+# --------------------------------------------------------------------- #
+#
+# ``gm compile`` reuses the binding-plus-ontology loading path that
+# ``gm validate`` set up, so most of the failure modes (missing
+# companion, broken companion ontology, binding shape/semantic errors)
+# are guaranteed-equivalent by construction and aren't re-tested here.
+# The compile-specific surface the tests below pin:
+#
+#   - Happy path writes the exact DDL the compiler emits to stdout.
+#   - ``-o PATH`` routes the DDL to a file and leaves stdout empty.
+#   - Compile-time rule violations (an entity with ``extends``) route
+#     through ``rule=compile-validation``, distinguishing them from
+#     loader-level binding/ontology errors.
+#   - An ontology file passed to ``gm compile`` is a usage error —
+#     you can't compile without a physical mapping.
+
+
+_COMPILE_ONTOLOGY = """
+  ontology: tiny
+  entities:
+    - name: Thing
+      keys: {primary: [id]}
+      properties:
+        - {name: id, type: string}
+        - {name: label, type: string}
+"""
+
+_COMPILE_BINDING = """
+  binding: tiny-bq-prod
+  ontology: tiny
+  target: {backend: bigquery, project: p, dataset: d}
+  entities:
+    - name: Thing
+      source: raw.things
+      properties:
+        - {name: id, column: thing_id}
+        - {name: label, column: display}
+"""
+
+# The exact DDL the compiler produces for the fixture pair above.
+# Kept in sync with the emitter's formatting rules; any change to the
+# compiler's output shape will fail this test and the golden in
+# ``test_compiler.py`` simultaneously — that's deliberate.
+_COMPILE_EXPECTED_DDL = textwrap.dedent(
+    """\
+    CREATE PROPERTY GRAPH tiny
+      NODE TABLES (
+        raw.things AS Thing
+          KEY (thing_id)
+          LABEL Thing PROPERTIES (thing_id AS id, display AS label)
+      );
+    """
+)
+
+
+def test_compile_binding_writes_ddl_to_stdout(tmp_path):
+  # Happy path: drop a binding and its companion ontology into the
+  # same directory, run ``gm compile``, expect the exact DDL on
+  # stdout with exit 0 and nothing on stderr.
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(app, ["compile", str(binding)])
+
+  assert result.exit_code == 0
+  assert result.output == _COMPILE_EXPECTED_DDL
+
+
+def test_compile_binding_with_output_flag_writes_file_and_no_stdout(tmp_path):
+  # ``-o PATH`` should land the DDL in the named file and leave
+  # stdout empty — important so the command is pipeable into build
+  # systems that redirect stdout but care about exit codes.
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+  out_path = tmp_path / "out.sql"
+
+  result = _RUNNER.invoke(
+      app, ["compile", str(binding), "-o", str(out_path)]
+  )
+
+  assert result.exit_code == 0
+  assert result.output == ""
+  assert out_path.read_text(encoding="utf-8") == _COMPILE_EXPECTED_DDL
+
+
+def test_compile_binding_with_explicit_ontology_flag(tmp_path):
+  # Mirror of the validate test: stash the ontology where
+  # auto-discovery can't find it, pass it explicitly, and confirm
+  # the DDL comes through.
+  sibling = tmp_path / "sibling"
+  sibling.mkdir()
+  ontology = _write(sibling, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(
+      app, ["compile", str(binding), "--ontology", str(ontology)]
+  )
+
+  assert result.exit_code == 0
+  assert result.output == _COMPILE_EXPECTED_DDL
+
+
+def test_compile_routes_compile_time_errors_with_compile_validation_rule(
+    tmp_path,
+):
+  # A binding can be loader-valid but still fail at compile time —
+  # the canonical case is an ontology that uses ``extends``, which
+  # v0 compile rejects. These errors must be tagged
+  # ``rule=compile-validation`` (not ``binding-validation`` or
+  # ``ontology-validation``) so tooling can tell them apart.
+  _write(
+      tmp_path,
+      "tiny.ontology.yaml",
+      """
+      ontology: tiny
+      entities:
+        - name: Parent
+          keys: {primary: [id]}
+          properties: [{name: id, type: string}]
+        - name: Child
+          extends: Parent
+          properties: []
+      """,
+  )
+  binding = _write(
+      tmp_path,
+      "tiny.binding.yaml",
+      """
+      binding: b
+      ontology: tiny
+      target: {backend: bigquery, project: p, dataset: d}
+      entities:
+        - name: Parent
+          source: t
+          properties: [{name: id, column: id}]
+      """,
+  )
+
+  result = _RUNNER.invoke(app, ["compile", str(binding)])
+
+  expected = (
+      f"{binding}:0:0: compile-validation \u2014 Entity 'Child' uses "
+      "'extends'; v0 compilation does not support inheritance.\n"
+  )
+  assert result.exit_code == 1
+  assert result.output == expected
+
+
+def test_compile_on_ontology_file_is_usage_error(tmp_path):
+  # Passing an ontology file to ``gm compile`` is nonsensical — an
+  # ontology alone has no physical mapping. Fail fast (exit 2) with
+  # a clear message rather than accepting the file and then dying
+  # deep inside the loader.
+  ontology = _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+
+  result = _RUNNER.invoke(app, ["compile", str(ontology)])
+
+  expected = (
+      f"{ontology}:0:0: cli-wrong-kind \u2014 "
+      "gm compile requires a binding file; got an ontology.\n"
+  )
+  assert result.exit_code == 2
+  assert result.output == expected
+
+
+def test_compile_missing_binding_file_is_usage_error(tmp_path):
+  # Same surface as ``gm validate`` for a missing input, kept as a
+  # sanity test so the compile command doesn't accidentally skip
+  # the existence check.
+  missing = tmp_path / "nope.binding.yaml"
+
+  result = _RUNNER.invoke(app, ["compile", str(missing)])
+
+  expected = (
+      f"{missing}:0:0: cli-missing-file \u2014 File not found: {missing}\n"
+  )
+  assert result.exit_code == 2
+  assert result.output == expected
+
+
+def test_compile_json_error_output_uses_compile_validation_rule(tmp_path):
+  # ``--json`` for compile errors flows through the same emitter as
+  # validate, so the routing is inherited; this test pins that the
+  # rule prefix survives into the JSON payload unchanged.
+  _write(
+      tmp_path,
+      "tiny.ontology.yaml",
+      """
+      ontology: tiny
+      entities:
+        - name: Parent
+          keys: {primary: [id]}
+          properties: [{name: id, type: string}]
+        - name: Child
+          extends: Parent
+          properties: []
+      """,
+  )
+  binding = _write(
+      tmp_path,
+      "tiny.binding.yaml",
+      """
+      binding: b
+      ontology: tiny
+      target: {backend: bigquery, project: p, dataset: d}
+      entities:
+        - name: Parent
+          source: t
+          properties: [{name: id, column: id}]
+      """,
+  )
+
+  result = _RUNNER.invoke(app, ["compile", str(binding), "--json"])
+
+  expected = textwrap.dedent(
+      f"""\
+      [
+        {{
+          "file": "{binding}",
+          "line": 0,
+          "col": 0,
+          "rule": "compile-validation",
+          "severity": "error",
+          "message": "Entity 'Child' uses 'extends'; v0 compilation does not support inheritance."
+        }}
+      ]
+      """
+  )
+  assert result.exit_code == 1
+  assert result.output == expected
+
+
+def test_compile_missing_companion_ontology_is_usage_error(tmp_path):
+  # Regression guard shared with validate: the compile command must
+  # also surface cli-missing-ontology (not a generic binding error)
+  # when the companion is absent, with the same message format.
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(app, ["compile", str(binding)])
+
+  expected_path = tmp_path / "tiny.ontology.yaml"
+  expected = (
+      f"{binding}:0:0: cli-missing-ontology \u2014 Binding references "
+      f"ontology 'tiny', but no companion ontology file found at "
+      f"{expected_path}.\n"
+  )
+  assert result.exit_code == 2
+  assert result.output == expected
+
+
 def test_validate_missing_file_with_json_emits_structured_json(tmp_path):
   missing = tmp_path / "does-not-exist.ontology.yaml"
 
