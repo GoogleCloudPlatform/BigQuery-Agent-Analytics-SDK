@@ -420,9 +420,13 @@ except ImportError as e:
 
 # Ontology Materializer
 try:
+  from .ontology_materializer import MaterializationResult
   from .ontology_materializer import OntologyMaterializer
+  from .ontology_materializer import TableStatus
 
-  __all__.append("OntologyMaterializer")
+  __all__.extend(
+      ["MaterializationResult", "OntologyMaterializer", "TableStatus"]
+  )
 except ImportError as e:
   logger.debug(
       "Could not import ontology materializer: %s.",

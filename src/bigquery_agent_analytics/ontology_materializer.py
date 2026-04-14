@@ -47,9 +47,11 @@ Example usage::
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import logging
 from typing import Optional
+import uuid
 
 from google.cloud import bigquery
 
@@ -62,6 +64,46 @@ from .ontology_models import PropertySpec
 from .ontology_models import RelationshipSpec
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
+
+
+# ------------------------------------------------------------------ #
+# Materialization status dataclasses                                   #
+# ------------------------------------------------------------------ #
+
+
+@dataclasses.dataclass
+class TableStatus:
+  """Status of a single table materialization operation.
+
+  Attributes:
+      table_ref: Fully qualified BigQuery table reference.
+      rows_attempted: Number of rows attempted for insert.
+      rows_inserted: Number of rows successfully inserted.
+      cleanup_status: One of 'deleted', 'delete_failed', or 'skipped'.
+      insert_status: One of 'inserted' or 'insert_failed'.
+      idempotent: True only if cleanup succeeded before insert.
+  """
+
+  table_ref: str
+  rows_attempted: int
+  rows_inserted: int
+  cleanup_status: str  # 'deleted' | 'delete_failed' | 'skipped'
+  insert_status: str  # 'inserted' | 'insert_failed'
+  idempotent: bool  # True only if cleanup succeeded before insert
+
+
+@dataclasses.dataclass
+class MaterializationResult:
+  """Result of a materialization operation.
+
+  Attributes:
+      row_counts: Name to count mapping (backward compatible).
+      table_statuses: Table ref to TableStatus mapping.
+  """
+
+  row_counts: dict[str, int]  # name -> count (backward compat)
+  table_statuses: dict[str, TableStatus]  # table_ref -> status
+
 
 # ------------------------------------------------------------------ #
 # Type mapping: YAML property types -> BQ DDL types                    #
@@ -322,6 +364,9 @@ class OntologyMaterializer:
       spec: A validated ``GraphSpec``.
       bq_client: Optional pre-configured BigQuery client.
       location: BigQuery location.
+      write_mode: Write strategy — ``'streaming'`` (default) uses
+          ``insert_rows_json``; ``'batch_load'`` uses
+          ``load_table_from_json`` with a staging table.
   """
 
   def __init__(
@@ -331,11 +376,18 @@ class OntologyMaterializer:
       spec: GraphSpec,
       bq_client: Optional[bigquery.Client] = None,
       location: Optional[str] = None,
+      write_mode: str = "streaming",
   ) -> None:
+    if write_mode not in ("streaming", "batch_load"):
+      raise ValueError(
+          f"write_mode must be 'streaming' or 'batch_load', "
+          f"got {write_mode!r}."
+      )
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.spec = spec
     self.location = location
+    self.write_mode = write_mode
     self._bq_client = bq_client
 
   @property
@@ -466,10 +518,13 @@ class OntologyMaterializer:
 
   # ---- Materialization --------------------------------------------
 
-  def _delete_for_sessions(
-      self, table_ref: str, session_ids: list[str]
-  ) -> None:
-    """Delete rows for given sessions from a table."""
+  def _delete_for_sessions(self, table_ref: str, session_ids: list[str]) -> str:
+    """Delete rows for given sessions from a table.
+
+    Returns:
+        ``'deleted'`` on success, ``'skipped'`` if the table does not
+        exist, or ``'delete_failed'`` on other errors.
+    """
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
@@ -481,35 +536,110 @@ class OntologyMaterializer:
           job_config=job_config,
       )
       job.result()
+      return "deleted"
     except Exception as e:
       err_msg = str(e).lower()
       if "not found" in err_msg or "does not exist" in err_msg:
         logger.debug("Table %s does not exist yet: %s", table_ref, e)
+        return "skipped"
       else:
         logger.warning("Delete for sessions failed on %s: %s", table_ref, e)
+        return "delete_failed"
 
-  def materialize(
+  def _batch_load_table(
+      self,
+      table_ref: str,
+      rows: list[dict],
+      session_ids: list[str],
+  ) -> TableStatus:
+    """Load rows via ``load_table_from_json`` with a staging table.
+
+    Steps:
+      1. Load rows into a staging table (``table_ref + '_staging_<hex>'``).
+      2. DELETE existing rows for *session_ids* from the target table.
+      3. INSERT INTO target FROM staging.
+      4. DROP staging table.
+
+    Args:
+        table_ref: Fully qualified target table reference.
+        rows: Row dicts to insert.
+        session_ids: Sessions to delete before insert.
+
+    Returns:
+        A ``TableStatus`` describing the outcome.
+    """
+    staging_suffix = uuid.uuid4().hex[:8]
+    staging_ref = f"{table_ref}_staging_{staging_suffix}"
+    cleanup_status = "skipped"
+    insert_status = "insert_failed"
+    rows_inserted = 0
+
+    try:
+      # Retrieve the target table schema for the load job.
+      target_table = self.bq_client.get_table(table_ref)
+      schema = target_table.schema
+
+      # Step 1: Load rows into the staging table.
+      job_config = bigquery.LoadJobConfig(
+          write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+          autodetect=False,
+          schema=schema,
+      )
+      load_job = self.bq_client.load_table_from_json(
+          rows,
+          staging_ref,
+          job_config=job_config,
+      )
+      load_job.result()
+
+      # Step 2: Delete existing rows for session_ids from target.
+      cleanup_status = self._delete_for_sessions(table_ref, session_ids)
+
+      # Step 3: Insert from staging into target.
+      insert_sql = f"INSERT INTO `{table_ref}` SELECT * FROM `{staging_ref}`"
+      try:
+        insert_job = self.bq_client.query(insert_sql)
+        insert_job.result()
+        insert_status = "inserted"
+        rows_inserted = len(rows)
+      except Exception as e:
+        logger.warning(
+            "Batch insert from staging failed for %s: %s",
+            table_ref,
+            e,
+        )
+        insert_status = "insert_failed"
+
+    except Exception as e:
+      logger.warning(
+          "Batch load to staging failed for %s: %s",
+          table_ref,
+          e,
+      )
+
+    # Step 4: Always try to drop the staging table.
+    try:
+      self.bq_client.delete_table(staging_ref, not_found_ok=True)
+    except Exception as e:
+      logger.debug("Failed to drop staging table %s: %s", staging_ref, e)
+
+    return TableStatus(
+        table_ref=table_ref,
+        rows_attempted=len(rows),
+        rows_inserted=rows_inserted,
+        cleanup_status=cleanup_status,
+        insert_status=insert_status,
+        idempotent=cleanup_status in ("deleted", "skipped"),
+    )
+
+  def _materialize_impl(
       self,
       graph: ExtractedGraph,
       session_ids: list[str],
-  ) -> dict[str, int]:
-    """Materialize an ``ExtractedGraph`` into BigQuery tables.
-
-    Uses delete-then-insert for session-scoped idempotency:
-    existing rows for the given sessions are deleted before
-    inserting the new graph data.
-
-    Args:
-        graph: The extracted graph to persist.
-        session_ids: Sessions being materialized (scopes the
-            delete for idempotency).
-
-    Returns:
-        Dict mapping entity/relationship name to row count inserted.
-    """
+  ) -> MaterializationResult:
+    """Internal implementation shared by ``materialize`` and ``materialize_with_status``."""
     entity_map = {e.name: e for e in self.spec.entities}
     rel_map = {r.name: r for r in self.spec.relationships}
-    result: dict[str, int] = {}
 
     # Derive session_id for rows from the session_ids parameter.
     # For single-session extractions this is straightforward; for
@@ -555,19 +685,41 @@ class OntologyMaterializer:
       )
 
     # One delete + one insert per physical table.
+    table_statuses: dict[str, TableStatus] = {}
     inserted_tables: set[str] = set()
-    for table_ref, rows in table_rows.items():
-      self._delete_for_sessions(table_ref, session_ids)
-      try:
-        errors = self.bq_client.insert_rows_json(table_ref, rows)
-        if errors:
-          logger.error("Insert errors for %s: %s", table_ref, errors)
-        else:
-          inserted_tables.add(table_ref)
-      except Exception as e:
-        logger.warning("Failed to insert rows for %s: %s", table_ref, e)
 
-    # Build result: only include names whose table insert succeeded.
+    for table_ref, rows in table_rows.items():
+      if self.write_mode == "batch_load":
+        status = self._batch_load_table(table_ref, rows, session_ids)
+        table_statuses[table_ref] = status
+        if status.insert_status == "inserted":
+          inserted_tables.add(table_ref)
+      else:
+        # Streaming insert path.
+        cleanup_status = self._delete_for_sessions(table_ref, session_ids)
+        insert_status = "insert_failed"
+        rows_inserted = 0
+        try:
+          errors = self.bq_client.insert_rows_json(table_ref, rows)
+          if errors:
+            logger.error("Insert errors for %s: %s", table_ref, errors)
+          else:
+            insert_status = "inserted"
+            rows_inserted = len(rows)
+            inserted_tables.add(table_ref)
+        except Exception as e:
+          logger.warning("Failed to insert rows for %s: %s", table_ref, e)
+        table_statuses[table_ref] = TableStatus(
+            table_ref=table_ref,
+            rows_attempted=len(rows),
+            rows_inserted=rows_inserted,
+            cleanup_status=cleanup_status,
+            insert_status=insert_status,
+            idempotent=cleanup_status in ("deleted", "skipped"),
+        )
+
+    # Build row_counts: only include names whose table insert succeeded.
+    row_counts: dict[str, int] = {}
     for name, count in name_counts.items():
       entity = entity_map.get(name)
       rel = rel_map.get(name)
@@ -578,6 +730,52 @@ class OntologyMaterializer:
       else:
         continue
       if ref in inserted_tables:
-        result[name] = count
+        row_counts[name] = count
 
-    return result
+    return MaterializationResult(
+        row_counts=row_counts,
+        table_statuses=table_statuses,
+    )
+
+  def materialize(
+      self,
+      graph: ExtractedGraph,
+      session_ids: list[str],
+  ) -> dict[str, int]:
+    """Materialize an ``ExtractedGraph`` into BigQuery tables.
+
+    Uses delete-then-insert for session-scoped idempotency:
+    existing rows for the given sessions are deleted before
+    inserting the new graph data.
+
+    Args:
+        graph: The extracted graph to persist.
+        session_ids: Sessions being materialized (scopes the
+            delete for idempotency).
+
+    Returns:
+        Dict mapping entity/relationship name to row count inserted.
+    """
+    return self._materialize_impl(graph, session_ids).row_counts
+
+  def materialize_with_status(
+      self,
+      graph: ExtractedGraph,
+      session_ids: list[str],
+  ) -> MaterializationResult:
+    """Materialize an ``ExtractedGraph`` with full status reporting.
+
+    Same behavior as ``materialize()`` but returns a
+    ``MaterializationResult`` with per-table ``TableStatus``
+    information in addition to the backward-compatible row counts.
+
+    Args:
+        graph: The extracted graph to persist.
+        session_ids: Sessions being materialized (scopes the
+            delete for idempotency).
+
+    Returns:
+        A ``MaterializationResult`` containing row counts and
+        per-table status details.
+    """
+    return self._materialize_impl(graph, session_ids)

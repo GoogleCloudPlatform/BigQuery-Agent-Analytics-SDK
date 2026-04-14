@@ -231,8 +231,8 @@ def compile_lineage_gql(
   name = graph_name or spec.name
   graph_ref = f"{project_id}.{dataset_id}.{name}"
 
-  prior_alias = "prior"
-  current_alias = "current"
+  prior_alias = "prev"
+  current_alias = "cur"
   edge_alias = _short_alias(rel.name, prefix="e")
 
   where_clause = ""

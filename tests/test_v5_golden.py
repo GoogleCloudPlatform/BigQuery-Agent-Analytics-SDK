@@ -783,12 +783,15 @@ class TestLineageGQL:
         dataset_id="ds",
         relationship_name="sup_YahooAdUnitEvolvedFrom",
     )
-    assert "prior" in gql
-    assert "current" in gql
+    assert "prev" in gql
+    assert "cur" in gql
+    # Aliases must not use BigQuery GQL reserved keywords.
+    assert "(current:" not in gql
+    assert "(prior:" not in gql
     assert "sup_YahooAdUnit" in gql
     assert "sup_YahooAdUnitEvolvedFrom" in gql
-    assert "prior_adUnitId" in gql or "prior.adUnitId" in gql
-    assert "current_adUnitName" in gql or "current.adUnitName" in gql
+    assert "prev_adUnitId" in gql or "prev.adUnitId" in gql
+    assert "cur_adUnitName" in gql or "cur.adUnitName" in gql
     assert "event_time" in gql
     assert "ORDER BY" in gql
 
@@ -954,3 +957,132 @@ class TestDDLSessionColumnsInProperties:
     props_section = clause.split("PROPERTIES")[1]
     assert "from_session_id" in props_section
     assert "to_session_id" in props_section
+
+
+# ------------------------------------------------------------------ #
+# TestMaterializerWriteMode                                            #
+# ------------------------------------------------------------------ #
+
+
+class TestMaterializerWriteMode:
+  """Materializer write_mode and status reporting."""
+
+  def test_default_write_mode_is_streaming(self):
+    """Default write_mode is 'streaming' for backward compatibility."""
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+
+    spec = _demo_spec()
+    mat = OntologyMaterializer(
+        project_id="p",
+        dataset_id="d",
+        spec=spec,
+    )
+    assert mat.write_mode == "streaming"
+
+  def test_batch_load_write_mode_accepted(self):
+    """write_mode='batch_load' is accepted without error."""
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+
+    spec = _demo_spec()
+    mat = OntologyMaterializer(
+        project_id="p",
+        dataset_id="d",
+        spec=spec,
+        write_mode="batch_load",
+    )
+    assert mat.write_mode == "batch_load"
+
+  def test_materialize_with_status_returns_result(self):
+    """materialize_with_status returns MaterializationResult."""
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.ontology_materializer import MaterializationResult
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+
+    spec = _demo_spec()
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = None
+    mock_client.query.return_value = mock_job
+    mock_client.insert_rows_json.return_value = []
+
+    mat = OntologyMaterializer(
+        project_id="p",
+        dataset_id="d",
+        spec=spec,
+        bq_client=mock_client,
+    )
+
+    graph = ExtractedGraph(
+        name="test",
+        nodes=[
+            ExtractedNode(
+                node_id="s1:mako_DecisionPoint:decision_id=d1",
+                entity_name="mako_DecisionPoint",
+                labels=["mako_DecisionPoint"],
+                properties=[
+                    ExtractedProperty(name="decision_id", value="d1"),
+                    ExtractedProperty(name="decision_type", value="q"),
+                ],
+            )
+        ],
+    )
+
+    result = mat.materialize_with_status(graph, ["s1"])
+    assert isinstance(result, MaterializationResult)
+    assert result.row_counts.get("mako_DecisionPoint", 0) >= 1
+    assert len(result.table_statuses) >= 1
+
+  def test_delete_failure_surfaces_non_idempotent(self):
+    """When DELETE fails, table status shows non-idempotent."""
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+
+    spec = _demo_spec()
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+
+    call_count = [0]
+
+    def side_effect(query, **kwargs):
+      call_count[0] += 1
+      if "DELETE" in query:
+        raise Exception("streaming buffer active")
+      return mock_job
+
+    mock_job.result.return_value = None
+    mock_client.query.side_effect = side_effect
+    mock_client.insert_rows_json.return_value = []
+
+    mat = OntologyMaterializer(
+        project_id="p",
+        dataset_id="d",
+        spec=spec,
+        bq_client=mock_client,
+    )
+
+    graph = ExtractedGraph(
+        name="test",
+        nodes=[
+            ExtractedNode(
+                node_id="s1:mako_DecisionPoint:decision_id=d1",
+                entity_name="mako_DecisionPoint",
+                labels=["mako_DecisionPoint"],
+                properties=[
+                    ExtractedProperty(name="decision_id", value="d1"),
+                ],
+            )
+        ],
+    )
+
+    result = mat.materialize_with_status(graph, ["s1"])
+    # Find the table status — cleanup should have failed.
+    failed_tables = [
+        ts
+        for ts in result.table_statuses.values()
+        if ts.cleanup_status == "delete_failed"
+    ]
+    assert len(failed_tables) >= 1
+    for ts in failed_tables:
+      assert ts.idempotent is False
