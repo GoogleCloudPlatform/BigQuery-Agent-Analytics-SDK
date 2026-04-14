@@ -146,6 +146,13 @@ gm compile <binding> [-o <out>]
 
 On any validation or compilation error, no DDL is emitted — even partially.
 
+### Filename convention
+
+When writing to a file, the conventional name is **`graph_ddl.sql`**.
+This contrasts with `table_ddl.sql`, the output of `gm scaffold`, so a
+directory containing both artifacts is self-describing. The convention
+is advisory — `-o` accepts any path.
+
 ## 6. `gm import-owl`
 
 Read OWL sources and emit a `*.ontology.yaml` (see `owl-import.md`).
