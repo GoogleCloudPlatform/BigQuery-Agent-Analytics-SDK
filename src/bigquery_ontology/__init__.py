@@ -27,6 +27,7 @@ from .binding_models import Binding
 from .binding_models import EntityBinding
 from .binding_models import PropertyBinding
 from .binding_models import RelationshipBinding
+from .compiler import compile_graph
 from .loader import load_ontology
 from .loader import load_ontology_from_string
 from .ontology_models import Cardinality
@@ -51,6 +52,7 @@ __all__ = [
     "PropertyType",
     "Relationship",
     "RelationshipBinding",
+    "compile_graph",
     "load_binding",
     "load_binding_from_string",
     "load_ontology",

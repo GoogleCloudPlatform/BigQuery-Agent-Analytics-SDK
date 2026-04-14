@@ -48,22 +48,29 @@ edge_tables: [<EdgeTable>, ...]
 ```
 
 ```yaml
-# NodeTable
-label: <string>                   # entity name
-key_columns: [<string>, ...]
-source: <string>                  # fully qualified
+# ResolvedLabelAndProperties
+label: <string>
 properties: [<ResolvedProperty>, ...]
 ```
 
 ```yaml
-# EdgeTable
-label: <string>                   # relationship name
+# ResolvedNodeTable
+alias: <string>                   # identifier used after AS and in REFERENCES
+source: <string>                  # fully qualified
+key_columns: [<string>, ...]
+label_and_properties: [<ResolvedLabelAndProperties>, ...]   # one per v0, more reserved for multi-label
+```
+
+```yaml
+# ResolvedEdgeTable
+alias: <string>
 source: <string>
+key_columns: [<string>, ...]      # row-level identity, always non-empty; see §3
 from_key_columns: [<string>, ...]
 to_key_columns: [<string>, ...]
 from_node_table: <string>         # which node table this edge's source points to
 to_node_table: <string>
-properties: [<ResolvedProperty>, ...]
+label_and_properties: [<ResolvedLabelAndProperties>, ...]
 ```
 
 ```yaml
@@ -86,6 +93,36 @@ are resolved recursively; cycles are a compile-time error.
 For each relationship, look up the single node table for each endpoint
 entity. Because v0 does not lower inheritance, each endpoint entity is
 bound to exactly one node table, so endpoint resolution is direct.
+
+### Derive table aliases
+
+Every node and edge table gets an alias after `AS` in the emitted
+DDL, and edge tables use node-table aliases in their `REFERENCES`
+clauses. We use the ontology label verbatim as the alias (`Account`,
+`HOLDS`, etc.) so the DDL reads by logical type rather than leaking
+physical table basenames. The ontology loader already guarantees
+entity and relationship names are unique within the ontology and
+disjoint across kinds, so this aliasing is collision-free by
+construction — no runtime uniqueness check is required.
+
+### Resolve edge keys
+
+Every edge in the resolved graph carries a non-empty `key_columns`.
+BigQuery's property-graph model wants row-level identity on edges
+even when the ontology doesn't spell one out, so the resolver picks
+a value in all three cases:
+
+- **`keys.primary` declared.** `key_columns` is the bound physical
+  columns for those properties. Example: `TRANSFER` with primary
+  `[transaction_id]` → `KEY (txn_id)`.
+- **`keys.additional` declared.** `key_columns` is the endpoint
+  columns followed by the bound additional-key columns — together
+  they form a globally-unique row identifier. Example: `HOLDS` with
+  additional `[as_of]` → `KEY (account_id, security_id, snapshot_date)`.
+- **No keys declared.** `key_columns` is just the endpoint columns,
+  expressing "one edge per endpoint pair" as a safe default. Authors
+  who need multi-edges should declare `keys.additional` with a
+  discriminator property.
 
 ## 4. Emission
 
@@ -140,10 +177,10 @@ Emitted DDL:
 ```sql
 CREATE PROPERTY GRAPH finance
   NODE TABLES (
-    raw.accounts AS accounts
+    raw.accounts AS Account
       KEY (acct_id)
       LABEL Account PROPERTIES (acct_id AS account_id, created_ts AS opened_at),
-    raw.persons AS persons
+    raw.persons AS Person
       KEY (person_id)
       LABEL Person PROPERTIES (
         person_id,
@@ -151,18 +188,39 @@ CREATE PROPERTY GRAPH finance
         given_name AS first_name,
         family_name AS last_name,
         (given_name || ' ' || family_name) AS full_name
-      )
+      ),
+    ref.securities AS Security
+      KEY (cusip)
+      LABEL Security PROPERTIES (cusip AS security_id)
   )
   EDGE TABLES (
-    raw.holdings AS holdings
-      SOURCE KEY (account_id) REFERENCES accounts (acct_id)
-      DESTINATION KEY (security_id) REFERENCES securities (cusip)
+    raw.holdings AS HOLDS
+      KEY (account_id, security_id)
+      SOURCE KEY (account_id) REFERENCES Account (acct_id)
+      DESTINATION KEY (security_id) REFERENCES Security (cusip)
       LABEL HOLDS PROPERTIES (snapshot_date AS as_of, qty AS quantity)
   );
 ```
 
 Derived expressions become SQL expressions in the `PROPERTIES` list;
 column renames become `AS` clauses.
+
+Formatting rules applied to the output, all in service of determinism:
+
+- `LABEL <name> PROPERTIES (...)` stays bundled as a single clause
+  per the GCP grammar's `LabelAndProperties` production. Even though
+  each element carries only one label today, keeping label and
+  property list paired reserves the shape for future multi-label
+  support without another emitter rewrite.
+- The bundled clause stays on a single line when the rendered line
+  (including its indent) fits within 80 columns; otherwise the
+  property list breaks across lines, one property per line, with
+  the closing paren on its own line. The `LABEL <name> PROPERTIES (`
+  opener remains intact on the first line so the label-property
+  association survives the wrap visually.
+- Node tables and edge tables are sorted alphabetically by label;
+  property lists within each table follow the ontology's declaration
+  order.
 
 ### Spanner
 
@@ -175,11 +233,14 @@ The resolved model maps to the `CREATE PROPERTY GRAPH` grammar as follows:
 
 | Resolved model | GCP grammar |
 |---|---|
-| `NodeTable.source` | `<source> [AS <alias>]` |
-| `NodeTable.key_columns` | `KEY (<cols>)` |
-| `NodeTable.label` + `properties` | `LABEL <name> PROPERTIES (<spec_list>)` |
-| `EdgeTable.from_key_columns` + `from_node_table` | `SOURCE KEY (<cols>) REFERENCES <node>` |
-| `EdgeTable.to_key_columns` + `to_node_table` | `DESTINATION KEY (<cols>) REFERENCES <node>` |
+| `ResolvedNodeTable.source` + `alias` | `<source> AS <alias>` |
+| `ResolvedNodeTable.key_columns` | `KEY (<cols>)` |
+| `ResolvedNodeTable.label_and_properties[i]` | `LABEL <name> PROPERTIES (<spec_list>)` (one per entry; `LabelAndPropertiesList` overall) |
+| `ResolvedEdgeTable.source` + `alias` | `<source> AS <alias>` |
+| `ResolvedEdgeTable.key_columns` | `KEY (<cols>)` |
+| `ResolvedEdgeTable.from_key_columns` + `from_node_table` | `SOURCE KEY (<cols>) REFERENCES <node>` |
+| `ResolvedEdgeTable.to_key_columns` + `to_node_table` | `DESTINATION KEY (<cols>) REFERENCES <node>` |
+| `ResolvedEdgeTable.label_and_properties[i]` | `LABEL <name> PROPERTIES (<spec_list>)` (one per entry) |
 
 The resolved model collapses the grammar's variant forms to a single
 canonical shape. We always emit the explicit
