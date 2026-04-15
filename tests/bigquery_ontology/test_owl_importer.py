@@ -22,6 +22,8 @@ import textwrap
 import pytest
 import yaml
 
+pytest.importorskip("rdflib")
+
 from bigquery_ontology.owl_importer import import_owl
 
 _FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
