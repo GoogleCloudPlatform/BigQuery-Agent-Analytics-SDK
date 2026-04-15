@@ -17,16 +17,18 @@
 ``gm validate`` accepts either an ontology YAML or a binding YAML and
 dispatches to the matching loader. ``gm compile`` takes a binding YAML
 and emits the corresponding ``CREATE PROPERTY GRAPH`` DDL on stdout
-(or to ``-o PATH``). Both commands resolve a binding's companion
-ontology by auto-discovering ``<name>.ontology.yaml`` next to the
-binding; ``--ontology PATH`` overrides that lookup.
+(or to ``-o PATH``). ``gm import-owl`` reads OWL source files and
+emits ``ontology.yaml``. Both ``validate`` and ``compile`` resolve a
+binding's companion ontology by auto-discovering
+``<name>.ontology.yaml`` next to the binding; ``--ontology PATH``
+overrides that lookup.
 
 Exit codes:
 
   0 — success
   1 — validation / compilation error
   2 — usage error (bad flag, missing file, missing companion ontology,
-      compile invoked on a non-binding file)
+      compile invoked on a non-binding file, missing dependency)
   3 — internal error
 """
 
@@ -51,7 +53,7 @@ from .ontology_models import Ontology
 
 app = typer.Typer(
     name="gm",
-    help="Graph-model CLI. Commands: validate, compile.",
+    help="Graph-model CLI. Commands: validate, compile, import-owl.",
     add_completion=False,
     no_args_is_help=True,
 )
@@ -436,6 +438,182 @@ def compile_command(
       raise typer.Exit(code=1)
   else:
     typer.echo(ddl, nl=False)
+
+
+# --------------------------------------------------------------------- #
+# gm import-owl                                                          #
+# --------------------------------------------------------------------- #
+
+_FORMAT_MAP = {"ttl": "turtle", "rdfxml": "xml"}
+
+
+@app.command("import-owl")
+def import_owl_command(
+    sources: list[str] = typer.Argument(
+        ...,
+        help="One or more OWL source files (Turtle or RDF/XML).",
+    ),
+    include_namespace: list[str] = typer.Option(
+        ...,
+        "--include-namespace",
+        help=(
+            "IRI namespace prefix to include. Required; repeatable. "
+            "Only classes and properties whose IRIs start with one of "
+            "these prefixes are imported."
+        ),
+    ),
+    output_path: str | None = typer.Option(
+        None,
+        "-o",
+        "--out",
+        help="Write YAML to this file instead of stdout.",
+    ),
+    format_override: str | None = typer.Option(
+        None,
+        "--format",
+        help="Override parser selection: ttl or rdfxml.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit structured JSON errors on stderr.",
+    ),
+) -> None:
+  """Import OWL sources into ontology YAML.
+
+  Reads one or more OWL files (Turtle or RDF/XML), filters by
+  namespace, and emits an ``ontology.yaml`` file. The output may
+  contain ``FILL_IN`` placeholders for ambiguities that require manual
+  resolution before ``gm validate`` will pass.
+
+  A drop summary of excluded and unsupported OWL features is always
+  printed to stderr.
+  """
+  for src in sources:
+    src_path = Path(src)
+    if not src_path.exists() or not src_path.is_file():
+      _emit_errors(
+          [
+              {
+                  "file": src,
+                  "line": 0,
+                  "col": 0,
+                  "rule": "cli-missing-file",
+                  "severity": "error",
+                  "message": f"File not found: {src}",
+              }
+          ],
+          as_json=json_output,
+      )
+      raise typer.Exit(code=2)
+    if not os.access(src_path, os.R_OK):
+      _emit_errors(
+          [
+              {
+                  "file": src,
+                  "line": 0,
+                  "col": 0,
+                  "rule": "cli-missing-file",
+                  "severity": "error",
+                  "message": f"File not readable: {src}",
+              }
+          ],
+          as_json=json_output,
+      )
+      raise typer.Exit(code=2)
+
+  rdflib_format: str | None = None
+  if format_override is not None:
+    rdflib_format = _FORMAT_MAP.get(format_override)
+    if rdflib_format is None:
+      _emit_errors(
+          [
+              {
+                  "file": "<cli>",
+                  "line": 0,
+                  "col": 0,
+                  "rule": "cli-usage",
+                  "severity": "error",
+                  "message": (
+                      f"Unknown format {format_override!r}. "
+                      "Accepted values: ttl, rdfxml."
+                  ),
+              }
+          ],
+          as_json=json_output,
+      )
+      raise typer.Exit(code=2)
+
+  try:
+    from .owl_importer import import_owl
+  except ImportError:
+    _emit_errors(
+        [
+            {
+                "file": "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-dependency",
+                "severity": "error",
+                "message": (
+                    "rdflib is required for OWL import. Install it "
+                    "with: pip install 'bigquery-agent-analytics[owl]'"
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
+  try:
+    yaml_text, drop_summary = import_owl(
+        sources,
+        include_namespaces=include_namespace,
+        format=rdflib_format,
+    )
+  except ValueError as exc:
+    _emit_errors(
+        [
+            {
+                "file": sources[0] if sources else "<cli>",
+                "line": 0,
+                "col": 0,
+                "rule": "import-validation",
+                "severity": "error",
+                "message": str(exc),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=1)
+  except Exception as exc:  # pragma: no cover - defensive
+    typer.echo(f"internal error: {exc}", err=True)
+    raise typer.Exit(code=3)
+
+  if drop_summary:
+    typer.echo(drop_summary, err=True)
+
+  if output_path is not None:
+    resolved_output = Path(output_path)
+    try:
+      resolved_output.write_text(yaml_text, encoding="utf-8")
+    except (FileNotFoundError, PermissionError) as exc:
+      _emit_errors(
+          [
+              {
+                  "file": str(resolved_output),
+                  "line": 0,
+                  "col": 0,
+                  "rule": "cli-output-error",
+                  "severity": "error",
+                  "message": f"Cannot write output file: {exc}",
+              }
+          ],
+          as_json=json_output,
+      )
+      raise typer.Exit(code=1)
+  else:
+    typer.echo(yaml_text, nl=False)
 
 
 def _validate_binding_file(

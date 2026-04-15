@@ -603,3 +603,34 @@ class TestEdgeCases:
     entity = data["entities"][0]
     assert entity["description"] == "Thing"
     assert "Chose" in entity["synonyms"]
+
+  def test_haskey_excluded_by_namespace(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix a: <http://example.com/a#> .
+        @prefix ext: <http://external.com/ns#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+        a:Foo a owl:Class ;
+            owl:hasKey ( ext:ext_id ) .
+        ext:ext_id a owl:DatatypeProperty ;
+            rdfs:domain a:Foo ;
+            rdfs:range xsd:string .
+    """
+        ),
+        encoding="utf-8",
+    )
+
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/a#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    foo = data["entities"][0]
+    assert foo["keys"]["primary"] == ["FILL_IN"]
+    assert "excluded by namespace filter" in yaml_text
+    assert "owl:hasKey_excluded" in yaml_text

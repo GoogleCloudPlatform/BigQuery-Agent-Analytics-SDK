@@ -133,6 +133,7 @@ class _ImportedEntity:
   keys_primary: list[str] | None = None
   keys_fill_in: bool = False
   key_candidates: list[str] = field(default_factory=list)
+  keys_excluded: list[str] = field(default_factory=list)
   properties: list[_ImportedProperty] = field(default_factory=list)
   annotations: dict[str, AnnotationValue] = field(default_factory=dict)
   comments: list[str] = field(default_factory=list)
@@ -255,15 +256,21 @@ def _extract_parents(
 
 def _extract_keys(
     g: Graph, class_iri: URIRef, namespaces: list[str]
-) -> tuple[list[str] | None, bool, list[str]]:
+) -> tuple[list[str] | None, bool, list[str], list[str]]:
   for key_list in g.objects(class_iri, OWL.hasKey):
     keys: list[str] = []
+    excluded: list[str] = []
     for item in g.items(key_list):
-      if isinstance(item, URIRef) and _in_namespace(item, namespaces):
-        keys.append(_local_name(item))
+      if isinstance(item, URIRef):
+        if _in_namespace(item, namespaces):
+          keys.append(_local_name(item))
+        else:
+          excluded.append(str(item))
     if keys:
-      return keys, False, []
-  return None, False, []
+      return keys, False, [], excluded
+    if excluded:
+      return None, False, [], excluded
+  return None, False, [], []
 
 
 def _collect_drop_annotations(
@@ -361,13 +368,17 @@ def _extract_entities(
     extends, extends_fill_in, extends_candidates, parent_anns = (
         _extract_parents(g, cls, RDFS.subClassOf, namespaces)
     )
-    keys_primary, keys_fill_in, key_candidates = _extract_keys(
+    keys_primary, keys_fill_in, key_candidates, keys_excluded = _extract_keys(
         g, cls, namespaces
     )
 
     annotations: dict[str, AnnotationValue] = {}
     comments: list[str] = []
     annotations.update(parent_anns)
+    if keys_excluded:
+      annotations["owl:hasKey_excluded"] = (
+          keys_excluded if len(keys_excluded) > 1 else keys_excluded[0]
+      )
     _collect_drop_annotations(g, cls, annotations, comments, drops)
 
     entities[name] = _ImportedEntity(
@@ -381,6 +392,7 @@ def _extract_entities(
         keys_primary=keys_primary,
         keys_fill_in=keys_fill_in,
         key_candidates=key_candidates,
+        keys_excluded=keys_excluded,
         annotations=annotations,
         comments=comments,
     )
@@ -664,7 +676,13 @@ def _emit_ontology_yaml(
         lines.append(f"    extends: {entity.extends}")
 
       if entity.keys_fill_in:
-        lines.append("    # no owl:hasKey in OWL source")
+        if entity.keys_excluded:
+          lines.append(
+              "    # owl:hasKey declared but key properties excluded by"
+              " namespace filter"
+          )
+        else:
+          lines.append("    # no owl:hasKey in OWL source")
         if entity.key_candidates:
           candidates = ", ".join(entity.key_candidates)
           lines.append(f"    # candidate data properties: {candidates}")

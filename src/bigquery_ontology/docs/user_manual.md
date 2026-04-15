@@ -21,6 +21,13 @@
 - [Validating and Compiling](#validating-and-compiling)
   - [Validate](#validate)
   - [Compile](#compile)
+- [Importing from OWL](#importing-from-owl)
+  - [Prerequisites](#prerequisites)
+  - [Basic usage](#basic-usage)
+  - [What maps to what](#what-maps-to-what)
+  - [Namespace filtering](#namespace-filtering)
+  - [FILL_IN placeholders](#fill_in-placeholders)
+  - [Drop annotations](#drop-annotations)
 - [End-to-End Walkthrough](#end-to-end-walkthrough)
 
 ### Part 2: Reference
@@ -295,6 +302,121 @@ gm compile finance.binding.yaml | bq query --use_legacy_sql=false -
 ```
 
 Compilation validates both files first — any error prevents DDL output.
+
+---
+
+### Importing from OWL
+
+If your domain is already modeled as an OWL ontology, you can import it into `ontology.yaml` format instead of writing it by hand.
+
+#### Prerequisites
+
+The OWL importer requires `rdflib`, which is an optional dependency. Install it with:
+
+```bash
+pip install 'bigquery-agent-analytics[owl]'
+```
+
+#### Basic usage
+
+```bash
+gm import-owl finance.ttl \
+  --include-namespace "https://example.com/finance#" \
+  -o finance.ontology.yaml
+```
+
+This reads the Turtle file, keeps only classes and properties in the given namespace, and writes the resulting ontology YAML. A drop summary of excluded or unsupported OWL features is printed to stderr.
+
+Multiple source files and namespace prefixes are supported:
+
+```bash
+gm import-owl core.ttl extensions.ttl \
+  --include-namespace "https://example.com/core#" \
+  --include-namespace "https://example.com/ext#" \
+  -o combined.ontology.yaml
+```
+
+Use `--format ttl` or `--format rdfxml` to override parser auto-detection from the file extension.
+
+#### What maps to what
+
+| OWL construct | Ontology equivalent |
+|---|---|
+| `owl:Class` | Entity |
+| `owl:DatatypeProperty` with domain and range | Property on the domain entity |
+| `owl:ObjectProperty` with domain and range | Relationship (from domain, to range) |
+| `rdfs:subClassOf` (single parent) | `extends` on entity |
+| `rdfs:subPropertyOf` (single parent) | `extends` on relationship |
+| `owl:hasKey` | `keys.primary` |
+| `owl:FunctionalProperty` | `cardinality: many_to_one` (object properties only) |
+| `rdfs:label` | `description` |
+| `rdfs:comment` | Appended to `description` |
+| `skos:altLabel`, `skos:prefLabel` | `synonyms` |
+
+XSD datatypes are mapped to ontology types: `xsd:string` to `string`, `xsd:integer` to `integer`, `xsd:decimal` to `numeric`, `xsd:boolean` to `boolean`, `xsd:date` to `date`, `xsd:dateTime` to `timestamp`, and so on.
+
+#### Namespace filtering
+
+The `--include-namespace` flag is required and acts as an allow-list. Only OWL classes and properties whose IRIs start with one of the given namespace prefixes are included in the output. Everything else is excluded.
+
+This is important because most OWL files import many external vocabularies (upper ontologies, SKOS, Dublin Core) that you typically don't want in your property graph. The namespace filter lets you select just the classes you care about.
+
+For example, a FIBO (Financial Industry Business Ontology) module might import hundreds of classes from foundational vocabularies, but with `--include-namespace "https://spec.edmcouncil.org/fibo/ontology/FBC/"` you get only the financial business classes.
+
+Excluded items are not silently lost:
+
+- The drop summary on stderr counts excluded classes and properties per namespace.
+- Cross-boundary references from kept entities are recorded as annotations (e.g., `owl:subClassOf_excluded: https://example.com/upper#Agent`).
+
+#### FILL_IN placeholders
+
+When the OWL source is ambiguous or incomplete, the importer emits `FILL_IN` as a placeholder value with a YAML comment explaining what to do. Three situations produce placeholders:
+
+1. **Missing primary key.** The class has no `owl:hasKey` declaration. The importer lists candidate data properties in a comment:
+
+   ```yaml
+   - name: Account
+     # no owl:hasKey in OWL source
+     # candidate data properties: account_id, external_ref
+     keys:
+       primary: [FILL_IN]
+   ```
+
+2. **Multiple parent classes.** The class has more than one `rdfs:subClassOf` parent. Since the ontology model supports single inheritance, you must pick one:
+
+   ```yaml
+   - name: JointAccount
+     # multi-parent: rdfs:subClassOf [Account, Organization]
+     extends: FILL_IN
+   ```
+
+3. **Multiple domain or range.** A property has multiple `rdfs:domain` or `rdfs:range` values:
+
+   ```yaml
+   - name: ownedBy
+     # multi-range: rdfs:range [Person, Organization]
+     from: Asset
+     to: FILL_IN
+   ```
+
+The output file will fail `gm validate` until all `FILL_IN` markers are replaced with valid values. This is intentional — the importer never silently guesses.
+
+#### Drop annotations
+
+OWL features that don't have a direct ontology equivalent are preserved rather than silently discarded:
+
+- **Structured annotations** (machine-readable): equivalence (`owl:equivalentClass`), disjointness (`owl:disjointWith`), inverse relationships (`owl:inverseOf`), and property characteristics (`owl:characteristics: [Transitive, Symmetric]`) are stored in the entity or relationship's `annotations` map.
+
+  ```yaml
+  - name: Person
+    extends: Party
+    annotations:
+      owl:disjointWith: Organization
+  ```
+
+- **YAML comments**: restrictions (`someValuesFrom`, `allValuesFrom`, cardinality constraints) and class expressions (`unionOf`, `intersectionOf`) are written as comments above the affected element.
+
+The drop summary printed to stderr provides counts per category so you can quickly see what was preserved as annotations versus what was dropped entirely.
 
 ---
 
@@ -617,13 +739,31 @@ gm compile <file> [--ontology PATH] [-o PATH] [--json]
 
 Validates both files before compiling. Any validation error prevents DDL output.
 
+#### `gm import-owl`
+
+```
+gm import-owl <source>... --include-namespace <iri>... [-o <out>] [--format ttl|rdfxml] [--json]
+```
+
+| Argument/Option | Required | Default | Description |
+|-----------------|----------|---------|-------------|
+| `source` | yes | — | One or more OWL source files (Turtle `.ttl` or RDF/XML `.owl`/`.rdf`). |
+| `--include-namespace <iri>` | yes | — | IRI namespace prefix to include. Repeatable. |
+| `-o` / `--out <file>` | no | stdout | Write ontology YAML to file. |
+| `--format` | no | auto | Parser override: `ttl` or `rdfxml`. Default is inferred from file extension. |
+| `--json` | no | false | Emit structured JSON errors on stderr. |
+
+Output YAML may contain `FILL_IN` placeholders that must be resolved before `gm validate` will pass. A drop summary of excluded and unsupported OWL features is always printed to stderr (not affected by `--json`).
+
+Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
+
 #### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
 | 1 | Validation or compilation error (user-fixable) |
-| 2 | Usage error (missing file, wrong file kind, missing companion ontology) |
+| 2 | Usage error (missing file, wrong file kind, missing companion ontology, missing dependency) |
 | 3 | Internal error |
 
 #### Error format
@@ -664,6 +804,9 @@ Validates both files before compiling. Any validation error prevents DDL output.
 | `cli-unknown-kind` | File is neither ontology nor binding |
 | `cli-wrong-kind` | Compile invoked on a non-binding file |
 | `cli-output-error` | Cannot write output file |
+| `cli-missing-dependency` | Required optional dependency not installed (e.g. rdflib for OWL import) |
+| `cli-usage` | Invalid flag value |
+| `import-validation` | Semantic error during OWL import (e.g. name collision) |
 
 ---
 
