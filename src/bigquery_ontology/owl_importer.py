@@ -169,24 +169,40 @@ class _DropSummary:
 # ---------------------------------------------------------------------------
 
 
+def _pick_primary_label(labels) -> tuple[str | None, list[str]]:
+  """Pick the best label as description, return rest as synonyms.
+
+  Prefers English-tagged labels (``@en*``), then falls back to
+  untagged or other languages.  Within the preferred group, picks
+  alphabetically first for determinism.
+  """
+  en: list[str] = []
+  other: list[str] = []
+  for label in labels:
+    lang = getattr(label, "language", None)
+    if lang is not None and lang.startswith("en"):
+      en.append(str(label))
+    else:
+      other.append(str(label))
+
+  en.sort()
+  other.sort()
+  if en:
+    return en[0], en[1:] + other
+  if other:
+    return other[0], other[1:]
+  return None, []
+
+
 def _extract_labels_and_description(
     g: Graph, iri: URIRef
 ) -> tuple[str | None, list[str]]:
-  labels: list[str] = []
-  for label in g.objects(iri, RDFS.label):
-    labels.append(str(label))
+  raw_labels = list(g.objects(iri, RDFS.label))
+  description, synonyms = _pick_primary_label(raw_labels)
 
   comments: list[str] = []
   for comment in g.objects(iri, RDFS.comment):
     comments.append(str(comment))
-
-  description: str | None = None
-  synonyms: list[str] = []
-
-  if labels:
-    labels.sort()
-    description = labels[0]
-    synonyms = labels[1:]
   if comments:
     if description:
       description = description + "\n\n" + "\n\n".join(comments)
@@ -334,6 +350,13 @@ def _extract_entities(
       continue
 
     name = _local_name(cls)
+    if name in entities:
+      raise ValueError(
+          f"Name collision: entity {name!r} maps to both "
+          f"<{entities[name].iri}> and <{cls}>. Narrow the "
+          "namespace filter to resolve."
+      )
+
     description, synonyms = _extract_labels_and_description(g, cls)
     extends, extends_fill_in, extends_candidates, parent_anns = (
         _extract_parents(g, cls, RDFS.subClassOf, namespaces)
@@ -431,6 +454,13 @@ def _extract_relationships(
       continue
 
     name = _local_name(prop)
+    if name in relationships:
+      raise ValueError(
+          f"Name collision: relationship {name!r} maps to both "
+          f"<{relationships[name].iri}> and <{prop}>. Narrow the "
+          "namespace filter to resolve."
+      )
+
     description, synonyms = _extract_labels_and_description(g, prop)
 
     domains: list[str] = []

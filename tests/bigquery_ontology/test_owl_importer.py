@@ -475,3 +475,53 @@ class TestEdgeCases:
     assert _yaml_scalar("has: colon") == '"has: colon"'
     assert _yaml_scalar('has "quote"') == '"has \\"quote\\""'
     assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
+
+  def test_name_collision_raises(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix a: <http://example.com/a#> .
+        @prefix b: <http://example.com/b#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+        a:Thing a owl:Class .
+        b:Thing a owl:Class .
+    """
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Name collision"):
+      import_owl(
+          [ttl],
+          include_namespaces=["http://example.com/a#", "http://example.com/b#"],
+      )
+
+  def test_english_label_preferred(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix : <http://example.com/test#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        :Thing a owl:Class ;
+            rdfs:label "Chose"@fr ;
+            rdfs:label "Thing"@en ;
+            owl:hasKey ( :thing_id ) .
+        :thing_id a owl:DatatypeProperty ;
+            rdfs:domain :Thing ;
+            rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+    """
+        ),
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    entity = data["entities"][0]
+    assert entity["description"] == "Thing"
+    assert "Chose" in entity["synonyms"]
