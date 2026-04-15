@@ -230,6 +230,7 @@ SELECT
       COALESCE(
         JSON_VALUE(content, '$.text_summary'),
         JSON_VALUE(content, '$.response'),
+        JSON_VALUE(content, '$.artifacts[0].parts[0].text'),
         JSON_VALUE(content, '$.tool'),
         ''
       )
@@ -255,6 +256,7 @@ WITH session_transcripts AS (
         COALESCE(
           JSON_VALUE(content, '$.text_summary'),
           JSON_VALUE(content, '$.response'),
+          JSON_VALUE(content, '$.artifacts[0].parts[0].text'),
           JSON_VALUE(content, '$.tool'),
           ''
         )
@@ -375,6 +377,7 @@ WITH session_transcripts AS (
         COALESCE(
           JSON_VALUE(content, '$.text_summary'),
           JSON_VALUE(content, '$.response'),
+          JSON_VALUE(content, '$.artifacts[0].parts[0].text'),
           JSON_VALUE(content, '$.tool'),
           ''
         )
@@ -443,6 +446,7 @@ WITH session_transcripts AS (
         COALESCE(
           JSON_VALUE(content, '$.text_summary'),
           JSON_VALUE(content, '$.response'),
+          JSON_VALUE(content, '$.artifacts[0].parts[0].text'),
           JSON_VALUE(content, '$.tool'),
           ''
         )
