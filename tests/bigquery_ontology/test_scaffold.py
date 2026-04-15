@@ -117,10 +117,10 @@ class TestEntityDDL:
 
   def test_single_pk_entity(self):
     ontology = load_ontology_from_string(textwrap.dedent(_PERSON_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="my_dataset")
+    ddl, _ = scaffold(ontology, dataset="my_dataset", project="p")
     expected = textwrap.dedent(
         """\
-        CREATE TABLE `my_dataset.person` (
+        CREATE TABLE `p.my_dataset.person` (
           party_id  STRING NOT NULL,
           name      STRING,
           dob       DATE,
@@ -134,10 +134,10 @@ class TestEntityDDL:
     ontology = load_ontology_from_string(
         textwrap.dedent(_COMPOUND_KEY_ONTOLOGY)
     )
-    ddl, _ = scaffold(ontology, dataset="my_dataset")
+    ddl, _ = scaffold(ontology, dataset="my_dataset", project="p")
     expected = textwrap.dedent(
         """\
-        CREATE TABLE `my_dataset.account_day` (
+        CREATE TABLE `p.my_dataset.account_day` (
           account_id  STRING NOT NULL,
           as_of       DATE NOT NULL,
           balance     NUMERIC,
@@ -151,13 +151,15 @@ class TestEntityDDL:
     ontology = load_ontology_from_string(
         textwrap.dedent(_DERIVED_PROP_ONTOLOGY)
     )
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "full_name" not in ddl
 
   def test_preserve_naming(self):
     ontology = load_ontology_from_string(textwrap.dedent(_PERSON_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="my_dataset", naming="preserve")
-    assert "`my_dataset.Person`" in ddl
+    ddl, _ = scaffold(
+        ontology, dataset="my_dataset", project="p", naming="preserve"
+    )
+    assert "`p.my_dataset.Person`" in ddl
     assert "party_id" in ddl and "STRING NOT NULL" in ddl
 
   def test_project_qualified(self):
@@ -264,17 +266,17 @@ class TestRelationshipDDL:
 
   def test_no_keys_relationship(self):
     ontology = load_ontology_from_string(textwrap.dedent(_FOLLOWS_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="my_dataset")
+    ddl, _ = scaffold(ontology, dataset="my_dataset", project="p")
     expected_rel = textwrap.dedent(
         """\
-        CREATE TABLE `my_dataset.follows` (
+        CREATE TABLE `p.my_dataset.follows` (
           from_party_id  STRING NOT NULL,
           to_party_id    STRING NOT NULL,
           since          DATE,
           -- TODO: uncomment if (from_party_id, to_party_id) is unique per row
           -- PRIMARY KEY (from_party_id, to_party_id) NOT ENFORCED,
-          FOREIGN KEY (from_party_id) REFERENCES `my_dataset.person`(party_id) NOT ENFORCED,
-          FOREIGN KEY (to_party_id) REFERENCES `my_dataset.person`(party_id) NOT ENFORCED
+          FOREIGN KEY (from_party_id) REFERENCES `p.my_dataset.person`(party_id) NOT ENFORCED,
+          FOREIGN KEY (to_party_id) REFERENCES `p.my_dataset.person`(party_id) NOT ENFORCED
         );
     """
     )
@@ -282,18 +284,18 @@ class TestRelationshipDDL:
 
   def test_keys_additional_relationship(self):
     ontology = load_ontology_from_string(textwrap.dedent(_HOLDING_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="my_dataset")
+    ddl, _ = scaffold(ontology, dataset="my_dataset", project="p")
     expected_rel = textwrap.dedent(
         """\
-        CREATE TABLE `my_dataset.holding` (
+        CREATE TABLE `p.my_dataset.holding` (
           from_account_id  STRING NOT NULL,
           from_as_of       DATE NOT NULL,
           to_isin          STRING NOT NULL,
           as_of            DATE NOT NULL,
           quantity         NUMERIC,
           PRIMARY KEY (from_account_id, from_as_of, to_isin, as_of) NOT ENFORCED,
-          FOREIGN KEY (from_account_id, from_as_of) REFERENCES `my_dataset.account`(account_id, as_of) NOT ENFORCED,
-          FOREIGN KEY (to_isin) REFERENCES `my_dataset.security`(isin) NOT ENFORCED
+          FOREIGN KEY (from_account_id, from_as_of) REFERENCES `p.my_dataset.account`(account_id, as_of) NOT ENFORCED,
+          FOREIGN KEY (to_isin) REFERENCES `p.my_dataset.security`(isin) NOT ENFORCED
         );
     """
     )
@@ -301,7 +303,7 @@ class TestRelationshipDDL:
 
   def test_keys_primary_relationship(self):
     ontology = load_ontology_from_string(textwrap.dedent(_REL_OWN_PK_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "transfer_id     STRING NOT NULL" in ddl
     assert "PRIMARY KEY (transfer_id) NOT ENFORCED" in ddl
     assert "from_person_id  STRING NOT NULL" in ddl
@@ -310,29 +312,29 @@ class TestRelationshipDDL:
   def test_endpoint_column_collision(self):
     ontology = load_ontology_from_string(textwrap.dedent(_COLLISION_ONTOLOGY))
     with pytest.raises(ValueError, match="collides with a generated endpoint"):
-      scaffold(ontology, dataset="ds")
+      scaffold(ontology, dataset="ds", project="p")
 
   def test_derived_properties_excluded_from_rel(self):
     ontology = load_ontology_from_string(textwrap.dedent(_REL_DERIVED_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "label" not in ddl
     assert "since" in ddl and "DATE" in ddl
 
   def test_no_keys_emits_suggested_pk_comment(self):
     ontology = load_ontology_from_string(textwrap.dedent(_FOLLOWS_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "-- TODO: uncomment if (from_party_id, to_party_id) is unique" in ddl
     assert "-- PRIMARY KEY (from_party_id, to_party_id) NOT ENFORCED" in ddl
 
   def test_keys_primary_has_no_suggested_pk_comment(self):
     ontology = load_ontology_from_string(textwrap.dedent(_REL_OWN_PK_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "-- TODO" not in ddl
     assert "-- PRIMARY KEY" not in ddl
 
   def test_keys_additional_has_no_suggested_pk_comment(self):
     ontology = load_ontology_from_string(textwrap.dedent(_HOLDING_ONTOLOGY))
-    ddl, _ = scaffold(ontology, dataset="ds")
+    ddl, _ = scaffold(ontology, dataset="ds", project="p")
     assert "-- TODO" not in ddl
     assert "-- PRIMARY KEY" not in ddl
 
@@ -346,7 +348,7 @@ class TestBindingYAML:
 
   def test_person_follows_binding(self):
     ontology = load_ontology_from_string(textwrap.dedent(_FOLLOWS_ONTOLOGY))
-    _, binding = scaffold(ontology, dataset="my_dataset")
+    _, binding = scaffold(ontology, dataset="my_dataset", project="p")
     expected = textwrap.dedent(
         """\
         # Generated by gm scaffold. This file is user-owned \u2014 edit freely.
@@ -354,17 +356,18 @@ class TestBindingYAML:
         ontology: test
         target:
           backend: bigquery
+          project: p
           dataset: my_dataset
         entities:
           - name: Person
-            source: my_dataset.person
+            source: p.my_dataset.person
             properties:
               - {name: party_id, column: party_id}
               - {name: name, column: name}
               - {name: dob, column: dob}
         relationships:
           - name: Follows
-            source: my_dataset.follows
+            source: p.my_dataset.follows
             from_columns: [from_party_id]
             to_columns: [to_party_id]
             properties:
@@ -394,19 +397,19 @@ class TestBindingYAML:
     ontology = load_ontology_from_string(
         textwrap.dedent(_DERIVED_PROP_ONTOLOGY)
     )
-    _, binding = scaffold(ontology, dataset="ds")
+    _, binding = scaffold(ontology, dataset="ds", project="p")
     assert "full_name" not in binding
 
   def test_entities_only_no_relationships(self):
     ontology = load_ontology_from_string(textwrap.dedent(_PERSON_ONTOLOGY))
-    ddl, binding = scaffold(ontology, dataset="ds")
+    ddl, binding = scaffold(ontology, dataset="ds", project="p")
     assert "relationships:" not in binding
     assert "FOREIGN KEY" not in ddl
 
   def test_determinism(self):
     ontology = load_ontology_from_string(textwrap.dedent(_FOLLOWS_ONTOLOGY))
-    ddl1, b1 = scaffold(ontology, dataset="ds")
-    ddl2, b2 = scaffold(ontology, dataset="ds")
+    ddl1, b1 = scaffold(ontology, dataset="ds", project="p")
+    ddl2, b2 = scaffold(ontology, dataset="ds", project="p")
     assert ddl1 == ddl2
     assert b1 == b2
 
@@ -430,7 +433,7 @@ class TestRejectExtends:
     )
     ontology = load_ontology_from_string(yaml)
     with pytest.raises(ValueError, match="extends"):
-      scaffold(ontology, dataset="ds")
+      scaffold(ontology, dataset="ds", project="p")
 
   def test_relationship_extends_rejected(self):
     yaml = textwrap.dedent(
@@ -457,4 +460,80 @@ class TestRejectExtends:
     )
     ontology = load_ontology_from_string(yaml)
     with pytest.raises(ValueError, match="extends"):
-      scaffold(ontology, dataset="ds")
+      scaffold(ontology, dataset="ds", project="p")
+
+
+class TestRejectDerivedKeys:
+
+  def test_entity_derived_primary_key_rejected(self):
+    yaml = textwrap.dedent(
+        """
+      ontology: test
+      entities:
+        - name: Person
+          keys: {primary: [computed_id]}
+          properties:
+            - {name: first_name, type: string}
+            - {name: last_name, type: string}
+            - name: computed_id
+              type: string
+              expr: "first_name || '_' || last_name"
+    """
+    )
+    ontology = load_ontology_from_string(yaml)
+    with pytest.raises(ValueError, match="derived property"):
+      scaffold(ontology, dataset="ds", project="p")
+
+  def test_rel_derived_primary_key_rejected(self):
+    yaml = textwrap.dedent(
+        """
+      ontology: test
+      entities:
+        - name: Person
+          keys: {primary: [pid]}
+          properties:
+            - {name: pid, type: string}
+      relationships:
+        - name: Knows
+          from: Person
+          to: Person
+          keys: {primary: [rid]}
+          properties:
+            - {name: since, type: date}
+            - name: rid
+              type: string
+              expr: "'computed'"
+    """
+    )
+    ontology = load_ontology_from_string(yaml)
+    with pytest.raises(ValueError, match="derived property"):
+      scaffold(ontology, dataset="ds", project="p")
+
+  def test_rel_derived_additional_key_rejected(self):
+    yaml = textwrap.dedent(
+        """
+      ontology: test
+      entities:
+        - name: Account
+          keys: {primary: [account_id]}
+          properties:
+            - {name: account_id, type: string}
+        - name: Security
+          keys: {primary: [isin]}
+          properties:
+            - {name: isin, type: string}
+      relationships:
+        - name: Holding
+          from: Account
+          to: Security
+          keys: {additional: [as_of]}
+          properties:
+            - name: as_of
+              type: date
+              expr: "CURRENT_DATE()"
+            - {name: quantity, type: numeric}
+    """
+    )
+    ontology = load_ontology_from_string(yaml)
+    with pytest.raises(ValueError, match="derived property"):
+      scaffold(ontology, dataset="ds", project="p")

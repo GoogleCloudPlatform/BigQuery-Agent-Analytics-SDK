@@ -79,6 +79,8 @@ def test_scaffold_writes_ddl_and_binding(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
       ],
@@ -88,14 +90,15 @@ def test_scaffold_writes_ddl_and_binding(tmp_path):
   ddl = (out / "table_ddl.sql").read_text(encoding="utf-8")
   binding = (out / "binding.yaml").read_text(encoding="utf-8")
 
-  assert "CREATE TABLE `ds.person`" in ddl
-  assert "CREATE TABLE `ds.follows`" in ddl
+  assert "CREATE TABLE `p.ds.person`" in ddl
+  assert "CREATE TABLE `p.ds.follows`" in ddl
   assert "PRIMARY KEY (party_id) NOT ENFORCED" in ddl
   assert "FOREIGN KEY" in ddl
 
   assert "binding: ds" in binding
   assert "ontology: test" in binding
-  assert "source: ds.person" in binding
+  assert "project: p" in binding
+  assert "source: p.ds.person" in binding
   assert "from_columns: [from_party_id]" in binding
 
 
@@ -111,6 +114,8 @@ def test_scaffold_creates_output_dir(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
       ],
@@ -159,6 +164,8 @@ def test_scaffold_preserve_naming(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--naming",
           "preserve",
           "--out",
@@ -168,7 +175,7 @@ def test_scaffold_preserve_naming(tmp_path):
   assert result.exit_code == 0, result.output
 
   ddl = (out / "table_ddl.sql").read_text(encoding="utf-8")
-  assert "`ds.Person`" in ddl
+  assert "`p.ds.Person`" in ddl
 
 
 # --------------------------------------------------------------------- #
@@ -190,6 +197,8 @@ def test_scaffold_non_empty_dir_is_usage_error(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
       ],
@@ -208,6 +217,8 @@ def test_scaffold_missing_ontology_is_usage_error(tmp_path):
           str(tmp_path / "nope.yaml"),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
       ],
@@ -228,6 +239,8 @@ def test_scaffold_invalid_naming_is_usage_error(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--naming",
           "kebab",
           "--out",
@@ -236,6 +249,29 @@ def test_scaffold_invalid_naming_is_usage_error(tmp_path):
   )
   assert result.exit_code == 2
   assert "cli-usage" in result.output
+
+
+def test_scaffold_out_is_file_is_usage_error(tmp_path):
+  ont = _write(tmp_path, "test.ontology.yaml", _TINY_ONTOLOGY)
+  out = tmp_path / "out"
+  out.write_text("not a directory")
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "scaffold",
+          "--ontology",
+          str(ont),
+          "--dataset",
+          "ds",
+          "--project",
+          "p",
+          "--out",
+          str(out),
+      ],
+  )
+  assert result.exit_code == 2
+  assert "cli-output-error" in result.output
 
 
 def test_scaffold_extends_is_validation_error(tmp_path):
@@ -250,6 +286,8 @@ def test_scaffold_extends_is_validation_error(tmp_path):
           str(ont),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
       ],
@@ -269,6 +307,8 @@ def test_scaffold_json_error_output(tmp_path):
           str(tmp_path / "nope.yaml"),
           "--dataset",
           "ds",
+          "--project",
+          "p",
           "--out",
           str(out),
           "--json",

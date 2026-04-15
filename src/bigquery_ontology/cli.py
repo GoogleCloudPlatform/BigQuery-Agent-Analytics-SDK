@@ -470,10 +470,10 @@ def scaffold_command(
         "--naming",
         help="Column/table naming: 'snake' (default) or 'preserve'.",
     ),
-    project: str | None = typer.Option(
-        None,
+    project: str = typer.Option(
+        ...,
         "--project",
-        help="BigQuery project ID. Omit for dataset-only qualification.",
+        help="BigQuery project ID.",
     ),
     json_output: bool = typer.Option(
         False,
@@ -539,7 +539,24 @@ def scaffold_command(
     raise typer.Exit(code=2)
 
   out_path = Path(out)
-  if out_path.exists() and any(out_path.iterdir()):
+  if out_path.exists() and not out_path.is_dir():
+    _emit_errors(
+        [
+            {
+                "file": str(out_path),
+                "line": 0,
+                "col": 0,
+                "rule": "cli-output-error",
+                "severity": "error",
+                "message": (
+                    f"Output path exists and is not a directory: {out_path}"
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+  if out_path.is_dir() and any(out_path.iterdir()):
     _emit_errors(
         [
             {

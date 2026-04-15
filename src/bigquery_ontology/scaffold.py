@@ -104,6 +104,26 @@ def _reject_extends(ontology: Ontology) -> None:
       )
 
 
+def _reject_derived_keys(
+    keys: Keys,
+    prop_map: dict[str, object],
+    owner: str,
+) -> None:
+  groups: list[tuple[str, list[str]]] = []
+  if keys.primary:
+    groups.append(("primary", keys.primary))
+  if keys.additional:
+    groups.append(("additional", keys.additional))
+  for label, columns in groups:
+    for col_name in columns:
+      prop = prop_map.get(col_name)
+      if prop is not None and getattr(prop, "expr", None) is not None:
+        raise ValueError(
+            f"{owner}: {label} key column {col_name!r} is a derived "
+            "property (has 'expr'). Key columns must be stored."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Intermediate dataclasses
 # ---------------------------------------------------------------------------
@@ -144,25 +164,25 @@ class _ScaffoldRelTable:
 # ---------------------------------------------------------------------------
 
 
-def _qualify(dataset: str, table: str, project: str | None) -> str:
-  if project:
-    return f"{project}.{dataset}.{table}"
-  return f"{dataset}.{table}"
+def _qualify(dataset: str, table: str, project: str) -> str:
+  return f"{project}.{dataset}.{table}"
 
 
 def _resolve_entity_table(
     entity: Entity,
     dataset: str,
-    project: str | None,
+    project: str,
     naming: str,
 ) -> _ScaffoldEntityTable:
   assert entity.keys is not None and entity.keys.primary is not None
+
+  prop_map = {p.name: p for p in entity.properties}
+  _reject_derived_keys(entity.keys, prop_map, f"Entity {entity.name!r}")
+
   pk_set = set(entity.keys.primary)
 
   pk_columns: list[_ScaffoldColumn] = []
   other_columns: list[_ScaffoldColumn] = []
-
-  prop_map = {p.name: p for p in entity.properties}
 
   for pk_name in entity.keys.primary:
     prop = prop_map[pk_name]
@@ -226,7 +246,7 @@ def _resolve_rel_table(
     rel: Relationship,
     entity_map: dict[str, Entity],
     dataset: str,
-    project: str | None,
+    project: str,
     naming: str,
 ) -> _ScaffoldRelTable:
   from_entity = entity_map[rel.from_]
@@ -257,6 +277,9 @@ def _resolve_rel_table(
     )
 
   keys: Keys | None = rel.keys
+  if keys is not None:
+    rel_prop_map = {p.name: p for p in rel.properties}
+    _reject_derived_keys(keys, rel_prop_map, f"Relationship {rel.name!r}")
   pk_col_names: tuple[str, ...] | None = None
 
   if keys is not None and keys.primary is not None:
@@ -406,7 +429,7 @@ def _emit_binding_yaml(
     entity_tables: list[_ScaffoldEntityTable],
     rel_tables: list[_ScaffoldRelTable],
     dataset: str,
-    project: str | None,
+    project: str,
     naming: str,
 ) -> str:
   lines: list[str] = []
@@ -418,8 +441,7 @@ def _emit_binding_yaml(
   lines.append(f"ontology: {ontology.ontology}")
   lines.append("target:")
   lines.append("  backend: bigquery")
-  if project:
-    lines.append(f"  project: {project}")
+  lines.append(f"  project: {project}")
   lines.append(f"  dataset: {dataset}")
 
   if entity_tables:
@@ -461,7 +483,7 @@ def scaffold(
     ontology: Ontology,
     *,
     dataset: str,
-    project: str | None = None,
+    project: str,
     naming: str = "snake",
 ) -> tuple[str, str]:
   """Generate ``(ddl_text, binding_yaml_text)`` from an ontology.
