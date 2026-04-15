@@ -108,17 +108,19 @@ gm validate <file>
 
 - Loader detects ontology vs binding from the top-level key.
 - **Ontology** → checked against `ontology.md` §10.
-- **Binding** → checked against `binding.md` §9. The loader also
-  attempts to locate the companion ontology (named by `ontology:` in
-  the binding, looked up as `<name>.ontology.yaml` in the same
-  directory) for cross-validation. If not found, binding validates
-  syntactically and the loader emits a warning.
+- **Binding** → checked against `binding.md` §9. The CLI locates
+  the companion ontology (named by `ontology:` in the binding,
+  looked up as `<name>.ontology.yaml` in the same directory) for
+  cross-validation. If the companion is not found, validation fails
+  with exit 2 (`cli-missing-ontology`). Use `--ontology PATH` to
+  point at a specific ontology file and skip auto-discovery.
 
 ### Flags
 
 | Flag | Purpose |
 |---|---|
 | `--json` | Structured error output (see §3). |
+| `--ontology <path>` | For binding files: path to the companion ontology. Overrides auto-discovery of `<name>.ontology.yaml` next to the binding. |
 
 On success, nothing is written to stdout.
 
@@ -130,9 +132,11 @@ rule as `gm validate` (§4).
 ### Usage
 
 ```
-gm compile <binding> [-o <out>]
+gm compile <binding> [--ontology <path>] [-o <out>]
 ```
 
+- Input must be a binding YAML file. Passing an ontology file (or any
+  other non-binding YAML) exits 2 with `cli-wrong-kind`.
 - Runs validation implicitly on both files before emission. Any error
   fails the compile; no partial DDL is emitted.
 - Writes DDL to stdout unless `-o` is given.
@@ -141,10 +145,18 @@ gm compile <binding> [-o <out>]
 
 | Flag | Purpose |
 |---|---|
-| `-o <file>`, `--out <file>` | Write DDL to file instead of stdout. |
+| `-o <file>`, `--output <file>` | Write DDL to file instead of stdout. |
+| `--ontology <path>` | Path to the companion ontology. Overrides auto-discovery (same as `gm validate`). |
 | `--json` | Structured errors for the implicit validation step. |
 
 On any validation or compilation error, no DDL is emitted — even partially.
+
+### Filename convention
+
+When writing to a file, the conventional name is **`graph_ddl.sql`**.
+This contrasts with `table_ddl.sql`, the output of `gm scaffold`, so a
+directory containing both artifacts is self-describing. The convention
+is advisory — `-o` accepts any path.
 
 ## 6. `gm import-owl`
 

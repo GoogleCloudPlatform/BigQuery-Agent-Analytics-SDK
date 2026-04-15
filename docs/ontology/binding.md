@@ -11,7 +11,8 @@ backend.
   transformed.
 - **One file per target.** One binding file per target, e.g. `(backend, deployment env)` pair. No conditional logic inside a file.
 - **Backend-neutral shape.** Entity and relationship binding syntax is
-  identical for BigQuery and Spanner; only the `target:` block differs.
+  backend-independent; only the `target:` block differs. Spanner support
+  is deferred until the SDK grows Spanner support.
 - **Ontology-aware, ontology-unaware.** The binding references ontology
   names and never redeclares logical structure. The ontology file does not
   know bindings exist.
@@ -110,13 +111,9 @@ relationships: [<RelationshipBinding>, ...]  # optional
 
 ```yaml
 # Target
-backend: bigquery | spanner             # required
-# BigQuery-specific:
-project: <string>                       # required for bigquery
-dataset: <string>                       # required for bigquery
-# Spanner-specific:
-instance: <string>                      # required for spanner
-database: <string>                      # required for spanner
+backend: bigquery                       # required (spanner deferred)
+project: <string>                       # required
+dataset: <string>                       # required
 ```
 
 ```yaml
@@ -152,20 +149,10 @@ target:
   dataset: finance
 ```
 
-Spanner:
-
-```yaml
-target:
-  backend: spanner
-  instance: my-instance
-  database: finance
-```
-
 Source names in entity and relationship bindings resolve relative to the
-target: for BigQuery, a bare `table` or `dataset.table` uses the target's
-`project` / `dataset` as defaults; a fully-qualified
-`project.dataset.table` overrides them. For Spanner, a bare `table`
-resolves against the target database. Views are valid sources for both.
+target: a bare `table` or `dataset.table` uses the target's `project` /
+`dataset` as defaults; a fully-qualified `project.dataset.table` overrides
+them. Views are valid sources.
 
 ## 4. Entity binding
 
@@ -222,9 +209,7 @@ otherwise the edge has nothing to point at.
 
 The ontology is backend-neutral; the binding enforces target compatibility.
 
-- **BigQuery** supports all 11 logical types in `ontology.md` §7.
-- **Spanner** does not support `time` or `datetime`. A binding that
-  exposes either on a Spanner target fails validation.
+BigQuery supports all 11 logical types defined in the ontology spec.
 
 No implicit coercion. If the physical column type does not match the
 logical property type, fix it upstream (a view, or land the data
@@ -249,9 +234,7 @@ correctly).
     entity's `keys.primary` length; same for `to_columns` and `to`.
 11. For every bound relationship: the `from` and `to` entities each have
     at least one bound descendant (including themselves).
-12. For the Spanner target, no bound property has logical type `time` or
-    `datetime`.
-13. Unknown YAML keys anywhere are a validation error (`extra="forbid"`).
+12. Unknown YAML keys anywhere are a validation error (`extra="forbid"`).
 
 ## 10. Relationship to ontology
 

@@ -39,6 +39,9 @@ llm = [
 bigframes = [
   "bigframes>=1.0.0",
 ]
+owl = [
+  "rdflib>=7.0",
+]
 cli = []
 dev = [
   "pytest>=7.0",
@@ -47,7 +50,7 @@ dev = [
   "isort>=5.0",
 ]
 all = [
-  "bigquery-agent-analytics[llm,bigframes,cli,dev]",
+  "bigquery-agent-analytics[llm,bigframes,owl,cli,dev]",
 ]
 
 [project.scripts]
@@ -56,6 +59,7 @@ gm = "bigquery_ontology.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bigquery_agent_analytics", "src/bigquery_ontology"]
+exclude = ["src/bigquery_ontology/docs"]
 
 [tool.pyink]
 line-length = 80
