@@ -777,7 +777,7 @@ def import_owl_command(
     resolved_output = Path(output_path)
     try:
       resolved_output.write_text(yaml_text, encoding="utf-8")
-    except (FileNotFoundError, PermissionError) as exc:
+    except OSError as exc:
       _emit_errors(
           [
               {

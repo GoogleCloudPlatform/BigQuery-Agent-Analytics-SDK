@@ -1073,3 +1073,25 @@ def test_import_owl_missing_rdflib_exits_2(tmp_path):
   assert result.exit_code == 2
   assert "cli-missing-dependency" in result.output
   assert "pip install" in result.output
+
+
+@_requires_rdflib
+def test_import_owl_output_to_existing_directory_emits_error(tmp_path):
+  ttl = _write(tmp_path, "test.ttl", _TINY_TURTLE)
+  existing_dir = tmp_path / "a_directory"
+  existing_dir.mkdir()
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "import-owl",
+          str(ttl),
+          "--include-namespace",
+          "http://example.com/test#",
+          "-o",
+          str(existing_dir),
+      ],
+  )
+
+  assert result.exit_code == 1
+  assert "cli-output-error" in result.output
