@@ -1,0 +1,26 @@
+binding: shop_bq
+ontology: shop
+target:
+  backend: bigquery
+  project: test-proj
+  dataset: test_ds
+entities:
+  - name: Customer
+    source: customers
+    properties:
+      - name: customer_id
+        column: cust_id
+      - name: display_name
+        column: name
+  - name: Order
+    source: orders
+    properties:
+      - name: order_id
+        column: order_id
+      - name: total
+        column: total_usd
+relationships:
+  - name: Placed
+    source: placed_edges
+    from_columns: [cust_id]
+    to_columns: [order_id]

@@ -362,6 +362,7 @@ try:
   from .ontology_models import ExtractedProperty
   from .ontology_models import GraphSpec
   from .ontology_models import KeySpec
+  from .ontology_models import load_from_ontology_binding
   from .ontology_models import load_graph_spec
   from .ontology_models import load_graph_spec_from_string
   from .ontology_models import PropertySpec
@@ -377,6 +378,7 @@ try:
           "ExtractedProperty",
           "GraphSpec",
           "KeySpec",
+          "load_from_ontology_binding",
           "load_graph_spec",
           "load_graph_spec_from_string",
           "PropertySpec",

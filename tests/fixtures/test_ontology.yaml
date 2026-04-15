@@ -1,0 +1,22 @@
+ontology: shop
+entities:
+  - name: Customer
+    keys:
+      primary: [customer_id]
+    properties:
+      - name: customer_id
+        type: string
+      - name: display_name
+        type: string
+  - name: Order
+    keys:
+      primary: [order_id]
+    properties:
+      - name: order_id
+        type: string
+      - name: total
+        type: double
+relationships:
+  - name: Placed
+    from: Customer
+    to: Order
