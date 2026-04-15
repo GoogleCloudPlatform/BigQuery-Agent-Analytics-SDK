@@ -40,7 +40,6 @@ from typing import Union
 
 try:
   from rdflib import Graph
-  from rdflib import Namespace
   from rdflib import URIRef
   from rdflib.namespace import OWL
   from rdflib.namespace import RDF
@@ -151,8 +150,10 @@ class _ImportedRelationship:
   to_candidates: list[str] = field(default_factory=list)
   description: str | None = None
   synonyms: list[str] = field(default_factory=list)
+  extends: str | None = None
+  extends_fill_in: bool = False
+  extends_candidates: list[str] = field(default_factory=list)
   cardinality: str | None = None
-  properties: list[_ImportedProperty] = field(default_factory=list)
   annotations: dict[str, AnnotationValue] = field(default_factory=dict)
   comments: list[str] = field(default_factory=list)
 
@@ -392,14 +393,14 @@ def _extract_datatype_properties(
 
     ont_type = "string"
     xsd_annotation: str | None = None
-    if ranges:
+    if len(ranges) == 1:
       xsd_ref = ranges[0]
       if xsd_ref in _XSD_TYPE_MAP:
         ont_type = _XSD_TYPE_MAP[xsd_ref]
         if xsd_ref == _ANYURI:
           xsd_annotation = "anyURI"
-      else:
-        ont_type = "string"
+    elif len(ranges) > 1:
+      ont_type = "FILL_IN"
 
     imported_prop = _ImportedProperty(
         name=prop_name,
@@ -460,6 +461,8 @@ def _extract_relationships(
     elif len(domains) > 1:
       from_fill_in = True
       from_candidates = sorted(domains)
+    elif not domain_excluded:
+      from_fill_in = True
 
     to_entity: str | None = None
     to_fill_in = False
@@ -469,6 +472,8 @@ def _extract_relationships(
     elif len(ranges) > 1:
       to_fill_in = True
       to_candidates = sorted(ranges)
+    elif not range_excluded:
+      to_fill_in = True
 
     cardinality: str | None = None
     if (prop, RDF.type, OWL.FunctionalProperty) in g:
@@ -504,6 +509,9 @@ def _extract_relationships(
         to_candidates=to_candidates,
         description=description,
         synonyms=synonyms,
+        extends=extends,
+        extends_fill_in=extends_fill_in,
+        extends_candidates=extends_candidates,
         cardinality=cardinality,
         annotations=annotations,
         comments=comments,
@@ -535,9 +543,11 @@ def _resolve_keys(entities: dict[str, _ImportedEntity]) -> None:
 
 def _yaml_scalar(value: str) -> str:
   if any(
-      c in value for c in (":", "{", "}", "[", "]", ",", "#", "'", '"', "\n")
+      c in value
+      for c in (":", "{", "}", "[", "]", ",", "#", "'", '"', "\n", "\\")
   ):
-    return f'"{value}"'
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
   return value
 
 
@@ -620,16 +630,29 @@ def _emit_ontology_yaml(
       if rel.description:
         lines.append(f"    description: {_yaml_scalar(rel.description)}")
 
+      if rel.extends_fill_in:
+        candidates = ", ".join(rel.extends_candidates)
+        lines.append(f"    # multi-parent: rdfs:subPropertyOf [{candidates}]")
+        lines.append("    extends: FILL_IN")
+      elif rel.extends:
+        lines.append(f"    extends: {rel.extends}")
+
       if rel.from_fill_in:
-        candidates = ", ".join(rel.from_candidates)
-        lines.append(f"    # multi-domain: [{candidates}]")
+        if rel.from_candidates:
+          candidates = ", ".join(rel.from_candidates)
+          lines.append(f"    # multi-domain: [{candidates}]")
+        else:
+          lines.append("    # no rdfs:domain in OWL source")
         lines.append("    from: FILL_IN")
       elif rel.from_entity:
         lines.append(f"    from: {rel.from_entity}")
 
       if rel.to_fill_in:
-        candidates = ", ".join(rel.to_candidates)
-        lines.append(f"    # multi-range: [{candidates}]")
+        if rel.to_candidates:
+          candidates = ", ".join(rel.to_candidates)
+          lines.append(f"    # multi-range: [{candidates}]")
+        else:
+          lines.append("    # no rdfs:range in OWL source")
         lines.append("    to: FILL_IN")
       elif rel.to_entity:
         lines.append(f"    to: {rel.to_entity}")

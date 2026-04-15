@@ -389,3 +389,89 @@ class TestEdgeCases:
     data = yaml.safe_load(yaml_text)
     rel = next(r for r in data["relationships"] if r["name"] == "rel")
     assert rel["cardinality"] == "many_to_one"
+
+  def test_no_domain_emits_fill_in(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix : <http://example.com/test#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        :A a owl:Class ; owl:hasKey ( :a_id ) .
+        :a_id a owl:DatatypeProperty ; rdfs:domain :A ; rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+        :orphan a owl:ObjectProperty ; rdfs:range :A .
+    """
+        ),
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rel = next(r for r in data["relationships"] if r["name"] == "orphan")
+    assert rel["from"] == "FILL_IN"
+    assert rel["to"] == "A"
+    assert "no rdfs:domain" in yaml_text
+
+  def test_no_range_emits_fill_in(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix : <http://example.com/test#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        :A a owl:Class ; owl:hasKey ( :a_id ) .
+        :a_id a owl:DatatypeProperty ; rdfs:domain :A ; rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+        :orphan a owl:ObjectProperty ; rdfs:domain :A .
+    """
+        ),
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rel = next(r for r in data["relationships"] if r["name"] == "orphan")
+    assert rel["from"] == "A"
+    assert rel["to"] == "FILL_IN"
+    assert "no rdfs:range" in yaml_text
+
+  def test_relationship_extends(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix : <http://example.com/test#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        :A a owl:Class ; owl:hasKey ( :a_id ) .
+        :a_id a owl:DatatypeProperty ; rdfs:domain :A ; rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+        :parent_rel a owl:ObjectProperty ; rdfs:domain :A ; rdfs:range :A .
+        :child_rel a owl:ObjectProperty ; rdfs:subPropertyOf :parent_rel ;
+            rdfs:domain :A ; rdfs:range :A .
+    """
+        ),
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rel_map = {r["name"]: r for r in data["relationships"]}
+    assert rel_map["child_rel"]["extends"] == "parent_rel"
+
+  def test_yaml_scalar_escapes_quotes(self, tmp_path):
+    from bigquery_ontology.owl_importer import _yaml_scalar
+
+    assert _yaml_scalar("hello") == "hello"
+    assert _yaml_scalar("has: colon") == '"has: colon"'
+    assert _yaml_scalar('has "quote"') == '"has \\"quote\\""'
+    assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
