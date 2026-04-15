@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pytest
@@ -114,13 +115,15 @@ class TestDualLoader:
     """lineage_config is passed through to the adapter layer.
 
     Full lineage validation requires matching properties on the
-    relationship (tested in test_runtime_spec.py). Here we just
-    verify the parameter is accepted without error when the config
-    references a non-existent relationship (ignored silently).
+    relationship (tested in test_runtime_spec.py). Here we verify
+    the parameter is accepted and that a typo in the relationship
+    name produces a warning.
     """
+    import logging
+
     from bigquery_agent_analytics.runtime_spec import LineageEdgeConfig
 
-    # Config for a relationship not in this spec — should be ignored.
+    # Config for a relationship not in this spec — should warn.
     spec = load_from_ontology_binding(
         _ONTOLOGY_PATH,
         _BINDING_PATH,
@@ -135,6 +138,24 @@ class TestDualLoader:
     placed = next(r for r in spec.relationships if r.name == "Placed")
     assert placed.binding.from_session_column is None
     assert placed.binding.to_session_column is None
+
+  def test_lineage_config_typo_warns(self, caplog):
+    """Mistyped relationship name in lineage_config produces a warning."""
+    from bigquery_agent_analytics.runtime_spec import LineageEdgeConfig
+
+    with caplog.at_level(logging.WARNING):
+      load_from_ontology_binding(
+          _ONTOLOGY_PATH,
+          _BINDING_PATH,
+          lineage_config={
+              "PlacedTypo": LineageEdgeConfig(
+                  from_session_column="from_sid",
+                  to_session_column="to_sid",
+              ),
+          },
+      )
+    assert "PlacedTypo" in caplog.text
+    assert "not found in the binding" in caplog.text
 
   def test_invalid_ontology_path_raises(self):
     with pytest.raises(FileNotFoundError):

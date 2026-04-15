@@ -309,6 +309,18 @@ def graph_spec_from_ontology_binding(
         )
     )
 
+  # Warn about lineage_config keys that did not match any relationship.
+  if lineage_config:
+    bound_rel_names = {rb.name for rb in binding.relationships}
+    unmatched = set(lineage_config) - bound_rel_names
+    if unmatched:
+      logger.warning(
+          'lineage_config references relationships not found in the '
+          'binding: %s. These lineage configurations will have no '
+          'effect. Check for typos in relationship names.',
+          sorted(unmatched),
+      )
+
   return GraphSpec(
       name=ontology.ontology,
       entities=entity_specs,
