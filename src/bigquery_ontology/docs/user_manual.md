@@ -18,6 +18,7 @@
   - [Structure](#structure)
   - [Mapping entities](#mapping-entities)
   - [Mapping relationships](#mapping-relationships)
+- [Installing the CLI](#installing-the-cli)
 - [Validating and Compiling](#validating-and-compiling)
   - [Validate](#validate)
   - [Compile](#compile)
@@ -263,6 +264,34 @@ relationships:
 ```
 
 The arity (number of columns) of `from_columns` must match the source entity's primary key length, and likewise for `to_columns`.
+
+---
+
+### Installing the CLI
+
+Install the package to get the `gm` command:
+
+```bash
+pip install bigquery-agent-analytics
+```
+
+To verify the installation:
+
+```bash
+gm --help
+```
+
+For local development, install in editable mode from the repo root:
+
+```bash
+pip install -e .
+```
+
+If you plan to use `gm import-owl`, install with the OWL extra:
+
+```bash
+pip install bigquery-agent-analytics[owl]
+```
 
 ---
 
