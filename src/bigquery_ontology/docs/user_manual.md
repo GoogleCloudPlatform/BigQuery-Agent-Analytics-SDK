@@ -28,6 +28,7 @@
   - [Namespace filtering](#namespace-filtering)
   - [FILL_IN placeholders](#fill_in-placeholders)
   - [Drop annotations](#drop-annotations)
+- [Scaffolding a New Project](#scaffolding-a-new-project)
 - [End-to-End Walkthrough](#end-to-end-walkthrough)
 
 ### Part 2: Reference
@@ -420,6 +421,56 @@ The drop summary printed to stderr provides counts per category so you can quick
 
 ---
 
+### Scaffolding a New Project
+
+If you are starting a greenfield project with no existing BigQuery tables, `gm scaffold` can generate starter `CREATE TABLE` DDL and a matching binding from your ontology:
+
+```bash
+gm scaffold \
+  --ontology finance.ontology.yaml \
+  --dataset my_dataset \
+  --out ./graph/
+```
+
+This writes two files into the `--out` directory:
+
+- **`table_ddl.sql`** -- `CREATE TABLE` statements for every entity and relationship. Entity tables get a `PRIMARY KEY ... NOT ENFORCED` clause; relationship tables get `FOREIGN KEY` references to their endpoint entity tables.
+- **`binding.yaml`** -- a binding stub that maps every non-derived ontology property to the generated column name. This file is immediately valid as input to `gm compile`.
+
+Scaffold is a **one-shot generator**. Its outputs are user-owned: commit them to version control and edit freely. Scaffold will not re-run against an existing output directory (it refuses to write into a non-empty `--out`).
+
+#### Naming
+
+By default (`--naming snake`), scaffold converts PascalCase and camelCase identifiers to snake_case:
+
+| Ontology name | Table/column name |
+|---------------|-------------------|
+| `Person` | `person` |
+| `firstName` | `first_name` |
+| `HTTPRequest` | `http_request` |
+
+Use `--naming preserve` to keep identifiers verbatim.
+
+#### Typical greenfield workflow
+
+```bash
+# 1. Generate tables and binding from the ontology
+gm scaffold --ontology finance.ontology.yaml --dataset my_dataset --out ./graph/
+
+# 2. Create the tables in BigQuery
+bq query --use_legacy_sql=false < ./graph/table_ddl.sql
+
+# 3. Edit the binding or DDL as needed (add partitioning, clustering, etc.)
+
+# 4. Compile the property graph DDL
+gm compile ./graph/binding.yaml -o ./graph/graph_ddl.sql
+
+# 5. Create the property graph
+bq query --use_legacy_sql=false < ./graph/graph_ddl.sql
+```
+
+---
+
 ### End-to-End Walkthrough
 
 Here is a complete example from YAML to DDL using a finance domain.
@@ -757,6 +808,23 @@ Output YAML may contain `FILL_IN` placeholders that must be resolved before `gm 
 
 Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
 
+#### `gm scaffold`
+
+```
+gm scaffold --ontology PATH --dataset NAME --out DIR [--naming {snake|preserve}] [--project ID] [--json]
+```
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `--ontology PATH` | yes | — | Path to the ontology YAML file. |
+| `--dataset NAME` | yes | — | BigQuery dataset name for generated tables. |
+| `--out DIR` | yes | — | Output directory. Must not exist or must be empty. |
+| `--naming` | no | `snake` | `snake` converts to snake_case; `preserve` keeps ontology names verbatim. |
+| `--project ID` | no | omitted | BigQuery project ID. When set, table names are project-qualified. |
+| `--json` | no | false | Emit structured JSON errors on stderr. |
+
+Writes `table_ddl.sql` and `binding.yaml` to the output directory. Refuses to overwrite a non-empty directory.
+
 #### Exit codes
 
 | Code | Meaning |
@@ -805,8 +873,10 @@ Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
 | `cli-wrong-kind` | Compile invoked on a non-binding file |
 | `cli-output-error` | Cannot write output file |
 | `cli-missing-dependency` | Required optional dependency not installed (e.g. rdflib for OWL import) |
-| `cli-usage` | Invalid flag value |
+| `cli-usage` | Invalid flag value (e.g. bad `--naming`, bad `--format`) |
+| `cli-non-empty-dir` | Scaffold output directory is not empty |
 | `import-validation` | Semantic error during OWL import (e.g. name collision) |
+| `scaffold-validation` | Scaffold-time validation (e.g. `extends`, endpoint-column collision) |
 
 ---
 

@@ -37,6 +37,7 @@ from .ontology_models import Ontology
 from .ontology_models import Property
 from .ontology_models import PropertyType
 from .ontology_models import Relationship
+from .scaffold import scaffold
 
 __all__ = [
     "Backend",
@@ -57,4 +58,5 @@ __all__ = [
     "load_binding_from_string",
     "load_ontology",
     "load_ontology_from_string",
+    "scaffold",
 ]
