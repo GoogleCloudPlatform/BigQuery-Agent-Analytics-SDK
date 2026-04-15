@@ -520,6 +520,25 @@ except ImportError as e:
       e,
   )
 
+# Runtime Spec Adapter (ontology package bridge)
+try:
+  from .runtime_spec import graph_spec_from_ontology_binding
+  from .runtime_spec import graph_spec_to_ontology_binding
+  from .runtime_spec import LineageEdgeConfig
+
+  __all__.extend(
+      [
+          "LineageEdgeConfig",
+          "graph_spec_from_ontology_binding",
+          "graph_spec_to_ontology_binding",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import runtime spec adapter: %s.",
+      e,
+  )
+
 # BigFrames Evaluator (optional bigframes dependency)
 try:
   from .bigframes_evaluator import BigFramesEvaluator

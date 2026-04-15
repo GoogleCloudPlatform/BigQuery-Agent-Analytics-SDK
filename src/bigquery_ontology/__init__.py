@@ -19,24 +19,44 @@ backend-neutral ontology described in YAML, with entities, relationships,
 properties, keys, and single-parent inheritance.
 """
 
-from .loader import load_ontology
-from .loader import load_ontology_from_string
-from .models import Cardinality
-from .models import Entity
-from .models import Keys
-from .models import Ontology
-from .models import Property
-from .models import PropertyType
-from .models import Relationship
+from .binding_loader import load_binding
+from .binding_loader import load_binding_from_string
+from .binding_models import Backend
+from .binding_models import BigQueryTarget
+from .binding_models import Binding
+from .binding_models import EntityBinding
+from .binding_models import PropertyBinding
+from .binding_models import RelationshipBinding
+from .graph_ddl_compiler import compile_graph
+from .ontology_loader import load_ontology
+from .ontology_loader import load_ontology_from_string
+from .ontology_models import Cardinality
+from .ontology_models import Entity
+from .ontology_models import Keys
+from .ontology_models import Ontology
+from .ontology_models import Property
+from .ontology_models import PropertyType
+from .ontology_models import Relationship
+from .scaffold import scaffold
 
 __all__ = [
+    "Backend",
+    "BigQueryTarget",
+    "Binding",
     "Cardinality",
     "Entity",
+    "EntityBinding",
     "Keys",
     "Ontology",
     "Property",
+    "PropertyBinding",
     "PropertyType",
     "Relationship",
+    "RelationshipBinding",
+    "compile_graph",
+    "load_binding",
+    "load_binding_from_string",
     "load_ontology",
     "load_ontology_from_string",
+    "scaffold",
 ]
