@@ -476,6 +476,82 @@ class TestEdgeCases:
     assert _yaml_scalar('has "quote"') == '"has \\"quote\\""'
     assert _yaml_scalar("back\\slash") == '"back\\\\slash"'
 
+  def test_yaml_scalar_quotes_booleans_and_nulls(self, tmp_path):
+    from bigquery_ontology.owl_importer import _yaml_scalar
+
+    for val in ("true", "false", "yes", "no", "on", "off", "null", "~"):
+      quoted = _yaml_scalar(val)
+      assert quoted.startswith('"'), f"{val} should be quoted"
+      parsed = yaml.safe_load(f"key: {quoted}")
+      assert parsed["key"] == val, f"{val} should round-trip as string"
+
+  def test_yaml_scalar_quotes_numbers(self, tmp_path):
+    from bigquery_ontology.owl_importer import _yaml_scalar
+
+    for val in ("42", "1.5", "0", "-3"):
+      quoted = _yaml_scalar(val)
+      assert quoted.startswith('"'), f"{val} should be quoted"
+      parsed = yaml.safe_load(f"key: {quoted}")
+      assert parsed["key"] == val
+
+  def test_yaml_scalar_quotes_special_leading_chars(self, tmp_path):
+    from bigquery_ontology.owl_importer import _yaml_scalar
+
+    for val in ("*alias", "&anchor", "!tag", "%dir"):
+      quoted = _yaml_scalar(val)
+      assert quoted.startswith('"'), f"{val} should be quoted"
+
+  def test_yaml_scalar_empty_string(self, tmp_path):
+    from bigquery_ontology.owl_importer import _yaml_scalar
+
+    assert _yaml_scalar("") == '""'
+
+  def test_entity_relationship_name_overlap_raises(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix : <http://example.com/test#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+        :Foo a owl:Class ; owl:hasKey ( :foo_id ) .
+        :foo_id a owl:DatatypeProperty ; rdfs:domain :Foo ;
+            rdfs:range <http://www.w3.org/2001/XMLSchema#string> .
+        :Foo a owl:ObjectProperty ; rdfs:domain :Foo ; rdfs:range :Foo .
+    """
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        ValueError, match="collision between entities and relationships"
+    ):
+      import_owl([ttl], include_namespaces=["http://example.com/test#"])
+
+  def test_duplicate_property_name_raises(self, tmp_path):
+    ttl = tmp_path / "test.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+        @prefix a: <http://example.com/a#> .
+        @prefix b: <http://example.com/b#> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+        a:Thing a owl:Class ; owl:hasKey ( a:name ) .
+        a:name a owl:DatatypeProperty ; rdfs:domain a:Thing ; rdfs:range xsd:string .
+        b:name a owl:DatatypeProperty ; rdfs:domain a:Thing ; rdfs:range xsd:integer .
+    """
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate property"):
+      import_owl(
+          [ttl],
+          include_namespaces=["http://example.com/a#", "http://example.com/b#"],
+      )
+
   def test_name_collision_raises(self, tmp_path):
     ttl = tmp_path / "test.ttl"
     ttl.write_text(

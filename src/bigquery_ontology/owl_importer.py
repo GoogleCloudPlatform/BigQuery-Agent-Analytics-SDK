@@ -433,6 +433,13 @@ def _extract_datatype_properties(
 
     for domain_name in domains:
       if domain_name in entities:
+        existing = {p.name for p in entities[domain_name].properties}
+        if prop_name in existing:
+          raise ValueError(
+              f"Duplicate property {prop_name!r} on entity "
+              f"{domain_name!r}. Two OWL properties with the same "
+              "local name share a domain."
+          )
         entities[domain_name].properties.append(imported_prop)
 
 
@@ -571,11 +578,52 @@ def _resolve_keys(entities: dict[str, _ImportedEntity]) -> None:
 # ---------------------------------------------------------------------------
 
 
+_YAML_BOOL_NULL = frozenset(
+    {
+        "true",
+        "false",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "True",
+        "False",
+        "Yes",
+        "No",
+        "On",
+        "Off",
+        "TRUE",
+        "FALSE",
+        "YES",
+        "NO",
+        "ON",
+        "OFF",
+        "null",
+        "Null",
+        "NULL",
+        "~",
+    }
+)
+
+_YAML_NEEDS_QUOTE_CHARS = frozenset(":{}[],\"'#\n\\*&!%@`?|>-")
+
+
 def _yaml_scalar(value: str) -> str:
-  if any(
-      c in value
-      for c in (":", "{", "}", "[", "]", ",", "#", "'", '"', "\n", "\\")
-  ):
+  if not value:
+    return '""'
+  needs_quote = (
+      value in _YAML_BOOL_NULL
+      or any(c in _YAML_NEEDS_QUOTE_CHARS for c in value)
+      or value[0] in (" ", "\t")
+      or value[-1] in (" ", "\t")
+  )
+  if not needs_quote:
+    try:
+      parsed = float(value)
+      needs_quote = True
+    except ValueError:
+      pass
+  if needs_quote:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
   return value
@@ -777,6 +825,14 @@ def import_owl(
   _extract_datatype_properties(g, entities, include_namespaces, drops)
   relationships = _extract_relationships(g, entities, include_namespaces, drops)
   _resolve_keys(entities)
+
+  overlap = set(entities) & set(relationships)
+  if overlap:
+    names = ", ".join(sorted(overlap))
+    raise ValueError(
+        f"Name collision between entities and relationships: {names}. "
+        "Entity and relationship names must be disjoint."
+    )
 
   if ontology_name is None:
     ns = include_namespaces[0].rstrip("#/")
