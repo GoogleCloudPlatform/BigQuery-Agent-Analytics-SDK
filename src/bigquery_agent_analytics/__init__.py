@@ -435,12 +435,16 @@ except ImportError as e:
 
 # Ontology Property Graph Compiler
 try:
+  from .ontology_property_graph import can_use_upstream_compiler
+  from .ontology_property_graph import compile_ddl_via_upstream
   from .ontology_property_graph import compile_property_graph_ddl
   from .ontology_property_graph import OntologyPropertyGraphCompiler
 
   __all__.extend(
       [
           "OntologyPropertyGraphCompiler",
+          "can_use_upstream_compiler",
+          "compile_ddl_via_upstream",
           "compile_property_graph_ddl",
       ]
   )

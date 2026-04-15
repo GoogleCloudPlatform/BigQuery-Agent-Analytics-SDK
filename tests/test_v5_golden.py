@@ -1086,3 +1086,94 @@ class TestMaterializerWriteMode:
     assert len(failed_tables) >= 1
     for ts in failed_tables:
       assert ts.idempotent is False
+
+
+# ------------------------------------------------------------------ #
+# TestUpstreamDDLBridge                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestUpstreamDDLBridge:
+  """Upstream DDL compiler bridge (Step 2 migration)."""
+
+  def test_can_use_upstream_flat_spec(self):
+    """Flat spec without extends or lineage is compatible."""
+    from bigquery_agent_analytics.ontology_property_graph import can_use_upstream_compiler
+
+    entity = _make_entity(
+        "A",
+        props=[PropertySpec(name="a_id", type="string")],
+        keys=["a_id"],
+        source="p.d.a_table",
+    )
+    spec = GraphSpec(name="g", entities=[entity], relationships=[])
+    assert can_use_upstream_compiler(spec) is True
+
+  def test_cannot_use_upstream_with_extends(self):
+    """Spec with extends is not compatible with upstream v0."""
+    from bigquery_agent_analytics.ontology_property_graph import can_use_upstream_compiler
+
+    spec = _demo_spec()
+    # YMGO has sup_YahooAdUnit extends mako_Candidate.
+    assert can_use_upstream_compiler(spec) is False
+
+  def test_cannot_use_upstream_with_lineage(self):
+    """Spec with session column overrides is not compatible."""
+    from bigquery_agent_analytics.ontology_property_graph import can_use_upstream_compiler
+
+    spec = _make_lineage_spec()
+    assert can_use_upstream_compiler(spec) is False
+
+  def test_compile_via_upstream_flat_spec(self):
+    """Flat spec produces valid DDL via upstream compiler."""
+    from bigquery_agent_analytics.ontology_property_graph import compile_ddl_via_upstream
+
+    a = _make_entity(
+        "Customer",
+        props=[
+            PropertySpec(name="cid", type="string"),
+            PropertySpec(name="name", type="string"),
+        ],
+        keys=["cid"],
+        source="p.d.customers",
+    )
+    b = _make_entity(
+        "Order",
+        props=[PropertySpec(name="oid", type="string")],
+        keys=["oid"],
+        source="p.d.orders",
+    )
+    rel = RelationshipSpec(
+        name="Placed",
+        from_entity="Customer",
+        to_entity="Order",
+        binding=BindingSpec(
+            source="p.d.placed",
+            from_columns=["cid"],
+            to_columns=["oid"],
+        ),
+    )
+    spec = GraphSpec(name="shop", entities=[a, b], relationships=[rel])
+    ddl = compile_ddl_via_upstream(spec, "p", "d")
+    assert "CREATE PROPERTY GRAPH" in ddl
+    assert "NODE TABLES" in ddl
+    assert "EDGE TABLES" in ddl
+    assert "Customer" in ddl
+    assert "Order" in ddl
+    assert "Placed" in ddl
+
+  def test_compile_via_upstream_rejects_extends(self):
+    """Upstream compiler rejects extends."""
+    from bigquery_agent_analytics.ontology_property_graph import compile_ddl_via_upstream
+
+    spec = _demo_spec()
+    with pytest.raises(ValueError, match="extends"):
+      compile_ddl_via_upstream(spec, "p", "d")
+
+  def test_compile_via_upstream_rejects_lineage(self):
+    """Upstream compiler rejects lineage session column overrides."""
+    from bigquery_agent_analytics.ontology_property_graph import compile_ddl_via_upstream
+
+    spec = _make_lineage_spec()
+    with pytest.raises(ValueError, match="session column overrides"):
+      compile_ddl_via_upstream(spec, "p", "d")

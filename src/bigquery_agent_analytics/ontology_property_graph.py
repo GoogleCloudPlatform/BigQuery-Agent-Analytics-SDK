@@ -418,3 +418,98 @@ class OntologyPropertyGraphCompiler:
     except Exception as e:
       logger.warning("Failed to create Property Graph: %s", e)
       return False
+
+
+# ------------------------------------------------------------------ #
+# Upstream DDL bridge                                                   #
+# ------------------------------------------------------------------ #
+
+
+def _spec_uses_extends(spec: GraphSpec) -> bool:
+  """Return True if any entity in the spec uses ``extends``."""
+  return any(e.extends for e in spec.entities)
+
+
+def _spec_uses_lineage_columns(spec: GraphSpec) -> bool:
+  """Return True if any relationship uses session column overrides."""
+  return any(
+      r.binding.from_session_column is not None
+      or r.binding.to_session_column is not None
+      for r in spec.relationships
+  )
+
+
+def compile_ddl_via_upstream(
+    spec: GraphSpec,
+    project_id: str,
+    dataset_id: str,
+) -> str:
+  """Compile DDL using the upstream ``bigquery_ontology`` compiler.
+
+  Converts the SDK ``GraphSpec`` to an upstream ``Ontology`` +
+  ``Binding`` and delegates to ``bigquery_ontology.compile_graph()``.
+  This produces clean ontology-level DDL without SDK runtime metadata
+  (no ``session_id``, ``extracted_at`` columns).
+
+  This is useful for previewing the upstream DDL or validating that
+  the spec is compatible with the upstream compiler.
+
+  Raises:
+      ValueError: If the spec uses ``extends`` (upstream v0 rejects
+          inheritance), ``from_session_column`` / ``to_session_column``
+          (SDK lineage extension not supported upstream), or if the
+          conversion fails.
+      ImportError: If the ``bigquery_ontology`` package is not available.
+  """
+  if not can_use_upstream_compiler(spec):
+    reasons = []
+    if _spec_uses_extends(spec):
+      entities_with_extends = [e.name for e in spec.entities if e.extends]
+      reasons.append(f"entities use extends: {entities_with_extends}")
+    if _spec_uses_lineage_columns(spec):
+      rels_with_lineage = [
+          r.name
+          for r in spec.relationships
+          if r.binding.from_session_column is not None
+          or r.binding.to_session_column is not None
+      ]
+      reasons.append(
+          f"relationships use session column overrides: " f"{rels_with_lineage}"
+      )
+    raise ValueError(
+        "Spec is not compatible with the upstream v0 compiler: "
+        + "; ".join(reasons)
+    )
+
+  from bigquery_ontology import compile_graph
+
+  from .runtime_spec import graph_spec_to_ontology_binding
+
+  ontology, binding, _ = graph_spec_to_ontology_binding(
+      spec,
+      ontology_name=spec.name,
+      binding_name=f"{spec.name}_binding",
+      project_id=project_id,
+      dataset_id=dataset_id,
+  )
+  return compile_graph(ontology, binding)
+
+
+def can_use_upstream_compiler(spec: GraphSpec) -> bool:
+  """Check whether a GraphSpec is compatible with the upstream compiler.
+
+  The upstream ``bigquery_ontology`` compiler (v0) does not support:
+
+  - ``extends`` on entities or relationships (inheritance lowering is
+    a future design).
+  - ``from_session_column`` / ``to_session_column`` on relationship
+    bindings (SDK-specific lineage extension).
+
+  Returns:
+      True if the spec can be compiled by the upstream compiler.
+  """
+  if _spec_uses_extends(spec):
+    return False
+  if _spec_uses_lineage_columns(spec):
+    return False
+  return True
