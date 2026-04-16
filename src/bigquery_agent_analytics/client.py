@@ -1356,7 +1356,12 @@ class Client:
       endpoint: str,
       connection_id: Optional[str] = None,
   ) -> list:
-    """Classifies sessions using BigQuery AI.GENERATE."""
+    """Classifies sessions using BigQuery AI.GENERATE.
+
+    Sessions where AI.GENERATE returns NULL (e.g. due to rate
+    limiting or transient errors) are retried via the Gemini API
+    up to 3 times.
+    """
     prompt = build_categorical_prompt(config)
 
     query = build_ai_generate_query(
@@ -1367,6 +1372,7 @@ class Client:
         endpoint=endpoint,
         temperature=config.temperature,
         connection_id=connection_id,
+        max_output_tokens=config.max_output_tokens,
     )
 
     query_params = list(params) + [
@@ -1383,11 +1389,112 @@ class Client:
     results = list(self.bq_client.query(query, job_config=job_config).result())
 
     session_results = []
+    null_sessions = {}
     for row in results:
       r = dict(row)
       sid = r.get("session_id", "unknown")
-      session_results.append(parse_categorical_row(sid, r, config))
+      parsed = parse_categorical_row(sid, r, config)
+      if r.get("classifications") is None and r.get("transcript"):
+        null_sessions[sid] = r.get("transcript", "")
+      session_results.append(parsed)
+
+    if null_sessions:
+      logger.warning(
+          "AI.GENERATE returned NULL for %d sessions, "
+          "retrying via Gemini API",
+          len(null_sessions),
+      )
+      retried = self._retry_null_sessions(
+          null_sessions,
+          config,
+          endpoint,
+          max_retries=3,
+      )
+      if retried:
+        retried_map = {r.session_id: r for r in retried}
+        session_results = [
+            retried_map.get(sr.session_id, sr) for sr in session_results
+        ]
+        success = sum(
+            1 for r in retried if not any(m.parse_error for m in r.metrics)
+        )
+        logger.info(
+            "Gemini API retry resolved %d/%d NULL sessions",
+            success,
+            len(null_sessions),
+        )
+
     return session_results
+
+  def _retry_null_sessions(
+      self,
+      transcripts: dict[str, str],
+      config: CategoricalEvaluationConfig,
+      endpoint: str,
+      max_retries: int = 3,
+  ) -> list:
+    """Retries classification for NULL sessions via Gemini API.
+
+    Args:
+        transcripts: Maps session_id to transcript text.
+        config: Evaluation config.
+        endpoint: Model endpoint.
+        max_retries: Maximum number of retry attempts.
+
+    Returns:
+        List of CategoricalSessionResult for successfully retried
+        sessions.
+    """
+    remaining = dict(transcripts)
+    all_results = {}
+
+    for attempt in range(1, max_retries + 1):
+      if not remaining:
+        break
+      try:
+        results = _run_sync(
+            classify_sessions_via_api(remaining, config, endpoint)
+        )
+        still_failed = {}
+        for r in results:
+          has_error = any(m.parse_error for m in r.metrics)
+          if has_error and r.session_id in remaining:
+            still_failed[r.session_id] = remaining[r.session_id]
+            for m in r.metrics:
+              if m.parse_error:
+                logger.warning(
+                    "Retry attempt %d, session %s, metric %s: "
+                    "parse_error=True, raw_response=%s",
+                    attempt,
+                    r.session_id,
+                    m.metric_name,
+                    repr(m.raw_response[:500] if m.raw_response else None),
+                )
+                break
+          else:
+            all_results[r.session_id] = r
+        remaining = still_failed
+        if remaining:
+          logger.warning(
+              "Retry attempt %d: %d sessions still unresolved",
+              attempt,
+              len(remaining),
+          )
+      except Exception as e:
+        logger.warning(
+            "Gemini API retry attempt %d failed: %s",
+            attempt,
+            e,
+        )
+
+    if remaining:
+      logger.warning(
+          "%d sessions still unresolved after %d retries",
+          len(remaining),
+          max_retries,
+      )
+
+    return list(all_results.values())
 
   def _categorical_api_fallback(
       self,
