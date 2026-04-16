@@ -81,6 +81,71 @@ def _build_client(
   )
 
 
+def _load_spec_from_args(
+    spec_path: str | None,
+    ontology_path: str | None,
+    binding_path: str | None,
+    env: str | None,
+) -> "ResolvedGraph":
+  """Load a ResolvedGraph from either separated or combined YAML.
+
+  Separated (--ontology + --binding) is the primary path.
+  Combined (--spec-path) is a deprecated fallback.
+  """
+  from .resolved_spec import ResolvedGraph
+
+  has_any_separated = ontology_path is not None or binding_path is not None
+  has_combined = spec_path is not None
+
+  # Reject any mixing of separated and combined flags.
+  if has_any_separated and has_combined:
+    raise typer.BadParameter(
+        "Cannot mix --ontology/--binding with --spec-path. "
+        "Use --ontology PATH --binding PATH (preferred) or "
+        "--spec-path PATH (deprecated), not both."
+    )
+
+  if has_any_separated:
+    # Both must be present together.
+    if ontology_path is None or binding_path is None:
+      raise typer.BadParameter(
+          "--ontology and --binding must be used together."
+      )
+    # --env is not supported with separated inputs.
+    if env is not None:
+      raise typer.BadParameter(
+          "--env is only supported with --spec-path (deprecated). "
+          "Separated ontology/binding YAML does not use {{ env }} "
+          "placeholders."
+      )
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    from .resolved_spec import resolve
+
+    ontology = load_ontology(ontology_path)
+    binding = load_binding(binding_path, ontology=ontology)
+    return resolve(ontology, binding)
+
+  if has_combined:
+    import warnings
+
+    warnings.warn(
+        "--spec-path is deprecated. "
+        "Use --ontology PATH --binding PATH instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    from .resolved_spec import load_resolved_graph
+
+    return load_resolved_graph(spec_path, env=env)
+
+  raise typer.BadParameter(
+      "Provide either --ontology PATH --binding PATH (preferred) "
+      "or --spec-path PATH (deprecated)."
+  )
+
+
 # ------------------------------------------------------------------ #
 # Evaluator factories                                                  #
 # ------------------------------------------------------------------ #
@@ -696,7 +761,21 @@ def ontology_property_graph(
     dataset_id: str = typer.Option(
         ..., envvar="BQ_AGENT_DATASET", help=_DATASET_HELP
     ),
-    spec_path: str = typer.Option(..., help="Path to YAML graph spec file."),
+    ontology_path: str = typer.Option(
+        None,
+        "--ontology",
+        help="Path to ontology YAML file (use with --binding).",
+    ),
+    binding_path: str = typer.Option(
+        None,
+        "--binding",
+        help="Path to binding YAML file (use with --ontology).",
+    ),
+    spec_path: str = typer.Option(
+        None,
+        "--spec-path",
+        help="[Deprecated] Path to combined graph-spec YAML.",
+    ),
     env: Optional[str] = typer.Option(
         None, help="Value for {{ env }} placeholder in binding.source."
     ),
@@ -715,9 +794,8 @@ def ontology_property_graph(
   """Generate or create a Property Graph from an ontology YAML spec."""
   try:
     from .ontology_property_graph import OntologyPropertyGraphCompiler
-    from .resolved_spec import load_resolved_graph
 
-    spec = load_resolved_graph(spec_path, env=env)
+    spec = _load_spec_from_args(spec_path, ontology_path, binding_path, env)
     compiler = OntologyPropertyGraphCompiler(
         project_id=project_id,
         dataset_id=dataset_id,
@@ -761,7 +839,21 @@ def ontology_build(
     dataset_id: str = typer.Option(
         ..., envvar="BQ_AGENT_DATASET", help=_DATASET_HELP
     ),
-    spec_path: str = typer.Option(..., help="Path to YAML graph spec file."),
+    ontology_path: str = typer.Option(
+        None,
+        "--ontology",
+        help="Path to ontology YAML file (use with --binding).",
+    ),
+    binding_path: str = typer.Option(
+        None,
+        "--binding",
+        help="Path to binding YAML file (use with --ontology).",
+    ),
+    spec_path: str = typer.Option(
+        None,
+        "--spec-path",
+        help="[Deprecated] Path to combined graph-spec YAML.",
+    ),
     session_ids: str = typer.Option(
         ..., help="Comma-separated session IDs to extract."
     ),
@@ -790,13 +882,15 @@ def ontology_build(
   try:
     from .ontology_orchestrator import build_ontology_graph
 
+    loaded_spec = _load_spec_from_args(
+        spec_path, ontology_path, binding_path, env
+    )
     sids = [s.strip() for s in session_ids.split(",") if s.strip()]
     result = build_ontology_graph(
         session_ids=sids,
-        spec_path=spec_path,
+        spec=loaded_spec,
         project_id=project_id,
         dataset_id=dataset_id,
-        env=env,
         graph_name=graph_name,
         table_id=table_id,
         endpoint=endpoint,
@@ -842,7 +936,21 @@ def ontology_showcase_gql(
     dataset_id: str = typer.Option(
         ..., envvar="BQ_AGENT_DATASET", help=_DATASET_HELP
     ),
-    spec_path: str = typer.Option(..., help="Path to YAML graph spec file."),
+    ontology_path: str = typer.Option(
+        None,
+        "--ontology",
+        help="Path to ontology YAML file (use with --binding).",
+    ),
+    binding_path: str = typer.Option(
+        None,
+        "--binding",
+        help="Path to binding YAML file (use with --ontology).",
+    ),
+    spec_path: str = typer.Option(
+        None,
+        "--spec-path",
+        help="[Deprecated] Path to combined graph-spec YAML.",
+    ),
     env: Optional[str] = typer.Option(
         None, help="Value for {{ env }} placeholder in binding.source."
     ),
@@ -864,9 +972,8 @@ def ontology_showcase_gql(
   """Generate a GQL showcase query from an ontology YAML spec."""
   try:
     from .ontology_orchestrator import compile_showcase_gql
-    from .resolved_spec import load_resolved_graph
 
-    spec = load_resolved_graph(spec_path, env=env)
+    spec = _load_spec_from_args(spec_path, ontology_path, binding_path, env)
     gql = compile_showcase_gql(
         spec,
         project_id=project_id,

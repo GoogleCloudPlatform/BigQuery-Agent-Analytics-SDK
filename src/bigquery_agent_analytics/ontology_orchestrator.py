@@ -290,9 +290,10 @@ def _short_alias(name: str, prefix: str = "") -> str:
 
 def build_ontology_graph(
     session_ids: list[str],
-    spec_path: str,
     project_id: str,
     dataset_id: str,
+    spec_path: str | None = None,
+    spec: ResolvedGraph | None = None,
     env: Optional[str] = None,
     graph_name: Optional[str] = None,
     table_id: str = "agent_events",
@@ -302,7 +303,7 @@ def build_ontology_graph(
 ) -> dict[str, Any]:
   """Run the full ontology graph pipeline end-to-end.
 
-  1. Load the YAML spec.
+  1. Load the YAML spec (or use pre-loaded ``spec``).
   2. Extract an ``ExtractedGraph`` from agent telemetry.
   3. Create physical tables (if not exists).
   4. Materialize extracted nodes/edges into tables.
@@ -310,9 +311,12 @@ def build_ontology_graph(
 
   Args:
       session_ids: Sessions to extract from.
-      spec_path: Path to the YAML graph spec.
       project_id: GCP project ID.
       dataset_id: BigQuery dataset ID.
+      spec_path: [Deprecated] Path to the YAML graph spec. Use
+          ``spec`` instead.
+      spec: A pre-loaded ``ResolvedGraph``. Preferred over
+          ``spec_path``.
       env: Value for ``{{ env }}`` placeholder substitution.
       graph_name: Override the property graph name.
       table_id: Source telemetry table name.
@@ -328,10 +332,14 @@ def build_ontology_graph(
   from .ontology_graph import OntologyGraphManager
   from .ontology_materializer import OntologyMaterializer
   from .ontology_property_graph import OntologyPropertyGraphCompiler
-  # 1. Load spec and convert to ResolvedGraph.
-  from .resolved_spec import load_resolved_graph
 
-  spec = load_resolved_graph(spec_path, env=env)
+  # 1. Load spec (or use pre-loaded ResolvedGraph).
+  if spec is None:
+    if spec_path is None:
+      raise ValueError("Either spec or spec_path is required.")
+    from .resolved_spec import load_resolved_graph
+
+    spec = load_resolved_graph(spec_path, env=env)
   name = graph_name or spec.name
   logger.info(
       "Loaded spec %r with %d entities, %d relationships.",
