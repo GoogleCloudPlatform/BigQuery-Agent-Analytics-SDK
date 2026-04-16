@@ -50,7 +50,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from .ontology_models import load_graph_spec
 from .resolved_spec import ResolvedGraph
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -330,9 +329,9 @@ def build_ontology_graph(
   from .ontology_materializer import OntologyMaterializer
   from .ontology_property_graph import OntologyPropertyGraphCompiler
   # 1. Load spec and convert to ResolvedGraph.
-  from .resolved_spec import resolve_from_graph_spec
+  from .resolved_spec import load_resolved_graph
 
-  spec = resolve_from_graph_spec(load_graph_spec(spec_path, env=env))
+  spec = load_resolved_graph(spec_path, env=env)
   name = graph_name or spec.name
   logger.info(
       "Loaded spec %r with %d entities, %d relationships.",

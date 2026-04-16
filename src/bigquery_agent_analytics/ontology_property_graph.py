@@ -24,12 +24,12 @@ the YAML ontology rather than hard-coding table structures.
 
 Example usage::
 
-    from bigquery_agent_analytics.ontology_models import load_graph_spec
+    from bigquery_agent_analytics.resolved_spec import load_resolved_graph
     from bigquery_agent_analytics.ontology_property_graph import (
         OntologyPropertyGraphCompiler,
     )
 
-    spec = load_graph_spec("examples/ymgo_graph_spec.yaml", env="p.d")
+    spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     compiler = OntologyPropertyGraphCompiler(
         project_id="my-project",
         dataset_id="analytics",

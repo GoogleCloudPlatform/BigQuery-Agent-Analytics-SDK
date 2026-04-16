@@ -25,12 +25,12 @@ property fields).
 
 Example usage::
 
-    from bigquery_agent_analytics.ontology_models import load_graph_spec
+    from bigquery_agent_analytics.resolved_spec import load_resolved_graph
     from bigquery_agent_analytics.ontology_schema_compiler import (
         compile_output_schema,
     )
 
-    spec = load_graph_spec("examples/ymgo_graph_spec.yaml", env="p.d")
+    spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     schema_json = compile_output_schema(spec)
     # Use in: AI.GENERATE(..., output_schema => '{schema_json}')
 """

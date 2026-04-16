@@ -25,13 +25,13 @@ same delete-then-insert idempotency pattern as V3's
 
 Example usage::
 
-    from bigquery_agent_analytics.ontology_models import load_graph_spec
+    from bigquery_agent_analytics.resolved_spec import load_resolved_graph
     from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
     from bigquery_agent_analytics.ontology_materializer import (
         OntologyMaterializer,
     )
 
-    spec = load_graph_spec("examples/ymgo_graph_spec.yaml", env="p.d")
+    spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     mgr = OntologyGraphManager(
         project_id="my-project", dataset_id="analytics", spec=spec,
     )

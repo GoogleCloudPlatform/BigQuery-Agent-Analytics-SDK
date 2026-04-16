@@ -709,14 +709,11 @@ class TestOrchestratorBridge:
   def test_orchestrator_creates_resolved_spec(self):
     """Verify the spec loaded by build_ontology_graph is a ResolvedGraph."""
     # Build a ResolvedGraph the same way the orchestrator would.
-    from bigquery_agent_analytics.ontology_models import load_graph_spec
     from bigquery_agent_analytics.ontology_orchestrator import compile_showcase_gql
-    from bigquery_agent_analytics.resolved_spec import resolve_from_graph_spec
+    from bigquery_agent_analytics.resolved_spec import load_resolved_graph
     from bigquery_agent_analytics.resolved_spec import ResolvedGraph
 
-    spec = resolve_from_graph_spec(
-        load_graph_spec("examples/ymgo_graph_spec.yaml", env="p.d")
-    )
+    spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     assert isinstance(spec, ResolvedGraph)
     # Proves compile_showcase_gql can consume it without AttributeError.
     gql = compile_showcase_gql(spec, project_id="p", dataset_id="d")

@@ -354,41 +354,34 @@ except ImportError as e:
 
 # Ontology Models
 try:
-  from .ontology_models import BindingSpec
-  from .ontology_models import EntitySpec
   from .ontology_models import ExtractedEdge
   from .ontology_models import ExtractedGraph
   from .ontology_models import ExtractedNode
   from .ontology_models import ExtractedProperty
-  from .ontology_models import GraphSpec
-  from .ontology_models import KeySpec
-  from .ontology_models import load_from_ontology_binding
-  from .ontology_models import load_graph_spec
-  from .ontology_models import load_graph_spec_from_string
-  from .ontology_models import PropertySpec
-  from .ontology_models import RelationshipSpec
 
   __all__.extend(
       [
-          "BindingSpec",
-          "EntitySpec",
           "ExtractedEdge",
           "ExtractedGraph",
           "ExtractedNode",
           "ExtractedProperty",
-          "GraphSpec",
-          "KeySpec",
-          "load_from_ontology_binding",
-          "load_graph_spec",
-          "load_graph_spec_from_string",
-          "PropertySpec",
-          "RelationshipSpec",
       ]
   )
 except ImportError as e:
   logger.debug(
       "Could not import ontology model components: %s. "
       "Ensure pyyaml is installed.",
+      e,
+  )
+
+# Resolved Spec
+try:
+  from .resolved_spec import load_resolved_graph
+
+  __all__.append("load_resolved_graph")
+except ImportError as e:
+  logger.debug(
+      "Could not import resolved spec: %s.",
       e,
   )
 
@@ -498,19 +491,11 @@ except ImportError as e:
 
 # V5: TTL Importer
 try:
-  from .ttl_importer import import_owl_to_graph_spec
   from .ttl_importer import import_owl_to_ontology
-  from .ttl_importer import ttl_import
-  from .ttl_importer import ttl_resolve
-  from .ttl_importer import TTLImportResult
 
   __all__.extend(
       [
-          "TTLImportResult",
-          "import_owl_to_graph_spec",
           "import_owl_to_ontology",
-          "ttl_import",
-          "ttl_resolve",
       ]
   )
 except ImportError as e:
@@ -532,15 +517,15 @@ except ImportError as e:
 
 # Runtime Spec Adapter (ontology package bridge)
 try:
-  from .runtime_spec import graph_spec_from_ontology_binding
   from .runtime_spec import graph_spec_to_ontology_binding
   from .runtime_spec import LineageEdgeConfig
+  from .runtime_spec import resolved_graph_to_ontology_binding
 
   __all__.extend(
       [
           "LineageEdgeConfig",
-          "graph_spec_from_ontology_binding",
           "graph_spec_to_ontology_binding",
+          "resolved_graph_to_ontology_binding",
       ]
   )
 except ImportError as e:

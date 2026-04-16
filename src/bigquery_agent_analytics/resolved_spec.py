@@ -446,3 +446,15 @@ def resolve_from_graph_spec(spec) -> ResolvedGraph:
       entities=tuple(entities),
       relationships=tuple(relationships),
   )
+
+
+def load_resolved_graph(path: str, env: str | None = None) -> ResolvedGraph:
+  """Load a combined graph-spec YAML file into a ResolvedGraph.
+
+  This is the migration-compatible replacement for ``load_graph_spec()``.
+  It reads the combined YAML, builds the legacy GraphSpec internally,
+  and converts it to a ResolvedGraph.
+  """
+  from .ontology_models import load_graph_spec
+
+  return resolve_from_graph_spec(load_graph_spec(path, env=env))

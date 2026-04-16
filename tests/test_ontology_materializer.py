@@ -33,7 +33,7 @@ from bigquery_agent_analytics.ontology_materializer import _route_node
 from bigquery_agent_analytics.ontology_materializer import compile_entity_ddl
 from bigquery_agent_analytics.ontology_materializer import compile_relationship_ddl
 from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
-from bigquery_agent_analytics.ontology_models import load_graph_spec
+from bigquery_agent_analytics.resolved_spec import load_resolved_graph
 from bigquery_agent_analytics.resolved_spec import ResolvedEntity
 from bigquery_agent_analytics.resolved_spec import ResolvedGraph
 from bigquery_agent_analytics.resolved_spec import ResolvedProperty
@@ -42,50 +42,6 @@ from bigquery_agent_analytics.resolved_spec import ResolvedRelationship
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
-
-
-def _graph_spec_to_resolved(spec):
-  """Convert a legacy GraphSpec (from load_graph_spec) to ResolvedGraph."""
-  entities = tuple(
-      ResolvedEntity(
-          name=e.name,
-          source=e.binding.source,
-          key_columns=tuple(e.keys.primary),
-          labels=tuple(e.labels),
-          properties=tuple(
-              ResolvedProperty(
-                  column=p.name, logical_name=p.name, sdk_type=p.type
-              )
-              for p in e.properties
-          ),
-          description=e.description,
-          extends=e.extends,
-      )
-      for e in spec.entities
-  )
-  relationships = tuple(
-      ResolvedRelationship(
-          name=r.name,
-          source=r.binding.source,
-          from_entity=r.from_entity,
-          to_entity=r.to_entity,
-          from_columns=tuple(r.binding.from_columns or []),
-          to_columns=tuple(r.binding.to_columns or []),
-          properties=tuple(
-              ResolvedProperty(
-                  column=p.name, logical_name=p.name, sdk_type=p.type
-              )
-              for p in r.properties
-          ),
-          description=r.description,
-          from_session_column=getattr(r.binding, "from_session_column", None),
-          to_session_column=getattr(r.binding, "to_session_column", None),
-      )
-      for r in spec.relationships
-  )
-  return ResolvedGraph(
-      name=spec.name, entities=entities, relationships=relationships
-  )
 
 
 def _make_entity(name, props=None, keys=None, source="p.d.t"):
@@ -320,7 +276,7 @@ class TestCompileRelationshipDdl:
         "examples",
         "ymgo_graph_spec.yaml",
     )
-    spec = _graph_spec_to_resolved(load_graph_spec(demo_path, env="p.d"))
+    spec = load_resolved_graph(demo_path, env="p.d")
     for entity in spec.entities:
       ddl = compile_entity_ddl(entity, "proj", "ds")
       assert "CREATE TABLE IF NOT EXISTS" in ddl
