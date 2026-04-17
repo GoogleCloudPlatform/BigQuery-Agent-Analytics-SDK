@@ -1585,7 +1585,7 @@ class TestClientContextGraph:
   """Tests for Client.context_graph() factory method."""
 
   def test_context_graph_returns_manager(self):
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
 
       # Patch schema verification
@@ -1600,7 +1600,7 @@ class TestClientContextGraph:
         assert mgr.dataset_id == "d"
 
   def test_context_graph_with_config(self):
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
 
       with patch.object(Client, "_verify_schema"):
@@ -1614,7 +1614,7 @@ class TestClientContextGraph:
 
   def test_get_session_trace_gql_fallback_on_empty(self):
     """GQL with no edges falls back to flat get_session_trace."""
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
       from bigquery_agent_analytics.trace import Trace
 
@@ -1641,7 +1641,7 @@ class TestClientContextGraph:
 
   def test_get_session_trace_gql_merges_isolated_events(self):
     """GQL edges + flat SQL merge captures isolated events."""
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
       from bigquery_agent_analytics.trace import Span
       from bigquery_agent_analytics.trace import Trace
@@ -1722,7 +1722,7 @@ class TestClientContextGraph:
 
   def test_get_session_trace_gql_backfills_parent_link(self):
     """Span first seen as parent_ gets parent_span_id backfilled."""
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
       from bigquery_agent_analytics.trace import Span
       from bigquery_agent_analytics.trace import Trace
@@ -1828,7 +1828,7 @@ class TestClientContextGraph:
 
   def test_get_session_trace_gql_chronological_order(self):
     """Spans are returned in chronological order."""
-    with patch("bigquery_agent_analytics.client.bigquery.Client"):
+    with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
       from bigquery_agent_analytics.trace import Trace
 
