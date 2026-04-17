@@ -92,4 +92,4 @@ The script automatically detects and resolves responses from remote A2A
 
 ### Sample report output
 
-![Sample report output](reports/quality_report_20260417_214854.md)
+[Sample report output](reports/quality_report_20260417_214854.md)
