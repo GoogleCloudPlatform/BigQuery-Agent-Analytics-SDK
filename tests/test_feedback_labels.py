@@ -177,3 +177,35 @@ class TestSemanticGroupingLabels:
     _sql, labels = calls[0]
     assert labels.get("sdk_feature") == "feedback"
     assert labels.get("sdk_ai_function") == "ai-generate"
+
+  def test_legacy_ml_generate_text_grouping_labels_ml_generate_text(self):
+    # A legacy model ref (project.dataset.model) skips the AI.GENERATE
+    # try block entirely and dispatches through the ML.GENERATE_TEXT
+    # branch, which must carry ai_function=ml-generate-text.
+    mock_bq = _mock_bq_client()
+    config = AnalysisConfig(
+        mode="auto_group_using_semantics",
+        top_k=5,
+    )
+    loop = asyncio.new_event_loop()
+    try:
+      loop.run_until_complete(
+          _semantic_grouping(
+              mock_bq,
+              "p",
+              "d",
+              "agent_events",
+              "1=1",
+              [],
+              config,
+              text_model="p.d.gemini_text_model",
+              loop=loop,
+          )
+      )
+    finally:
+      loop.close()
+    calls = _labels_per_call(mock_bq)
+    assert calls, "expected the legacy branch to have dispatched a query"
+    _sql, labels = calls[0]
+    assert labels.get("sdk_feature") == "feedback"
+    assert labels.get("sdk_ai_function") == "ml-generate-text"
