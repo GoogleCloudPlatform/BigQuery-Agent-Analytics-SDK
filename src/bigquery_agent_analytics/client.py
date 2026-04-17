@@ -329,6 +329,7 @@ class Client:
     self.location = location
     self.gcs_bucket_name = gcs_bucket_name
     self._bq_client = bq_client
+    self._warned_unlabeled_client = False
     self.endpoint = endpoint or DEFAULT_ENDPOINT
     self.connection_id = connection_id
 
@@ -346,12 +347,25 @@ class Client:
   def bq_client(self) -> bigquery.Client:
     """Lazily initializes the BigQuery client.
 
-    Returns a ``LabeledBigQueryClient`` so every job the SDK submits
-    carries the default SDK labels (``sdk``, ``sdk_version``,
-    ``sdk_surface``). If the caller passed a vanilla ``bigquery.Client``
-    at construction time, it is transparently re-wrapped so labels
-    still apply. Non-``bigquery.Client`` objects (e.g. ``MagicMock`` in
-    tests) are honored as-is.
+    When no ``bq_client`` is passed at construction time, builds a
+    ``LabeledBigQueryClient`` via ``make_bq_client`` so every job the
+    SDK submits carries the default SDK labels (``sdk``,
+    ``sdk_version``, ``sdk_surface``).
+
+    When the caller passes a vanilla ``bigquery.Client``, it is
+    honored **as-is** — we do not reconstruct it. Rebuilding from
+    ``project`` / ``credentials`` / ``location`` would silently drop
+    the caller's ``default_query_job_config`` (think
+    ``maximum_bytes_billed``, ``use_legacy_sql``, custom labels, write
+    disposition), ``default_load_job_config``, ``client_info``,
+    ``client_options``, any custom transport/session, and any subclass
+    overrides on ``query`` / ``load_table_from_json``. A one-shot
+    ``WARNING`` points callers to ``make_bq_client`` (or
+    ``LabeledBigQueryClient`` directly) if they also want SDK
+    telemetry labels.
+
+    Non-``bigquery.Client`` objects (e.g. ``MagicMock`` in tests) are
+    honored as-is, unchanged.
     """
     if self._bq_client is None:
       self._bq_client = make_bq_client(
@@ -360,16 +374,15 @@ class Client:
     elif isinstance(self._bq_client, bigquery.Client) and not isinstance(
         self._bq_client, LabeledBigQueryClient
     ):
-      logger.debug(
-          "Wrapping user-provided bigquery.Client in "
-          "LabeledBigQueryClient so SDK labels apply to every job."
-      )
-      self._bq_client = LabeledBigQueryClient(
-          project=self._bq_client.project,
-          credentials=self._bq_client._credentials,
-          location=self._bq_client.location,
-          sdk_surface="python",
-      )
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._bq_client
 
   # -------------------------------------------------------------- #

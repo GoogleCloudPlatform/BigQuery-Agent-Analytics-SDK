@@ -61,17 +61,67 @@ class TestClientBqClientFactory:
     client = _make_client(bq_client=labeled)
     assert client.bq_client is labeled
 
-  def test_user_provided_vanilla_client_is_wrapped(self, caplog):
+  def test_user_provided_vanilla_client_is_honored_as_is(self, caplog):
+    # PR #24 review: rebuilding the caller's client from project /
+    # credentials / location alone silently drops
+    # default_query_job_config, client_info, client_options, custom
+    # transport, subclass overrides, etc. Honor it as-is and WARN once
+    # that SDK labels will not apply.
     import logging
 
     vanilla = bigquery.Client(
         project="test-project", credentials=AnonymousCredentials()
     )
-    with caplog.at_level(logging.DEBUG):
-      client = _make_client(bq_client=vanilla)
-    wrapped = client.bq_client
-    assert isinstance(wrapped, LabeledBigQueryClient)
-    assert wrapped.project == "test-project"
+    client = _make_client(bq_client=vanilla)
+    with caplog.at_level(logging.WARNING):
+      returned = client.bq_client
+    assert returned is vanilla
+    assert not isinstance(returned, LabeledBigQueryClient)
+    assert any(
+        "SDK telemetry labels will not be applied" in r.message
+        for r in caplog.records
+    )
+
+  def test_warning_emitted_at_most_once_per_client(self, caplog):
+    import logging
+
+    vanilla = bigquery.Client(
+        project="test-project", credentials=AnonymousCredentials()
+    )
+    client = _make_client(bq_client=vanilla)
+    with caplog.at_level(logging.WARNING):
+      _ = client.bq_client
+      _ = client.bq_client
+      _ = client.bq_client
+    warnings = [
+        r
+        for r in caplog.records
+        if "SDK telemetry labels will not be applied" in r.message
+    ]
+    assert len(warnings) == 1
+
+  def test_vanilla_client_default_query_job_config_preserved(self):
+    # Regression guard for PR #24 review: caller-set defaults like
+    # maximum_bytes_billed must survive Client construction.
+    default_cfg = bigquery.QueryJobConfig(
+        maximum_bytes_billed=1_000_000_000, use_legacy_sql=False
+    )
+    default_cfg.labels = {"team": "search"}
+
+    vanilla = bigquery.Client(
+        project="test-project", credentials=AnonymousCredentials()
+    )
+    vanilla.default_query_job_config = default_cfg
+
+    client = _make_client(bq_client=vanilla)
+    returned = client.bq_client
+    assert returned is vanilla
+    # `default_query_job_config` returns a copy, so check content not identity.
+    assert returned.default_query_job_config.maximum_bytes_billed == (
+        1_000_000_000
+    )
+    assert returned.default_query_job_config.use_legacy_sql is False
+    assert returned.default_query_job_config.labels == {"team": "search"}
 
   def test_mock_client_is_not_wrapped(self):
     # Existing tests pass MagicMock() as bq_client. Those must keep working;
