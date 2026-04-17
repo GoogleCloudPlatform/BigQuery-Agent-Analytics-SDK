@@ -41,6 +41,8 @@ from typing import Optional
 
 from google.cloud import bigquery
 
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
 from .categorical_evaluator import DEFAULT_RESULTS_TABLE
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -148,10 +150,7 @@ class CategoricalViewManager:
   @property
   def bq_client(self) -> bigquery.Client:
     if self._bq_client is None:
-      kwargs: dict = {"project": self.project_id}
-      if self.location:
-        kwargs["location"] = self.location
-      self._bq_client = bigquery.Client(**kwargs)
+      self._bq_client = make_bq_client(self.project_id, location=self.location)
     return self._bq_client
 
   def available_views(self) -> list[str]:
@@ -196,7 +195,10 @@ class CategoricalViewManager:
         self.dataset_id,
         full_name,
     )
-    self.bq_client.query(sql).result()
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(), feature="eval-categorical"
+    )
+    self.bq_client.query(sql, job_config=job_config).result()
     logger.info("View %s created successfully.", full_name)
 
   def create_all_views(self) -> dict[str, str]:

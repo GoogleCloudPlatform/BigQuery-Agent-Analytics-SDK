@@ -137,6 +137,12 @@ class TestViewManager:
     assert "LLM_REQUEST" in sql
     vm.bq_client.query.return_value.result.assert_called_once()
 
+  def test_create_view_labels_job_config_with_views_feature(self, vm):
+    vm.create_view("LLM_REQUEST")
+    job_config = vm.bq_client.query.call_args.kwargs.get("job_config")
+    assert job_config is not None
+    assert dict(job_config.labels or {}).get("sdk_feature") == "views"
+
   def test_create_all_views(self, vm):
     created = vm.create_all_views()
     assert len(created) == len(_EVENT_VIEW_DEFS)

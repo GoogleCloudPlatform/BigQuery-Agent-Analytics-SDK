@@ -53,6 +53,9 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -512,7 +515,7 @@ Required JSON format:
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
     return self._client
 
   async def get_session_trace(self, session_id: str) -> SessionTrace:
@@ -544,6 +547,9 @@ Required JSON format:
             ),
         ]
     )
+    # Apply labels BEFORE executor dispatch so they materialize on the
+    # QueryJobConfig in the caller's thread.
+    job_config = with_sdk_labels(job_config, feature="trace-read")
 
     # Run query in executor to avoid blocking
     loop = asyncio.get_event_loop()

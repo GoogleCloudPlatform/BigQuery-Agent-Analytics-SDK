@@ -411,6 +411,12 @@ class TestBigQueryTraceEvaluator:
     assert len(trace.tool_calls) == 1
     assert trace.tool_calls[0].tool_name == "greet"
 
+    # Phase 2a: the query must be labeled so BigQuery Agent Analytics SDK
+    # usage shows up in INFORMATION_SCHEMA.JOBS with sdk_feature=trace-read.
+    job_config = mock_client.query.call_args.kwargs.get("job_config")
+    assert job_config is not None
+    assert dict(job_config.labels or {}).get("sdk_feature") == "trace-read"
+
   @pytest.mark.asyncio
   async def test_evaluate_session_with_trajectory(self, evaluator, mock_client):
     """Test evaluating session with golden trajectory."""
