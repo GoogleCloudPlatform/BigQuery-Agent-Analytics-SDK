@@ -43,13 +43,15 @@ EVAL_MODEL_ID=gemini-2.5-flash
 
 ```bash
 # From the repo root:
-./scripts/quality_report.sh                      # evaluate last 100 sessions
-./scripts/quality_report.sh --limit 500          # evaluate last 500 sessions
-./scripts/quality_report.sh --time_period 7d     # evaluate last 7 days
-./scripts/quality_report.sh --report             # also generate markdown report
-./scripts/quality_report.sh --no-eval            # browse Q&A only (no evaluation)
-./scripts/quality_report.sh --persist            # persist results to BigQuery
+./scripts/quality_report.sh                         # evaluate last 100 sessions
+./scripts/quality_report.sh --limit 500             # evaluate last 500 sessions
+./scripts/quality_report.sh --time_period 7d        # evaluate last 7 days
+./scripts/quality_report.sh --report                # also generate markdown report
+./scripts/quality_report.sh --no-eval               # browse Q&A only (no evaluation)
+./scripts/quality_report.sh --persist               # persist results to BigQuery
 ./scripts/quality_report.sh --model gemini-2.5-pro  # use a specific model
+./scripts/quality_report.sh --samples 20            # show 20 sessions per category
+./scripts/quality_report.sh --samples all           # show all sessions per category
 ```
 
 Or run the Python script directly:
@@ -86,3 +88,8 @@ The evaluation uses two categorical metrics:
 
 The script automatically detects and resolves responses from remote A2A
 (Agent-to-Agent) agents by extracting `A2A_INTERACTION` events from traces.
+
+
+### Sample report output
+
+![Sample report output](reports/quality_report_20260417_214854.md)

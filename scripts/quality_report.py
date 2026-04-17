@@ -32,11 +32,13 @@ Optional environment variables:
 
 Usage:
     python quality_report.py                      # evaluate last 100 sessions
-    python quality_report.py --limit 50           # evaluate last 50
+    python quality_report.py --limit 50           # evaluate last 50 sessions
     python quality_report.py --time_period 7d     # evaluate last 7 days
     python quality_report.py --report             # also generate markdown report
     python quality_report.py --no-eval            # browse Q&A only
     python quality_report.py --persist            # persist results to BigQuery
+    python quality_report.py --samples 20         # show 20 sessions per category
+    python quality_report.py --samples all        # show all sessions
 """
 import argparse
 import json
@@ -46,11 +48,8 @@ import sys
 import time
 from datetime import datetime
 
-# Allow running from repo root or scripts/ directory
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _repo_root = os.path.join(_script_dir, "..")
-if os.path.isdir(os.path.join(_repo_root, "src", "bigquery_agent_analytics")):
-  sys.path.insert(0, os.path.join(_repo_root, "src"))
 
 # Load .env if present (optional convenience)
 try:
@@ -457,8 +456,13 @@ def run_browse(args):
 def run_eval(args):
   model = args.model or EVAL_MODEL_ID
   logger.info(f"Project: {PROJECT_ID}, Dataset: {DATASET_ID}, Table: {TABLE_ID}")
+  logger.info(f"Location: {DATASET_LOCATION}")
   logger.info(f"Evaluation model: {model}")
-  logger.info(f"Filter: {args.time_period or 'all'}, limit {args.limit}")
+  logger.info(
+      f"Parameters: time_period={args.time_period or 'all'}, limit={args.limit}, "
+      f"persist={args.persist}, report={args.report}, "
+      f"samples={args.samples or 'default (10/5/3)'}"
+  )
 
   t0 = time.time()
   try:
@@ -474,10 +478,22 @@ def run_eval(args):
   elapsed = time.time() - t0
 
   result["report"].details["elapsed_seconds"] = round(elapsed, 1)
-  _print_eval_results(result["report"], result["resolved_map"])
+  result["report"].details["project"] = PROJECT_ID
+  result["report"].details["dataset"] = f"{DATASET_ID}.{TABLE_ID}"
+  result["report"].details["location"] = DATASET_LOCATION
+  result["report"].details["eval_model"] = model
+  result["report"].details["time_period"] = args.time_period or "all"
+  result["report"].details["limit"] = args.limit
+  result["report"].details["persist"] = args.persist
+  result["report"].details["samples"] = args.samples or "default (10/5/3)"
+  _print_eval_results(result["report"], result["resolved_map"], samples=args.samples)
 
+  report_path = None
   if args.report:
-    _write_md_report(result["report"], result["resolved_map"], args)
+    report_path = _write_md_report(result["report"], result["resolved_map"], args)
+
+  if report_path:
+    print(f"\n  Markdown report: {report_path}")
 
 
 def _group_by_category(report):
@@ -530,7 +546,7 @@ _METRIC_LABELS = {
 }
 
 
-def _print_eval_results(report, resolved_map):
+def _print_eval_results(report, resolved_map, samples=None):
   hr = "\u2500" * 70
 
   by_category = _group_by_category(report)
@@ -539,12 +555,18 @@ def _print_eval_results(report, resolved_map):
   }
 
   # --- Per-session details ---
-  for cat, cat_label, limit in [
-      ("unhelpful", "UNHELPFUL", 10),
-      ("partial", "PARTIAL", 5),
-      ("meaningful", "MEANINGFUL", 3),
-      ("unknown", "UNCLASSIFIED (parse errors)", 3),
+  _default_samples = {"unhelpful": 10, "partial": 5, "meaningful": 3, "unknown": 3}
+  for cat, cat_label in [
+      ("unhelpful", "UNHELPFUL"),
+      ("partial", "PARTIAL"),
+      ("meaningful", "MEANINGFUL"),
+      ("unknown", "UNCLASSIFIED (parse errors)"),
   ]:
+    limit = (
+        len(by_category.get(cat, []))
+        if samples == "all"
+        else (int(samples) if samples else _default_samples.get(cat, 5))
+    )
     sessions = by_category.get(cat, [])
     if not sessions:
       continue
@@ -596,17 +618,19 @@ def _print_eval_results(report, resolved_map):
 
     hdr = (
         f"  {'Agent':<30s} {'Sess':>4s}  {'Status':>6s}  "
-        f"{'Helpful':>12s}  {'Unhelpful':>12s}  {'Partial':>7s}  "
+        f"{'Helpful':>12s}  {'Unhelpful':>12s}  "
+        f"{'Partial':>7s}  {'Errors':>6s}  "
         f"{'% of All':>8s}  {'% of All':>8s}"
     )
     hdr2 = (
         f"  {'':<30s} {'':>4s}  {'':>6s}  "
-        f"{'':>12s}  {'':>12s}  {'':>7s}  "
+        f"{'':>12s}  {'':>12s}  "
+        f"{'':>7s}  {'':>6s}  "
         f"{'Helpful':>8s}  {'Unhelpful':>8s}"
     )
     print(hdr)
     print(hdr2)
-    print("  " + "\u2500" * 98)
+    print("  " + "\u2500" * 106)
 
     for agent, stats in sorted(
         agent_stats.items(), key=lambda x: -x[1]["total"]
@@ -639,12 +663,12 @@ def _print_eval_results(report, resolved_map):
       helpful_str = f"{stats['meaningful']} ({helpful_pct:.0f}%)"
       unhelpful_str = f"{stats['unhelpful']} ({unhelpful_pct:.0f}%)"
       partial_str = str(stats["partial"])
-      if stats.get("unclassified"):
-        partial_str += f"+{stats['unclassified']}"
+      errors_str = str(stats.get("unclassified", 0))
 
       line = (
           f"  {agent_name:<30s} {total:>4d}  {status:>6s}  "
-          f"{helpful_str:>12s}  {unhelpful_str:>12s}  {partial_str:>7s}  "
+          f"{helpful_str:>12s}  {unhelpful_str:>12s}  "
+          f"{partial_str:>7s}  {errors_str:>6s}  "
           f"{helpful_contrib:>7.0f}%  {unhelpful_contrib:>7.0f}%"
       )
       print(line)
@@ -739,11 +763,10 @@ def _write_md_report(report, resolved_map, args):
   w(f"**Generated:** {timestamp}  ")
   w(f"**Project:** {PROJECT_ID}  ")
   w(f"**Dataset:** {DATASET_ID}.{TABLE_ID}  ")
+  w(f"**Location:** {DATASET_LOCATION}  ")
   model = args.model or EVAL_MODEL_ID
   w(f"**Eval model:** {model}  ")
   w(f"**Sessions:** {report.total_sessions}  ")
-  elapsed = report.details.get("elapsed_seconds", "?")
-  w(f"**Elapsed:** {elapsed}s  ")
   w("")
 
   by_category = _group_by_category(report)
@@ -822,10 +845,14 @@ def _write_md_report(report, resolved_map, args):
 
   # --- Unhelpful Sessions ---
   unhelpful_sessions = by_category.get("unhelpful", [])
+  _md_samples = None if args.samples == "all" else (int(args.samples) if args.samples else None)
   if unhelpful_sessions:
+    shown = unhelpful_sessions if _md_samples is None else unhelpful_sessions[:_md_samples]
     w("## Unhelpful Sessions")
+    if len(shown) < len(unhelpful_sessions):
+      w(f"\n*Showing {len(shown)} of {len(unhelpful_sessions)}*")
     w("")
-    for sr in unhelpful_sessions:
+    for sr in shown:
       sid = sr.session_id
       ctx = resolved_map.get(sid, {})
       question = ctx.get("question", "")
@@ -851,9 +878,12 @@ def _write_md_report(report, resolved_map, args):
   # --- Partial Sessions ---
   partial_sessions = by_category.get("partial", [])
   if partial_sessions:
+    shown = partial_sessions if _md_samples is None else partial_sessions[:_md_samples]
     w("## Partial Sessions")
+    if len(shown) < len(partial_sessions):
+      w(f"\n*Showing {len(shown)} of {len(partial_sessions)}*")
     w("")
-    for sr in partial_sessions:
+    for sr in shown:
       sid = sr.session_id
       ctx = resolved_map.get(sid, {})
       question = ctx.get("question", "")
@@ -895,7 +925,7 @@ def _write_md_report(report, resolved_map, args):
   with open(report_path, "w") as f:
     f.write("\n".join(lines) + "\n")
 
-  logger.info(f"Markdown report: {os.path.abspath(report_path)}")
+  return os.path.abspath(report_path)
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +944,8 @@ Examples:
   %(prog)s --report                  Also generate a Markdown report
   %(prog)s --persist                 Evaluate and persist results to BQ
   %(prog)s --time_period 7d          Evaluate last 7 days
+  %(prog)s --samples 20              Show up to 20 sessions per category
+  %(prog)s --samples all             Show all sessions per category
       """,
   )
   parser.add_argument(
@@ -952,6 +984,12 @@ Examples:
       "--report",
       action="store_true",
       help="Generate a Markdown report in scripts/reports/",
+  )
+  parser.add_argument(
+      "--samples",
+      type=str,
+      default=None,
+      help="Max sample sessions to display per category, or 'all' (default: 10/5/3)",
   )
 
   args = parser.parse_args()

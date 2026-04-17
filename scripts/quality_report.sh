@@ -8,6 +8,8 @@
 #   ./quality_report.sh --report                 # also generate markdown report
 #   ./quality_report.sh --persist                # evaluate + persist to BQ
 #   ./quality_report.sh --time_period 7d         # evaluate last 7 days
+#   ./quality_report.sh --samples 20             # show 20 sessions per category
+#   ./quality_report.sh --samples all            # show all sessions
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
