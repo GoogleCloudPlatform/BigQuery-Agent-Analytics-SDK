@@ -1359,60 +1359,6 @@ class BatchEvaluator:
   ) AS result
   """
 
-  # Legacy template for pre-created BQ ML models.
-  _LEGACY_BATCH_EVALUATION_QUERY = """
-  WITH session_traces AS (
-    SELECT
-      session_id,
-      STRING_AGG(
-        CONCAT(event_type, ': ',
-          COALESCE(
-            JSON_EXTRACT_SCALAR(
-              content, '$.text_summary'
-            ), ''
-          )
-        ),
-        '\\n' ORDER BY timestamp
-      ) AS trace_text
-    FROM `{project}.{dataset}.{table}`
-    WHERE timestamp > TIMESTAMP_SUB(
-      CURRENT_TIMESTAMP(), INTERVAL @days DAY
-    )
-      AND event_type IN (
-        'USER_MESSAGE_RECEIVED',
-        'TOOL_STARTING',
-        'TOOL_COMPLETED',
-        'AGENT_COMPLETED'
-      )
-    GROUP BY session_id
-    HAVING LENGTH(trace_text) > 10
-    LIMIT @limit
-  )
-  SELECT
-    session_id,
-    trace_text,
-    ML.GENERATE_TEXT(
-      MODEL `{model}`,
-      STRUCT(
-        CONCAT(
-          'Evaluate this agent trace on a scale of 1-10',
-          ' for:\\n',
-          '1. Task completion\\n',
-          '2. Efficiency\\n',
-          '3. Tool usage\\n',
-          'Trace:\\n', trace_text,
-          '\\n\\nOutput as JSON: ',
-          '{{"task_completion": X, ',
-          '"efficiency": X, "tool_usage": X}}'
-        ) AS prompt
-      ),
-      STRUCT(
-        0.1 AS temperature, 500 AS max_output_tokens
-      )
-    ).ml_generate_text_result AS evaluation
-  FROM session_traces
-  """
-
   def __init__(
       self,
       project_id: str,
