@@ -46,6 +46,9 @@ from typing import Optional
 
 from google.cloud import bigquery
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
 from .resolved_spec import resolve_from_graph_spec
 from .resolved_spec import ResolvedEntity
 from .resolved_spec import ResolvedGraph
@@ -344,6 +347,7 @@ class OntologyPropertyGraphCompiler:
     self.spec = _ensure_resolved(spec)
     self.location = location
     self._bq_client = bq_client
+    self._warned_unlabeled_client = False
 
   @classmethod
   def from_ontology_binding(
@@ -378,10 +382,19 @@ class OntologyPropertyGraphCompiler:
   def bq_client(self) -> bigquery.Client:
     """Lazily initializes the BigQuery client."""
     if self._bq_client is None:
-      kwargs: dict = {"project": self.project_id}
-      if self.location:
-        kwargs["location"] = self.location
-      self._bq_client = bigquery.Client(**kwargs)
+      self._bq_client = make_bq_client(self.project_id, location=self.location)
+    elif isinstance(self._bq_client, bigquery.Client) and not isinstance(
+        self._bq_client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._bq_client
 
   def get_ddl(self, graph_name: Optional[str] = None) -> str:
@@ -449,7 +462,10 @@ class OntologyPropertyGraphCompiler:
     """
     ddl = self.get_ddl(graph_name)
     try:
-      job = self.bq_client.query(ddl)
+      job_config = with_sdk_labels(
+          bigquery.QueryJobConfig(), feature="ontology-gql"
+      )
+      job = self.bq_client.query(ddl, job_config=job_config)
       job.result()
       name = graph_name or self.spec.name
       logger.info("Property Graph '%s' created successfully.", name)

@@ -150,20 +150,20 @@ class TestLazyBqClient:
     )
     assert mgr.bq_client is client
 
-  @patch("bigquery_agent_analytics.ontology_graph.bigquery.Client")
-  def test_creates_client_when_none(self, mock_client_cls):
-    mock_client_cls.return_value = MagicMock()
+  @patch("bigquery_agent_analytics.ontology_graph.make_bq_client")
+  def test_creates_client_when_none(self, mock_factory):
+    mock_factory.return_value = MagicMock()
     mgr = OntologyGraphManager(
         project_id="proj",
         dataset_id="ds",
         spec=_simple_spec(),
     )
     _ = mgr.bq_client
-    mock_client_cls.assert_called_once_with(project="proj")
+    mock_factory.assert_called_once_with("proj", location=None)
 
-  @patch("bigquery_agent_analytics.ontology_graph.bigquery.Client")
-  def test_creates_client_with_location(self, mock_client_cls):
-    mock_client_cls.return_value = MagicMock()
+  @patch("bigquery_agent_analytics.ontology_graph.make_bq_client")
+  def test_creates_client_with_location(self, mock_factory):
+    mock_factory.return_value = MagicMock()
     mgr = OntologyGraphManager(
         project_id="proj",
         dataset_id="ds",
@@ -171,11 +171,11 @@ class TestLazyBqClient:
         location="us-east4",
     )
     _ = mgr.bq_client
-    mock_client_cls.assert_called_once_with(project="proj", location="us-east4")
+    mock_factory.assert_called_once_with("proj", location="us-east4")
 
-  @patch("bigquery_agent_analytics.ontology_graph.bigquery.Client")
-  def test_lazy_client_cached(self, mock_client_cls):
-    mock_client_cls.return_value = MagicMock()
+  @patch("bigquery_agent_analytics.ontology_graph.make_bq_client")
+  def test_lazy_client_cached(self, mock_factory):
+    mock_factory.return_value = MagicMock()
     mgr = OntologyGraphManager(
         project_id="proj",
         dataset_id="ds",
@@ -184,7 +184,7 @@ class TestLazyBqClient:
     c1 = mgr.bq_client
     c2 = mgr.bq_client
     assert c1 is c2
-    mock_client_cls.assert_called_once()
+    mock_factory.assert_called_once()
 
 
 # ------------------------------------------------------------------ #

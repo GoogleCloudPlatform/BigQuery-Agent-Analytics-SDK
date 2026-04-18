@@ -540,16 +540,16 @@ class TestCompilerInit:
     assert compiler.project_id == "proj"
     assert compiler.dataset_id == "ds"
 
-  @patch("bigquery_agent_analytics.ontology_property_graph.bigquery.Client")
-  def test_lazy_client(self, mock_client_cls):
-    mock_client_cls.return_value = MagicMock()
+  @patch("bigquery_agent_analytics.ontology_property_graph.make_bq_client")
+  def test_lazy_client(self, mock_factory):
+    mock_factory.return_value = MagicMock()
     compiler = OntologyPropertyGraphCompiler(
         project_id="proj",
         dataset_id="ds",
         spec=_simple_spec(),
     )
     _ = compiler.bq_client
-    mock_client_cls.assert_called_once_with(project="proj")
+    mock_factory.assert_called_once_with("proj", location=None)
 
 
 class TestCompilerGetDdl:
