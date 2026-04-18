@@ -13,6 +13,9 @@ venv/
 env/
 uv.lock
 
+# Script outputs
+scripts/reports/
+
 # Local workspace metadata
 .code*/
 deploy/streaming_evaluation/.streaming_evaluation_state.json
