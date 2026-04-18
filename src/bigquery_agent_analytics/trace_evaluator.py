@@ -53,6 +53,8 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
+from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -816,40 +818,29 @@ Required JSON format:
 
       response_text = response.text.strip()
 
-      # Extract JSON from response with robust parsing
-      json_str = None
-      if "```json" in response_text:
-        # Extract from markdown code block
-        parts = response_text.split("```json")
-        if len(parts) > 1:
-          json_part = parts[1]
-          if "```" in json_part:
-            json_str = json_part.split("```")[0]
-          else:
-            json_str = json_part
-      elif "```" in response_text:
-        # Try generic code block
-        parts = response_text.split("```")
-        if len(parts) >= 2:
-          json_str = parts[1]
-      elif "{" in response_text:
-        # Try to extract JSON object directly
-        try:
-          start = response_text.index("{")
-          # Find matching closing brace
-          brace_count = 0
-          end = start
-          for i, char in enumerate(response_text[start:], start):
-            if char == "{":
-              brace_count += 1
-            elif char == "}":
-              brace_count -= 1
-              if brace_count == 0:
-                end = i + 1
-                break
-          json_str = response_text[start:end]
-        except (ValueError, IndexError):
-          pass
+      # Strip markdown fences and extract JSON
+      if response_text.startswith("```"):
+        json_str = strip_markdown_fences(response_text)
+      else:
+        json_str = None
+      if not json_str:
+        # No fences found — try to extract JSON object directly
+        if "{" in response_text:
+          try:
+            start = response_text.index("{")
+            brace_count = 0
+            end = start
+            for i, char in enumerate(response_text[start:], start):
+              if char == "{":
+                brace_count += 1
+              elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                  end = i + 1
+                  break
+            json_str = response_text[start:end]
+          except (ValueError, IndexError):
+            pass
 
       if not json_str:
         return {}, response_text

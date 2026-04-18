@@ -66,6 +66,8 @@ from typing import Any, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
+from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 DEFAULT_ENDPOINT = "gemini-2.5-flash"
@@ -126,6 +128,12 @@ class CategoricalEvaluationConfig(BaseModel):
   include_justification: bool = Field(
       default=True,
       description="Include justification in output.",
+  )
+  max_output_tokens: int = Field(
+      default=8192,
+      ge=1,
+      le=65536,
+      description="Max output tokens for classification response.",
   )
   prompt_version: Optional[str] = Field(
       default=None,
@@ -241,6 +249,7 @@ FROM `{project}.{dataset}.{table}`
 WHERE {where}
 GROUP BY session_id
 HAVING LENGTH(transcript) > 10
+ORDER BY MAX(timestamp) DESC, session_id
 LIMIT @trace_limit
 """
 
@@ -267,6 +276,7 @@ WITH session_transcripts AS (
   WHERE {where}
   GROUP BY session_id
   HAVING LENGTH(transcript) > 10
+  ORDER BY MAX(timestamp) DESC, session_id
   LIMIT @trace_limit
 )
 SELECT
@@ -278,7 +288,7 @@ SELECT
       '\\n\\nTranscript:\\n', transcript
     ),
     endpoint => '{endpoint}',
-    model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": 1024}}}}',
+    model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": {max_output_tokens}}}}}',
     output_schema => 'classifications STRING'
   )).classifications AS classifications
 FROM session_transcripts
@@ -388,6 +398,7 @@ WITH session_transcripts AS (
   WHERE {where}
   GROUP BY session_id
   HAVING LENGTH(transcript) > 10
+  ORDER BY MAX(timestamp) DESC, session_id
   LIMIT @trace_limit
 )
 SELECT
@@ -411,6 +422,7 @@ def build_ai_generate_query(
     endpoint: str,
     temperature: float,
     connection_id: Optional[str] = None,
+    max_output_tokens: int = 8192,
 ) -> str:
   """Builds the AI.GENERATE categorical classification query.
 
@@ -457,6 +469,7 @@ WITH session_transcripts AS (
   WHERE {where}
   GROUP BY session_id
   HAVING LENGTH(transcript) > 10
+  ORDER BY MAX(timestamp) DESC, session_id
   LIMIT @trace_limit
 )
 SELECT
@@ -468,7 +481,7 @@ SELECT
       '\\n\\nTranscript:\\n', transcript
     ),{connection_clause}
     endpoint => '{_escape_sql_string_literal(endpoint)}',
-    model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": 1024}}}}',
+    model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": {max_output_tokens}}}}}',
     output_schema => 'classifications STRING'
   )).classifications AS classifications
 FROM session_transcripts
@@ -658,8 +671,12 @@ def parse_classifications(
         for m in config.metrics
     ]
 
+  # Strip markdown code blocks (```json ... ```) that models often wrap
+  # around JSON output. Uses the shared helper from evaluators.py.
+  text = strip_markdown_fences(raw_json)
+
   try:
-    parsed = json.loads(raw_json)
+    parsed = json.loads(text)
   except (json.JSONDecodeError, TypeError):
     return [
         CategoricalMetricResult(
@@ -852,11 +869,24 @@ async def classify_sessions_via_api(
             contents=full_prompt,
             config=types.GenerateContentConfig(
                 temperature=config.temperature,
-                max_output_tokens=1024,
+                max_output_tokens=config.max_output_tokens,
             ),
         )
-        raw_text = response.text.strip()
+        raw_text = response.text.strip() if response.text else ""
         metrics = parse_classifications(raw_text, config)
+        has_parse_error = any(m.parse_error for m in metrics)
+        if has_parse_error:
+          finish_reason = None
+          if response.candidates:
+            finish_reason = response.candidates[0].finish_reason
+          logger.warning(
+              "API parse error for session %s: finish_reason=%s, "
+              "raw_text_len=%d, raw_text=%s",
+              sid,
+              finish_reason,
+              len(raw_text),
+              repr(raw_text[:500]),
+          )
         results.append(
             CategoricalSessionResult(
                 session_id=sid,
@@ -865,9 +895,10 @@ async def classify_sessions_via_api(
         )
       except Exception as e:
         logger.warning(
-            "Categorical API classification failed for %s: %s",
+            "Categorical API classification EXCEPTION for %s: %s (type=%s)",
             sid,
             e,
+            type(e).__name__,
         )
         results.append(
             CategoricalSessionResult(

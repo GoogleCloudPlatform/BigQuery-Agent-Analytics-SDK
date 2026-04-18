@@ -355,6 +355,139 @@ class TestParseClassifications:
     assert len(results) == 1
     assert results[0].category == "positive"
 
+  def test_markdown_json_fence(self):
+    """parse_classifications should handle ```json fenced responses."""
+    config = _make_config()
+    inner = json.dumps(
+        [
+            {
+                "metric_name": "tone",
+                "category": "positive",
+                "justification": "ok",
+            },
+            {
+                "metric_name": "safety",
+                "category": "safe",
+                "justification": "fine",
+            },
+        ]
+    )
+    raw = f"```json\n{inner}\n```"
+    results = parse_classifications(raw, config)
+    assert len(results) == 2
+    assert results[0].category == "positive"
+    assert results[0].parse_error is False
+    assert results[1].category == "safe"
+    assert results[1].parse_error is False
+
+  def test_markdown_plain_fence(self):
+    """parse_classifications should handle plain ``` fenced responses."""
+    config = _make_config()
+    inner = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+    raw = f"```\n{inner}\n```"
+    results = parse_classifications(raw, config)
+    assert len(results) == 2
+    assert results[0].category == "positive"
+    assert results[0].parse_error is False
+
+  def test_markdown_fence_no_newline(self):
+    """Handle ```json without newline after opening fence."""
+    config = _make_config()
+    inner = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+    raw = f"```json{inner}```"
+    results = parse_classifications(raw, config)
+    assert len(results) == 2
+    assert results[0].category == "positive"
+    assert results[0].parse_error is False
+
+
+# ------------------------------------------------------------------ #
+# strip_markdown_fences Tests                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestStripMarkdownFences:
+  """Tests for the shared strip_markdown_fences helper."""
+
+  def test_json_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
+
+  def test_plain_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences("```\n[1, 2]\n```") == "[1, 2]"
+
+  def test_no_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences('{"a": 1}') == '{"a": 1}'
+
+  def test_empty(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences("") == ""
+
+  def test_none(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences(None) is None
+
+  def test_no_newline_after_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences('```json{"a": 1}```') == '{"a": 1}'
+
+  def test_whitespace_around(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    result = strip_markdown_fences('  ```json\n  {"a": 1}  \n```  ')
+    assert '"a": 1' in result
+
+  def test_sql_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences("```sql\nSELECT 1\n```") == "SELECT 1"
+
+  def test_uppercase_language_tag(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences('```JSON\n{"a": 1}\n```') == '{"a": 1}'
+
+  def test_unknown_language_tag(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences("```python\nprint('hi')\n```") == "print('hi')"
+
+  def test_truncated_fence_no_closing(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences('```json\n{"a": 1}') == '{"a": 1}'
+
+  def test_trailing_content_after_fence(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    result = strip_markdown_fences(
+        '```json\n{"score": 1}\n```\nHere\'s my analysis...'
+    )
+    assert result == '{"score": 1}'
+
+  def test_language_tag_with_digits(self):
+    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+
+    assert strip_markdown_fences("```json5\n{}\n```") == "{}"
+
 
 # ------------------------------------------------------------------ #
 # Parse Row Tests                                                      #
@@ -539,6 +672,7 @@ class TestCategoricalAIGenerateQuery:
         where="1=1",
         endpoint="gemini-2.5-flash",
         temperature=0.0,
+        max_output_tokens=8192,
     )
     assert "p.d.t" in formatted
     assert "gemini-2.5-flash" in formatted
@@ -1242,3 +1376,587 @@ class TestParseClassifyRow:
     }
     sr, null_count = parse_classify_row("s1", row, config)
     assert null_count == 2
+
+
+# ------------------------------------------------------------------ #
+# max_output_tokens Tests                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestMaxOutputTokens:
+  """Tests for max_output_tokens config and propagation."""
+
+  def test_config_default(self):
+    config = _make_config()
+    assert config.max_output_tokens == 8192
+
+  def test_config_custom_value(self):
+    config = CategoricalEvaluationConfig(
+        metrics=[
+            CategoricalMetricDefinition(
+                name="tone",
+                definition="Tone.",
+                categories=[
+                    CategoricalMetricCategory(
+                        name="positive",
+                        definition="Good.",
+                    ),
+                ],
+            ),
+        ],
+        max_output_tokens=4096,
+    )
+    assert config.max_output_tokens == 4096
+
+  def test_build_ai_generate_query_default(self):
+    sql = build_ai_generate_query(
+        "p",
+        "d",
+        "t",
+        "1=1",
+        "gemini-2.5-flash",
+        0.0,
+    )
+    assert 'maxOutputTokens": 8192' in sql
+
+  def test_build_ai_generate_query_custom(self):
+    sql = build_ai_generate_query(
+        "p",
+        "d",
+        "t",
+        "1=1",
+        "gemini-2.5-flash",
+        0.0,
+        max_output_tokens=2048,
+    )
+    assert 'maxOutputTokens": 2048' in sql
+
+  def test_template_uses_placeholder(self):
+    formatted = CATEGORICAL_AI_GENERATE_QUERY.format(
+        project="p",
+        dataset="d",
+        table="t",
+        where="1=1",
+        endpoint="ep",
+        temperature=0.0,
+        max_output_tokens=4096,
+    )
+    assert 'maxOutputTokens": 4096' in formatted
+
+  def test_api_uses_config_value(self):
+    """classify_sessions_via_api should pass config.max_output_tokens
+    to the Gemini API GenerateContentConfig."""
+    import sys
+
+    config = _make_config()
+    config = config.model_copy(update={"max_output_tokens": 2048})
+    transcripts = {"s1": "USER: Hello"}
+
+    mock_response = MagicMock()
+    mock_response.text = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+    mock_client, _ = _make_genai_client(mock_response)
+
+    # Build mocks with access to the types module to verify
+    # GenerateContentConfig call args.
+    mock_genai = MagicMock()
+    mock_genai.Client.return_value = mock_client
+
+    with patch.dict(
+        sys.modules,
+        {
+            "google": MagicMock(genai=mock_genai),
+            "google.genai": mock_genai,
+            "google.genai.types": mock_genai.types,
+        },
+    ):
+      _run(classify_sessions_via_api(transcripts, config))
+
+    # types.GenerateContentConfig is called inside classify_sessions_via_api
+    mock_genai.types.GenerateContentConfig.assert_called_once_with(
+        temperature=0.0,
+        max_output_tokens=2048,
+    )
+
+
+# ------------------------------------------------------------------ #
+# finish_reason logging Tests                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestFinishReasonLogging:
+  """Tests for finish_reason logging on parse errors."""
+
+  def test_parse_error_logs_finish_reason(self):
+    """When the API returns unparseable text, finish_reason should
+    be logged as a warning."""
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+
+    mock_response = MagicMock()
+    mock_response.text = "not valid json at all"
+    mock_candidate = MagicMock()
+    mock_candidate.finish_reason = "MAX_TOKENS"
+    mock_response.candidates = [mock_candidate]
+
+    mock_client, _ = _make_genai_client(mock_response)
+
+    with _mock_genai_modules(mock_client):
+      with patch(
+          "bigquery_agent_analytics.categorical_evaluator.logger"
+      ) as mock_logger:
+        results = _run(classify_sessions_via_api(transcripts, config))
+
+    assert all(m.parse_error for m in results[0].metrics)
+    mock_logger.warning.assert_called()
+    warning_args = mock_logger.warning.call_args[0]
+    assert "finish_reason" in warning_args[0]
+
+  def test_null_response_text_handled(self):
+    """When response.text is None, should not crash."""
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+
+    mock_response = MagicMock()
+    mock_response.text = None
+    mock_response.candidates = []
+
+    mock_client, _ = _make_genai_client(mock_response)
+
+    with _mock_genai_modules(mock_client):
+      results = _run(classify_sessions_via_api(transcripts, config))
+
+    assert len(results) == 1
+    assert all(m.parse_error for m in results[0].metrics)
+
+
+# ------------------------------------------------------------------ #
+# NULL retry logic Tests                                               #
+# ------------------------------------------------------------------ #
+
+
+class TestRetryFailedSessions:
+  """Tests for _retry_failed_sessions on the Client."""
+
+  def _make_client(self):
+    """Build a Client with a mocked BQ client."""
+    from bigquery_agent_analytics.client import Client
+
+    mock_bq = MagicMock()
+    mock_bq.query.return_value.result.return_value = []
+    return Client(
+        project_id="p",
+        dataset_id="d",
+        table_id="t",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+  def test_retry_replaces_null_sessions(self):
+    """NULL sessions should be replaced by successful API retries."""
+    client = self._make_client()
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+
+    good_result = CategoricalSessionResult(
+        session_id="s1",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                category="positive",
+                passed_validation=True,
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                category="safe",
+                passed_validation=True,
+            ),
+        ],
+    )
+
+    with patch(
+        "bigquery_agent_analytics.client._run_sync",
+        return_value=[good_result],
+    ):
+      results = client._retry_failed_sessions(
+          transcripts,
+          config,
+          "gemini-2.5-flash",
+          max_retries=1,
+      )
+
+    assert len(results) == 1
+    assert results[0].session_id == "s1"
+    assert results[0].metrics[0].category == "positive"
+
+  def test_retry_exhausts_attempts(self):
+    """Sessions that keep failing should exhaust all retry attempts."""
+    client = self._make_client()
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+
+    bad_result = CategoricalSessionResult(
+        session_id="s1",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                parse_error=True,
+                passed_validation=False,
+                raw_response="bad",
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                parse_error=True,
+                passed_validation=False,
+            ),
+        ],
+    )
+
+    with patch(
+        "bigquery_agent_analytics.client._run_sync",
+        return_value=[bad_result],
+    ) as mock_run:
+      results = client._retry_failed_sessions(
+          transcripts,
+          config,
+          "gemini-2.5-flash",
+          max_retries=3,
+      )
+
+    assert len(results) == 0
+    assert mock_run.call_count == 3
+
+  def test_retry_handles_api_exception(self):
+    """API exceptions during retry should not crash."""
+    client = self._make_client()
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+
+    with patch(
+        "bigquery_agent_analytics.client._run_sync",
+        side_effect=RuntimeError("API down"),
+    ):
+      results = client._retry_failed_sessions(
+          transcripts,
+          config,
+          "gemini-2.5-flash",
+          max_retries=2,
+      )
+
+    assert len(results) == 0
+
+  def test_retry_partial_success(self):
+    """When some sessions succeed and some fail, only the successful
+    ones should be returned."""
+    client = self._make_client()
+    config = _make_config()
+    transcripts = {"s1": "text1", "s2": "text2"}
+
+    good_result = CategoricalSessionResult(
+        session_id="s1",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                category="positive",
+                passed_validation=True,
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                category="safe",
+                passed_validation=True,
+            ),
+        ],
+    )
+    bad_result = CategoricalSessionResult(
+        session_id="s2",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                parse_error=True,
+                passed_validation=False,
+                raw_response="bad",
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                parse_error=True,
+                passed_validation=False,
+            ),
+        ],
+    )
+
+    with patch(
+        "bigquery_agent_analytics.client._run_sync",
+        return_value=[good_result, bad_result],
+    ):
+      results = client._retry_failed_sessions(
+          transcripts,
+          config,
+          "gemini-2.5-flash",
+          max_retries=1,
+      )
+
+    assert len(results) == 1
+    assert results[0].session_id == "s1"
+
+  def test_ai_generate_detects_null_classifications(self):
+    """_categorical_ai_generate should detect NULL classifications
+    and trigger retry."""
+    client = self._make_client()
+    config = _make_config()
+
+    valid_json = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+
+    # Use plain dicts: dict(plain_dict) returns a copy, which
+    # matches the behavior of dict(bigquery.Row).
+    mock_rows = [
+        {
+            "session_id": "s1",
+            "transcript": "text1",
+            "classifications": valid_json,
+        },
+        {
+            "session_id": "s2",
+            "transcript": "text2",
+            "classifications": None,
+        },
+    ]
+
+    client.bq_client.query.return_value.result.return_value = mock_rows
+
+    retry_result = CategoricalSessionResult(
+        session_id="s2",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                category="negative",
+                passed_validation=True,
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                category="safe",
+                passed_validation=True,
+            ),
+        ],
+    )
+
+    with patch.object(
+        client,
+        "_retry_failed_sessions",
+        return_value=[retry_result],
+    ) as mock_retry:
+      results, retry_meta = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+      )
+
+    mock_retry.assert_called_once()
+    call_args = mock_retry.call_args
+    assert "s2" in call_args[0][0]
+    assert "s1" not in call_args[0][0]
+    assert len(results) == 2
+    assert retry_meta["failed_count"] == 1
+    assert retry_meta["retry_attempted"] is True
+
+  def test_ai_generate_no_retry_when_all_succeed(self):
+    """When all rows have classifications, no retry should happen."""
+    client = self._make_client()
+    config = _make_config()
+
+    valid_json = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+
+    mock_rows = [
+        {
+            "session_id": "s1",
+            "transcript": "text1",
+            "classifications": valid_json,
+        },
+    ]
+
+    client.bq_client.query.return_value.result.return_value = mock_rows
+
+    with patch.object(
+        client,
+        "_retry_failed_sessions",
+    ) as mock_retry:
+      results, retry_meta = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+      )
+
+    mock_retry.assert_not_called()
+    assert len(results) == 1
+    assert results[0].metrics[0].category == "positive"
+    assert retry_meta == {}
+
+  def test_ai_generate_null_without_transcript_skips_retry(self):
+    """NULL classifications with no transcript should NOT be retried."""
+    client = self._make_client()
+    config = _make_config()
+
+    mock_rows = [
+        {
+            "session_id": "s1",
+            "transcript": None,
+            "classifications": None,
+        },
+    ]
+
+    client.bq_client.query.return_value.result.return_value = mock_rows
+
+    with patch.object(
+        client,
+        "_retry_failed_sessions",
+    ) as mock_retry:
+      results, retry_meta = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+      )
+
+    mock_retry.assert_not_called()
+    assert len(results) == 1
+    assert retry_meta == {}
+
+  def test_ai_generate_detects_parse_error_classifications(self):
+    """Non-NULL but unparseable classifications should also trigger retry."""
+    client = self._make_client()
+    config = _make_config()
+
+    valid_json = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+
+    mock_rows = [
+        {
+            "session_id": "s1",
+            "transcript": "text1",
+            "classifications": valid_json,
+        },
+        {
+            "session_id": "s2",
+            "transcript": "text2",
+            "classifications": "not valid json",
+        },
+    ]
+
+    client.bq_client.query.return_value.result.return_value = mock_rows
+
+    retry_result = CategoricalSessionResult(
+        session_id="s2",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                category="negative",
+                passed_validation=True,
+            ),
+            CategoricalMetricResult(
+                metric_name="safety",
+                category="safe",
+                passed_validation=True,
+            ),
+        ],
+    )
+
+    with patch.object(
+        client,
+        "_retry_failed_sessions",
+        return_value=[retry_result],
+    ) as mock_retry:
+      results, retry_meta = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+      )
+
+    mock_retry.assert_called_once()
+    call_args = mock_retry.call_args
+    assert "s2" in call_args[0][0]
+    assert "s1" not in call_args[0][0]
+    assert len(results) == 2
+    assert retry_meta["failed_count"] == 1
+    assert retry_meta["retry_attempted"] is True
+
+
+# ------------------------------------------------------------------ #
+# ORDER BY before LIMIT — regression tests (#55)                       #
+# ------------------------------------------------------------------ #
+
+
+class TestQueryOrderByBeforeLimit:
+  """Ensure all session-fetching query templates have ORDER BY before LIMIT."""
+
+  def test_transcript_query_orders_before_limit(self):
+    sql = CATEGORICAL_TRANSCRIPT_QUERY
+    order_pos = sql.index("ORDER BY MAX(timestamp)")
+    limit_pos = sql.index("LIMIT @trace_limit")
+    assert order_pos < limit_pos
+
+  def test_ai_generate_query_orders_before_limit(self):
+    sql = CATEGORICAL_AI_GENERATE_QUERY
+    order_pos = sql.index("ORDER BY MAX(timestamp)")
+    limit_pos = sql.index("LIMIT @trace_limit")
+    assert order_pos < limit_pos
+
+  def test_ai_classify_query_orders_before_limit(self):
+    config = _make_config()
+    sql = build_ai_classify_query(config, "proj", "ds", "tbl", "1=1")
+    order_pos = sql.index("ORDER BY MAX(timestamp)")
+    limit_pos = sql.index("LIMIT @trace_limit")
+    assert order_pos < limit_pos
+
+  def test_ai_generate_dynamic_query_orders_before_limit(self):
+    sql = build_ai_generate_query(
+        "proj", "ds", "tbl", "1=1", "gemini-2.5-flash", 0.0
+    )
+    order_pos = sql.index("ORDER BY MAX(timestamp)")
+    limit_pos = sql.index("LIMIT @trace_limit")
+    assert order_pos < limit_pos
+
+  def test_all_queries_have_session_id_tiebreaker(self):
+    """ORDER BY should include session_id for full determinism."""
+    config = _make_config()
+    queries = [
+        ("CATEGORICAL_TRANSCRIPT_QUERY", CATEGORICAL_TRANSCRIPT_QUERY),
+        ("CATEGORICAL_AI_GENERATE_QUERY", CATEGORICAL_AI_GENERATE_QUERY),
+        (
+            "build_ai_classify_query",
+            build_ai_classify_query(config, "p", "d", "t", "1=1"),
+        ),
+        (
+            "build_ai_generate_query",
+            build_ai_generate_query(
+                "p", "d", "t", "1=1", "gemini-2.5-flash", 0.0
+            ),
+        ),
+    ]
+    for name, sql in queries:
+      assert (
+          "ORDER BY MAX(timestamp) DESC, session_id" in sql
+      ), f"{name} missing session_id tiebreaker in ORDER BY"
