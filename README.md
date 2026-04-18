@@ -54,6 +54,14 @@ regressions — all through BigQuery SQL or Python.
 - Streaming evaluation (Cloud Scheduler + Cloud Run)
 - Continuous query templates
 
+**Usage Telemetry**
+- Every job the SDK submits is labeled (`sdk`, `sdk_version`,
+  `sdk_surface`, `sdk_feature`, and `sdk_ai_function` where relevant)
+  so operators can attribute spend, latency, and adoption directly
+  from `INFORMATION_SCHEMA.JOBS_BY_PROJECT`. No extra telemetry
+  pipeline is required. See [docs/sdk_usage_tracking.md](docs/sdk_usage_tracking.md)
+  for the label schema and ready-to-run tracking queries.
+
 ## Prerequisites
 
 - Python 3.10+

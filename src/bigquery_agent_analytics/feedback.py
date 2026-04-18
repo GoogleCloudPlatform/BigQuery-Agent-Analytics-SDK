@@ -40,6 +40,8 @@ from typing import Any, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -434,9 +436,10 @@ async def compute_drift(
       dataset=dataset_id,
       golden_table=golden_table,
   )
+  golden_config = with_sdk_labels(bigquery.QueryJobConfig(), feature="drift")
   golden_job = await loop.run_in_executor(
       None,
-      lambda: bq_client.query(golden_q),
+      lambda: bq_client.query(golden_q, job_config=golden_config),
   )
   golden_rows = await loop.run_in_executor(
       None,
@@ -456,6 +459,7 @@ async def compute_drift(
   job_config = bigquery.QueryJobConfig(
       query_parameters=query_params,
   )
+  job_config = with_sdk_labels(job_config, feature="drift")
   prod_job = await loop.run_in_executor(
       None,
       lambda: bq_client.query(prod_q, job_config=job_config),
@@ -577,6 +581,7 @@ async def _semantic_drift(
         model=embedding_model,
         where=where_clause,
     )
+    ai_function = "ml-generate-embedding"
   else:
     query = _AI_EMBED_SEMANTIC_DRIFT_QUERY.format(
         project=project_id,
@@ -586,8 +591,12 @@ async def _semantic_drift(
         endpoint=embedding_model,
         where=where_clause,
     )
+    ai_function = "ai-embed"
 
   job_config = bq_mod.QueryJobConfig(query_parameters=query_params)
+  job_config = with_sdk_labels(
+      job_config, feature="drift", ai_function=ai_function
+  )
   job = await loop.run_in_executor(
       None,
       lambda: bq_client.query(query, job_config=job_config),
@@ -743,6 +752,7 @@ async def _frequently_asked(
       where=where_clause,
   )
   job_config = bigquery.QueryJobConfig(query_parameters=params)
+  job_config = with_sdk_labels(job_config, feature="feedback")
   job = await loop.run_in_executor(
       None,
       lambda: bq_client.query(query, job_config=job_config),
@@ -796,6 +806,7 @@ async def _frequently_unanswered(
       where=where_clause,
   )
   job_config = bigquery.QueryJobConfig(query_parameters=params)
+  job_config = with_sdk_labels(job_config, feature="feedback")
   job = await loop.run_in_executor(
       None,
       lambda: bq_client.query(query, job_config=job_config),
@@ -885,6 +896,9 @@ async def _semantic_grouping(
         job_config = bigquery.QueryJobConfig(
             query_parameters=query_params,
         )
+        job_config = with_sdk_labels(
+            job_config, feature="feedback", ai_function="ai-generate"
+        )
         result = await _run_grouping_query(
             bq_client,
             query,
@@ -917,6 +931,9 @@ async def _semantic_grouping(
       )
       job_config = bigquery.QueryJobConfig(
           query_parameters=query_params,
+      )
+      job_config = with_sdk_labels(
+          job_config, feature="feedback", ai_function="ml-generate-text"
       )
       result = await _run_grouping_query(
           bq_client,

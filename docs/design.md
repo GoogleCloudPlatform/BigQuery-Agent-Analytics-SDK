@@ -1228,7 +1228,6 @@ results = client.query(formatted, job_config=job_config)
 | `ai_ml_integration.py` | `_DETECT_LATENCY_ANOMALIES_QUERY` | ARIMA anomaly detection |
 | `ai_ml_integration.py` | `_CREATE_BEHAVIOR_MODEL_QUERY` | Autoencoder model training DDL |
 | `ai_ml_integration.py` | `_BATCH_EVALUATION_QUERY` | Batch evaluation via AI.GENERATE |
-| `ai_ml_integration.py` | `_LEGACY_BATCH_EVALUATION_QUERY` | Legacy batch evaluation |
 
 ---
 

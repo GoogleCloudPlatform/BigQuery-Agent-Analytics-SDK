@@ -490,16 +490,16 @@ class TestOntologyMaterializerInit:
     assert mat.project_id == "proj"
     assert mat.dataset_id == "ds"
 
-  @patch("bigquery_agent_analytics.ontology_materializer.bigquery.Client")
-  def test_lazy_client(self, mock_client_cls):
-    mock_client_cls.return_value = MagicMock()
+  @patch("bigquery_agent_analytics.ontology_materializer.make_bq_client")
+  def test_lazy_client(self, mock_factory):
+    mock_factory.return_value = MagicMock()
     mat = OntologyMaterializer(
         project_id="proj",
         dataset_id="ds",
         spec=_simple_spec(),
     )
     _ = mat.bq_client
-    mock_client_cls.assert_called_once_with(project="proj")
+    mock_factory.assert_called_once_with("proj", location=None)
 
 
 class TestGetDdl:
@@ -637,7 +637,7 @@ class TestCreateTables:
     mock_client = _mock_bq_client()
     call_count = 0
 
-    def side_effect(sql):
+    def side_effect(sql, **_kwargs):
       nonlocal call_count
       call_count += 1
       if call_count == 1:

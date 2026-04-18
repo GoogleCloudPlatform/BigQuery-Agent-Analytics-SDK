@@ -55,6 +55,10 @@ from pydantic import Field
 
 from bigquery_agent_analytics.evaluators import strip_markdown_fences
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -507,6 +511,7 @@ Required JSON format:
     self.table_id = table_id
     self.table_ref = f"{project_id}.{dataset_id}.{table_id}"
     self._client = client
+    self._warned_unlabeled_client = False
     self.llm_judge_model = llm_judge_model or "gemini-2.5-flash"
     self.include_event_types = include_event_types or self._DEFAULT_EVENT_TYPES
 
@@ -514,7 +519,19 @@ Required JSON format:
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def get_session_trace(self, session_id: str) -> SessionTrace:
@@ -546,6 +563,9 @@ Required JSON format:
             ),
         ]
     )
+    # Apply labels BEFORE executor dispatch so they materialize on the
+    # QueryJobConfig in the caller's thread.
+    job_config = with_sdk_labels(job_config, feature="trace-read")
 
     # Run query in executor to avoid blocking
     loop = asyncio.get_event_loop()

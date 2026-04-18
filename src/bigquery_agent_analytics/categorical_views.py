@@ -41,6 +41,9 @@ from typing import Optional
 
 from google.cloud import bigquery
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
 from .categorical_evaluator import DEFAULT_RESULTS_TABLE
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -144,14 +147,24 @@ class CategoricalViewManager:
     self.view_prefix = view_prefix
     self.location = location
     self._bq_client = bq_client
+    self._warned_unlabeled_client = False
 
   @property
   def bq_client(self) -> bigquery.Client:
     if self._bq_client is None:
-      kwargs: dict = {"project": self.project_id}
-      if self.location:
-        kwargs["location"] = self.location
-      self._bq_client = bigquery.Client(**kwargs)
+      self._bq_client = make_bq_client(self.project_id, location=self.location)
+    elif isinstance(self._bq_client, bigquery.Client) and not isinstance(
+        self._bq_client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._bq_client
 
   def available_views(self) -> list[str]:
@@ -196,7 +209,10 @@ class CategoricalViewManager:
         self.dataset_id,
         full_name,
     )
-    self.bq_client.query(sql).result()
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(), feature="eval-categorical"
+    )
+    self.bq_client.query(sql, job_config=job_config).result()
     logger.info("View %s created successfully.", full_name)
 
   def create_all_views(self) -> dict[str, str]:

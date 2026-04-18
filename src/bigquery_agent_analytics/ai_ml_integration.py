@@ -70,6 +70,10 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -222,6 +226,7 @@ class BigQueryAIClient:
     self.project_id = project_id
     self.dataset_id = dataset_id
     self._client = client
+    self._warned_unlabeled_client = False
     self.location = location
     self.connection_id = connection_id
 
@@ -238,10 +243,19 @@ class BigQueryAIClient:
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(
-          project=self.project_id,
-          location=self.location,
-      )
+      self._client = make_bq_client(self.project_id, location=self.location)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def generate_text(
@@ -276,6 +290,9 @@ class BigQueryAIClient:
         query_parameters=[
             bigquery.ScalarQueryParameter("prompt", "STRING", prompt),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="ai-ml", ai_function="ai-generate"
     )
 
     loop = asyncio.get_event_loop()
@@ -320,15 +337,20 @@ class BigQueryAIClient:
       query = self._LEGACY_GENERATE_EMBEDDING_QUERY.format(
           model=self.embedding_model,
       )
+      ai_function = "ml-generate-embedding"
     else:
       query = self._AI_EMBED_QUERY.format(
           endpoint=self.embedding_endpoint,
       )
+      ai_function = "ai-embed"
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ArrayQueryParameter("texts", "STRING", texts),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="ai-ml", ai_function=ai_function
     )
 
     loop = asyncio.get_event_loop()
@@ -513,6 +535,7 @@ class EmbeddingSearchClient:
     self.embeddings_table = embeddings_table
     self.source_table = source_table
     self._client = client
+    self._warned_unlabeled_client = False
     self.embedding_model = embedding_model
     self.embedding_endpoint = embedding_endpoint
 
@@ -520,7 +543,19 @@ class EmbeddingSearchClient:
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def search(
@@ -569,7 +604,11 @@ class EmbeddingSearchClient:
         filters=" ".join(filters),
     )
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    # ML.DISTANCE is pure vector math over pre-computed embeddings, not
+    # an LLM/AI invocation, so no sdk_ai_function dimension is set here.
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params), feature="ai-ml"
+    )
 
     loop = asyncio.get_event_loop()
     try:
@@ -619,6 +658,7 @@ class EmbeddingSearchClient:
           source_table=self.source_table,
           model=self.embedding_model,
       )
+      ai_function = "ml-generate-embedding"
     else:
       query = self._AI_EMBED_INDEX_QUERY.format(
           project=self.project_id,
@@ -627,11 +667,15 @@ class EmbeddingSearchClient:
           source_table=self.source_table,
           endpoint=self.embedding_endpoint,
       )
+      ai_function = "ai-embed"
 
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("days", "INT64", since_days),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="ai-ml", ai_function=ai_function
     )
 
     loop = asyncio.get_event_loop()
@@ -847,13 +891,26 @@ class AnomalyDetector:
     self.dataset_id = dataset_id
     self.table_id = table_id
     self._client = client
+    self._warned_unlabeled_client = False
     self.use_legacy_anomaly_model = use_legacy_anomaly_model
 
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def train_latency_model(
@@ -886,6 +943,8 @@ class AnomalyDetector:
         table=self.table_id,
     )
 
+    # CREATE MODEL DDL — no AI function is invoked at query time; the
+    # ARIMA_PLUS model is consumed later by ML.DETECT_ANOMALIES.
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter(
@@ -893,6 +952,7 @@ class AnomalyDetector:
             ),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="ai-ml")
 
     loop = asyncio.get_event_loop()
     try:
@@ -933,12 +993,14 @@ class AnomalyDetector:
           dataset=self.dataset_id,
           table=self.table_id,
       )
+      ai_function = "ml-detect-anomalies"
     else:
       query = self._AI_DETECT_LATENCY_ANOMALIES_QUERY.format(
           project=self.project_id,
           dataset=self.dataset_id,
           table=self.table_id,
       )
+      ai_function = "ai-detect-anomalies"
 
     params = [
         bigquery.ScalarQueryParameter("hours", "INT64", since_hours),
@@ -950,7 +1012,11 @@ class AnomalyDetector:
           ),
       )
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="ai-ml",
+        ai_function=ai_function,
+    )
 
     loop = asyncio.get_event_loop()
     try:
@@ -1030,6 +1096,7 @@ class AnomalyDetector:
               "confidence_level", "FLOAT64", confidence_level
           ),
       ]
+      ai_function = "ml-forecast"
     else:
       # AI.FORECAST requires literal values for named arguments
       # (horizon, confidence_level), so they are inlined via .format().
@@ -1046,8 +1113,13 @@ class AnomalyDetector:
               "training_days", "INT64", training_days
           ),
       ]
+      ai_function = "ai-forecast"
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="ai-ml",
+        ai_function=ai_function,
+    )
 
     loop = asyncio.get_event_loop()
     try:
@@ -1113,12 +1185,24 @@ class AnomalyDetector:
     HAVING total_events > 0 AND avg_latency IS NOT NULL
     """
 
+    # Neither the features-table build nor the autoencoder CREATE MODEL
+    # invokes an AI function at query time, so only feature="ai-ml" is
+    # set — no sdk_ai_function dimension here.
+    features_job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(), feature="ai-ml"
+    )
+    model_job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(), feature="ai-ml"
+    )
+
     loop = asyncio.get_event_loop()
     try:
       # Create features table
       query_job = await loop.run_in_executor(
           None,
-          lambda: self.client.query(features_query),
+          lambda: self.client.query(
+              features_query, job_config=features_job_config
+          ),
       )
       await loop.run_in_executor(None, lambda: query_job.result())
 
@@ -1130,7 +1214,7 @@ class AnomalyDetector:
 
       query_job = await loop.run_in_executor(
           None,
-          lambda: self.client.query(model_query),
+          lambda: self.client.query(model_query, job_config=model_job_config),
       )
       await loop.run_in_executor(None, lambda: query_job.result())
 
@@ -1163,6 +1247,9 @@ class AnomalyDetector:
         query_parameters=[
             bigquery.ScalarQueryParameter("hours", "INT64", since_hours),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="ai-ml", ai_function="ml-detect-anomalies"
     )
 
     loop = asyncio.get_event_loop()
@@ -1272,60 +1359,6 @@ class BatchEvaluator:
   ) AS result
   """
 
-  # Legacy template for pre-created BQ ML models.
-  _LEGACY_BATCH_EVALUATION_QUERY = """
-  WITH session_traces AS (
-    SELECT
-      session_id,
-      STRING_AGG(
-        CONCAT(event_type, ': ',
-          COALESCE(
-            JSON_EXTRACT_SCALAR(
-              content, '$.text_summary'
-            ), ''
-          )
-        ),
-        '\\n' ORDER BY timestamp
-      ) AS trace_text
-    FROM `{project}.{dataset}.{table}`
-    WHERE timestamp > TIMESTAMP_SUB(
-      CURRENT_TIMESTAMP(), INTERVAL @days DAY
-    )
-      AND event_type IN (
-        'USER_MESSAGE_RECEIVED',
-        'TOOL_STARTING',
-        'TOOL_COMPLETED',
-        'AGENT_COMPLETED'
-      )
-    GROUP BY session_id
-    HAVING LENGTH(trace_text) > 10
-    LIMIT @limit
-  )
-  SELECT
-    session_id,
-    trace_text,
-    ML.GENERATE_TEXT(
-      MODEL `{model}`,
-      STRUCT(
-        CONCAT(
-          'Evaluate this agent trace on a scale of 1-10',
-          ' for:\\n',
-          '1. Task completion\\n',
-          '2. Efficiency\\n',
-          '3. Tool usage\\n',
-          'Trace:\\n', trace_text,
-          '\\n\\nOutput as JSON: ',
-          '{{"task_completion": X, ',
-          '"efficiency": X, "tool_usage": X}}'
-        ) AS prompt
-      ),
-      STRUCT(
-        0.1 AS temperature, 500 AS max_output_tokens
-      )
-    ).ml_generate_text_result AS evaluation
-  FROM session_traces
-  """
-
   def __init__(
       self,
       project_id: str,
@@ -1351,6 +1384,7 @@ class BatchEvaluator:
     self.dataset_id = dataset_id
     self.table_id = table_id
     self._client = client
+    self._warned_unlabeled_client = False
     self.endpoint = endpoint or eval_model or self._DEFAULT_ENDPOINT
     # Keep eval_model for backward compatibility
     self.eval_model = eval_model or self.endpoint
@@ -1359,7 +1393,19 @@ class BatchEvaluator:
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def evaluate_recent_sessions(
@@ -1388,6 +1434,9 @@ class BatchEvaluator:
             bigquery.ScalarQueryParameter("days", "INT64", days),
             bigquery.ScalarQueryParameter("limit", "INT64", limit),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="ai-ml", ai_function="ai-generate"
     )
 
     loop = asyncio.get_event_loop()

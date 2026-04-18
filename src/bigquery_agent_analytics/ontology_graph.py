@@ -47,6 +47,9 @@ from typing import Optional
 
 from google.cloud import bigquery
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
 from .extracted_models import ExtractedEdge
 from .extracted_models import ExtractedGraph
 from .extracted_models import ExtractedNode
@@ -385,6 +388,7 @@ class OntologyGraphManager:
     self.endpoint = endpoint
     self.location = location
     self._bq_client = bq_client
+    self._warned_unlabeled_client = False
     self.extractors = extractors or {}
 
   @classmethod
@@ -446,10 +450,19 @@ class OntologyGraphManager:
   def bq_client(self) -> bigquery.Client:
     """Lazily initializes the BigQuery client."""
     if self._bq_client is None:
-      kwargs: dict = {"project": self.project_id}
-      if self.location:
-        kwargs["location"] = self.location
-      self._bq_client = bigquery.Client(**kwargs)
+      self._bq_client = make_bq_client(self.project_id, location=self.location)
+    elif isinstance(self._bq_client, bigquery.Client) and not isinstance(
+        self._bq_client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._bq_client
 
   def _resolve_endpoint(self) -> str:
@@ -596,6 +609,7 @@ class OntologyGraphManager:
             ),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="ontology-build")
     try:
       job = self.bq_client.query(query, job_config=job_config)
       events = []
@@ -662,6 +676,9 @@ class OntologyGraphManager:
             ),
         ]
     )
+    job_config = with_sdk_labels(
+        job_config, feature="ontology-build", ai_function="ai-generate"
+    )
 
     try:
       job = self.bq_client.query(query, job_config=job_config)
@@ -685,6 +702,7 @@ class OntologyGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="ontology-build")
 
     try:
       job = self.bq_client.query(query, job_config=job_config)

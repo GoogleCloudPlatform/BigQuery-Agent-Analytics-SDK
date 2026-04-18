@@ -78,6 +78,7 @@ def _build_client(
       verify_schema=False,
       endpoint=endpoint,
       connection_id=connection_id,
+      sdk_surface="cli",
   )
 
 

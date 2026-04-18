@@ -101,6 +101,37 @@ class TestCategoricalViewManager:
     assert "categorical_results_latest" in sql
     vm.bq_client.query.return_value.result.assert_called_once()
 
+  def test_create_view_labels_with_eval_categorical_feature(self, vm):
+    vm.create_view("categorical_daily_counts")
+    job_config = vm.bq_client.query.call_args.kwargs.get("job_config")
+    assert job_config is not None
+    assert (
+        dict(job_config.labels or {}).get("sdk_feature") == "eval-categorical"
+    )
+
+  def test_vanilla_client_emits_warn_once(self, caplog):
+    # PR #25 review: mirror Phase 1 warn-once behavior.
+    import logging
+
+    from google.auth.credentials import AnonymousCredentials
+    from google.cloud import bigquery
+
+    vanilla = bigquery.Client(
+        project=PROJECT, credentials=AnonymousCredentials()
+    )
+    vm = CategoricalViewManager(
+        project_id=PROJECT, dataset_id=DATASET, bq_client=vanilla
+    )
+    with caplog.at_level(logging.WARNING):
+      _ = vm.bq_client
+      _ = vm.bq_client
+    warnings = [
+        r
+        for r in caplog.records
+        if "SDK telemetry labels will not be applied" in r.message
+    ]
+    assert len(warnings) == 1
+
   def test_create_all_views(self, vm):
     created = vm.create_all_views()
     assert len(created) == len(_CATEGORICAL_VIEW_DEFS)
@@ -188,22 +219,24 @@ class TestCategoricalViewManager:
     assert vm.location == "EU"
 
     with mock.patch(
-        "bigquery_agent_analytics.categorical_views.bigquery.Client"
-    ) as mock_bq_cls:
-      mock_bq_cls.return_value = mock.MagicMock()
+        "bigquery_agent_analytics.categorical_views.make_bq_client"
+    ) as mock_factory:
+      mock_factory.return_value = mock.MagicMock()
       _ = vm.bq_client
-      mock_bq_cls.assert_called_once_with(project=PROJECT, location="EU")
+      mock_factory.assert_called_once_with(PROJECT, location="EU")
 
   def test_no_location_omits_kwarg(self):
-    """When location is None, the lazy client omits the location kwarg."""
+    """When location is None, the lazy client passes location=None."""
     vm = CategoricalViewManager(
         project_id=PROJECT,
         dataset_id=DATASET,
     )
 
     with mock.patch(
-        "bigquery_agent_analytics.categorical_views.bigquery.Client"
-    ) as mock_bq_cls:
-      mock_bq_cls.return_value = mock.MagicMock()
+        "bigquery_agent_analytics.categorical_views.make_bq_client"
+    ) as mock_factory:
+      mock_factory.return_value = mock.MagicMock()
       _ = vm.bq_client
-      mock_bq_cls.assert_called_once_with(project=PROJECT)
+      # make_bq_client treats location=None as "no location"; passes it
+      # explicitly so the factory owns the decision.
+      mock_factory.assert_called_once_with(PROJECT, location=None)

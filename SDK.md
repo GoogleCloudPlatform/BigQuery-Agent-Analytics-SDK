@@ -1941,6 +1941,54 @@ handle aggregation.
 
 ---
 
+## 22. Usage Telemetry
+
+Every BigQuery job the SDK submits is labeled so operators can
+attribute spend, latency, and adoption directly from
+`INFORMATION_SCHEMA.JOBS` without running a separate telemetry
+pipeline.
+
+**Label schema**
+
+| Key | Value |
+| --- | ----- |
+| `sdk` | constant `bigquery-agent-analytics` |
+| `sdk_version` | package version, BQ-safe (e.g. `0-4-0`) |
+| `sdk_surface` | `python` \| `cli` \| `remote-function` |
+| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` |
+| `sdk_ai_function` | set only on AI/ML invocations: `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` |
+
+All labels also apply to load jobs submitted by the SDK (e.g. the
+ontology materializer's batch-load path). Streaming inserts via
+`insert_rows_json` are not jobs and do not carry labels.
+
+**Opt-in / opt-out**
+
+- The default `Client(...)` constructor returns a labeled client.
+- Explicit `make_bq_client(...)` lets you customize the underlying
+  `bigquery.Client` (e.g. `default_query_job_config`) while keeping
+  labels.
+- Passing a vanilla `bigquery.Client` via `bq_client=...` is honored
+  as-is; the SDK logs a one-shot `WARNING` and skips labeling so
+  your caller-side client settings survive intact.
+
+**Reserved namespace and user labels**
+
+The `sdk*` keys are SDK-managed. If a caller pre-sets one, the SDK
+overrides it with a `WARNING`. Non-`sdk*` labels on the
+`QueryJobConfig.labels` dict (for example your team or cost-center
+tags) are preserved and coexist with the SDK labels — useful for
+joining SDK spend against your own dimensions.
+
+**Tracking queries**
+
+See [docs/sdk_usage_tracking.md](docs/sdk_usage_tracking.md) for
+ready-to-run SQL templates: feature adoption, AI/ML function cost
+breakdown, p50/p95 latency by feature, version-adoption histograms,
+and surface attribution.
+
+---
+
 ## Module Architecture
 
 ```

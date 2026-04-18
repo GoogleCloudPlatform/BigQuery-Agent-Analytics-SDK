@@ -72,6 +72,10 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -985,16 +989,26 @@ class ContextGraphManager:
     self.table_id = table_id
     self.config = config or ContextGraphConfig()
     self._client = client
+    self._warned_unlabeled_client = False
     self.location = location
 
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(
-          project=self.project_id,
-          location=self.location,
-      )
+      self._client = make_bq_client(self.project_id, location=self.location)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   def _resolve_endpoint(self) -> str:
@@ -1060,7 +1074,10 @@ class ContextGraphManager:
         dataset=self.dataset_id,
         biz_table=self.config.biz_nodes_table,
     )
-    job = self.client.query(ddl)
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(), feature="context-graph"
+    )
+    job = self.client.query(ddl, job_config=job_config)
     job.result()
 
   def _extract_via_ai_generate(self, session_ids: list[str]) -> list[BizNode]:
@@ -1082,6 +1099,9 @@ class ContextGraphManager:
         query_parameters=[
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="context-graph", ai_function="ai-generate"
     )
 
     try:
@@ -1113,6 +1133,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1147,6 +1168,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1188,7 +1210,10 @@ class ContextGraphManager:
     )
 
     try:
-      job = self.client.query(create_query)
+      job_config = with_sdk_labels(
+          bigquery.QueryJobConfig(), feature="context-graph"
+      )
+      job = self.client.query(create_query, job_config=job_config)
       job.result()
     except Exception as e:
       logger.warning("Failed to create biz nodes table: %s", e)
@@ -1242,7 +1267,10 @@ class ContextGraphManager:
     )
 
     try:
-      job = self.client.query(create_query)
+      job_config = with_sdk_labels(
+          bigquery.QueryJobConfig(), feature="context-graph"
+      )
+      job = self.client.query(create_query, job_config=job_config)
       job.result()
     except Exception as e:
       logger.warning("Failed to create cross-links table: %s", e)
@@ -1253,6 +1281,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     # Delete existing cross-links for these sessions (idempotent)
     try:
@@ -1333,7 +1362,10 @@ class ContextGraphManager:
     else:
       ddl = self.get_property_graph_ddl(graph_name)
     try:
-      job = self.client.query(ddl)
+      job_config = with_sdk_labels(
+          bigquery.QueryJobConfig(), feature="context-graph"
+      )
+      job = self.client.query(ddl, job_config=job_config)
       job.result()
       logger.info(
           "Property Graph '%s' created (decisions=%s)",
@@ -1475,7 +1507,10 @@ class ContextGraphManager:
           )
       )
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="context-graph",
+    )
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1522,7 +1557,10 @@ class ContextGraphManager:
           bigquery.ScalarQueryParameter("biz_entity", "STRING", biz_entity)
       )
 
-    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="context-graph",
+    )
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1592,6 +1630,7 @@ class ContextGraphManager:
             ),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1642,6 +1681,7 @@ class ContextGraphManager:
             ),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1675,6 +1715,7 @@ class ContextGraphManager:
             bigquery.ScalarQueryParameter("session_id", "STRING", session_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1716,6 +1757,7 @@ class ContextGraphManager:
             bigquery.ScalarQueryParameter("session_id", "STRING", session_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -1850,7 +1892,10 @@ class ContextGraphManager:
         _CREATE_MADE_DECISION_EDGES_TABLE_QUERY,
         _CREATE_CANDIDATE_EDGES_TABLE_QUERY,
     ):
-      job = self.client.query(ddl_template.format(**fmt))
+      job_config = with_sdk_labels(
+          bigquery.QueryJobConfig(), feature="context-graph"
+      )
+      job = self.client.query(ddl_template.format(**fmt), job_config=job_config)
       job.result()
 
   def extract_decision_points(
@@ -1897,6 +1942,9 @@ class ContextGraphManager:
         query_parameters=[
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
+    )
+    job_config = with_sdk_labels(
+        job_config, feature="context-graph", ai_function="ai-generate"
     )
 
     try:
@@ -1973,6 +2021,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     try:
       job = self.client.query(query, job_config=job_config)
@@ -2103,6 +2152,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
     fmt = {
         "project": self.project_id,
         "dataset": self.dataset_id,
@@ -2153,6 +2203,7 @@ class ContextGraphManager:
             bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
 
     fmt = {
         "project": self.project_id,
@@ -2312,6 +2363,7 @@ class ContextGraphManager:
             bigquery.ScalarQueryParameter("session_id", "STRING", session_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
     try:
       job = self.client.query(query, job_config=job_config)
       rows = list(job.result())
@@ -2355,6 +2407,7 @@ class ContextGraphManager:
             bigquery.ScalarQueryParameter("decision_id", "STRING", decision_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
     try:
       job = self.client.query(query, job_config=job_config)
       rows = list(job.result())

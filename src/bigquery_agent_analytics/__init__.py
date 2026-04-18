@@ -46,6 +46,22 @@ logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 __all__ = []
 
+# --- Telemetry primitives (always available) ---
+# Exposed as public API so operators who want SDK labels on a custom
+# bigquery.Client configuration can opt in via make_bq_client, and
+# advanced users can pass a LabeledBigQueryClient directly.
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
+__all__.extend(
+    [
+        "LabeledBigQueryClient",
+        "make_bq_client",
+        "with_sdk_labels",
+    ]
+)
+
 # --- SDK Client & Core ---
 try:
   from .client import Client

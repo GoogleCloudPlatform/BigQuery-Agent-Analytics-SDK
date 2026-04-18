@@ -57,6 +57,10 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
+from ._telemetry import LabeledBigQueryClient
+from ._telemetry import make_bq_client
+from ._telemetry import with_sdk_labels
+
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
@@ -180,12 +184,25 @@ class BigQuerySessionMemory:
     self.dataset_id = dataset_id
     self.table_id = table_id
     self._client = client
+    self._warned_unlabeled_client = False
 
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def get_recent_context(
@@ -224,6 +241,7 @@ class BigQuerySessionMemory:
             bigquery.ScalarQueryParameter("max_events", "INT64", max_events),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="memory")
 
     loop = asyncio.get_event_loop()
     query_job = await loop.run_in_executor(
@@ -317,13 +335,26 @@ class BigQueryEpisodicMemory:
     self.table_id = table_id
     self.embeddings_table_id = embeddings_table_id or f"{table_id}_embeddings"
     self._client = client
+    self._warned_unlabeled_client = False
     self.embedding_model = embedding_model
 
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def retrieve_similar_episodes(
@@ -387,6 +418,7 @@ class BigQueryEpisodicMemory:
             bigquery.ScalarQueryParameter("top_k", "INT64", top_k),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="memory")
 
     loop = asyncio.get_event_loop()
     query_job = await loop.run_in_executor(
@@ -445,6 +477,7 @@ class BigQueryEpisodicMemory:
             bigquery.ScalarQueryParameter("limit", "INT64", top_k * 10),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="memory")
 
     loop = asyncio.get_event_loop()
     query_job = await loop.run_in_executor(
@@ -731,12 +764,25 @@ class UserProfileBuilder:
     self.dataset_id = dataset_id
     self.table_id = table_id
     self._client = client
+    self._warned_unlabeled_client = False
 
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def build_profile(self, user_id: str) -> UserProfile:
@@ -762,6 +808,7 @@ class UserProfileBuilder:
             bigquery.ScalarQueryParameter("user_id", "STRING", user_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="memory")
 
     loop = asyncio.get_event_loop()
 
@@ -806,6 +853,7 @@ class UserProfileBuilder:
             bigquery.ScalarQueryParameter("user_id", "STRING", user_id),
         ]
     )
+    job_config = with_sdk_labels(job_config, feature="memory")
 
     loop = asyncio.get_event_loop()
 
@@ -906,6 +954,7 @@ class BigQueryMemoryService(BaseMemoryService):
     self.dataset_id = dataset_id
     self.table_id = table_id
     self._client = client
+    self._warned_unlabeled_client = False
     self.embedding_model = embedding_model
 
     self.session_memory = BigQuerySessionMemory(
@@ -923,11 +972,43 @@ class BigQueryMemoryService(BaseMemoryService):
         project_id, dataset_id, table_id, client
     )
 
+    # Emit the vanilla-client WARNING exactly once at the service
+    # boundary — each child otherwise latches its own warning flag, so a
+    # single unlabeled client injected here would produce up to four
+    # separate warnings across the service's lifetime. Latch them all
+    # up front so only the service-level log fires.
+    if isinstance(client, bigquery.Client) and not isinstance(
+        client, LabeledBigQueryClient
+    ):
+      logger.warning(
+          "User-provided bigquery.Client is not a "
+          "LabeledBigQueryClient; SDK telemetry labels will not be "
+          "applied to jobs from this client. To opt in, construct "
+          "the client via bigquery_agent_analytics.make_bq_client() "
+          "or pass a LabeledBigQueryClient directly."
+      )
+      self._warned_unlabeled_client = True
+      self.session_memory._warned_unlabeled_client = True
+      self.episodic_memory._warned_unlabeled_client = True
+      self.profile_builder._warned_unlabeled_client = True
+
   @property
   def client(self) -> bigquery.Client:
     """Lazily initializes and returns the BigQuery client."""
     if self._client is None:
-      self._client = bigquery.Client(project=self.project_id)
+      self._client = make_bq_client(self.project_id)
+    elif isinstance(self._client, bigquery.Client) and not isinstance(
+        self._client, LabeledBigQueryClient
+    ):
+      if not self._warned_unlabeled_client:
+        logger.warning(
+            "User-provided bigquery.Client is not a "
+            "LabeledBigQueryClient; SDK telemetry labels will not be "
+            "applied to jobs from this client. To opt in, construct "
+            "the client via bigquery_agent_analytics.make_bq_client() "
+            "or pass a LabeledBigQueryClient directly."
+        )
+        self._warned_unlabeled_client = True
     return self._client
 
   async def add_session_to_memory(self, session: Session) -> None:

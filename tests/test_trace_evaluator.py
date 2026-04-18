@@ -411,6 +411,39 @@ class TestBigQueryTraceEvaluator:
     assert len(trace.tool_calls) == 1
     assert trace.tool_calls[0].tool_name == "greet"
 
+    # Phase 2a: the query must be labeled so BigQuery Agent Analytics SDK
+    # usage shows up in INFORMATION_SCHEMA.JOBS with sdk_feature=trace-read.
+    job_config = mock_client.query.call_args.kwargs.get("job_config")
+    assert job_config is not None
+    assert dict(job_config.labels or {}).get("sdk_feature") == "trace-read"
+
+  def test_vanilla_client_emits_warn_once(self, caplog):
+    # PR #25 review: mirror Phase 1 warn-once behavior on the evaluator's
+    # `client` property so vanilla bigquery.Client injections are
+    # discoverable in logs and not silently missing from telemetry.
+    import logging
+
+    from google.auth.credentials import AnonymousCredentials
+    from google.cloud import bigquery
+
+    vanilla = bigquery.Client(
+        project="test-project", credentials=AnonymousCredentials()
+    )
+    evaluator = BigQueryTraceEvaluator(
+        project_id="test-project",
+        dataset_id="test-dataset",
+        client=vanilla,
+    )
+    with caplog.at_level(logging.WARNING):
+      _ = evaluator.client
+      _ = evaluator.client
+    warnings = [
+        r
+        for r in caplog.records
+        if "SDK telemetry labels will not be applied" in r.message
+    ]
+    assert len(warnings) == 1
+
   @pytest.mark.asyncio
   async def test_evaluate_session_with_trajectory(self, evaluator, mock_client):
     """Test evaluating session with golden trajectory."""
