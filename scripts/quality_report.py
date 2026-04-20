@@ -529,7 +529,8 @@ def run_eval(args):
   result["report"].details["limit"] = args.limit
   result["report"].details["persist"] = args.persist
   result["report"].details["samples"] = args.samples or "default (10/5/3)"
-  _print_eval_results(result["report"], result["resolved_map"], samples=args.samples)
+  _print_eval_results(result["report"], result["resolved_map"], samples=args.samples,
+                      unhelpful_threshold=args.threshold)
 
   report_path = None
   if args.report:
@@ -603,7 +604,7 @@ _METRIC_LABELS = {
 }
 
 
-def _print_eval_results(report, resolved_map, samples=None):
+def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=10.0):
   hr = "\u2500" * 70
 
   by_category = _group_by_category(report)
@@ -808,10 +809,10 @@ def _print_eval_results(report, resolved_map, samples=None):
 
   print(f"{'=' * 70}")
 
-  if fp_rate > 10:
-    print(f"\n  WARNING: Unhelpful rate ({fp_rate:.1f}%) exceeds 10% threshold!")
+  if fp_rate > unhelpful_threshold:
+    print(f"\n  WARNING: Unhelpful rate ({fp_rate:.1f}%) exceeds {unhelpful_threshold:.0f}% threshold!")
   elif fp_rate > 0:
-    print("\n  Unhelpful responses detected but within acceptable range.")
+    print(f"\n  Unhelpful responses detected but below {unhelpful_threshold:.0f}% threshold.")
   else:
     print("\n  All responses were meaningful.")
 
@@ -1134,6 +1135,12 @@ Examples:
       default=None,
       metavar="PATH",
       help="Write structured evaluation results as JSON to the given file path",
+  )
+  parser.add_argument(
+      "--threshold",
+      type=float,
+      default=10.0,
+      help="Unhelpful rate warning threshold in %% (default: 10)",
   )
 
   args = parser.parse_args()
