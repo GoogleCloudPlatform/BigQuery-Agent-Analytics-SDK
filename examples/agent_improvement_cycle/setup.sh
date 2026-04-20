@@ -70,9 +70,6 @@ echo "[3/4] Installing Python dependencies..."
 cd "$REPO_ROOT"
 pip install -e ".[all]" --quiet 2>&1 | tail -1 || pip install -e ".[all]"
 pip install python-dotenv --quiet 2>&1 | tail -1 || pip install python-dotenv
-
-# Also install google-adk extras needed by the demo agent
-pip install "google-adk[bigquery]" --quiet 2>&1 | tail -1 || pip install "google-adk[bigquery]"
 echo "  Dependencies installed."
 
 # 4. Configure environment
