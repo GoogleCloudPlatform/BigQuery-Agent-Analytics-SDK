@@ -82,8 +82,8 @@ echo "  Vertex AI API: enabled"
 echo ""
 echo "[4/5] Installing Python dependencies..."
 cd "$REPO_ROOT"
-pip install -e ".[all]" --quiet 2>&1 | tail -1 || pip install -e ".[all]"
-pip install python-dotenv --quiet 2>&1 | tail -1 || pip install python-dotenv
+pip install -e ".[all]" --quiet --no-warn-script-location 2>&1 | tail -1 || pip install -e ".[all]"
+pip install python-dotenv --quiet --no-warn-script-location 2>&1 | tail -1 || pip install python-dotenv
 echo "  Dependencies installed."
 
 # 5. Configure environment
