@@ -1,0 +1,77 @@
+{
+  "eval_set_id": "company_info_improvement_cycle",
+  "name": "Company Info Agent Evaluation",
+  "description": "Test cases for the agent improvement cycle demo. Covers happy paths and intentional v1 flaws.",
+  "eval_cases": [
+    {
+      "id": "pto_balance",
+      "question": "How many PTO days do I get per year?",
+      "category": "pto",
+      "expected_tool": "lookup_company_policy",
+      "notes": "Should answer correctly from tool"
+    },
+    {
+      "id": "pto_rollover",
+      "question": "Can I carry over unused vacation days to next year?",
+      "category": "pto",
+      "expected_tool": "lookup_company_policy",
+      "notes": "Should answer correctly from tool"
+    },
+    {
+      "id": "sick_leave_policy",
+      "question": "How many sick days do I have?",
+      "category": "sick_leave",
+      "expected_tool": "lookup_company_policy",
+      "notes": "Should answer correctly from tool"
+    },
+    {
+      "id": "remote_work_days",
+      "question": "How many days can I work from home?",
+      "category": "remote_work",
+      "expected_tool": "lookup_company_policy",
+      "notes": "Should answer correctly from tool"
+    },
+    {
+      "id": "expense_reimbursement",
+      "question": "What is the meal reimbursement limit for business travel?",
+      "category": "expenses",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 prompt has no expense info, agent will be unhelpful or hallucinate"
+    },
+    {
+      "id": "expense_receipts",
+      "question": "Do I need receipts for a $30 lunch during a work trip?",
+      "category": "expenses",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 prompt has no expense info"
+    },
+    {
+      "id": "benefits_health",
+      "question": "What health insurance plans does the company offer?",
+      "category": "benefits",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 prompt says 'competitive benefits' with no specifics, will hallucinate"
+    },
+    {
+      "id": "benefits_401k",
+      "question": "Does the company match 401k contributions?",
+      "category": "benefits",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 prompt has no 401k details, will hallucinate"
+    },
+    {
+      "id": "vacation_planning_relative",
+      "question": "I want to take next Friday off. How do I request PTO?",
+      "category": "pto",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 has no date handling, may ask for clarification"
+    },
+    {
+      "id": "parental_leave",
+      "question": "How long is the parental leave policy?",
+      "category": "benefits",
+      "expected_tool": "lookup_company_policy",
+      "notes": "FLAW: v1 prompt has no parental leave details"
+    }
+  ]
+}
