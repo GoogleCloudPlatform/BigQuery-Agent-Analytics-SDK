@@ -38,7 +38,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEMO_DIR = os.path.dirname(_SCRIPT_DIR)
 
 # Load environment and configure Vertex AI
-_env_path = os.path.join(_DEMO_DIR, "../../.env")
+_env_path = os.path.join(_DEMO_DIR, ".env")
 if os.path.exists(_env_path):
   load_dotenv(dotenv_path=_env_path)
 

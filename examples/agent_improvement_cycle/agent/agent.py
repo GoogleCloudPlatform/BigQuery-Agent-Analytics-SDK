@@ -34,7 +34,7 @@ from .tools import get_current_date
 from .tools import lookup_company_policy
 
 # Load environment
-_env_path = os.path.join(os.path.dirname(__file__), "../../.env")
+_env_path = os.path.join(os.path.dirname(__file__), "../.env")
 if os.path.exists(_env_path):
   load_dotenv(dotenv_path=_env_path)
 
