@@ -208,7 +208,7 @@ def write_improved_prompt(improved_prompt, changes_summary, current_version):
   # Sanitize for safe Python embedding
   safe_summary = changes_summary.replace("\n", " ").strip()
   triple_q = '"' * 3
-  safe_prompt = improved_prompt.replace(triple_q, "\\\"\\\"\\\"")
+  safe_prompt = improved_prompt.replace(triple_q, '\\"\\"\\"')
 
   # Build the new version block
   new_block = (

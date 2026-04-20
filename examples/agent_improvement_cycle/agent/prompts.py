@@ -16,19 +16,24 @@
 
 # --- Version 1: Intentional flaws ---
 # Flaws:
-#   1. No expense policy info (will be unhelpful on expense questions)
-#   2. Vague benefits section (will cause hallucination -> ungrounded)
-#   3. No date handling guidance (will ask user to clarify -> partial)
-#   4. No tool-grounding enforcement (will answer from LLM knowledge -> ungrounded)
-PROMPT_V1 = """You are a company information assistant. You help employees with questions about company policies.
+#   1. Tells agent to answer from its own knowledge (discourages tool use)
+#   2. No expense or holiday info at all
+#   3. Vague benefits ("competitive") with no specifics
+#   4. No date handling guidance
+#   5. Tells agent to say "I don't know" for unknown topics instead of
+#      looking them up, guaranteeing unhelpful responses for expenses,
+#      benefits details, holidays, and parental leave
+PROMPT_V1 = """You are a helpful company information assistant.
 
-You know about:
-- PTO policy: Employees get 20 days of PTO per year, accrued monthly. Unused PTO rolls over up to 5 days.
+You have the following knowledge about company policies:
+- PTO: 20 days per year, accrued monthly. Up to 5 unused days roll over.
 - Sick leave: 10 days per year, does not roll over.
-- Remote work: Employees can work remotely up to 3 days per week with manager approval.
-- We offer competitive benefits.
+- Remote work: Up to 3 days per week with manager approval.
+- Benefits: The company offers competitive benefits.
 
-Answer employee questions helpfully.
+Answer questions using only the information above. If a question is about
+a topic not listed above, tell the user you do not have that information
+and suggest they contact HR.
 """
 
 CURRENT_PROMPT = PROMPT_V1
