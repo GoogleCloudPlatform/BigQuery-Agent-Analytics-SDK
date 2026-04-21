@@ -151,11 +151,16 @@ Return ONLY the JSON, no other text.
 
 
 async def run_golden_eval(eval_cases_path: str | None = None) -> list[dict]:
-  """Run golden eval cases with LLM judge, no BQ logging.
+  """Run eval cases with LLM judge, no BQ logging.
 
   Creates a throwaway agent with the current prompt and scores each
   response with a lightweight LLM judge.  Returns results with
   pass/fail verdicts.
+
+  Args:
+      eval_cases_path: Path to eval cases JSON. If None, defaults to
+          eval_cases.json (the golden set). Can point to any file
+          with the same schema (e.g. synthetic traffic).
   """
   from agent.tools import get_current_date
   from agent.tools import lookup_company_policy
@@ -240,7 +245,11 @@ def main() -> None:
   parser.add_argument(
       "--golden",
       action="store_true",
-      help="Run golden eval with LLM judge (no BQ logging, pass/fail verdict)",
+      help=(
+          "LLM judge mode: run cases through a throwaway agent (no BQ"
+          " logging) and score each response pass/fail. Uses --eval-cases"
+          " if provided, otherwise defaults to eval_cases.json."
+      ),
   )
   args = parser.parse_args()
 

@@ -128,9 +128,10 @@ echo "  PRE-FLIGHT: Verifying golden eval set passes with current prompt"
 echo ""
 step_start
 
+set +e
 python3 -W ignore::UserWarning "$SCRIPT_DIR/eval/run_eval.py" --golden
-
 PREFLIGHT_EXIT=$?
+set -e
 step_end
 
 if [[ $PREFLIGHT_EXIT -ne 0 ]]; then
@@ -323,9 +324,14 @@ with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
     --count "$TRAFFIC_COUNT" \
     --output "$FRESH_TRAFFIC"
 
+  # --golden = LLM judge mode (throwaway agent, no BQ)
+  # --eval-cases = evaluate the fresh traffic, not the golden set
+  # Failures here are expected (they're the "after" score), so don't exit.
+  set +e
   python3 -W ignore::UserWarning "$SCRIPT_DIR/eval/run_eval.py" \
     --golden \
     --eval-cases "$FRESH_TRAFFIC"
+  set -e
 
   # Print before/after comparison
   FRESH_RESULTS="$SCRIPT_DIR/reports/latest_eval_results.json"
@@ -336,16 +342,21 @@ with open('$REPORT_JSON') as f:
 with open('$FRESH_RESULTS') as f:
     after_results = json.load(f)
 b = before.get('summary', {})
+mr = int(b.get('meaningful_rate', 0))
 after_passed = sum(1 for r in after_results if r.get('pass', False))
 after_total = len(after_results)
 after_rate = round(100 * after_passed / after_total) if after_total else 0
+before_line = f'Before (V${CURRENT_V}):  {mr:>3}% meaningful  ({b.get(\"meaningful\", \"?\")}/{b.get(\"total_sessions\", \"?\")} sessions)'
+after_line  = f'After  (V${NEW_V}):  {after_rate:>3}% pass rate    ({after_passed}/{after_total} sessions)'
+title = 'CYCLE ${cycle} RESULTS'
+W = max(len(before_line), len(after_line), len(title)) + 4
 print()
-print('  ┌───────────────────────────────────────────────────────┐')
-print('  │              CYCLE ${cycle} RESULTS                          │')
-print('  ├───────────────────────────────────────────────────────┤')
-print(f\"  │  Before (V${CURRENT_V}):  {b.get('meaningful_rate', '?'):>3}% meaningful  ({b.get('meaningful', '?')}/{b.get('total_sessions', '?')} sessions)  │\")
-print(f\"  │  After  (V${NEW_V}):  {after_rate:>3}% pass rate    ({after_passed}/{after_total} sessions)  │\")
-print('  └───────────────────────────────────────────────────────┘')
+print(f'  ┌{\"─\" * W}┐')
+print(f'  │{title:^{W}}│')
+print(f'  ├{\"─\" * W}┤')
+print(f'  │  {before_line:<{W - 2}}│')
+print(f'  │  {after_line:<{W - 2}}│')
+print(f'  └{\"─\" * W}┘')
 " 2>/dev/null || true
 
   step_end
