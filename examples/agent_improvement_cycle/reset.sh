@@ -22,9 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Resetting demo to initial state..."
 
-# Restore V1 prompt and original golden eval set from baselines
-cp "$SCRIPT_DIR/agent/prompts_v1.py" "$SCRIPT_DIR/agent/prompts.py"
-cp "$SCRIPT_DIR/eval/eval_cases_v1.json" "$SCRIPT_DIR/eval/eval_cases.json"
+# Restore V1 prompt and original golden eval set from git
+git checkout -- "$SCRIPT_DIR/agent/prompts.py" "$SCRIPT_DIR/eval/eval_cases.json"
 
 # Remove generated traffic and reports
 rm -f "$SCRIPT_DIR"/eval/synthetic_traffic_cycle_*.json

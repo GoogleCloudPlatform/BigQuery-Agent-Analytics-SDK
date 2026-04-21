@@ -23,55 +23,6 @@
       "category": "remote_work",
       "expected_tool": "lookup_company_policy",
       "notes": "V1 has this info in the prompt, should pass"
-    },
-    {
-      "id": "extracted_how_long_is_the_parental_leave_policy",
-      "question": "How long is the parental leave policy?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_i_want_to_take_next_friday_off_is_that_a",
-      "question": "I want to take next Friday off. Is that a company holiday or should I use PTO?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (partial)"
-    },
-    {
-      "id": "extracted_does_the_company_match_401k_contribution",
-      "question": "Does the company match 401k contributions?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_do_i_need_receipts_for_a_30_lunch_during",
-      "question": "Do I need receipts for a $30 lunch during a work trip?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_what_are_the_company_holidays_this_year",
-      "question": "What are the company holidays this year?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_what_is_the_meal_reimbursement_limit_for",
-      "question": "What is the meal reimbursement limit for business travel?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_what_health_insurance_plans_does_the_com",
-      "question": "What health insurance plans does the company offer?",
-      "category": "unknown",
-      "expected_tool": "lookup_company_policy",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
     }
   ]
 }
