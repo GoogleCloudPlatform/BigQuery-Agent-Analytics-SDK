@@ -214,7 +214,7 @@ Rules:
 |---|---|---|---|
 | `name` | string | yes | See §4a for uniqueness rules. |
 | `abstract` | boolean | no | Defaults to `false`. See §3a. |
-| `extends` | string | no | Name of the parent relationship. Single-parent. Forbidden on abstract relationships. |
+| `extends` | string | no | Name of the parent relationship. Single-parent. Forbidden on abstract relationships — `extends` is a bare name reference, and abstract relationship names are not unique on their own (§4a), so a bare name cannot unambiguously identify the parent. |
 | `keys` | Keys | no | See §6. |
 | `from` | string | yes | Source entity name. Concrete relationships require a concrete source. |
 | `to` | string | yes | Target entity name. Concrete relationships require a concrete target. |
@@ -228,10 +228,17 @@ Rules:
 
 - **Concrete relationships** require unique `(name,)` within the
   ontology (same rule as entities).
-- **Abstract relationships** require unique `(name, from, to)`. Two
-  abstract relationships with the same name but different endpoints
-  are legal — this is what lets an imported taxonomy emit multiple
-  `skos_broader` edges without synthetic naming.
+- **Abstract relationships** require unique `(name, from, to)`. The
+  relaxation is necessary because abstract relationships model
+  informational predicates from external vocabularies (e.g. SKOS
+  `broader`, `related`) where the same predicate name connects many
+  different pairs of node types. Requiring name uniqueness alone would
+  force synthetic names (`skos_broader_1`, `skos_broader_2`, …) that
+  diverge from the source vocabulary and make the ontology harder to
+  read. The cost of the relaxation is that `extends` becomes
+  unresolvable for abstract relationships — a bare name no longer
+  identifies a single relationship — which is why `extends` is
+  forbidden on abstract relationships.
 - Concrete and abstract relationships cannot share a name.
 
 ## 5. Property

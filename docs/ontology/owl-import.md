@@ -632,10 +632,11 @@ second-class placeholders. Most shape rules still apply:
   - Must reference declared entity names in `from` / `to`; endpoint
     existence is enforced.
   - **May point at concrete or abstract entities** in any combination.
-  - **Must not use `extends`**. Abstract relationships are
-    informational; the mixed concrete/abstract parent-map would have
-    ambiguous uniqueness. If keys are declared, they still follow
-    shape rules.
+  - **Must not use `extends`**. `extends` is a bare name reference,
+    but abstract relationship names are not unique on their own — two
+    abstract relationships may share a name if their endpoints differ.
+    A bare name cannot unambiguously identify the parent, so `extends`
+    is forbidden. If keys are declared, they still follow shape rules.
   - Uniqueness is relaxed to `(name, from, to)` instead of `(name,)`
     alone — so multiple `skos_broader` edges with different endpoints
     are legal (see §19.5).
@@ -655,13 +656,21 @@ second-class placeholders. Most shape rules still apply:
 ### 19.5 Relationship uniqueness
 
 Abstract relationships use relaxed uniqueness: `(name, from, to)` must
-be unique, rather than `(name)` alone. Concrete relationships retain
-strict `(name)` uniqueness. This relaxation is what allows multiple
-`skos_broader` edges to share a name without synthetic suffixes.
+be unique, rather than `(name)` alone. The relaxation is necessary
+because external vocabularies like SKOS use a single predicate name
+(`broader`, `related`) across many different node-type pairs. Requiring
+name uniqueness alone would force synthetic names
+(`skos_broader_1`, `skos_broader_2`, …) that diverge from the source
+vocabulary and make the ontology harder to read.
 
-The relaxation is deliberately narrow: `compile_graph` and `gm bind`
-only operate on concrete elements, and concrete uniqueness is
-unchanged. The emitted DDL and GQL surfaces are unaffected.
+The cost of the relaxation is that `extends` becomes unresolvable for
+abstract relationships — a bare name no longer identifies a single
+relationship — so `extends` is forbidden on abstract relationships.
+
+Concrete relationships retain strict `(name)` uniqueness. The
+relaxation is deliberately narrow: the compiler and binding layer only
+operate on concrete elements, so the emitted DDL and GQL surfaces are
+unaffected.
 
 ### 19.6 Language selection (`--language`)
 
