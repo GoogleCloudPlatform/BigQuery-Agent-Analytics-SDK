@@ -135,17 +135,18 @@ This step does three things:
 
 Step 5 mirrors Steps 1-3 but with the improved prompt: generate
 fresh traffic, run it through the agent, and score from BigQuery.
-The regression check already passed in Step 4, so Step 5 goes
-straight to measurement.
 
-1. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
+1. **Regression check:** Run the extended golden eval (~10 cases)
+   PASS/FAIL to verify the improved prompt still passes everything.
+
+2. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
    Re-running the Step 1 traffic would be circular -- the prompt was
    specifically fixed to handle those questions.
 
-2. **Run through agent:** The fresh questions are sent to the V2
+3. **Run through agent:** The fresh questions are sent to the V2
    agent and logged to BigQuery -- exactly like Step 2.
 
-3. **Score from BigQuery:** The SDK's quality report reads the new
+4. **Score from BigQuery:** The SDK's quality report reads the new
    sessions from BigQuery and scores them -- exactly like Step 3.
 
 *(point to the results box)*
