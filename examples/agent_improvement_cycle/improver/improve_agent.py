@@ -274,7 +274,13 @@ async def _judge_cases(
     print(f"    {tag}: {case['id']}{suffix}")
     return result
 
-  results = list(await asyncio.gather(*[_judge_one(c) for c in cases]))
+  sem = asyncio.Semaphore(3)
+
+  async def _throttled(case):
+    async with sem:
+      return await _judge_one(case)
+
+  results = list(await asyncio.gather(*[_throttled(c) for c in cases]))
   passed = sum(1 for r in results if r.get("pass", False))
 
   return passed, len(cases), results
