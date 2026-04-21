@@ -42,6 +42,18 @@ from typing import Any, Optional
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
+_ANSI_RED = "\x1b[31m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_RESET = "\x1b[0m"
+
+
+def _colorize(text: str, ansi_code: str, enabled: bool) -> str:
+  """Wraps text in an ANSI color code when enabled, else returns unchanged."""
+  if not enabled:
+    return text
+  return f"{ansi_code}{text}{_ANSI_RESET}"
+
+
 class EventType(Enum):
   """Standard event types logged by the analytics plugin."""
 
@@ -232,12 +244,23 @@ class Span:
     if not self.is_error:
       return None
     parts = [self.event_type]
-    tool = self.content.get("tool")
-    if tool:
-      parts.append(f"tool={tool}")
+    if self.tool_name:
+      parts.append(f"tool={self.tool_name}")
     if self.error_message:
       parts.append(self.error_message[:200])
     return " | ".join(parts)
+
+  @property
+  def tool_name(self) -> Optional[str]:
+    """Returns the tool name for tool-related events.
+
+    Populated for ``TOOL_STARTING``, ``TOOL_COMPLETED``,
+    ``TOOL_ERROR``, and ``HITL_*`` events where the plugin writes
+    the tool name into ``content.tool``. Returns ``None`` for
+    spans that do not describe a tool invocation.
+    """
+    tool = self.content.get("tool")
+    return tool if tool else None
 
   @property
   def label(self) -> str:
@@ -631,7 +654,7 @@ class Trace:
 
     return roots
 
-  def render(self, format: str = "tree") -> str:
+  def render(self, format: str = "tree", color: bool = False) -> str:
     """Renders the trace as a hierarchical DAG view.
 
     This generates a tree representation of the agent's
@@ -642,6 +665,12 @@ class Trace:
 
     Args:
         format: Render format. Currently supports "tree".
+        color: When ``True``, wrap error markers and warning
+            markers in ANSI color codes (red and yellow
+            respectively). Default ``False`` emits plain text
+            suitable for any output target. Enable this in TTY
+            contexts (terminal sessions) for faster visual
+            scanning of failures in large traces.
 
     Returns:
         A string containing the rendered trace. Also printed
@@ -661,10 +690,10 @@ class Trace:
     if not roots:
       # Flat rendering when no span IDs exist
       for span in self.spans:
-        self._render_flat_span(span, lines)
+        self._render_flat_span(span, lines, color=color)
     else:
       for root in roots:
-        self._render_span(root, lines, prefix="", is_last=True)
+        self._render_span(root, lines, prefix="", is_last=True, color=color)
 
     output = "\n".join(lines)
     print(output)
@@ -676,16 +705,17 @@ class Trace:
       lines: list[str],
       prefix: str,
       is_last: bool,
+      color: bool = False,
   ) -> None:
     """Recursively renders a span and its children as a tree."""
     connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
 
     if span.is_error:
-      status_icon = "\u2717"
+      status_icon = _colorize("\u2717", _ANSI_RED, color)
     elif span.subtree_has_error:
       # Propagate error visibility: mark parents whose subtree
       # contains an error so the failure is visible at every level.
-      status_icon = "\u26a0"
+      status_icon = _colorize("\u26a0", _ANSI_YELLOW, color)
     else:
       status_icon = "\u2713"
 
@@ -719,11 +749,20 @@ class Trace:
           lines,
           child_prefix,
           is_last=(i == len(span.children) - 1),
+          color=color,
       )
 
-  def _render_flat_span(self, span: Span, lines: list[str]) -> None:
+  def _render_flat_span(
+      self,
+      span: Span,
+      lines: list[str],
+      color: bool = False,
+  ) -> None:
     """Renders a single span without tree structure."""
-    status_icon = "\u2717" if span.is_error else "\u2713"
+    if span.is_error:
+      status_icon = _colorize("\u2717", _ANSI_RED, color)
+    else:
+      status_icon = "\u2713"
     latency = ""
     if span.latency_ms is not None:
       latency = f" ({span.latency_ms:.0f}ms)"

@@ -120,6 +120,51 @@ class TestSpan:
     )
     assert "ERROR" in span.label
 
+  def test_tool_name_for_tool_event(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": "search_contacts"},
+    )
+    assert span.tool_name == "search_contacts"
+
+  def test_tool_name_for_hitl_event(self):
+    span = Span(
+        event_type="HITL_APPROVAL_REQUESTED",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": "book_meeting"},
+    )
+    assert span.tool_name == "book_meeting"
+
+  def test_tool_name_none_for_non_tool_event(self):
+    span = Span(
+        event_type="USER_MESSAGE_RECEIVED",
+        agent=None,
+        timestamp=datetime.now(timezone.utc),
+        content={"text_summary": "Hello"},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_none_when_missing(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_none_when_empty(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": ""},
+    )
+    assert span.tool_name is None
+
   def test_summary_with_text(self):
     span = Span(
         event_type="USER_MESSAGE_RECEIVED",
@@ -299,6 +344,85 @@ class TestTrace:
     assert "sess-1" in output
     assert "USER_MESSAGE_RECEIVED" in output
     assert "TOOL_STARTING" in output
+
+  def test_render_color_default_off(self):
+    """Default render() must not emit ANSI escape codes."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render()
+    assert "\x1b[" not in output
+
+  def test_render_color_true_wraps_error_icon(self):
+    """With color=True, error spans get red ANSI wrap on the cross icon."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[31m\u2717\x1b[0m" in output
+
+  def test_render_color_true_wraps_subtree_warning(self):
+    """Parent of an error child gets yellow warning icon wrap."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="AGENT_STARTING",
+            agent="agent",
+            timestamp=ts,
+            span_id="s1",
+        ),
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s2",
+            parent_span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[33m\u26a0\x1b[0m" in output
+    assert "\x1b[31m\u2717\x1b[0m" in output
+
+  def test_render_color_true_no_wrap_on_success(self):
+    """Successful spans stay plain even with color=True."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search", "result": "ok"},
+            status="OK",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[" not in output
 
   def test_render_flat_no_span_ids(self):
     ts = datetime.now(timezone.utc)
