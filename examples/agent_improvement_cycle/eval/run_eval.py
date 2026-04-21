@@ -128,14 +128,8 @@ async def run_all_cases(
           "session_id": "",
       }
 
-  sem = asyncio.Semaphore(3)
-
-  async def _throttled(i, case):
-    async with sem:
-      return await _run_one(i, case)
-
   results = await asyncio.gather(
-      *[_throttled(i, case) for i, case in enumerate(cases, 1)]
+      *[_run_one(i, case) for i, case in enumerate(cases, 1)]
   )
   results = list(results)
 
