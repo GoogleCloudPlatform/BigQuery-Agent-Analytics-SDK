@@ -91,7 +91,7 @@ def _load_dotenv():
         os.path.join(_repo_root, ".env"),
     ]:
       if os.path.isfile(candidate):
-        load_dotenv(candidate, override=True)
+        load_dotenv(candidate, override=False)
         break
   except ImportError:
     pass

@@ -108,7 +108,7 @@ scores each one on two dimensions:
 - **Task grounding:** Was the answer based on tool output, or did the
   agent make something up?
 
-*(point to the quality summary)* Around 30% meaningful. The agent had
+*(point to the quality summary)* Around 40% meaningful. The agent had
 the right tools all along -- the prompt just did not let it use them.
 
 ### Step 4: Improve Prompt (~1-2 min)
@@ -133,30 +133,28 @@ This step does three things:
 
 ### Step 5: Measure Improvement (~2-3 min)
 
-Step 5 mirrors Steps 1-3 but with the improved prompt: generate
-fresh traffic, run it through the agent, and score from BigQuery.
+Step 5 mirrors Steps 1-3 but with the improved prompt. The
+regression check already passed in Step 4, so Step 5 goes straight
+to fresh traffic.
 
-1. **Regression check:** Run the extended golden eval (~10 cases)
-   PASS/FAIL to verify the improved prompt still passes everything.
-
-2. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
+1. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
    Re-running the Step 1 traffic would be circular -- the prompt was
    specifically fixed to handle those questions.
 
-3. **Run through agent:** The fresh questions are sent to the V2
+2. **Run through agent:** The fresh questions are sent to the V2
    agent and logged to BigQuery -- exactly like Step 2.
 
-4. **Score from BigQuery:** The SDK's quality report reads the new
+3. **Score from BigQuery:** The SDK's quality report reads the new
    sessions from BigQuery and scores them -- exactly like Step 3.
 
 *(point to the results box)*
 
 ```
-  Before (V1):   30% meaningful  (3/10 sessions)
-  After  (V2):  100% meaningful  (10/10 sessions)
+  Before (V1):   40% meaningful  (4/10 sessions)
+  After  (V2):  90% meaningful  (9/10 sessions)
 ```
 
-From 30% to 100% in one automated cycle, scored from BigQuery on
+From 40% to 90% in one automated cycle, scored from BigQuery on
 entirely new questions.
 
 ---

@@ -327,28 +327,14 @@ with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
   echo ""
   echo "  STEP 5/$TOTAL_STEPS: MEASURE IMPROVEMENT"
   echo ""
-  echo "  Goal:    Verify the improved prompt and measure quality on fresh traffic"
-  echo "  Method:  1. Run extended golden eval ($GOLDEN_AFTER cases) PASS/FAIL"
-  echo "           2. Generate fresh synthetic traffic (different from Step 1)"
-  echo "           3. Run through agent with BigQuery logging"
-  echo "           4. Score sessions from BigQuery (same as Step 3)"
+  echo "  Goal:    Measure quality on fresh, unseen traffic via BigQuery"
+  echo "  Method:  1. Generate fresh synthetic traffic (different from Step 1)"
+  echo "           2. Run through agent with BigQuery logging"
+  echo "           3. Score sessions from BigQuery (same as Step 3)"
   echo ""
   step_start
 
-  # 5a: Run extended golden eval as regression check
-  echo "  --- Regression check ($GOLDEN_AFTER cases) ---"
-  set +e
-  python3 "$SCRIPT_DIR/eval/run_eval.py" --golden
-  GOLDEN_EXIT=$?
-  set -e
-  if [[ $GOLDEN_EXIT -ne 0 ]]; then
-    echo ""
-    echo "  ERROR: Extended golden eval failed after improvement."
-    exit 1
-  fi
-
-  # 5b: Generate fresh synthetic traffic
-  echo ""
+  # 5a: Generate fresh synthetic traffic
   echo "  --- Fresh traffic ---"
   FRESH_TRAFFIC="$SCRIPT_DIR/eval/synthetic_traffic_cycle_${cycle}_fresh.json"
   python3 "$SCRIPT_DIR/eval/generate_traffic.py" \
