@@ -218,43 +218,43 @@ def call_improver(
 # ---------------------------------------------------------------------------
 
 
-async def run_golden_eval(candidate_prompt: str) -> tuple[bool, int, int]:
-  """Run the golden eval set against a candidate prompt.
-
-  Creates a throwaway agent with the candidate prompt (no BQ logging)
-  and runs every golden eval case.  Each response is scored by a
-  lightweight LLM judge.
-
-  Returns:
-      (passed_all, passed_count, total) where passed_all is True only
-      if every golden case passes.
-  """
-  # Lazy imports to avoid triggering BQ plugin creation from agent.agent
+def _create_eval_agent(prompt: str):
+  """Create a throwaway agent + runner for evaluation (no BQ logging)."""
   from google.adk.agents import Agent
   from google.adk.runners import InMemoryRunner
 
   sys.path.insert(0, _DEMO_DIR)
   from agent.tools import get_current_date
   from agent.tools import lookup_company_policy
-  from eval.run_eval import run_single_case
 
-  golden_cases = load_eval_cases().get("eval_cases", [])
   model_id = os.getenv("DEMO_MODEL_ID", "gemini-2.5-flash")
-
-  test_agent = Agent(
-      name="golden_eval_agent",
+  agent = Agent(
+      name="eval_agent",
       model=model_id,
       description="An agent that answers questions about company policies.",
-      instruction=candidate_prompt,
+      instruction=prompt,
       tools=[lookup_company_policy, get_current_date],
   )
+  runner = InMemoryRunner(agent=agent, app_name="eval_agent")
+  return runner
 
-  runner = InMemoryRunner(agent=test_agent, app_name="golden_eval")
+
+async def _judge_cases(
+    runner, cases: list[dict], label: str
+) -> tuple[int, int, list[dict]]:
+  """Run cases through agent and judge each response.
+
+  Returns (passed_count, total, results_list).
+  """
+  from eval.run_eval import run_single_case
+
+  model_id = os.getenv("DEMO_MODEL_ID", "gemini-2.5-flash")
   client = genai.Client()
   passed = 0
+  results = []
 
-  for case in golden_cases:
-    result = await run_single_case(runner, case, user_id="golden_eval")
+  for case in cases:
+    result = await run_single_case(runner, case, user_id="eval")
     judge_prompt = GOLDEN_JUDGE_PROMPT.format(
         question=case["question"],
         response=result["response"][:500],
@@ -268,13 +268,33 @@ async def run_golden_eval(candidate_prompt: str) -> tuple[bool, int, int]:
         ),
     )
     verdict = json.loads(judge_response.text)
-    if verdict.get("pass", False):
+    pass_fail = verdict.get("pass", False)
+    if pass_fail:
       passed += 1
       print(f"    PASS: {case['id']}")
     else:
       print(f"    FAIL: {case['id']} - {verdict.get('reason', '')}")
+    result["pass"] = pass_fail
+    result["reason"] = verdict.get("reason", "")
+    results.append(result)
 
-  total = len(golden_cases)
+  return passed, len(cases), results
+
+
+async def run_golden_eval(candidate_prompt: str) -> tuple[bool, int, int]:
+  """Run the golden eval set against a candidate prompt.
+
+  Creates a throwaway agent with the candidate prompt (no BQ logging)
+  and runs every golden eval case.  Each response is scored by a
+  lightweight LLM judge.
+
+  Returns:
+      (passed_all, passed_count, total) where passed_all is True only
+      if every golden case passes.
+  """
+  golden_cases = load_eval_cases().get("eval_cases", [])
+  runner = _create_eval_agent(candidate_prompt)
+  passed, total, _ = await _judge_cases(runner, golden_cases, "golden")
   return passed == total, passed, total
 
 
@@ -496,8 +516,7 @@ def main() -> None:
         " to golden eval set."
     )
 
-  print(f"\n  v{current_version} -> v{new_version} complete.")
-  print("  Re-run evaluation to measure improvement.\n")
+  print(f"\n  v{current_version} -> v{new_version} complete.\n")
 
 
 if __name__ == "__main__":

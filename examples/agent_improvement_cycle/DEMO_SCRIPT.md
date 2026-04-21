@@ -1,6 +1,6 @@
 # Agent Improvement Cycle - Demo Script
 
-**Duration:** ~5-7 minutes
+**Duration:** ~5 minutes (single cycle), ~15 minutes (3 cycles)
 **Format:** Live terminal walkthrough
 
 ---
@@ -45,7 +45,7 @@ guide the agent to use them.
 
 ---
 
-## Show and Run the Golden Eval Set (60s)
+## Show the Golden Eval Set (30s)
 
 **Command:**
 ```shell
@@ -57,40 +57,34 @@ the V1 prompt already handles correctly: PTO days, sick leave, and
 remote work. The golden set starts small and grows each cycle as
 failed synthetic cases are extracted into it.
 
-Before starting the improvement cycle, verify the golden set passes
-with the current V1 prompt. This runs each case through a throwaway
-agent (no BigQuery logging) and uses an LLM judge to score each
-response pass or fail.
-
-**Command:**
-```shell
-python3 eval/run_eval.py --golden
-```
-
-*(as output scrolls)* All three cases pass. The V1 prompt handles these
-basic questions correctly.
-
 These cases are the floor. No prompt change is accepted unless every
 golden case still passes. As the cycle runs, failed synthetic cases
 get added here, raising the bar each iteration.
 
 ---
 
-## Cycle 1 - Step 1: Generate Synthetic Traffic (20s)
+## Run One Cycle (~4 min)
 
 **Command:**
 ```shell
-./run_cycle.sh --cycles 3
+./run_cycle.sh
 ```
 
-First, the script calls Gemini to generate 15 diverse user questions.
-These are intentionally different from the golden set -- varied
-phrasing, edge cases, situational questions. They simulate real-world
-traffic the agent has not been tuned for.
+### Pre-flight: Golden Eval (~25s)
 
----
+The script starts by running the golden eval set against the current
+prompt. This verifies the starting point: all 3 cases should pass
+with V1. If any fail, the script stops with a non-zero exit code --
+fix the prompt first.
 
-## Cycle 1 - Step 2: Run Traffic (30s)
+### Step 1: Generate Synthetic Traffic (~20s)
+
+The script calls Gemini to generate 10 diverse user questions. These
+are intentionally different from the golden set -- varied phrasing,
+situational questions, covering all six policy topics. They simulate
+real-world traffic the agent has not been tuned for.
+
+### Step 2: Run Traffic Through Agent (~30-40s)
 
 The generated questions are sent to the agent using ADK's
 `InMemoryRunner`. The agent runs locally and executes its tools
@@ -104,9 +98,7 @@ No extra logging code required.
 *(as output scrolls)* Some questions get proper answers, others get
 "I don't have that information, contact HR."
 
----
-
-## Cycle 1 - Step 3: Evaluate Quality (30s)
+### Step 3: Evaluate Quality (~25s)
 
 The SDK's quality report reads those sessions back from BigQuery and
 scores each one on two dimensions:
@@ -116,54 +108,63 @@ scores each one on two dimensions:
 - **Task grounding:** Was the answer based on tool output, or did the
   agent make something up?
 
-*(point to the quality summary)* Low meaningful rate. The agent had the
-right tools all along -- the prompt just did not let it use them.
+*(point to the quality summary)* Around 30% meaningful. The agent had
+the right tools all along -- the prompt just did not let it use them.
 
----
+### Step 4: Improve Prompt (~40s)
 
-## Cycle 1 - Step 4: Auto-Improve (45s)
+This step does three things:
 
-The improver sends three things to Gemini: the current prompt, the
-quality report, and a list of the agent's available tools
-(`lookup_company_policy`, `get_current_date`) with their signatures.
-Gemini analyzes what went wrong and rewrites the prompt.
+1. **Rewrite:** Gemini receives the current prompt, the quality report,
+   and the available tool signatures. It analyzes what went wrong and
+   generates a new prompt.
 
-Before accepting, the golden eval gate runs: every case in the golden
-set is tested against the candidate prompt using a throwaway agent
-(no BigQuery logging). If any golden case fails, the candidate is
-rejected and Gemini generates a new one.
+2. **Golden eval gate:** Every case in the golden set is tested against
+   the candidate prompt using a throwaway agent. If any golden case
+   fails, the candidate is rejected and Gemini generates a new one
+   (up to 3 attempts).
 
-Once the golden eval passes, the improved prompt is written to disk.
-Then the failed synthetic cases are extracted from the quality report
-and added to the golden eval set. Next cycle, those cases become part
-of the regression gate.
+3. **Extract failures:** Failed synthetic cases are pulled from the
+   quality report and added to the golden eval set. Next cycle, those
+   cases become part of the regression gate.
 
 *(point to output)* V1 becomes V2. The golden set grows from 3 to
-roughly 8-10 cases.
+~10 cases.
+
+### Step 5: Measure Improvement (~90s)
+
+The improvement needs to be tested on questions the prompt has never
+seen. Re-running the Step 1 traffic would be circular -- the prompt
+was specifically fixed to handle those questions.
+
+Instead, Gemini generates a fresh batch of 10 new questions. These are
+run through the improved V2 prompt and scored by an LLM judge. This
+tests whether the improvement generalizes.
+
+*(point to the results box)*
+
+```
+  Before (V1):   30% meaningful  (3/10 sessions)
+  After  (V2):  100% pass rate   (10/10 sessions)
+```
+
+From 30% to 100% in one automated cycle, tested on entirely new
+questions.
 
 ---
 
-## Cycle 2 (30s)
+## Multi-Cycle Run (optional, ~15 min)
 
-Cycle 2 runs the same four steps. Fresh synthetic traffic is generated,
-the agent now runs with V2, and the golden set includes the cases that
-failed in cycle 1.
+To show the full loop with prompt refinement across cycles:
 
-*(as it runs)* Questions about expenses and benefits now get real
-answers via `lookup_company_policy`.
+```shell
+./reset.sh
+./run_cycle.sh --cycles 3
+```
 
-*(point to quality score)* Quality jumps. A few edge cases may remain,
-like date-dependent questions.
-
----
-
-## Cycle 3 (30s)
-
-The prompt is refined one more time. Date handling instructions are
-added. Holiday lookup is combined with `get_current_date`.
-
-*(point to final score)* Over 90% meaningful. From low scores to 90%
-in three automated cycles, with no manual prompt engineering.
+Each cycle generates fresh synthetic traffic, evaluates, improves, and
+measures. The golden eval set grows with each cycle as new edge cases
+are discovered and locked in.
 
 ---
 
@@ -175,12 +176,18 @@ git diff agent/prompts.py
 git diff eval/eval_cases.json
 ```
 
-Three prompt versions, each one addressing specific failures from the
-previous cycle's synthetic traffic. The golden eval set grew from 3
-cases to roughly 15+, each new case extracted from a real failure.
+The prompt evolved from V1 to V2 (or V4 with 3 cycles), each version
+addressing specific failures from the previous cycle's synthetic
+traffic. The golden eval set grew from 3 cases to 10+ cases, each new
+case extracted from a real failure.
 
 The key idea: the golden eval set is the regression gate. Synthetic
 traffic discovers new failures. The improver fixes the prompt. The
 golden eval ensures nothing breaks. Failed cases are extracted into the
 golden set so they never recur. Over time, your tests reflect what
 users actually ask -- not what you guessed they would.
+
+To reset and run again:
+```shell
+./reset.sh
+```

@@ -57,20 +57,23 @@ what you imagined they would ask.
 agent/
   agent.py           # ADK agent (company policy Q&A assistant)
   prompts.py         # Versioned prompts (V1 has intentional flaws)
+  prompts_v1.py      # Baseline V1 prompt (used by reset.sh)
   tools.py           # lookup_company_policy, get_current_date
 
 eval/
   eval_cases.json    # Golden eval set (regression gate, grows each cycle)
+  eval_cases_v1.json # Baseline 3-case golden set (used by reset.sh)
   generate_traffic.py # Generates synthetic user traffic via Gemini
   run_eval.py        # Runs eval/traffic cases via ADK InMemoryRunner
 
 improver/
   improve_agent.py   # Improves prompt, validates via golden eval gate
 
-reports/             # Generated reports, synthetic traffic, eval results
+reports/             # Generated reports, eval results
 
 run_cycle.sh         # Orchestrator: traffic -> eval -> quality -> improve
 setup.sh             # One-time setup (auth, deps, BigQuery dataset)
+reset.sh             # Reset to V1 prompt and 3 golden cases
 ```
 
 ## How the Cycle Works
@@ -201,6 +204,11 @@ degradation:
   response. The candidate is rejected if any golden case fails.
   This replaces LLM-based "does this look right?" validation with
   actual behavioral testing.
+  - **If golden cases fail**: The candidate prompt is rejected and
+    Gemini generates a new one. This retries up to 3 times. If all
+    3 attempts fail the golden eval, the script exits with an error.
+    This means the prompt is never degraded -- the golden set is the
+    hard floor that every prompt version must clear.
 - **Eval case schema validation**: Extracted failure cases are checked
   for required fields (`id`, `question`, `category`, `expected_tool`).
   Malformed cases are skipped rather than written to disk.
@@ -299,10 +307,11 @@ cat eval/eval_cases.json
 
 ### Reset to V1
 
-To start over, reset the prompt and eval cases to their original state:
+To start over, reset everything to the initial state (V1 prompt,
+3 golden eval cases, no reports):
 
 ```bash
-git checkout -- agent/prompts.py eval/eval_cases.json
+./reset.sh
 ```
 
 ## SDK Features Used

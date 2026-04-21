@@ -49,21 +49,27 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
 TRAFFIC_PROMPT = """You are generating realistic employee questions for a company HR policy chatbot.
 
-The chatbot can answer questions about these policy topics using its tools:
-- pto (vacation days, accrual, rollover)
-- sick_leave (sick days, doctor's notes)
-- remote_work (work-from-home policy, core hours)
-- expenses (meal limits, receipts, travel approval)
-- benefits (health insurance, dental, vision, 401k, parental leave)
-- holidays (company holiday schedule, specific dates)
+The chatbot has tools that contain SPECIFIC data on these topics:
+
+- **pto**: 20 days/year, accrued monthly, up to 5 days rollover, 2-week advance notice for >3 day requests
+- **sick_leave**: 10 days/year, no rollover, doctor's note required after 3 consecutive days
+- **remote_work**: up to 3 days/week with manager approval, core hours 10am-3pm
+- **expenses**: meals up to $75/day, receipts required over $25, travel over $500 needs pre-approval, 30-day submission window
+- **benefits**: PPO/HMO health plans (80% company-paid), dental (full preventive, 80% major), vision ($200 frames every 2 years), 401k with 4% match (vested after 1 year), parental leave (16 weeks primary, 8 weeks secondary)
+- **holidays**: 11 paid holidays per year (New Year's, MLK Day, Presidents' Day, Memorial Day, July 4th, Labor Day, Thanksgiving + day after, Christmas Eve, Christmas, New Year's Eve)
+
+The chatbot also has a tool that returns today's date.
+
+## Rules
+1. ONLY ask questions that the data above can answer. Do NOT ask about topics outside this data (e.g., mileage, home office equipment, gym memberships, tuition, sabbaticals).
+2. Mix direct factual questions ("What is the meal limit?") with situational ones ("I have a $40 dinner receipt from a client meeting -- do I need to submit it?").
+3. Include 1-2 date-related questions that require knowing today's date (e.g., "Is there a holiday coming up this month?", "When is the next company holiday?").
+4. Cover all six topics. Vary the phrasing naturally.
 
 ## Existing questions to AVOID duplicating
 {existing_questions}
 
-## Your task
-Generate {count} diverse, realistic questions that an employee might ask.
-Mix simple factual questions with situational ones. Vary the phrasing
-and complexity. Cover all six topics roughly evenly.
+Generate exactly {count} questions.
 
 Return JSON with exactly this structure:
 {{

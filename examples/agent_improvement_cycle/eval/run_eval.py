@@ -178,7 +178,10 @@ async def run_golden_eval(eval_cases_path: str | None = None) -> list[dict]:
   runner = InMemoryRunner(agent=test_agent, app_name="golden_eval")
   client = genai.Client()
 
-  print(f"\nRunning golden eval ({len(cases)} cases, no BQ logging)...\n")
+  from agent.prompts import CURRENT_VERSION
+
+  print(f"\n  Evaluating {len(cases)} cases with prompt V{CURRENT_VERSION}")
+  print("  (throwaway agent + LLM judge, no BigQuery)\n")
 
   results = []
   passed = 0
@@ -212,14 +215,12 @@ async def run_golden_eval(eval_cases_path: str | None = None) -> list[dict]:
     results.append(result)
 
   total = len(cases)
-  print(f"\nGolden eval: {passed}/{total} passed.")
+  rate = round(100 * passed / total) if total else 0
+  print(f"\n  Result: {passed}/{total} passed ({rate}%)")
   if passed == total:
-    print("All golden cases pass. Ready to run the improvement cycle.")
+    print("  All cases pass.")
   else:
-    print(
-        f"{total - passed} case(s) failed. Fix the prompt before running"
-        " the cycle."
-    )
+    print(f"  {total - passed} case(s) failed.")
 
   return results
 
@@ -245,8 +246,10 @@ def main() -> None:
 
   if args.golden:
     results = asyncio.run(run_golden_eval(args.eval_cases))
+    failed = sum(1 for r in results if not r.get("pass", False))
   else:
     results = asyncio.run(run_all_cases(args.eval_cases))
+    failed = 0
 
   # Write results to a file for reference
   results_path = os.path.join(_DEMO_DIR, "reports", "latest_eval_results.json")
@@ -254,6 +257,9 @@ def main() -> None:
   with open(results_path, "w") as f:
     json.dump(results, f, indent=2)
   print(f"Results saved to {results_path}")
+
+  if failed:
+    sys.exit(1)
 
 
 if __name__ == "__main__":
