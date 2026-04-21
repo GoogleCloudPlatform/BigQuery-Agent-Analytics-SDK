@@ -24,13 +24,15 @@ This demo shows how to close that gap using two SDK components:
 
 The full cycle:
 
-1. **Run** a Q&A agent that answers employee policy questions
-2. **Log** every session to BigQuery via the plugin
+1. **Generate** synthetic user traffic (Gemini produces diverse questions)
+2. **Run** the traffic through the agent, logging sessions to BigQuery
 3. **Evaluate** logged sessions using the SDK's quality evaluation
 4. **Improve** the agent prompt based on what actually failed
-5. **Extend** the eval suite with new cases derived from real failures,
-   so regressions are caught before they reach users
-6. **Repeat** until quality stabilizes
+5. **Validate** the candidate prompt against the golden eval set
+   (regression gate)
+6. **Extend** the golden eval set with failed cases from the synthetic
+   traffic, so regressions are caught before they reach users
+7. **Repeat** until quality stabilizes
 
 The hero moment: quality typically climbs from ~30% to ~90%+ across 3 cycles
 (results vary due to non-deterministic LLM output).
@@ -40,35 +42,47 @@ The hero moment: quality typically climbs from ~30% to ~90%+ across 3 cycles
 Static eval suites go stale. Users ask questions you never anticipated.
 The plugin captures every real interaction, and the SDK's quality
 evaluation scores them automatically. The improver reads those scores,
-identifies the failure patterns, fixes the prompt, and generates new
-eval cases so the same failures never recur.
+identifies the failure patterns, fixes the prompt, and extracts the
+failures into the golden eval set so they never recur.
 
-Each cycle, the eval suite grows with cases sourced from actual
-production failures. Over time, your tests reflect what users actually
-ask, not what you imagined they would ask.
+Each cycle, the golden eval set grows with cases sourced from actual
+failures. Over time, your tests reflect what users actually ask, not
+what you imagined they would ask.
 
 ## Architecture
 
 ```
 agent/
-  agent.py       # ADK agent (company policy Q&A assistant)
-  prompts.py     # Versioned prompts (V1 has intentional flaws)
-  tools.py       # lookup_company_policy, get_current_date
+  agent.py           # ADK agent (company policy Q&A assistant)
+  prompts.py         # Versioned prompts (V1 has intentional flaws)
+  tools.py           # lookup_company_policy, get_current_date
 
 eval/
-  eval_cases.json   # Test questions with expected behavior
-  run_eval.py       # Runs eval cases via ADK InMemoryRunner
+  eval_cases.json    # Golden eval set (regression gate, grows each cycle)
+  generate_traffic.py # Generates synthetic user traffic via Gemini
+  run_eval.py        # Runs eval/traffic cases via ADK InMemoryRunner
 
 improver/
-  improve_agent.py  # Reads quality report, calls Gemini to fix prompt
+  improve_agent.py   # Improves prompt, validates via golden eval gate
 
-reports/            # Generated reports and eval results
+reports/             # Generated reports, synthetic traffic, eval results
 
-run_cycle.sh        # Orchestrator: eval -> quality report -> improve
-setup.sh            # One-time setup (auth, deps, BigQuery dataset)
+run_cycle.sh         # Orchestrator: traffic -> eval -> quality -> improve
+setup.sh             # One-time setup (auth, deps, BigQuery dataset)
 ```
 
 ## How the Cycle Works
+
+### Two Eval Sets
+
+This demo uses two distinct sets of questions:
+
+- **Golden eval set** (`eval_cases.json`): The regression gate. These
+  cases must always pass. The set starts with 10 cases and grows each
+  cycle as failed synthetic cases are extracted into it.
+- **Synthetic traffic**: Generated fresh each cycle by Gemini. These
+  simulate diverse, unpredictable user questions that differ from the
+  golden set. They are the source of new failures that drive improvement.
 
 ### The Agent
 
@@ -97,27 +111,19 @@ The v1 prompt has intentional problems that cause ~70% of sessions to fail:
 The tools themselves have all the data. The flaw is that the prompt
 discourages the agent from using them.
 
-### Step 1: Run Eval Cases (run_eval.py)
+### Step 1: Generate Synthetic Traffic (generate_traffic.py)
 
-`run_eval.py` runs the agent **locally** using ADK's `InMemoryRunner`.
-No server, no deployment, no containers. The agent runs entirely
-in-process on your machine.
+`generate_traffic.py` calls Gemini to produce diverse, realistic
+employee questions. The questions are intentionally different from the
+golden eval set, covering the same policy topics but with varied
+phrasing and scenarios.
 
-Here is what happens for each question in `eval/eval_cases.json`:
+### Step 2: Run Traffic (run_eval.py)
 
-1. `InMemoryRunner` creates a new ADK session for the agent
-2. The question is sent as a user message
-3. The agent processes it like a real request: it calls Gemini on
-   Vertex AI for reasoning, and executes its tools (`lookup_company_policy`,
-   `get_current_date`) locally
-4. `BigQueryAgentAnalyticsPlugin` (attached as a plugin to the runner)
-   automatically captures the full session trace and writes it to BigQuery.
-   This is the same plugin you would use in production. No extra logging
-   code is needed.
-
-The questions are hardcoded test cases that simulate real user traffic.
-In production, real users generate sessions naturally through your agent's
-serving endpoint. The plugin captures those sessions the same way.
+`run_eval.py` sends the generated questions to the agent using ADK's
+`InMemoryRunner`. The agent runs locally -- no server, no deployment.
+Each session is automatically logged to BigQuery via the
+`BigQueryAgentAnalyticsPlugin`.
 
 ```python
 # From run_eval.py - this is how the agent runs locally:
@@ -131,7 +137,7 @@ async for event in runner.run_async(user_id, session_id, user_message):
     ...
 ```
 
-### Step 2: Evaluate Quality (quality_report.py)
+### Step 3: Evaluate Quality (quality_report.py)
 
 The SDK's `quality_report.py` reads the sessions just logged to BigQuery
 and scores each one:
@@ -143,44 +149,42 @@ The `--app-name` flag filters to sessions from this agent only (ignoring
 other agents sharing the same BigQuery dataset). `--output-json` produces
 a structured report that the improver consumes programmatically.
 
-### Step 3: Auto-Improve (improve_agent.py)
+### Step 4: Auto-Improve (improve_agent.py)
 
 `improve_agent.py` reads the quality report JSON and calls Gemini to fix
 the prompt:
 
 1. Reads the quality report (which sessions failed and why)
 2. Reads the current prompt from `agent/prompts.py`
-3. Sends both to Gemini, asking it to fix the identified issues
-4. Gemini returns a JSON with: an improved prompt, a summary of changes,
-   and new eval cases that test the fixes
-5. **Validates the improved prompt** via a second Gemini call that
-   compares the original and improved prompts, checking that key topics
-   and tool references are preserved, the prompt is coherent, and changes
-   match the stated summary. If validation fails, the improvement is
-   retried (up to 3 attempts).
-6. **Validates new eval cases** against a required schema (`id`,
-   `question`, `category`, `expected_tool`). Cases missing required
-   fields are skipped with a warning, preventing malformed cases from
-   crashing the next cycle.
-7. The script writes `PROMPT_V{N+1}` to `prompts.py` and updates
+3. Sends both to Gemini along with the available tool list, asking it
+   to fix the identified issues
+4. Gemini returns a JSON with an improved prompt and a summary of changes
+5. **Runs the golden eval set** against the candidate prompt using a
+   throwaway agent (no BigQuery logging). A lightweight LLM judge
+   scores each response. If any golden case fails, the candidate is
+   rejected and a new one is generated (up to 3 attempts).
+6. The script writes `PROMPT_V{N+1}` to `prompts.py` and updates
    `CURRENT_PROMPT` to point to it
-8. New eval cases are appended to `eval/eval_cases.json`
+7. **Extracts failed synthetic cases** from the quality report and
+   adds them to the golden eval set (`eval_cases.json`), so the same
+   failures are caught in future cycles
 
-On the next cycle, the agent uses the improved prompt, and the new eval
-cases verify the fixes hold.
+On the next cycle, the agent uses the improved prompt, the golden eval
+set has grown, and a fresh batch of synthetic traffic tests new edges.
 
 ### Data Flow
 
 ```
-Agent sessions  -->  BigQuery  -->  SDK quality evaluation  -->  improve_agent.py
-(via plugin)         (storage)      (quality_report.py)          |
-                                                                 v
-                                                           LLM validation
-                                                           (compare old/new)
-                                                                 |
-                                                                 v
-                                                           prompt fix +
-                                                           validated eval cases
+generate_traffic.py   run_eval.py          quality_report.py    improve_agent.py
+  (Gemini)      -->    (agent + BQ)   -->    (BQ -> scores)  -->   |
+                                                                   v
+                                                             golden eval gate
+                                                             (throwaway agent)
+                                                                   |
+                                                                   v
+                                                             prompt fix +
+                                                             extract failures
+                                                             to golden set
 ```
 
 ### Guardrails
@@ -188,17 +192,19 @@ Agent sessions  -->  BigQuery  -->  SDK quality evaluation  -->  improve_agent.p
 The improvement pipeline includes several safeguards to prevent
 degradation:
 
-- **LLM-based prompt validation**: A second Gemini call reviews each
-  improved prompt against the original, verifying that key content,
-  tool references, and coherence are preserved. Failed validations
-  trigger an automatic retry.
-- **Eval case schema validation**: New eval cases generated by the LLM
-  are checked for required fields (`id`, `question`, `category`,
-  `expected_tool`). Malformed cases are skipped rather than written to
-  disk, preventing crashes in the next cycle.
+- **Golden eval gate**: Before accepting a candidate prompt, the full
+  golden eval set is run against a throwaway agent with the candidate
+  prompt (no BigQuery logging). A lightweight LLM judge scores each
+  response. The candidate is rejected if any golden case fails.
+  This replaces LLM-based "does this look right?" validation with
+  actual behavioral testing.
+- **Eval case schema validation**: Extracted failure cases are checked
+  for required fields (`id`, `question`, `category`, `expected_tool`).
+  Malformed cases are skipped rather than written to disk.
+- **Question deduplication**: Extracted cases are deduplicated by both
+  ID and question text before being added to the golden set.
 - **Retry with backoff**: The quality report step retries with backoff
-  (up to ~60s) to handle BigQuery write propagation delays, especially
-  on cold datasets or slow networks.
+  (up to ~60s) to handle BigQuery write propagation delays.
 - **Syntax validation**: The generated `prompts.py` is compiled before
   being written, catching Python syntax errors from malformed LLM output.
 - **Length check**: Prompts shorter than 50 characters are rejected as
@@ -265,6 +271,9 @@ BigQuery dataset if it does not exist.
 
 # Eval only (no improvement step)
 ./run_cycle.sh --eval-only
+
+# Customize traffic volume
+./run_cycle.sh --cycles 3 --traffic-count 20
 ```
 
 ### 4. Inspect results
@@ -275,10 +284,13 @@ After a run, check the `reports/` directory:
 # Quality report JSON (consumed by the improver)
 cat reports/quality_report_cycle_1.json | python3 -m json.tool | head -20
 
+# Synthetic traffic that was generated
+cat reports/synthetic_traffic_cycle_1.json | python3 -m json.tool | head -20
+
 # See how the prompt evolved
 cat agent/prompts.py
 
-# See new eval cases added by the improver
+# See new eval cases extracted from failures
 cat eval/eval_cases.json
 ```
 

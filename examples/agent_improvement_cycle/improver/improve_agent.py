@@ -17,13 +17,15 @@
 
 This script:
 1. Reads the quality report JSON (from quality_report.py --output-json)
-2. Reads the current prompts.py
-3. Reads the current eval_cases.json
-4. Calls Gemini to generate an improved prompt + new eval cases
-5. Validates and writes the improvements
+2. Reads the current prompts.py and the golden eval set
+3. Calls Gemini to generate an improved prompt
+4. Runs the golden eval set against the candidate prompt (regression gate)
+5. Extracts failed synthetic cases and adds them to the golden set
+6. Writes the validated prompt to prompts.py
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -87,81 +89,33 @@ Rules:
 Return your response as JSON with exactly these fields:
 {{
   "improved_prompt": "the full improved prompt text",
-  "changes_summary": "brief description of what changed and why",
-  "new_eval_cases": [
-    {{
-      "id": "unique_id",
-      "question": "a question that tests the fix",
-      "category": "the policy category",
-      "expected_tool": "lookup_company_policy",
-      "notes": "what this tests"
-    }}
-  ]
+  "changes_summary": "brief description of what changed and why"
 }}
 
-Generate 2-4 new eval cases that specifically test the issues you fixed.
 Return ONLY the JSON, no other text.
 """
 
 
-VALIDATION_PROMPT = """You are a quality reviewer for AI agent system prompts. Compare the original and improved prompts and determine if the improvement is valid.
+GOLDEN_JUDGE_PROMPT = """You are evaluating an AI agent's response to a policy question.
 
-## Original Prompt
-```
-{original_prompt}
-```
-
-## Improved Prompt
-```
-{improved_prompt}
-```
-
-## Stated Changes
-{changes_summary}
-
-## Validation Criteria
-1. **Preserved content**: The improved prompt must retain all key topics and tool references from the original. Nothing that was working should be removed.
-2. **Coherence**: The improved prompt must be a coherent system prompt, not random text or a partial fragment.
-3. **Relevance**: The changes should relate to the stated changes summary, not introduce unrelated content.
-4. **Tool references**: Tool names (lookup_company_policy, get_current_date) must still be referenced or the agent won't know to use them.
+Question: {question}
+Response: {response}
 
 Return JSON with exactly these fields:
 {{
-  "valid": true or false,
+  "pass": true or false,
   "reason": "one-sentence explanation"
 }}
 
+A response PASSES if it provides a specific, substantive answer to the question.
+A response FAILS if it says "I don't know", defers to HR, or gives vague/generic information without specifics.
 Return ONLY the JSON, no other text.
 """
 
 
-def validate_improved_prompt(
-    original_prompt: str, improved_prompt: str, changes_summary: str
-) -> None:
-  """Use Gemini to validate that the improved prompt is a sensible revision."""
-  prompt = VALIDATION_PROMPT.format(
-      original_prompt=original_prompt,
-      improved_prompt=improved_prompt,
-      changes_summary=changes_summary,
-  )
-
-  model_id = os.getenv("DEMO_MODEL_ID", "gemini-2.5-flash")
-  client = genai.Client()
-  response = client.models.generate_content(
-      model=model_id,
-      contents=prompt,
-      config=GenerateContentConfig(
-          temperature=0.0,
-          response_mime_type="application/json",
-      ),
-  )
-
-  result = json.loads(response.text)
-  if not result.get("valid", False):
-    raise ValueError(
-        f"Prompt validation failed: {result.get('reason', 'unknown')}"
-    )
-  print(f"  Validation passed: {result.get('reason', 'ok')}")
+# ---------------------------------------------------------------------------
+# Loaders
+# ---------------------------------------------------------------------------
 
 
 def load_quality_report(path: str) -> dict:
@@ -175,15 +129,12 @@ def load_current_prompt() -> tuple[str, int]:
   with open(_PROMPTS_PATH) as f:
     content = f.read()
 
-  # Extract CURRENT_VERSION
   version_match = re.search(r"CURRENT_VERSION\s*=\s*(\d+)", content)
   current_version = int(version_match.group(1)) if version_match else 1
 
-  # Extract CURRENT_PROMPT value by finding the variable it points to
   prompt_ref_match = re.search(r"CURRENT_PROMPT\s*=\s*PROMPT_V(\d+)", content)
   if prompt_ref_match:
     v = prompt_ref_match.group(1)
-    # Find that prompt's content
     pattern = rf'PROMPT_V{v}\s*=\s*"""(.*?)"""'
     prompt_match = re.search(pattern, content, re.DOTALL)
     if prompt_match:
@@ -193,9 +144,14 @@ def load_current_prompt() -> tuple[str, int]:
 
 
 def load_eval_cases() -> dict:
-  """Load current eval cases."""
+  """Load the golden eval cases."""
   with open(_EVAL_CASES_PATH) as f:
     return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Improver
+# ---------------------------------------------------------------------------
 
 
 def format_problem_sessions(report: dict) -> str:
@@ -229,7 +185,7 @@ def format_problem_sessions(report: dict) -> str:
 def call_improver(
     current_prompt: str, current_version: int, report: dict
 ) -> dict:
-  """Call Gemini to generate improvements."""
+  """Call Gemini to generate an improved prompt."""
   summary = report.get("summary", {})
   prompt = IMPROVER_PROMPT.format(
       current_version=current_version,
@@ -257,11 +213,122 @@ def call_improver(
   return json.loads(response.text)
 
 
+# ---------------------------------------------------------------------------
+# Golden eval gate
+# ---------------------------------------------------------------------------
+
+
+async def run_golden_eval(candidate_prompt: str) -> tuple[bool, int, int]:
+  """Run the golden eval set against a candidate prompt.
+
+  Creates a throwaway agent with the candidate prompt (no BQ logging)
+  and runs every golden eval case.  Each response is scored by a
+  lightweight LLM judge.
+
+  Returns:
+      (passed_all, passed_count, total) where passed_all is True only
+      if every golden case passes.
+  """
+  # Lazy imports to avoid triggering BQ plugin creation from agent.agent
+  from google.adk.agents import Agent
+  from google.adk.runners import InMemoryRunner
+
+  sys.path.insert(0, _DEMO_DIR)
+  from agent.tools import get_current_date
+  from agent.tools import lookup_company_policy
+  from eval.run_eval import run_single_case
+
+  golden_cases = load_eval_cases().get("eval_cases", [])
+  model_id = os.getenv("DEMO_MODEL_ID", "gemini-2.5-flash")
+
+  test_agent = Agent(
+      name="golden_eval_agent",
+      model=model_id,
+      description="An agent that answers questions about company policies.",
+      instruction=candidate_prompt,
+      tools=[lookup_company_policy, get_current_date],
+  )
+
+  runner = InMemoryRunner(agent=test_agent, app_name="golden_eval")
+  client = genai.Client()
+  passed = 0
+
+  for case in golden_cases:
+    result = await run_single_case(runner, case, user_id="golden_eval")
+    judge_prompt = GOLDEN_JUDGE_PROMPT.format(
+        question=case["question"],
+        response=result["response"][:500],
+    )
+    judge_response = client.models.generate_content(
+        model=model_id,
+        contents=judge_prompt,
+        config=GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+        ),
+    )
+    verdict = json.loads(judge_response.text)
+    if verdict.get("pass", False):
+      passed += 1
+      print(f"    PASS: {case['id']}")
+    else:
+      print(f"    FAIL: {case['id']} - {verdict.get('reason', '')}")
+
+  total = len(golden_cases)
+  return passed == total, passed, total
+
+
+# ---------------------------------------------------------------------------
+# Failure extraction
+# ---------------------------------------------------------------------------
+
+
+def extract_failed_cases(report: dict) -> list[dict]:
+  """Extract failed synthetic sessions as new golden eval cases.
+
+  Reads the quality report, finds unhelpful/partial sessions, and
+  converts them into eval case format for the golden set.
+  """
+  new_cases = []
+  for session in report.get("sessions", []):
+    cat = (
+        session.get("metrics", {})
+        .get("response_usefulness", {})
+        .get("category", "")
+    )
+    if cat not in ("unhelpful", "partial"):
+      continue
+
+    question = session.get("question", "")
+    if not question:
+      continue
+
+    # Build an eval case from the failed session
+    case_id = re.sub(r"[^a-z0-9]+", "_", question.lower().strip())[:40]
+    case_id = f"extracted_{case_id.strip('_')}"
+
+    new_cases.append(
+        {
+            "id": case_id,
+            "question": question,
+            "category": "unknown",
+            "expected_tool": "lookup_company_policy",
+            "notes": f"Extracted from failed synthetic traffic ({cat})",
+        }
+    )
+
+  return new_cases
+
+
+# ---------------------------------------------------------------------------
+# Write prompt
+# ---------------------------------------------------------------------------
+
+
 def write_improved_prompt(
     improved_prompt: str,
     changes_summary: str,
     current_version: int,
-    current_prompt: str,
 ) -> int:
   """Append a new prompt version to prompts.py."""
   new_version = current_version + 1
@@ -269,16 +336,13 @@ def write_improved_prompt(
   with open(_PROMPTS_PATH) as f:
     content = f.read()
 
-  # Basic length sanity check
   if len(improved_prompt.strip()) < 50:
     raise ValueError("Improved prompt is too short, likely invalid")
 
-  # Sanitize for safe Python embedding
   safe_summary = changes_summary.replace("\n", " ").strip()
   triple_q = '"' * 3
   safe_prompt = improved_prompt.replace(triple_q, '\\"\\"\\"')
 
-  # Build the new version block
   new_block = (
       f"\n\n# --- Version {new_version}: Improvements from cycle"
       f" {current_version} ---\n"
@@ -286,7 +350,6 @@ def write_improved_prompt(
       f'PROMPT_V{new_version} = """{safe_prompt}\n"""\n'
   )
 
-  # Replace CURRENT_PROMPT and CURRENT_VERSION
   content = re.sub(
       r"CURRENT_PROMPT\s*=\s*PROMPT_V\d+",
       f"CURRENT_PROMPT = PROMPT_V{new_version}",
@@ -298,22 +361,16 @@ def write_improved_prompt(
       content,
   )
 
-  # Insert new version block before CURRENT_PROMPT line
   current_prompt_line = f"CURRENT_PROMPT = PROMPT_V{new_version}"
   content = content.replace(
       current_prompt_line,
       new_block + "\n" + current_prompt_line,
   )
 
-  # Validate the result is valid Python
   try:
     compile(content, _PROMPTS_PATH, "exec")
   except SyntaxError as e:
     raise ValueError(f"Generated prompts.py has syntax error: {e}")
-
-  # LLM-based validation: verify the improved prompt preserves key content
-  # and is a coherent revision, not a hallucinated replacement.
-  validate_improved_prompt(current_prompt, improved_prompt, changes_summary)
 
   with open(_PROMPTS_PATH, "w") as f:
     f.write(content)
@@ -321,13 +378,18 @@ def write_improved_prompt(
   return new_version
 
 
+# ---------------------------------------------------------------------------
+# Add cases to golden set
+# ---------------------------------------------------------------------------
+
 _REQUIRED_CASE_KEYS = {"id", "question", "category", "expected_tool"}
 
 
 def add_eval_cases(new_cases: list[dict]) -> int:
-  """Append new eval cases to eval_cases.json."""
+  """Append new eval cases to the golden eval set."""
   data = load_eval_cases()
   existing_ids = {c["id"] for c in data["eval_cases"]}
+  existing_questions = {c["question"] for c in data["eval_cases"]}
 
   added = 0
   for case in new_cases:
@@ -335,19 +397,26 @@ def add_eval_cases(new_cases: list[dict]) -> int:
     if missing:
       print(f"  Skipping invalid eval case (missing {missing}): {case}")
       continue
-    if case["id"] not in existing_ids:
-      data["eval_cases"].append(case)
-      existing_ids.add(case["id"])
-      added += 1
+    # Deduplicate by both ID and question text
+    if case["id"] in existing_ids or case["question"] in existing_questions:
+      continue
+    data["eval_cases"].append(case)
+    existing_ids.add(case["id"])
+    existing_questions.add(case["question"])
+    added += 1
 
-  # Validate JSON is valid
-  json.dumps(data)
+  json.dumps(data)  # Validate JSON
 
   with open(_EVAL_CASES_PATH, "w") as f:
     json.dump(data, f, indent=2)
     f.write("\n")
 
   return added
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -367,23 +436,46 @@ def main() -> None:
   print(f"  Current prompt version: v{current_version}")
   print(f"  Quality score: {report['summary']['meaningful_rate']}% meaningful")
 
-  # Check if improvement is needed
   if report["summary"]["meaningful_rate"] >= 95:
     print("  Quality is already high (>=95%). No improvement needed.")
     return
 
-  # Call Gemini to generate improvements (retry on syntax errors)
+  # Generate improved prompt, validated by golden eval (retry up to 3 times)
   for attempt in range(3):
     print(
-        f"  Calling Gemini to generate improvements (attempt {attempt + 1})..."
+        f"  Calling Gemini to generate improvements (attempt"
+        f" {attempt + 1})..."
     )
     result = call_improver(current_prompt, current_version, report)
+    candidate = result["improved_prompt"]
+
+    if len(candidate.strip()) < 50:
+      print("  Warning: candidate prompt too short, retrying...")
+      if attempt == 2:
+        raise ValueError("All attempts produced invalid prompts")
+      continue
+
+    # Golden eval gate: run all golden cases against the candidate
+    golden_cases = load_eval_cases().get("eval_cases", [])
+    print(f"  Running golden eval ({len(golden_cases)} cases)...")
+    passed_all, passed, total = asyncio.run(run_golden_eval(candidate))
+    print(f"  Golden eval: {passed}/{total} passed.")
+
+    if not passed_all:
+      print("  Golden eval FAILED: candidate breaks existing cases.")
+      if attempt == 2:
+        raise ValueError("Golden eval failed after 3 attempts")
+      print("  Retrying with a new candidate...")
+      continue
+
+    print("  Golden eval PASSED: no regressions.")
+
+    # Write the validated prompt
     try:
       new_version = write_improved_prompt(
-          result["improved_prompt"],
+          candidate,
           result["changes_summary"],
           current_version,
-          current_prompt,
       )
       break
     except ValueError as e:
@@ -391,17 +483,21 @@ def main() -> None:
       if attempt == 2:
         raise
       print("  Retrying...")
+
   print(f"  Written PROMPT_V{new_version} to prompts.py")
   print(f"  Changes: {result['changes_summary']}")
 
-  # Add new eval cases
-  new_cases = result.get("new_eval_cases", [])
-  if new_cases:
-    added = add_eval_cases(new_cases)
-    print(f"  Added {added} new eval cases to eval_cases.json")
+  # Extract failed synthetic cases and add to golden set
+  failed_cases = extract_failed_cases(report)
+  if failed_cases:
+    added = add_eval_cases(failed_cases)
+    print(
+        f"  Extracted {len(failed_cases)} failed cases, added {added} new"
+        " to golden eval set."
+    )
 
   print(f"\n  v{current_version} -> v{new_version} complete.")
-  print(f"  Re-run evaluation to measure improvement.\n")
+  print("  Re-run evaluation to measure improvement.\n")
 
 
 if __name__ == "__main__":

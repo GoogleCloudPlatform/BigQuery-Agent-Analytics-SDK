@@ -1,173 +1,169 @@
-# Agent Improvement Cycle - Demo Voice Script
+# Agent Improvement Cycle - Demo Script
 
 **Duration:** ~5-7 minutes
 **Format:** Live terminal walkthrough
 
 ---
 
-## INTRO (30s)
+## Introduction (30s)
 
-Here's the problem. You build an agent, you write some eval cases, you ship it.
-Users start asking questions you never anticipated. Your eval suite goes stale.
-You have no idea what's failing in production until someone complains.
+Agents break in production. You write eval cases, you ship, and then
+users ask questions you never thought of. The eval suite goes stale.
+Failures pile up silently.
 
-What if the agent could learn from its own mistakes? Not retraining. Not
-fine-tuning. Just... reading what went wrong and fixing its own prompt.
-
-That's what this demo shows. A closed-loop improvement cycle powered by the
-BigQuery Agent Analytics SDK. Three steps, fully automated. Let's run it.
+This demo shows a way to fix that: a closed-loop improvement cycle
+using the
+[BigQuery Agent Analytics SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).
+The agent runs, logs sessions to BigQuery using the
+[BigQuery Agent Analytics plugin for ADK](https://adk.dev/integrations/bigquery-agent-analytics/),
+evaluates its own quality, and rewrites its prompt to fix what failed.
+Four steps, fully automated.
 
 ---
 
 ## Show the V1 Prompt (30s)
 
-**Command:** `cat agent/prompts.py`
+**Command:**
+```shell
+cat agent/prompts.py
+```
 
-Let's look at our starting point. This is the agent's prompt, version 1.
+This is the starting prompt, version 1. It has intentional flaws that
+mirror common real-world mistakes:
 
-We put some flaws in here on purpose, but these are exactly the kind of
-mistakes you see in real projects:
+- It tells the agent to "answer from the knowledge above" instead of
+  calling its tools.
+- It covers PTO, sick leave, and remote work, but says nothing about
+  expenses or holidays. Those tools exist, but the prompt ignores them.
+- Benefits are described as "competitive" with no details. The agent
+  will guess or deflect.
+- There is no mention of the `get_current_date` tool, so date-related
+  questions like "Is next Friday a holiday?" will fail.
 
-- The prompt says "answer from the knowledge above" instead of calling tools.
-  Classic prototyping shortcut that never got cleaned up.
-- It covers PTO, sick leave, remote work, but skips expenses and holidays.
-  Someone added those tools later, but forgot to update the prompt.
-- Benefits just says "competitive." Copy-pasted from the company website.
-  The agent will either make things up or say "I don't know."
-- No date handling. There's a `get_current_date` tool, but the prompt
-  never mentions it. "Is next Friday a holiday?" won't work.
-
-The tools have all the answers. The prompt just doesn't let the agent use
-them. And without production telemetry, you wouldn't know until users
-start complaining.
-
----
-
-## Show Eval Cases (20s)
-
-**Command:** `cat eval/eval_cases.json`
-
-Here are our test questions. Ten of them.
-
-Three are easy. "How many PTO days do I get?" The prompt has that info, so even
-V1 should answer correctly. But seven of them hit the blind spots. "What's the
-meal reimbursement limit?" "Does the company match 401k?" "What are the holidays
-this year?" V1 will deflect all of these.
+The tools can answer all of these questions. The prompt simply does not
+guide the agent to use them.
 
 ---
 
-## Run Cycle 1 - Step 1: Simulate User Traffic (45s)
+## Show the Golden Eval Set (20s)
 
-**Command:** `./run_cycle.sh --cycles 3`
+**Command:**
+```shell
+cat eval/eval_cases.json
+```
 
-Step 1: Simulate user traffic. The script sends each test question to the agent.
-It uses ADK's InMemoryRunner, which means the agent runs entirely locally in
-this Python process. No server, no deployment. But it does make real calls to
-Gemini on Vertex AI for reasoning, and the tools execute locally against
-hardcoded policy data.
-
-Here's the key part: every session is automatically logged to BigQuery by the
-BigQueryAgentAnalyticsPlugin. Same plugin you'd use in production. The full
-trace goes in: the user question, every tool call, every LLM response. Zero
-extra logging code.
-
-*(as output scrolls)* You can see it processing each question. "How many PTO
-days?" gets a real answer. But "What is the meal reimbursement limit?"... the
-agent says "I don't have that information, contact HR." Because the prompt told
-it to.
+This is the golden eval set -- the regression gate. Ten cases that the
+agent must always pass. Three are straightforward ("How many PTO days
+do I get?"), seven target the blind spots. The golden set starts here
+and grows each cycle as failed cases are extracted into it.
 
 ---
 
-## Cycle 1 - Step 2: Evaluate Quality (45s)
+## Cycle 1 - Step 1: Generate Synthetic Traffic (20s)
 
-Step 2: Evaluate quality. The SDK's quality report reads those sessions back
-from BigQuery and scores each one on two dimensions.
+**Command:**
+```shell
+./run_cycle.sh --cycles 3
+```
 
-First, response usefulness: was the answer actually helpful, partially helpful,
-or unhelpful? Second, task grounding: did the agent base its answer on tool
-output, or did it hallucinate?
-
-*(point to the quality summary)* There's our score. About 30% meaningful. Seven
-out of ten questions got unhelpful responses. The agent had the tools to answer
-every single one, but the prompt blocked it.
+First, the script calls Gemini to generate 15 diverse user questions.
+These are intentionally different from the golden set -- varied
+phrasing, edge cases, situational questions. They simulate real-world
+traffic the agent has not been tuned for.
 
 ---
 
-## Cycle 1 - Step 3: Auto-Improve (45s)
+## Cycle 1 - Step 2: Run Traffic (30s)
 
-Step 3: Auto-improve. The script takes that quality report and sends it to
-Gemini along with the current prompt. Gemini sees which sessions failed and
-why. "The agent deflected expense questions even though lookup_company_policy
-has expense data." "The agent said 'competitive benefits' instead of looking
-up specific plan details."
+The generated questions are sent to the agent using ADK's
+`InMemoryRunner`. The agent runs locally and executes its tools
+against local policy data.
 
-Gemini rewrites the prompt. It adds instructions to always call
-lookup_company_policy before answering policy questions. It adds guidance for
-expenses, holidays, benefits. And it generates new eval cases that specifically
-test those fixes, so if they break in a future cycle, we catch it immediately.
+Every session is automatically logged to BigQuery by the
+[BigQuery Agent Analytics plugin](https://adk.dev/integrations/bigquery-agent-analytics/).
+The full trace is captured: user question, tool calls, LLM responses.
+No extra logging code required.
 
-But here's the important part: we don't just trust the LLM's output blindly.
-Before writing anything to disk, the improver runs two validation steps:
+*(as output scrolls)* Some questions get proper answers, others get
+"I don't have that information, contact HR."
 
-1. **Prompt validation via a second Gemini call.** We send both the original
-   and the improved prompt to a reviewer LLM and ask: did you preserve the
-   key topics? Are the tool references still there? Is this coherent, or did
-   the model hallucinate something unrelated? If validation fails, it retries
-   the whole improvement automatically.
+---
 
-2. **Eval case schema validation.** Every new eval case the LLM generates
-   must have the required fields: `id`, `question`, `category`,
-   `expected_tool`. If the model returns a malformed case, it gets skipped
-   with a warning instead of silently breaking the next cycle.
+## Cycle 1 - Step 3: Evaluate Quality (30s)
 
-*(point to output)* V1 becomes V2. The new prompt is written to prompts.py, and
-the validated eval cases are appended to eval_cases.json.
+The SDK's quality report reads those sessions back from BigQuery and
+scores each one on two dimensions:
+
+- **Response usefulness:** Was the answer meaningful, partial, or
+  unhelpful?
+- **Task grounding:** Was the answer based on tool output, or did the
+  agent make something up?
+
+*(point to the quality summary)* Low meaningful rate. The agent had the
+right tools all along -- the prompt just did not let it use them.
+
+---
+
+## Cycle 1 - Step 4: Auto-Improve (45s)
+
+The improver sends three things to Gemini: the current prompt, the
+quality report, and a list of the agent's available tools
+(`lookup_company_policy`, `get_current_date`) with their signatures.
+Gemini analyzes what went wrong and rewrites the prompt.
+
+Before accepting, the golden eval gate runs: every case in the golden
+set is tested against the candidate prompt using a throwaway agent
+(no BigQuery logging). If any golden case fails, the candidate is
+rejected and Gemini generates a new one.
+
+Once the golden eval passes, the improved prompt is written to disk.
+Then the failed synthetic cases are extracted from the quality report
+and added to the golden eval set. Next cycle, those cases become part
+of the regression gate.
+
+*(point to output)* V1 becomes V2. The golden set grows from 10 to
+roughly 14-16 cases.
 
 ---
 
 ## Cycle 2 (30s)
 
-Now cycle 2 starts. Same three steps, but the agent is running with the
-improved V2 prompt. And there are more eval cases now, the ones Gemini added.
+Cycle 2 runs the same four steps. Fresh synthetic traffic is generated,
+the agent now runs with V2, and the golden set includes the cases that
+failed in cycle 1.
 
-*(as it runs)* Watch the responses. "What's the meal reimbursement limit?" Now
-it calls lookup_company_policy, gets "$75 per day during business travel."
-"Does the company match 401k?" It looks it up: "4% match, vested after one
-year."
+*(as it runs)* Questions about expenses and benefits now get real
+answers via `lookup_company_policy`.
 
-*(point to quality score)* The quality score jumps. We're at about 70-80% now.
-Maybe there are still a couple of edge cases. The date question, the one about
-"Is next Friday a holiday?" That might still be tricky.
+*(point to quality score)* Quality jumps. A few edge cases may remain,
+like date-dependent questions.
 
 ---
 
 ## Cycle 3 (30s)
 
-Cycle 3. The prompt gets refined again. The last edge cases get fixed. Date
-handling instructions added. Holiday lookup combined with get_current_date.
+The prompt is refined one more time. Date handling instructions are
+added. Holiday lookup is combined with `get_current_date`.
 
-*(point to final score)* 90%+ meaningful. From 30% to 90% in three automated
-cycles. No human prompt engineering. The agent learned from its own production
-data.
+*(point to final score)* Over 90% meaningful. From low scores to 90%
+in three automated cycles, with no manual prompt engineering.
 
 ---
 
 ## Wrap-Up (30s)
 
-**Command:** `git diff agent/prompts.py`
+**Command:**
+```shell
+git diff agent/prompts.py
+git diff eval/eval_cases.json
+```
 
-Let's look at what changed.
+Three prompt versions, each one addressing specific failures from the
+previous cycle's synthetic traffic. The golden eval set grew from 10
+cases to roughly 20+, each new case extracted from a real failure.
 
-Three prompt versions. Each one targeted at specific failures found in the
-previous cycle's sessions. And the eval suite grew from 10 cases to about
-16-18, each new case sourced from a real failure.
-
-This is the whole point. Static eval suites go stale. Users ask questions you
-didn't anticipate. The BigQuery Agent Analytics Plugin captures every real
-interaction. The SDK's quality evaluation scores them automatically. And the
-improver closes the loop.
-
-The eval suite grows with cases from actual failures. Over time, your tests
-reflect what users really ask, not what you imagined they would ask.
-
-That's the cycle.
+The key idea: the golden eval set is the regression gate. Synthetic
+traffic discovers new failures. The improver fixes the prompt. The
+golden eval ensures nothing breaks. Failed cases are extracted into the
+golden set so they never recur. Over time, your tests reflect what
+users actually ask -- not what you guessed they would.
