@@ -214,19 +214,33 @@ print(CURRENT_VERSION)
   REPORT_JSON="$REPORTS_DIR/quality_report_cycle_${cycle}.json"
   rm -f "$REPORT_JSON"
 
-  # Retry with backoff for BigQuery write propagation
+  # Retry with backoff for BigQuery streaming buffer propagation.
+  # quality_report.py always exits 0, so we must check the session
+  # count ourselves — an empty report means data hasn't landed yet.
   MAX_RETRIES=6
   for attempt in $(seq 1 "$MAX_RETRIES"); do
-    sleep 5
+    sleep 15
     python3 "$REPO_ROOT/scripts/quality_report.py" \
       --app-name "$APP_NAME" \
       --output-json "$REPORT_JSON" \
       --limit "$TRAFFIC_COUNT" \
-      --time-period 24h && break || true
+      --time-period 24h || { rm -f "$REPORT_JSON"; true; }
+
+    if [[ -f "$REPORT_JSON" ]]; then
+      SESSION_COUNT=$(python3 -c "
+import json
+with open('$REPORT_JSON') as f:
+    print(json.load(f).get('summary', {}).get('total_sessions', 0))
+" 2>/dev/null || echo "0")
+      if [[ "$SESSION_COUNT" -gt 0 ]]; then
+        break
+      fi
+      echo "  No sessions found yet (attempt $attempt/$MAX_RETRIES), waiting for BQ propagation..."
+      rm -f "$REPORT_JSON"
+    fi
 
     if [[ $attempt -lt $MAX_RETRIES ]]; then
-      echo "  Quality report attempt $attempt/$MAX_RETRIES failed, retrying in 10s..."
-      sleep 10
+      sleep 15
     fi
   done
 
