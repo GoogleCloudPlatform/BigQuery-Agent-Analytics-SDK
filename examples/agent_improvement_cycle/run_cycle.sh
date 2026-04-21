@@ -265,10 +265,10 @@ print(f\"  ({s.get('meaningful', '?')} meaningful, {s.get('partial', '?')} parti
   echo "  STEP 4/$TOTAL_STEPS: IMPROVE PROMPT"
   echo ""
   echo "  Goal:    Fix the prompt to address failed sessions"
-  echo "  Method:  1. Gemini analyzes failures and rewrites the prompt"
-  echo "           2. Golden eval gate: run all golden cases against the"
-  echo "              candidate. If any regresses, reject and retry."
-  echo "           3. Extract failed synthetic cases into the golden eval set"
+  echo "  Method:  1. Extract failed cases into golden eval set"
+  echo "           2. Gemini generates improved prompt"
+  echo "           3. Regression gate: candidate must pass ALL golden"
+  echo "              cases (original + extracted). Retry if any fail."
   echo "  Input:   reports/quality_report_cycle_${cycle}.json"
   echo "  Output:  agent/prompts.py (new version)"
   echo "           eval/eval_cases.json (extended with failed cases)"
@@ -310,46 +310,98 @@ with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
   echo ""
   echo "  STEP 5/$TOTAL_STEPS: MEASURE IMPROVEMENT"
   echo ""
-  echo "  Goal:    Test the improved prompt against fresh, unseen questions"
-  echo "  Method:  Generate NEW synthetic traffic (different from Step 1),"
-  echo "           run it through the improved V${NEW_V} prompt, and score"
-  echo "           each response with an LLM judge."
-  echo "  Why:     The Step 1 traffic was used to identify failures --"
-  echo "           re-running it would be circular. Fresh questions test"
-  echo "           whether the improvement generalizes."
+  echo "  Goal:    Verify the improved prompt on the extended eval set"
+  echo "           and measure quality on fresh, unseen traffic via BigQuery"
+  echo "  Method:  1. Run extended golden eval ($GOLDEN_AFTER cases)"
+  echo "           2. Generate fresh synthetic traffic (different from Step 1)"
+  echo "           3. Run through agent with BigQuery logging"
+  echo "           4. Score sessions from BigQuery (same as Step 3)"
   echo ""
   step_start
 
+  # 5a: Run extended golden eval as final regression check
+  echo "  --- Regression check ---"
+  set +e
+  python3 -W ignore::UserWarning "$SCRIPT_DIR/eval/run_eval.py" --golden
+  GOLDEN_EXIT=$?
+  set -e
+  if [[ $GOLDEN_EXIT -ne 0 ]]; then
+    echo ""
+    echo "  ERROR: Extended golden eval failed after improvement."
+    exit 1
+  fi
+
+  # 5b: Generate fresh synthetic traffic
+  echo ""
+  echo "  --- Fresh traffic ---"
   FRESH_TRAFFIC="$SCRIPT_DIR/eval/synthetic_traffic_cycle_${cycle}_fresh.json"
-  rm -f "$SCRIPT_DIR/reports/latest_eval_results.json"
   python3 -W ignore::UserWarning "$SCRIPT_DIR/eval/generate_traffic.py" \
     --count "$TRAFFIC_COUNT" \
     --output "$FRESH_TRAFFIC"
 
-  # --golden = LLM judge mode (throwaway agent, no BQ)
-  # --eval-cases = evaluate the fresh traffic, not the golden set
-  # Failures here are expected (they're the "after" score), so don't exit.
-  set +e
+  # 5c: Run fresh traffic through the improved agent (WITH BQ logging)
   python3 -W ignore::UserWarning "$SCRIPT_DIR/eval/run_eval.py" \
-    --golden \
     --eval-cases "$FRESH_TRAFFIC"
-  set -e
 
-  # Print before/after comparison
-  FRESH_RESULTS="$SCRIPT_DIR/reports/latest_eval_results.json"
+  # 5d: Score from BigQuery
+  # Wait 30s for BQ streaming buffer propagation. Without this, the
+  # query may return stale sessions from Step 2 (already visible) instead
+  # of the fresh Step 5c sessions (still propagating).
+  echo ""
+  echo "  --- Quality report from BigQuery (waiting for propagation) ---"
+  FRESH_REPORT="$REPORTS_DIR/quality_report_cycle_${cycle}_after.json"
+  rm -f "$FRESH_REPORT"
+
+  MAX_RETRIES=6
+  for attempt in $(seq 1 "$MAX_RETRIES"); do
+    sleep 30
+    python3 "$REPO_ROOT/scripts/quality_report.py" \
+      --app-name "$APP_NAME" \
+      --output-json "$FRESH_REPORT" \
+      --limit "$TRAFFIC_COUNT" \
+      --time-period 24h || { rm -f "$FRESH_REPORT"; true; }
+
+    # Guard: if the report has the same session IDs as Step 3, the
+    # fresh sessions have not propagated yet. Delete and retry.
+    if [[ -f "$FRESH_REPORT" ]]; then
+      IS_FRESH=$(python3 -c "
+import json, sys
+with open('$REPORT_JSON') as f:
+    old = {s['session_id'] for s in json.load(f).get('sessions', [])}
+with open('$FRESH_REPORT') as f:
+    new = {s['session_id'] for s in json.load(f).get('sessions', [])}
+print('yes' if new and new != old else 'no')
+" 2>/dev/null || echo "no")
+      if [[ "$IS_FRESH" == "yes" ]]; then
+        break
+      fi
+      echo "  Sessions not yet propagated (attempt $attempt/$MAX_RETRIES)..."
+      rm -f "$FRESH_REPORT"
+    fi
+
+    if [[ $attempt -lt $MAX_RETRIES ]]; then
+      sleep 10
+    fi
+  done
+
+  if [[ ! -f "$FRESH_REPORT" ]]; then
+    echo "ERROR: Fresh quality report was not generated after $MAX_RETRIES attempts" >&2
+    exit 1
+  fi
+
+  # 5e: Print before/after comparison
   python3 -c "
 import json
 with open('$REPORT_JSON') as f:
     before = json.load(f)
-with open('$FRESH_RESULTS') as f:
-    after_results = json.load(f)
+with open('$FRESH_REPORT') as f:
+    after = json.load(f)
 b = before.get('summary', {})
-mr = int(b.get('meaningful_rate', 0))
-after_passed = sum(1 for r in after_results if r.get('pass', False))
-after_total = len(after_results)
-after_rate = round(100 * after_passed / after_total) if after_total else 0
-before_line = f'Before (V${CURRENT_V}):  {mr:>3}% meaningful  ({b.get(\"meaningful\", \"?\")}/{b.get(\"total_sessions\", \"?\")} sessions)'
-after_line  = f'After  (V${NEW_V}):  {after_rate:>3}% pass rate    ({after_passed}/{after_total} sessions)'
+a = after.get('summary', {})
+b_mr = int(b.get('meaningful_rate', 0))
+a_mr = int(a.get('meaningful_rate', 0))
+before_line = f'Before (V${CURRENT_V}):  {b_mr:>3}% meaningful  ({b.get(\"meaningful\", \"?\")}/{b.get(\"total_sessions\", \"?\")} sessions)'
+after_line  = f'After  (V${NEW_V}):  {a_mr:>3}% meaningful  ({a.get(\"meaningful\", \"?\")}/{a.get(\"total_sessions\", \"?\")} sessions)'
 title = 'CYCLE ${cycle} RESULTS'
 W = max(len(before_line), len(after_line), len(title)) + 4
 print()

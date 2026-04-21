@@ -284,7 +284,7 @@ async def _judge_cases(
 async def run_golden_eval(candidate_prompt: str) -> tuple[bool, int, int]:
   """Run the golden eval set against a candidate prompt.
 
-  Creates a throwaway agent with the candidate prompt (no BQ logging)
+  Creates a local agent with the candidate prompt (no BQ logging)
   and runs every golden eval case.  Each response is scored by a
   lightweight LLM judge.
 
@@ -466,15 +466,26 @@ def main() -> None:
     print("  Quality is already high (>=95%). No improvement needed.")
     return
 
+  # Extract failed synthetic cases FIRST so the golden eval gate
+  # validates the candidate against the full set (original + extracted).
+  failed_cases = extract_failed_cases(report)
+  if failed_cases:
+    added = add_eval_cases(failed_cases)
+    golden_count = len(load_eval_cases().get("eval_cases", []))
+    print(
+        f"  Extracted {len(failed_cases)} failed cases, added {added}"
+        f" new to golden eval set ({golden_count} total)."
+    )
+  else:
+    print("  No failed cases to extract.")
+
   # Generate improved prompt, validated by golden eval (retry up to 3 times)
   new_version = None
   best_passed = -1
+  total = 0
 
   for attempt in range(3):
-    print(
-        f"  Calling Gemini to generate improvements (attempt"
-        f" {attempt + 1})..."
-    )
+    print(f"\n  Generating improved prompt (attempt {attempt + 1}/3)...")
     result = call_improver(current_prompt, current_version, report)
     candidate = result["improved_prompt"]
 
@@ -482,22 +493,25 @@ def main() -> None:
       print("  Warning: candidate prompt too short, retrying...")
       continue
 
-    # Golden eval gate: run all golden cases against the candidate
+    # Validate against the FULL golden set (original + extracted cases)
     golden_cases = load_eval_cases().get("eval_cases", [])
-    print(f"  Running golden eval ({len(golden_cases)} cases)...")
+    print(
+        f"  Candidate generated. Running regression tests"
+        f" ({len(golden_cases)} cases)..."
+    )
     passed_all, passed, total = asyncio.run(run_golden_eval(candidate))
-    print(f"  Golden eval: {passed}/{total} passed.")
+    print(f"  Regression tests: {passed}/{total} passed.")
 
     if passed > best_passed:
       best_passed = passed
 
     if not passed_all:
-      print("  Golden eval FAILED: candidate breaks existing cases.")
+      print("  FAILED: candidate does not pass all cases.")
       if attempt < 2:
         print("  Retrying with a new candidate...")
       continue
 
-    print("  Golden eval PASSED: no regressions.")
+    print("  PASSED: all regression tests pass.")
 
     # Write the validated prompt
     try:
@@ -514,31 +528,14 @@ def main() -> None:
 
   if new_version is None:
     print(
-        f"  WARNING: All candidates failed golden eval (best:"
+        f"\n  WARNING: All candidates failed regression tests (best:"
         f" {best_passed}/{total}). Skipping improvement to avoid"
         " regressions."
     )
-    # Still extract failed cases to grow the golden set
-    failed_cases = extract_failed_cases(report)
-    if failed_cases:
-      added = add_eval_cases(failed_cases)
-      print(
-          f"  Extracted {len(failed_cases)} failed cases, added {added}"
-          " new to golden eval set."
-      )
     return
 
   print(f"  Written PROMPT_V{new_version} to prompts.py")
   print(f"  Changes: {result['changes_summary']}")
-
-  # Extract failed synthetic cases and add to golden set
-  failed_cases = extract_failed_cases(report)
-  if failed_cases:
-    added = add_eval_cases(failed_cases)
-    print(
-        f"  Extracted {len(failed_cases)} failed cases, added {added} new"
-        " to golden eval set."
-    )
 
   print(f"\n  v{current_version} -> v{new_version} complete.\n")
 

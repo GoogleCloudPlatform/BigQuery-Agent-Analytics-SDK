@@ -63,7 +63,7 @@ get added here, raising the bar each iteration.
 
 ---
 
-## Run One Cycle (~4 min)
+## Run One Cycle (~5 min)
 
 **Command:**
 ```shell
@@ -111,45 +111,53 @@ scores each one on two dimensions:
 *(point to the quality summary)* Around 30% meaningful. The agent had
 the right tools all along -- the prompt just did not let it use them.
 
-### Step 4: Improve Prompt (~40s)
+### Step 4: Improve Prompt (~1-2 min)
 
 This step does three things:
 
-1. **Rewrite:** Gemini receives the current prompt, the quality report,
+1. **Extract failures:** Failed synthetic cases are pulled from the
+   quality report and added to the golden eval set. The golden set
+   grows from 3 to ~10 cases.
+
+2. **Rewrite:** Gemini receives the current prompt, the quality report,
    and the available tool signatures. It analyzes what went wrong and
-   generates a new prompt.
+   generates a new candidate prompt.
 
-2. **Golden eval gate:** Every case in the golden set is tested against
-   the candidate prompt using a throwaway agent. If any golden case
-   fails, the candidate is rejected and Gemini generates a new one
-   (up to 3 attempts).
+3. **Regression gate:** The candidate is tested against the FULL
+   golden set (original 3 + extracted failures). The candidate must
+   pass ALL cases -- not just the original 3, but also the failures
+   it was designed to fix. If any case fails, the candidate is
+   rejected and Gemini generates a new one (up to 3 attempts).
 
-3. **Extract failures:** Failed synthetic cases are pulled from the
-   quality report and added to the golden eval set. Next cycle, those
-   cases become part of the regression gate.
+*(point to output)* V1 becomes V2. The candidate passed all 10 cases.
 
-*(point to output)* V1 becomes V2. The golden set grows from 3 to
-~10 cases.
+### Step 5: Measure Improvement (~2-3 min)
 
-### Step 5: Measure Improvement (~90s)
+Step 5 mirrors Steps 1-3 but with the improved prompt: generate
+fresh traffic, run it through the agent, and score from BigQuery.
 
-The improvement needs to be tested on questions the prompt has never
-seen. Re-running the Step 1 traffic would be circular -- the prompt
-was specifically fixed to handle those questions.
+1. **Regression check:** Run the extended golden eval (10 cases) to
+   verify the improved prompt still passes everything.
 
-Instead, Gemini generates a fresh batch of 10 new questions. These are
-run through the improved V2 prompt and scored by an LLM judge. This
-tests whether the improvement generalizes.
+2. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
+   Re-running the Step 1 traffic would be circular -- the prompt was
+   specifically fixed to handle those questions.
+
+3. **Run through agent:** The fresh questions are sent to the V2
+   agent and logged to BigQuery -- exactly like Step 2.
+
+4. **Score from BigQuery:** The SDK's quality report reads the new
+   sessions from BigQuery and scores them -- exactly like Step 3.
 
 *(point to the results box)*
 
 ```
   Before (V1):   30% meaningful  (3/10 sessions)
-  After  (V2):  100% pass rate   (10/10 sessions)
+  After  (V2):  100% meaningful  (10/10 sessions)
 ```
 
-From 30% to 100% in one automated cycle, tested on entirely new
-questions.
+From 30% to 100% in one automated cycle, scored from BigQuery on
+entirely new questions.
 
 ---
 

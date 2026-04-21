@@ -94,7 +94,9 @@ async def run_single_case(
   }
 
 
-async def run_all_cases(eval_cases_path: str | None = None) -> list[dict]:
+async def run_all_cases(
+    eval_cases_path: str | None = None,
+) -> list[dict]:
   """Run all eval cases and print results."""
   cases = load_eval_cases(eval_cases_path)
   print(f"\nRunning {len(cases)} cases...\n")
@@ -186,7 +188,7 @@ async def run_golden_eval(eval_cases_path: str | None = None) -> list[dict]:
   from agent.prompts import CURRENT_VERSION
 
   print(f"\n  Evaluating {len(cases)} cases with prompt V{CURRENT_VERSION}")
-  print("  (throwaway agent + LLM judge, no BigQuery)\n")
+  print("  (LLM judge, no BigQuery logging)\n")
 
   results = []
   passed = 0
@@ -246,7 +248,7 @@ def main() -> None:
       "--golden",
       action="store_true",
       help=(
-          "LLM judge mode: run cases through a throwaway agent (no BQ"
+          "LLM judge mode: run cases through a local agent (no BQ"
           " logging) and score each response pass/fail. Uses --eval-cases"
           " if provided, otherwise defaults to eval_cases.json."
       ),

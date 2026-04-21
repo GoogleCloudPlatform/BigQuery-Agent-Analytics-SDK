@@ -160,20 +160,22 @@ a structured report that the improver consumes programmatically.
 `improve_agent.py` reads the quality report JSON and calls Gemini to fix
 the prompt:
 
-1. Reads the quality report (which sessions failed and why)
-2. Reads the current prompt from `agent/prompts.py`
-3. Sends both to Gemini along with the available tool list, asking it
+1. **Extracts failed synthetic cases** from the quality report and
+   adds them to the golden eval set (`eval_cases.json`). The golden
+   set grows before the candidate is generated.
+2. Reads the quality report (which sessions failed and why)
+3. Reads the current prompt from `agent/prompts.py`
+4. Sends both to Gemini along with the available tool list, asking it
    to fix the identified issues
-4. Gemini returns a JSON with an improved prompt and a summary of changes
-5. **Runs the golden eval set** against the candidate prompt using a
-   throwaway agent (no BigQuery logging). A lightweight LLM judge
-   scores each response. If any golden case fails, the candidate is
-   rejected and a new one is generated (up to 3 attempts).
-6. The script writes `PROMPT_V{N+1}` to `prompts.py` and updates
+5. Gemini returns a JSON with an improved prompt and a summary of changes
+6. **Runs the full golden eval set** (original + extracted cases)
+   against the candidate prompt (no BigQuery logging). A lightweight
+   LLM judge scores each response. The candidate must pass ALL cases,
+   including the failures it was designed to fix. If any case fails,
+   the candidate is rejected and a new one is generated (up to 3
+   attempts).
+7. The script writes `PROMPT_V{N+1}` to `prompts.py` and updates
    `CURRENT_PROMPT` to point to it
-7. **Extracts failed synthetic cases** from the quality report and
-   adds them to the golden eval set (`eval_cases.json`), so the same
-   failures are caught in future cycles
 
 On the next cycle, the agent uses the improved prompt, the golden eval
 set has grown, and a fresh batch of synthetic traffic tests new edges.
