@@ -15,7 +15,7 @@
 
 """Run the improvement cycle for any ADK agent.
 
-Loads ``improve/config.json`` (or a path given via ``--agent-config``)
+Loads ``config.json`` (or a path given via ``--agent-config``)
 to discover the agent module, prompts file, and eval cases.
 
 Usage:
@@ -35,7 +35,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 from agent_improvement import load_config
 from agent_improvement import run_improvement
 
-_DEFAULT_CONFIG = os.path.join(_SCRIPT_DIR, "improve", "config.json")
+_DEFAULT_CONFIG = os.path.join(_SCRIPT_DIR, "config.json")
 
 
 def main() -> None:
@@ -50,7 +50,7 @@ def main() -> None:
       "--agent-config",
       type=str,
       default=_DEFAULT_CONFIG,
-      help=("Path to the agent's config.json (default: improve/config.json)"),
+      help="Path to the agent's config.json (default: config.json)",
   )
   parser.add_argument(
       "--from-eval-results",

@@ -23,7 +23,10 @@ from __future__ import annotations
 
 from abc import ABC
 from abc import abstractmethod
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 class PromptAdapter(ABC):
@@ -187,4 +190,132 @@ class PythonFilePromptAdapter(PromptAdapter):
     with open(self._path, "w") as f:
       f.write(content)
 
+    return new_version
+
+
+class VertexPromptAdapter(PromptAdapter):
+  """Reads/writes prompts via the Vertex AI Prompt Registry API.
+
+  Prompts are stored server-side as Dataset resources with versioning.
+  Each ``write_prompt`` call creates a new DatasetVersion via
+  ``client.prompts.update()``.
+
+  Usage::
+
+      adapter = VertexPromptAdapter(
+          prompt_id="1234567890",
+          project="my-project",
+          location="us-central1",
+      )
+      text, version = adapter.read_prompt()
+      adapter.write_prompt(new_text, version, "fixed tool usage")
+
+  To create the initial prompt resource, use
+  :meth:`create_prompt`.
+  """
+
+  def __init__(
+      self,
+      prompt_id: str,
+      project: str | None = None,
+      location: str = "us-central1",
+      model: str = "gemini-2.5-flash",
+  ) -> None:
+    from vertexai import Client
+
+    self._prompt_id = prompt_id
+    self._model = model
+    self._client = Client(project=project, location=location)
+
+  @property
+  def prompt_id(self) -> str:
+    return self._prompt_id
+
+  @classmethod
+  def create_prompt(
+      cls,
+      text: str,
+      display_name: str,
+      model: str = "gemini-2.5-flash",
+      project: str | None = None,
+      location: str = "us-central1",
+  ) -> VertexPromptAdapter:
+    """Create a new prompt in the Vertex AI Prompt Registry.
+
+    Returns a ``VertexPromptAdapter`` bound to the new prompt ID.
+    """
+    from google.genai.types import Content
+    from google.genai.types import Part
+    from vertexai import Client
+    from vertexai._genai.types.common import Prompt
+    from vertexai._genai.types.common import PromptData
+
+    client = Client(project=project, location=location)
+    prompt = client.prompts.create(
+        prompt=Prompt(
+            prompt_data=PromptData(
+                system_instruction=Content(parts=[Part(text=text)]),
+                contents=[
+                    Content(role="user", parts=[Part(text="{{user_input}}")])
+                ],
+                model=model,
+            )
+        ),
+        config={"prompt_display_name": display_name},
+    )
+    logger.info("Created Vertex AI prompt %s", prompt.prompt_id)
+    return cls(
+        prompt_id=prompt.prompt_id,
+        project=project,
+        location=location,
+        model=model,
+    )
+
+  def read_prompt(self) -> tuple[str, int]:
+    prompt = self._client.prompts.get(prompt_id=self._prompt_id)
+    text = ""
+    if (
+        prompt.prompt_data
+        and prompt.prompt_data.system_instruction
+        and prompt.prompt_data.system_instruction.parts
+    ):
+      text = prompt.prompt_data.system_instruction.parts[0].text or ""
+
+    # create() produces 0 DatasetVersions (= v1), each update() adds one
+    versions = list(
+        self._client.prompts.list_versions(prompt_id=self._prompt_id)
+    )
+    version = len(versions) + 1
+
+    return text.strip(), version
+
+  def write_prompt(self, text: str, version: int, summary: str) -> int:
+    from google.genai.types import Content
+    from google.genai.types import Part
+    from vertexai._genai.types.common import Prompt
+    from vertexai._genai.types.common import PromptData
+
+    if len(text.strip()) < 50:
+      raise ValueError("Improved prompt is too short, likely invalid")
+
+    new_version = version + 1
+    self._client.prompts.update(
+        prompt_id=self._prompt_id,
+        prompt=Prompt(
+            prompt_data=PromptData(
+                system_instruction=Content(parts=[Part(text=text)]),
+                contents=[
+                    Content(role="user", parts=[Part(text="{{user_input}}")])
+                ],
+                model=self._model,
+            )
+        ),
+        config={"version_display_name": f"v{new_version}_{summary[:40]}"},
+    )
+    logger.info(
+        "Wrote prompt v%d to Vertex AI (%s): %s",
+        new_version,
+        self._prompt_id,
+        summary,
+    )
     return new_version

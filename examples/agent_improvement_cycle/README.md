@@ -1,8 +1,10 @@
 # Agent Improvement Cycle Demo
 
 Demonstrates a closed-loop agent improvement cycle powered by the
-**BigQuery Agent Analytics SDK**. The cycle learns from real agent
-sessions logged in production, not just synthetic test cases.
+**BigQuery Agent Analytics SDK** and **Vertex AI Prompt Registry**.
+The cycle learns from real agent sessions logged in production, not
+just synthetic test cases. Prompts are stored, versioned, and
+optimized in Vertex AI.
 
 For a guided walkthrough, see the [Demo Script](DEMO_SCRIPT.md).
 
@@ -16,20 +18,24 @@ predicted.
 
 ## The Solution: Learn from the Field
 
-This demo shows how to close that gap using two SDK components:
+This demo shows how to close that gap using three components:
 
 1. **`BigQueryAgentAnalyticsPlugin`** captures every real agent session
    (questions, tool calls, responses) into BigQuery automatically.
 2. **`quality_report.py`** (the SDK's evaluation script) reads those
    logged sessions back from BigQuery, evaluates quality, and produces
    structured reports that can drive automated improvement.
+3. **Vertex AI Prompt Registry** stores and versions the agent's prompt
+   in the cloud. The **Vertex AI Prompt Optimizer** generates improved
+   prompts using synthetic ground truth from a teacher model.
 
 The full cycle:
 
 1. **Generate** synthetic user traffic (Gemini produces diverse questions)
 2. **Run** the traffic through the agent, logging sessions to BigQuery
 3. **Evaluate** logged sessions using the SDK's quality evaluation
-4. **Improve** the agent prompt based on what actually failed
+4. **Improve** the agent prompt using the Vertex AI Prompt Optimizer
+   with synthetic ground truth from a teacher model
 5. **Validate** the candidate prompt against the golden eval set
    (regression gate)
 6. **Extend** the golden eval set with failed cases from the synthetic
@@ -43,9 +49,10 @@ The hero moment: quality typically climbs from ~30% to ~90%+ across 3 cycles
 
 Static eval suites go stale. Users ask questions you never anticipated.
 The plugin captures every real interaction, and the SDK's quality
-evaluation scores them automatically. The improver reads those scores,
-identifies the failure patterns, fixes the prompt, and extracts the
-failures into the golden eval set so they never recur.
+evaluation scores them automatically. The Vertex AI Prompt Optimizer
+reads those scores, generates ground truth via a teacher model,
+optimizes the prompt, and the pipeline extracts the failures into the
+golden eval set so they never recur.
 
 Each cycle, the golden eval set grows with cases sourced from actual
 failures. Over time, your tests reflect what users actually ask, not
@@ -54,35 +61,100 @@ what you imagined they would ask.
 ## Architecture
 
 ```
+config.json              # Declarative config: agent module, prompt storage,
+                         # model, eval paths, optimizer settings
+
 agent/
-  agent.py           # ADK agent (company policy Q&A assistant)
-  prompts.py         # Versioned prompts (V1 has intentional flaws)
-  prompts_v1.py      # Baseline V1 prompt (used by reset.sh)
-  tools.py           # lookup_company_policy, get_current_date
+  agent.py               # ADK agent (company policy Q&A assistant)
+                         # Reads prompt from Vertex AI Prompt Registry
+  prompts.py             # V1 seed prompt (used by setup/reset only)
+  tools.py               # lookup_company_policy, get_current_date
 
 eval/
-  eval_cases.json    # Golden eval set (regression gate, grows each cycle)
-  eval_cases_v1.json # Baseline 3-case golden set (used by reset.sh)
-  generate_traffic.py # Generates synthetic user traffic via Gemini
-  run_eval.py        # Runs eval/traffic cases via ADK InMemoryRunner
+  eval_cases.json        # Golden eval set (regression gate, grows each cycle)
+  generate_traffic.py    # Generates synthetic user traffic via Gemini
+  run_eval.py            # Runs eval/traffic cases via ADK InMemoryRunner
 
-agent_improvement/   # Reusable improvement module (works with any ADK agent)
-  config.py          # ImprovementConfig dataclass
-  improver_agent.py  # LoopAgent + LlmAgent with tool-based workflow
-  eval_runner.py     # Run eval cases + LLM judge
-  prompt_adapter.py  # ABC + PythonFilePromptAdapter
-  tool_introspection.py # Auto-extract tool signatures from agent tools
-  prompts.py         # Default judge/improver prompt templates
+agent_improvement/       # Reusable improvement module (works with any ADK agent)
+  config.py              # ImprovementConfig dataclass
+  config_loader.py       # Loads config.json, builds ImprovementConfig
+  improver_agent.py      # LoopAgent + LlmAgent with tool-based workflow
+  eval_runner.py         # Run eval cases + LLM judge
+  prompt_adapter.py      # PromptAdapter ABC + VertexPromptAdapter +
+                         # PythonFilePromptAdapter
+  tool_introspection.py  # Auto-extract tool signatures from agent tools
+  prompts.py             # Default judge/improver prompt templates
 
-run_improvement.py   # Entry point: wires company_info_agent config
-reports/             # Generated reports, eval results
+run_improvement.py       # Entry point: loads config.json, runs improvement
+setup_vertex.py          # Creates/resets Vertex AI prompt (called by setup.sh)
+reports/                 # Generated reports, eval results
 
-run_cycle.sh         # Orchestrator: traffic -> eval -> quality -> improve
-setup.sh             # One-time setup (auth, deps, BigQuery dataset)
-reset.sh             # Reset to V1 prompt and 3 golden cases
+run_cycle.sh             # Orchestrator: traffic -> eval -> quality -> improve
+setup.sh                 # One-time setup (auth, deps, BigQuery, Vertex AI prompt)
+reset.sh                 # Reset to V1 prompt and 3 golden cases
 ```
 
+### config.json
+
+All agent-specific settings live in a single declarative config file:
+
+```json
+{
+  "app_name": "company_info_agent",
+  "agent_module": "agent.agent",
+  "prompts_path": "agent/prompts.py",
+  "eval_cases_path": "eval/eval_cases.json",
+  "traffic_generator": "eval/generate_traffic.py",
+  "model_id": "gemini-2.5-flash",
+  "max_attempts": 3,
+  "prompt_storage": "vertex",
+  "vertex_prompt_id": "1234567890",
+  "use_vertex_optimizer": true
+}
+```
+
+To point the cycle at a different agent, create a `config.json` for it
+and pass `--agent-config /path/to/config.json`.
+
 ## How the Cycle Works
+
+### Prompt Storage: Vertex AI Prompt Registry
+
+The agent's prompt is stored in the
+[Vertex AI Prompt Registry](https://cloud.google.com/vertex-ai/docs/generative-ai/prompts/prompt-management),
+not in a local file. This gives you:
+
+- **Cloud-native versioning**: each improvement creates a new version
+- **Audit trail**: full history of prompt changes with metadata
+- **API access**: read/write via `vertexai.Client().prompts`
+- **No file hacking**: no regex parsing, no version variables
+
+The `VertexPromptAdapter` handles all reads and writes. On startup,
+`agent.py` fetches the current prompt from the registry via the
+`VERTEX_PROMPT_ID` environment variable. The improvement cycle writes
+new versions back through the same adapter.
+
+`setup.sh` creates the initial prompt resource automatically.
+`reset.sh` deletes it and creates a fresh one at V1.
+
+### Prompt Optimization: Vertex AI Prompt Optimizer
+
+When the cycle identifies failed sessions, it uses the
+**Vertex AI Prompt Optimizer** to generate improved prompts:
+
+1. **Identify failures**: Extract sessions scored as "unhelpful" or
+   "partial" from the quality report.
+2. **Generate ground truth**: A "teacher agent" (same tools, better
+   prompt) re-answers each failed question to produce what the correct
+   response should have been.
+3. **Optimize**: Feed the current prompt + (question, bad_response,
+   ground_truth) triples to the Vertex AI Prompt Optimizer in
+   `target_response` mode.
+4. **Validate**: Test the optimized prompt against the full golden
+   eval set before accepting it.
+
+This replaces raw "ask Gemini to rewrite the prompt" with a
+structured optimization pipeline backed by real failure data.
 
 ### Two Eval Sets
 
@@ -123,150 +195,50 @@ The v1 prompt has intentional problems that cause ~70% of sessions to fail:
 The tools themselves have all the data. The flaw is that the prompt
 discourages the agent from using them.
 
-### Step 1: Generate Synthetic Traffic (generate_traffic.py)
+### Step-by-Step
 
-`generate_traffic.py` calls Gemini to produce diverse, realistic
-employee questions. The questions are intentionally different from the
-golden eval set, covering the same policy topics but with varied
-phrasing and scenarios.
+**Step 1: Generate Synthetic Traffic** -- `generate_traffic.py` calls
+Gemini to produce diverse, realistic employee questions, intentionally
+different from the golden eval set.
 
-### Step 2: Run Traffic (run_eval.py)
-
-`run_eval.py` sends the generated questions to the agent using ADK's
-`InMemoryRunner`. The agent runs locally -- no server, no deployment.
-Each session is automatically logged to BigQuery via the
+**Step 2: Run Traffic** -- `run_eval.py` sends questions to the agent
+using ADK's `InMemoryRunner`. Sessions are logged to BigQuery via the
 `BigQueryAgentAnalyticsPlugin`.
 
-```python
-# From run_eval.py - this is how the agent runs locally:
-runner = InMemoryRunner(
-    agent=root_agent,
-    app_name="company_info_agent",
-    plugins=[bq_logging_plugin],   # <-- sessions auto-logged to BigQuery
-)
-# Send a question, get a response - just like a real user interaction
-async for event in runner.run_async(user_id, session_id, user_message):
-    ...
-```
+**Step 3: Evaluate Quality** -- The SDK's `quality_report.py` reads
+sessions from BigQuery and scores each one on response_usefulness
+(meaningful/partial/unhelpful) and task_grounding (grounded/ungrounded).
 
-### Step 3: Evaluate Quality (quality_report.py)
-
-The SDK's `quality_report.py` reads the sessions just logged to BigQuery
-and scores each one:
-
-- **response_usefulness**: Was the answer meaningful, partial, or unhelpful?
-- **task_grounding**: Was it based on tool output, or did the agent hallucinate?
-
-The `--app-name` flag filters to sessions from this agent only (ignoring
-other agents sharing the same BigQuery dataset). `--output-json` produces
-a structured report that the improver consumes programmatically.
-
-### Step 4: Auto-Improve (agent_improvement module)
-
-The improvement step is implemented as an ADK **LoopAgent** that wraps a
-single **LlmAgent** with six tools. The LLM decides the workflow — when
-to retry, when to exit — rather than following a hardcoded loop.
+**Step 4: Improve Prompt** -- An ADK LoopAgent wrapping an LlmAgent
+with six tools:
 
 ```
 LoopAgent("prompt_improver", max_iterations=3)
-  └── LlmAgent("prompt_engineer")
+  +-- LlmAgent("prompt_engineer")
         tools: read_quality_report, read_current_prompt,
                generate_candidate, test_candidate,
                write_prompt, exit_loop
 ```
 
-The workflow:
+The `generate_candidate` tool uses the Vertex AI Prompt Optimizer with
+synthetic ground truth from a teacher agent. The `test_candidate` tool
+runs the full golden eval set. The `write_prompt` tool persists the
+validated prompt to the Vertex AI Prompt Registry.
 
-1. **Extracts failed synthetic cases** from the quality report and
-   adds them to the golden eval set (`eval_cases.json`). The golden
-   set grows before the candidate is generated.
-2. The LlmAgent calls `read_quality_report` to understand which
-   sessions failed and why
-3. Calls `read_current_prompt` to get the current prompt and
-   auto-extracted tool signatures
-4. Calls `generate_candidate` — Gemini generates an improved prompt
-   based on the failures and available tools
-5. Calls `test_candidate` — runs the full golden eval set (original +
-   extracted cases) against the candidate. A lightweight LLM judge
-   scores each response.
-6. If all cases pass: calls `write_prompt` then `exit_loop`
-7. If some fail: the LLM analyzes *why* they failed and loops back to
-   generate a better candidate
-
-The LoopAgent exits when `exit_loop` fires (ADK's built-in escalation)
-or after `max_iterations` (default 3).
-
-The `agent_improvement` module is **reusable for any ADK agent**. To
-apply it to a different agent, create an `ImprovementConfig` with your
-agent factory, tools, prompt adapter, and eval cases path:
-
-```python
-from agent_improvement import ImprovementConfig, PythonFilePromptAdapter, run_improvement
-
-config = ImprovementConfig(
-    agent_factory=lambda prompt: Agent(name="my_agent", instruction=prompt, tools=[...]),
-    agent_name="my_agent",
-    agent_tools=[my_tool_a, my_tool_b],
-    prompt_adapter=PythonFilePromptAdapter("path/to/prompts.py"),
-    eval_cases_path="path/to/eval_cases.json",
-)
-asyncio.run(run_improvement(config, report_path="quality_report.json"))
-```
-
-On the next cycle, the agent uses the improved prompt, the golden eval
-set has grown, and a fresh batch of synthetic traffic tests new edges.
-
-### Data Flow
-
-```
-generate_traffic.py   run_eval.py          quality_report.py    run_improvement.py
-  (Gemini)      -->    (agent + BQ)   -->    (BQ -> scores)  -->   |
-                                                                   v
-                                                             LoopAgent
-                                                             (prompt_improver)
-                                                                   |
-                                                             LlmAgent tools:
-                                                             read_quality_report
-                                                             generate_candidate
-                                                             test_candidate
-                                                             write_prompt
-                                                             exit_loop
-                                                                   |
-                                                                   v
-                                                             prompt fix +
-                                                             extract failures
-                                                             to golden set
-```
+**Step 5: Measure Improvement** -- Fresh synthetic traffic is generated
+and scored against the improved prompt via BigQuery.
 
 ### Guardrails
 
-The improvement pipeline includes several safeguards to prevent
-degradation:
-
-- **Golden eval gate**: Before accepting a candidate prompt, the full
-  golden eval set is run against a throwaway agent with the candidate
-  prompt (no BigQuery logging). A lightweight LLM judge scores each
-  response. The candidate is rejected if any golden case fails.
-  This replaces LLM-based "does this look right?" validation with
-  actual behavioral testing.
-  - **If golden cases fail**: The candidate prompt is rejected and
-    Gemini generates a new one. This retries up to 3 times. If all
-    3 attempts fail the golden eval, the improvement step is skipped
-    (the prompt is not changed) and the cycle continues. Failed
-    synthetic cases are still extracted into the golden set. This
-    means the prompt is never degraded -- the golden set is the
-    hard floor that every prompt version must clear.
-- **Eval case schema validation**: Extracted failure cases are checked
-  for required fields (`id`, `question`, `category`, `expected_tool`).
-  Malformed cases are skipped rather than written to disk.
+- **Golden eval gate**: Candidate prompts must pass ALL golden cases.
+  Rejected if any fail, retried up to 3 times.
+- **Eval case extraction**: Failed synthetic cases are added to the
+  golden set before improvement, raising the bar each cycle.
 - **Question deduplication**: Extracted cases are deduplicated by both
-  ID and question text before being added to the golden set.
-- **Retry with backoff**: The quality report step retries with backoff
-  (up to ~60s) to handle BigQuery write propagation delays.
-- **Syntax validation**: The generated `prompts.py` is compiled before
-  being written, catching Python syntax errors from malformed LLM output.
-- **Length check**: Prompts shorter than 50 characters are rejected as
-  likely invalid.
+  ID and question text.
+- **Length check**: Prompts shorter than 50 characters are rejected.
+- **Retry with backoff**: Quality report step retries for BigQuery
+  write propagation delays.
 
 ## Quick Start
 
@@ -286,7 +258,7 @@ Your authenticated user or service account needs these IAM roles:
 |------|-----|
 | `roles/bigquery.dataEditor` | Create datasets, write agent session data |
 | `roles/bigquery.jobUser` | Run BigQuery queries for evaluation |
-| `roles/aiplatform.user` | Call Gemini models (agent + evaluator + improver) |
+| `roles/aiplatform.user` | Call Gemini models and Vertex AI Prompt APIs |
 
 ### 1. Configure environment
 
@@ -296,27 +268,15 @@ Set your GCP project:
 export PROJECT_ID=my-project-id
 ```
 
-All other variables have sensible defaults. Only set them if you need different values:
-
-```bash
-# BigQuery dataset for session logs (defaults shown)
-DATASET_ID=agent_logs
-DATASET_LOCATION=us-central1
-TABLE_ID=agent_events
-
-# Agent model (defaults shown)
-DEMO_MODEL_ID=gemini-2.5-flash
-DEMO_AGENT_LOCATION=us-central1
-```
-
 ### 2. Run setup
 
 ```bash
 ./setup.sh
 ```
 
-This installs dependencies, verifies credentials, and creates the
-BigQuery dataset if it does not exist.
+This installs dependencies, verifies credentials, creates the
+BigQuery dataset, and creates the initial V1 prompt in the
+Vertex AI Prompt Registry.
 
 ### 3. Run the demo
 
@@ -332,6 +292,9 @@ BigQuery dataset if it does not exist.
 
 # Customize traffic volume
 ./run_cycle.sh --cycles 3 --traffic-count 20
+
+# Use a different agent's config
+./run_cycle.sh --agent-config /path/to/other/config.json
 ```
 
 ### 4. Inspect results
@@ -343,10 +306,7 @@ After a run, check the `reports/` directory:
 cat reports/quality_report_cycle_1.json | python3 -m json.tool | head -20
 
 # Synthetic traffic that was generated
-cat eval/synthetic_traffic_cycle_1.json | python3 -m json.tool | head -20
-
-# See how the prompt evolved
-cat agent/prompts.py
+cat reports/synthetic_traffic_cycle_1.json | python3 -m json.tool | head -20
 
 # See new eval cases extracted from failures
 cat eval/eval_cases.json
@@ -354,41 +314,66 @@ cat eval/eval_cases.json
 
 ### Reset to V1
 
-To start over, reset everything to the initial state (V1 prompt,
-3 golden eval cases, no reports):
+To start over, reset everything to the initial state (fresh V1
+prompt in Vertex AI, 3 golden eval cases, no reports):
 
 ```bash
 ./reset.sh
 ```
 
-## SDK Features Used
+This deletes the old Vertex AI prompt and creates a fresh one at V1.
 
-- **`BigQueryAgentAnalyticsPlugin`** - logs every agent session (user
-  message, tool calls, agent response) to BigQuery automatically
-- **`quality_report.py --app-name`** - scopes evaluation to sessions from
-  this specific agent, filtering out other agents sharing the same dataset
-- **`quality_report.py --output-json`** - structured quality report for
-  automated consumption by the improver
-- **Categorical evaluation metrics** - `response_usefulness` (was it
-  helpful?) and `task_grounding` (was it based on tool output?)
+## Using with Other Agents
+
+The `agent_improvement` module is reusable. To apply it to a different
+agent:
+
+1. Create a `config.json` with your agent's settings
+2. Ensure your agent module exports `create_agent(prompt) -> Agent`,
+   `AGENT_TOOLS`, `root_agent`, and `bq_logging_plugin`
+3. Run: `./run_cycle.sh --agent-config /path/to/your/config.json`
 
 ## Configuration
 
+### config.json fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `app_name` | required | Agent name for BQ filtering |
+| `agent_module` | required | Python module path (e.g. `agent.agent`) |
+| `prompts_path` | required | Path to prompts.py (for V1 seed text) |
+| `eval_cases_path` | required | Path to golden eval set JSON |
+| `traffic_generator` | required | Path to traffic generation script |
+| `model_id` | `gemini-2.5-flash` | Gemini model for agent and judge |
+| `max_attempts` | `3` | Max prompt improvement attempts per cycle |
+| `prompt_storage` | `vertex` | `vertex` or `python_file` |
+| `vertex_prompt_id` | `""` | Vertex AI prompt ID (auto-filled by setup) |
+| `use_vertex_optimizer` | `true` | Use Vertex AI Prompt Optimizer |
+
+### Environment variables (.env)
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROJECT_ID` | from `gcloud` | Google Cloud project ID (env var or gcloud config) |
+| `PROJECT_ID` | from `gcloud` | Google Cloud project ID |
 | `DATASET_ID` | `agent_logs` | BigQuery dataset for session logs |
 | `DATASET_LOCATION` | `us-central1` | BigQuery dataset location |
 | `TABLE_ID` | `agent_events` | BigQuery table name |
 | `DEMO_MODEL_ID` | `gemini-2.5-flash` | Model for the demo agent |
-| `DEMO_AGENT_LOCATION` | `us-central1` | Vertex AI location |
+| `VERTEX_PROMPT_ID` | from setup | Vertex AI prompt resource ID |
 
 ### Cost notes
 
 Each improvement cycle makes Gemini API calls for traffic generation,
-agent execution, quality evaluation, and prompt improvement. The golden
-eval gate also calls Gemini once per golden case per attempt (up to 3
-attempts per cycle). Since the golden set grows each cycle (failed
-synthetic cases are extracted into it), per-cycle cost increases over
-time. A typical single cycle uses ~50-80 Gemini calls; a 3-cycle run
-uses ~200-300.
+agent execution, quality evaluation, and prompt optimization. The
+Vertex AI Prompt Optimizer also runs the teacher model to generate
+ground truth for failed sessions. A typical single cycle uses ~50-80
+Gemini calls; a 3-cycle run uses ~200-300.
+
+## Future / Next Steps
+
+- **Sentiment analysis integration**: Extend the quality evaluation to
+  detect sentiment dips in agent responses. Use sentiment scores as an
+  additional signal for the improvement cycle, identifying not just
+  factually wrong answers but also responses that leave users frustrated
+  or confused. Feed sentiment-flagged sessions to the optimizer alongside
+  usefulness failures.

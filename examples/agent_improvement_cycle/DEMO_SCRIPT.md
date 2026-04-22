@@ -16,8 +16,9 @@ using the
 [BigQuery Agent Analytics SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).
 The agent runs, logs sessions to BigQuery using the
 [BigQuery Agent Analytics plugin for ADK](https://adk.dev/integrations/bigquery-agent-analytics/),
-evaluates its own quality, and rewrites its prompt to fix what failed.
-Four steps, fully automated.
+evaluates its own quality, and uses the **Vertex AI Prompt Optimizer**
+to fix what failed. Prompts are stored in the **Vertex AI Prompt
+Registry**, versioned automatically with every improvement.
 
 ---
 
@@ -28,7 +29,7 @@ Four steps, fully automated.
 ./setup.sh
 ```
 
-Before running the demo, run the setup script. It performs five checks:
+The setup script performs six checks:
 
 1. **Python version:** Verifies Python 3.10+ is installed.
 2. **Google Cloud auth:** Confirms `gcloud` is authenticated and a
@@ -36,8 +37,30 @@ Before running the demo, run the setup script. It performs five checks:
 3. **APIs:** Enables BigQuery and Vertex AI APIs if not already active.
 4. **Dependencies:** Installs Python packages from `requirements.txt`.
 5. **Configuration:** Creates the `.env` file with your project ID,
-   BigQuery dataset, and table name. Creates the BQ dataset if it does
-   not exist.
+   BigQuery dataset, and table name. Creates the BQ dataset if needed.
+6. **Vertex AI prompt:** Creates the V1 prompt in the Vertex AI Prompt
+   Registry and writes the prompt ID to `.env` and `config.json`.
+
+---
+
+## Show the Config (30s)
+
+**Command:**
+```shell
+cat config.json
+```
+
+This is the declarative config that drives the entire cycle. Key fields:
+
+- `prompt_storage: "vertex"` -- the prompt lives in Vertex AI, not a
+  local file
+- `use_vertex_optimizer: true` -- improvements use the Vertex AI Prompt
+  Optimizer with synthetic ground truth from a teacher model
+- `vertex_prompt_id` -- the Vertex AI prompt resource (auto-filled by
+  setup)
+
+The same config works for any ADK agent. Change the `agent_module` and
+paths to point at a different agent.
 
 ---
 
@@ -48,8 +71,8 @@ Before running the demo, run the setup script. It performs five checks:
 cat agent/prompts.py
 ```
 
-This is the starting prompt, version 1. It has intentional flaws that
-mirror common real-world mistakes:
+This is the V1 seed prompt. It has intentional flaws that mirror common
+real-world mistakes:
 
 - It tells the agent to "answer from the knowledge above" instead of
   calling its tools.
@@ -61,7 +84,8 @@ mirror common real-world mistakes:
   questions like "Is next Friday a holiday?" will fail.
 
 The tools can answer all of these questions. The prompt simply does not
-guide the agent to use them.
+guide the agent to use them. The agent reads this prompt from the
+Vertex AI Prompt Registry at startup (not from the file directly).
 
 ---
 
@@ -94,8 +118,8 @@ get added here, raising the bar each iteration.
 
 The script starts by running the golden eval set against the current
 prompt. This verifies the starting point: all 3 cases should pass
-with V1. If any fail, the script stops with a non-zero exit code --
-fix the prompt first.
+with V1. If any fail, the script auto-improves to fix them before
+proceeding.
 
 ### Step 1: Generate Synthetic Traffic (~20s)
 
@@ -140,29 +164,33 @@ agent. It has six tools and decides its own workflow:
    quality report and added to the golden eval set. The golden set
    grows from 3 to ~10 cases.
 
-2. **LoopAgent runs:** The `prompt_engineer` LlmAgent reads the
-   quality report and current prompt via tool calls, then calls
-   `generate_candidate` to get an improved prompt from Gemini. It
-   auto-extracts tool signatures from the target agent's code, so it
-   knows exactly what tools are available.
+2. **Generate ground truth:** A "teacher agent" (same tools, better
+   prompt) re-answers each failed question to produce what the correct
+   response should have been. This is the synthetic ground truth.
 
-3. **Regression gate:** The agent calls `test_candidate` to run the
-   FULL golden set (original 3 + extracted failures). The candidate
-   must pass ALL cases. If any fail, the LLM analyzes why and
-   generates a better candidate. The loop exits when all cases pass
-   (via `exit_loop`) or after 3 iterations.
+3. **Optimize prompt:** The current prompt + (question, bad_response,
+   ground_truth) triples are sent to the **Vertex AI Prompt Optimizer**
+   in `target_response` mode. The optimizer generates a structurally
+   improved prompt.
+
+4. **Regression gate:** The optimized prompt is tested against the
+   FULL golden set (original 3 + extracted failures). All cases must
+   pass. If any fail, the LLM analyzes why and generates a better
+   candidate. The loop exits when all cases pass (via `exit_loop`)
+   or after 3 iterations.
+
+5. **Write to Vertex AI:** The validated prompt is written to the
+   Vertex AI Prompt Registry as a new version.
 
 The improvement module is reusable -- it works with any ADK agent, not
-just this demo. You provide an `ImprovementConfig` with your agent
-factory, tools, prompt file, and eval set.
+just this demo. You provide a `config.json` with your agent module,
+tools, and eval set.
 
 *(point to output)* V1 becomes V2. The candidate passed all 10 cases.
 
 ### Step 5: Measure Improvement (~2-3 min)
 
-Step 5 mirrors Steps 1-3 but with the improved prompt. The
-regression check already passed in Step 4, so Step 5 goes straight
-to fresh traffic.
+Step 5 mirrors Steps 1-3 but with the improved prompt:
 
 1. **Fresh traffic:** Gemini generates a NEW batch of 10 questions.
    Re-running the Step 1 traffic would be circular -- the prompt was
@@ -205,20 +233,20 @@ are discovered and locked in.
 
 **Command:**
 ```shell
-git diff agent/prompts.py
-git diff eval/eval_cases.json
+cat eval/eval_cases.json
 ```
 
 The prompt evolved from V1 to V2 (or V4 with 3 cycles), each version
-addressing specific failures from the previous cycle's synthetic
-traffic. The golden eval set grew from 3 cases to 10+ cases, each new
-case extracted from a real failure.
+stored as a new version in the Vertex AI Prompt Registry. The golden
+eval set grew from 3 cases to 10+ cases, each new case extracted from
+a real failure.
 
 The key idea: the golden eval set is the regression gate. Synthetic
-traffic discovers new failures. The improver fixes the prompt. The
-golden eval ensures nothing breaks. Failed cases are extracted into the
-golden set so they never recur. Over time, your tests reflect what
-users actually ask -- not what you guessed they would.
+traffic discovers new failures. The Vertex AI Prompt Optimizer fixes
+the prompt using teacher-generated ground truth. The golden eval
+ensures nothing breaks. Failed cases are extracted into the golden set
+so they never recur. Over time, your tests reflect what users actually
+ask -- not what you guessed they would.
 
 To reset and run again:
 ```shell

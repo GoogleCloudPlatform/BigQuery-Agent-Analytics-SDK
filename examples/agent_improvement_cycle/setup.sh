@@ -40,7 +40,7 @@ echo "============================================"
 echo ""
 
 # 1. Check Python
-echo "[1/5] Checking Python..."
+echo "[1/6] Checking Python..."
 if ! command -v python3 &>/dev/null; then
   echo "ERROR: python3 is required but not found." >&2
   exit 1
@@ -50,7 +50,7 @@ echo "  $PYTHON_VERSION"
 
 # 2. Check gcloud auth
 echo ""
-echo "[2/5] Checking Google Cloud authentication..."
+echo "[2/6] Checking Google Cloud authentication..."
 if ! command -v gcloud &>/dev/null; then
   echo "ERROR: gcloud CLI is required. Install: https://cloud.google.com/sdk/docs/install" >&2
   exit 1
@@ -72,7 +72,7 @@ echo "  Credentials: OK"
 
 # 3. Enable required APIs
 echo ""
-echo "[3/5] Enabling required Google Cloud APIs..."
+echo "[3/6] Enabling required Google Cloud APIs..."
 gcloud services enable bigquery.googleapis.com --project="$PROJECT_ID" 2>/dev/null
 echo "  BigQuery API: enabled"
 gcloud services enable aiplatform.googleapis.com --project="$PROJECT_ID" 2>/dev/null
@@ -80,7 +80,7 @@ echo "  Vertex AI API: enabled"
 
 # 4. Install dependencies
 echo ""
-echo "[4/5] Installing Python dependencies..."
+echo "[4/6] Installing Python dependencies..."
 cd "$REPO_ROOT"
 pip install -e ".[all]" --quiet --no-warn-script-location 2>&1 | tail -1 || pip install -e ".[all]"
 pip install python-dotenv --quiet --no-warn-script-location 2>&1 | tail -1 || pip install python-dotenv
@@ -88,7 +88,7 @@ echo "  Dependencies installed."
 
 # 5. Configure environment
 echo ""
-echo "[5/5] Configuring environment..."
+echo "[5/6] Configuring environment..."
 
 DATASET_ID="${DATASET_ID:-agent_logs}"
 DATASET_LOCATION="${DATASET_LOCATION:-${BQ_LOCATION:-us-central1}}"
@@ -115,6 +115,12 @@ EOF
 else
   echo "  $ENV_FILE already exists, skipping."
 fi
+
+# 6. Create Vertex AI prompt
+echo ""
+echo "[6/6] Setting up Vertex AI prompt..."
+cd "$SCRIPT_DIR"
+python3 "$SCRIPT_DIR/setup_vertex.py"
 
 echo ""
 echo "============================================"

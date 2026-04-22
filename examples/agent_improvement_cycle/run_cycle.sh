@@ -83,7 +83,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --agent-config F   Path to agent's config.json"
-      echo "                     (default: improve/config.json)"
+      echo "                     (default: config.json)"
       echo "  --cycles N         Run N improvement cycles (default: 1)"
       echo "  --eval-only        Only run evaluation (Steps 1-3), skip improvement"
       echo "  --app-name X       Override agent app name for BQ filtering"
@@ -106,12 +106,12 @@ mkdir -p "$REPORTS_DIR"
 
 # Resolve config path
 if [[ -z "$AGENT_CONFIG" ]]; then
-  AGENT_CONFIG="$SCRIPT_DIR/improve/config.json"
+  AGENT_CONFIG="$SCRIPT_DIR/config.json"
 fi
 AGENT_CONFIG="$(cd "$(dirname "$AGENT_CONFIG")" && pwd)/$(basename "$AGENT_CONFIG")"
 
-# Agent root = config's grandparent (improve/config.json -> agent root)
-AGENT_ROOT="$(dirname "$(dirname "$AGENT_CONFIG")")"
+# Agent root = config's parent directory
+AGENT_ROOT="$(dirname "$AGENT_CONFIG")"
 
 # Read metadata with jq
 APP_NAME="${APP_NAME_OVERRIDE:-$(jq -r '.app_name' "$AGENT_CONFIG")}"
@@ -119,13 +119,33 @@ PROMPTS_PATH="$AGENT_ROOT/$(jq -r '.prompts_path' "$AGENT_CONFIG")"
 EVAL_CASES_PATH="$AGENT_ROOT/$(jq -r '.eval_cases_path' "$AGENT_CONFIG")"
 TRAFFIC_GENERATOR="$AGENT_ROOT/$(jq -r '.traffic_generator' "$AGENT_CONFIG")"
 VERSION_VAR=$(jq -r '.version_variable // "CURRENT_VERSION"' "$AGENT_CONFIG")
+PROMPT_STORAGE=$(jq -r '.prompt_storage // "python_file"' "$AGENT_CONFIG")
+VERTEX_PROMPT_ID=$(jq -r '.vertex_prompt_id // ""' "$AGENT_CONFIG")
+
+# Auto-setup: create Vertex AI prompt if not yet configured
+if [[ "$PROMPT_STORAGE" == "vertex" && -z "$VERTEX_PROMPT_ID" ]]; then
+  echo ""
+  echo "  No Vertex AI prompt configured. Running setup..."
+  python3 "$SCRIPT_DIR/setup_vertex.py"
+  # Re-read the prompt ID after setup
+  VERTEX_PROMPT_ID=$(jq -r '.vertex_prompt_id // ""' "$AGENT_CONFIG")
+fi
 
 # Build the --agent-config flag for Python scripts
 AGENT_CONFIG_FLAG="--agent-config $AGENT_CONFIG"
 
-# Helper: read current version from the prompts file (pure grep, no Python)
+# Helper: read current prompt version
 _read_version() {
-  grep -oP "${VERSION_VAR}\s*=\s*\K\d+" "$PROMPTS_PATH"
+  if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
+    python3 -c "
+from vertexai import Client
+c = Client(location='us-central1')
+vs = list(c.prompts.list_versions(prompt_id='$VERTEX_PROMPT_ID'))
+print(len(vs) + 1)
+"
+  else
+    grep -oP "${VERSION_VAR}\s*=\s*\K\d+" "$PROMPTS_PATH"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -155,6 +175,10 @@ echo ""
 echo "  Cycles:     $CYCLES"
 echo "  Agent:      $APP_NAME"
 echo "  Config:     $AGENT_CONFIG"
+echo "  Storage:    $PROMPT_STORAGE"
+if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
+  echo "  Prompt ID:  $VERTEX_PROMPT_ID"
+fi
 echo "  Traffic:    $TRAFFIC_COUNT questions per cycle"
 CYCLE_START_TIME=$(date +%s)
 
@@ -460,7 +484,11 @@ echo "  Artifacts:"
 ls -1 "$REPORTS_DIR"/ 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 echo ""
 echo "  Inspect changes:"
-echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
+if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
+  echo "    Prompt stored in Vertex AI: $VERTEX_PROMPT_ID"
+else
+  echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
+fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
 separator
 echo ""

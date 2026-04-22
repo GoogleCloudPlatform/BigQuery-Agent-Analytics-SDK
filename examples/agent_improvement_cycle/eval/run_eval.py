@@ -38,7 +38,7 @@ _DEMO_DIR = os.path.dirname(_SCRIPT_DIR)
 # Add parent to path so we can import agent_improvement
 sys.path.insert(0, _DEMO_DIR)
 
-_DEFAULT_CONFIG = os.path.join(_DEMO_DIR, "improve", "config.json")
+_DEFAULT_CONFIG = os.path.join(_DEMO_DIR, "config.json")
 
 
 def load_eval_cases(path: str | None = None) -> list[dict]:

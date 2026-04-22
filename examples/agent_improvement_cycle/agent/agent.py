@@ -29,7 +29,6 @@ from google.adk.plugins.bigquery_agent_analytics_plugin import BigQueryLoggerCon
 import google.auth
 from google.genai import types
 
-from .prompts import CURRENT_PROMPT
 from .tools import get_current_date
 from .tools import lookup_company_policy
 
@@ -73,8 +72,29 @@ def create_agent(prompt: str) -> Agent:
   )
 
 
-# Build the agent
-root_agent = create_agent(CURRENT_PROMPT)
+# Read prompt: Vertex AI Prompt Registry if configured, else local prompts.py
+_vertex_prompt_id = os.getenv("VERTEX_PROMPT_ID")
+if _vertex_prompt_id:
+  from vertexai import Client as _VertexClient
+
+  _vx_client = _VertexClient(project=project_id, location=LOCATION)
+  _prompt_obj = _vx_client.prompts.get(prompt_id=_vertex_prompt_id)
+  _prompt_text = ""
+  if (
+      _prompt_obj.prompt_data
+      and _prompt_obj.prompt_data.system_instruction
+      and _prompt_obj.prompt_data.system_instruction.parts
+  ):
+    _prompt_text = (
+        _prompt_obj.prompt_data.system_instruction.parts[0].text or ""
+    )
+  print(f"  Loaded prompt from Vertex AI ({_vertex_prompt_id})")
+else:
+  from .prompts import CURRENT_PROMPT
+
+  _prompt_text = CURRENT_PROMPT
+
+root_agent = create_agent(_prompt_text)
 
 # BigQuery telemetry
 bq_config = BigQueryLoggerConfig(

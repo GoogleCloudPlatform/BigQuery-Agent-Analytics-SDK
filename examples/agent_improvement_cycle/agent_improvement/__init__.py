@@ -27,12 +27,14 @@ from agent_improvement.improver_agent import create_improver_agent
 from agent_improvement.improver_agent import run_improvement
 from agent_improvement.prompt_adapter import PromptAdapter
 from agent_improvement.prompt_adapter import PythonFilePromptAdapter
+from agent_improvement.prompt_adapter import VertexPromptAdapter
 from agent_improvement.tool_introspection import extract_tool_signatures
 
 __all__ = [
     "ImprovementConfig",
     "PromptAdapter",
     "PythonFilePromptAdapter",
+    "VertexPromptAdapter",
     "EvalRunner",
     "extract_tool_signatures",
     "create_improver_agent",

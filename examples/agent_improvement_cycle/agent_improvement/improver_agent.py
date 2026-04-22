@@ -111,21 +111,13 @@ def read_current_prompt() -> str:
   )
 
 
-def generate_candidate(current_prompt: str, current_version: int) -> str:
-  """Generate an improved prompt candidate using Gemini.
-
-  Args:
-      current_prompt: The current agent prompt text.
-      current_version: The current prompt version number.
-
-  Returns:
-      JSON with ``improved_prompt`` and ``changes_summary`` fields.
-  """
-  config: ImprovementConfig = _state["config"]
+def _generate_via_gemini(
+    config: ImprovementConfig, current_prompt: str, current_version: int
+) -> str:
+  """Generate an improved prompt using raw Gemini generation."""
   report = _state.get("report", {})
   summary = report.get("summary", {})
 
-  # Format problem sessions
   lines = []
   for session in report.get("sessions", []):
     metrics = session.get("metrics", {})
@@ -173,6 +165,173 @@ def generate_candidate(current_prompt: str, current_version: int) -> str:
       ),
   )
   return response.text
+
+
+async def _generate_ground_truth(
+    config: ImprovementConfig, failed_sessions: list[dict]
+) -> list[dict]:
+  """Generate synthetic ground truth for failed sessions.
+
+  Uses a "teacher agent" -- the same agent factory with a prompt
+  that explicitly instructs tool usage -- to produce reference
+  answers for each failed question.  The teacher runs with the
+  same tools as the target agent, so its answers are grounded in
+  real tool output.
+
+  Returns a list of dicts with ``question``, ``bad_response``, and
+  ``ground_truth`` keys.
+  """
+  teacher_prompt = (
+      "You are an expert assistant. For EVERY question, you MUST call "
+      "the available tools to look up the answer. NEVER say 'I don't "
+      "know' or 'contact HR'. ALWAYS use the tools first, then answer "
+      "based on the tool results. Be specific and thorough."
+  )
+  teacher_agent = config.agent_factory(teacher_prompt)
+  runner = InMemoryRunner(agent=teacher_agent, app_name="teacher_agent")
+
+  async def _get_answer(session: dict) -> dict:
+    question = session.get("question", "")
+    sess = await runner.session_service.create_session(
+        app_name="teacher_agent", user_id="teacher"
+    )
+    msg = Content(role="user", parts=[Part(text=question)])
+    answer = ""
+    async for event in runner.run_async(
+        user_id="teacher", session_id=sess.id, new_message=msg
+    ):
+      if event.content and event.content.parts:
+        for part in event.content.parts:
+          if part.text:
+            answer += part.text
+    return {
+        "question": question,
+        "bad_response": session.get("response", "")[:500],
+        "ground_truth": answer,
+    }
+
+  results = list(
+      await asyncio.gather(*[_get_answer(s) for s in failed_sessions])
+  )
+  return [r for r in results if r["ground_truth"].strip()]
+
+
+async def _generate_via_vertex_optimizer(
+    config: ImprovementConfig, current_prompt: str
+) -> str:
+  """Generate an improved prompt using Vertex AI Prompt Optimizer.
+
+  Workflow:
+
+  1. Extract failed sessions from the quality report.
+  2. Run a **teacher agent** (same tools, better prompt) on each
+     failed question to produce synthetic ground truth.
+  3. Feed the original prompt + (question, bad_response,
+     ground_truth) triples to the Vertex AI Prompt Optimizer in
+     ``target_response`` mode.
+  4. Return the optimizer's improved system instructions.
+  """
+  import pandas as pd
+  from vertexai import Client
+  from vertexai._genai.types.common import OptimizeConfig
+  from vertexai._genai.types.common import OptimizeTarget
+
+  report = _state.get("report", {})
+
+  # Collect failed sessions
+  failed = []
+  for session in report.get("sessions", []):
+    metrics = session.get("metrics", {})
+    usefulness = metrics.get("response_usefulness", {})
+    cat = usefulness.get("category", "unknown")
+    if cat in ("unhelpful", "partial"):
+      failed.append(session)
+
+  if not failed:
+    return json.dumps(
+        {
+            "improved_prompt": current_prompt,
+            "changes_summary": "No problem sessions to optimize against.",
+        }
+    )
+
+  # Generate ground truth via teacher agent
+  print("  Generating synthetic ground truth via teacher agent...")
+  gt_results = await _generate_ground_truth(config, failed)
+  print(f"  Generated {len(gt_results)} ground truth answers.")
+
+  if not gt_results:
+    return json.dumps(
+        {
+            "improved_prompt": current_prompt,
+            "changes_summary": "Teacher agent could not generate ground truth.",
+        }
+    )
+
+  # Build DataFrame for target_response mode
+  rows = []
+  for r in gt_results:
+    rows.append(
+        {
+            "prompt": r["question"],
+            "model_response": r["bad_response"],
+            "target_response": r["ground_truth"],
+        }
+    )
+
+  df = pd.DataFrame(rows)
+
+  client = Client(location="us-central1")
+  result = client.prompts.optimize(
+      prompt=current_prompt,
+      config=OptimizeConfig(
+          optimization_target=(
+              OptimizeTarget.OPTIMIZATION_TARGET_FEW_SHOT_TARGET_RESPONSE
+          ),
+          examples_dataframe=df,
+      ),
+  )
+
+  parsed = result.parsed_response
+  if (
+      hasattr(parsed, "new_system_instructions")
+      and parsed.new_system_instructions
+  ):
+    improved = parsed.new_system_instructions
+    changes = "Vertex AI Prompt Optimizer (target_response mode)"
+  elif hasattr(parsed, "suggested_prompt") and parsed.suggested_prompt:
+    improved = parsed.suggested_prompt
+    changes = "Vertex AI Prompt Optimizer (guideline mode)"
+  else:
+    improved = current_prompt
+    changes = "Optimizer returned no changes"
+
+  return json.dumps(
+      {
+          "improved_prompt": improved,
+          "changes_summary": changes,
+      }
+  )
+
+
+async def generate_candidate(current_prompt: str, current_version: int) -> str:
+  """Generate an improved prompt candidate.
+
+  Uses the Vertex AI Prompt Optimizer when ``use_vertex_optimizer``
+  is enabled in config, otherwise falls back to raw Gemini generation.
+
+  Args:
+      current_prompt: The current agent prompt text.
+      current_version: The current prompt version number.
+
+  Returns:
+      JSON with ``improved_prompt`` and ``changes_summary`` fields.
+  """
+  config: ImprovementConfig = _state["config"]
+
+  if config.use_vertex_optimizer:
+    return await _generate_via_vertex_optimizer(config, current_prompt)
+  return _generate_via_gemini(config, current_prompt, current_version)
 
 
 async def test_candidate(candidate_prompt: str) -> str:

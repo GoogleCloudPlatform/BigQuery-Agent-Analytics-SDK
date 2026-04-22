@@ -58,3 +58,4 @@ class ImprovementConfig:
   max_attempts: int = 3
   quality_threshold: float = 1.0
   judge_prompt: str | None = None
+  use_vertex_optimizer: bool = False

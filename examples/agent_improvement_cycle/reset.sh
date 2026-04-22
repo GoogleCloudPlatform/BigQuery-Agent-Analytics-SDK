@@ -22,12 +22,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Resetting demo to initial state..."
 
-# Restore V1 prompt and original golden eval set from git
-git checkout -- "$SCRIPT_DIR/agent/prompts.py" "$SCRIPT_DIR/eval/eval_cases.json"
+# Restore original golden eval set from git
+git checkout -- "$SCRIPT_DIR/eval/eval_cases.json"
+
+# Delete old prompt, create fresh V1 in Vertex AI
+python3 "$SCRIPT_DIR/setup_vertex.py"
 
 # Remove generated traffic and reports
 rm -f "$SCRIPT_DIR"/eval/synthetic_traffic_cycle_*.json
 rm -rf "$SCRIPT_DIR"/reports/*
 
-echo "Done. Prompt reset to V1, golden eval set reset to 3 cases."
+echo ""
+echo "Done. Prompt reset to V1 in Vertex AI, golden eval set reset to 3 cases."
 echo "Run ./run_cycle.sh to start a fresh cycle."
