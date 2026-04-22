@@ -17,7 +17,7 @@
 # Agent Improvement Cycle Orchestrator
 # ============================================================================
 #
-# Runs a closed-loop improvement cycle for any ADK agent.  Each cycle:
+# Runs a closed-loop improvement cycle for an ADK agent.  Each cycle:
 #
 #   Step 1  Generate synthetic traffic  (Gemini produces diverse questions)
 #   Step 2  Run traffic through agent   (sessions logged to BigQuery)
@@ -26,10 +26,9 @@
 #   Step 5  Measure improvement         (fresh traffic + LLM judge)
 #
 # Usage:
-#   ./run_cycle.sh                                          # Demo agent
-#   ./run_cycle.sh --agent-config /path/to/config.py        # Any agent
-#   ./run_cycle.sh --cycles 3                               # 3 cycles
-#   ./run_cycle.sh --eval-only                              # Steps 1-3 only
+#   ./run_cycle.sh              # Run one improvement cycle
+#   ./run_cycle.sh --cycles 3   # Run 3 consecutive cycles
+#   ./run_cycle.sh --eval-only  # Only run Steps 1-3, skip improvement
 # ============================================================================
 
 set -euo pipefail
@@ -51,8 +50,8 @@ fi
 # Defaults
 CYCLES=1
 EVAL_ONLY=false
+APP_NAME="company_info_agent"
 TRAFFIC_COUNT=10
-AGENT_CONFIG=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -65,13 +64,8 @@ while [[ $# -gt 0 ]]; do
       EVAL_ONLY=true
       shift
       ;;
-    --agent-config)
-      AGENT_CONFIG="$2"
-      shift 2
-      ;;
     --app-name)
-      # Legacy flag, overrides config's APP_NAME
-      APP_NAME_OVERRIDE="$2"
+      APP_NAME="$2"
       shift 2
       ;;
     --traffic-count)
@@ -82,11 +76,9 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --agent-config F   Path to agent's improvement_config.py"
-      echo "                     (default: improve/improvement_config.py)"
       echo "  --cycles N         Run N improvement cycles (default: 1)"
       echo "  --eval-only        Only run evaluation (Steps 1-3), skip improvement"
-      echo "  --app-name X       Override agent app name for BQ filtering"
+      echo "  --app-name X       Agent app name for filtering (default: company_info_agent)"
       echo "  --traffic-count N  Number of synthetic questions per cycle (default: 10)"
       echo "  -h, --help         Show this help message"
       exit 0
@@ -99,48 +91,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$REPORTS_DIR"
-
-# ---------------------------------------------------------------------------
-# Load agent config metadata
-# ---------------------------------------------------------------------------
-
-# Resolve config path
-if [[ -z "$AGENT_CONFIG" ]]; then
-  AGENT_CONFIG="$SCRIPT_DIR/improve/improvement_config.py"
-fi
-AGENT_CONFIG="$(cd "$(dirname "$AGENT_CONFIG")" && pwd)/$(basename "$AGENT_CONFIG")"
-
-# Read metadata from the config module
-_read_config_var() {
-  python3 -c "
-import importlib.util, sys
-spec = importlib.util.spec_from_file_location('cfg', '$AGENT_CONFIG')
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-print(getattr(mod, '$1', ''))
-" 2>/dev/null
-}
-
-APP_NAME="${APP_NAME_OVERRIDE:-$(_read_config_var APP_NAME)}"
-PROMPTS_PATH="$(_read_config_var PROMPTS_PATH)"
-EVAL_CASES_PATH="$(_read_config_var EVAL_CASES_PATH)"
-TRAFFIC_GENERATOR="$(_read_config_var TRAFFIC_GENERATOR)"
-
-# Build the --agent-config flag for Python scripts
-AGENT_CONFIG_FLAG="--agent-config $AGENT_CONFIG"
-
-# Helper: read CURRENT_VERSION from the prompts file via the config module
-_read_version() {
-  python3 -c "
-import importlib.util
-spec = importlib.util.spec_from_file_location('cfg', '$AGENT_CONFIG')
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-config = mod.build_config()
-_, version = config.prompt_adapter.read_prompt()
-print(version)
-"
-}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -168,7 +118,6 @@ echo "  AGENT IMPROVEMENT CYCLE"
 echo ""
 echo "  Cycles:     $CYCLES"
 echo "  Agent:      $APP_NAME"
-echo "  Config:     $AGENT_CONFIG"
 echo "  Traffic:    $TRAFFIC_COUNT questions per cycle"
 CYCLE_START_TIME=$(date +%s)
 
@@ -183,7 +132,7 @@ echo ""
 step_start
 
 set +e
-python3 "$SCRIPT_DIR/eval/run_eval.py" --golden $AGENT_CONFIG_FLAG
+python3 "$SCRIPT_DIR/eval/run_eval.py" --golden
 PREFLIGHT_EXIT=$?
 set -e
 step_end
@@ -195,7 +144,6 @@ if [[ $PREFLIGHT_EXIT -ne 0 ]]; then
 
   EVAL_RESULTS="$REPORTS_DIR/latest_eval_results.json"
   python3 "$SCRIPT_DIR/run_improvement.py" \
-    $AGENT_CONFIG_FLAG \
     --from-eval-results "$EVAL_RESULTS"
 
   # Verify the fix worked
@@ -203,7 +151,7 @@ if [[ $PREFLIGHT_EXIT -ne 0 ]]; then
   echo "  Re-running pre-flight after auto-fix..."
   echo ""
   set +e
-  python3 "$SCRIPT_DIR/eval/run_eval.py" --golden $AGENT_CONFIG_FLAG
+  python3 "$SCRIPT_DIR/eval/run_eval.py" --golden
   PREFLIGHT_EXIT=$?
   set -e
 
@@ -222,7 +170,11 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo "  CYCLE $cycle OF $CYCLES"
 
   # Get current prompt version
-  CURRENT_V=$(_read_version)
+  CURRENT_V=$(python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+from agent.prompts import CURRENT_VERSION
+print(CURRENT_VERSION)
+")
 
   # =========================================================================
   # STEP 1: Generate synthetic traffic
@@ -232,12 +184,13 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo "  STEP 1/$TOTAL_STEPS: GENERATE SYNTHETIC TRAFFIC"
   echo ""
   echo "  Goal:    Produce diverse user questions that differ from the golden eval set"
-  echo "  Method:  Gemini generates $TRAFFIC_COUNT questions"
+  echo "  Method:  Gemini generates $TRAFFIC_COUNT realistic employee questions"
+  echo "  Output:  eval/synthetic_traffic_cycle_${cycle}.json"
   echo ""
   step_start
 
-  TRAFFIC_JSON="$REPORTS_DIR/synthetic_traffic_cycle_${cycle}.json"
-  python3 "$TRAFFIC_GENERATOR" \
+  TRAFFIC_JSON="$SCRIPT_DIR/eval/synthetic_traffic_cycle_${cycle}.json"
+  python3 "$SCRIPT_DIR/eval/generate_traffic.py" \
     --count "$TRAFFIC_COUNT" \
     --output "$TRAFFIC_JSON"
 
@@ -252,12 +205,12 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo ""
   echo "  Goal:    Send questions to the agent, log every session to BigQuery"
   echo "  Prompt:  V${CURRENT_V} (current)"
+  echo "  Input:   eval/synthetic_traffic_cycle_${cycle}.json"
   echo "  Logging: BigQuery via BigQueryAgentAnalyticsPlugin"
   echo ""
   step_start
 
   python3 "$SCRIPT_DIR/eval/run_eval.py" \
-    $AGENT_CONFIG_FLAG \
     --eval-cases "$TRAFFIC_JSON"
 
   step_end
@@ -273,6 +226,7 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo "  Method:  SDK quality_report.py reads sessions, LLM judges each one"
   echo "  Metrics: response_usefulness (meaningful/partial/unhelpful)"
   echo "           task_grounding (grounded/ungrounded)"
+  echo "  Output:  reports/quality_report_cycle_${cycle}.json"
   echo ""
   step_start
 
@@ -280,6 +234,8 @@ for cycle in $(seq 1 "$CYCLES"); do
   rm -f "$REPORT_JSON"
 
   # Retry with backoff for BigQuery streaming buffer propagation.
+  # quality_report.py always exits 0, so we must check the session
+  # count ourselves — an empty report means data hasn't landed yet.
   MAX_RETRIES=6
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     sleep 15
@@ -327,6 +283,9 @@ for cycle in $(seq 1 "$CYCLES"); do
     continue
   fi
 
+  # =========================================================================
+  # STEP 4: Auto-improve the agent prompt
+  # =========================================================================
   separator
   echo ""
   echo "  STEP 4/$TOTAL_STEPS: IMPROVE PROMPT"
@@ -336,14 +295,16 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo "           2. Gemini generates improved prompt"
   echo "           3. Regression gate: candidate must pass ALL golden"
   echo "              cases (original + extracted). Retry if any fail."
+  echo "  Input:   reports/quality_report_cycle_${cycle}.json"
+  echo "  Output:  agent/prompts.py (new version)"
+  echo "           eval/eval_cases.json (extended with failed cases)"
   echo ""
   step_start
 
-  GOLDEN_BEFORE=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
+  GOLDEN_BEFORE=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
   set +e
   python3 "$SCRIPT_DIR/run_improvement.py" \
-    $AGENT_CONFIG_FLAG \
     "$REPORT_JSON"
   IMPROVE_EXIT=$?
   set -e
@@ -354,8 +315,14 @@ for cycle in $(seq 1 "$CYCLES"); do
     echo "  Continuing with current prompt."
   fi
 
-  NEW_V=$(_read_version)
-  GOLDEN_AFTER=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
+  NEW_V=$(python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+import importlib, agent.prompts
+importlib.reload(agent.prompts)
+print(agent.prompts.CURRENT_VERSION)
+")
+
+  GOLDEN_AFTER=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
   echo ""
   echo "  Prompt:      V${CURRENT_V} -> V${NEW_V}"
@@ -379,17 +346,19 @@ for cycle in $(seq 1 "$CYCLES"); do
 
   # 5a: Generate fresh synthetic traffic
   echo "  --- Fresh traffic ---"
-  FRESH_TRAFFIC="$REPORTS_DIR/synthetic_traffic_cycle_${cycle}_fresh.json"
-  python3 "$TRAFFIC_GENERATOR" \
+  FRESH_TRAFFIC="$SCRIPT_DIR/eval/synthetic_traffic_cycle_${cycle}_fresh.json"
+  python3 "$SCRIPT_DIR/eval/generate_traffic.py" \
     --count "$TRAFFIC_COUNT" \
     --output "$FRESH_TRAFFIC"
 
   # 5c: Run fresh traffic through the improved agent (WITH BQ logging)
   python3 "$SCRIPT_DIR/eval/run_eval.py" \
-    $AGENT_CONFIG_FLAG \
     --eval-cases "$FRESH_TRAFFIC"
 
   # 5d: Score from BigQuery
+  # Wait 30s for BQ streaming buffer propagation. Without this, the
+  # query may return stale sessions from Step 2 (already visible) instead
+  # of the fresh Step 5c sessions (still propagating).
   echo ""
   echo "  --- Quality report from BigQuery (waiting for propagation) ---"
   FRESH_REPORT="$REPORTS_DIR/quality_report_cycle_${cycle}_after.json"
@@ -460,8 +429,13 @@ done
 # ---------------------------------------------------------------------------
 
 TOTAL_ELAPSED=$(( $(date +%s) - CYCLE_START_TIME ))
-FINAL_V=$(_read_version)
-FINAL_GOLDEN=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
+FINAL_V=$(python3 -c "
+import sys; sys.path.insert(0, '$SCRIPT_DIR')
+import importlib, agent.prompts
+importlib.reload(agent.prompts)
+print(agent.prompts.CURRENT_VERSION)
+")
+FINAL_GOLDEN=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
 separator
 echo ""
@@ -474,7 +448,11 @@ echo "  Artifacts:"
 ls -1 "$REPORTS_DIR"/ 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 echo ""
 echo "  Inspect changes:"
-echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
-echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
+echo "    git diff agent/prompts.py       # prompt evolution"
+echo "    git diff eval/eval_cases.json   # new regression cases"
+echo "    cat agent/prompts.py            # all prompt versions"
+echo ""
+echo "  Reset to V1:"
+echo "    ./reset.sh"
 separator
 echo ""
