@@ -67,7 +67,7 @@ def _unwrap_text_field(value: str) -> str:
   """
   if not value.startswith(_TEXT_WRAPPER_PREFIX):
     return value
-  inner = value[len(_TEXT_WRAPPER_PREFIX):]
+  inner = value[len(_TEXT_WRAPPER_PREFIX) :]
   if not inner or inner[0] not in ("'", '"'):
     return inner
   quote = inner[0]
@@ -848,7 +848,11 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response")
           if result:
-            return _unwrap_text_field(result) if isinstance(result, str) else result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
           return _unwrap_text_field(str(c))
 
@@ -858,7 +862,11 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response") or c.get("text_summary")
           if result:
-            return _unwrap_text_field(result) if isinstance(result, str) else result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
           return _unwrap_text_field(str(c))
     return None
