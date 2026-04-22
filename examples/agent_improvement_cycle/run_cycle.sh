@@ -246,11 +246,7 @@ print(CURRENT_VERSION)
       --time-period 24h || { rm -f "$REPORT_JSON"; true; }
 
     if [[ -f "$REPORT_JSON" ]]; then
-      SESSION_COUNT=$(python3 -c "
-import json
-with open('$REPORT_JSON') as f:
-    print(json.load(f).get('summary', {}).get('total_sessions', 0))
-" 2>/dev/null || echo "0")
+      SESSION_COUNT=$(jq -r '.summary.total_sessions // 0' "$REPORT_JSON" 2>/dev/null || echo "0")
       if [[ "$SESSION_COUNT" -gt 0 ]]; then
         break
       fi
@@ -269,15 +265,9 @@ with open('$REPORT_JSON') as f:
   fi
 
   # Print quality summary
-  python3 -c "
-import json
-with open('$REPORT_JSON') as f:
-    data = json.load(f)
-s = data.get('summary', {})
-print()
-print(f\"  BASELINE SCORE (V${CURRENT_V}): {s.get('meaningful_rate', '?')}% meaningful\")
-print(f\"  ({s.get('meaningful', '?')} meaningful, {s.get('partial', '?')} partial, {s.get('unhelpful', '?')} unhelpful out of {s.get('total_sessions', '?')})\")
-"
+  echo ""
+  echo "  BASELINE SCORE (V${CURRENT_V}): $(jq -r '.summary.meaningful_rate' "$REPORT_JSON")% meaningful"
+  echo "  ($(jq -r '.summary.meaningful' "$REPORT_JSON") meaningful, $(jq -r '.summary.partial' "$REPORT_JSON") partial, $(jq -r '.summary.unhelpful' "$REPORT_JSON") unhelpful out of $(jq -r '.summary.total_sessions' "$REPORT_JSON"))"
 
   step_end
 
@@ -311,11 +301,7 @@ print(f\"  ({s.get('meaningful', '?')} meaningful, {s.get('partial', '?')} parti
   echo ""
   step_start
 
-  GOLDEN_BEFORE=$(python3 -c "
-import json
-with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
-    print(len(json.load(f)['eval_cases']))
-")
+  GOLDEN_BEFORE=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
   set +e
   python3 "$SCRIPT_DIR/run_improvement.py" \
@@ -336,11 +322,7 @@ importlib.reload(agent.prompts)
 print(agent.prompts.CURRENT_VERSION)
 ")
 
-  GOLDEN_AFTER=$(python3 -c "
-import json
-with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
-    print(len(json.load(f)['eval_cases']))
-")
+  GOLDEN_AFTER=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
   echo ""
   echo "  Prompt:      V${CURRENT_V} -> V${NEW_V}"
@@ -394,14 +376,9 @@ with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
     # Guard: if the report has the same session IDs as Step 3, the
     # fresh sessions have not propagated yet. Delete and retry.
     if [[ -f "$FRESH_REPORT" ]]; then
-      IS_FRESH=$(python3 -c "
-import json, sys
-with open('$REPORT_JSON') as f:
-    old = {s['session_id'] for s in json.load(f).get('sessions', [])}
-with open('$FRESH_REPORT') as f:
-    new = {s['session_id'] for s in json.load(f).get('sessions', [])}
-print('yes' if new and new != old else 'no')
-" 2>/dev/null || echo "no")
+      OLD_IDS=$(jq -r '[.sessions[].session_id] | sort | join(",")' "$REPORT_JSON" 2>/dev/null || echo "")
+      NEW_IDS=$(jq -r '[.sessions[].session_id] | sort | join(",")' "$FRESH_REPORT" 2>/dev/null || echo "")
+      IS_FRESH=$( [[ -n "$NEW_IDS" && "$NEW_IDS" != "$OLD_IDS" ]] && echo "yes" || echo "no" )
       if [[ "$IS_FRESH" == "yes" ]]; then
         break
       fi
@@ -420,28 +397,26 @@ print('yes' if new and new != old else 'no')
   fi
 
   # 5e: Print before/after comparison
-  python3 -c "
-import json
-with open('$REPORT_JSON') as f:
-    before = json.load(f)
-with open('$FRESH_REPORT') as f:
-    after = json.load(f)
-b = before.get('summary', {})
-a = after.get('summary', {})
-b_mr = int(b.get('meaningful_rate', 0))
-a_mr = int(a.get('meaningful_rate', 0))
-before_line = f'Before (V${CURRENT_V}):  {b_mr:>3}% meaningful  ({b.get(\"meaningful\", \"?\")}/{b.get(\"total_sessions\", \"?\")} sessions)'
-after_line  = f'After  (V${NEW_V}):  {a_mr:>3}% meaningful  ({a.get(\"meaningful\", \"?\")}/{a.get(\"total_sessions\", \"?\")} sessions)'
-title = 'CYCLE ${cycle} RESULTS'
-W = max(len(before_line), len(after_line), len(title)) + 4
-print()
-print(f'  ┌{\"─\" * W}┐')
-print(f'  │{title:^{W}}│')
-print(f'  ├{\"─\" * W}┤')
-print(f'  │  {before_line:<{W - 2}}│')
-print(f'  │  {after_line:<{W - 2}}│')
-print(f'  └{\"─\" * W}┘')
-" 2>/dev/null || true
+  B_MR=$(jq -r '.summary.meaningful_rate // 0' "$REPORT_JSON")
+  B_M=$(jq -r '.summary.meaningful // "?"' "$REPORT_JSON")
+  B_T=$(jq -r '.summary.total_sessions // "?"' "$REPORT_JSON")
+  A_MR=$(jq -r '.summary.meaningful_rate // 0' "$FRESH_REPORT")
+  A_M=$(jq -r '.summary.meaningful // "?"' "$FRESH_REPORT")
+  A_T=$(jq -r '.summary.total_sessions // "?"' "$FRESH_REPORT")
+
+  BEFORE_LINE="Before (V${CURRENT_V}):  ${B_MR}% meaningful  (${B_M}/${B_T} sessions)"
+  AFTER_LINE="After  (V${NEW_V}):  ${A_MR}% meaningful  (${A_M}/${A_T} sessions)"
+  TITLE="CYCLE ${cycle} RESULTS"
+  # Width = longest line + 4 padding
+  W=${#BEFORE_LINE}; [[ ${#AFTER_LINE} -gt $W ]] && W=${#AFTER_LINE}; [[ ${#TITLE} -gt $W ]] && W=${#TITLE}; W=$((W + 4))
+  HR=$(printf '─%.0s' $(seq 1 "$W"))
+  echo ""
+  printf "  ┌%s┐\n" "$HR"
+  printf "  │%*s%s%*s│\n" $(( (W - ${#TITLE}) / 2 )) "" "$TITLE" $(( (W - ${#TITLE} + 1) / 2 )) ""
+  printf "  ├%s┤\n" "$HR"
+  printf "  │  %-$((W - 2))s│\n" "$BEFORE_LINE"
+  printf "  │  %-$((W - 2))s│\n" "$AFTER_LINE"
+  printf "  └%s┘\n" "$HR"
 
   step_end
 
@@ -460,11 +435,7 @@ import importlib, agent.prompts
 importlib.reload(agent.prompts)
 print(agent.prompts.CURRENT_VERSION)
 ")
-FINAL_GOLDEN=$(python3 -c "
-import json
-with open('$SCRIPT_DIR/eval/eval_cases.json') as f:
-    print(len(json.load(f)['eval_cases']))
-")
+FINAL_GOLDEN=$(jq '.eval_cases | length' "$SCRIPT_DIR/eval/eval_cases.json")
 
 separator
 echo ""
