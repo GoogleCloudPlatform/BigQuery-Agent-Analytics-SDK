@@ -54,38 +54,85 @@ class PromptAdapter(ABC):
 class PythonFilePromptAdapter(PromptAdapter):
   """Reads/writes prompts from a ``prompts.py`` file.
 
-  Expected file format::
+  Default expected file format::
 
       PROMPT_V1 = \"\"\"...\"\"\"
 
       CURRENT_PROMPT = PROMPT_V1
       CURRENT_VERSION = 1
 
+  For multi-prompt agents (e.g. a supervisor with sub-agent prompts),
+  set ``prompt_variable`` to the specific variable name::
+
+      adapter = PythonFilePromptAdapter(
+          "prompts.py",
+          prompt_variable="CURRENT_SUPERVISOR_INSTRUCTION",
+      )
+
   Each improvement appends a new ``PROMPT_V<n+1>`` block and updates
-  the ``CURRENT_PROMPT`` and ``CURRENT_VERSION`` references.
+  the prompt variable and ``CURRENT_VERSION`` references.
   """
 
-  def __init__(self, path: str) -> None:
+  def __init__(
+      self,
+      path: str,
+      prompt_variable: str = "CURRENT_PROMPT",
+      version_variable: str = "CURRENT_VERSION",
+  ) -> None:
     self._path = path
+    self._prompt_variable = prompt_variable
+    self._version_variable = version_variable
 
   @property
   def path(self) -> str:
     return self._path
 
+  @property
+  def prompt_variable(self) -> str:
+    return self._prompt_variable
+
+  @property
+  def version_variable(self) -> str:
+    return self._version_variable
+
   def read_prompt(self) -> tuple[str, int]:
     with open(self._path) as f:
       content = f.read()
 
-    version_match = re.search(r"CURRENT_VERSION\s*=\s*(\d+)", content)
+    version_match = re.search(rf"{self._version_variable}\s*=\s*(\d+)", content)
     current_version = int(version_match.group(1)) if version_match else 1
 
-    prompt_ref_match = re.search(r"CURRENT_PROMPT\s*=\s*PROMPT_V(\d+)", content)
+    # Match: CURRENT_PROMPT = PROMPT_V<n>
+    prompt_ref_match = re.search(
+        rf"{re.escape(self._prompt_variable)}\s*=\s*PROMPT_V(\d+)", content
+    )
     if prompt_ref_match:
       v = prompt_ref_match.group(1)
       pattern = rf'PROMPT_V{v}\s*=\s*"""(.*?)"""'
       prompt_match = re.search(pattern, content, re.DOTALL)
       if prompt_match:
         return prompt_match.group(1).strip(), current_version
+
+    # Fallback: match CURRENT_PROMPT = """...""" (inline string)
+    inline_match = re.search(
+        rf'{re.escape(self._prompt_variable)}\s*=\s*"""(.*?)"""',
+        content,
+        re.DOTALL,
+    )
+    if inline_match:
+      return inline_match.group(1).strip(), current_version
+
+    # Fallback: match CURRENT_PROMPT = "..." or CURRENT_PROMPT = (...)
+    # For parenthesized string concatenation, execute the file
+    # and read the variable value directly.
+    try:
+      ns = {}
+      exec(compile(content, self._path, "exec"), ns)  # noqa: S102
+      value = ns.get(self._prompt_variable, "")
+      if isinstance(value, str) and value:
+        return value.strip(), current_version
+    except Exception:
+      pass
 
     return "", current_version
 
@@ -109,21 +156,29 @@ class PythonFilePromptAdapter(PromptAdapter):
         f'PROMPT_V{new_version} = """{safe_prompt}\n"""\n'
     )
 
+    # Update the prompt variable reference
+    # Handle both CURRENT_PROMPT = PROMPT_V<n> and CURRENT_PROMPT = <IDENTIFIER>
+    prompt_var_escaped = re.escape(self._prompt_variable)
     content = re.sub(
-        r"CURRENT_PROMPT\s*=\s*PROMPT_V\d+",
-        f"CURRENT_PROMPT = PROMPT_V{new_version}",
+        rf"{prompt_var_escaped}\s*=\s*\S+",
+        f"{self._prompt_variable} = PROMPT_V{new_version}",
         content,
+        count=1,
     )
+
+    # Update version variable
+    version_var_escaped = re.escape(self._version_variable)
     content = re.sub(
-        r"CURRENT_VERSION\s*=\s*\d+",
-        f"CURRENT_VERSION = {new_version}",
+        rf"{version_var_escaped}\s*=\s*\d+",
+        f"{self._version_variable} = {new_version}",
         content,
     )
 
-    current_prompt_line = f"CURRENT_PROMPT = PROMPT_V{new_version}"
+    # Insert new block before the prompt variable assignment
+    prompt_assignment = f"{self._prompt_variable} = PROMPT_V{new_version}"
     content = content.replace(
-        current_prompt_line,
-        new_block + "\n" + current_prompt_line,
+        prompt_assignment,
+        new_block + "\n" + prompt_assignment,
     )
 
     try:

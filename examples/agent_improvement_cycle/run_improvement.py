@@ -13,64 +13,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run the improvement cycle for the company_info_agent.
+"""Run the improvement cycle for any ADK agent.
 
-This is the demo entry point that wires the reusable
-``agent_improvement`` module to the company_info_agent's shared
-agent factory, tools, and eval set.
+Loads an ``improvement_config.py`` module (via ``--agent-config``) that
+provides the ``build_config()`` function returning an
+``ImprovementConfig``.  Falls back to the demo's company_info_agent
+config when no ``--agent-config`` is given.
 
 Usage:
     python run_improvement.py <report.json>
+    python run_improvement.py --agent-config /path/to/improvement_config.py <report.json>
     python run_improvement.py --from-eval-results <eval_results.json>
 """
 
 import argparse
 import asyncio
+import importlib.util
 import os
 import sys
 
-from dotenv import load_dotenv
-import google.auth
-
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Load environment
-_env_path = os.path.join(_SCRIPT_DIR, ".env")
-if os.path.exists(_env_path):
-  load_dotenv(dotenv_path=_env_path)
-
-_, _auth_project = google.auth.default()
-_project_id = os.getenv("PROJECT_ID") or _auth_project
-os.environ["GOOGLE_CLOUD_PROJECT"] = _project_id
-os.environ["GOOGLE_CLOUD_LOCATION"] = os.getenv(
-    "DEMO_AGENT_LOCATION", "us-central1"
-)
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
-
-# Ensure the demo directory is on the path
 sys.path.insert(0, _SCRIPT_DIR)
 
-from agent.agent import AGENT_TOOLS
-from agent.agent import create_agent
 from agent_improvement import ImprovementConfig
-from agent_improvement import PythonFilePromptAdapter
 from agent_improvement import run_improvement
 
-_MODEL_ID = os.getenv("DEMO_MODEL_ID", "gemini-2.5-flash")
-_PROMPTS_PATH = os.path.join(_SCRIPT_DIR, "agent", "prompts.py")
-_EVAL_CASES_PATH = os.path.join(_SCRIPT_DIR, "eval", "eval_cases.json")
+
+def _load_config_module(config_path: str):
+  """Dynamically import an improvement_config.py module."""
+  spec = importlib.util.spec_from_file_location("agent_config", config_path)
+  mod = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(mod)
+  return mod
 
 
-def _build_config() -> ImprovementConfig:
-  return ImprovementConfig(
-      agent_factory=create_agent,
-      agent_name="company_info_agent",
-      agent_tools=AGENT_TOOLS,
-      prompt_adapter=PythonFilePromptAdapter(_PROMPTS_PATH),
-      eval_cases_path=_EVAL_CASES_PATH,
-      model_id=_MODEL_ID,
-      max_attempts=3,
-  )
+def _load_config(config_path: str | None) -> ImprovementConfig:
+  """Load ImprovementConfig from the given config path or the demo default."""
+  if config_path is None:
+    config_path = os.path.join(_SCRIPT_DIR, "improve", "improvement_config.py")
+  mod = _load_config_module(config_path)
+  return mod.build_config()
 
 
 def main() -> None:
@@ -82,6 +64,15 @@ def main() -> None:
       help="Path to the quality report JSON file",
   )
   parser.add_argument(
+      "--agent-config",
+      type=str,
+      default=None,
+      help=(
+          "Path to the agent's improvement_config.py module. If not"
+          " provided, uses the demo's company_info_agent config."
+      ),
+  )
+  parser.add_argument(
       "--from-eval-results",
       action="store_true",
       help=(
@@ -91,7 +82,7 @@ def main() -> None:
   )
   args = parser.parse_args()
 
-  config = _build_config()
+  config = _load_config(args.agent_config)
   result = asyncio.run(
       run_improvement(
           config,
