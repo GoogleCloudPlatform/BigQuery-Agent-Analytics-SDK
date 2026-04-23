@@ -385,7 +385,7 @@ Use `--format ttl` or `--format rdfxml` to override parser auto-detection from t
 | `rdfs:label` | `description` |
 | `rdfs:comment` | Appended to `description` |
 | `skos:Concept`, `skos:broader`, `skos:definition`, etc. | See **Importing SKOS** below |
-| Dublin Core / other literal predicates | `annotations` (by local name) |
+| Dublin Core / other literal predicates | `annotations` (keyed `prefix:local`, or full IRI when the namespace has no bound prefix) |
 
 XSD datatypes are mapped to ontology types: `xsd:string` to `string`, `xsd:integer` to `integer`, `xsd:decimal` to `numeric`, `xsd:boolean` to `boolean`, `xsd:date` to `date`, `xsd:dateTime` to `timestamp`, and so on.
 
@@ -475,7 +475,7 @@ Abstract elements are declared but not bound to BigQuery tables:
 | `skos:prefLabel`, `skos:altLabel`, `skos:hiddenLabel` (selected language) | `synonyms` |
 | `skos:prefLabel` etc. (other languages) | Annotation `skos:prefLabel@<lang>` |
 | `skos:definition`, `notation`, `scopeNote`, `example`, `historyNote`, `editorialNote`, `changeNote` | Annotation `skos:<pred>` |
-| `skos:inScheme`, `skos:topConceptOf` | Annotation `skos:<pred>` |
+| `skos:inScheme`, `skos:topConceptOf` | Annotation `skos:<pred>` (IRI target stored verbatim) |
 | `skos:broader` / `skos:narrower` | Abstract relationship `skos_broader` (narrower normalized) |
 | `skos:related` | Abstract relationship `skos_related` |
 | `skos:exactMatch` / `closeMatch` / `broadMatch` / `narrowMatch` / `relatedMatch` | Abstract relationship if target is imported; annotation with full IRI otherwise |
@@ -530,7 +530,7 @@ relationships:
 
 If every entity ends up abstract, the drop summary emits a hint: *"all entities are abstract (SKOS-only). No concrete entities are available for binding. Consider representing the taxonomy as dimension columns instead of entity types."*
 
-**Generic literal annotations.** Literal-valued predicates outside the RDF/RDFS/OWL/SKOS namespaces — Dublin Core (`dc:title`, `dcterms:creator`), Schema.org, custom vocabularies — are preserved as `annotations: { <local_name>: <value> }`. Multiple values for the same predicate merge into a sorted list.
+**Generic literal annotations.** Literal-valued predicates outside the RDF/RDFS/OWL/SKOS namespaces — Dublin Core (`dc:title`, `dcterms:creator`), Schema.org, custom vocabularies — are preserved as `annotations: { <key>: <value> }`, where `<key>` is `prefix:local` when the predicate's namespace has a bound prefix and the full IRI otherwise. Retaining the prefix keeps `dc:title` and `dcterms:title` distinguishable. Multiple values for the same predicate merge into a sorted list.
 
 ---
 

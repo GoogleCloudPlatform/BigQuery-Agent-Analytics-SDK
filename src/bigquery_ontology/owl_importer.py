@@ -967,13 +967,16 @@ def _extract_skos_relationships(
       _add_rel("skos_broader", from_name, to_name, _SKOS_BROADER)
 
   # skos:related — symmetric, emit one direction per pair.
+  # Sort endpoints so mutual assertions (:a related :b AND :b related :a)
+  # collapse to a single edge under the ordered dedupe key.
   for subj, obj in g.subject_objects(_SKOS_RELATED):
     if not isinstance(subj, URIRef) or not isinstance(obj, URIRef):
       continue
     from_name = iri_to_name.get(str(subj))
     to_name = iri_to_name.get(str(obj))
     if from_name and to_name:
-      _add_rel("skos_related", from_name, to_name, _SKOS_RELATED)
+      a, b = sorted((from_name, to_name))
+      _add_rel("skos_related", a, b, _SKOS_RELATED)
 
   # Match predicates — relationship if target is imported, else annotation.
   # Collect external matches per (entity, predicate) to allow sort before

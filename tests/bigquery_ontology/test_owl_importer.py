@@ -680,6 +680,25 @@ class TestPureSkosImport:
     assert len(related) >= 1
     assert related[0]["abstract"] is True
 
+  def test_related_is_symmetric_single_edge(self, tmp_path):
+    # skos:related is symmetric; mutual assertions must collapse to one edge.
+    ttl = tmp_path / "mutual_related.ttl"
+    ttl.write_text(
+        "@prefix : <http://example.com/taxonomy#> .\n"
+        "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .\n"
+        ":c1 a skos:Concept ; skos:related :c2 .\n"
+        ":c2 a skos:Concept ; skos:related :c1 .\n",
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    related = [r for r in data["relationships"] if r["name"] == "skos_related"]
+    assert len(related) == 1
+    assert {related[0]["from"], related[0]["to"]} == {"skos_c1", "skos_c2"}
+
   def test_skos_annotations_preserved(self):
     yaml_text, _ = import_owl(
         [_SKOS_TTL],

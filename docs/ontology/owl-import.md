@@ -169,9 +169,12 @@ values, interpreted as "the intersection of these."
 - SKOS labels (`skos:prefLabel`, `skos:altLabel`, `skos:hiddenLabel`)
   and literal-valued SKOS predicates: see §19.
 - Custom annotation properties outside the recognized set (RDF, RDFS,
-  OWL, SKOS) → collected as `annotations: { <local_name>: <value> }`
-  when the value is a literal. Multiple values for the same predicate
-  merge into a sorted list. Non-literal values are dropped.
+  OWL, SKOS) → collected as `annotations: { <key>: <value> }` when the
+  value is a literal, where `<key>` is `prefix:local` when the
+  predicate's namespace has a bound prefix and the full IRI otherwise.
+  Bare local names would collide across vocabularies (e.g. `dc:title`
+  vs. `dcterms:title`). Multiple values for the same predicate merge
+  into a sorted list. Non-literal values are dropped.
 
 ## 10. Primary keys
 
@@ -591,12 +594,14 @@ Literal-valued predicates (all preserved as annotations, colon-prefixed):
 | `skos:editorialNote` | Annotation `skos:editorialNote` | |
 | `skos:changeNote` | Annotation `skos:changeNote` | |
 
-Reference predicates (IRI target stored as local name):
+Reference predicates (IRI target stored verbatim — full IRI preserved
+so scheme identity survives when local names collide across
+vocabularies):
 
 | SKOS construct | Ontology equivalent | Notes |
 |---|---|---|
-| `skos:inScheme` | Annotation `skos:inScheme` | |
-| `skos:topConceptOf` | Annotation `skos:topConceptOf` | |
+| `skos:inScheme` | Annotation `skos:inScheme` | Full IRI preserved |
+| `skos:topConceptOf` | Annotation `skos:topConceptOf` | Full IRI preserved |
 
 Graph-shaped predicates (abstract relationships):
 
@@ -690,13 +695,16 @@ The tag is matched by prefix, so `en` covers `en`, `en-US`, `en-GB`.
 ### 19.7 Generic literal annotations
 
 Unknown literal-valued predicates (not RDF, RDFS, OWL, or SKOS) are
-preserved as `annotations: { <local_name>: <value> }`. Multiple values
-for the same predicate merge into a sorted list.
+preserved as `annotations: { <key>: <value> }`, where `<key>` is
+`prefix:local` when the predicate's namespace has a bound prefix and
+the full IRI otherwise. Multiple values for the same predicate merge
+into a sorted list.
 
 This covers Dublin Core (`dc:title`, `dcterms:creator`), Schema.org
 literals, and custom annotation properties without special handling.
-Full IRI is preserved in the drop summary when the local name is
-ambiguous across source vocabularies.
+Retaining the prefix (or full IRI) keeps vocabularies with colliding
+local names — `dc:title` vs. `dcterms:title` — distinguishable at the
+annotation level, not just in the drop summary.
 
 ### 19.8 Drop summary additions
 
