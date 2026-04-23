@@ -54,6 +54,30 @@ def _colorize(text: str, ansi_code: str, enabled: bool) -> str:
   return f"{ansi_code}{text}{_ANSI_RESET}"
 
 
+_TEXT_WRAPPER_PREFIX = "text: "
+
+
+def _unwrap_text_field(value: str) -> str:
+  """Strip a leading ``text: '...'`` wrapper if present.
+
+  Some ADK plugin versions serialize an LLM response with a literal
+  ``text: '...'`` Python-repr-style prefix in ``content.response``.
+  Strip it so ``Span.summary`` and ``Trace.render`` surface a clean
+  human-readable string.
+  """
+  if not value.startswith(_TEXT_WRAPPER_PREFIX):
+    return value
+  inner = value[len(_TEXT_WRAPPER_PREFIX) :]
+  if not inner or inner[0] not in ("'", '"'):
+    return inner
+  quote = inner[0]
+  # Match trailing quote only if the string is not truncated.
+  if len(inner) >= 2 and inner.endswith(quote):
+    return inner[1:-1]
+  # Truncated — drop the opening quote and leave the rest.
+  return inner[1:]
+
+
 class EventType(Enum):
   """Standard event types logged by the analytics plugin."""
 
@@ -342,6 +366,7 @@ class Span:
       text = self.content.get("text") or ""
     if not text:
       text = self.content.get("raw") or ""
+    text = _unwrap_text_field(text) if isinstance(text, str) else text
     if not text and self.content_parts:
       for p in self.content_parts:
         if p.text:
@@ -823,9 +848,13 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response")
           if result:
-            return result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
-          return str(c)
+          return _unwrap_text_field(str(c))
 
     for span in reversed(self.spans):
       if span.event_type == "AGENT_COMPLETED":
@@ -833,9 +862,13 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response") or c.get("text_summary")
           if result:
-            return result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
-          return str(c)
+          return _unwrap_text_field(str(c))
     return None
 
   @property

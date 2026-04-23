@@ -294,6 +294,57 @@ class TestSpan:
     )
     assert span.summary == "You are a helpful assistant"
 
+  def test_summary_unwraps_text_single_quoted(self):
+    """`text: 'hello'` wrapper should be stripped from response."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text: 'hello world'"},
+    )
+    assert span.summary == "hello world"
+
+  def test_summary_unwraps_text_double_quoted(self):
+    """`text: \"hello\"` wrapper should be stripped too."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": 'text: "hello world"'},
+    )
+    assert span.summary == "hello world"
+
+  def test_summary_unwraps_truncated_text_field(self):
+    """Truncated `text: 'abc...` (no closing quote) strips opening quote only."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text: 'I found three Priyas"},
+    )
+    assert span.summary == "I found three Priyas"
+
+  def test_summary_leaves_plain_text_alone(self):
+    """A response without the wrapper must be returned unchanged."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "Booking confirmed for Priya Patel."},
+    )
+    assert span.summary == "Booking confirmed for Priya Patel."
+
+  def test_summary_leaves_non_wrapper_text_prefix_alone(self):
+    """`text:` without a following space-quoted value is not our wrapper."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text:the-tool-id-is-x"},
+    )
+    # No leading `text: ` (with space), so the unwrapper leaves it alone.
+    assert span.summary == "text:the-tool-id-is-x"
+
 
 class TestTrace:
   """Tests for Trace class."""
@@ -539,6 +590,33 @@ class TestTrace:
     ]
     trace = Trace(trace_id="t", session_id="s", spans=spans)
     assert trace.final_response == "LLM said this"
+
+  def test_final_response_unwraps_text_prefix_from_llm_response(self):
+    """text: '...' wrapper must be stripped at the trace-level accessor too."""
+    ts = datetime.now(timezone.utc)
+    spans = [
+        Span(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=ts,
+            content={"response": "text: 'I found three people named Priya.'"},
+        ),
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "I found three people named Priya."
+
+  def test_final_response_unwraps_text_prefix_from_agent_completed(self):
+    ts = datetime.now(timezone.utc)
+    spans = [
+        Span(
+            event_type="AGENT_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"response": 'text: "Booking confirmed."'},
+        ),
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "Booking confirmed."
 
   def test_final_response_null_agent_completed(self):
     """Handles null AGENT_COMPLETED content (ADK plugin behavior)."""
