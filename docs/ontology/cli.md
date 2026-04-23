@@ -166,10 +166,15 @@ Read OWL sources and emit a `*.ontology.yaml` (see `owl-import.md`).
 
 ```
 gm import-owl <source>... --include-namespace <iri>... [-o <out>]
+              [--format ttl|rdfxml] [--language <tag>] [--json]
 ```
 
 - One or more OWL source files (Turtle, RDF/XML).
 - At least one `--include-namespace` required; multiple allowed.
+- Recognizes both OWL and SKOS constructs; SKOS concepts become
+  abstract entities, SKOS graph predicates become abstract
+  relationships, and SKOS literals become annotations. See
+  `owl-import.md` §19 for the full mapping.
 - Output uses `FILL_IN` for ambiguities and annotations for dropped OWL
   features (see `owl-import.md` §11, §13). `FILL_IN` causes
   `gm validate` to fail until resolved.
@@ -181,9 +186,14 @@ gm import-owl <source>... --include-namespace <iri>... [-o <out>]
 | `--include-namespace <iri>` | Required, repeatable. |
 | `-o <file>`, `--out <file>` | Write YAML to file instead of stdout. |
 | `--format ttl\|rdfxml` | Override parser selection from file extension. |
+| `--language <tag>` | BCP-47 language tag for label selection (default `en`). Other-language labels become language-suffixed annotations. |
 | `--json` | Structured drop-and-placeholder summary. |
 
-Drop summary is printed to stderr regardless of `--json`.
+Drop summary is printed to stderr regardless of `--json`. It includes
+SKOS counts (concepts imported as abstract, relationships imported as
+abstract, annotations preserved, labels discarded by language
+selection, external match targets, generic literal annotations) and a
+hint when every imported entity is abstract.
 
 ## 7. Open questions
 

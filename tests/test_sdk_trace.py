@@ -120,6 +120,73 @@ class TestSpan:
     )
     assert "ERROR" in span.label
 
+  def test_tool_name_for_tool_event(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": "search_contacts"},
+    )
+    assert span.tool_name == "search_contacts"
+
+  def test_tool_name_for_hitl_event(self):
+    span = Span(
+        event_type="HITL_APPROVAL_REQUESTED",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": "book_meeting"},
+    )
+    assert span.tool_name == "book_meeting"
+
+  def test_tool_name_none_for_non_tool_event(self):
+    span = Span(
+        event_type="USER_MESSAGE_RECEIVED",
+        agent=None,
+        timestamp=datetime.now(timezone.utc),
+        content={"text_summary": "Hello"},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_none_when_missing(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_none_when_empty(self):
+    span = Span(
+        event_type="TOOL_STARTING",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": ""},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_does_not_leak_for_non_tool_event_with_tool_key(self):
+    """Non-tool events carrying an incidental content['tool'] key must
+    NOT surface it as tool_name. The attribute means "this span invoked
+    a tool" — arbitrary payloads that happen to use the same key name
+    should return None."""
+    span = Span(
+        event_type="AGENT_THOUGHT",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"tool": "looks_like_a_tool_but_isnt", "note": "reasoning"},
+    )
+    assert span.tool_name is None
+
+  def test_tool_name_does_not_leak_for_llm_response_with_tool_key(self):
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "I'll use a tool", "tool": "mentioned_in_text"},
+    )
+    assert span.tool_name is None
+
   def test_summary_with_text(self):
     span = Span(
         event_type="USER_MESSAGE_RECEIVED",
@@ -227,6 +294,57 @@ class TestSpan:
     )
     assert span.summary == "You are a helpful assistant"
 
+  def test_summary_unwraps_text_single_quoted(self):
+    """`text: 'hello'` wrapper should be stripped from response."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text: 'hello world'"},
+    )
+    assert span.summary == "hello world"
+
+  def test_summary_unwraps_text_double_quoted(self):
+    """`text: \"hello\"` wrapper should be stripped too."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": 'text: "hello world"'},
+    )
+    assert span.summary == "hello world"
+
+  def test_summary_unwraps_truncated_text_field(self):
+    """Truncated `text: 'abc...` (no closing quote) strips opening quote only."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text: 'I found three Priyas"},
+    )
+    assert span.summary == "I found three Priyas"
+
+  def test_summary_leaves_plain_text_alone(self):
+    """A response without the wrapper must be returned unchanged."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "Booking confirmed for Priya Patel."},
+    )
+    assert span.summary == "Booking confirmed for Priya Patel."
+
+  def test_summary_leaves_non_wrapper_text_prefix_alone(self):
+    """`text:` without a following space-quoted value is not our wrapper."""
+    span = Span(
+        event_type="LLM_RESPONSE",
+        agent="agent",
+        timestamp=datetime.now(timezone.utc),
+        content={"response": "text:the-tool-id-is-x"},
+    )
+    # No leading `text: ` (with space), so the unwrapper leaves it alone.
+    assert span.summary == "text:the-tool-id-is-x"
+
 
 class TestTrace:
   """Tests for Trace class."""
@@ -300,6 +418,116 @@ class TestTrace:
     assert "USER_MESSAGE_RECEIVED" in output
     assert "TOOL_STARTING" in output
 
+  def test_render_color_default_off(self):
+    """Default render() must not emit ANSI escape codes."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render()
+    assert "\x1b[" not in output
+
+  def test_render_color_true_wraps_error_icon(self):
+    """With color=True, error spans get red ANSI wrap on the cross icon."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[31m\u2717\x1b[0m" in output
+
+  def test_render_color_true_wraps_subtree_warning(self):
+    """Parent of an error child gets yellow warning icon wrap."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="AGENT_STARTING",
+            agent="agent",
+            timestamp=ts,
+            span_id="s1",
+        ),
+        Span(
+            event_type="TOOL_ERROR",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search"},
+            error_message="boom",
+            status="ERROR",
+            span_id="s2",
+            parent_span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[33m\u26a0\x1b[0m" in output
+    assert "\x1b[31m\u2717\x1b[0m" in output
+
+  def test_render_color_true_no_wrap_on_success(self):
+    """Successful spans stay plain even with color=True."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "search", "result": "ok"},
+            status="OK",
+            span_id="s1",
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render(color=True)
+    assert "\x1b[" not in output
+
+  def test_render_handles_unicode_tool_names(self):
+    """Non-ASCII tool names must not crash render() and must preserve
+    the tree-connector structure on each line. Display-width alignment
+    in monospace fonts is a known limitation (tracked separately) —
+    this test pins the minimum: no exceptions, connectors emitted."""
+    ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    spans = [
+        Span(
+            event_type="TOOL_STARTING",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "搜索联系人"},
+            span_id="s1",
+        ),
+        Span(
+            event_type="TOOL_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"tool": "🔍_fuzzy_search", "result": "ok"},
+            span_id="s2",
+            parent_span_id="s1",
+            latency_ms=50,
+        ),
+    ]
+    trace = Trace(trace_id="t1", session_id="sess-1", spans=spans)
+    output = trace.render()
+    assert "搜索联系人" in output
+    assert "🔍_fuzzy_search" in output
+    # tree connectors present on every non-header line
+    assert "\u2514\u2500" in output or "\u251c\u2500" in output
+
   def test_render_flat_no_span_ids(self):
     ts = datetime.now(timezone.utc)
     spans = [
@@ -362,6 +590,33 @@ class TestTrace:
     ]
     trace = Trace(trace_id="t", session_id="s", spans=spans)
     assert trace.final_response == "LLM said this"
+
+  def test_final_response_unwraps_text_prefix_from_llm_response(self):
+    """text: '...' wrapper must be stripped at the trace-level accessor too."""
+    ts = datetime.now(timezone.utc)
+    spans = [
+        Span(
+            event_type="LLM_RESPONSE",
+            agent="agent",
+            timestamp=ts,
+            content={"response": "text: 'I found three people named Priya.'"},
+        ),
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "I found three people named Priya."
+
+  def test_final_response_unwraps_text_prefix_from_agent_completed(self):
+    ts = datetime.now(timezone.utc)
+    spans = [
+        Span(
+            event_type="AGENT_COMPLETED",
+            agent="agent",
+            timestamp=ts,
+            content={"response": 'text: "Booking confirmed."'},
+        ),
+    ]
+    trace = Trace(trace_id="t", session_id="s", spans=spans)
+    assert trace.final_response == "Booking confirmed."
 
   def test_final_response_null_agent_completed(self):
     """Handles null AGENT_COMPLETED content (ADK plugin behavior)."""

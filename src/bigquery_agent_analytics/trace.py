@@ -42,6 +42,42 @@ from typing import Any, Optional
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 
+_ANSI_RED = "\x1b[31m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_RESET = "\x1b[0m"
+
+
+def _colorize(text: str, ansi_code: str, enabled: bool) -> str:
+  """Wraps text in an ANSI color code when enabled, else returns unchanged."""
+  if not enabled:
+    return text
+  return f"{ansi_code}{text}{_ANSI_RESET}"
+
+
+_TEXT_WRAPPER_PREFIX = "text: "
+
+
+def _unwrap_text_field(value: str) -> str:
+  """Strip a leading ``text: '...'`` wrapper if present.
+
+  Some ADK plugin versions serialize an LLM response with a literal
+  ``text: '...'`` Python-repr-style prefix in ``content.response``.
+  Strip it so ``Span.summary`` and ``Trace.render`` surface a clean
+  human-readable string.
+  """
+  if not value.startswith(_TEXT_WRAPPER_PREFIX):
+    return value
+  inner = value[len(_TEXT_WRAPPER_PREFIX) :]
+  if not inner or inner[0] not in ("'", '"'):
+    return inner
+  quote = inner[0]
+  # Match trailing quote only if the string is not truncated.
+  if len(inner) >= 2 and inner.endswith(quote):
+    return inner[1:-1]
+  # Truncated — drop the opening quote and leave the rest.
+  return inner[1:]
+
+
 class EventType(Enum):
   """Standard event types logged by the analytics plugin."""
 
@@ -232,12 +268,31 @@ class Span:
     if not self.is_error:
       return None
     parts = [self.event_type]
-    tool = self.content.get("tool")
-    if tool:
-      parts.append(f"tool={tool}")
+    if self.tool_name:
+      parts.append(f"tool={self.tool_name}")
     if self.error_message:
       parts.append(self.error_message[:200])
     return " | ".join(parts)
+
+  @property
+  def tool_name(self) -> Optional[str]:
+    """Returns the tool name for tool-related events.
+
+    Populated only for ``TOOL_STARTING``, ``TOOL_COMPLETED``,
+    ``TOOL_ERROR``, and ``HITL_*`` event types where the plugin
+    writes the tool name into ``content.tool``. Returns ``None``
+    for any other event type, even if ``content`` happens to
+    carry a ``"tool"`` key — callers rely on this attribute
+    meaning "this span invoked a tool."
+    """
+    if self.event_type not in (
+        "TOOL_STARTING",
+        "TOOL_COMPLETED",
+        "TOOL_ERROR",
+    ) and not self.event_type.startswith("HITL_"):
+      return None
+    tool = self.content.get("tool")
+    return tool if tool else None
 
   @property
   def label(self) -> str:
@@ -311,6 +366,7 @@ class Span:
       text = self.content.get("text") or ""
     if not text:
       text = self.content.get("raw") or ""
+    text = _unwrap_text_field(text) if isinstance(text, str) else text
     if not text and self.content_parts:
       for p in self.content_parts:
         if p.text:
@@ -631,7 +687,7 @@ class Trace:
 
     return roots
 
-  def render(self, format: str = "tree") -> str:
+  def render(self, format: str = "tree", color: bool = False) -> str:
     """Renders the trace as a hierarchical DAG view.
 
     This generates a tree representation of the agent's
@@ -642,6 +698,12 @@ class Trace:
 
     Args:
         format: Render format. Currently supports "tree".
+        color: When ``True``, wrap error markers and warning
+            markers in ANSI color codes (red and yellow
+            respectively). Default ``False`` emits plain text
+            suitable for any output target. Enable this in TTY
+            contexts (terminal sessions) for faster visual
+            scanning of failures in large traces.
 
     Returns:
         A string containing the rendered trace. Also printed
@@ -661,10 +723,10 @@ class Trace:
     if not roots:
       # Flat rendering when no span IDs exist
       for span in self.spans:
-        self._render_flat_span(span, lines)
+        self._render_flat_span(span, lines, color=color)
     else:
       for root in roots:
-        self._render_span(root, lines, prefix="", is_last=True)
+        self._render_span(root, lines, prefix="", is_last=True, color=color)
 
     output = "\n".join(lines)
     print(output)
@@ -676,16 +738,17 @@ class Trace:
       lines: list[str],
       prefix: str,
       is_last: bool,
+      color: bool = False,
   ) -> None:
     """Recursively renders a span and its children as a tree."""
     connector = "\u2514\u2500 " if is_last else "\u251c\u2500 "
 
     if span.is_error:
-      status_icon = "\u2717"
+      status_icon = _colorize("\u2717", _ANSI_RED, color)
     elif span.subtree_has_error:
       # Propagate error visibility: mark parents whose subtree
       # contains an error so the failure is visible at every level.
-      status_icon = "\u26a0"
+      status_icon = _colorize("\u26a0", _ANSI_YELLOW, color)
     else:
       status_icon = "\u2713"
 
@@ -719,11 +782,20 @@ class Trace:
           lines,
           child_prefix,
           is_last=(i == len(span.children) - 1),
+          color=color,
       )
 
-  def _render_flat_span(self, span: Span, lines: list[str]) -> None:
+  def _render_flat_span(
+      self,
+      span: Span,
+      lines: list[str],
+      color: bool = False,
+  ) -> None:
     """Renders a single span without tree structure."""
-    status_icon = "\u2717" if span.is_error else "\u2713"
+    if span.is_error:
+      status_icon = _colorize("\u2717", _ANSI_RED, color)
+    else:
+      status_icon = "\u2713"
     latency = ""
     if span.latency_ms is not None:
       latency = f" ({span.latency_ms:.0f}ms)"
@@ -776,9 +848,13 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response")
           if result:
-            return result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
-          return str(c)
+          return _unwrap_text_field(str(c))
 
     for span in reversed(self.spans):
       if span.event_type == "AGENT_COMPLETED":
@@ -786,9 +862,13 @@ class Trace:
         if isinstance(c, dict):
           result = c.get("response") or c.get("text_summary")
           if result:
-            return result
+            return (
+                _unwrap_text_field(result)
+                if isinstance(result, str)
+                else result
+            )
         elif c:
-          return str(c)
+          return _unwrap_text_field(str(c))
     return None
 
   @property

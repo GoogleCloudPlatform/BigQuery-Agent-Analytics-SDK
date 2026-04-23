@@ -384,7 +384,8 @@ Use `--format ttl` or `--format rdfxml` to override parser auto-detection from t
 | `owl:FunctionalProperty` | `cardinality: many_to_one` (object properties only) |
 | `rdfs:label` | `description` |
 | `rdfs:comment` | Appended to `description` |
-| `skos:altLabel`, `skos:prefLabel` | `synonyms` |
+| `skos:Concept`, `skos:broader`, `skos:definition`, etc. | See **Importing SKOS** below |
+| Dublin Core / other literal predicates | `annotations` (keyed `prefix:local`, or full IRI when the namespace has no bound prefix) |
 
 XSD datatypes are mapped to ontology types: `xsd:string` to `string`, `xsd:integer` to `integer`, `xsd:decimal` to `numeric`, `xsd:boolean` to `boolean`, `xsd:date` to `date`, `xsd:dateTime` to `timestamp`, and so on.
 
@@ -450,6 +451,86 @@ OWL features that don't have a direct ontology equivalent are preserved rather t
 - **YAML comments**: restrictions (`someValuesFrom`, `allValuesFrom`, cardinality constraints) and class expressions (`unionOf`, `intersectionOf`) are written as comments above the affected element.
 
 The drop summary printed to stderr provides counts per category so you can quickly see what was preserved as annotations versus what was dropped entirely.
+
+#### Importing SKOS
+
+Many real-world ontologies mix OWL (formal classes and properties) with SKOS (human-readable labels, taxonomies, cross-vocabulary mappings). `gm import-owl` recognizes both; no extra flag is required to enable SKOS handling.
+
+**Informational by default.** OWL constructs flow into structural fields (`extends`, `keys`, `properties`, `from`/`to`). SKOS predicates never do — they produce abstract entities, abstract relationships, and annotations. `skos:broader` is *not* subsumption, so it never maps to `extends`.
+
+**Abstract elements.** A standalone `skos:Concept` (no `owl:Class` typing) becomes an abstract entity with a `skos_` name prefix. A class typed as both `owl:Class` and `skos:Concept` stays concrete and unprefixed — OWL provides the structure, SKOS contributes annotations and synonyms.
+
+Abstract elements are declared but not bound to BigQuery tables:
+
+- Primary keys are optional on abstract entities.
+- `gm scaffold` skips them when generating DDL and binding.
+- `gm compile` rejects any binding that targets them.
+
+**SKOS mapping (summary):**
+
+| SKOS construct | Result |
+|---|---|
+| `skos:Concept` (standalone) | Abstract entity `skos_<name>` |
+| `owl:Class` + `skos:Concept` | Concrete entity, unprefixed |
+| `skos:prefLabel`, `skos:altLabel`, `skos:hiddenLabel` (selected language) | `synonyms` |
+| `skos:prefLabel` etc. (other languages) | Annotation `skos:prefLabel@<lang>` |
+| `skos:definition`, `notation`, `scopeNote`, `example`, `historyNote`, `editorialNote`, `changeNote` | Annotation `skos:<pred>` |
+| `skos:inScheme`, `skos:topConceptOf` | Annotation `skos:<pred>` (IRI target stored verbatim) |
+| `skos:broader` / `skos:narrower` | Abstract relationship `skos_broader` (narrower normalized) |
+| `skos:related` | Abstract relationship `skos_related` |
+| `skos:exactMatch` / `closeMatch` / `broadMatch` / `narrowMatch` / `relatedMatch` | Abstract relationship if target is imported; annotation with full IRI otherwise |
+
+See `docs/ontology/owl-import.md` §19 for the full table and worked examples.
+
+**Multilingual labels.** The `--language` flag (default `en`) selects labels by BCP-47 tag. Labels in the selected language populate description/synonyms; labels in other languages become language-suffixed annotations:
+
+```bash
+gm import-owl concepts.ttl \
+  --include-namespace "https://example.com/concepts#" \
+  --language fr \
+  -o concepts.ontology.yaml
+```
+
+**Duplicate `skos_broader` edges.** Abstract relationships use relaxed uniqueness: `(name, from, to)` must be unique rather than `(name,)` alone. Multiple `skos_broader` edges with different endpoints are legal in the same ontology without synthetic naming.
+
+**Worked example — pure SKOS taxonomy:**
+
+```turtle
+:Banking a skos:Concept ;
+    skos:prefLabel "Banking"@en ;
+    skos:definition "Activities of financial institutions."@en .
+
+:RetailBanking a skos:Concept ;
+    skos:prefLabel "Retail Banking"@en ;
+    skos:altLabel "Consumer Banking"@en ;
+    skos:broader :Banking ;
+    skos:notation "RB" .
+```
+
+becomes:
+
+```yaml
+entities:
+  - name: skos_Banking
+    abstract: true
+    synonyms: [Banking]
+    annotations:
+      skos:definition: Activities of financial institutions.
+  - name: skos_RetailBanking
+    abstract: true
+    synonyms: [Consumer Banking, Retail Banking]
+    annotations:
+      skos:notation: RB
+relationships:
+  - name: skos_broader
+    abstract: true
+    from: skos_RetailBanking
+    to: skos_Banking
+```
+
+If every entity ends up abstract, the drop summary emits a hint: *"all entities are abstract (SKOS-only). No concrete entities are available for binding. Consider representing the taxonomy as dimension columns instead of entity types."*
+
+**Generic literal annotations.** Literal-valued predicates outside the RDF/RDFS/OWL/SKOS namespaces — Dublin Core (`dc:title`, `dcterms:creator`), Schema.org, custom vocabularies — are preserved as `annotations: { <key>: <value> }`, where `<key>` is `prefix:local` when the predicate's namespace has a bound prefix and the full IRI otherwise. Retaining the prefix keeps `dc:title` and `dcterms:title` distinguishable. Multiple values for the same predicate merge into a sorted list.
 
 ---
 
@@ -825,7 +906,8 @@ Validates both files before compiling. Any validation error prevents DDL output.
 #### `gm import-owl`
 
 ```
-gm import-owl <source>... --include-namespace <iri>... [-o <out>] [--format ttl|rdfxml] [--json]
+gm import-owl <source>... --include-namespace <iri>... [-o <out>]
+              [--format ttl|rdfxml] [--language <tag>] [--json]
 ```
 
 | Argument/Option | Required | Default | Description |
@@ -834,9 +916,12 @@ gm import-owl <source>... --include-namespace <iri>... [-o <out>] [--format ttl|
 | `--include-namespace <iri>` | yes | — | IRI namespace prefix to include. Repeatable. |
 | `-o` / `--out <file>` | no | stdout | Write ontology YAML to file. |
 | `--format` | no | auto | Parser override: `ttl` or `rdfxml`. Default is inferred from file extension. |
+| `--language <tag>` | no | `en` | BCP-47 language tag for label selection. Labels in the selected language populate names and synonyms; labels in other languages become language-suffixed annotations (e.g., `skos:prefLabel@fr`). |
 | `--json` | no | false | Emit structured JSON errors on stderr. |
 
-Output YAML may contain `FILL_IN` placeholders that must be resolved before `gm validate` will pass. A drop summary of excluded and unsupported OWL features is always printed to stderr (not affected by `--json`).
+Output YAML may contain `FILL_IN` placeholders that must be resolved before `gm validate` will pass. A drop summary of excluded and unsupported OWL/SKOS features is always printed to stderr (not affected by `--json`).
+
+The importer recognizes both OWL and SKOS constructs. See the **Importing SKOS** subsection above for the mapping table, abstract-element semantics, and worked examples.
 
 Requires `rdflib`. Install with `pip install 'bigquery-agent-analytics[owl]'`.
 

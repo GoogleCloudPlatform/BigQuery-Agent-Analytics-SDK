@@ -653,6 +653,16 @@ def import_owl_command(
         "--format",
         help="Override parser selection: ttl or rdfxml.",
     ),
+    language: str = typer.Option(
+        "en",
+        "--language",
+        help=(
+            "BCP-47 language tag for label selection (default: en). "
+            "Labels in the selected language are used for names and "
+            "synonyms; labels in other languages become "
+            "language-suffixed annotations."
+        ),
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -750,6 +760,7 @@ def import_owl_command(
         sources,
         include_namespaces=include_namespace,
         format=rdflib_format,
+        language=language,
     )
   except ValueError as exc:
     _emit_errors(

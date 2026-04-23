@@ -148,6 +148,7 @@ class Entity(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   name: str
+  abstract: bool = False
   extends: Optional[str] = None
   keys: Optional[Keys] = None
   properties: list[Property] = Field(default_factory=list)
@@ -175,6 +176,7 @@ class Relationship(BaseModel):
   model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
   name: str
+  abstract: bool = False
   extends: Optional[str] = None
   keys: Optional[Keys] = None
   from_: str = Field(alias="from")

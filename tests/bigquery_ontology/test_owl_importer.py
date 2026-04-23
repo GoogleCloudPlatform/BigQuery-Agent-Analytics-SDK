@@ -602,7 +602,7 @@ class TestEdgeCases:
     data = yaml.safe_load(yaml_text)
     entity = data["entities"][0]
     assert entity["description"] == "Thing"
-    assert "Chose" in entity["synonyms"]
+    assert entity["annotations"]["rdfs:label@fr"] == "Chose"
 
   def test_haskey_excluded_by_namespace(self, tmp_path):
     ttl = tmp_path / "test.ttl"
@@ -634,3 +634,951 @@ class TestEdgeCases:
     assert foo["keys"]["primary"] == ["FILL_IN"]
     assert "excluded by namespace filter" in yaml_text
     assert "owl:hasKey_excluded" in yaml_text
+
+
+# ------------------------------------------------------------------ #
+# SKOS import tests                                                    #
+# ------------------------------------------------------------------ #
+
+_SKOS_TTL = _FIXTURES / "skos_taxonomy.ttl"
+_MIXED_TTL = _FIXTURES / "mixed_owl_skos.ttl"
+
+
+class TestPureSkosImport:
+  """Import a pure SKOS taxonomy with concepts, broader, related, match."""
+
+  def test_all_entities_are_abstract_with_prefix(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    for entity in data["entities"]:
+      assert entity["abstract"] is True, f"{entity['name']} should be abstract"
+      assert entity["name"].startswith("skos_"), entity["name"]
+
+  def test_broader_relationships_are_abstract(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    broader = [r for r in rels if r["name"] == "skos_broader"]
+    assert len(broader) >= 2
+    for r in broader:
+      assert r["abstract"] is True
+
+  def test_related_relationship(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    related = [r for r in rels if r["name"] == "skos_related"]
+    assert len(related) >= 1
+    assert related[0]["abstract"] is True
+
+  def test_related_is_symmetric_single_edge(self, tmp_path):
+    # skos:related is symmetric; mutual assertions must collapse to one edge.
+    ttl = tmp_path / "mutual_related.ttl"
+    ttl.write_text(
+        "@prefix : <http://example.com/taxonomy#> .\n"
+        "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .\n"
+        ":c1 a skos:Concept ; skos:related :c2 .\n"
+        ":c2 a skos:Concept ; skos:related :c1 .\n",
+        encoding="utf-8",
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    related = [r for r in data["relationships"] if r["name"] == "skos_related"]
+    assert len(related) == 1
+    assert {related[0]["from"], related[0]["to"]} == {"skos_c1", "skos_c2"}
+
+  def test_skos_annotations_preserved(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    banking = next(e for e in data["entities"] if e["name"] == "skos_Banking")
+    assert banking["annotations"]["skos:definition"] == (
+        "Activities of financial institutions."
+    )
+
+  def test_synonyms_from_altlabel(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    retail = next(
+        e for e in data["entities"] if e["name"] == "skos_RetailBanking"
+    )
+    assert "Consumer Banking" in retail["synonyms"]
+
+  def test_notation_annotation(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    retail = next(
+        e for e in data["entities"] if e["name"] == "skos_RetailBanking"
+    )
+    assert retail["annotations"]["skos:notation"] == "RB"
+
+  def test_external_match_becomes_annotation(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    wm = next(
+        e for e in data["entities"] if e["name"] == "skos_WealthManagement"
+    )
+    assert "skos:exactMatch" in wm["annotations"]
+
+  def test_no_description_for_pure_skos(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    for entity in data["entities"]:
+      assert "description" not in entity
+
+  def test_no_keys_on_abstract_entities(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    for entity in data["entities"]:
+      assert "keys" not in entity
+
+  def test_all_abstract_hint_in_summary(self):
+    _, summary = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    assert "all entities are abstract" in summary.lower()
+
+  def test_narrower_normalized_to_broader(self):
+    """skos:narrower on WealthManagement → InvestmentBanking should
+    produce a skos_broader from InvestmentBanking to WealthManagement."""
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    broader = [r for r in rels if r["name"] == "skos_broader"]
+    # InvestmentBanking broader WealthManagement (via narrower inverse)
+    inv_wm = [
+        r
+        for r in broader
+        if r["from"] == "skos_InvestmentBanking"
+        and r["to"] == "skos_WealthManagement"
+    ]
+    assert len(inv_wm) == 1
+
+
+class TestMixedOwlSkos:
+  """Import files with both OWL classes and SKOS concepts."""
+
+  def test_owl_skos_entity_is_concrete(self):
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    account = next(e for e in data["entities"] if e["name"] == "Account")
+    assert "abstract" not in account or account.get("abstract") is False
+
+  def test_pure_skos_entity_is_abstract(self):
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    fp = next(
+        e for e in data["entities"] if e["name"] == "skos_FinancialProduct"
+    )
+    assert fp["abstract"] is True
+
+  def test_owl_entity_enriched_with_skos_metadata(self):
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    account = next(e for e in data["entities"] if e["name"] == "Account")
+    assert account["annotations"]["skos:definition"] == (
+        "A record of financial transactions."
+    )
+    assert "Acct" in account["synonyms"]
+
+  def test_external_exactmatch_is_annotation(self):
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    account = next(e for e in data["entities"] if e["name"] == "Account")
+    assert "skos:exactMatch" in account["annotations"]
+
+  def test_cross_kind_broader(self):
+    """Account (concrete OWL) → skos:broader → FinancialProduct (abstract SKOS)."""
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    broader = [
+        r
+        for r in rels
+        if r["name"] == "skos_broader"
+        and r["from"] == "Account"
+        and r["to"] == "skos_FinancialProduct"
+    ]
+    assert len(broader) == 1
+    assert broader[0]["abstract"] is True
+
+  def test_owl_relationship_stays_concrete(self):
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    holds = next(r for r in rels if r["name"] == "holds")
+    assert "abstract" not in holds or holds.get("abstract") is False
+
+  def test_skos_related_between_owl_entities(self):
+    """Account (OWL+SKOS) skos:related Ledger (OWL) → abstract rel."""
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rels = data["relationships"]
+    related = [
+        r
+        for r in rels
+        if r["name"] == "skos_related"
+        and r["from"] == "Account"
+        and r["to"] == "Ledger"
+    ]
+    assert len(related) == 1
+    assert related[0]["abstract"] is True
+
+
+class TestLanguageSelection:
+  """Multilingual label handling via --language."""
+
+  def test_default_english(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    banking = next(e for e in data["entities"] if e["name"] == "skos_Banking")
+    assert "skos:prefLabel@fr" in banking["annotations"]
+    assert banking["annotations"]["skos:prefLabel@fr"] == "Banque"
+
+  def test_french_selection(self):
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+        language="fr",
+    )
+    data = yaml.safe_load(yaml_text)
+    banking = next(e for e in data["entities"] if e["name"] == "skos_Banking")
+    # French selected → English goes to annotation
+    assert "skos:prefLabel@en" in banking["annotations"]
+
+
+class TestAbstractOntologyValidation:
+  """Ontology loader handles abstract entities and relationships."""
+
+  def test_abstract_entity_no_keys_passes(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_abstract
+      entities:
+        - name: ConcreteEntity
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_AbstractEntity
+          abstract: true
+    """
+    )
+    ont = load_ontology_from_string(yaml_str)
+    assert ont.entities[1].abstract is True
+
+  def test_abstract_rel_duplicate_names_different_endpoints(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_abstract_rels
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: B
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: C
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: B
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: C
+    """
+    )
+    ont = load_ontology_from_string(yaml_str)
+    assert len(ont.relationships) == 2
+
+  def test_abstract_rel_duplicate_name_same_endpoints_fails(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_dup
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: B
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: B
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: B
+    """
+    )
+    with pytest.raises(ValueError, match="Duplicate abstract relationship"):
+      load_ontology_from_string(yaml_str)
+
+  def test_concrete_relationship_abstract_endpoint_fails(self):
+    """A concrete relationship cannot have an abstract endpoint —
+    there is nothing to bind."""
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_concrete_abstract_endpoint
+      entities:
+        - name: Concrete
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_AbstractTarget
+          abstract: true
+      relationships:
+        - name: pointsAt
+          from: Concrete
+          to: skos_AbstractTarget
+    """
+    )
+    with pytest.raises(ValueError, match="abstract endpoint"):
+      load_ontology_from_string(yaml_str)
+
+  def test_abstract_relationship_abstract_endpoint_allowed(self):
+    """An abstract relationship may have abstract endpoints."""
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_abstract_abstract_endpoint
+      entities:
+        - name: Concrete
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_AbstractSource
+          abstract: true
+        - name: skos_AbstractTarget
+          abstract: true
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: skos_AbstractSource
+          to: skos_AbstractTarget
+    """
+    )
+    ont = load_ontology_from_string(yaml_str)
+    assert len(ont.relationships) == 1
+
+  def test_abstract_relationship_endpoint_must_exist(self):
+    """Endpoint existence is still enforced on abstract relationships."""
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_missing_endpoint
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: DoesNotExist
+    """
+    )
+    with pytest.raises(ValueError, match="DoesNotExist"):
+      load_ontology_from_string(yaml_str)
+
+  def test_concrete_abstract_name_collision_fails(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test_collision
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: B
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: rel
+          from: A
+          to: B
+        - name: rel
+          abstract: true
+          from: A
+          to: B
+    """
+    )
+    with pytest.raises(ValueError, match="concrete and an abstract"):
+      load_ontology_from_string(yaml_str)
+
+
+class TestAbstractBindingRejection:
+  """Binding loader rejects abstract targets."""
+
+  def test_binding_abstract_entity_fails(self):
+    from bigquery_ontology import load_ontology_from_string
+    from bigquery_ontology.binding_loader import load_binding_from_string
+
+    ont = load_ontology_from_string(
+        textwrap.dedent(
+            """\
+      ontology: test
+      entities:
+        - name: Concrete
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: Abstract
+          abstract: true
+    """
+        )
+    )
+    binding_yaml = textwrap.dedent(
+        """\
+      binding: test_bind
+      ontology: test
+      target:
+        backend: bigquery
+        project: p
+        dataset: d
+      entities:
+        - name: Abstract
+          source: tbl
+          properties:
+            - {name: id, column: id}
+    """
+    )
+    with pytest.raises(ValueError, match="abstract entity"):
+      load_binding_from_string(binding_yaml, ontology=ont)
+
+  def test_binding_abstract_relationship_fails(self):
+    from bigquery_ontology import load_ontology_from_string
+    from bigquery_ontology.binding_loader import load_binding_from_string
+
+    ont = load_ontology_from_string(
+        textwrap.dedent(
+            """\
+      ontology: test
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: B
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: A
+          to: B
+    """
+        )
+    )
+    binding_yaml = textwrap.dedent(
+        """\
+      binding: test_bind
+      ontology: test
+      target:
+        backend: bigquery
+        project: p
+        dataset: d
+      entities:
+        - name: A
+          source: tbl_a
+          properties:
+            - {name: id, column: id}
+        - name: B
+          source: tbl_b
+          properties:
+            - {name: id, column: id}
+      relationships:
+        - name: skos_broader
+          source: tbl_rel
+          from_columns: [a_id]
+          to_columns: [b_id]
+    """
+    )
+    with pytest.raises(ValueError, match="abstract relationship"):
+      load_binding_from_string(binding_yaml, ontology=ont)
+
+
+class TestAbstractScaffold:
+  """Scaffold skips abstract entities and relationships."""
+
+  def test_scaffold_skips_abstract(self):
+    from bigquery_ontology import load_ontology_from_string
+    from bigquery_ontology.scaffold import scaffold
+
+    ont = load_ontology_from_string(
+        textwrap.dedent(
+            """\
+      ontology: test
+      entities:
+        - name: Concrete
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_Abstract
+          abstract: true
+      relationships:
+        - name: skos_broader
+          abstract: true
+          from: Concrete
+          to: skos_Abstract
+    """
+        )
+    )
+    ddl, binding_yaml = scaffold(ont, dataset="ds", project="proj")
+    assert "concrete" in ddl
+    assert "skos_abstract" not in ddl
+    assert "skos_broader" not in ddl
+    assert "skos_Abstract" not in binding_yaml
+    assert "skos_broader" not in binding_yaml
+
+
+class TestOwlRefToSkosConcept:
+  """An OWL ObjectProperty whose rdfs:range is a pure SKOS concept
+  must resolve to the correct ``skos_`` prefixed entity name."""
+
+  def test_owl_objectproperty_range_on_skos_concept(self, tmp_path):
+    ttl = tmp_path / "ref.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/test#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+      :Category a skos:Concept ;
+          skos:prefLabel "Category"@en .
+
+      :Account a owl:Class ;
+          owl:hasKey ( :account_id ) .
+      :account_id a owl:DatatypeProperty ;
+          rdfs:domain :Account ;
+          rdfs:range xsd:string .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    # When added, an OWL ObjectProperty pointing at :Category should
+    # emit ``to: skos_Category``, not ``to: Category``.
+    # Add a probe ObjectProperty and reparse.
+    ttl.write_text(
+        ttl.read_text()
+        + textwrap.dedent(
+            """
+      :belongsTo a owl:ObjectProperty ;
+          rdfs:domain :Account ;
+          rdfs:range :Category .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    rel = next(r for r in data["relationships"] if r["name"] == "belongsTo")
+    assert rel["to"] == "skos_Category"
+    # Endpoint is abstract → relationship must be marked abstract too,
+    # or the loader rejects the ontology.
+    assert rel.get("abstract") is True
+
+    # Verify the emitted YAML actually round-trips through the loader.
+    from bigquery_ontology import load_ontology_from_string
+
+    load_ontology_from_string(yaml_text)
+
+  def test_owl_subclassof_skos_concept_extends_resolves(self, tmp_path):
+    """An OWL class whose rdfs:subClassOf target is a pure SKOS concept
+    must emit ``extends: skos_<name>`` so the YAML loads."""
+    ttl = tmp_path / "subclass.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/test#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+      :Category a skos:Concept ;
+          skos:prefLabel "Category"@en .
+
+      :Account a owl:Class ;
+          rdfs:subClassOf :Category ;
+          owl:hasKey ( :account_id ) .
+      :account_id a owl:DatatypeProperty ;
+          rdfs:domain :Account ;
+          rdfs:range xsd:string .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl],
+        include_namespaces=["http://example.com/test#"],
+    )
+    data = yaml.safe_load(yaml_text)
+    account = next(e for e in data["entities"] if e["name"] == "Account")
+    assert account["extends"] == "skos_Category"
+
+    # Round-trip through loader — proves the extends target resolves.
+    from bigquery_ontology import load_ontology_from_string
+
+    load_ontology_from_string(yaml_text)
+
+
+class TestAbstractKeyShapeValidation:
+  """Abstract entities/relationships with declared keys must still
+  satisfy shape rules."""
+
+  def test_abstract_entity_key_column_must_exist(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test
+      entities:
+        - name: Real
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_Bad
+          abstract: true
+          keys:
+            primary: [nonexistent]
+    """
+    )
+    with pytest.raises(ValueError, match="nonexistent"):
+      load_ontology_from_string(yaml_str)
+
+  def test_abstract_entity_forbids_additional_keys(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test
+      entities:
+        - name: Real
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: skos_Bad
+          abstract: true
+          properties:
+            - {name: x, type: string}
+          keys:
+            primary: [x]
+            additional: [x]
+    """
+    )
+    with pytest.raises(ValueError, match="additional is not allowed"):
+      load_ontology_from_string(yaml_str)
+
+  def test_abstract_relationship_cannot_use_extends(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_str = textwrap.dedent(
+        """\
+      ontology: test
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+        - name: B
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: parentRel
+          from: A
+          to: B
+        - name: childRel
+          abstract: true
+          extends: parentRel
+          from: A
+          to: B
+    """
+    )
+    with pytest.raises(ValueError, match="abstract.*must not use 'extends'"):
+      load_ontology_from_string(yaml_str)
+
+
+class TestRoundTrip:
+  """Emitted YAML with abstract elements loads and validates."""
+
+  def test_pure_skos_roundtrip(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_text, _ = import_owl(
+        [_SKOS_TTL],
+        include_namespaces=["http://example.com/taxonomy#"],
+    )
+    ont = load_ontology_from_string(yaml_text)
+    assert all(e.abstract for e in ont.entities)
+    assert all(r.abstract for r in ont.relationships)
+
+  def test_mixed_owl_skos_roundtrip(self):
+    from bigquery_ontology import load_ontology_from_string
+
+    yaml_text, _ = import_owl(
+        [_MIXED_TTL],
+        include_namespaces=["http://example.com/finance#"],
+    )
+    ont = load_ontology_from_string(yaml_text)
+    concrete_entities = [e for e in ont.entities if not e.abstract]
+    abstract_entities = [e for e in ont.entities if e.abstract]
+    assert len(concrete_entities) >= 2  # Account, Ledger
+    assert len(abstract_entities) >= 1  # skos_FinancialProduct
+
+  def test_concrete_entity_no_abstract_key_emitted(self, tmp_path):
+    """Concrete entities must not emit ``abstract: false`` (default is
+    False; emitting the default bloats every real-world ontology file)."""
+    ttl = tmp_path / "simple.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/t#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+      :A a owl:Class ; owl:hasKey ( :a_id ) .
+      :a_id a owl:DatatypeProperty ;
+          rdfs:domain :A ; rdfs:range xsd:string .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl], include_namespaces=["http://example.com/t#"]
+    )
+    assert "abstract: false" not in yaml_text
+
+  def test_omitted_abstract_key_loads_as_false(self):
+    """YAML that omits ``abstract`` must parse back to ``abstract=False``,
+    so the emitter's suppression of the default is safe."""
+    from bigquery_ontology import load_ontology_from_string
+
+    ont = load_ontology_from_string(
+        textwrap.dedent(
+            """\
+      ontology: t
+      entities:
+        - name: A
+          keys: {primary: [id]}
+          properties:
+            - {name: id, type: string}
+      relationships:
+        - name: rel
+          from: A
+          to: A
+    """
+        )
+    )
+    assert ont.entities[0].abstract is False
+    assert ont.relationships[0].abstract is False
+
+
+class TestSkosSchemeAnnotationPreservation:
+  """``skos:inScheme`` / ``skos:topConceptOf`` must preserve full IRIs."""
+
+  def test_in_scheme_preserves_full_iri(self, tmp_path):
+    ttl = tmp_path / "schemes.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/tax#> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+      :c1 a skos:Concept ;
+          skos:inScheme <http://ns1.example/Scheme> ,
+                        <http://ns2.example/Scheme> ;
+          skos:prefLabel "C1"@en .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl], include_namespaces=["http://example.com/tax#"]
+    )
+    data = yaml.safe_load(yaml_text)
+    concept = next(e for e in data["entities"] if e["name"] == "skos_c1")
+    schemes = concept["annotations"]["skos:inScheme"]
+    # Both full IRIs preserved, not collapsed to the shared local name.
+    assert "http://ns1.example/Scheme" in schemes
+    assert "http://ns2.example/Scheme" in schemes
+
+  def test_top_concept_of_preserves_full_iri(self, tmp_path):
+    ttl = tmp_path / "top.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/tax#> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+      :c1 a skos:Concept ;
+          skos:topConceptOf <http://ns1.example/Scheme> ;
+          skos:prefLabel "C1"@en .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl], include_namespaces=["http://example.com/tax#"]
+    )
+    data = yaml.safe_load(yaml_text)
+    concept = next(e for e in data["entities"] if e["name"] == "skos_c1")
+    assert (
+        concept["annotations"]["skos:topConceptOf"]
+        == "http://ns1.example/Scheme"
+    )
+
+
+class TestMultiLabelNonSelectedLanguage:
+  """Multiple labels in the same non-selected (predicate, language)
+  must be preserved — not silently overwritten."""
+
+  def test_two_french_alt_labels_both_preserved(self, tmp_path):
+    ttl = tmp_path / "multi.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/tax#> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+      :c1 a skos:Concept ;
+          skos:prefLabel "C1"@en ;
+          skos:altLabel "alpha-fr"@fr , "beta-fr"@fr ;
+          skos:hiddenLabel "hidden-fr"@fr .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl], include_namespaces=["http://example.com/tax#"]
+    )
+    data = yaml.safe_load(yaml_text)
+    anns = next(e for e in data["entities"] if e["name"] == "skos_c1")[
+        "annotations"
+    ]
+    # Both French altLabels survive as a list, not collapsed to one.
+    assert sorted(anns["skos:altLabel@fr"]) == ["alpha-fr", "beta-fr"]
+    assert anns["skos:hiddenLabel@fr"] == "hidden-fr"
+
+
+class TestGenericAnnotationNamespacePrefix:
+  """Generic literal-annotation keys must retain their namespace prefix
+  so vocabularies with colliding local names don't merge."""
+
+  def test_dc_and_dcterms_title_do_not_collide(self, tmp_path):
+    ttl = tmp_path / "dc.ttl"
+    ttl.write_text(
+        textwrap.dedent(
+            """\
+      @prefix : <http://example.com/t#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+      @prefix dc: <http://purl.org/dc/elements/1.1/> .
+      @prefix dcterms: <http://purl.org/dc/terms/> .
+
+      :A a owl:Class ;
+          owl:hasKey ( :a_id ) ;
+          dc:title "DC Title" ;
+          dcterms:title "DCterms Title" .
+      :a_id a owl:DatatypeProperty ;
+          rdfs:domain :A ; rdfs:range xsd:string .
+    """
+        )
+    )
+    yaml_text, _ = import_owl(
+        [ttl], include_namespaces=["http://example.com/t#"]
+    )
+    data = yaml.safe_load(yaml_text)
+    anns = next(e for e in data["entities"] if e["name"] == "A")["annotations"]
+    # Keys retain their prefix and don't collapse to a single "title".
+    assert anns.get("dc:title") == "DC Title"
+    assert anns.get("dcterms:title") == "DCterms Title"
+    assert "title" not in anns

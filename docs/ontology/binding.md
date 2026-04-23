@@ -221,9 +221,10 @@ correctly).
 2. The ontology named by `ontology:` exists and loads without errors.
 3. `target.backend` is supported; backend-specific required fields are
    present.
-4. Every `EntityBinding.name` names an entity declared in the ontology.
+4. Every `EntityBinding.name` names an entity declared in the ontology,
+   and the entity must not be abstract (see `ontology.md` §3a).
 5. Every `RelationshipBinding.name` names a relationship declared in the
-   ontology.
+   ontology, and the relationship must not be abstract.
 6. No duplicate entity or relationship names within the binding.
 7. For every bound entity, every non-derived property (including
    inherited) has exactly one `PropertyBinding` with a non-empty `column`.

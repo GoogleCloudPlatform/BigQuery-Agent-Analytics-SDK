@@ -89,21 +89,6 @@ _ONTOLOGY_TO_BQ_TYPE: dict[PropertyType, str] = {
 # ---------------------------------------------------------------------------
 
 
-def _reject_extends(ontology: Ontology) -> None:
-  for entity in ontology.entities:
-    if entity.extends is not None:
-      raise ValueError(
-          f"Entity {entity.name!r} uses 'extends'; v0 scaffold "
-          "does not support inheritance."
-      )
-  for rel in ontology.relationships:
-    if rel.extends is not None:
-      raise ValueError(
-          f"Relationship {rel.name!r} uses 'extends'; v0 scaffold "
-          "does not support inheritance."
-      )
-
-
 def _reject_derived_keys(
     keys: Keys,
     prop_map: dict[str, object],
@@ -425,7 +410,9 @@ def _emit_rel_ddl(table: _ScaffoldRelTable) -> str:
 
 
 def _emit_binding_yaml(
-    ontology: Ontology,
+    ontology_name: str,
+    entities: list[Entity],
+    relationships: list[Relationship],
     entity_tables: list[_ScaffoldEntityTable],
     rel_tables: list[_ScaffoldRelTable],
     dataset: str,
@@ -438,7 +425,7 @@ def _emit_binding_yaml(
       "This file is user-owned \u2014 edit freely."
   )
   lines.append(f"binding: {dataset}")
-  lines.append(f"ontology: {ontology.ontology}")
+  lines.append(f"ontology: {ontology_name}")
   lines.append("target:")
   lines.append("  backend: bigquery")
   lines.append(f"  project: {project}")
@@ -446,7 +433,7 @@ def _emit_binding_yaml(
 
   if entity_tables:
     lines.append("entities:")
-    for entity, et in zip(ontology.entities, entity_tables):
+    for entity, et in zip(entities, entity_tables):
       lines.append(f"  - name: {entity.name}")
       lines.append(f"    source: {et.table_name}")
       non_derived = [p for p in entity.properties if p.expr is None]
@@ -458,7 +445,7 @@ def _emit_binding_yaml(
 
   if rel_tables:
     lines.append("relationships:")
-    for rel, rt in zip(ontology.relationships, rel_tables):
+    for rel, rt in zip(relationships, rel_tables):
       from_fk, to_fk = rt.foreign_keys
       lines.append(f"  - name: {rel.name}")
       lines.append(f"    source: {rt.table_name}")
@@ -492,17 +479,33 @@ def scaffold(
       ValueError: If the ontology uses ``extends`` or an endpoint-column
           name collision is detected on a relationship.
   """
-  _reject_extends(ontology)
+  # Abstract elements are informational only and have no physical
+  # backing — skip them in scaffold output.
+  concrete_entities = [e for e in ontology.entities if not e.abstract]
+  concrete_rels = [r for r in ontology.relationships if not r.abstract]
 
-  entity_map = {e.name: e for e in ontology.entities}
+  for entity in concrete_entities:
+    if entity.extends is not None:
+      raise ValueError(
+          f"Entity {entity.name!r} uses 'extends'; v0 scaffold "
+          "does not support inheritance."
+      )
+  for rel in concrete_rels:
+    if rel.extends is not None:
+      raise ValueError(
+          f"Relationship {rel.name!r} uses 'extends'; v0 scaffold "
+          "does not support inheritance."
+      )
+
+  entity_map = {e.name: e for e in concrete_entities}
 
   entity_tables = [
       _resolve_entity_table(e, dataset, project, naming)
-      for e in ontology.entities
+      for e in concrete_entities
   ]
   rel_tables = [
       _resolve_rel_table(r, entity_map, dataset, project, naming)
-      for r in ontology.relationships
+      for r in concrete_rels
   ]
 
   ddl_parts: list[str] = []
@@ -513,7 +516,14 @@ def scaffold(
   ddl_text = "\n".join(ddl_parts)
 
   binding_text = _emit_binding_yaml(
-      ontology, entity_tables, rel_tables, dataset, project, naming
+      ontology.ontology,
+      concrete_entities,
+      concrete_rels,
+      entity_tables,
+      rel_tables,
+      dataset,
+      project,
+      naming,
   )
 
   return ddl_text, binding_text

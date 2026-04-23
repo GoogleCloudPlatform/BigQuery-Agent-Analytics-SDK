@@ -1,0 +1,41 @@
+@prefix : <http://example.com/finance#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Mixed OWL+SKOS entity — OWL structure wins, stays concrete.
+:Account a owl:Class, skos:Concept ;
+    rdfs:label "Account" ;
+    skos:altLabel "Acct"@en ;
+    skos:definition "A record of financial transactions."@en ;
+    skos:related :Ledger ;
+    skos:exactMatch <http://fibo.org/ontology/FBC/Account> ;
+    owl:hasKey ( :account_id ) .
+
+:account_id a owl:DatatypeProperty ;
+    rdfs:domain :Account ;
+    rdfs:range xsd:string .
+
+# Pure OWL entity — no SKOS typing.
+:Ledger a owl:Class ;
+    rdfs:label "Ledger" ;
+    owl:hasKey ( :ledger_id ) .
+
+:ledger_id a owl:DatatypeProperty ;
+    rdfs:domain :Ledger ;
+    rdfs:range xsd:string .
+
+# Pure SKOS concept — abstract entity.
+:FinancialProduct a skos:Concept ;
+    skos:prefLabel "Financial Product"@en ;
+    skos:definition "Any product offered by a financial institution."@en .
+
+# Cross-kind: OWL class → SKOS broader → SKOS concept.
+:Account skos:broader :FinancialProduct .
+
+# OWL relationship (concrete).
+:holds a owl:ObjectProperty ;
+    rdfs:label "holds" ;
+    rdfs:domain :Account ;
+    rdfs:range :Ledger .

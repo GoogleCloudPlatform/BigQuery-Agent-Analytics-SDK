@@ -1,0 +1,27 @@
+@prefix : <http://example.com/taxonomy#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+
+:BankingScheme a skos:ConceptScheme ;
+    skos:prefLabel "Banking Taxonomy"@en .
+
+:Banking a skos:Concept ;
+    skos:prefLabel "Banking"@en ;
+    skos:prefLabel "Banque"@fr ;
+    skos:definition "Activities of financial institutions."@en ;
+    skos:inScheme :BankingScheme .
+
+:RetailBanking a skos:Concept ;
+    skos:prefLabel "Retail Banking"@en ;
+    skos:altLabel "Consumer Banking"@en ;
+    skos:broader :Banking ;
+    skos:notation "RB" .
+
+:InvestmentBanking a skos:Concept ;
+    skos:prefLabel "Investment Banking"@en ;
+    skos:broader :Banking ;
+    skos:related :RetailBanking .
+
+:WealthManagement a skos:Concept ;
+    skos:prefLabel "Wealth Management"@en ;
+    skos:narrower :InvestmentBanking ;
+    skos:exactMatch <http://external.org/ontology/WM> .

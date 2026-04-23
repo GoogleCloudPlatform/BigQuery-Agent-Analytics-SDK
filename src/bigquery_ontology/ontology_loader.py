@@ -77,10 +77,26 @@ def load_ontology_from_string(yaml_string: str) -> Ontology:
 def _validate_ontology(ont: Ontology) -> None:
   """Run cross-element semantic validation over a parsed ontology."""
   entity_map = _check_unique_names(ont.entities, "entity")
-  rel_map = _check_unique_names(ont.relationships, "relationship")
+
+  # Relationships: concrete require unique (name,); abstract require
+  # unique (name, from, to).  No name shared between the two groups.
+  concrete_rels = [r for r in ont.relationships if not r.abstract]
+  abstract_rels = [r for r in ont.relationships if r.abstract]
+  rel_map = _check_unique_names(concrete_rels, "relationship")
+  _check_unique_abstract_relationships(abstract_rels)
+  abstract_rel_names = {r.name for r in abstract_rels}
+  concrete_abstract_overlap = set(rel_map) & abstract_rel_names
+  if concrete_abstract_overlap:
+    name = sorted(concrete_abstract_overlap)[0]
+    raise ValueError(
+        f"Relationship name {name!r} is used by both a concrete and an "
+        "abstract relationship; names must not be shared across the two."
+    )
+
   # Names live in a single ontology-wide namespace: an entity and a
   # relationship cannot share a name.
-  collisions = set(entity_map) & set(rel_map)
+  all_rel_names = set(rel_map) | abstract_rel_names
+  collisions = set(entity_map) & all_rel_names
   if collisions:
     name = sorted(collisions)[0]
     raise ValueError(
@@ -94,20 +110,42 @@ def _validate_ontology(ont: Ontology) -> None:
     _check_property_names_unique(rel.properties, f"relationship {rel.name!r}")
 
   _check_extends_targets(ont.entities, entity_map, "entity")
-  _check_extends_targets(ont.relationships, rel_map, "relationship")
+  # extends targets only checked for concrete relationships (abstract
+  # relationships do not participate in inheritance chains).
+  _check_extends_targets(concrete_rels, rel_map, "relationship")
   _check_no_extends_cycles(ont.entities, "entity")
-  _check_no_extends_cycles(ont.relationships, "relationship")
+  _check_no_extends_cycles(concrete_rels, "relationship")
 
   _check_no_property_redeclaration(ont.entities, entity_map, "entity")
-  _check_no_property_redeclaration(ont.relationships, rel_map, "relationship")
+  _check_no_property_redeclaration(concrete_rels, rel_map, "relationship")
   _check_no_key_redeclaration(ont.entities, entity_map, "entity")
-  _check_no_key_redeclaration(ont.relationships, rel_map, "relationship")
+  _check_no_key_redeclaration(concrete_rels, rel_map, "relationship")
 
   for ent in ont.entities:
-    _check_entity_keys(ent, entity_map)
+    if not ent.abstract:
+      _check_entity_keys(ent, entity_map)
+    elif ent.keys is not None:
+      # Abstract entities don't require keys, but if keys are declared
+      # they must still follow the shape rules.
+      _check_entity_key_shape(ent, ent.keys, entity_map)
+  # Endpoint existence and the abstract-endpoint rule apply to all
+  # relationships; key and covariant-narrowing checks only to concrete.
   for rel in ont.relationships:
-    _check_relationship_keys(rel, rel_map)
     _check_relationship_endpoints(rel, entity_map)
+  for rel in abstract_rels:
+    # Abstract relationships are informational. They must not use
+    # ``extends`` (that would require resolving through a mixed
+    # concrete/abstract parent map with ambiguous uniqueness), and
+    # their keys — if declared — must still follow shape rules.
+    if rel.extends is not None:
+      raise ValueError(
+          f"Relationship {rel.name!r} is abstract and must not use "
+          f"'extends'."
+      )
+    if rel.keys is not None:
+      _check_relationship_key_shape(rel, rel.keys)
+  for rel in concrete_rels:
+    _check_relationship_keys(rel, rel_map)
     _check_covariant_narrowing(rel, rel_map, entity_map)
 
 
@@ -126,6 +164,21 @@ def _check_unique_names(
       raise ValueError(f"Duplicate {kind} name: {item.name!r}")
     out[item.name] = item
   return out
+
+
+def _check_unique_abstract_relationships(
+    rels: Iterable[Relationship],
+) -> None:
+  """Abstract relationships must be unique by ``(name, from, to)``."""
+  seen: set[tuple[str, str, str]] = set()
+  for r in rels:
+    key = (r.name, r.from_, r.to)
+    if key in seen:
+      raise ValueError(
+          f"Duplicate abstract relationship: "
+          f"({r.name!r}, from={r.from_!r}, to={r.to!r})"
+      )
+    seen.add(key)
 
 
 def _check_property_names_unique(
@@ -293,6 +346,17 @@ def _check_entity_keys(entity: Entity, entity_map: dict[str, Entity]) -> None:
   keys = _effective_keys(entity, entity_map)
   if keys is None or not keys.primary:
     raise ValueError(f"Entity {entity.name!r}: keys.primary is required.")
+  _check_entity_key_shape(entity, keys, entity_map)
+
+
+def _check_entity_key_shape(
+    entity: Entity, keys: Keys, entity_map: dict[str, Entity]
+) -> None:
+  """Shape-only entity key checks: forbid ``additional``, verify that
+  key columns reference declared properties, and validate alternate
+  keys. These apply whether or not the entity is abstract; only the
+  ``primary is required`` rule is relaxed for abstract entities.
+  """
   if keys.additional is not None:
     raise ValueError(f"Entity {entity.name!r}: keys.additional is not allowed.")
   props = _effective_properties(entity, entity_map)
@@ -308,19 +372,33 @@ def _check_relationship_keys(
   keys = _effective_keys(rel, rel_map)
   if keys is None:
     return  # no uniqueness constraint; multi-edges permitted.
+  _check_relationship_key_mode(rel, keys)
+  props = _effective_properties(rel, rel_map)
+  _check_key_columns_known(keys, props, f"Relationship {rel.name!r}")
+  _check_alternate_keys(keys, f"Relationship {rel.name!r}")
+
+
+def _check_relationship_key_mode(rel: Relationship, keys: Keys) -> None:
   if keys.primary and keys.additional:
     raise ValueError(
         f"Relationship {rel.name!r}: primary and additional are "
         f"mutually exclusive."
     )
   if keys.additional is not None and keys.alternate:
-    # Largely overlaps with ``_check_alternate_keys`` (which catches the
-    # "primary missing" case), but emits a relationship-specific message
-    # for the additional+alternate combination instead of the generic one.
     raise ValueError(
         f"Relationship {rel.name!r}: alternate keys require a primary key."
     )
-  props = _effective_properties(rel, rel_map)
+
+
+def _check_relationship_key_shape(rel: Relationship, keys: Keys) -> None:
+  """Shape-only key validation for abstract relationships.
+
+  Abstract rels do not participate in inheritance, so key columns and
+  alternate keys are resolved against the relationship's own
+  declared properties rather than an effective (inherited) set.
+  """
+  _check_relationship_key_mode(rel, keys)
+  props = {p.name: p for p in rel.properties}
   _check_key_columns_known(keys, props, f"Relationship {rel.name!r}")
   _check_alternate_keys(keys, f"Relationship {rel.name!r}")
 
@@ -328,7 +406,12 @@ def _check_relationship_keys(
 def _check_relationship_endpoints(
     rel: Relationship, entity_map: dict[str, Entity]
 ) -> None:
-  """Endpoints must reference declared entities."""
+  """Endpoints must reference declared entities.
+
+  Concrete relationships must have concrete endpoints — binding a
+  relationship requires bindable endpoints. Abstract relationships
+  may reference any combination (concrete, abstract, or mixed).
+  """
   if rel.from_ not in entity_map:
     raise ValueError(
         f"Relationship {rel.name!r}: from {rel.from_!r} is not a "
@@ -338,6 +421,19 @@ def _check_relationship_endpoints(
     raise ValueError(
         f"Relationship {rel.name!r}: to {rel.to!r} is not a declared entity."
     )
+  if not rel.abstract:
+    if entity_map[rel.from_].abstract:
+      raise ValueError(
+          f"Relationship {rel.name!r} is concrete but its 'from' "
+          f"endpoint {rel.from_!r} is abstract. A concrete "
+          f"relationship cannot have an abstract endpoint."
+      )
+    if entity_map[rel.to].abstract:
+      raise ValueError(
+          f"Relationship {rel.name!r} is concrete but its 'to' "
+          f"endpoint {rel.to!r} is abstract. A concrete "
+          f"relationship cannot have an abstract endpoint."
+      )
 
 
 def _is_entity_subtype(

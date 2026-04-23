@@ -68,6 +68,13 @@ Each step produces a file whose name states what kind of DDL it is.
 Scaffold refuses to write into a non-empty `--out` directory. The user
 deletes or moves the previous output if they want to regenerate.
 
+**Abstract elements** (see `ontology.md` §3a) are skipped entirely.
+Abstract entities produce no `CREATE TABLE` statement and no
+`entities:` entry in the generated binding; abstract relationships
+produce no edge table and no `relationships:` entry. They exist in
+the ontology for documentation or taxonomy purposes and have no
+physical representation to scaffold.
+
 ## 3. Node (entity) table convention
 
 Scaffold derives every structural element from the ontology. No column

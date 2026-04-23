@@ -276,6 +276,11 @@ On top of ontology-level (`ontology.md` §10) and binding-level
 3. No cycles among derived properties.
 4. Every logical property type is supported by the target backend
    (`ontology.md` §7).
+5. **No abstract elements in bindings.** The binding loader already
+   rejects bindings that target abstract entities or relationships
+   (`ontology.md` §3a). The compiler guards against this as
+   defense-in-depth so a hand-constructed `Binding` object that skips
+   the loader still raises rather than emitting unresolvable DDL.
 
 Warnings: bound entity referenced by no relationship.
 

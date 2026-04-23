@@ -226,11 +226,32 @@ def _check_binding_names_resolve(
           f"Entity binding {eb.name!r} does not name a declared entity "
           f"in ontology {binding.ontology!r}."
       )
+    if entity_map[eb.name].abstract:
+      raise ValueError(
+          f"Entity binding {eb.name!r} targets an abstract entity "
+          f"(declared for documentation but not backed by a table). "
+          f"Abstract entities typically come from SKOS-only concepts or "
+          f"ontologies that declare structure without physical "
+          f"realization. Remove this binding, or promote {eb.name!r} in "
+          f"the ontology (drop ``abstract: true`` and give it keys) to "
+          f"back it with a table."
+      )
   for rb in binding.relationships:
     if rb.name not in rel_map:
       raise ValueError(
           f"Relationship binding {rb.name!r} does not name a declared "
           f"relationship in ontology {binding.ontology!r}."
+      )
+    if rel_map[rb.name].abstract:
+      raise ValueError(
+          f"Relationship binding {rb.name!r} targets an abstract "
+          f"relationship (declared for documentation but not backed by "
+          f"an edge table). Abstract relationships typically come from "
+          f"SKOS graph predicates (e.g. ``skos:broader``) or from "
+          f"relationships whose endpoints are abstract. Remove this "
+          f"binding, or promote {rb.name!r} in the ontology (drop "
+          f"``abstract: true`` and ensure its endpoints are concrete) "
+          f"to back it with an edge table."
       )
 
 

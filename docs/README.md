@@ -25,6 +25,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [ontology_graph_v4_design.md](ontology_graph_v4_design.md) | YAML-driven ontology extraction and materialization |
 | [ontology_graph_v5_design.md](ontology_graph_v5_design.md) | V5: TTL import, mixed extraction, temporal lineage |
 | [learning_ontology_and_context_graph.md](learning_ontology_and_context_graph.md) | Learning guide for ontology and context graph |
+| [implementation_plan_concept_index_runtime.md](implementation_plan_concept_index_runtime.md) | Phased implementation plan for concept index + runtime entity resolution (issue #58) |
 
 ## Ontology Reference
 

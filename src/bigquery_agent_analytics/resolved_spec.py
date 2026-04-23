@@ -205,6 +205,17 @@ def resolve(
   happens. All downstream SDK modules should consume the resolved
   output rather than re-implementing the mapping.
 
+  Concrete-only contract: abstract upstream entities and relationships
+  (``abstract=True``, introduced in PR #62 for SKOS import) are
+  filtered out before the name-indexed lookup maps are built. The
+  returned ``ResolvedGraph`` therefore contains only bindable
+  elements. The validated ``load_binding(...)`` path already rejects
+  bindings that target abstract elements; this filter is
+  defense-in-depth for callers that construct ``Ontology`` and
+  ``Binding`` objects programmatically. A binding that references an
+  abstract element surfaces as a ``not defined`` error rather than a
+  silent corruption from a collapsed ``{name: obj}`` map.
+
   Args:
       ontology: A validated ``bigquery_ontology.Ontology``.
       binding: A validated ``bigquery_ontology.Binding`` referencing
@@ -217,24 +228,57 @@ def resolve(
 
   Raises:
       ValueError: If a bound entity/relationship is not found in the
-          ontology, or if an entity has no primary key.
+          ontology's concrete elements, if an entity has no primary
+          key, or if the ontology contains no concrete entities at all.
   """
   lineage_config = lineage_config or {}
   project = binding.target.project
   dataset = binding.target.dataset
 
+  # Concrete-only contract: abstract upstream elements are not
+  # bindable, but for entities we must keep abstract parents reachable
+  # in the name-index map because a concrete child may ``extends`` an
+  # abstract parent and inherit its keys/properties (upstream
+  # validation allows this shape; ``_effective_keys`` /
+  # ``_effective_properties`` walks the ancestor chain via
+  # ``item_map[cur]``).
+  #
+  # Entities: full map for inheritance traversal, concrete-only set
+  # used to enforce bindability.
+  # Relationships: abstract relationships do not participate in
+  # inheritance (upstream's ``_check_extends_targets`` runs only on
+  # concrete relationships), so filter them before building the map.
+  # This also prevents the ``(name, from, to)``-unique abstract
+  # relationships relaxed in PR #62 from collapsing under
+  # ``{r.name: r}`` last-write-wins.
+  concrete_entity_names = {e.name for e in ontology.entities if not e.abstract}
+  concrete_relationships = [r for r in ontology.relationships if not r.abstract]
+
+  if not concrete_entity_names:
+    abstract_count = len(ontology.entities)
+    raise ValueError(
+        f"Ontology {ontology.ontology!r} has {abstract_count} abstract "
+        f"entities but no concrete entities. The SDK runtime requires "
+        f"at least one concrete (bindable) entity. Abstract entities "
+        f"typically come from SKOS-only concepts or ontologies that "
+        f"declare structure without physical realization; drop "
+        f"``abstract: true`` and give at least one entity keys + a "
+        f"binding to use the SDK."
+    )
+
   ont_entity_map = {e.name: e for e in ontology.entities}
-  ont_rel_map = {r.name: r for r in ontology.relationships}
+  ont_rel_map = {r.name: r for r in concrete_relationships}
 
   # -- Entities --------------------------------------------------------
   resolved_entities: list[ResolvedEntity] = []
   for eb in binding.entities:
-    ont_entity = ont_entity_map.get(eb.name)
-    if ont_entity is None:
+    if eb.name not in concrete_entity_names:
       raise ValueError(
           f"Binding references entity {eb.name!r} which is not "
-          f"defined in ontology {ontology.ontology!r}."
+          f"defined in ontology {ontology.ontology!r} (or is declared "
+          f"abstract and therefore not bindable)."
       )
+    ont_entity = ont_entity_map[eb.name]
 
     col_map: dict[str, str] = {bp.name: bp.column for bp in eb.properties}
 

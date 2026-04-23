@@ -173,27 +173,73 @@ additional: [<string>, ...]             # relationships only, mode 2: extends (f
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | yes | Unique within the ontology. |
+| `abstract` | boolean | no | Defaults to `false`. See §3a. |
 | `extends` | string | no | Name of the parent entity. Single-parent. |
-| `keys` | Keys | yes | See §6. |
+| `keys` | Keys | yes on concrete; optional on abstract | See §6. |
 | `properties` | list\<Property\> | no | See §5. |
 | `description` | string | no | Free-form. |
 | `synonyms` | list\<string\> | no | Alternate names for search / LLM grounding. |
 | `annotations` | map\<string, string \| list\<string\>\> | no | Free-form metadata. Values may be a string or a list of strings. |
 
+## 3a. Abstract elements
+
+An element with `abstract: true` is declared in the ontology but is
+**not bound to a physical table**. Abstract elements are informational:
+documentation, taxonomy structure, or cross-vocabulary mappings that
+don't back any row data. The field exists primarily to let the OWL
+importer represent standalone SKOS concepts (see `owl-import.md` §19),
+but it is part of the core ontology model and may be used by
+hand-authored ontologies as well.
+
+Rules:
+
+- **Abstract entities** do not require `keys.primary`. Declared keys
+  still follow the shape rules in §6.
+- **Abstract relationships** must not use `extends`; see §4. Declared
+  keys still follow the shape rules in §6.
+- A **concrete relationship** cannot have an **abstract endpoint**:
+  a relationship that will be materialized needs bindable endpoints
+  on both sides.
+- An **abstract relationship** may point at concrete entities,
+  abstract entities, or any combination.
+- A concrete relationship and an abstract relationship cannot share a
+  name.
+- Bindings that target an abstract entity or abstract relationship are
+  rejected by the binding loader. `gm scaffold` skips abstract
+  elements entirely when emitting DDL and binding stubs.
+
 ## 4. Relationship
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `name` | string | yes | Unique within the ontology. |
-| `extends` | string | no | Name of the parent relationship. Single-parent. |
+| `name` | string | yes | See §4a for uniqueness rules. |
+| `abstract` | boolean | no | Defaults to `false`. See §3a. |
+| `extends` | string | no | Name of the parent relationship. Single-parent. Forbidden on abstract relationships — `extends` is a bare name reference, and abstract relationship names are not unique on their own (§4a), so a bare name cannot unambiguously identify the parent. |
 | `keys` | Keys | no | See §6. |
-| `from` | string | yes | Source entity name. |
-| `to` | string | yes | Target entity name. |
+| `from` | string | yes | Source entity name. Concrete relationships require a concrete source. |
+| `to` | string | yes | Target entity name. Concrete relationships require a concrete target. |
 | `cardinality` | enum | no | `one_to_one` \| `one_to_many` \| `many_to_one` \| `many_to_many`. |
 | `properties` | list\<Property\> | no | See §5. |
 | `description` | string | no | |
 | `synonyms` | list\<string\> | no | |
 | `annotations` | map\<string, string \| list\<string\>\> | no | |
+
+### 4a. Relationship name uniqueness
+
+- **Concrete relationships** require unique `(name,)` within the
+  ontology (same rule as entities).
+- **Abstract relationships** require unique `(name, from, to)`. The
+  relaxation is necessary because abstract relationships model
+  informational predicates from external vocabularies (e.g. SKOS
+  `broader`, `related`) where the same predicate name connects many
+  different pairs of node types. Requiring name uniqueness alone would
+  force synthetic names (`skos_broader_1`, `skos_broader_2`, …) that
+  diverge from the source vocabulary and make the ontology harder to
+  read. The cost of the relaxation is that `extends` becomes
+  unresolvable for abstract relationships — a bare name no longer
+  identifies a single relationship — which is why `extends` is
+  forbidden on abstract relationships.
+- Concrete and abstract relationships cannot share a name.
 
 ## 5. Property
 
@@ -339,10 +385,14 @@ child `alumni: Person → School` is valid iff `Person extends Party` and
 
 Enforced by the ontology loader before any downstream stage runs.
 
-1. Every entity and relationship name is unique within the ontology.
+1. Entity names are unique within the ontology. Concrete relationship
+   names are unique. Abstract relationships are unique by
+   `(name, from, to)`. A concrete and abstract relationship cannot
+   share a name. Entities and relationships cannot share a name.
 2. Every property name is unique within its entity or relationship.
 3. `extends` must resolve to a declared entity (entity-to-entity) or
    relationship (relationship-to-relationship) of the correct kind.
+   Abstract relationships must not use `extends`.
 4. No cycles in `extends` chains.
 5. Redeclaring an inherited property (by name) is an error.
 6. Redeclaring inherited keys is an error.
@@ -354,9 +404,13 @@ Enforced by the ontology loader before any downstream stage runs.
    On entities, `additional` is not allowed.
 10. Relationships with `extends`: `from` / `to` satisfy covariant narrowing
     against the parent's endpoints.
-11. Every entity must declare `keys.primary`.
+11. Every **concrete** entity must declare `keys.primary`. Abstract
+    entities may omit it.
 12. Property `type` is one of the valid types (§7).
 13. Unknown YAML keys anywhere in the spec are an error (`extra="forbid"`).
+14. Relationship endpoints must reference declared entities (concrete
+    or abstract). A concrete relationship cannot point at an abstract
+    entity.
 
 ## 11. Out of scope / future docs
 
@@ -371,11 +425,6 @@ Enforced by the ontology loader before any downstream stage runs.
 
 ## 12. Open questions
 
-- **Reintroduce `abstract`?** Dropped from v0 because it leaks binding-layer
-  semantics into the ontology — an unbound entity in a given environment is
-  effectively abstract for that environment, and the binding layer can warn
-  on "unbound entity with no bound descendants." Revisit if that check proves
-  insufficient in practice.
 - **Cardinality narrowing under inheritance.** Currently specified as
   "inherited unchanged." Narrowing (e.g., parent `many_to_many`, child
   `one_to_many`) has obvious modeling value but raises enforcement questions;
