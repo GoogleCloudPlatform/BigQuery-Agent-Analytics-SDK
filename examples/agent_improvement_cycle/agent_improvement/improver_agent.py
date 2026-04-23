@@ -48,7 +48,12 @@ from google.genai.types import HttpRetryOptions
 from google.genai.types import Part
 
 # ---------------------------------------------------------------------------
-# Shared state — set by run_improvement(), read by tool functions
+# Shared state — set by run_improvement(), read by tool functions.
+#
+# This module-level dict assumes a single improvement cycle runs per
+# process. Concurrent cycles in the same process would clobber each
+# other's state. This is fine for CLI usage and the LoopAgent runner,
+# which are inherently single-cycle-at-a-time.
 # ---------------------------------------------------------------------------
 
 _state: dict = {}
@@ -373,14 +378,16 @@ async def _generate_via_vertex_optimizer(
   # The optimizer rewrites the entire prompt and strips tool
   # instructions. Re-append them so the agent actually uses tools
   # instead of relying on data inlined by the optimizer.
-  if "lookup_company_policy" not in improved and tool_sigs:
+  tool_names = [getattr(t, "__name__", "") for t in config.agent_tools]
+  has_tool_ref = any(name and name in improved for name in tool_names)
+  if not has_tool_ref and tool_sigs:
     improved += (
         "\n\nIMPORTANT: You have access to tools that contain complete, "
-        "up-to-date policy information. For EVERY policy question, you "
-        "MUST call the appropriate tool to look up the answer. Do NOT "
-        "rely solely on the information above — the tools may have more "
-        "details. NEVER say 'I don't have that information' or 'contact "
-        "HR' without first calling a tool."
+        "up-to-date information. For EVERY question, you MUST call the "
+        "appropriate tool to look up the answer. Do NOT rely solely on "
+        "the information above -- the tools may have more details. "
+        "NEVER say 'I don't have that information' without first "
+        "calling a tool."
         "\n\nAVAILABLE TOOLS:\n" + tool_sigs
     )
     changes += " + tool-use directive re-appended"
@@ -490,93 +497,40 @@ _REQUIRED_CASE_KEYS = {"id", "question", "category", "expected_tool"}
 
 
 def _classify_question(question: str, tools: list) -> tuple[str, str]:
-  """Infer category and expected_tool from a question.
+  """Infer category and expected_tool from available tools.
 
-  Uses tool docstrings and keyword matching to classify questions
-  against available tools. Returns ("unknown", "unknown") if no
-  tool covers the topic.
+  Matches question keywords against tool names and docstrings to
+  determine which tool should handle the question. This is
+  domain-agnostic: it works with any set of tools.
+
+  Returns ``("unknown", "unknown")`` if no tool matches.
   """
+  if not tools:
+    return "unknown", "unknown"
+
+  # Single tool: always the expected tool
+  if len(tools) == 1:
+    name = getattr(tools[0], "__name__", "unknown")
+    return name, name
+
   q = question.lower()
 
-  # Build keyword -> (category, tool_name) mapping from tool docstrings
-  # and common policy topic keywords
-  _TOPIC_KEYWORDS = {
-      "pto": [
-          "pto",
-          "paid time off",
-          "vacation",
-          "time off",
-          "days off",
-          "rollover",
-          "accrual",
-          "accrued",
-      ],
-      "sick_leave": [
-          "sick",
-          "illness",
-          "doctor's note",
-          "doctor note",
-          "medical",
-      ],
-      "remote_work": [
-          "remote",
-          "work from home",
-          "wfh",
-          "core hours",
-          "telecommut",
-      ],
-      "expenses": [
-          "expense",
-          "receipt",
-          "reimburs",
-          "meal limit",
-          "travel approval",
-          "pre-approval",
-          "business dinner",
-          "business lunch",
-          "business trip",
-      ],
-      "benefits": [
-          "benefit",
-          "401k",
-          "401(k)",
-          "health insurance",
-          "dental",
-          "vision",
-          "parental leave",
-          "maternity",
-          "paternity",
-          "caregiver",
-          "retirement",
-          "vesting",
-          "vested",
-          "ppo",
-          "hmo",
-      ],
-      "holidays": [
-          "holiday",
-          "christmas",
-          "new year",
-          "thanksgiving",
-          "memorial day",
-          "independence day",
-          "paid day off",
-      ],
-      "date": [
-          "next friday",
-          "next monday",
-          "next week",
-          "next month",
-          "today",
-          "this week",
-      ],
-  }
+  for tool in tools:
+    name = getattr(tool, "__name__", "")
+    doc = (getattr(tool, "__doc__", "") or "").lower()
 
-  for category, keywords in _TOPIC_KEYWORDS.items():
-    if any(kw in q for kw in keywords):
-      if category == "date":
-        return "date_handling", "get_current_date"
-      return category, "lookup_company_policy"
+    # Extract meaningful keywords from tool name (skip short words)
+    name_keywords = [
+        w for w in name.lower().replace("_", " ").split() if len(w) > 2
+    ]
+
+    # Extract keywords from first line of docstring
+    doc_first_line = doc.split("\n")[0] if doc else ""
+    doc_keywords = [w for w in doc_first_line.split() if len(w) > 3]
+
+    all_keywords = name_keywords + doc_keywords
+    if any(kw in q for kw in all_keywords):
+      return name, name
 
   return "unknown", "unknown"
 

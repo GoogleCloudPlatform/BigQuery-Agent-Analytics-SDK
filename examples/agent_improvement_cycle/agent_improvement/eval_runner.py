@@ -75,7 +75,12 @@ class EvalRunner:
       case: dict,
       user_id: str = "eval_user",
   ) -> dict:
-    """Run a single eval case and return the response."""
+    """Run a single eval case and return the response.
+
+    Captures both text output and tool call events so the judge can
+    verify tool usage with objective data rather than guessing from
+    response text.
+    """
     session = await runner.session_service.create_session(
         app_name=runner.app_name,
         user_id=user_id,
@@ -85,6 +90,7 @@ class EvalRunner:
         parts=[Part(text=case["question"])],
     )
     response_text = ""
+    tools_called: list[str] = []
     async for event in runner.run_async(
         user_id=user_id,
         session_id=session.id,
@@ -94,25 +100,45 @@ class EvalRunner:
         for part in event.content.parts:
           if part.text:
             response_text += part.text
+          if hasattr(part, "function_call") and part.function_call:
+            tools_called.append(part.function_call.name)
 
     return {
         "case_id": case["id"],
         "question": case["question"],
         "category": case.get("category", ""),
         "response": response_text,
+        "tools_called": tools_called,
         "session_id": session.id,
     }
 
   async def judge_case(self, case: dict, result: dict) -> dict:
-    """Score a single case response with the LLM judge."""
+    """Score a single case response with the LLM judge.
+
+    Uses objective tool-call data captured by ``run_single_case``
+    rather than asking the judge to infer tool usage from response
+    text.
+    """
     expected_tool = case.get("expected_tool", "")
+    tools_called = result.get("tools_called", [])
+
     if expected_tool and expected_tool != "unknown":
-      tool_check = f"Expected tool: {expected_tool}"
-      tool_fail_rule = (
-          f"\nA response also FAILS if it provides specific-sounding "
-          f"information without evidence that the '{expected_tool}' "
-          f"tool was called (the answer may be hallucinated)."
-      )
+      if expected_tool in tools_called:
+        tool_check = (
+            f"Expected tool '{expected_tool}' was called. "
+            f"Tools called: {', '.join(tools_called)}"
+        )
+        tool_fail_rule = ""
+      else:
+        tool_check = (
+            f"Expected tool '{expected_tool}' was NOT called. "
+            f"Tools called: {', '.join(tools_called) or 'none'}"
+        )
+        tool_fail_rule = (
+            f"\nA response FAILS if the expected tool "
+            f"'{expected_tool}' was not called, as the answer "
+            f"may be hallucinated without tool grounding."
+        )
     else:
       tool_check = ""
       tool_fail_rule = ""

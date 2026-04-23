@@ -289,6 +289,22 @@ class VertexPromptAdapter(PromptAdapter):
     )
     version = len(versions) + 1
 
+    # Warn if the local mirror has drifted from Vertex AI
+    if self._local_backup:
+      try:
+        local_text, local_version = self._local_backup.read_prompt()
+        if local_version != version:
+          logger.warning(
+              "Vertex AI prompt is v%d but local mirror %s is v%d. "
+              "The local file may be out of date. Run the improvement "
+              "cycle or reset to re-sync.",
+              version,
+              self._local_backup.path,
+              local_version,
+          )
+      except Exception:
+        pass  # Local file may not exist yet
+
     return text.strip(), version
 
   def write_prompt(self, text: str, version: int, summary: str) -> int:
