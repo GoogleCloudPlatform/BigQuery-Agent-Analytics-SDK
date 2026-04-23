@@ -205,6 +205,17 @@ def resolve(
   happens. All downstream SDK modules should consume the resolved
   output rather than re-implementing the mapping.
 
+  Concrete-only contract: abstract upstream entities and relationships
+  (``abstract=True``, introduced in PR #62 for SKOS import) are
+  filtered out before the name-indexed lookup maps are built. The
+  returned ``ResolvedGraph`` therefore contains only bindable
+  elements. The validated ``load_binding(...)`` path already rejects
+  bindings that target abstract elements; this filter is
+  defense-in-depth for callers that construct ``Ontology`` and
+  ``Binding`` objects programmatically. A binding that references an
+  abstract element surfaces as a ``not defined`` error rather than a
+  silent corruption from a collapsed ``{name: obj}`` map.
+
   Args:
       ontology: A validated ``bigquery_ontology.Ontology``.
       binding: A validated ``bigquery_ontology.Binding`` referencing
@@ -217,14 +228,34 @@ def resolve(
 
   Raises:
       ValueError: If a bound entity/relationship is not found in the
-          ontology, or if an entity has no primary key.
+          ontology's concrete elements, if an entity has no primary
+          key, or if the ontology contains no concrete entities at all.
   """
   lineage_config = lineage_config or {}
   project = binding.target.project
   dataset = binding.target.dataset
 
-  ont_entity_map = {e.name: e for e in ontology.entities}
-  ont_rel_map = {r.name: r for r in ontology.relationships}
+  # Concrete-only filter: abstract upstream elements never enter the
+  # name-indexed maps. See the docstring above for the rationale.
+  concrete_entities = [e for e in ontology.entities if not e.abstract]
+  concrete_relationships = [
+      r for r in ontology.relationships if not r.abstract
+  ]
+
+  if not concrete_entities:
+    abstract_count = len(ontology.entities)
+    raise ValueError(
+        f"Ontology {ontology.ontology!r} has {abstract_count} abstract "
+        f"entities but no concrete entities. The SDK runtime requires "
+        f"at least one concrete (bindable) entity. Abstract entities "
+        f"typically come from SKOS-only concepts or ontologies that "
+        f"declare structure without physical realization; drop "
+        f"``abstract: true`` and give at least one entity keys + a "
+        f"binding to use the SDK."
+    )
+
+  ont_entity_map = {e.name: e for e in concrete_entities}
+  ont_rel_map = {r.name: r for r in concrete_relationships}
 
   # -- Entities --------------------------------------------------------
   resolved_entities: list[ResolvedEntity] = []
