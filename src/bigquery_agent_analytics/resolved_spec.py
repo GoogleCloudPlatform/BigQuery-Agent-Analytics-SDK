@@ -235,14 +235,30 @@ def resolve(
   project = binding.target.project
   dataset = binding.target.dataset
 
-  # Concrete-only filter: abstract upstream elements never enter the
-  # name-indexed maps. See the docstring above for the rationale.
-  concrete_entities = [e for e in ontology.entities if not e.abstract]
+  # Concrete-only contract: abstract upstream elements are not
+  # bindable, but for entities we must keep abstract parents reachable
+  # in the name-index map because a concrete child may ``extends`` an
+  # abstract parent and inherit its keys/properties (upstream
+  # validation allows this shape; ``_effective_keys`` /
+  # ``_effective_properties`` walks the ancestor chain via
+  # ``item_map[cur]``).
+  #
+  # Entities: full map for inheritance traversal, concrete-only set
+  # used to enforce bindability.
+  # Relationships: abstract relationships do not participate in
+  # inheritance (upstream's ``_check_extends_targets`` runs only on
+  # concrete relationships), so filter them before building the map.
+  # This also prevents the ``(name, from, to)``-unique abstract
+  # relationships relaxed in PR #62 from collapsing under
+  # ``{r.name: r}`` last-write-wins.
+  concrete_entity_names = {
+      e.name for e in ontology.entities if not e.abstract
+  }
   concrete_relationships = [
       r for r in ontology.relationships if not r.abstract
   ]
 
-  if not concrete_entities:
+  if not concrete_entity_names:
     abstract_count = len(ontology.entities)
     raise ValueError(
         f"Ontology {ontology.ontology!r} has {abstract_count} abstract "
@@ -254,18 +270,19 @@ def resolve(
         f"binding to use the SDK."
     )
 
-  ont_entity_map = {e.name: e for e in concrete_entities}
+  ont_entity_map = {e.name: e for e in ontology.entities}
   ont_rel_map = {r.name: r for r in concrete_relationships}
 
   # -- Entities --------------------------------------------------------
   resolved_entities: list[ResolvedEntity] = []
   for eb in binding.entities:
-    ont_entity = ont_entity_map.get(eb.name)
-    if ont_entity is None:
+    if eb.name not in concrete_entity_names:
       raise ValueError(
           f"Binding references entity {eb.name!r} which is not "
-          f"defined in ontology {ontology.ontology!r}."
+          f"defined in ontology {ontology.ontology!r} (or is declared "
+          f"abstract and therefore not bindable)."
       )
+    ont_entity = ont_entity_map[eb.name]
 
     col_map: dict[str, str] = {bp.name: bp.column for bp in eb.properties}
 

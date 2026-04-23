@@ -428,3 +428,58 @@ class TestResolveAbstractFilter:
     )
     with pytest.raises(ValueError, match="not defined"):
       resolve(ontology, binding)
+
+  def test_concrete_child_extends_abstract_parent_inherits_keys(self):
+    """A concrete entity may extend an abstract parent and inherit its
+    keys and properties. Upstream validation allows this shape; the
+    adapter must preserve it.
+
+    The filter must not remove abstract parents from the inheritance-
+    traversal map, or ``_effective_keys`` / ``_effective_properties``
+    will crash with a ``KeyError`` when walking the ancestor chain.
+    """
+    ontology = Ontology(
+        ontology="test",
+        entities=[
+            Entity(
+                name="AbstractParent",
+                abstract=True,
+                keys=Keys(primary=["pid"]),
+                properties=[
+                    Property(name="pid", type=PropertyType.STRING),
+                    Property(name="label", type=PropertyType.STRING),
+                ],
+            ),
+            Entity(
+                name="Child",
+                extends="AbstractParent",
+                # No own keys or properties -- inherited from parent.
+            ),
+        ],
+        relationships=[],
+    )
+    binding = Binding(
+        binding="test_binding",
+        ontology="test",
+        target=_target(),
+        entities=[
+            EntityBinding(
+                name="Child",
+                source="children",
+                properties=[
+                    PropertyBinding(name="pid", column="child_id"),
+                    PropertyBinding(name="label", column="child_label"),
+                ],
+            ),
+        ],
+        relationships=[],
+    )
+    graph = resolve(ontology, binding)
+    # AbstractParent must not appear in the output -- it is not bindable.
+    assert {e.name for e in graph.entities} == {"Child"}
+    # Child inherits pid as its primary key (remapped to child_id).
+    child = graph.entities[0]
+    assert child.key_columns == ("child_id",)
+    # Child also inherits the label property.
+    col_names = {p.column for p in child.properties}
+    assert col_names == {"child_id", "child_label"}
