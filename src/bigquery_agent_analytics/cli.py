@@ -40,6 +40,7 @@ from typing import Optional
 import typer
 
 from .evaluators import CodeEvaluator
+from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
 from .formatter import format_output
 from .trace import TraceFilter
@@ -358,12 +359,70 @@ def evaluate(
     typer.echo(format_output(report, fmt))
 
     if exit_code and report.pass_rate < 1.0:
+      _emit_evaluate_failures(report)
       raise typer.Exit(code=1)
   except typer.Exit:
     raise
   except Exception as exc:
     typer.echo(f"Error: {exc}", err=True)
     raise typer.Exit(code=2)
+
+
+def _emit_evaluate_failures(
+    report: EvaluationReport, max_sessions: int = 10
+) -> None:
+  """Emit readable FAIL lines for failing sessions before --exit-code exits.
+
+  One line per (session_id, metric_name) that failed its threshold, with
+  the raw observed value and budget when the metric declared them via
+  ``observed_key`` / ``budget``. Capped at ``max_sessions`` most-recent
+  failures so CI logs stay scannable.
+  """
+  failed = [s for s in report.session_scores if not s.passed]
+  if not failed:
+    return
+  typer.echo("", err=True)
+  typer.echo(
+      f"--exit-code: {len(failed)} session(s) failed (of "
+      f"{report.total_sessions} evaluated)",
+      err=True,
+  )
+  shown = failed[:max_sessions]
+  for s in shown:
+    for metric_name, score in s.scores.items():
+      detail = s.details.get(f"metric_{metric_name}") or {}
+      observed = detail.get("observed")
+      budget = detail.get("budget")
+      # Consider both the per-metric detail's passed field (when set)
+      # and the raw score-vs-threshold fallback for custom metrics.
+      if detail:
+        if detail.get("passed", True):
+          continue
+      else:
+        # Custom metric with no observed/budget metadata — infer pass/fail
+        # from the score. Default threshold on _MetricDef is 0.5, so we
+        # can't know the exact threshold here; skip unless the score is
+        # a clean 0.0 (the binary-scorer pattern the prebuilts use now).
+        if score != 0.0:
+          continue
+      parts = [f"FAIL session={s.session_id} metric={metric_name}"]
+      if observed is not None:
+        if isinstance(observed, float):
+          parts.append(f"observed={observed:.4g}")
+        else:
+          parts.append(f"observed={observed}")
+      if budget is not None:
+        if isinstance(budget, float):
+          parts.append(f"budget={budget:.4g}")
+        else:
+          parts.append(f"budget={budget}")
+      typer.echo("  " + " ".join(parts), err=True)
+  if len(failed) > len(shown):
+    typer.echo(
+        f"  ... {len(failed) - len(shown)} more failing session(s) "
+        f"(raise --limit or see --format=json for full list)",
+        err=True,
+    )
 
 
 @app.command()

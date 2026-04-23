@@ -70,31 +70,60 @@ class StreamingTrigger:
 
 
 def build_streaming_observability_evaluator() -> CodeEvaluator:
-  """Build the fixed launch evaluator profile for streaming observability."""
+  """Build the fixed launch evaluator profile for streaming observability.
+
+  Uses raw-budget gates (a session passes iff the observed metric is
+  within the configured budget) for consistency with
+  ``CodeEvaluator.latency`` / ``.error_rate`` / ``.turn_count``.
+  Prior implementation used normalized scores with a 0.5 pass cutoff,
+  which caused gates to fire at roughly half the configured budget.
+  """
 
   def _score_latency(session_summary: dict[str, Any]) -> float:
-    return udf_kernels.score_latency(
-        session_summary.get("avg_latency_ms", 0),
-        _LATENCY_THRESHOLD_MS,
-    )
+    observed = session_summary.get("avg_latency_ms", 0) or 0
+    return 1.0 if observed <= _LATENCY_THRESHOLD_MS else 0.0
+
+  def _observed_error_rate(session_summary: dict[str, Any]) -> float:
+    calls = session_summary.get("tool_calls", 0) or 0
+    errors = session_summary.get("tool_errors", 0) or 0
+    if calls <= 0:
+      return 0.0
+    return errors / calls
 
   def _score_error_rate(session_summary: dict[str, Any]) -> float:
-    return udf_kernels.score_error_rate(
-        session_summary.get("tool_calls", 0),
-        session_summary.get("tool_errors", 0),
-        _MAX_ERROR_RATE,
+    calls = session_summary.get("tool_calls", 0) or 0
+    if calls <= 0:
+      return 1.0
+    return (
+        1.0 if _observed_error_rate(session_summary) <= _MAX_ERROR_RATE else 0.0
     )
 
   def _score_turn_count(session_summary: dict[str, Any]) -> float:
-    return udf_kernels.score_turn_count(
-        session_summary.get("turn_count", 0),
-        _MAX_TURNS,
-    )
+    observed = session_summary.get("turn_count", 0) or 0
+    return 1.0 if observed <= _MAX_TURNS else 0.0
 
   evaluator = CodeEvaluator(name=STREAMING_EVALUATOR_PROFILE)
-  evaluator.add_metric("latency", _score_latency, threshold=0.5)
-  evaluator.add_metric("error_rate", _score_error_rate, threshold=0.5)
-  evaluator.add_metric("turn_count", _score_turn_count, threshold=0.5)
+  evaluator.add_metric(
+      "latency",
+      _score_latency,
+      threshold=1.0,
+      observed_key="avg_latency_ms",
+      budget=_LATENCY_THRESHOLD_MS,
+  )
+  evaluator.add_metric(
+      "error_rate",
+      _score_error_rate,
+      threshold=1.0,
+      observed_fn=_observed_error_rate,
+      budget=_MAX_ERROR_RATE,
+  )
+  evaluator.add_metric(
+      "turn_count",
+      _score_turn_count,
+      threshold=1.0,
+      observed_key="turn_count",
+      budget=_MAX_TURNS,
+  )
   return evaluator
 
 
