@@ -27,8 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import warnings
+
+warnings.filterwarnings("ignore")
+logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 from agent_improvement.config import ImprovementConfig
 from agent_improvement.eval_runner import EvalRunner
@@ -331,8 +336,9 @@ async def _generate_via_vertex_optimizer(
 
   print(
       f"  Calling Vertex AI Prompt Optimizer with {len(gt_results)} "
-      "ground truth examples (this may take 30-60s)..."
+      "ground truth examples..."
   )
+  print("  (The optimizer is a server-side job — typically 2-4 minutes.)")
 
   from google.genai.types import HttpOptions
   from google.genai.types import HttpRetryOptions
@@ -349,15 +355,31 @@ async def _generate_via_vertex_optimizer(
           ),
       ),
   )
-  result = client.prompts.optimize(
-      prompt=prompt_with_tools,
-      config=OptimizeConfig(
-          optimization_target=(
-              OptimizeTarget.OPTIMIZATION_TARGET_FEW_SHOT_TARGET_RESPONSE
-          ),
-          examples_dataframe=df,
-      ),
-  )
+
+  # Run the blocking optimizer call in a thread so we can print
+  # progress while it works. Without this the event loop is blocked
+  # and nothing prints until the call returns.
+  async def _progress_indicator():
+    elapsed = 0
+    while True:
+      await asyncio.sleep(15)
+      elapsed += 15
+      print(f"  ... still optimizing ({elapsed}s elapsed)", flush=True)
+
+  progress_task = asyncio.create_task(_progress_indicator())
+  try:
+    result = await asyncio.to_thread(
+        client.prompts.optimize,
+        prompt=prompt_with_tools,
+        config=OptimizeConfig(
+            optimization_target=(
+                OptimizeTarget.OPTIMIZATION_TARGET_FEW_SHOT_TARGET_RESPONSE
+            ),
+            examples_dataframe=df,
+        ),
+    )
+  finally:
+    progress_task.cancel()
 
   print("  Optimizer returned a candidate prompt.")
 
