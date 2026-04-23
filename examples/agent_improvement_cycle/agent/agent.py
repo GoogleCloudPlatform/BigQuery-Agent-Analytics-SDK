@@ -54,16 +54,20 @@ os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
 
-def create_agent(prompt: str) -> Agent:
+def create_agent(prompt: str, model_id: str | None = None) -> Agent:
   """Create a company_info_agent with the given prompt.
 
   This is the single agent factory for the demo. Used by eval,
   improvement, and the main agent entry point.
+
+  Args:
+      prompt: System instruction for the agent.
+      model_id: Optional model override. Defaults to MODEL_ID from env.
   """
   return Agent(
       name="company_info_agent",
       model=Gemini(
-          model=MODEL_ID,
+          model=model_id or MODEL_ID,
           retry_options=types.HttpRetryOptions(attempts=3),
       ),
       description="An agent that answers questions about company policies.",

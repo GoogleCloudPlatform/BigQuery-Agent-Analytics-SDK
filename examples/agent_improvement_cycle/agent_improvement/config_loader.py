@@ -131,5 +131,6 @@ def load_config(config_path: str) -> ImprovementConfig:
       model_id=cfg.get("model_id", "gemini-2.5-flash"),
       max_attempts=cfg.get("max_attempts", 3),
       judge_prompt=cfg.get("judge_prompt"),
+      teacher_model_id=cfg.get("teacher_model_id"),
       use_vertex_optimizer=cfg.get("use_vertex_optimizer", False),
   )

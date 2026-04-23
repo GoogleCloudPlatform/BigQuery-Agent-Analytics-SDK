@@ -35,7 +35,8 @@ The setup script performs six checks:
 2. **Google Cloud auth:** Confirms `gcloud` is authenticated and a
    project is set.
 3. **APIs:** Enables BigQuery and Vertex AI APIs if not already active.
-4. **Dependencies:** Installs Python packages from `requirements.txt`.
+4. **Dependencies:** Installs Python packages (`google-cloud-aiplatform`,
+   `google-adk`, `google-genai`, `pandas`, `python-dotenv`).
 5. **Configuration:** Creates the `.env` file with your project ID,
    BigQuery dataset, and table name. Creates the BQ dataset if needed.
 6. **Vertex AI prompt:** Creates the V1 prompt in the Vertex AI Prompt
@@ -206,10 +207,10 @@ Step 5 mirrors Steps 1-3 but with the improved prompt:
 
 ```
   Before (V1):   40% meaningful  (4/10 sessions)
-  After  (V2):  90% meaningful  (9/10 sessions)
+  After  (V2): 100% meaningful (10/10 sessions)
 ```
 
-From 40% to 90% in one automated cycle, scored from BigQuery on
+From 40% to 100% in one automated cycle, scored from BigQuery on
 entirely new questions.
 
 ---

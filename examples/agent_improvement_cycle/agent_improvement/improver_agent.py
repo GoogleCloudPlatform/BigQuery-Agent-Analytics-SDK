@@ -188,7 +188,12 @@ async def _generate_ground_truth(
       "know' or 'contact HR'. ALWAYS use the tools first, then answer "
       "based on the tool results. Be specific and thorough."
   )
-  teacher_agent = config.agent_factory(teacher_prompt)
+  if config.teacher_model_id:
+    teacher_agent = config.agent_factory(
+        teacher_prompt, model_id=config.teacher_model_id
+    )
+  else:
+    teacher_agent = config.agent_factory(teacher_prompt)
   runner = InMemoryRunner(agent=teacher_agent, app_name="teacher_agent")
 
   async def _get_answer(session: dict) -> dict:
@@ -751,10 +756,10 @@ async def run_improvement(
   _, old_version = config.prompt_adapter.read_prompt()
   rate = report["summary"]["meaningful_rate"]
   print("")
-  print("  ┌──────────────────────────────────────┐")
-  print("  │          PROMPT IMPROVER              │")
-  print("  ├──────────────────────────────────────┤")
-  print(f"  │  Prompt version:  v{old_version:<17}│")
+  print("   ┌──────────────────────────────────────┐")
+  print("   │          PROMPT IMPROVER             │")
+  print("   ├──────────────────────────────────────┤")
+  print(f"  │  Prompt version:  v{old_version:<17} │")
   print(
       f"  │  Quality score:   {rate}% meaningful{' ' * (7 - len(str(rate)))}│"
   )

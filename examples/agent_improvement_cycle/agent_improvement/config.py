@@ -44,12 +44,18 @@ class ImprovementConfig:
           giving up.
       quality_threshold: Fraction of golden cases that must pass
           (1.0 = all cases).
+      teacher_model_id: Optional Gemini model for the teacher agent that
+          generates ground truth. Defaults to *None*, which uses the
+          same model as the target agent (``model_id``). Set to a
+          stronger model (e.g. ``gemini-2.5-pro``) when failures
+          require more reasoning capability than the target model can
+          provide with just a better prompt.
       judge_prompt: Custom LLM judge prompt template. Must contain
           ``{question}`` and ``{response}`` placeholders. If *None*,
           uses the default judge prompt.
   """
 
-  agent_factory: Callable[[str], Agent]
+  agent_factory: Callable[..., Agent]
   agent_name: str
   agent_tools: list[Callable]
   prompt_adapter: PromptAdapter
@@ -58,4 +64,5 @@ class ImprovementConfig:
   max_attempts: int = 3
   quality_threshold: float = 1.0
   judge_prompt: str | None = None
+  teacher_model_id: str | None = None
   use_vertex_optimizer: bool = False

@@ -42,7 +42,7 @@ The full cycle:
    traffic, so regressions are caught before they reach users
 7. **Repeat** until quality stabilizes
 
-The hero moment: quality typically climbs from ~30% to ~90%+ across 3 cycles
+The hero moment: quality typically climbs from ~40% to ~100% in a single cycle
 (results vary due to non-deterministic LLM output).
 
 ### Why This Matters
@@ -87,11 +87,12 @@ agent_improvement/       # Reusable improvement module (works with any ADK agent
 
 run_improvement.py       # Entry point: loads config.json, runs improvement
 setup_vertex.py          # Creates/resets Vertex AI prompt (called by setup.sh)
-reports/                 # Generated reports, eval results
+reports/                 # Generated reports, eval results, ground truth
 
 run_cycle.sh             # Orchestrator: traffic -> eval -> quality -> improve
 setup.sh                 # One-time setup (auth, deps, BigQuery, Vertex AI prompt)
-reset.sh                 # Reset to V1 prompt and 3 golden cases
+reset.sh                 # Reset to V1 prompt, prompts.py, and 3 golden cases
+show_prompt.sh           # Display current prompt from Vertex AI (curl + jq)
 ```
 
 ### config.json
@@ -103,13 +104,16 @@ All agent-specific settings live in a single declarative config file:
   "app_name": "company_info_agent",
   "agent_module": "agent.agent",
   "prompts_path": "agent/prompts.py",
+  "prompt_variable": "CURRENT_PROMPT",
+  "version_variable": "CURRENT_VERSION",
   "eval_cases_path": "eval/eval_cases.json",
   "traffic_generator": "eval/generate_traffic.py",
   "model_id": "gemini-2.5-flash",
   "max_attempts": 3,
   "prompt_storage": "vertex",
   "vertex_prompt_id": "1234567890",
-  "use_vertex_optimizer": true
+  "use_vertex_optimizer": true,
+  "teacher_model_id": null
 }
 ```
 
@@ -127,15 +131,28 @@ not in a local file. This gives you:
 - **Cloud-native versioning**: each improvement creates a new version
 - **Audit trail**: full history of prompt changes with metadata
 - **API access**: read/write via `vertexai.Client().prompts`
-- **No file hacking**: no regex parsing, no version variables
+- **Local mirroring**: each update is also written to `agent/prompts.py`
+  so changes are visible in `git diff`
 
 The `VertexPromptAdapter` handles all reads and writes. On startup,
 `agent.py` fetches the current prompt from the registry via the
 `VERTEX_PROMPT_ID` environment variable. The improvement cycle writes
-new versions back through the same adapter.
+new versions back through the same adapter and mirrors them to
+`agent/prompts.py` via the `PythonFilePromptAdapter`.
+
+To inspect the current prompt from the command line:
+
+```bash
+./show_prompt.sh              # Display current prompt text
+./show_prompt.sh --versions   # List all versions
+```
 
 `setup.sh` creates the initial prompt resource automatically.
-`reset.sh` deletes it and creates a fresh one at V1.
+`reset.sh` deletes it and creates a fresh one at V1, and restores
+`agent/prompts.py` to its original state.
+
+The cycle displays the current prompt at the start and end of each
+run so you can see exactly what changed.
 
 ### Prompt Optimization: Vertex AI Prompt Optimizer
 
@@ -146,7 +163,7 @@ When the cycle identifies failed sessions, it uses the
    "partial" from the quality report.
 2. **Generate ground truth**: A "teacher agent" (same tools, better
    prompt) re-answers each failed question to produce what the correct
-   response should have been.
+   response should have been. See below for details.
 3. **Optimize**: Feed the current prompt + (question, bad_response,
    ground_truth) triples to the Vertex AI Prompt Optimizer in
    `target_response` mode.
@@ -155,6 +172,67 @@ When the cycle identifies failed sessions, it uses the
 
 This replaces raw "ask Gemini to rewrite the prompt" with a
 structured optimization pipeline backed by real failure data.
+
+### Teacher Agent and Synthetic Ground Truth
+
+The Vertex AI Prompt Optimizer needs examples of correct output to
+learn from. But where do those come from? You do not have
+hand-written reference answers for every possible user question ...
+especially not for questions discovered from synthetic traffic that
+you never anticipated.
+
+The solution is the **teacher agent**. It is built from the same
+`agent_factory` and runs with the **same tools and the same model**
+as the target agent. The only difference is the prompt: instead of
+the flawed V1 instruction, the teacher gets a short, direct
+instruction that explicitly requires tool usage:
+
+```
+You are an expert assistant. For EVERY question, you MUST call
+the available tools to look up the answer. NEVER say 'I don't
+know' or 'contact HR'. ALWAYS use the tools first, then answer
+based on the tool results. Be specific and thorough.
+```
+
+The insight: the V1 agent fails not because the tools are broken or
+the model is incapable, but because the V1 prompt actively
+**discourages** tool use ("answer from the knowledge above"). The
+teacher prompt removes that barrier, so the teacher produces correct,
+tool-grounded answers to the same questions the target agent failed.
+
+The full flow:
+
+```
+Failed sessions from quality report
+        |
+        v
+  Teacher agent re-answers each failed question
+  (same tools, same model, better prompt)
+        |
+        v
+  Produces triples:
+    (question, bad_response, ground_truth)
+        |
+        v
+  Vertex AI Prompt Optimizer
+  (target_response mode)
+        |
+        v
+  Optimized prompt that steers the agent
+  toward tool-grounded answers
+```
+
+The teacher's answers are saved to `reports/ground_truth_latest.json`
+for inspection. Each entry contains the original question, the bad
+response from the target agent, and the teacher's ground truth
+answer.
+
+**Why not just use the teacher prompt directly?** The teacher prompt
+is generic ... it works for any agent with any tools. The optimized
+prompt is specific: it learns the domain vocabulary, the tool names,
+the response style, and the edge cases from the ground truth
+examples. The optimizer produces a prompt that is both correct and
+tailored to the agent's actual use case.
 
 ### Two Eval Sets
 
@@ -274,9 +352,11 @@ export PROJECT_ID=my-project-id
 ./setup.sh
 ```
 
-This installs dependencies (`pip install bigquery-agent-analytics[improvement]`),
-verifies credentials, creates the BigQuery dataset, and creates
-the initial V1 prompt in the Vertex AI Prompt Registry.
+This installs dependencies (`google-cloud-aiplatform`, `google-adk`,
+`google-genai`, etc.), verifies credentials, creates the BigQuery
+dataset, and creates the initial V1 prompt in the Vertex AI Prompt
+Registry. Improved prompts are mirrored to `agent/prompts.py` for
+git tracking.
 
 ### 3. Run the demo
 
@@ -284,7 +364,7 @@ the initial V1 prompt in the Vertex AI Prompt Registry.
 # Single improvement cycle
 ./run_cycle.sh
 
-# Full demo: 3 cycles, watch the score climb from ~30% to ~90%
+# Full demo: 3 cycles, watch the score climb from ~40% to ~100%
 ./run_cycle.sh --cycles 3
 
 # Eval only (no improvement step)
@@ -341,7 +421,9 @@ agent:
 |-------|---------|-------------|
 | `app_name` | required | Agent name for BQ filtering |
 | `agent_module` | required | Python module path (e.g. `agent.agent`) |
-| `prompts_path` | required | Path to prompts.py (for V1 seed text) |
+| `prompts_path` | required | Path to prompts.py (for V1 seed text and local mirroring) |
+| `prompt_variable` | `CURRENT_PROMPT` | Variable name in prompts.py holding the active prompt |
+| `version_variable` | `CURRENT_VERSION` | Variable name in prompts.py holding the version number |
 | `eval_cases_path` | required | Path to golden eval set JSON |
 | `traffic_generator` | required | Path to traffic generation script |
 | `model_id` | `gemini-2.5-flash` | Gemini model for agent and judge |
@@ -349,6 +431,7 @@ agent:
 | `prompt_storage` | `vertex` | `vertex` or `python_file` |
 | `vertex_prompt_id` | `""` | Vertex AI prompt ID (auto-filled by setup) |
 | `use_vertex_optimizer` | `true` | Use Vertex AI Prompt Optimizer |
+| `teacher_model_id` | `null` | Model for teacher agent (null = same as `model_id`) |
 
 ### Environment variables (.env)
 
