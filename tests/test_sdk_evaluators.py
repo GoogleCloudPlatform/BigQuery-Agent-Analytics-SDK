@@ -116,7 +116,7 @@ class TestCodeEvaluatorPrebuilt:
         }
     )
     assert score.passed is True
-    assert score.scores["latency"] > 0.5
+    assert score.scores["latency"] == 1.0
 
   def test_latency_fail(self):
     evaluator = CodeEvaluator.latency(threshold_ms=1000)
@@ -148,7 +148,7 @@ class TestCodeEvaluatorPrebuilt:
         }
     )
     assert score.passed is True
-    assert score.scores["turn_count"] > 0.5
+    assert score.scores["turn_count"] == 1.0
 
   def test_turn_count_fail(self):
     evaluator = CodeEvaluator.turn_count(max_turns=5)
@@ -192,6 +192,150 @@ class TestCodeEvaluatorPrebuilt:
         }
     )
     assert score.scores["error_rate"] == 1.0
+
+
+class TestPrebuiltRawBudgetBoundaries:
+  """Regression tests: prebuilt gates compare raw observed <= budget.
+
+  Prior implementation used normalized scores with a 0.5 pass cutoff,
+  which caused every gate to effectively fire at ``budget / 2`` (e.g.
+  ``CodeEvaluator.latency(threshold_ms=5000)`` failed at observed >
+  2500 ms). These tests lock in the new raw-budget semantics and
+  guard against regressions.
+  """
+
+  def test_latency_boundary_inclusive(self):
+    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "avg_latency_ms": 5000}
+    )
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "avg_latency_ms": 5001}
+    )
+    # Observed == budget must PASS (regression: old impl failed here at
+    # any value strictly above budget/2 = 2500).
+    assert at_budget.passed is True
+    assert at_budget.scores["latency"] == 1.0
+    assert just_over.passed is False
+    assert just_over.scores["latency"] == 0.0
+
+  def test_latency_old_midpoint_now_passes(self):
+    # The old normalized impl failed at 2501ms with threshold=5000; under
+    # the new impl this is nowhere near the budget and must pass.
+    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    score = evaluator.evaluate_session(
+        {"session_id": "s1", "avg_latency_ms": 2501}
+    )
+    assert score.passed is True
+    assert score.scores["latency"] == 1.0
+
+  def test_turn_count_boundary_inclusive(self):
+    evaluator = CodeEvaluator.turn_count(max_turns=10)
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "turn_count": 10}
+    )
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "turn_count": 11}
+    )
+    assert at_budget.passed is True
+    assert just_over.passed is False
+
+  def test_turn_count_old_midpoint_now_passes(self):
+    evaluator = CodeEvaluator.turn_count(max_turns=10)
+    score = evaluator.evaluate_session({"session_id": "s1", "turn_count": 6})
+    # Old impl: 1.0 - 6/10 = 0.4 -> fail. New: 6 <= 10 -> pass.
+    assert score.passed is True
+
+  def test_error_rate_boundary_inclusive(self):
+    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "tool_calls": 10, "tool_errors": 1}
+    )
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "tool_calls": 10, "tool_errors": 2}
+    )
+    assert at_budget.passed is True
+    assert just_over.passed is False
+
+  def test_token_efficiency_boundary_inclusive(self):
+    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "total_tokens": 50000}
+    )
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "total_tokens": 50001}
+    )
+    assert at_budget.passed is True
+    assert just_over.passed is False
+
+  def test_ttft_boundary_inclusive(self):
+    evaluator = CodeEvaluator.ttft(threshold_ms=1000)
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "avg_ttft_ms": 1000}
+    )
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "avg_ttft_ms": 1001}
+    )
+    assert at_budget.passed is True
+    assert just_over.passed is False
+
+  def test_cost_per_session_boundary_inclusive(self):
+    evaluator = CodeEvaluator.cost_per_session(
+        max_cost_usd=0.01,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.001,
+    )
+    # Cost at budget: (5000/1000 + 5000/1000) * 0.001 = 0.01 exactly.
+    at_budget = evaluator.evaluate_session(
+        {"session_id": "s1", "input_tokens": 5000, "output_tokens": 5000}
+    )
+    # Cost just over: 10001 input tokens at 0.001/1K -> 0.010001.
+    just_over = evaluator.evaluate_session(
+        {"session_id": "s2", "input_tokens": 10001, "output_tokens": 0}
+    )
+    assert at_budget.passed is True
+    assert just_over.passed is False
+
+  def test_observed_key_and_budget_in_details(self):
+    """Per-metric detail must expose observed/budget for CLI output."""
+    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    score = evaluator.evaluate_session(
+        {"session_id": "s1", "avg_latency_ms": 6000}
+    )
+    detail = score.details.get("metric_latency")
+    assert detail is not None
+    assert detail["observed"] == 6000
+    assert detail["budget"] == 5000
+    assert detail["passed"] is False
+
+  def test_error_rate_observed_fn_in_details(self):
+    """Computed observed (errors/calls) surfaces in details via observed_fn."""
+    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    score = evaluator.evaluate_session(
+        {"session_id": "s1", "tool_calls": 10, "tool_errors": 5}
+    )
+    detail = score.details.get("metric_error_rate")
+    assert detail is not None
+    assert detail["observed"] == pytest.approx(0.5)
+    assert detail["budget"] == pytest.approx(0.1)
+    assert detail["passed"] is False
+
+  def test_cost_observed_fn_in_details(self):
+    """Computed cost surfaces in details via observed_fn."""
+    evaluator = CodeEvaluator.cost_per_session(
+        max_cost_usd=0.01,
+        input_cost_per_1k=0.001,
+        output_cost_per_1k=0.001,
+    )
+    score = evaluator.evaluate_session(
+        {"session_id": "s1", "input_tokens": 20000, "output_tokens": 0}
+    )
+    detail = score.details.get("metric_cost")
+    assert detail is not None
+    # 20000 / 1000 * 0.001 = 0.02
+    assert detail["observed"] == pytest.approx(0.02)
+    assert detail["budget"] == pytest.approx(0.01)
+    assert detail["passed"] is False
 
 
 class TestLLMAsJudgePrebuilt:
@@ -364,8 +508,8 @@ class TestTokenEfficiencyPrebuilt:
             "total_tokens": 10000,
         }
     )
-    # 1.0 - 10000/50000 = 0.8
-    assert score.scores["token_efficiency"] == pytest.approx(0.8)
+    # Binary gate: observed <= budget -> 1.0
+    assert score.scores["token_efficiency"] == 1.0
     assert score.passed is True
 
   def test_over_budget(self):
@@ -387,8 +531,9 @@ class TestTokenEfficiencyPrebuilt:
             "total_tokens": 50000,
         }
     )
-    assert score.scores["token_efficiency"] == 0.0
-    assert score.passed is False
+    # Boundary is inclusive (observed <= budget).
+    assert score.scores["token_efficiency"] == 1.0
+    assert score.passed is True
 
 
 class TestCostPerSessionPrebuilt:
@@ -412,8 +557,7 @@ class TestCostPerSessionPrebuilt:
         input_cost_per_1k=0.001,
         output_cost_per_1k=0.002,
     )
-    # Cost = (10000/1000)*0.001 + (5000/1000)*0.002
-    #      = 10*0.001 + 5*0.002 = 0.01 + 0.01 = 0.02
+    # Estimated cost = 0.02 USD, well under 1.0 USD budget -> 1.0
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -421,7 +565,7 @@ class TestCostPerSessionPrebuilt:
             "output_tokens": 5000,
         }
     )
-    assert score.scores["cost"] == pytest.approx(0.98)
+    assert score.scores["cost"] == 1.0
     assert score.passed is True
 
   def test_over_budget(self):
@@ -473,7 +617,7 @@ class TestTTFTPrebuilt:
             "avg_ttft_ms": 400,
         }
     )
-    assert score.scores["ttft"] == pytest.approx(0.6)
+    assert score.scores["ttft"] == 1.0
     assert score.passed is True
 
   def test_over_threshold(self):

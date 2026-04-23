@@ -17,10 +17,16 @@
 Tests are organized in two sections:
 
 1. **Direct kernel tests** — verify each pure function in isolation
-   with typed scalar inputs, including edge cases.
-2. **Parity tests** — verify that calling a kernel directly produces
-   the same result as going through the ``CodeEvaluator`` factory,
-   proving the refactor did not change behavior.
+   with typed scalar inputs, including edge cases. The ``udf_kernels``
+   module powers the SQL-native UDF path in ``udf_sql_templates.py``
+   and intentionally keeps the normalized ``1.0 - (observed / budget)``
+   score for BigQuery SQL compatibility.
+2. **Prebuilt divergence tests** — document that the Python
+   ``CodeEvaluator.{latency, error_rate, ...}`` prebuilts *no longer*
+   mirror the SQL kernel scores. They return a binary 1.0/0.0 gate
+   against the raw observed value instead, so the same input yields
+   different numeric scores via the two paths while the pass/fail
+   outcome matches the user's budget intent.
 """
 
 import pytest
@@ -258,124 +264,144 @@ class TestScoreCost:
 
 
 # ------------------------------------------------------------------ #
-# Parity Tests: kernel results == CodeEvaluator results                #
+# Prebuilt divergence: CodeEvaluator prebuilts are binary gates,
+# ``udf_kernels`` stays on the normalized ``1.0 - observed/budget``.
+# These two paths now intentionally disagree on the numeric score;
+# they still agree on the user-intent boundary (observed <= budget).
 # ------------------------------------------------------------------ #
 
 
-class TestParityLatency:
-  """Prove score_latency() == CodeEvaluator.latency() for all cases."""
+class TestPrebuiltBinaryLatency:
+  """CodeEvaluator.latency returns 1.0/0.0 against the raw budget."""
 
   @pytest.mark.parametrize(
-      "avg,threshold",
+      "avg,threshold,expected_score,expected_pass",
       [
-          (0, 5000),
-          (-100, 5000),
-          (2500, 5000),
-          (5000, 5000),
-          (10000, 5000),
-          (1234.5, 3000),
+          (0, 5000, 1.0, True),
+          (2500, 5000, 1.0, True),  # old normalized impl: 0.5 -> fail
+          (5000, 5000, 1.0, True),  # boundary inclusive
+          (5001, 5000, 0.0, False),
+          (10000, 5000, 0.0, False),
       ],
   )
-  def test_parity(self, avg, threshold):
-    kernel_score = score_latency(avg, threshold)
+  def test_binary(self, avg, threshold, expected_score, expected_pass):
     ev = CodeEvaluator.latency(threshold_ms=threshold)
     result = ev.evaluate_session({"session_id": "s1", "avg_latency_ms": avg})
-    assert result.scores["latency"] == pytest.approx(kernel_score)
+    assert result.scores["latency"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
+
+  def test_sql_kernel_unchanged(self):
+    """score_latency stays on the normalized score used by SQL UDFs."""
+    assert score_latency(2500, 5000) == pytest.approx(0.5)
+    assert score_latency(5000, 5000) == pytest.approx(0.0)
 
 
-class TestParityErrorRate:
+class TestPrebuiltBinaryErrorRate:
 
   @pytest.mark.parametrize(
-      "calls,errors,max_rate",
+      "calls,errors,max_rate,expected_score,expected_pass",
       [
-          (0, 0, 0.1),
-          (10, 0, 0.1),
-          (10, 1, 0.1),
-          (10, 5, 0.1),
-          (100, 5, 0.1),
-          (50, 3, 0.2),
+          (0, 0, 0.1, 1.0, True),
+          (10, 0, 0.1, 1.0, True),
+          (10, 1, 0.1, 1.0, True),  # exactly at budget passes
+          (10, 2, 0.1, 0.0, False),
+          (100, 5, 0.1, 1.0, True),
+          (50, 3, 0.2, 1.0, True),
       ],
   )
-  def test_parity(self, calls, errors, max_rate):
-    kernel_score = score_error_rate(calls, errors, max_rate)
+  def test_binary(self, calls, errors, max_rate, expected_score, expected_pass):
     ev = CodeEvaluator.error_rate(max_error_rate=max_rate)
     result = ev.evaluate_session(
         {"session_id": "s1", "tool_calls": calls, "tool_errors": errors}
     )
-    assert result.scores["error_rate"] == pytest.approx(kernel_score)
+    assert result.scores["error_rate"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
 
 
-class TestParityTurnCount:
+class TestPrebuiltBinaryTurnCount:
 
   @pytest.mark.parametrize(
-      "turns,max_t",
+      "turns,max_t,expected_score,expected_pass",
       [
-          (0, 10),
-          (-1, 10),
-          (5, 10),
-          (10, 10),
-          (20, 10),
-          (3, 7),
+          (0, 10, 1.0, True),
+          (5, 10, 1.0, True),
+          (10, 10, 1.0, True),
+          (11, 10, 0.0, False),
+          (20, 10, 0.0, False),
       ],
   )
-  def test_parity(self, turns, max_t):
-    kernel_score = score_turn_count(turns, max_t)
+  def test_binary(self, turns, max_t, expected_score, expected_pass):
     ev = CodeEvaluator.turn_count(max_turns=max_t)
     result = ev.evaluate_session({"session_id": "s1", "turn_count": turns})
-    assert result.scores["turn_count"] == pytest.approx(kernel_score)
+    assert result.scores["turn_count"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
 
 
-class TestParityTokenEfficiency:
+class TestPrebuiltBinaryTokenEfficiency:
 
   @pytest.mark.parametrize(
-      "tokens,max_t",
+      "tokens,max_t,expected_score,expected_pass",
       [
-          (0, 50000),
-          (-100, 50000),
-          (25000, 50000),
-          (50000, 50000),
-          (100000, 50000),
+          (0, 50000, 1.0, True),
+          (25000, 50000, 1.0, True),  # old normalized impl: 0.5 -> fail
+          (50000, 50000, 1.0, True),
+          (50001, 50000, 0.0, False),
+          (100000, 50000, 0.0, False),
       ],
   )
-  def test_parity(self, tokens, max_t):
-    kernel_score = score_token_efficiency(tokens, max_t)
+  def test_binary(self, tokens, max_t, expected_score, expected_pass):
     ev = CodeEvaluator.token_efficiency(max_tokens=max_t)
     result = ev.evaluate_session({"session_id": "s1", "total_tokens": tokens})
-    assert result.scores["token_efficiency"] == pytest.approx(kernel_score)
+    assert result.scores["token_efficiency"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
 
 
-class TestParityTtft:
+class TestPrebuiltBinaryTtft:
 
   @pytest.mark.parametrize(
-      "avg,threshold",
+      "avg,threshold,expected_score,expected_pass",
       [
-          (0, 1000),
-          (-50, 1000),
-          (500, 1000),
-          (1000, 1000),
-          (2000, 1000),
+          (0, 1000, 1.0, True),
+          (500, 1000, 1.0, True),  # old normalized impl: 0.5 -> fail
+          (1000, 1000, 1.0, True),
+          (1001, 1000, 0.0, False),
+          (2000, 1000, 0.0, False),
       ],
   )
-  def test_parity(self, avg, threshold):
-    kernel_score = score_ttft(avg, threshold)
+  def test_binary(self, avg, threshold, expected_score, expected_pass):
     ev = CodeEvaluator.ttft(threshold_ms=threshold)
     result = ev.evaluate_session({"session_id": "s1", "avg_ttft_ms": avg})
-    assert result.scores["ttft"] == pytest.approx(kernel_score)
+    assert result.scores["ttft"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
 
 
-class TestParityCost:
+class TestPrebuiltBinaryCost:
 
   @pytest.mark.parametrize(
-      "inp,out,max_c,inp_rate,out_rate",
+      "inp,out,max_c,inp_rate,out_rate,expected_score,expected_pass",
       [
-          (0, 0, 1.0, 0.00025, 0.00125),
-          (10000, 10000, 1.0, 0.00025, 0.00125),
-          (1000000, 200000, 0.5, 0.00025, 0.00125),
-          (1000, 1000, 0.01, 0.001, 0.002),
+          # cost = 0.0, budget = 1.0 -> pass
+          (0, 0, 1.0, 0.00025, 0.00125, 1.0, True),
+          # cost ≈ 0.015, budget = 1.0 -> pass
+          (10000, 10000, 1.0, 0.00025, 0.00125, 1.0, True),
+          # cost = 0.5 exactly at budget -> pass (inclusive boundary)
+          (1000000, 200000, 0.5, 0.00025, 0.00125, 1.0, True),
+          # cost = 0.003, budget = 0.01 -> pass
+          (1000, 1000, 0.01, 0.001, 0.002, 1.0, True),
+          # cost = 2.0, budget = 0.01 -> fail
+          (1000, 1000, 0.01, 1.0, 1.0, 0.0, False),
       ],
   )
-  def test_parity(self, inp, out, max_c, inp_rate, out_rate):
-    kernel_score = score_cost(inp, out, max_c, inp_rate, out_rate)
+  def test_binary(
+      self,
+      inp,
+      out,
+      max_c,
+      inp_rate,
+      out_rate,
+      expected_score,
+      expected_pass,
+  ):
     ev = CodeEvaluator.cost_per_session(
         max_cost_usd=max_c,
         input_cost_per_1k=inp_rate,
@@ -384,7 +410,8 @@ class TestParityCost:
     result = ev.evaluate_session(
         {"session_id": "s1", "input_tokens": inp, "output_tokens": out}
     )
-    assert result.scores["cost"] == pytest.approx(kernel_score)
+    assert result.scores["cost"] == pytest.approx(expected_score)
+    assert result.passed is expected_pass
 
 
 # ------------------------------------------------------------------ #

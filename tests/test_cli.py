@@ -249,6 +249,178 @@ class TestEvaluate:
     assert result.exit_code == 1
 
   @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_emits_failure_lines(self, mock_build):
+    """--exit-code failure path emits one FAIL line per failing session.
+
+    Regression guard: prior output did not point the reader at which
+    threshold regressed and by how much. The new path stashes the raw
+    observed value + budget in ``SessionScore.details`` and prints
+    them on stderr before raising Exit(code=1).
+    """
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="latency_evaluator",
+        total_sessions=2,
+        passed_sessions=1,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="good",
+                scores={"latency": 1.0},
+                passed=True,
+                details={
+                    "metric_latency": {
+                        "observed": 1200,
+                        "budget": 5000,
+                        "threshold": 1.0,
+                        "score": 1.0,
+                        "passed": True,
+                    }
+                },
+            ),
+            SessionScore(
+                session_id="bad",
+                scores={"latency": 0.0},
+                passed=False,
+                details={
+                    "metric_latency": {
+                        "observed": 7500,
+                        "budget": 5000,
+                        "threshold": 1.0,
+                        "score": 0.0,
+                        "passed": False,
+                    }
+                },
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=latency",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "--exit-code" in combined
+    assert "1 session(s) failed" in combined
+    assert "FAIL session=bad" in combined
+    assert "metric=latency" in combined
+    assert "observed=7500" in combined
+    assert "budget=5000" in combined
+    # Passing sessions must not emit a FAIL line.
+    assert "session=good" not in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_emits_fallback_for_custom_metric(
+      self, mock_build
+  ):
+    """Custom metric without observed/budget still gets a FAIL line.
+
+    Regression guard: previously the emitter only printed a line when
+    the score was exactly 0.0, so a custom ``add_metric(threshold=0.7)``
+    or LLM judge scoring 0.6 for a failing session silently produced
+    only the summary header. That left CI logs unhelpful.
+    """
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="custom_eval",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"helpfulness": 0.6},
+                passed=False,
+                details={
+                    "metric_helpfulness": {
+                        "observed": None,
+                        "budget": None,
+                        "threshold": 0.7,
+                        "score": 0.6,
+                        "passed": False,
+                    }
+                },
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=latency",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "FAIL session=bad" in combined
+    assert "metric=helpfulness" in combined
+    assert "score=0.6" in combined
+    assert "threshold=0.7" in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_emits_fallback_with_no_details(self, mock_build):
+    """Failing session with empty details still emits a FAIL line.
+
+    Safety-net guard: if an upstream evaluator doesn't populate
+    per-metric details, we still name the session and metric rather
+    than printing only the summary header.
+    """
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="legacy_eval",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"legacy_metric": 0.3},
+                passed=False,
+                details={},
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=latency",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "FAIL session=bad" in combined
+    assert "metric=legacy_metric" in combined
+    assert "score=0.3" in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
   def test_evaluate_exit_code_on_pass(self, mock_build):
     client = MagicMock()
     client.evaluate.return_value = _mock_report(10, 10)

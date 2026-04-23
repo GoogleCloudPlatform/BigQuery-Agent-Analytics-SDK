@@ -136,11 +136,29 @@ class EvaluationReport(BaseModel):
 
 @dataclass
 class _MetricDef:
-  """Internal definition of a code metric."""
+  """Internal definition of a code metric.
+
+  ``observed_key``, ``observed_fn``, and ``budget`` are optional
+  reporting metadata used by the prebuilt evaluators (latency,
+  error_rate, turn_count, …) to surface the raw observed value and
+  the user-supplied budget in ``SessionScore.details``. They don't
+  affect pass/fail computation — that still goes through ``fn`` +
+  ``threshold`` — but they let downstream consumers (CLI
+  ``--exit-code`` output, dashboards) emit readable failure lines
+  without having to re-run the scorer.
+
+  When ``observed_fn`` is set it takes precedence over
+  ``observed_key``; use it for metrics whose observed value is
+  computed from multiple summary fields (e.g. ``tool_errors /
+  tool_calls`` for error rate).
+  """
 
   name: str
   fn: Callable[[dict[str, Any]], float]
   threshold: float = 0.5
+  observed_key: Optional[str] = None
+  budget: Optional[float] = None
+  observed_fn: Optional[Callable[[dict[str, Any]], Any]] = None
 
 
 class CodeEvaluator:
@@ -177,13 +195,29 @@ class CodeEvaluator:
       name: str,
       fn: Callable[[dict[str, Any]], float],
       threshold: float = 0.5,
+      observed_key: Optional[str] = None,
+      budget: Optional[float] = None,
+      observed_fn: Optional[Callable[[dict[str, Any]], Any]] = None,
   ) -> CodeEvaluator:
     """Adds a custom metric function.
 
     Args:
         name: Metric name.
         fn: Function taking session summary, returning 0-1 score.
-        threshold: Pass/fail threshold.
+            The score is compared to ``threshold``; a session passes
+            the metric when ``score >= threshold``.
+        threshold: Pass/fail threshold applied to ``fn``'s score.
+        observed_key: Optional session-summary key whose value is the
+            raw observed metric (e.g. ``"avg_latency_ms"``). When set,
+            ``evaluate_session`` stashes the observed value + ``budget``
+            under ``SessionScore.details`` for downstream reporting.
+        budget: Optional raw-budget value corresponding to the metric
+            (e.g. the latency-ms threshold the user supplied). Reported
+            alongside ``observed_key``; not used for pass/fail.
+        observed_fn: Optional callable that derives the observed value
+            from the session summary. Used when the observed metric is
+            computed (e.g. ``tool_errors/tool_calls``) rather than
+            stored directly. Takes precedence over ``observed_key``.
 
     Returns:
         Self for chaining.
@@ -193,6 +227,9 @@ class CodeEvaluator:
             name=name,
             fn=fn,
             threshold=threshold,
+            observed_key=observed_key,
+            budget=budget,
+            observed_fn=observed_fn,
         )
     )
     return self
@@ -207,6 +244,7 @@ class CodeEvaluator:
         SessionScore with computed scores.
     """
     scores: dict[str, float] = {}
+    details: dict[str, Any] = {}
     passed = True
 
     for metric in self._metrics:
@@ -214,26 +252,64 @@ class CodeEvaluator:
         score = metric.fn(session_summary)
         score = max(0.0, min(1.0, float(score)))
         scores[metric.name] = score
-        if score < metric.threshold:
+        metric_passed = score >= metric.threshold
+        if not metric_passed:
           passed = False
       except Exception as e:
         logger.warning("Metric %s failed: %s", metric.name, e)
         scores[metric.name] = 0.0
+        metric_passed = False
         passed = False
+
+      # Stash per-metric reporting detail for *every* metric so the CLI
+      # ``--exit-code`` failure output always has a threshold / score /
+      # passed triple to emit, even for custom metrics that didn't
+      # declare observed_key / observed_fn. Observed / budget are only
+      # included when the metric supplied them. Keys are prefixed with
+      # ``metric_`` to avoid colliding with other details callers.
+      observed_value: Optional[Any] = None
+      if metric.observed_fn is not None:
+        try:
+          observed_value = metric.observed_fn(session_summary)
+        except Exception:  # pylint: disable=broad-except
+          observed_value = None
+      elif metric.observed_key is not None:
+        observed_value = session_summary.get(metric.observed_key)
+      details[f"metric_{metric.name}"] = {
+          "observed": observed_value,
+          "budget": metric.budget,
+          "threshold": metric.threshold,
+          "score": scores[metric.name],
+          "passed": metric_passed,
+      }
 
     return SessionScore(
         session_id=session_summary.get("session_id", "unknown"),
         scores=scores,
         passed=passed,
+        details=details,
     )
 
   # ---- Pre-built evaluators ---- #
+
+  # The prebuilt evaluators below use raw-budget gates: they fail iff
+  # the observed metric exceeds the user-supplied budget. Historically
+  # these ran the normalized ``udf_kernels.score_*`` functions under a
+  # 0.5 score cutoff, which caused ``--threshold=5000`` on latency to
+  # fail near 2500ms — the gate was at half the budget the user typed.
+  # See CHANGELOG and the related blog-post-#2 plan (#77) for context.
+  # ``udf_kernels.score_*`` is unchanged; it still powers the SQL-native
+  # UDF path in ``udf_sql_templates.py``, which has its own semantics.
 
   @staticmethod
   def latency(
       threshold_ms: float = 5000.0,
   ) -> CodeEvaluator:
-    """Pre-built evaluator that checks average latency.
+    """Pre-built evaluator that fails when average latency exceeds the budget.
+
+    Pass/fail is a raw comparison: ``avg_latency_ms <= threshold_ms``
+    passes, strictly greater fails. The returned evaluator's score for
+    a session is ``1.0`` on pass and ``0.0`` on fail.
 
     Args:
         threshold_ms: Maximum acceptable average latency in ms.
@@ -243,15 +319,25 @@ class CodeEvaluator:
     """
 
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_latency(s.get("avg_latency_ms", 0), threshold_ms)
+      observed = s.get("avg_latency_ms", 0) or 0
+      return 1.0 if observed <= threshold_ms else 0.0
 
     evaluator = CodeEvaluator(name="latency_evaluator")
-    evaluator.add_metric("latency", _score, threshold=0.5)
+    evaluator.add_metric(
+        "latency",
+        _score,
+        threshold=1.0,
+        observed_key="avg_latency_ms",
+        budget=threshold_ms,
+    )
     return evaluator
 
   @staticmethod
   def turn_count(max_turns: int = 10) -> CodeEvaluator:
-    """Pre-built evaluator that checks turn count.
+    """Pre-built evaluator that fails when turn count exceeds the budget.
+
+    Pass/fail is a raw comparison: ``turn_count <= max_turns`` passes,
+    strictly greater fails.
 
     Args:
         max_turns: Maximum acceptable number of turns.
@@ -261,17 +347,28 @@ class CodeEvaluator:
     """
 
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_turn_count(s.get("turn_count", 0), max_turns)
+      observed = s.get("turn_count", 0) or 0
+      return 1.0 if observed <= max_turns else 0.0
 
     evaluator = CodeEvaluator(name="turn_count_evaluator")
-    evaluator.add_metric("turn_count", _score, threshold=0.5)
+    evaluator.add_metric(
+        "turn_count",
+        _score,
+        threshold=1.0,
+        observed_key="turn_count",
+        budget=max_turns,
+    )
     return evaluator
 
   @staticmethod
   def error_rate(
       max_error_rate: float = 0.1,
   ) -> CodeEvaluator:
-    """Pre-built evaluator that checks tool error rate.
+    """Pre-built evaluator that fails when tool error rate exceeds the budget.
+
+    Pass/fail is a raw comparison: ``(tool_errors / tool_calls) <= max_error_rate``
+    passes, strictly greater fails. Sessions with zero tool calls pass
+    trivially (nothing to fail).
 
     Args:
         max_error_rate: Maximum acceptable tool error fraction.
@@ -280,22 +377,37 @@ class CodeEvaluator:
         CodeEvaluator configured for error rate checking.
     """
 
+    def _observed(s: dict[str, Any]) -> float:
+      calls = s.get("tool_calls", 0) or 0
+      errors = s.get("tool_errors", 0) or 0
+      if calls <= 0:
+        return 0.0
+      return errors / calls
+
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_error_rate(
-          s.get("tool_calls", 0),
-          s.get("tool_errors", 0),
-          max_error_rate,
-      )
+      calls = s.get("tool_calls", 0) or 0
+      if calls <= 0:
+        return 1.0
+      return 1.0 if _observed(s) <= max_error_rate else 0.0
 
     evaluator = CodeEvaluator(name="error_rate_evaluator")
-    evaluator.add_metric("error_rate", _score, threshold=0.5)
+    evaluator.add_metric(
+        "error_rate",
+        _score,
+        threshold=1.0,
+        observed_fn=_observed,
+        budget=max_error_rate,
+    )
     return evaluator
 
   @staticmethod
   def token_efficiency(
       max_tokens: int = 50000,
   ) -> CodeEvaluator:
-    """Pre-built evaluator that checks total token usage.
+    """Pre-built evaluator that fails when total tokens exceed the budget.
+
+    Pass/fail is a raw comparison: ``total_tokens <= max_tokens``
+    passes, strictly greater fails.
 
     Args:
         max_tokens: Maximum acceptable total token count.
@@ -305,19 +417,27 @@ class CodeEvaluator:
     """
 
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_token_efficiency(
-          s.get("total_tokens", 0), max_tokens
-      )
+      observed = s.get("total_tokens", 0) or 0
+      return 1.0 if observed <= max_tokens else 0.0
 
     evaluator = CodeEvaluator(name="token_efficiency_evaluator")
-    evaluator.add_metric("token_efficiency", _score, threshold=0.5)
+    evaluator.add_metric(
+        "token_efficiency",
+        _score,
+        threshold=1.0,
+        observed_key="total_tokens",
+        budget=max_tokens,
+    )
     return evaluator
 
   @staticmethod
   def ttft(
       threshold_ms: float = 1000.0,
   ) -> CodeEvaluator:
-    """Pre-built evaluator that checks average time-to-first-token.
+    """Pre-built evaluator that fails when TTFT exceeds the budget.
+
+    Pass/fail is a raw comparison: ``avg_ttft_ms <= threshold_ms``
+    passes, strictly greater fails.
 
     Args:
         threshold_ms: Maximum acceptable average TTFT in ms.
@@ -327,10 +447,17 @@ class CodeEvaluator:
     """
 
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_ttft(s.get("avg_ttft_ms", 0) or 0, threshold_ms)
+      observed = s.get("avg_ttft_ms", 0) or 0
+      return 1.0 if observed <= threshold_ms else 0.0
 
     evaluator = CodeEvaluator(name="ttft_evaluator")
-    evaluator.add_metric("ttft", _score, threshold=0.5)
+    evaluator.add_metric(
+        "ttft",
+        _score,
+        threshold=1.0,
+        observed_key="avg_ttft_ms",
+        budget=threshold_ms,
+    )
     return evaluator
 
   @staticmethod
@@ -339,7 +466,10 @@ class CodeEvaluator:
       input_cost_per_1k: float = 0.00025,
       output_cost_per_1k: float = 0.00125,
   ) -> CodeEvaluator:
-    """Pre-built evaluator that checks estimated cost.
+    """Pre-built evaluator that fails when per-session cost exceeds the budget.
+
+    Pass/fail is a raw comparison: ``estimated_cost_usd <= max_cost_usd``
+    passes, strictly greater fails.
 
     Args:
         max_cost_usd: Maximum acceptable cost in USD.
@@ -350,17 +480,24 @@ class CodeEvaluator:
         CodeEvaluator configured for cost checking.
     """
 
+    def _observed(s: dict[str, Any]) -> float:
+      input_tokens = s.get("input_tokens", 0) or 0
+      output_tokens = s.get("output_tokens", 0) or 0
+      return (input_tokens / 1000.0) * input_cost_per_1k + (
+          output_tokens / 1000.0
+      ) * output_cost_per_1k
+
     def _score(s: dict[str, Any]) -> float:
-      return udf_kernels.score_cost(
-          s.get("input_tokens", 0),
-          s.get("output_tokens", 0),
-          max_cost_usd,
-          input_cost_per_1k,
-          output_cost_per_1k,
-      )
+      return 1.0 if _observed(s) <= max_cost_usd else 0.0
 
     evaluator = CodeEvaluator(name="cost_evaluator")
-    evaluator.add_metric("cost", _score, threshold=0.5)
+    evaluator.add_metric(
+        "cost",
+        _score,
+        threshold=1.0,
+        observed_fn=_observed,
+        budget=max_cost_usd,
+    )
     return evaluator
 
 
