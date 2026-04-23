@@ -111,7 +111,9 @@ def main() -> None:
   v1_text = _read_v1_prompt(config)
   model_id = config.get("model_id", "gemini-2.5-flash")
   app_name = config.get("app_name", "agent")
-  client = Client(location=config.get("vertex_location", "us-central1"))
+  location = config.get("vertex_location", "us-central1")
+  print(f"  Initializing Vertex AI client (location={location})...")
+  client = Client(location=location)
 
   existing_id = _get_existing_prompt_id()
 
@@ -119,12 +121,13 @@ def main() -> None:
   if existing_id:
     print(f"  Deleting old prompt {existing_id}...")
     try:
-      client.prompts.delete(prompt_id=existing_id)
+      client.prompts.delete(prompt_id=existing_id, config={"timeout": 300})
+      print("  Deleted.")
     except Exception as e:
       print(f"  Warning: could not delete old prompt: {e}")
 
   # Create fresh prompt with V1 content
-  print("Creating Vertex AI prompt with V1 content...")
+  print("  Creating Vertex AI prompt with V1 content...")
   prompt_data = PromptData(
       system_instruction=Content(parts=[Part(text=v1_text)]),
       contents=[Content(role="user", parts=[Part(text="{{user_input}}")])],
@@ -132,7 +135,7 @@ def main() -> None:
   )
   prompt = client.prompts.create(
       prompt=Prompt(prompt_data=prompt_data),
-      config={"prompt_display_name": app_name},
+      config={"prompt_display_name": app_name, "timeout": 300},
   )
   prompt_id = prompt.prompt_id
   print(f"  Created prompt: {prompt_id}")

@@ -103,9 +103,9 @@ if ! bq show "${PROJECT_ID}:${DATASET_ID}" &>/dev/null 2>&1; then
   bq mk --dataset --location="$DATASET_LOCATION" "${PROJECT_ID}:${DATASET_ID}" 2>/dev/null || true
 fi
 
-# Write .env file (don't overwrite if it exists)
-if [[ ! -f "$ENV_FILE" ]]; then
-  cat > "$ENV_FILE" <<EOF
+# Write .env file — always recreate to pick up the current project.
+# The old VERTEX_PROMPT_ID is cleared so setup_vertex.py creates fresh.
+cat > "$ENV_FILE" <<EOF
 # Agent Improvement Cycle Demo Configuration
 PROJECT_ID=$PROJECT_ID
 DATASET_ID=$DATASET_ID
@@ -114,10 +114,7 @@ TABLE_ID=$TABLE_ID
 DEMO_MODEL_ID=gemini-2.5-flash
 DEMO_AGENT_LOCATION=us-central1
 EOF
-  echo "  Created $ENV_FILE"
-else
-  echo "  $ENV_FILE already exists, skipping."
-fi
+echo "  Created $ENV_FILE"
 
 # 6. Create Vertex AI prompt
 echo ""
