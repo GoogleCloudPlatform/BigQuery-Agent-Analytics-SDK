@@ -23,48 +23,6 @@
       "category": "remote_work",
       "expected_tool": "lookup_company_policy",
       "notes": "V1 has this info in the prompt, should pass"
-    },
-    {
-      "id": "extracted_what_are_the_daily_core_hours_that_i_am",
-      "question": "What are the daily core hours that I am expected to be available when working remotely?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_what_is_the_maximum_daily_limit_for_meal",
-      "question": "What is the maximum daily limit for meal expenses when traveling for business?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_what_is_the_company_s_matching_contribut",
-      "question": "What is the company's matching contribution percentage for the 401k plan?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_is_new_year_s_eve_observed_as_a_paid_hol",
-      "question": "Is New Year's Eve observed as a paid holiday?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_how_many_weeks_of_parental_leave_are_pro",
-      "question": "How many weeks of parental leave are provided for a secondary caregiver?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
-    },
-    {
-      "id": "extracted_if_i_am_out_of_office_for_four_consecuti",
-      "question": "If I am out of office for four consecutive days due to illness, will I need to provide a doctor's note?",
-      "category": "unknown",
-      "expected_tool": "unknown",
-      "notes": "Extracted from failed synthetic traffic (unhelpful)"
     }
   ]
 }

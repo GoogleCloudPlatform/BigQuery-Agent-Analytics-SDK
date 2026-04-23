@@ -148,6 +148,36 @@ print(len(vs) + 1)
   fi
 }
 
+# Helper: display the current prompt text and version
+_show_prompt() {
+  local label="${1:-Current prompt}"
+  if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
+    python3 -c "
+from vertexai import Client
+c = Client(location='us-central1')
+p = c.prompts.get(prompt_id='$VERTEX_PROMPT_ID')
+text = ''
+if p.prompt_data and p.prompt_data.system_instruction and p.prompt_data.system_instruction.parts:
+    text = p.prompt_data.system_instruction.parts[0].text or ''
+vs = list(c.prompts.list_versions(prompt_id='$VERTEX_PROMPT_ID'))
+v = len(vs) + 1
+print(f'  $label (v{v}, {len(text)} chars):')
+print()
+for line in text.strip().split('\n'):
+    print(f'    {line}')
+print()
+print(f'  To inspect: python3 -c \"from vertexai import Client; c=Client(location=\\\"us-central1\\\"); p=c.prompts.get(prompt_id=\\\"$VERTEX_PROMPT_ID\\\"); print(p.prompt_data.system_instruction.parts[0].text)\"')
+"
+  else
+    local v
+    v=$(grep -oP "${VERSION_VAR}\s*=\s*\K\d+" "$PROMPTS_PATH")
+    echo "  $label (v${v}):"
+    echo ""
+    echo "    File: $PROMPTS_PATH"
+    echo ""
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -181,6 +211,10 @@ if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
 fi
 echo "  Traffic:    $TRAFFIC_COUNT questions per cycle"
 CYCLE_START_TIME=$(date +%s)
+
+separator
+echo ""
+_show_prompt "STARTING PROMPT"
 
 # ---------------------------------------------------------------------------
 # Pre-flight: verify golden eval passes with current prompt
@@ -472,11 +506,15 @@ echo "  Artifacts:"
 ls -1 "$REPORTS_DIR"/ 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 echo ""
 echo "  Inspect changes:"
-if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
-  echo "    Prompt stored in Vertex AI: $VERTEX_PROMPT_ID"
+if [[ "$PROMPT_STORAGE" == "vertex" ]]; then
+  echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution (mirrored locally)"
 else
   echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
 fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
+
+separator
+echo ""
+_show_prompt "FINAL PROMPT"
 separator
 echo ""

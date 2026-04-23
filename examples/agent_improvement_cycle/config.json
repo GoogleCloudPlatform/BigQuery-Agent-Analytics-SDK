@@ -9,6 +9,6 @@
   "model_id": "gemini-2.5-flash",
   "max_attempts": 3,
   "prompt_storage": "vertex",
-  "vertex_prompt_id": "4800124169486336000",
+  "vertex_prompt_id": "",
   "use_vertex_optimizer": true
 }

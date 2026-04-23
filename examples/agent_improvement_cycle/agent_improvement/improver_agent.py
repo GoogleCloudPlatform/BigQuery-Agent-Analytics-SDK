@@ -439,8 +439,105 @@ def write_prompt(candidate_prompt: str, changes_summary: str) -> str:
 _REQUIRED_CASE_KEYS = {"id", "question", "category", "expected_tool"}
 
 
-def extract_failed_cases(report: dict) -> list[dict]:
-  """Extract failed sessions as new golden eval cases."""
+def _classify_question(question: str, tools: list) -> tuple[str, str]:
+  """Infer category and expected_tool from a question.
+
+  Uses tool docstrings and keyword matching to classify questions
+  against available tools. Returns ("unknown", "unknown") if no
+  tool covers the topic.
+  """
+  q = question.lower()
+
+  # Build keyword -> (category, tool_name) mapping from tool docstrings
+  # and common policy topic keywords
+  _TOPIC_KEYWORDS = {
+      "pto": [
+          "pto",
+          "paid time off",
+          "vacation",
+          "time off",
+          "days off",
+          "rollover",
+          "accrual",
+          "accrued",
+      ],
+      "sick_leave": [
+          "sick",
+          "illness",
+          "doctor's note",
+          "doctor note",
+          "medical",
+      ],
+      "remote_work": [
+          "remote",
+          "work from home",
+          "wfh",
+          "core hours",
+          "telecommut",
+      ],
+      "expenses": [
+          "expense",
+          "receipt",
+          "reimburs",
+          "meal limit",
+          "travel approval",
+          "pre-approval",
+          "business dinner",
+          "business lunch",
+          "business trip",
+      ],
+      "benefits": [
+          "benefit",
+          "401k",
+          "401(k)",
+          "health insurance",
+          "dental",
+          "vision",
+          "parental leave",
+          "maternity",
+          "paternity",
+          "caregiver",
+          "retirement",
+          "vesting",
+          "vested",
+          "ppo",
+          "hmo",
+      ],
+      "holidays": [
+          "holiday",
+          "christmas",
+          "new year",
+          "thanksgiving",
+          "memorial day",
+          "independence day",
+          "paid day off",
+      ],
+      "date": [
+          "next friday",
+          "next monday",
+          "next week",
+          "next month",
+          "today",
+          "this week",
+      ],
+  }
+
+  for category, keywords in _TOPIC_KEYWORDS.items():
+    if any(kw in q for kw in keywords):
+      if category == "date":
+        return "date_handling", "get_current_date"
+      return category, "lookup_company_policy"
+
+  return "unknown", "unknown"
+
+
+def extract_failed_cases(report: dict, tools: list | None = None) -> list[dict]:
+  """Extract failed sessions as new golden eval cases.
+
+  Classifies each question against available tools to infer
+  category and expected_tool. Questions that don't match any
+  tool topic are still extracted with category="unknown".
+  """
   new_cases = []
   for session in report.get("sessions", []):
     cat = (
@@ -455,6 +552,8 @@ def extract_failed_cases(report: dict) -> list[dict]:
     if not question:
       continue
 
+    category, expected_tool = _classify_question(question, tools or [])
+
     case_id = re.sub(r"[^a-z0-9]+", "_", question.lower().strip())[:40]
     case_id = f"extracted_{case_id.strip('_')}"
 
@@ -462,8 +561,8 @@ def extract_failed_cases(report: dict) -> list[dict]:
         {
             "id": case_id,
             "question": question,
-            "category": "unknown",
-            "expected_tool": "unknown",
+            "category": category,
+            "expected_tool": expected_tool,
             "notes": f"Extracted from failed synthetic traffic ({cat})",
         }
     )
@@ -681,7 +780,7 @@ async def run_improvement(
     }
 
   # Extract failed cases into golden set FIRST
-  failed_cases = extract_failed_cases(report)
+  failed_cases = extract_failed_cases(report, tools=config.agent_tools)
   if failed_cases:
     added = add_eval_cases(config.eval_cases_path, failed_cases)
     with open(config.eval_cases_path) as f:
