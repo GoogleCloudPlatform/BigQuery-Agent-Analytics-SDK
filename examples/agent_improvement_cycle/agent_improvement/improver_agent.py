@@ -190,8 +190,8 @@ async def _generate_ground_truth(
   teacher_prompt = (
       "You are an expert assistant. For EVERY question, you MUST call "
       "the available tools to look up the answer. NEVER say 'I don't "
-      "know' or 'contact HR'. ALWAYS use the tools first, then answer "
-      "based on the tool results. Be specific and thorough."
+      "know' or defer the user elsewhere. ALWAYS use the tools first, "
+      "then answer based on the tool results. Be specific and thorough."
   )
   if config.teacher_model_id:
     teacher_agent = config.agent_factory(
@@ -320,11 +320,11 @@ async def _generate_via_vertex_optimizer(
   tool_sigs = format_tool_signatures(config.agent_tools)
   tool_use_directive = (
       "\n\nIMPORTANT: You have access to tools that contain complete, "
-      "up-to-date policy information. For EVERY policy question, you "
-      "MUST call the appropriate tool to look up the answer. Do NOT "
-      "answer from memory or from the information listed above. The "
-      "tools are the authoritative source. NEVER say 'I don't have "
-      "that information' or 'contact HR' without first calling a tool."
+      "up-to-date information. For EVERY question, you MUST call the "
+      "appropriate tool to look up the answer. Do NOT answer from "
+      "memory or from the information listed above. The tools are the "
+      "authoritative source. NEVER say 'I don't have that information' "
+      "or defer the user elsewhere without first calling a tool."
       "\n\nAVAILABLE TOOLS:\n" + tool_sigs
   )
   prompt_with_tools = current_prompt + tool_use_directive
@@ -338,7 +338,7 @@ async def _generate_via_vertex_optimizer(
   from google.genai.types import HttpRetryOptions
 
   client = Client(
-      location="us-central1",
+      location=config.vertex_location,
       http_options=HttpOptions(
           retry_options=HttpRetryOptions(
               attempts=6,
