@@ -25,9 +25,13 @@ This demo shows how to close that gap using three components:
 2. **`quality_report.py`** (the SDK's evaluation script) reads those
    logged sessions back from BigQuery, evaluates quality, and produces
    structured reports that can drive automated improvement.
-3. **Vertex AI Prompt Registry** stores and versions the agent's prompt
-   in the cloud. The **Vertex AI Prompt Optimizer** generates improved
+3. **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)** stores and versions the agent's prompt
+   in the cloud. The **[Vertex AI Prompt Optimizer](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/prompts/prompt-optimizer)** generates improved
    prompts using synthetic ground truth from a teacher model.
+
+
+![Overview](overview.png)
+
 
 The full cycle:
 
