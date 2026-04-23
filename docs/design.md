@@ -408,15 +408,36 @@ _metrics: list[dict]  # [{"name": str, "fn": Callable[[dict], float], "threshold
 
 Each metric function receives a session summary dict (aggregated from BigQuery) and returns a score in `[0.0, 1.0]`.
 
-**Pre-built factory methods:**
+**Pre-built factory methods** (Python path — raw-budget binary gates):
 
-| Factory | Metric Logic | Default Threshold |
-|---------|-------------|-------------------|
-| `latency(threshold_ms)` | `1.0 - min(avg_latency_ms / threshold_ms, 1.0)` | 0.5 |
-| `turn_count(max_turns)` | `1.0 - min(turn_count / max_turns, 1.0)` | 0.5 |
-| `error_rate(max_error_rate)` | `1.0 - min(actual_rate / max_rate, 1.0)` | 0.5 |
-| `token_efficiency(max_tokens)` | `1.0 - min(total_tokens / max_tokens, 1.0)` | 0.5 |
-| `cost_per_session(max_cost_usd, ...)` | `1.0 - min(computed_cost / max_cost, 1.0)` | 0.5 |
+Since v0.2.2 the Python prebuilts compare the observed metric directly
+against the user-supplied budget: `score = 1.0 if observed <= budget
+else 0.0`, with `threshold = 1.0`. A session fails iff the observed
+value strictly exceeds the budget.
+
+| Factory | Observed Value | Pass Condition |
+|---------|----------------|----------------|
+| `latency(threshold_ms)` | `avg_latency_ms` | `observed <= threshold_ms` |
+| `turn_count(max_turns)` | `turn_count` | `observed <= max_turns` |
+| `error_rate(max_error_rate)` | `tool_errors / tool_calls` (0 when no calls) | `observed <= max_error_rate` |
+| `token_efficiency(max_tokens)` | `total_tokens` | `observed <= max_tokens` |
+| `ttft(threshold_ms)` | `avg_ttft_ms` | `observed <= threshold_ms` |
+| `cost_per_session(max_cost_usd, ...)` | `(input_tokens/1K)*input_rate + (output_tokens/1K)*output_rate` | `observed <= max_cost_usd` |
+
+> **Prior to v0.2.2** these factories used a normalized score
+> `1.0 - min(observed / budget, 1.0)` with a `0.5` pass cutoff, which
+> effectively fired every gate at roughly half the budget the user
+> typed (e.g. `latency(threshold_ms=5000)` failed at `avg_latency_ms >
+> 2500`). See `CHANGELOG.md` for the migration note.
+
+**SQL-native UDF path** (`udf_kernels.score_*`, used by
+`udf_sql_templates.py`):
+
+Unchanged — keeps the normalized `1.0 - min(observed / budget, 1.0)`
+score because BigQuery SQL callers (e.g. scorecard dashboards) may
+already interpret the normalized value. The divergence from the Python
+path is intentional: Python prebuilts are binary CI gates; SQL UDFs
+are normalized metrics for analytical workloads.
 
 **`evaluate_session(session_summary) -> SessionScore`:**
 

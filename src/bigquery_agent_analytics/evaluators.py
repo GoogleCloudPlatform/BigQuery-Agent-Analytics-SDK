@@ -261,24 +261,27 @@ class CodeEvaluator:
         metric_passed = False
         passed = False
 
-      # Stash per-metric reporting detail when the metric declared its
-      # observed-key / budget. Keys under ``details`` are prefixed with
-      # ``metric_`` to avoid colliding with other details callers may add.
-      if metric.observed_key is not None or metric.observed_fn is not None:
-        if metric.observed_fn is not None:
-          try:
-            observed_value = metric.observed_fn(session_summary)
-          except Exception:  # pylint: disable=broad-except
-            observed_value = None
-        else:
-          observed_value = session_summary.get(metric.observed_key)
-        details[f"metric_{metric.name}"] = {
-            "observed": observed_value,
-            "budget": metric.budget,
-            "threshold": metric.threshold,
-            "score": scores[metric.name],
-            "passed": metric_passed,
-        }
+      # Stash per-metric reporting detail for *every* metric so the CLI
+      # ``--exit-code`` failure output always has a threshold / score /
+      # passed triple to emit, even for custom metrics that didn't
+      # declare observed_key / observed_fn. Observed / budget are only
+      # included when the metric supplied them. Keys are prefixed with
+      # ``metric_`` to avoid colliding with other details callers.
+      observed_value: Optional[Any] = None
+      if metric.observed_fn is not None:
+        try:
+          observed_value = metric.observed_fn(session_summary)
+        except Exception:  # pylint: disable=broad-except
+          observed_value = None
+      elif metric.observed_key is not None:
+        observed_value = session_summary.get(metric.observed_key)
+      details[f"metric_{metric.name}"] = {
+          "observed": observed_value,
+          "budget": metric.budget,
+          "threshold": metric.threshold,
+          "score": scores[metric.name],
+          "passed": metric_passed,
+      }
 
     return SessionScore(
         session_id=session_summary.get("session_id", "unknown"),

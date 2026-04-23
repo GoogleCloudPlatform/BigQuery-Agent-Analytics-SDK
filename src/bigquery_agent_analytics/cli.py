@@ -373,10 +373,14 @@ def _emit_evaluate_failures(
 ) -> None:
   """Emit readable FAIL lines for failing sessions before --exit-code exits.
 
-  One line per (session_id, metric_name) that failed its threshold, with
-  the raw observed value and budget when the metric declared them via
-  ``observed_key`` / ``budget``. Capped at ``max_sessions`` most-recent
-  failures so CI logs stay scannable.
+  One line per (session_id, metric_name) that failed its threshold.
+  Prefers the raw observed + budget pair (``CodeEvaluator`` prebuilts);
+  falls back to score + threshold when the metric didn't declare
+  observed/budget (custom ``add_metric`` users, ``LLMAsJudge``
+  criteria). A failing session is guaranteed to produce at least one
+  FAIL line — never just the summary header.
+
+  Capped at ``max_sessions`` most-recent failures so CI logs stay scannable.
   """
   failed = [s for s in report.session_scores if not s.passed]
   if not failed:
@@ -389,22 +393,29 @@ def _emit_evaluate_failures(
   )
   shown = failed[:max_sessions]
   for s in shown:
+    emitted_for_session = False
     for metric_name, score in s.scores.items():
       detail = s.details.get(f"metric_{metric_name}") or {}
-      observed = detail.get("observed")
-      budget = detail.get("budget")
-      # Consider both the per-metric detail's passed field (when set)
-      # and the raw score-vs-threshold fallback for custom metrics.
-      if detail:
-        if detail.get("passed", True):
+      passed_field = detail.get("passed")
+      threshold = detail.get("threshold")
+      # Decide pass/fail for this metric. Prefer the stashed ``passed``
+      # flag; fall back to score vs threshold when the detail isn't
+      # populated (older custom evaluators).
+      if passed_field is not None:
+        if passed_field:
+          continue
+      elif threshold is not None:
+        if score >= threshold:
           continue
       else:
-        # Custom metric with no observed/budget metadata — infer pass/fail
-        # from the score. Default threshold on _MetricDef is 0.5, so we
-        # can't know the exact threshold here; skip unless the score is
-        # a clean 0.0 (the binary-scorer pattern the prebuilts use now).
-        if score != 0.0:
+        # No per-metric metadata at all. Since the session is in the
+        # failed bucket, we still want to name the metric; assume it
+        # failed unless the score is a perfect 1.0.
+        if score >= 1.0:
           continue
+
+      observed = detail.get("observed")
+      budget = detail.get("budget")
       parts = [f"FAIL session={s.session_id} metric={metric_name}"]
       if observed is not None:
         if isinstance(observed, float):
@@ -416,7 +427,24 @@ def _emit_evaluate_failures(
           parts.append(f"budget={budget:.4g}")
         else:
           parts.append(f"budget={budget}")
+      # Always include score + threshold so the reader has numeric
+      # context even when observed / budget weren't declared (custom
+      # metrics, LLM judges).
+      parts.append(f"score={score:.4g}")
+      if threshold is not None and isinstance(threshold, (int, float)):
+        parts.append(f"threshold={threshold:.4g}")
       typer.echo("  " + " ".join(parts), err=True)
+      emitted_for_session = True
+
+    # Safety net: a failing session must produce at least one FAIL line.
+    # This triggers only if every metric's details claim passed=True
+    # while the session itself is flagged failed (a bug upstream) — we
+    # still point the reader at the session id.
+    if not emitted_for_session:
+      typer.echo(
+          f"  FAIL session={s.session_id} (no per-metric detail available)",
+          err=True,
+      )
   if len(failed) > len(shown):
     typer.echo(
         f"  ... {len(failed) - len(shown)} more failing session(s) "
