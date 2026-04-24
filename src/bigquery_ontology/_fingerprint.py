@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Canonical model fingerprint + compile_id for concept-index provenance.
+"""Canonical fingerprint primitives for concept-index provenance.
 
 Internal module. Both the ontology compiler (``graph_ddl_compiler`` when
 it gains ``compile_concept_index``) and the SDK runtime (``OntologyRuntime``
@@ -22,7 +22,29 @@ rows and the side that verifies them, so there is exactly one definition.
 
 The underscore prefix marks this as non-public. Not re-exported from
 ``bigquery_ontology/__init__.py``. See
-``docs/implementation_plan_concept_index_runtime.md`` watchpoint W1.
+``docs/implementation_plan_concept_index_runtime.md`` watchpoints W1/W2.
+
+Three exports, three roles:
+
+- :func:`fingerprint_model` — full SHA-256 over a validated Pydantic
+  model, returned as ``"sha256:" + 64 hex chars``. Used by the
+  compiler to fingerprint the ``Ontology`` and ``Binding`` inputs,
+  and by the runtime to compute cached local fingerprints from the
+  same models.
+- :func:`compile_fingerprint` — full 64-hex SHA-256 over the concat
+  of ``ontology_fingerprint``, ``binding_fingerprint``, and
+  ``compiler_version``. **Canonical integrity key.** Used for strict
+  verification: main↔meta pair consistency and runtime freshness
+  checks.
+- :func:`compile_id` — 12-hex display/debug token. Derived as
+  ``compile_fingerprint(...)[:_COMPILE_ID_LEN]`` — always a
+  structural truncation of the full integrity key, never its own
+  hash. Use for operator UX (reports, queue rows, log lines).
+  **Never use as the sole freshness check.**
+
+Invariant: ``compile_id == compile_fingerprint[:12]``. Enforced at
+the function boundary so a future refactor cannot let the two drift
+out of sync.
 
 Serialization contract (pinned):
 
@@ -35,7 +57,8 @@ Serialization contract (pinned):
 - Encoding: ``json.dumps(..., sort_keys=True, separators=(",", ":"),
   ensure_ascii=False)``. Sorted keys at every nesting level, no
   whitespace, UTF-8.
-- Hash: SHA-256 over the encoded bytes; output ``"sha256:" + hexdigest``.
+- Hash: SHA-256 over the encoded bytes; output ``"sha256:" + hexdigest``
+  for model fingerprints, raw hex for compile fingerprints.
 
 Never fingerprint over ``yaml.dump(model)``, ``str(model)``, or
 ``model.model_dump()`` without ``mode="json"``. Each of those breaks
@@ -78,19 +101,21 @@ def fingerprint_model(model: BaseModel) -> str:
   return _FINGERPRINT_PREFIX + hashlib.sha256(canonical).hexdigest()
 
 
-def compile_id(
+def compile_fingerprint(
     ontology_fingerprint: str,
     binding_fingerprint: str,
     compiler_version: str,
 ) -> str:
-  """Return the 12-hex-char pair-consistency tag used by the concept index.
+  """Return the full 64-hex canonical integrity key for a compile.
 
-  Derived deterministically from the three compile inputs so that the
-  main concept-index table and its ``__meta`` sibling can be tied
-  together without requiring DDL-level transactions. 48 bits is
-  sufficient for pair consistency within a single ``output_table``;
-  full-fingerprint freshness is checked separately against the meta
-  row.
+  Full SHA-256 over
+  ``ontology_fingerprint || binding_fingerprint || compiler_version``.
+  This is the **canonical integrity key** used by strict verification
+  for main-table ↔ meta-table pair consistency and for runtime
+  freshness checks against cached local fingerprints.
+
+  Never truncate this for verification purposes. See ``compile_id``
+  for the short display/debug companion.
 
   Args:
       ontology_fingerprint: ``fingerprint_model(ontology)`` output.
@@ -98,12 +123,45 @@ def compile_id(
       compiler_version: Version string of the compiler that produced
           the index (e.g. ``"bigquery_ontology 0.2.1"``). Semver bumps
           with behavior changes must flow through this field so the
-          tag invalidates old meta.
+          fingerprint invalidates old meta.
 
   Returns:
-      12 lowercase hex characters.
+      64 lowercase hex characters (256 bits).
   """
   payload = "\x00".join(
       (ontology_fingerprint, binding_fingerprint, compiler_version)
   ).encode("utf-8")
-  return hashlib.sha256(payload).hexdigest()[:_COMPILE_ID_LEN]
+  return hashlib.sha256(payload).hexdigest()
+
+
+def compile_id(
+    ontology_fingerprint: str,
+    binding_fingerprint: str,
+    compiler_version: str,
+) -> str:
+  """Return the 12-hex-char display token for a compile.
+
+  Derived as ``compile_fingerprint(...)[:_COMPILE_ID_LEN]``. The short
+  form is always a structural truncation of the full integrity key —
+  never its own hash — so that the two provenance columns in the
+  concept index cannot drift out of sync.
+
+  **Display-only.** Use this for operator reports, error messages,
+  queue rows, and log lines. Never use ``compile_id`` as the sole
+  freshness check; strict verification must use
+  :func:`compile_fingerprint` directly.
+
+  Args:
+      ontology_fingerprint: ``fingerprint_model(ontology)`` output.
+      binding_fingerprint: ``fingerprint_model(binding)`` output.
+      compiler_version: Version string of the compiler that produced
+          the index.
+
+  Returns:
+      12 lowercase hex characters — the first 12 chars of
+      ``compile_fingerprint(ontology_fingerprint, binding_fingerprint,
+      compiler_version)``.
+  """
+  return compile_fingerprint(
+      ontology_fingerprint, binding_fingerprint, compiler_version
+  )[:_COMPILE_ID_LEN]

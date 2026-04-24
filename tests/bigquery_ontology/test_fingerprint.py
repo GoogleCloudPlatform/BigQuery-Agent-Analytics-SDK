@@ -14,20 +14,27 @@
 
 """Tests for the internal fingerprint module used by concept-index provenance.
 
-The fingerprint contract is pinned in `docs/implementation_plan_concept_index_runtime.md`
-(W1) and in the issue #58 body under "Fingerprint algorithm":
+The contract is pinned in `docs/implementation_plan_concept_index_runtime.md`
+(W1/W2) and in the issue #58 body under "Fingerprint algorithm":
 
 - Input: `BaseModel.model_dump(mode="json", by_alias=False, exclude_none=False)`.
 - Canonical JSON: `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
-- Hash: SHA-256, returned as ``"sha256:"`` + 64 hex chars.
-- ``compile_id``: first 12 hex chars of
-  ``SHA-256(ontology_fingerprint || binding_fingerprint || compiler_version)``.
+- ``fingerprint_model``: SHA-256, returned as ``"sha256:"`` + 64 hex chars.
+- ``compile_fingerprint``: full 64-hex SHA-256 over
+  ``ontology_fingerprint || binding_fingerprint || compiler_version``.
+  Canonical integrity key; used by strict verification.
+- ``compile_id``: 12-hex display token derived as
+  ``compile_fingerprint(...)[:12]``. Never used as the sole
+  freshness check.
 
-These tests pin the contract so a future "optimizer" cannot silently
-replace the serialization with ``yaml.dump`` or ``str(model)`` or
+Invariant: ``compile_id == compile_fingerprint[:12]``.
+
+These tests pin the serialization contract (so a future "optimizer"
+cannot silently replace it with ``yaml.dump`` or ``str(model)`` or
 ``model.model_dump()`` without ``mode="json"``, all of which would
 break cross-package agreement between the compiler-side writer and
-the runtime-side verifier.
+the runtime-side verifier) and the Option 2 column contract from
+issue #58 (so the short and long forms cannot drift apart).
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ import pytest
 
 from bigquery_ontology import load_binding_from_string
 from bigquery_ontology import load_ontology_from_string
+from bigquery_ontology._fingerprint import compile_fingerprint
 from bigquery_ontology._fingerprint import compile_id
 from bigquery_ontology._fingerprint import fingerprint_model
 
@@ -200,12 +208,55 @@ class TestFingerprintModel:
 
 
 # ------------------------------------------------------------------ #
-# compile_id                                                          #
+# compile_fingerprint — canonical integrity key                       #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileFingerprint:
+  """Full 64-hex SHA-256 over the three compile inputs.
+
+  This is the canonical integrity key used by strict verification.
+  Must respond to every input independently and must be 64 hex chars.
+  """
+
+  def test_length_is_sixty_four_hex_chars(self):
+    fp = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    assert len(fp) == 64
+    assert all(c in "0123456789abcdef" for c in fp)
+
+  def test_deterministic_for_same_inputs(self):
+    fp1 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    fp2 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    assert fp1 == fp2
+
+  def test_changes_with_ontology_fingerprint(self):
+    fp1 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    fp2 = compile_fingerprint("sha256:zz", "sha256:bb", "gm-1.0.0")
+    assert fp1 != fp2
+
+  def test_changes_with_binding_fingerprint(self):
+    fp1 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    fp2 = compile_fingerprint("sha256:aa", "sha256:zz", "gm-1.0.0")
+    assert fp1 != fp2
+
+  def test_changes_with_compiler_version(self):
+    """Compiler version changes must shift the fingerprint even when
+    both input fingerprints are unchanged — otherwise a semver bump
+    to the compiler with behavior changes would fail to invalidate
+    old meta.
+    """
+    fp1 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    fp2 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.1.0")
+    assert fp1 != fp2
+
+
+# ------------------------------------------------------------------ #
+# compile_id — 12-hex display token, derived from compile_fingerprint #
 # ------------------------------------------------------------------ #
 
 
 class TestCompileId:
-  """Short pair-consistency tag derived from the three compile inputs."""
+  """Short display/debug tag derived from ``compile_fingerprint``."""
 
   def test_length_is_twelve_hex_chars(self):
     cid = compile_id("sha256:aa", "sha256:bb", "gm-1.0.0")
@@ -238,6 +289,52 @@ class TestCompileId:
 
 
 # ------------------------------------------------------------------ #
+# Structural invariant: compile_id == compile_fingerprint[:12]        #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileIdFingerprintInvariant:
+  """The short display token must be a structural truncation of the
+  full integrity key — never its own hash. This prevents the two
+  provenance columns in the concept index from drifting out of sync.
+
+  Pinned in the ``_fingerprint.py`` module docstring and in issue #58
+  (Option 2).
+  """
+
+  def test_compile_id_is_prefix_of_compile_fingerprint(self):
+    args = ("sha256:aa", "sha256:bb", "gm-1.0.0")
+    assert compile_id(*args) == compile_fingerprint(*args)[:12]
+
+  def test_invariant_holds_across_varied_inputs(self):
+    """Invariant must hold for any input triple, not just one case."""
+    cases = [
+        ("sha256:aa", "sha256:bb", "gm-1.0.0"),
+        ("sha256:ff0000", "sha256:0000ff", "gm-2.3.4"),
+        ("", "", ""),  # degenerate but deterministic
+        ("x" * 100, "y" * 100, "z" * 100),  # long inputs
+    ]
+    for args in cases:
+      assert (
+          compile_id(*args) == compile_fingerprint(*args)[:12]
+      ), f"invariant broken for {args}"
+
+  def test_compile_id_never_computes_its_own_hash(self):
+    """Regression guard: if someone re-implements ``compile_id`` to
+    hash a different payload (e.g. a subset of inputs, or a different
+    separator), the invariant breaks and this test catches it.
+    """
+    # Any change to the payload that preserves the relative ordering
+    # but alters the bytes would produce a different 12-hex prefix.
+    # Assert the derivation is pure truncation of compile_fingerprint.
+    args = ("sha256:a", "sha256:b", "v")
+    full = compile_fingerprint(*args)
+    short = compile_id(*args)
+    assert short == full[:12]
+    assert full.startswith(short)
+
+
+# ------------------------------------------------------------------ #
 # Public surface                                                      #
 # ------------------------------------------------------------------ #
 
@@ -252,13 +349,16 @@ class TestPrivateSurface:
 
     assert not hasattr(bigquery_ontology, "fingerprint_model")
     assert not hasattr(bigquery_ontology, "compile_id")
+    assert not hasattr(bigquery_ontology, "compile_fingerprint")
 
   def test_importable_via_absolute_path(self):
     """Both packages import via ``from bigquery_ontology._fingerprint
     import ...``. Make sure that path continues to work.
     """
+    from bigquery_ontology._fingerprint import compile_fingerprint as _cfp
     from bigquery_ontology._fingerprint import compile_id as _cid
     from bigquery_ontology._fingerprint import fingerprint_model as _fp
 
+    assert callable(_cfp)
     assert callable(_cid)
     assert callable(_fp)
