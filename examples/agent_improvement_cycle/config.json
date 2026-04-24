@@ -1,0 +1,14 @@
+{
+  "app_name": "company_info_agent",
+  "agent_module": "agent.agent",
+  "prompts_path": "agent/prompts.py",
+  "prompt_variable": "CURRENT_PROMPT",
+  "version_variable": "CURRENT_VERSION",
+  "eval_cases_path": "eval/eval_cases.json",
+  "traffic_generator": "eval/generate_traffic.py",
+  "model_id": "gemini-2.5-flash",
+  "max_attempts": 3,
+  "prompt_storage": "vertex",
+  "vertex_prompt_id": "",
+  "use_vertex_optimizer": true
+}

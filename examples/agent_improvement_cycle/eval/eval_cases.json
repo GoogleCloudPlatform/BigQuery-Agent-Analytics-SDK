@@ -1,0 +1,28 @@
+{
+  "eval_set_id": "company_info_improvement_cycle",
+  "name": "Company Info Agent Evaluation",
+  "description": "Golden eval set for the agent improvement cycle demo. Starts with 3 cases that the V1 prompt handles correctly. Failed synthetic cases are extracted into this set each cycle, raising the regression bar.",
+  "eval_cases": [
+    {
+      "id": "pto_balance",
+      "question": "How many PTO days do I get per year?",
+      "category": "pto",
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call). Extracted cases will have real expected_tool values."
+    },
+    {
+      "id": "sick_leave_days",
+      "question": "How many sick days do I have?",
+      "category": "sick_leave",
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call)."
+    },
+    {
+      "id": "remote_work_days",
+      "question": "How many days can I work from home?",
+      "category": "remote_work",
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call)."
+    }
+  ]
+}

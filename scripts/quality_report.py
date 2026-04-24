@@ -39,7 +39,13 @@ Usage:
     python quality_report.py --persist            # persist results to BigQuery
     python quality_report.py --samples 20         # show 20 sessions per category
     python quality_report.py --samples all        # show all sessions
+    python quality_report.py --app-name my_agent  # filter to a specific agent
+    python quality_report.py --output-json r.json # write structured JSON output
 """
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import argparse
 import json
 import logging
@@ -72,8 +78,9 @@ logger = logging.getLogger("quality_report")
 
 def _configure_logging():
   """Configure logging format. Called once from main()."""
+  log_level = os.environ.get("LOGLEVEL", "INFO").upper()
   logging.basicConfig(
-      level=logging.INFO,
+      level=getattr(logging, log_level, logging.INFO),
       format="%(asctime)s [%(levelname)s] %(message)s",
       datefmt="%H:%M:%S",
   )
@@ -89,7 +96,7 @@ def _load_dotenv():
         os.path.join(_repo_root, ".env"),
     ]:
       if os.path.isfile(candidate):
-        load_dotenv(candidate, override=True)
+        load_dotenv(candidate, override=False)
         break
   except ImportError:
     pass
@@ -357,7 +364,7 @@ def resolve_trace_responses(traces):
 # ---------------------------------------------------------------------------
 
 def run_evaluation(
-    time_range=None, limit=100, model=None, persist=False
+    time_range=None, limit=100, model=None, persist=False, app_name=None
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig, TraceFilter
 
@@ -383,6 +390,8 @@ def run_evaluation(
   else:
     trace_filter = TraceFilter()
   trace_filter.limit = limit
+  if app_name:
+    trace_filter.root_agent_name = app_name
 
   report = client.evaluate_categorical(config=cat_config, filters=trace_filter)
 
@@ -439,6 +448,8 @@ def run_browse(args):
   else:
     trace_filter = TraceFilter()
   trace_filter.limit = args.limit
+  if args.app_name:
+    trace_filter.root_agent_name = args.app_name
 
   traces = client.list_traces(filter_criteria=trace_filter)
   logger.info("Fetched %d sessions", len(traces))
@@ -507,6 +518,7 @@ def run_eval(args):
         limit=args.limit,
         model=model,
         persist=args.persist,
+        app_name=args.app_name,
     )
   except Exception:
     logger.exception("Evaluation failed")
@@ -522,7 +534,8 @@ def run_eval(args):
   result["report"].details["limit"] = args.limit
   result["report"].details["persist"] = args.persist
   result["report"].details["samples"] = args.samples or "default (10/5/3)"
-  _print_eval_results(result["report"], result["resolved_map"], samples=args.samples)
+  _print_eval_results(result["report"], result["resolved_map"], samples=args.samples,
+                      unhelpful_threshold=args.threshold)
 
   report_path = None
   if args.report:
@@ -530,6 +543,19 @@ def run_eval(args):
 
   if report_path:
     print(f"\n  Markdown report: {report_path}")
+
+  if args.output_json:
+    output = _build_json_output(result["report"], result["resolved_map"])
+    if args.output_json == "-":
+      json.dump(output, sys.stdout, indent=2, default=str)
+      sys.stdout.write("\n")
+      print("  JSON report: (stdout)", file=sys.stderr)
+    else:
+      json_path = os.path.abspath(args.output_json)
+      os.makedirs(os.path.dirname(json_path), exist_ok=True)
+      with open(json_path, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+      print(f"\n  JSON report: {json_path}")
 
 
 def _group_by_category(report):
@@ -584,7 +610,7 @@ _METRIC_LABELS = {
 }
 
 
-def _print_eval_results(report, resolved_map, samples=None):
+def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=10.0):
   hr = "\u2500" * 70
 
   by_category = _group_by_category(report)
@@ -789,10 +815,10 @@ def _print_eval_results(report, resolved_map, samples=None):
 
   print(f"{'=' * 70}")
 
-  if fp_rate > 10:
-    print(f"\n  WARNING: Unhelpful rate ({fp_rate:.1f}%) exceeds 10% threshold!")
+  if fp_rate > unhelpful_threshold:
+    print(f"\n  WARNING: Unhelpful rate ({fp_rate:.1f}%) exceeds {unhelpful_threshold:.0f}% threshold!")
   elif fp_rate > 0:
-    print("\n  Unhelpful responses detected but within acceptable range.")
+    print(f"\n  Unhelpful responses detected but below {unhelpful_threshold:.0f}% threshold.")
   else:
     print("\n  All responses were meaningful.")
 
@@ -985,6 +1011,59 @@ def _write_md_report(report, resolved_map, args):
 
 
 # ---------------------------------------------------------------------------
+# JSON report output
+# ---------------------------------------------------------------------------
+
+def _build_json_output(report, resolved_map):
+  """Build a structured dict for JSON output of evaluation results."""
+  by_category = _group_by_category(report)
+  agent_stats = _build_agent_stats(report, resolved_map)
+
+  sessions = []
+  for sr in report.session_results:
+    ctx = resolved_map.get(sr.session_id, {})
+    metrics = {}
+    for mr in sr.metrics:
+      metrics[mr.metric_name] = {
+          "category": mr.category,
+          "justification": mr.justification,
+      }
+    sessions.append({
+        "session_id": sr.session_id,
+        "question": ctx.get("question", ""),
+        "response": ctx.get("response", ""),
+        "answered_by": ctx.get("answered_by", ""),
+        "is_a2a": ctx.get("is_a2a", False),
+        "latency_s": ctx.get("latency_s"),
+        "metrics": metrics,
+    })
+
+  fp_count = len(by_category.get("unhelpful", []))
+  partial_count = len(by_category.get("partial", []))
+  meaningful_count = len(by_category.get("meaningful", []))
+  total = report.total_sessions
+
+  return {
+      "summary": {
+          "total_sessions": total,
+          "meaningful": meaningful_count,
+          "partial": partial_count,
+          "unhelpful": fp_count,
+          "meaningful_rate": round(meaningful_count / total * 100, 1) if total else 0,
+          "unhelpful_rate": round(fp_count / total * 100, 1) if total else 0,
+      },
+      "category_distributions": {
+          k: dict(v) for k, v in report.category_distributions.items()
+      },
+      "per_agent": {
+          agent: dict(stats) for agent, stats in agent_stats.items()
+      },
+      "sessions": sessions,
+      "details": {k: str(v) for k, v in report.details.items()},
+  }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1002,6 +1081,8 @@ Examples:
   %(prog)s --time-period 7d          Evaluate last 7 days
   %(prog)s --samples 20              Show up to 20 sessions per category
   %(prog)s --samples all             Show all sessions per category
+  %(prog)s --app-name my_agent       Filter to a specific agent app
+  %(prog)s --output-json report.json Write structured JSON output
       """,
   )
   parser.add_argument(
@@ -1047,6 +1128,28 @@ Examples:
       type=_samples_arg,
       default=None,
       help="Max sample sessions to display per category, or 'all' (default: 10/5/3)",
+  )
+  parser.add_argument(
+      "--app-name",
+      type=str,
+      default=None,
+      help="Filter to sessions from a specific agent app name. Matches the "
+           "root_agent_name attribute set by BigQueryAgentAnalyticsPlugin; "
+           "sessions from other sources may not populate this field",
+  )
+  parser.add_argument(
+      "--output-json",
+      type=str,
+      default=None,
+      metavar="PATH",
+      help="Write structured evaluation results as JSON to the given file path "
+           "(writes all sessions regardless of --samples)",
+  )
+  parser.add_argument(
+      "--threshold",
+      type=float,
+      default=10.0,
+      help="Unhelpful rate warning threshold in %% (default: 10)",
   )
 
   args = parser.parse_args()

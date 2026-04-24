@@ -49,8 +49,14 @@ dev = [
   "pyink>=24.3.0",
   "isort>=5.0",
 ]
+improvement = [
+  "google-genai>=1.0.0",
+  "google-cloud-aiplatform>=1.148.0",
+  "pandas>=2.0.0",
+  "python-dotenv>=1.0.0",
+]
 all = [
-  "bigquery-agent-analytics[llm,bigframes,owl,cli,dev]",
+  "bigquery-agent-analytics[llm,bigframes,owl,cli,dev,improvement]",
 ]
 
 [project.scripts]
