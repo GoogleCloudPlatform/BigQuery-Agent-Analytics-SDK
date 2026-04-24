@@ -249,6 +249,30 @@ class TestCompileFingerprint:
     fp2 = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.1.0")
     assert fp1 != fp2
 
+  def test_golden_vector(self):
+    """Pinned byte-exact digest for a known input triple.
+
+    This catches silent payload-contract changes that would still
+    pass length/determinism/input-sensitivity tests — e.g. swapping
+    the NUL separator to another byte, changing the concatenation
+    order, or altering the UTF-8 encoding. A refactor that changes
+    the payload shape will flip this value and fail the test even
+    if all the behavioral properties still hold.
+
+    The payload is:
+
+        "sha256:aa" + "\\x00" + "sha256:bb" + "\\x00" + "gm-1.0.0"
+
+    encoded as UTF-8, hashed with SHA-256.
+    """
+    full = compile_fingerprint("sha256:aa", "sha256:bb", "gm-1.0.0")
+    short = compile_id("sha256:aa", "sha256:bb", "gm-1.0.0")
+    assert (
+        full
+        == "dd301e2874a3bc55dd3ab6ea428ad1046f6b4834b4dccd7a87cf82a1991e0184"
+    )
+    assert short == "dd301e2874a3"
+
 
 # ------------------------------------------------------------------ #
 # compile_id — 12-hex display token, derived from compile_fingerprint #

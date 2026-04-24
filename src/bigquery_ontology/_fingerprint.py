@@ -108,14 +108,27 @@ def compile_fingerprint(
 ) -> str:
   """Return the full 64-hex canonical integrity key for a compile.
 
-  Full SHA-256 over
-  ``ontology_fingerprint || binding_fingerprint || compiler_version``.
-  This is the **canonical integrity key** used by strict verification
-  for main-table ↔ meta-table pair consistency and for runtime
-  freshness checks against cached local fingerprints.
+  **Canonical integrity key.** Used by strict verification for main
+  ↔ meta pair consistency and runtime freshness checks against
+  cached local fingerprints. Never truncate this for verification
+  purposes. See ``compile_id`` for the short display/debug companion.
 
-  Never truncate this for verification purposes. See ``compile_id``
-  for the short display/debug companion.
+  Exact payload contract (pinned):
+
+  .. code-block:: text
+
+      payload = utf8(ontology_fingerprint + "\\x00" +
+                     binding_fingerprint + "\\x00" +
+                     compiler_version)
+      digest  = sha256(payload).hexdigest()  # 64 lowercase hex chars
+
+  The separator is a single NUL byte (``\\x00``). NUL is chosen
+  because it cannot appear in any of the three inputs (fingerprints
+  are hex; version strings are ASCII), so the delimited encoding is
+  unambiguous — no two different input triples can produce the same
+  payload. Do not reimplement this elsewhere; import
+  :func:`compile_fingerprint` from this module. Regression tests
+  pin a golden vector so a silent payload change is caught.
 
   Args:
       ontology_fingerprint: ``fingerprint_model(ontology)`` output.
