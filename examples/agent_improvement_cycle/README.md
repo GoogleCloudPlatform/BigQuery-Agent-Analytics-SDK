@@ -35,16 +35,17 @@ This demo shows how to close that gap using three components:
 
 The full cycle:
 
-1. **GENERATE (Synthetic Traffic):** Gemini produces diverse user questions to test the agent beyond anticipated scenarios.
-2. **RUN (Agent Execution):** Process traffic through the agent and log every trace/session into BigQuery.
-3. **EVALUATE (Quality Reporting):** SDK scripts read logged sessions; an LLM judge scores them for usefulness and grounding.
-4. **IMPROVE (Prompt Optimization):** The core optimization stage consists of four critical sub-steps:
+1. **GENERATE SYNTHETIC TRAFFIC:** Gemini produces diverse user questions to test the agent beyond anticipated scenarios.
+2. **RUN TRAFFIC THROUGH AGENT:** Process traffic through the agent and log every trace/session into BigQuery.
+3. **EVALUATE SESSION QUALITY:** SDK scripts read logged sessions; an LLM judge scores them for usefulness and grounding.
+4. **IMPROVE PROMPT:** The core optimization stage consists of four critical sub-steps:
     - **Extract:** Failed cases are moved into the golden eval set to raise the performance bar.
     - **Teacher Agent:** Generates ground truth by re-answering failed questions with tool-mandated logic.
     - **Optimize:** Vertex AI Prompt Optimizer generates a new candidate prompt.
     - **Validate (Regression Gate):** The candidate is tested against the full golden eval set.
-5. **MEASURE (Quantify Improvement):** Verify the improved prompt against fresh traffic to quantify the quality jump.
-6. **REPEAT (Cycle Orchestration):** Iterate the cycle until the agent's performance stabilizes.
+5. **MEASURE IMPROVEMENT:** Verify the improved prompt against fresh traffic to quantify the quality jump.
+
+Run multiple cycles with `--cycles N` to iterate until performance stabilizes.
 
 The hero moment: quality typically climbs from ~40% to ~100% in a single cycle
 (results vary due to non-deterministic LLM output).
