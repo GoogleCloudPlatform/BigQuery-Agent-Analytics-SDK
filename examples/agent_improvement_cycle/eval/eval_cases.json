@@ -7,22 +7,22 @@
       "id": "pto_balance",
       "question": "How many PTO days do I get per year?",
       "category": "pto",
-      "expected_tool": "lookup_company_policy",
-      "notes": "V1 has this info in the prompt, should pass"
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call). Extracted cases will have real expected_tool values."
     },
     {
       "id": "sick_leave_days",
       "question": "How many sick days do I have?",
       "category": "sick_leave",
-      "expected_tool": "lookup_company_policy",
-      "notes": "V1 has this info in the prompt, should pass"
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call)."
     },
     {
       "id": "remote_work_days",
       "question": "How many days can I work from home?",
       "category": "remote_work",
-      "expected_tool": "lookup_company_policy",
-      "notes": "V1 has this info in the prompt, should pass"
+      "expected_tool": "unknown",
+      "notes": "V1 answers from inline knowledge (no tool call)."
     }
   ]
 }

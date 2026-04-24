@@ -601,16 +601,18 @@ _CLASSIFIER_STOP = frozenset(
 
 
 def _word_forms(word: str) -> list[str]:
-  """Return the word plus common de-suffixed forms (plural, -ing, -ly)."""
+  """Return the word plus common de-suffixed forms (plural, -ing, -ly, -ies)."""
   forms = [word]
   if len(word) > 4:
-    if word.endswith("ing"):
+    if word.endswith("ies"):
+      forms.append(word[:-3] + "y")  # policies -> policy
+    elif word.endswith("ing"):
       forms.append(word[:-3])  # working -> work
     elif word.endswith("ly"):
       forms.append(word[:-2])  # remotely -> remote
     elif word.endswith("ed"):
       forms.append(word[:-2])  # requested -> request
-  if len(word) > 3 and word.endswith("s"):
+  if len(word) > 3 and word.endswith("s") and not word.endswith("ies"):
     forms.append(word[:-1])  # expenses -> expense
   return forms
 

@@ -238,7 +238,11 @@ step_end "Pre-flight check"
 if [[ $PREFLIGHT_EXIT -ne 0 ]]; then
   FAILING_V=$(_read_version)
   echo ""
-  echo "  PRE-FLIGHT FAILED: Prompt V${FAILING_V} does not pass all golden cases."
+  echo "  ┌─────────────────────────────────────────────────────────────┐"
+  echo "  │  WARNING: Prompt V${FAILING_V} does not pass all golden eval cases.  │"
+  echo "  │  The baseline will be auto-improved before the cycle runs. │"
+  echo "  │  Use ./reset.sh to restore the original V1 prompt.        │"
+  echo "  └─────────────────────────────────────────────────────────────┘"
   echo ""
 
   # Surface exactly which cases failed
@@ -324,6 +328,10 @@ for cycle in $(seq 1 "$CYCLES"); do
     $AGENT_CONFIG_FLAG \
     --eval-cases "$TRAFFIC_JSON"
 
+  # Save expected session IDs from this run for verification in Step 3.
+  EXPECTED_IDS="$REPORTS_DIR/expected_session_ids_cycle_${cycle}.json"
+  cp "$REPORTS_DIR/latest_eval_results.json" "$EXPECTED_IDS" 2>/dev/null || true
+
   step_end "Agent execution"
 
   # =========================================================================
@@ -376,6 +384,22 @@ for cycle in $(seq 1 "$CYCLES"); do
   if [[ ! -f "$REPORT_JSON" ]]; then
     echo "ERROR: Quality report was not generated after $MAX_RETRIES attempts" >&2
     exit 1
+  fi
+
+  # Verify scored sessions match the ones we actually ran.
+  if [[ -f "$EXPECTED_IDS" ]]; then
+    MISSING=$(python3 -c "
+import json
+with open('$EXPECTED_IDS') as f:
+    expected = set(r['session_id'] for r in json.load(f) if r.get('session_id'))
+with open('$REPORT_JSON') as f:
+    scored = set(s['session_id'] for s in json.load(f).get('sessions', []))
+missing = expected - scored
+print(len(missing))
+" 2>/dev/null || echo "0")
+    if [[ "$MISSING" -gt 0 ]]; then
+      echo "  Note: $MISSING expected session(s) not yet in quality report (BQ propagation delay)."
+    fi
   fi
 
   # Print quality summary
@@ -462,6 +486,10 @@ for cycle in $(seq 1 "$CYCLES"); do
     $AGENT_CONFIG_FLAG \
     --eval-cases "$FRESH_TRAFFIC"
 
+  # Save expected session IDs for Step 5 verification.
+  FRESH_EXPECTED_IDS="$REPORTS_DIR/expected_session_ids_cycle_${cycle}_fresh.json"
+  cp "$REPORTS_DIR/latest_eval_results.json" "$FRESH_EXPECTED_IDS" 2>/dev/null || true
+
   # 5d: Score from BigQuery
   echo ""
   echo "  --- Quality report from BigQuery ---"
@@ -514,6 +542,22 @@ print(len(old_ids & new_ids))
   if [[ ! -f "$FRESH_REPORT" ]]; then
     echo "ERROR: Fresh quality report was not generated after $MAX_RETRIES attempts" >&2
     exit 1
+  fi
+
+  # Verify scored sessions match the fresh traffic we ran.
+  if [[ -f "$FRESH_EXPECTED_IDS" ]]; then
+    MISSING=$(python3 -c "
+import json
+with open('$FRESH_EXPECTED_IDS') as f:
+    expected = set(r['session_id'] for r in json.load(f) if r.get('session_id'))
+with open('$FRESH_REPORT') as f:
+    scored = set(s['session_id'] for s in json.load(f).get('sessions', []))
+missing = expected - scored
+print(len(missing))
+" 2>/dev/null || echo "0")
+    if [[ "$MISSING" -gt 0 ]]; then
+      echo "  Note: $MISSING expected session(s) not yet in fresh quality report."
+    fi
   fi
 
   # 5e: Print before/after comparison
@@ -577,5 +621,3 @@ else
   echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
 fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
-
-

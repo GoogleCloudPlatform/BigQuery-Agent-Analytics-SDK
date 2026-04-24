@@ -51,8 +51,10 @@ class ImprovementConfig:
           require more reasoning capability than the target model can
           provide with just a better prompt.
       judge_prompt: Custom LLM judge prompt template. Must contain
-          ``{question}`` and ``{response}`` placeholders. If *None*,
-          uses the default judge prompt.
+          ``{question}`` and ``{response}`` placeholders. May also use
+          ``{tool_check}`` (objective tool-call evidence) and
+          ``{tool_fail_rule}`` (conditional rule when expected tool was
+          not called). If *None*, uses the default judge prompt.
   """
 
   agent_factory: Callable[..., Agent]

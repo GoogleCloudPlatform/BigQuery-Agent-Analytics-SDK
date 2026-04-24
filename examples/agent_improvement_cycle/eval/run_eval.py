@@ -221,7 +221,13 @@ def main() -> None:
     failed = sum(1 for r in results if not r.get("pass", False))
   else:
     results = asyncio.run(run_all_cases(args.eval_cases, args.agent_config))
-    failed = 0
+    # Fail if any case returned an error or missing session_id, since
+    # those cases won't appear in BigQuery and would skew quality scores.
+    failed = sum(
+        1
+        for r in results
+        if not r.get("session_id") or r.get("response", "").startswith("ERROR:")
+    )
 
   # Write results to a file for reference
   results_path = os.path.join(_DEMO_DIR, "reports", "latest_eval_results.json")
