@@ -219,6 +219,14 @@ separator
 echo ""
 _show_prompt "STARTING PROMPT"
 
+separator
+echo ""
+GOLDEN_COUNT=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
+echo "  GOLDEN EVAL SET ($GOLDEN_COUNT cases)"
+echo ""
+jq -r '.eval_cases[] | "    [\(.id)] \(.question) (\(.category // "general"))"' "$EVAL_CASES_PATH" 2>/dev/null || true
+echo ""
+
 # ---------------------------------------------------------------------------
 # Pre-flight: verify golden eval passes with current prompt
 # ---------------------------------------------------------------------------
