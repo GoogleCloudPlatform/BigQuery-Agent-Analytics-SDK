@@ -50,7 +50,7 @@ Neither package is designed as a turn-time agent SDK. This RFC does not add an i
 
 | Direction | Who calls it | When | What happens |
 | :---- | :---- | :---- | :---- |
-| 1 | Operator / CI | Once per ontology change (build-time) | `gm compile` → DDL \+ concept-index SQL published to BQ. |
+| 1 | Operator / CI | Once per ontology change (build-time) | `gm compile` → emits DDL \+ concept-index SQL; operator executes the emitted SQL to publish the tables to BigQuery. |
 | 2 | Batch orchestrator | Scheduled over accumulated traces (post-processing) | `extract_graph` / `extract_biz_nodes` from `bigquery_agent_analytics` → `AI.GENERATE` populates entity / relationship tables. |
 | 3 | Eval / analysis / curation pipeline (this RFC) | On accumulated data, at the pipeline's cadence | Pipeline imports `OntologyRuntime` \+ a resolver from `bigquery_agent_analytics` and calls `.resolve(...)` or `.validate_against_ontology(...)`. Each call is a BQ query against the concept index. |
 
