@@ -144,7 +144,7 @@ Work: `bigquery_ontology/contrib/advertising/` stub with Yahoo's resolver (if co
 
 - `src/bigquery_ontology/_fingerprint.py` — **internal** module (underscore prefix) with canonical JSON serialization of Pydantic models + SHA-256. Exposes:
   - `fingerprint_model(model: BaseModel) -> str` — full SHA-256 of a validated Pydantic model, prefixed `sha256:`.
-  - `compile_fingerprint(ontology_fingerprint, binding_fingerprint, compiler_version) -> str` — full 64-hex SHA-256 over the concatenated triple. **Canonical integrity key.**
+  - `compile_fingerprint(ontology_fingerprint, binding_fingerprint, compiler_version) -> str` — full 64-hex SHA-256 over the **NUL-delimited UTF-8 encoding** of the three inputs (`ontology_fingerprint + "\x00" + binding_fingerprint + "\x00" + compiler_version`). **Canonical integrity key.** Consumers must call this function, not reimplement the payload; a golden-vector test pins the byte-exact digest so any silent payload change is caught.
   - `compile_id(ontology_fingerprint, binding_fingerprint, compiler_version) -> str` — 12-hex display token, derived as `compile_fingerprint(...)[:12]`. The derivation is structural; `compile_id` never computes its own hash.
 
   Not re-exported from any `__init__.py`. Shared implementation between `compile_concept_index()` (ontology package) and `OntologyRuntime` (SDK package) via absolute import `from bigquery_ontology._fingerprint import ...`. Underscore prefix makes it clear this isn't semver-stable surface; it's an implementation detail both packages happen to need.
@@ -222,7 +222,7 @@ Guard: keep the compiler's shadow-swap path non-self-healing. The compiler detec
 - **Ontology package version bump**: new public API (`compile_concept_index`, re-exported from `bigquery_ontology/__init__.py`) warrants a minor version bump. `_fingerprint.py` is internal and does not factor into semver.
 - **SDK version bump**: new public API (`OntologyRuntime`, `EntityResolver` + `ExactMatchResolver` + `SynonymResolver`, dataclasses, exception classes, all re-exported from `bigquery_agent_analytics/__init__.py`) warrants a minor version bump.
 - **Existing resolution code in user applications**: no deprecation. Users continue their existing resolution approach until they opt into the SDK primitive.
-- **BQ permissions**: `--emit-concept-index` requires `bigquery.tables.create` on the target dataset (existing `compile_graph()` requirement, unchanged). Runtime reading requires `bigquery.tables.getData` on the concept index and meta tables (standard).
+- **BQ permissions**: `gm compile` (with or without `--emit-concept-index`) is a pure SQL-emission command — it writes DDL to stdout or `--output` and does not call BigQuery. Only local file-system access is required at compile time. **Executing** the emitted SQL (`bq query`, console, Airflow, etc.) requires `bigquery.tables.create` on the target dataset for the main and `__meta` tables, matching the existing execute-side requirement for the `CREATE PROPERTY GRAPH` DDL emitted by `compile_graph()`. Runtime reading of the concept index via `OntologyRuntime` requires `bigquery.tables.getData` on the concept-index and meta tables (standard).
 
 ## Open watchlist (not blocking, track during implementation)
 

@@ -140,7 +140,7 @@ CREATE TABLE `{dataset}.ontology_concept_index` (
 | Column | Role | Width | Used by |
 |---|---|---|---|
 | `compile_id` | Display/debug token — human-readable short tag for reports, queue rows, error messages, log lines. **Never the sole freshness check.** | 12 hex chars | Operator UX, dashboards, triage output |
-| `compile_fingerprint` | Canonical integrity key — full SHA-256 over `ontology_fingerprint \|\| binding_fingerprint \|\| compiler_version`. | 64 hex chars | Strict pair-consistency + runtime verification (§5) |
+| `compile_fingerprint` | Canonical integrity key — full SHA-256 over the NUL-delimited UTF-8 of `(ontology_fingerprint, binding_fingerprint, compiler_version)`. Consumers must call `_fingerprint.compile_fingerprint()`; do not reimplement. | 64 hex chars | Strict pair-consistency + runtime verification (§5) |
 
 Structural invariant: `compile_id == compile_fingerprint[:12]`. The short form is always derivable from the full form; never the other way around. Enforced at the `_fingerprint.py` module boundary so a future refactor cannot make them diverge.
 
@@ -238,7 +238,7 @@ Concept-index value is \~80% from SKOS annotations preserved through import (\#5
 
 | File | Change | Status |
 | :---- | :---- | :---- |
-| `_fingerprint.py` | **New internal** — `fingerprint_model`, `compile_id` | **\#71 open** |
+| `_fingerprint.py` | **New internal** — `fingerprint_model`, `compile_fingerprint` (canonical integrity key), `compile_id` (display token, derived as `compile_fingerprint(...)[:12]`) | **\#71 open** |
 | `concept_index.py` | New row builder | Pending A2 |
 | `graph_ddl_compiler.py` | Add `compile_concept_index`. `compile_graph` unchanged | Pending A3–A5 |
 | `cli.py:299` | Add `--emit-concept-index` \+ `--concept-index-table`; no-flag byte-identical | Pending A7 |
