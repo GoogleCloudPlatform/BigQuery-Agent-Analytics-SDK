@@ -123,16 +123,26 @@ Emitted when `gm compile --emit-concept-index --concept-index-table <fqn>` is pa
 
 ```sql
 CREATE TABLE `{dataset}.ontology_concept_index` (
-  entity_name  STRING NOT NULL,
-  label        STRING NOT NULL,   -- for label_kind='notation', holds notation value
-  label_kind   STRING NOT NULL,   -- 'name'|'pref'|'alt'|'hidden'|'synonym'|'notation'
-  notation     STRING,            -- per-entity display, repeats across rows
-  scheme       STRING,            -- NULL = not in any scheme
-  language     STRING,
-  is_abstract  BOOL   NOT NULL,
-  compile_id   STRING NOT NULL    -- 12 hex chars; pair-consistency tag
+  entity_name         STRING NOT NULL,
+  label               STRING NOT NULL,   -- for label_kind='notation', holds notation value
+  label_kind          STRING NOT NULL,   -- 'name'|'pref'|'alt'|'hidden'|'synonym'|'notation'
+  notation            STRING,            -- per-entity display, repeats across rows
+  scheme              STRING,            -- NULL = not in any scheme
+  language            STRING,
+  is_abstract         BOOL   NOT NULL,
+  compile_id          STRING NOT NULL,   -- 12 hex chars; display/debug token only
+  compile_fingerprint STRING NOT NULL    -- 64 hex chars; canonical integrity key
 );
 ```
+
+**Two provenance columns, one role each.**
+
+| Column | Role | Width | Used by |
+|---|---|---|---|
+| `compile_id` | Display/debug token — human-readable short tag for reports, queue rows, error messages, log lines. **Never the sole freshness check.** | 12 hex chars | Operator UX, dashboards, triage output |
+| `compile_fingerprint` | Canonical integrity key — full SHA-256 over `ontology_fingerprint \|\| binding_fingerprint \|\| compiler_version`. | 64 hex chars | Strict pair-consistency + runtime verification (§5) |
+
+Structural invariant: `compile_id == compile_fingerprint[:12]`. The short form is always derivable from the full form; never the other way around. Enforced at the `_fingerprint.py` module boundary so a future refactor cannot make them diverge.
 
 **Row multiplicity:** one row per `(entity_name, label, label_kind, language, scheme)` tuple — concept in 3 schemes × 5 labels \= 15 rows. Resolvers filter by scheme without JOIN.
 
@@ -201,12 +211,15 @@ Docs (`docs/ontology/concept-index.md`, from A8) will carry two or three canonic
 
 **TTL re-check queries (stale cache):**
 
-1. `SELECT DISTINCT compile_id FROM {output_table} LIMIT 2` — asserts exactly one value (pair consistency). More than one → refresh in progress.  
-2. `SELECT compile_id, ontology_fingerprint, binding_fingerprint FROM {output_table}__meta LIMIT 1` — asserts all three match cache (full-fingerprint freshness).
+1. `SELECT DISTINCT compile_fingerprint FROM {output_table} LIMIT 2` — asserts exactly one value (pair consistency at full-fingerprint resolution). More than one → refresh in progress.
+2. `SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint FROM {output_table}__meta LIMIT 1`.
+3. Require: `main.compile_fingerprint == meta.compile_fingerprint` (pair consistency) **and** `meta.ontology_fingerprint == cached.ontology_fingerprint` **and** `meta.binding_fingerprint == cached.binding_fingerprint` (component freshness).
+
+No short-ID arithmetic anywhere on the verification path. `compile_id` never appears in a strict-mode query.
 
 Main/meta disagreement → 2s one-shot retry → persistent \= `ConceptIndexInconsistentPair`. Cache drift \= `ConceptIndexRefreshed` (operator recreates `OntologyRuntime` with updated models).
 
-Why both tables, why full fingerprints: see §9 W2.
+Why full fingerprints on both tables: see §10 W2.
 
 ## **6\. Tie to issue \#57**
 
@@ -285,7 +298,7 @@ Single developer ≈ 7.5 weeks. Phases 1 \+ 2 parallelizable → \~4 weeks wall-
 | \# | Invariant | Failure mode if broken | Regression test |
 | :---- | :---- | :---- | :---- |
 | W1 | `_fingerprint.py` is the **single** source of canonical serialization; both packages import it | Compiler writes fingerprint X, runtime computes fingerprint Y, strict mode rejects every valid index | `tests/bigquery_ontology/test_fingerprint.py`: round-trip YAML → load → fingerprint; semantic edits change it, whitespace edits don't (landed in \#71) |
-| W2 | TTL re-check reads **both** tables with **full** fingerprints | Meta-only sentinel: refresh-window race → wrong data under "verified." Short-compile-id only: 48-bit collision → same class of failure | Mock race window (meta old, main new with different compile\_id but matching short prefix); assert runtime catches it. Assert single-table sentinel impl fails the test |
+| W2 | Strict verification uses `compile_fingerprint` (full 64-hex) on both tables — short `compile_id` never appears on the verification path | A reducer "optimization" to `SELECT compile_id FROM ...` would reintroduce the 48-bit collision hole under an out-of-band swap. A meta-only sentinel would reintroduce the refresh-window race | Assert strict-mode queries reference `compile_fingerprint` only; assert short-ID reducer fails a reintroduction test. Mock main/meta full-fingerprint mismatch and assert `ConceptIndexInconsistentPair` |
 | W3 | Shadow-swap is **non-self-healing**; compiler errors out and next `gm compile` resumes | Background retry loops mask partial-swap states; operator "pause traffic during shadow refresh" guidance becomes unenforceable | Inject mid-swap `DROP`/`RENAME` failure → `gm compile` errors with clear message; subsequent `gm compile` completes the swap without recompiling |
 
 ### **Deferred (tracked, not blocking)**
@@ -305,6 +318,7 @@ Single developer ≈ 7.5 weeks. Phases 1 \+ 2 parallelizable → \~4 weeks wall-
 - `scheme=` XOR `entity=` in v1. Narrower-closure in v2 only if real callers ask.  
 - `contrib/` for reference resolvers; external packages for user-owned domains.  
 - Strict verification on by default; `verify_concept_index="off"` is the explicit opt-out.
+- **Option 2 for provenance columns: `compile_fingerprint` is the canonical integrity key; `compile_id` is display-only.** Invariant `compile_id == compile_fingerprint[:12]` enforced at the `_fingerprint.py` module boundary. Short-ID arithmetic is forbidden on the strict verification path.
 
 ## **12\. Future directions — LLM composition (not in v1)**
 

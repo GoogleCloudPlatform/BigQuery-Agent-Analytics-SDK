@@ -29,11 +29,11 @@ This plan assumes issue #57 is either merged or lands in parallel. The concept i
 
 | Item | File | Additive? | Dependencies |
 |---|---|---|---|
-| A1 | Internal fingerprint module (`_fingerprint.py`, new) — canonical model serialization + SHA-256. Shared implementation detail, not public API | new | none |
-| A2 | Concept-index row builder (`concept_index.py`, new) — iterates `(ontology, binding)`, applies abstract-always / concrete-iff-bound rule, emits sorted row list | new | A1, #57's `abstract` field |
+| A1 | Internal fingerprint module (`_fingerprint.py`, new) — canonical model serialization + SHA-256. Exposes `fingerprint_model`, `compile_fingerprint` (full 64-hex, canonical integrity key), and `compile_id` (12-hex display, derived as `compile_fingerprint(...)[:12]`). Shared implementation detail, not public API | new | none |
+| A2 | Concept-index row builder (`concept_index.py`, new) — iterates `(ontology, binding)`, applies abstract-always / concrete-iff-bound rule, emits sorted row list. Each row carries both `compile_id` and `compile_fingerprint` | new | A1, #57's `abstract` field |
 | A3 | `compile_concept_index()` in `graph_ddl_compiler.py` | additive function in existing module | A1, A2 |
-| A4 | Meta row emission inside `compile_concept_index()` | part of A3 | A1 |
-| A5 | Inline-UNNEST path SQL generation (`CREATE OR REPLACE TABLE ... AS SELECT UNNEST(...)`) with `compile_id` column | part of A3 | A4 |
+| A4 | Meta row emission inside `compile_concept_index()` — writes both `compile_id` and `compile_fingerprint` plus component `ontology_fingerprint` / `binding_fingerprint` | part of A3 | A1 |
+| A5 | Inline-UNNEST path SQL generation (`CREATE OR REPLACE TABLE ... AS SELECT UNNEST(...)`) with both `compile_id` (display) and `compile_fingerprint` (integrity) columns on main and meta | part of A3 | A4 |
 | A6 | Shadow-swap fallback for >50K rows | part of A3 | A5 |
 | A7 | CLI extension: `--emit-concept-index` + `--concept-index-table` in `cli.py:299` | edits existing command | A3 |
 | A8 | Docs: `docs/ontology/concept-index.md` (new), update `docs/ontology/cli.md` and `docs/ontology/compilation.md` | docs | A3, A7 |
@@ -57,7 +57,7 @@ This plan assumes issue #57 is either merged or lands in parallel. The concept i
 | C1 | Exception classes in `ontology_runtime.py` — `ConceptIndexMismatchError`, `ConceptIndexProvenanceMissing`, `ConceptIndexInconsistentPair`, `ConceptIndexRefreshed` | Public API surface |
 | C2 | First-call verification — read meta, compute local fingerprints, compare | Lazy (on first concept-index access, not construction) |
 | C3 | Pair-consistency check with 2s one-shot retry | Used by C2 and C4 |
-| C4 | TTL re-check with full pair-consistency + full-fingerprint freshness | Two queries per stale call: `SELECT DISTINCT compile_id FROM main LIMIT 2` + `SELECT compile_id, ontology_fingerprint, binding_fingerprint FROM meta LIMIT 1` |
+| C4 | TTL re-check uses `compile_fingerprint` (full 64-hex) on both tables; `compile_id` never appears on the verification path | Two queries per stale call: `SELECT DISTINCT compile_fingerprint FROM main LIMIT 2` + `SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint FROM meta LIMIT 1` |
 | C5 | `verify_concept_index` flag handling: `"strict"` (default), `"missing_ok"`, `"off"` | |
 | C6 | `verify_ttl_seconds` flag handling: `60` (default), `0` (every-call), `None` (snapshot-bound) | |
 
@@ -75,10 +75,10 @@ This plan assumes issue #57 is either merged or lands in parallel. The concept i
 | D8 | Scope semantics: `scheme=` and `entity=` mutually exclusive; neither = error; both = error |
 | D9 | Pair consistency: inconsistent pair triggers retry; persistent inconsistency raises `ConceptIndexInconsistentPair` |
 | D10 | TTL re-check: fresh cache skips BQ; stale cache runs full check; matching values refresh cache; differing values raise `ConceptIndexRefreshed` |
-| D11 | 48-bit collision hypothetical: full fingerprints catch the collision that short `compile_id` doesn't (can simulate by injecting a crafted meta row) |
+| D11 | `compile_id == compile_fingerprint[:12]` invariant in `_fingerprint.py`; a hypothetical reducer that swaps the strict query from `compile_fingerprint` to `compile_id` fails a grep-level runtime-SQL check |
 | D12 | First-call verification: mismatched fingerprints raise `ConceptIndexMismatchError`; missing meta raises `ConceptIndexProvenanceMissing` |
 | D13 | Validation bounded output: `known_values_sample` capped at `sample_limit`; `known_value_count` correct; `candidates=None` unless composed |
-| D14 | Shadow-path emission correctness (>50K rows → both tables shadow-swap; compile_id present in both) |
+| D14 | Shadow-path emission correctness (>50K rows → both tables shadow-swap; `compile_id` and `compile_fingerprint` both present in main and meta) |
 | D15 | Abstract-entity filter: resolver with `WHERE NOT is_abstract` returns only concrete; default returns both |
 
 ## Phase plan
@@ -142,7 +142,12 @@ Work: `bigquery_ontology/contrib/advertising/` stub with Yahoo's resolver (if co
 
 ### New files
 
-- `src/bigquery_ontology/_fingerprint.py` — **internal** module (underscore prefix) with canonical JSON serialization of Pydantic models + SHA-256. Internal function: `fingerprint_model(model: BaseModel) -> str`. Short variant for `compile_id`: `compile_id(ontology_fingerprint, binding_fingerprint, compiler_version) -> str`. Not re-exported from any `__init__.py`. Shared implementation between `compile_concept_index()` (ontology package) and `OntologyRuntime` (SDK package) via absolute import `from bigquery_ontology._fingerprint import ...`. Underscore prefix makes it clear this isn't semver-stable surface; it's an implementation detail both packages happen to need.
+- `src/bigquery_ontology/_fingerprint.py` — **internal** module (underscore prefix) with canonical JSON serialization of Pydantic models + SHA-256. Exposes:
+  - `fingerprint_model(model: BaseModel) -> str` — full SHA-256 of a validated Pydantic model, prefixed `sha256:`.
+  - `compile_fingerprint(ontology_fingerprint, binding_fingerprint, compiler_version) -> str` — full 64-hex SHA-256 over the concatenated triple. **Canonical integrity key.**
+  - `compile_id(ontology_fingerprint, binding_fingerprint, compiler_version) -> str` — 12-hex display token, derived as `compile_fingerprint(...)[:12]`. The derivation is structural; `compile_id` never computes its own hash.
+
+  Not re-exported from any `__init__.py`. Shared implementation between `compile_concept_index()` (ontology package) and `OntologyRuntime` (SDK package) via absolute import `from bigquery_ontology._fingerprint import ...`. Underscore prefix makes it clear this isn't semver-stable surface; it's an implementation detail both packages happen to need.
 - `src/bigquery_ontology/concept_index.py` — row builder. Function: `build_rows(ontology: Ontology, binding: Binding) -> list[ConceptIndexRow]`. Applies "abstract always, concrete iff bound" rule. Emits one row per `(entity_name, label, label_kind, language, scheme)` tuple plus one notation row per entity per `skos:notation`. Sorts by `(scheme, entity_name, label_kind, language, label, notation, is_abstract)` with NULLs last. **Not re-exported from `bigquery_ontology/__init__.py` in v1.** Module is importable directly (`from bigquery_ontology.concept_index import build_rows, ConceptIndexRow`) for users who need pre-SQL row access — same pattern as the existing `from bigquery_ontology.graph_ddl_compiler import compile_graph` alongside the package-root export. Package-level re-export can be added later if a concrete caller appears; keeping it out of the root for v1 avoids growing semver surface ahead of need.
 - `src/bigquery_agent_analytics/ontology_runtime.py` — `OntologyRuntime` class with classmethods, read accessors, validation, verification. Exception classes (`ConceptIndexMismatchError` etc.) live here too.
 - `src/bigquery_agent_analytics/entity_resolver.py` — `EntityResolver` Protocol, `Candidate`, `ResolveResult`, `ExactMatchResolver`, `SynonymResolver`.
@@ -184,11 +189,26 @@ The fingerprint must be computed identically on both sides. `src/bigquery_ontolo
 
 Pin specifically in the module docstring: `Pydantic.model_dump(mode="json", by_alias=False, exclude_none=False)` with keys sorted at every nesting level and `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)` for the final encoding. Never use `yaml.dump()` or `str(model)` for fingerprint input.
 
-### W2 — TTL re-check must read both tables with full fingerprints
+### W2 — Strict verification uses `compile_fingerprint` (64-hex), never `compile_id` (12-hex)
 
-A future "optimizer" might see the TTL path and try to reduce it to a single-table sentinel `SELECT compile_id FROM meta LIMIT 1`. That would silently reintroduce the old meta / new main race. Or might try to reduce to short-compile-id comparison only, reintroducing the 48-bit collision hole.
+Provenance lives in two columns with distinct roles:
 
-Guard: a regression test that mocks a race window (meta unchanged, main updated with different compile_id but matching short hash via crafted rows) and asserts the runtime catches it. Also a test that a single-table sentinel implementation fails the test. Comment in `_ttl_recheck()` citing the specific failure modes, with a link back to issue #58.
+- `compile_id` is a 12-hex display token — used in error messages, queue rows, operator reports, log lines. Never on the strict verification path.
+- `compile_fingerprint` is the 64-hex canonical integrity key — used for main↔meta pair consistency and TTL re-check.
+
+The strict TTL re-check runs exactly three checks:
+
+1. `SELECT DISTINCT compile_fingerprint FROM {main} LIMIT 2` — must return one value (pair consistency).
+2. `SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint FROM {main}__meta LIMIT 1`.
+3. Require `main.compile_fingerprint == meta.compile_fingerprint` **and** both component fingerprints match the cached values computed from the caller's `(Ontology, Binding)` models.
+
+A future "optimizer" might try to reduce this to `SELECT compile_id FROM ...` (reintroducing the 48-bit collision hole) or to a meta-only sentinel (reintroducing the refresh-window race). Neither is acceptable.
+
+Guards:
+- Invariant test in `tests/bigquery_ontology/test_fingerprint.py`: `compile_id(...) == compile_fingerprint(...)[:_COMPILE_ID_LEN]`. Structural — enforced at the function boundary.
+- Regression test in the runtime layer: assert strict-mode queries reference `compile_fingerprint` only (grep-level check on the constructed SQL); assert a hypothetical reducer that swaps in `compile_id` fails the test.
+- Regression test that mocks a main/meta `compile_fingerprint` mismatch and asserts `ConceptIndexInconsistentPair`.
+- Comment in `_ttl_recheck()` naming both failure modes (collision hole, refresh race) with a link back to issue #58.
 
 ### W3 — Shadow-path failure handling must match the documented operational contract
 
