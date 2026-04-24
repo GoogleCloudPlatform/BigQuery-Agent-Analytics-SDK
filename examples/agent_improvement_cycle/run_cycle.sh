@@ -44,15 +44,6 @@ export PYTHONWARNINGS="ignore"
 export LOGLEVEL="${LOGLEVEL:-WARNING}"
 PY="python3 -W ignore"
 
-# Filter known noisy warnings from stderr (authlib deprecation comes from
-# google-adk's transitive dependency and bypasses Python warning filters
-# when a newer authlib is installed in ~/.local/lib).
-exec 2> >(while IFS= read -r line; do
-  case "$line" in
-    *AuthlibDeprecationWarning*|*"authlib.jose module is deprecated"*|*"from authlib.jose import"*|*"compatible before version"*) ;;
-    *) printf '%s\n' "$line" >&2 ;;
-  esac
-done)
 
 # Load .env from the demo directory so all scripts see the same config
 if [[ -f "$SCRIPT_DIR/.env" ]]; then

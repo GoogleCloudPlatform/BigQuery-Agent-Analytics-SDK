@@ -675,7 +675,7 @@ def _classify_question(question: str, tools: list) -> tuple[str, str]:
 
     # Score by counting keyword/question word overlaps.
     score = len(keywords & q_words)
-    if score > best_score:
+    if score > best_score or (score == best_score and name < (best_tool or "")):
       best_score = score
       best_tool = name
 
