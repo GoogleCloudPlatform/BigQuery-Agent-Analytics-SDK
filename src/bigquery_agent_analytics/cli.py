@@ -719,6 +719,36 @@ def categorical_eval(
         None,
         help="Prompt version tag for reproducibility.",
     ),
+    pass_category: Optional[list[str]] = typer.Option(
+        None,
+        "--pass-category",
+        help=(
+            "Declare the pass category for a metric as"
+            " METRIC=CATEGORY. Repeat for multiple metrics. Sessions"
+            " whose classification for METRIC equals CATEGORY count"
+            " as passing; everything else fails."
+        ),
+    ),
+    min_pass_rate: float = typer.Option(
+        1.0,
+        "--min-pass-rate",
+        help=(
+            "Minimum per-metric pass rate required with --exit-code."
+            " Applied to every metric that has a --pass-category."
+            " Defaults to 1.0 (every classified session must pass)."
+        ),
+        min=0.0,
+        max=1.0,
+    ),
+    exit_code: bool = typer.Option(
+        False,
+        "--exit-code",
+        help=(
+            "Return exit code 1 when any metric's pass rate falls"
+            " below --min-pass-rate. Requires at least one"
+            " --pass-category."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -785,13 +815,216 @@ def categorical_eval(
         endpoint=endpoint,
         connection_id=connection_id,
     )
+    # Validate --exit-code configuration before spending any BigQuery /
+    # LLM work. A missing or malformed --pass-category is a CI
+    # configuration bug; it would be wasteful to run the classification
+    # only to reject the flags afterwards.
+    pass_map: dict[str, set[str]] = {}
+    if exit_code:
+      pass_map = _parse_pass_category_flags(pass_category or [])
+      if not pass_map:
+        typer.echo(
+            "Error: --exit-code requires at least one --pass-category"
+            " METRIC=CATEGORY (tells the CLI which classification"
+            " counts as a pass).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     report = client.evaluate_categorical(config=config, filters=filters)
     typer.echo(format_output(report, fmt))
+
+    if exit_code:
+      _emit_categorical_failures(report, pass_map, min_pass_rate)
+      if _categorical_has_failures(report, pass_map, min_pass_rate):
+        raise typer.Exit(code=1)
   except typer.Exit:
     raise
   except Exception as exc:
     typer.echo(f"Error: {exc}", err=True)
     raise typer.Exit(code=2)
+
+
+def _parse_pass_category_flags(flags: list[str]) -> dict[str, set[str]]:
+  """Parse ``--pass-category METRIC=CATEGORY`` flags into a lookup.
+
+  Multiple categories for the same metric are allowed (e.g. both
+  ``useful`` and ``partially_useful`` pass). Invalid values raise
+  ``typer.Exit(code=2)`` with a readable error.
+  """
+  parsed: dict[str, set[str]] = {}
+  for raw in flags:
+    if "=" not in raw:
+      typer.echo(
+          f"Error: invalid --pass-category value '{raw}'; expected"
+          " METRIC=CATEGORY.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
+    metric, category = raw.split("=", 1)
+    metric = metric.strip()
+    category = category.strip()
+    if not metric or not category:
+      typer.echo(
+          f"Error: invalid --pass-category value '{raw}'; both"
+          " METRIC and CATEGORY must be non-empty.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
+    parsed.setdefault(metric, set()).add(category)
+  return parsed
+
+
+def _categorical_metric_pass_rate(
+    report, metric_name: str, pass_categories: set[str]
+) -> tuple[float, int, int, bool]:
+  """Return ``(pass_rate, passing, total, metric_observed)`` for one metric.
+
+  Walks ``report.session_results`` and counts a session as *passing*
+  for ``metric_name`` iff it produced a classification with
+  ``category in pass_categories``, ``not parse_error``, and
+  ``passed_validation``. Sessions with a parse error, a missing
+  classification, an ``out_of_bounds`` category, or no
+  ``MetricResult`` entry for the metric at all count as **failing** —
+  CI must not treat broken runs as passes.
+
+  ``metric_observed`` is ``False`` iff no ``MetricResult`` for
+  ``metric_name`` appeared in any session (likely a configuration
+  mistake: the user declared a pass category for a metric that isn't
+  in the metrics file or run window). The caller uses this to emit
+  a WARN rather than a FAIL.
+
+  The denominator is ``report.total_sessions`` when it's set; falls
+  back to ``len(report.session_results)`` for older reports. Falls
+  back further to summing ``report.category_distributions[metric_name]``
+  when ``session_results`` is empty so the gate remains defined for
+  minimal / mocked reports.
+
+  ``total == 0`` returns ``(1.0, 0, 0, False)`` — nothing to evaluate.
+  """
+  session_results = getattr(report, "session_results", None) or []
+  total = getattr(report, "total_sessions", 0) or len(session_results)
+  metric_observed = False
+
+  if session_results:
+    passing = 0
+    for sr in session_results:
+      matched = False
+      for mr in sr.metrics:
+        if mr.metric_name != metric_name:
+          continue
+        metric_observed = True
+        matched = True
+        if (
+            mr.category in pass_categories
+            and not mr.parse_error
+            and mr.passed_validation
+        ):
+          passing += 1
+        # First matching MetricResult wins for this session.
+        break
+      # A session with no MetricResult for this metric counts as a
+      # fail (parse gap, dropped response, metric missing from the
+      # model output). ``matched`` is intentionally unused after the
+      # loop — its only role is to document that unmatched sessions
+      # don't contribute to ``passing``.
+      del matched
+    if total == 0:
+      total = len(session_results)
+    if total == 0:
+      return 1.0, 0, 0, metric_observed
+    return passing / total, passing, total, metric_observed
+
+  # Fallback: no session_results (minimal mocked reports, older
+  # evaluator paths). Use category_distributions but still treat an
+  # empty distribution as "metric not observed" rather than a pass.
+  distribution = getattr(report, "category_distributions", {}).get(
+      metric_name, {}
+  )
+  dist_total = sum(distribution.values())
+  if dist_total == 0:
+    return 1.0, 0, 0, False
+  metric_observed = True
+  passing = sum(
+      count for name, count in distribution.items() if name in pass_categories
+  )
+  denominator = total if total > 0 else dist_total
+  return passing / denominator, passing, denominator, metric_observed
+
+
+def _categorical_has_failures(
+    report, pass_map: dict[str, set[str]], min_pass_rate: float
+) -> bool:
+  for metric_name, pass_categories in pass_map.items():
+    rate, _, total, metric_observed = _categorical_metric_pass_rate(
+        report, metric_name, pass_categories
+    )
+    # Metric that never showed up in the report is a WARN, not a FAIL
+    # — that decision is handled in ``_emit_categorical_failures``. We
+    # don't want a typo in the pass-category flag to turn into a
+    # silent green CI.
+    if not metric_observed:
+      continue
+    if total > 0 and rate < min_pass_rate:
+      return True
+  return False
+
+
+def _emit_categorical_failures(
+    report,
+    pass_map: dict[str, set[str]],
+    min_pass_rate: float,
+    max_lines: int = 10,
+) -> None:
+  """Emit one FAIL line per metric whose pass rate is under threshold.
+
+  Also warns (not fails) when a --pass-category references a metric
+  that has no classifications in the report — a likely configuration
+  mistake the reader should notice in CI logs.
+  """
+  failing: list[tuple[str, float, int, int]] = []
+  missing_metrics: list[str] = []
+  for metric_name, pass_categories in pass_map.items():
+    rate, passing, total, metric_observed = _categorical_metric_pass_rate(
+        report, metric_name, pass_categories
+    )
+    if not metric_observed:
+      missing_metrics.append(metric_name)
+      continue
+    if total > 0 and rate < min_pass_rate:
+      failing.append((metric_name, rate, passing, total))
+
+  if not failing and not missing_metrics:
+    return
+  typer.echo("", err=True)
+  if failing:
+    typer.echo(
+        f"--exit-code: {len(failing)} metric(s) under min-pass-rate"
+        f" {min_pass_rate:.3g}",
+        err=True,
+    )
+    for metric_name, rate, passing, total in failing[:max_lines]:
+      passes = sorted(pass_map[metric_name])
+      typer.echo(
+          f"  FAIL metric={metric_name}"
+          f" pass_rate={rate:.3g}"
+          f" ({passing}/{total})"
+          f" min={min_pass_rate:.3g}"
+          f" pass_categories={','.join(passes)}",
+          err=True,
+      )
+    if len(failing) > max_lines:
+      typer.echo(
+          f"  ... {len(failing) - max_lines} more failing metric(s)",
+          err=True,
+      )
+  for metric_name in missing_metrics:
+    typer.echo(
+        f"  WARN --pass-category referenced metric={metric_name} but no"
+        " classifications for it appeared in the report (check your"
+        " metrics file and the run window)",
+        err=True,
+    )
 
 
 # ------------------------------------------------------------------ #

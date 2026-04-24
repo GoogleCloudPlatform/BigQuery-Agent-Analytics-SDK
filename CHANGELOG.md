@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session_id, failing metric, observed value, and the budget it blew
   through. Output is capped at the first 10 failing sessions to keep
   CI logs scannable.
+- `bq-agent-sdk categorical-eval` gains `--exit-code`,
+  `--min-pass-rate`, and `--pass-category METRIC=CATEGORY`
+  (repeatable) flags. Declare which classification counts as passing
+  per metric, set a minimum pass rate across the run, and fail CI when
+  any metric falls below it. Multiple pass categories per metric are
+  OR'd together (e.g. `--pass-category tone=positive --pass-category
+  tone=neutral`). Missing metric names warn on stderr without failing
+  the run so configuration mistakes are visible in CI logs.
 
 ## [0.2.1]
 
