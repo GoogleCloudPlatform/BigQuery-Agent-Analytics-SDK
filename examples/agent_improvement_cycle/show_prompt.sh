@@ -33,7 +33,7 @@ fi
 
 # Get project and location
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
-LOCATION="${DATASET_LOCATION:-us-central1}"
+LOCATION=$(jq -r '.vertex_location // "us-central1"' "$SCRIPT_DIR/config.json" 2>/dev/null || echo "us-central1")
 
 # Get prompt ID from argument or config.json
 PROMPT_ID="${1:-}"

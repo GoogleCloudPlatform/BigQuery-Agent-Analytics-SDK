@@ -24,6 +24,13 @@ Usage:
     python run_improvement.py --from-eval-results <eval_results.json>
 """
 
+import logging
+import warnings
+
+warnings.filterwarnings("ignore")
+# Suppress noisy genai SDK "non-text parts in the response" warnings.
+logging.getLogger("google.genai").setLevel(logging.ERROR)
+
 import argparse
 import asyncio
 import os

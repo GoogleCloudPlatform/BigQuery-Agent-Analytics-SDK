@@ -133,4 +133,5 @@ def load_config(config_path: str) -> ImprovementConfig:
       judge_prompt=cfg.get("judge_prompt"),
       teacher_model_id=cfg.get("teacher_model_id"),
       use_vertex_optimizer=cfg.get("use_vertex_optimizer", False),
+      vertex_location=cfg.get("vertex_location", "us-central1"),
   )

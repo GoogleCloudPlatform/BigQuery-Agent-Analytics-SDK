@@ -27,8 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import warnings
+
+warnings.filterwarnings("ignore")
+logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 from agent_improvement.config import ImprovementConfig
 from agent_improvement.eval_runner import EvalRunner
@@ -48,7 +53,12 @@ from google.genai.types import HttpRetryOptions
 from google.genai.types import Part
 
 # ---------------------------------------------------------------------------
-# Shared state — set by run_improvement(), read by tool functions
+# Shared state — set by run_improvement(), read by tool functions.
+#
+# This module-level dict assumes a single improvement cycle runs per
+# process. Concurrent cycles in the same process would clobber each
+# other's state. This is fine for CLI usage and the LoopAgent runner,
+# which are inherently single-cycle-at-a-time.
 # ---------------------------------------------------------------------------
 
 _state: dict = {}
@@ -185,8 +195,8 @@ async def _generate_ground_truth(
   teacher_prompt = (
       "You are an expert assistant. For EVERY question, you MUST call "
       "the available tools to look up the answer. NEVER say 'I don't "
-      "know' or 'contact HR'. ALWAYS use the tools first, then answer "
-      "based on the tool results. Be specific and thorough."
+      "know' or defer the user elsewhere. ALWAYS use the tools first, "
+      "then answer based on the tool results. Be specific and thorough."
   )
   if config.teacher_model_id:
     teacher_agent = config.agent_factory(
@@ -315,25 +325,26 @@ async def _generate_via_vertex_optimizer(
   tool_sigs = format_tool_signatures(config.agent_tools)
   tool_use_directive = (
       "\n\nIMPORTANT: You have access to tools that contain complete, "
-      "up-to-date policy information. For EVERY policy question, you "
-      "MUST call the appropriate tool to look up the answer. Do NOT "
-      "answer from memory or from the information listed above. The "
-      "tools are the authoritative source. NEVER say 'I don't have "
-      "that information' or 'contact HR' without first calling a tool."
+      "up-to-date information. For EVERY question, you MUST call the "
+      "appropriate tool to look up the answer. Do NOT answer from "
+      "memory or from the information listed above. The tools are the "
+      "authoritative source. NEVER say 'I don't have that information' "
+      "or defer the user elsewhere without first calling a tool."
       "\n\nAVAILABLE TOOLS:\n" + tool_sigs
   )
   prompt_with_tools = current_prompt + tool_use_directive
 
   print(
       f"  Calling Vertex AI Prompt Optimizer with {len(gt_results)} "
-      "ground truth examples (this may take 30-60s)..."
+      "ground truth examples..."
   )
+  print("  (The optimizer is a server-side job — typically 2-4 minutes.)")
 
   from google.genai.types import HttpOptions
   from google.genai.types import HttpRetryOptions
 
   client = Client(
-      location="us-central1",
+      location=config.vertex_location,
       http_options=HttpOptions(
           retry_options=HttpRetryOptions(
               attempts=6,
@@ -344,15 +355,31 @@ async def _generate_via_vertex_optimizer(
           ),
       ),
   )
-  result = client.prompts.optimize(
-      prompt=prompt_with_tools,
-      config=OptimizeConfig(
-          optimization_target=(
-              OptimizeTarget.OPTIMIZATION_TARGET_FEW_SHOT_TARGET_RESPONSE
-          ),
-          examples_dataframe=df,
-      ),
-  )
+
+  # Run the blocking optimizer call in a thread so we can print
+  # progress while it works. Without this the event loop is blocked
+  # and nothing prints until the call returns.
+  async def _progress_indicator():
+    elapsed = 0
+    while True:
+      await asyncio.sleep(15)
+      elapsed += 15
+      print(f"  ... still optimizing ({elapsed}s elapsed)", flush=True)
+
+  progress_task = asyncio.create_task(_progress_indicator())
+  try:
+    result = await asyncio.to_thread(
+        client.prompts.optimize,
+        prompt=prompt_with_tools,
+        config=OptimizeConfig(
+            optimization_target=(
+                OptimizeTarget.OPTIMIZATION_TARGET_FEW_SHOT_TARGET_RESPONSE
+            ),
+            examples_dataframe=df,
+        ),
+    )
+  finally:
+    progress_task.cancel()
 
   print("  Optimizer returned a candidate prompt.")
 
@@ -373,14 +400,16 @@ async def _generate_via_vertex_optimizer(
   # The optimizer rewrites the entire prompt and strips tool
   # instructions. Re-append them so the agent actually uses tools
   # instead of relying on data inlined by the optimizer.
-  if "lookup_company_policy" not in improved and tool_sigs:
+  tool_names = [getattr(t, "__name__", "") for t in config.agent_tools]
+  has_tool_ref = any(name and name in improved for name in tool_names)
+  if not has_tool_ref and tool_sigs:
     improved += (
         "\n\nIMPORTANT: You have access to tools that contain complete, "
-        "up-to-date policy information. For EVERY policy question, you "
-        "MUST call the appropriate tool to look up the answer. Do NOT "
-        "rely solely on the information above — the tools may have more "
-        "details. NEVER say 'I don't have that information' or 'contact "
-        "HR' without first calling a tool."
+        "up-to-date information. For EVERY question, you MUST call the "
+        "appropriate tool to look up the answer. Do NOT rely solely on "
+        "the information above -- the tools may have more details. "
+        "NEVER say 'I don't have that information' without first "
+        "calling a tool."
         "\n\nAVAILABLE TOOLS:\n" + tool_sigs
     )
     changes += " + tool-use directive re-appended"
@@ -488,96 +517,168 @@ def write_prompt(candidate_prompt: str, changes_summary: str) -> str:
 
 _REQUIRED_CASE_KEYS = {"id", "question", "category", "expected_tool"}
 
+# Common words that cause false-positive keyword matches.
+_CLASSIFIER_STOP = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "was",
+        "get",
+        "set",
+        "not",
+        "one",
+        "use",
+        "per",
+        "any",
+        "all",
+        "can",
+        "may",
+        "has",
+        "had",
+        "its",
+        "our",
+        "out",
+        "who",
+        "did",
+        "now",
+        "her",
+        "his",
+        "with",
+        "from",
+        "this",
+        "that",
+        "have",
+        "will",
+        "been",
+        "into",
+        "over",
+        "also",
+        "than",
+        "them",
+        "then",
+        "they",
+        "what",
+        "when",
+        "each",
+        "some",
+        "only",
+        "such",
+        "more",
+        "most",
+        "many",
+        "much",
+        "must",
+        "here",
+        "well",
+        "very",
+        "does",
+        "done",
+        "just",
+        "like",
+        "make",
+        "take",
+        "give",
+        "come",
+        "back",
+        "after",
+        "about",
+        "could",
+        "would",
+        "should",
+        "args",
+        "string",
+        "returns",
+        "dictionary",
+        "error",
+        "message",
+        "found",
+        "available",
+        "requested",
+    }
+)
+
+
+def _word_forms(word: str) -> list[str]:
+  """Return the word plus common de-suffixed forms (plural, -ing, -ly)."""
+  forms = [word]
+  if len(word) > 4:
+    if word.endswith("ing"):
+      forms.append(word[:-3])  # working -> work
+    elif word.endswith("ly"):
+      forms.append(word[:-2])  # remotely -> remote
+    elif word.endswith("ed"):
+      forms.append(word[:-2])  # requested -> request
+  if len(word) > 3 and word.endswith("s"):
+    forms.append(word[:-1])  # expenses -> expense
+  return forms
+
 
 def _classify_question(question: str, tools: list) -> tuple[str, str]:
-  """Infer category and expected_tool from a question.
+  """Infer category and expected_tool from available tools.
 
-  Uses tool docstrings and keyword matching to classify questions
-  against available tools. Returns ("unknown", "unknown") if no
-  tool covers the topic.
+  Matches question words against tool names and full docstrings
+  (including parameter descriptions) to determine which tool should
+  handle the question. Uses word-boundary splitting, basic plural
+  normalization, and scoring to pick the best match.
+
+  Returns ``("unknown", "unknown")`` if no tool matches.
   """
-  q = question.lower()
+  if not tools:
+    return "unknown", "unknown"
 
-  # Build keyword -> (category, tool_name) mapping from tool docstrings
-  # and common policy topic keywords
-  _TOPIC_KEYWORDS = {
-      "pto": [
-          "pto",
-          "paid time off",
-          "vacation",
-          "time off",
-          "days off",
-          "rollover",
-          "accrual",
-          "accrued",
-      ],
-      "sick_leave": [
-          "sick",
-          "illness",
-          "doctor's note",
-          "doctor note",
-          "medical",
-      ],
-      "remote_work": [
-          "remote",
-          "work from home",
-          "wfh",
-          "core hours",
-          "telecommut",
-      ],
-      "expenses": [
-          "expense",
-          "receipt",
-          "reimburs",
-          "meal limit",
-          "travel approval",
-          "pre-approval",
-          "business dinner",
-          "business lunch",
-          "business trip",
-      ],
-      "benefits": [
-          "benefit",
-          "401k",
-          "401(k)",
-          "health insurance",
-          "dental",
-          "vision",
-          "parental leave",
-          "maternity",
-          "paternity",
-          "caregiver",
-          "retirement",
-          "vesting",
-          "vested",
-          "ppo",
-          "hmo",
-      ],
-      "holidays": [
-          "holiday",
-          "christmas",
-          "new year",
-          "thanksgiving",
-          "memorial day",
-          "independence day",
-          "paid day off",
-      ],
-      "date": [
-          "next friday",
-          "next monday",
-          "next week",
-          "next month",
-          "today",
-          "this week",
-      ],
-  }
+  # Single tool: always the expected tool
+  if len(tools) == 1:
+    name = getattr(tools[0], "__name__", "unknown")
+    return name, name
 
-  for category, keywords in _TOPIC_KEYWORDS.items():
-    if any(kw in q for kw in keywords):
-      if category == "date":
-        return "date_handling", "get_current_date"
-      return category, "lookup_company_policy"
+  # Build a set of normalized question words.
+  q_words: set[str] = set()
+  for w in re.split(r"\W+", question.lower()):
+    if w:
+      q_words.update(_word_forms(w))
 
+  best_tool = None
+  best_score = 0
+
+  for tool in tools:
+    name = getattr(tool, "__name__", "")
+    doc = (getattr(tool, "__doc__", "") or "").lower()
+
+    # Extract keywords from tool name (> 3 chars to skip "get", "set").
+    name_keywords = [
+        w
+        for w in name.lower().replace("_", " ").split()
+        if len(w) > 3 and w not in _CLASSIFIER_STOP
+    ]
+
+    # Extract from full docstring (>= 3 chars, filtered by stop words).
+    doc_words: list[str] = []
+    for token in doc.replace(",", " ").replace(".", " ").split():
+      token = token.strip("()[]:'\"")
+      if "_" in token:
+        doc_words.extend(
+            w
+            for w in token.split("_")
+            if len(w) > 2 and w not in _CLASSIFIER_STOP
+        )
+      elif len(token) > 2 and token not in _CLASSIFIER_STOP:
+        doc_words.append(token)
+
+    # Build normalized keyword set (original + de-suffixed forms).
+    keywords: set[str] = set()
+    for kw in name_keywords + doc_words:
+      keywords.update(_word_forms(kw))
+
+    # Score by counting keyword/question word overlaps.
+    score = len(keywords & q_words)
+    if score > best_score:
+      best_score = score
+      best_tool = name
+
+  if best_tool:
+    return best_tool, best_tool
   return "unknown", "unknown"
 
 

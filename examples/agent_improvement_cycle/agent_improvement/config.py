@@ -66,3 +66,4 @@ class ImprovementConfig:
   judge_prompt: str | None = None
   teacher_model_id: str | None = None
   use_vertex_optimizer: bool = False
+  vertex_location: str = "us-central1"

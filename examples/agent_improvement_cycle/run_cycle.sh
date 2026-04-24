@@ -38,8 +38,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 REPORTS_DIR="$SCRIPT_DIR/reports"
 
-# Suppress noisy Python warnings (e.g. authlib deprecation)
+# Suppress noisy Python warnings (authlib, etc.) and INFO-level log spam.
+# Belt-and-suspenders: env var for child processes, -W flag for direct calls.
 export PYTHONWARNINGS="ignore"
+export LOGLEVEL="${LOGLEVEL:-WARNING}"
+PY="python3 -W ignore"
 
 # Load .env from the demo directory so all scripts see the same config
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
@@ -121,12 +124,13 @@ TRAFFIC_GENERATOR="$AGENT_ROOT/$(jq -r '.traffic_generator' "$AGENT_CONFIG")"
 VERSION_VAR=$(jq -r '.version_variable // "CURRENT_VERSION"' "$AGENT_CONFIG")
 PROMPT_STORAGE=$(jq -r '.prompt_storage // "python_file"' "$AGENT_CONFIG")
 VERTEX_PROMPT_ID=$(jq -r '.vertex_prompt_id // ""' "$AGENT_CONFIG")
+VERTEX_LOCATION=$(jq -r '.vertex_location // "us-central1"' "$AGENT_CONFIG")
 
 # Auto-setup: create Vertex AI prompt if not yet configured
 if [[ "$PROMPT_STORAGE" == "vertex" && -z "$VERTEX_PROMPT_ID" ]]; then
   echo ""
   echo "  No Vertex AI prompt configured. Running setup..."
-  python3 "$SCRIPT_DIR/setup_vertex.py"
+  $PY "$SCRIPT_DIR/setup_vertex.py"
   # Re-read the prompt ID after setup
   VERTEX_PROMPT_ID=$(jq -r '.vertex_prompt_id // ""' "$AGENT_CONFIG")
 fi
@@ -139,7 +143,7 @@ _read_version() {
   if [[ "$PROMPT_STORAGE" == "vertex" && -n "$VERTEX_PROMPT_ID" ]]; then
     python3 -c "
 from vertexai import Client
-c = Client(location='us-central1')
+c = Client(location='$VERTEX_LOCATION')
 vs = list(c.prompts.list_versions(prompt_id='$VERTEX_PROMPT_ID'))
 print(len(vs) + 1)
 "
@@ -216,23 +220,43 @@ echo ""
 step_start
 
 set +e
-python3 "$SCRIPT_DIR/eval/run_eval.py" --golden $AGENT_CONFIG_FLAG
+$PY "$SCRIPT_DIR/eval/run_eval.py" --golden $AGENT_CONFIG_FLAG
 PREFLIGHT_EXIT=$?
 set -e
 step_end "Pre-flight check"
 
 if [[ $PREFLIGHT_EXIT -ne 0 ]]; then
+  FAILING_V=$(_read_version)
   echo ""
-  echo "  PRE-FLIGHT FAILED: Auto-improving prompt to pass golden eval set..."
+  echo "  PRE-FLIGHT FAILED: Prompt V${FAILING_V} does not pass all golden cases."
   echo ""
 
+  # Surface exactly which cases failed
   EVAL_RESULTS="$REPORTS_DIR/latest_eval_results.json"
-  python3 "$SCRIPT_DIR/run_improvement.py" \
+  if [[ -f "$EVAL_RESULTS" ]]; then
+    echo "  Failing cases:"
+    python3 -c "
+import json, sys
+with open('$EVAL_RESULTS') as f:
+    for r in json.load(f):
+        if not r.get('pass', False):
+            print(f\"    FAIL: {r.get('case_id','?')} - {r.get('reason','no reason')}\")
+" 2>/dev/null || true
+    echo ""
+  fi
+
+  echo "  Auto-improving prompt to pass golden eval set..."
+  echo ""
+
+  $PY "$SCRIPT_DIR/run_improvement.py" \
     $AGENT_CONFIG_FLAG \
     --from-eval-results "$EVAL_RESULTS"
 
-  # No need to re-run pre-flight: the improvement step's test_candidate
-  # already validated all golden cases pass before writing the prompt.
+  FIXED_V=$(_read_version)
+  echo ""
+  echo "  Pre-flight fix: V${FAILING_V} -> V${FIXED_V}"
+  # The improvement step's test_candidate already validated all golden
+  # cases pass before writing the prompt.
 fi
 
 for cycle in $(seq 1 "$CYCLES"); do
@@ -258,12 +282,16 @@ for cycle in $(seq 1 "$CYCLES"); do
   step_start
 
   TRAFFIC_JSON="$REPORTS_DIR/synthetic_traffic_cycle_${cycle}.json"
-  python3 "$TRAFFIC_GENERATOR" \
+  $PY "$TRAFFIC_GENERATOR" \
     --count "$TRAFFIC_COUNT" \
     --output "$TRAFFIC_JSON"
 
+  # Count actual cases (may be fewer than requested after dedup)
+  ACTUAL_TRAFFIC_COUNT=$(jq '.eval_cases | length' "$TRAFFIC_JSON")
+
   echo ""
   echo "  Generated questions saved to: $TRAFFIC_JSON"
+  echo "  Requested: $TRAFFIC_COUNT, Generated: $ACTUAL_TRAFFIC_COUNT (after dedup)"
   echo "  Sample questions:"
   jq -r '.eval_cases[:3][] | "    - \(.question)"' "$TRAFFIC_JSON" 2>/dev/null || true
 
@@ -282,7 +310,7 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo ""
   step_start
 
-  python3 "$SCRIPT_DIR/eval/run_eval.py" \
+  $PY "$SCRIPT_DIR/eval/run_eval.py" \
     $AGENT_CONFIG_FLAG \
     --eval-cases "$TRAFFIC_JSON"
 
@@ -315,10 +343,10 @@ for cycle in $(seq 1 "$CYCLES"); do
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     sleep 15
     echo "  Querying BigQuery and scoring sessions with LLM judge..."
-    python3 "$REPO_ROOT/scripts/quality_report.py" \
+    $PY "$REPO_ROOT/scripts/quality_report.py" \
       --app-name "$APP_NAME" \
       --output-json "$REPORT_JSON" \
-      --limit "$TRAFFIC_COUNT" \
+      --limit "$ACTUAL_TRAFFIC_COUNT" \
       --time-period 24h || { rm -f "$REPORT_JSON"; true; }
 
     if [[ -f "$REPORT_JSON" ]]; then
@@ -376,7 +404,7 @@ for cycle in $(seq 1 "$CYCLES"); do
   GOLDEN_BEFORE=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
 
   set +e
-  python3 "$SCRIPT_DIR/run_improvement.py" \
+  $PY "$SCRIPT_DIR/run_improvement.py" \
     $AGENT_CONFIG_FLAG \
     "$REPORT_JSON"
   IMPROVE_EXIT=$?
@@ -414,12 +442,13 @@ for cycle in $(seq 1 "$CYCLES"); do
   # 5a: Generate fresh synthetic traffic
   echo "  --- Fresh traffic ---"
   FRESH_TRAFFIC="$REPORTS_DIR/synthetic_traffic_cycle_${cycle}_fresh.json"
-  python3 "$TRAFFIC_GENERATOR" \
+  $PY "$TRAFFIC_GENERATOR" \
     --count "$TRAFFIC_COUNT" \
     --output "$FRESH_TRAFFIC"
+  ACTUAL_FRESH_COUNT=$(jq '.eval_cases | length' "$FRESH_TRAFFIC")
 
   # 5c: Run fresh traffic through the improved agent (WITH BQ logging)
-  python3 "$SCRIPT_DIR/eval/run_eval.py" \
+  $PY "$SCRIPT_DIR/eval/run_eval.py" \
     $AGENT_CONFIG_FLAG \
     --eval-cases "$FRESH_TRAFFIC"
 
@@ -440,22 +469,30 @@ for cycle in $(seq 1 "$CYCLES"); do
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     sleep 30
     echo "  Querying BigQuery and scoring sessions with LLM judge..."
-    python3 "$REPO_ROOT/scripts/quality_report.py" \
+    $PY "$REPO_ROOT/scripts/quality_report.py" \
       --app-name "$APP_NAME" \
       --output-json "$FRESH_REPORT" \
-      --limit "$TRAFFIC_COUNT" \
+      --limit "$ACTUAL_FRESH_COUNT" \
       --time-period 24h || { rm -f "$FRESH_REPORT"; true; }
 
-    # Guard: if the report has the same session IDs as Step 3, the
-    # fresh sessions have not propagated yet. Delete and retry.
+    # Guard: ensure NO old session IDs from Step 3 appear in the
+    # fresh report. A simple != check allows mixed old/new populations.
     if [[ -f "$FRESH_REPORT" ]]; then
-      OLD_IDS=$(jq -r '[.sessions[].session_id] | sort | join(",")' "$REPORT_JSON" 2>/dev/null || echo "")
-      NEW_IDS=$(jq -r '[.sessions[].session_id] | sort | join(",")' "$FRESH_REPORT" 2>/dev/null || echo "")
-      IS_FRESH=$( [[ -n "$NEW_IDS" && "$NEW_IDS" != "$OLD_IDS" ]] && echo "yes" || echo "no" )
+      OVERLAP_COUNT=$(python3 -c "
+import json
+with open('$REPORT_JSON') as f:
+    old_ids = set(s['session_id'] for s in json.load(f).get('sessions', []))
+with open('$FRESH_REPORT') as f:
+    new_sessions = json.load(f).get('sessions', [])
+new_ids = set(s['session_id'] for s in new_sessions)
+print(len(old_ids & new_ids))
+" 2>/dev/null || echo "999")
+      NEW_COUNT=$(jq -r '.summary.total_sessions // 0' "$FRESH_REPORT" 2>/dev/null || echo "0")
+      IS_FRESH=$( [[ "$NEW_COUNT" -gt 0 && "$OVERLAP_COUNT" == "0" ]] && echo "yes" || echo "no" )
       if [[ "$IS_FRESH" == "yes" ]]; then
         break
       fi
-      echo "  Sessions not yet propagated (attempt $attempt/$MAX_RETRIES)..."
+      echo "  Sessions not yet propagated or overlap detected (attempt $attempt/$MAX_RETRIES)..."
       rm -f "$FRESH_REPORT"
     fi
 

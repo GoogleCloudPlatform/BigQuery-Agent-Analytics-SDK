@@ -23,6 +23,12 @@ Supports ``--agent-config`` to load any agent's config.json.
 Falls back to the demo's company_info_agent when not provided.
 """
 
+import logging
+import warnings
+
+warnings.filterwarnings("ignore")
+logging.getLogger("google.genai").setLevel(logging.ERROR)
+
 import asyncio
 import json
 import os

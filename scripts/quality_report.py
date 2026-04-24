@@ -42,6 +42,10 @@ Usage:
     python quality_report.py --app-name my_agent  # filter to a specific agent
     python quality_report.py --output-json r.json # write structured JSON output
 """
+import warnings
+
+warnings.filterwarnings("ignore")
+
 import argparse
 import json
 import logging
@@ -74,8 +78,9 @@ logger = logging.getLogger("quality_report")
 
 def _configure_logging():
   """Configure logging format. Called once from main()."""
+  log_level = os.environ.get("LOGLEVEL", "INFO").upper()
   logging.basicConfig(
-      level=logging.INFO,
+      level=getattr(logging, log_level, logging.INFO),
       format="%(asctime)s [%(levelname)s] %(message)s",
       datefmt="%H:%M:%S",
   )
