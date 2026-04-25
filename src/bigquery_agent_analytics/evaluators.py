@@ -894,9 +894,15 @@ SELECT
   result.*
 FROM session_traces,
 AI.GENERATE(
+  -- Substitute the full Python prompt_template at SQL time:
+  -- prefix ++ trace_text ++ middle ++ final_response ++ suffix.
+  -- Each segment is a separate query parameter so we preserve the
+  -- exact Python template (including the per-criterion output-format
+  -- spec) that the API-fallback path uses.
   prompt => CONCAT(
-    @judge_prompt, '\\nTrace:\\n', trace_text,
-    '\\nResponse:\\n', COALESCE(final_response, 'N/A')
+    @judge_prompt_prefix, trace_text,
+    @judge_prompt_middle, COALESCE(final_response, 'N/A'),
+    @judge_prompt_suffix
   ),
   endpoint => '{endpoint}',
   model_params => JSON '{{"temperature": 0.1, "max_output_tokens": 500}}',
@@ -938,9 +944,13 @@ SELECT
   ML.GENERATE_TEXT(
     MODEL `{model}`,
     STRUCT(
-      CONCAT(@judge_prompt, '\\nTrace:\\n', trace_text,
-             '\\nResponse:\\n', COALESCE(final_response, 'N/A'))
-      AS prompt
+      -- Same prefix/middle/suffix substitution as the AI.GENERATE
+      -- path; preserves the full Python prompt_template.
+      CONCAT(
+        @judge_prompt_prefix, trace_text,
+        @judge_prompt_middle, COALESCE(final_response, 'N/A'),
+        @judge_prompt_suffix
+      ) AS prompt
     ),
     STRUCT(0.1 AS temperature, 500 AS max_output_tokens)
   ).ml_generate_text_result AS evaluation
@@ -949,6 +959,99 @@ FROM session_traces
 
 # Keep backward-compatible alias.
 LLM_JUDGE_BATCH_QUERY = _LEGACY_LLM_JUDGE_BATCH_QUERY
+
+
+_TRACE_SENTINEL = "\x00__BQAA_JUDGE_TRACE__\x00"
+_RESPONSE_SENTINEL = "\x00__BQAA_JUDGE_RESPONSE__\x00"
+
+
+def split_judge_prompt_template(prompt_template: str) -> tuple[str, str, str]:
+  """Split a Python judge prompt into ``(prefix, middle, suffix)``.
+
+  The Python ``LLMAsJudge`` prompt template uses ``{trace_text}`` and
+  ``{final_response}`` placeholders (in that order) to interpolate
+  per-session inputs. The BigQuery-native ``AI.GENERATE`` and
+  ``ML.GENERATE_TEXT`` paths can't use Python ``str.format`` — they
+  build the prompt at SQL time. This helper returns the three
+  literal segments those SQL paths need to ``CONCAT`` together with
+  the SQL-side ``trace_text`` and ``final_response`` columns,
+  preserving the exact full template (including the per-criterion
+  output-format spec that follows the placeholders).
+
+  Internally the helper format()s the template once with sentinel
+  values, so any literal ``{{...}}`` braces in the source template
+  (e.g. the JSON output spec ``{{"correctness": <score>, ...}}``)
+  are correctly un-escaped before splitting. The SQL paths see the
+  same string the API-fallback path's ``str.format(...)`` would
+  produce.
+
+  Args:
+      prompt_template: The Python prompt template, expected to
+          contain both ``{trace_text}`` and ``{final_response}``
+          placeholders in that order.
+
+  Returns:
+      ``(prefix, middle, suffix)`` such that
+      ``prefix + trace_text + middle + final_response + suffix``
+      reproduces ``prompt_template.format(trace_text=..., final_response=...)``
+      for any inputs. When a placeholder is missing, the helper
+      synthesizes a labeled section for the missing input and
+      places the label *immediately before* the injected value
+      (label first, then value), so the model reads
+      ``...Trace:\n<TRACE>\nResponse:\n<RESPONSE>...`` rather than
+      the value followed by an orphan label.
+  """
+  has_trace = "{trace_text}" in prompt_template
+  has_response = "{final_response}" in prompt_template
+
+  # Reminder for the fallback branches below: the SQL CONCAT runs
+  #   prefix ++ trace_text ++ middle ++ final_response ++ suffix
+  # so any label we synthesize for an absent placeholder must end
+  # up *next to* the value it labels (label first, then value),
+  # not on the far side of it. Earlier versions appended labels
+  # *after* the values, which produced ``<TRACE>\nTrace:\n...``.
+
+  if not has_trace and not has_response:
+    # No placeholders at all. Append a labeled trace + response
+    # block after the user's instructions. The labels precede the
+    # values so the model reads them in order.
+    return (
+        prompt_template + "\nTrace:\n",
+        "\nResponse:\n",
+        "",
+    )
+
+  if not has_trace:
+    # final_response placeholder only. Honor the user's structure
+    # and inject a labeled trace block right before the response,
+    # so the trace label sits next to the trace.
+    formatted = prompt_template.format(final_response=_RESPONSE_SENTINEL)
+    before_response, _, after_response = formatted.partition(_RESPONSE_SENTINEL)
+    return (
+        before_response + "\nTrace:\n",
+        "\n",
+        after_response,
+    )
+
+  if not has_response:
+    # trace_text placeholder only. Append a labeled response block
+    # after the original template's tail, so the response label
+    # sits next to the response value (not after it).
+    formatted = prompt_template.format(trace_text=_TRACE_SENTINEL)
+    prefix, _, after_trace = formatted.partition(_TRACE_SENTINEL)
+    return (
+        prefix,
+        after_trace + "\nResponse:\n",
+        "",
+    )
+
+  formatted = prompt_template.format(
+      trace_text=_TRACE_SENTINEL,
+      final_response=_RESPONSE_SENTINEL,
+  )
+  prefix, _, rest = formatted.partition(_TRACE_SENTINEL)
+  middle, _, suffix = rest.partition(_RESPONSE_SENTINEL)
+  return prefix, middle, suffix
 
 
 # ------------------------------------------------------------------ #

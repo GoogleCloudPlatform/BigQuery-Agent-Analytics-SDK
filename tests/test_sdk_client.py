@@ -482,6 +482,298 @@ class TestAIGenerateJudge:
     query_str = call_args[0][0]
     assert "AI.GENERATE" in query_str
 
+  def test_ai_generate_passes_full_prompt_template(self):
+    """AI.GENERATE judge passes the full Python template, not a truncated split.
+
+    Regression guard for the prompt-parity bug — earlier versions
+    sent only ``prompt_template.split('{trace_text}')[0]`` to AI.GENERATE,
+    silently dropping the per-criterion output-format spec that
+    follows the placeholders. This test asserts the BQ query receives
+    three parameters (prefix/middle/suffix) and that, concatenated
+    with the SQL trace_text/final_response columns, they reproduce
+    the exact Python template.
+    """
+    mock_bq = _mock_bq_client()
+    mock_rows = [
+        _make_mock_row(
+            {
+                "session_id": "s1",
+                "trace_text": "USER: hi",
+                "final_response": "hello",
+                "score": 8,
+                "justification": "ok",
+            }
+        ),
+    ]
+    mock_job = MagicMock()
+    mock_job.result.return_value = mock_rows
+    mock_bq.query.return_value = mock_job
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    evaluator = LLMAsJudge.correctness(threshold=0.5)
+    criterion = evaluator._criteria[0]
+    client._ai_generate_judge(evaluator, criterion, "agent_events", "TRUE", [])
+
+    # Inspect the QueryJobConfig.query_parameters that landed on the
+    # BigQuery client.
+    call_kwargs = mock_bq.query.call_args.kwargs
+    job_config = call_kwargs["job_config"]
+    by_name = {p.name: p.value for p in job_config.query_parameters}
+    assert "judge_prompt_prefix" in by_name
+    assert "judge_prompt_middle" in by_name
+    assert "judge_prompt_suffix" in by_name
+    # ``judge_prompt`` (the old single-segment param) must no longer
+    # appear — its presence would mean a caller is still on the
+    # truncated-split path.
+    assert "judge_prompt" not in by_name
+    # Concatenation reproduces the full template when the
+    # placeholders are filled in.
+    reconstructed = (
+        by_name["judge_prompt_prefix"]
+        + "TRACE_HERE"
+        + by_name["judge_prompt_middle"]
+        + "RESPONSE_HERE"
+        + by_name["judge_prompt_suffix"]
+    )
+    expected = criterion.prompt_template.format(
+        trace_text="TRACE_HERE", final_response="RESPONSE_HERE"
+    )
+    assert reconstructed == expected
+    # The Python template's per-criterion output-format spec must
+    # survive the round trip — that's the whole point of the fix.
+    assert "JSON object" in by_name["judge_prompt_suffix"]
+
+  def test_bqml_judge_passes_full_prompt_template(self):
+    """ML.GENERATE_TEXT path uses the same prefix/middle/suffix params."""
+    mock_bq = _mock_bq_client()
+    mock_rows = [
+        _make_mock_row(
+            {
+                "session_id": "s1",
+                "trace_text": "USER: hi",
+                "final_response": "hello",
+                "evaluation": '{"correctness": 8, "justification": "ok"}',
+            }
+        ),
+    ]
+    mock_job = MagicMock()
+    mock_job.result.return_value = mock_rows
+    mock_bq.query.return_value = mock_job
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    evaluator = LLMAsJudge.correctness(threshold=0.5)
+    criterion = evaluator._criteria[0]
+    client._bqml_judge(
+        evaluator,
+        criterion,
+        "agent_events",
+        "TRUE",
+        [],
+        text_model="proj.ds.gemini_text_model",
+    )
+
+    job_config = mock_bq.query.call_args.kwargs["job_config"]
+    names = {p.name for p in job_config.query_parameters}
+    assert {
+        "judge_prompt_prefix",
+        "judge_prompt_middle",
+        "judge_prompt_suffix",
+    }.issubset(names)
+    assert "judge_prompt" not in names
+
+  def test_ai_generate_success_sets_execution_mode(self):
+    """When AI.GENERATE succeeds, report.details says so explicitly."""
+    mock_bq = _mock_bq_client()
+    mock_rows = [
+        _make_mock_row(
+            {
+                "session_id": "s1",
+                "trace_text": "USER: hi",
+                "final_response": "hello",
+                "score": 8,
+                "justification": "ok",
+            }
+        ),
+    ]
+    mock_job = MagicMock()
+    mock_job.result.return_value = mock_rows
+    mock_bq.query.return_value = mock_job
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    report = client._evaluate_llm_judge(
+        LLMAsJudge.correctness(), "agent_events", "TRUE", []
+    )
+    assert report.details["execution_mode"] == "ai_generate"
+    # No fallback fired -> no fallback_reason on the report.
+    assert "fallback_reason" not in report.details
+
+  def test_ai_generate_failure_falls_back_to_ml_generate_text(self):
+    """AI.GENERATE failure -> BQML path takes over, mode reflects it."""
+    mock_bq = _mock_bq_client()
+
+    # First query call raises (AI.GENERATE), subsequent calls return
+    # a BQML-shaped row.
+    bqml_rows = [
+        _make_mock_row(
+            {
+                "session_id": "s1",
+                "trace_text": "USER: hi",
+                "final_response": "hello",
+                "evaluation": '{"correctness": 8, "justification": "ok"}',
+            }
+        ),
+    ]
+    bqml_job = MagicMock()
+    bqml_job.result.return_value = bqml_rows
+    mock_bq.query.side_effect = [
+        Exception("AI.GENERATE not available in this region"),
+        bqml_job,
+    ]
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    report = client._evaluate_llm_judge(
+        LLMAsJudge.correctness(), "agent_events", "TRUE", []
+    )
+    assert report.details["execution_mode"] == "ml_generate_text"
+    assert "ai_generate" in report.details["fallback_reason"]
+    assert "AI.GENERATE not available" in report.details["fallback_reason"]
+
+  def test_both_bq_paths_fail_falls_back_to_api(self):
+    """AI.GENERATE + ML.GENERATE_TEXT both fail -> Gemini API fallback."""
+    mock_bq = _mock_bq_client()
+    mock_bq.query.side_effect = Exception("connection missing")
+
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    # Stub _api_judge to avoid an actual google-genai call. The
+    # method exists on the client; we just want execution_mode set.
+    from bigquery_agent_analytics.evaluators import EvaluationReport
+    from bigquery_agent_analytics.evaluators import LLMAsJudge
+
+    stub_report = EvaluationReport(
+        dataset="proj.ds.agent_events WHERE TRUE",
+        evaluator_name="correctness_judge",
+        total_sessions=0,
+    )
+    with patch.object(client, "_api_judge", return_value=stub_report):
+      report = client._evaluate_llm_judge(
+          LLMAsJudge.correctness(), "agent_events", "TRUE", []
+      )
+    assert report.details["execution_mode"] == "api_fallback"
+    # Both upstream tiers should be named in the fallback chain.
+    assert "ai_generate" in report.details["fallback_reason"]
+    assert "ml_generate_text" in report.details["fallback_reason"]
+
+
+class TestSplitJudgePromptTemplate:
+  """Tests for evaluators.split_judge_prompt_template."""
+
+  def test_full_template_round_trips(self):
+    from bigquery_agent_analytics.evaluators import split_judge_prompt_template
+
+    tmpl = (
+        "You are a judge.\n## Trace\n{trace_text}\n## Response\n"
+        "{final_response}\n## Score\nReturn JSON."
+    )
+    prefix, middle, suffix = split_judge_prompt_template(tmpl)
+    rebuilt = prefix + "TT" + middle + "FR" + suffix
+    assert rebuilt == tmpl.format(trace_text="TT", final_response="FR")
+
+  def test_missing_final_response_keeps_label_next_to_response(self):
+    """Custom template with {trace_text} only — Response: label must
+    precede the appended response value.
+
+    The SQL CONCAT runs prefix ++ trace_text ++ middle ++
+    final_response ++ suffix, so a synthesized label for the
+    missing placeholder belongs *immediately before* the value it
+    labels — not on the far side of it.
+    """
+    from bigquery_agent_analytics.evaluators import split_judge_prompt_template
+
+    tmpl = "Prefix\n{trace_text}\nThen something."
+    prefix, middle, suffix = split_judge_prompt_template(tmpl)
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    assert "Response:\nRESPONSE" in rebuilt
+    # Whatever followed {trace_text} in the original template
+    # appears before the synthesized response label.
+    assert "Then something." in rebuilt
+    assert rebuilt.index("Then something.") < rebuilt.index(
+        "Response:\nRESPONSE"
+    )
+
+  def test_missing_trace_text_keeps_label_next_to_trace(self):
+    """Custom template with {final_response} only — Trace: label must
+    precede the appended trace value.
+
+    Regression guard for the reviewer-flagged bug: earlier versions
+    returned ``("", "\\nTrace:\\n" + before_response, suffix)`` which
+    injected ``<TRACE>\\nTrace:\\n<original prompt>...`` — trace
+    landed on the wrong side of the label, and the user's prompt
+    text appeared after the trace instead of before it.
+    """
+    from bigquery_agent_analytics.evaluators import split_judge_prompt_template
+
+    tmpl = "Custom rules.\n{final_response}\nDone."
+    prefix, middle, suffix = split_judge_prompt_template(tmpl)
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    # User's "Custom rules." prose appears before the synthesized
+    # Trace: label, and the trace value sits right after the label.
+    assert "Custom rules.\n" in rebuilt
+    assert "Trace:\nTRACE" in rebuilt
+    assert rebuilt.index("Custom rules.") < rebuilt.index("Trace:\nTRACE")
+    # Response follows the trace, and the user's "Done." tail
+    # appears after the response.
+    assert rebuilt.index("Trace:\nTRACE") < rebuilt.index("RESPONSE")
+    assert rebuilt.index("RESPONSE") < rebuilt.index("Done.")
+
+  def test_no_placeholders_appends_labeled_trace_then_response(self):
+    """Template with neither placeholder — labels precede their values.
+
+    Original instructions stay first; trace block comes next with
+    its label; response block comes last with its label.
+    """
+    from bigquery_agent_analytics.evaluators import split_judge_prompt_template
+
+    tmpl = "Just instructions, no placeholders."
+    prefix, middle, suffix = split_judge_prompt_template(tmpl)
+    rebuilt = prefix + "TRACE" + middle + "RESPONSE" + suffix
+    assert rebuilt.startswith(tmpl)
+    assert "Trace:\nTRACE" in rebuilt
+    assert "Response:\nRESPONSE" in rebuilt
+    assert rebuilt.index("Trace:\nTRACE") < rebuilt.index("Response:\nRESPONSE")
+
 
 class TestMultiCriterionJudge:
   """Tests for multi-criterion LLM judge (Fix #1)."""

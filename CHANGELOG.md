@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **LLM-as-Judge AI.GENERATE / ML.GENERATE_TEXT now uses the full Python
+  prompt template.** Previously both BQ-native paths sent only
+  ``prompt_template.split('{trace_text}')[0]`` to BigQuery, silently
+  dropping every instruction that followed the placeholders — including
+  the per-criterion output-format spec the judge model needs to score
+  consistently with the API-fallback path. The two BQ paths and the
+  Python API path now produce comparable scores against the same prompt.
+
+### Added
+
+- ``EvaluationReport.details["execution_mode"]`` is now populated for
+  LLM-as-Judge runs with one of ``ai_generate``, ``ml_generate_text``,
+  ``api_fallback``, or ``no_op`` — matching the value space the
+  categorical evaluator already exposes. When an earlier tier raised
+  before a later tier succeeded, ``details["fallback_reason"]`` carries
+  the chained exception messages in attempt order, so CI and dashboards
+  can audit which path actually ran.
+- ``evaluators.split_judge_prompt_template(prompt_template)`` is the
+  helper the SQL paths use to safely substitute the template into
+  ``CONCAT()``; exposed publicly for downstream code that needs the
+  same shape.
+
 ## [0.2.2] - 2026-04-24
 
 ### Changed (breaking)
