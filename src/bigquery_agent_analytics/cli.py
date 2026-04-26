@@ -302,7 +302,14 @@ def evaluate(
     ),
     strict: bool = typer.Option(
         False,
-        help="Fail sessions with unparseable judge output.",
+        help=(
+            "Stamp parse-error metadata on AI.GENERATE judge rows with"
+            " empty or NULL typed output. Those rows already fail"
+            " (empty score < threshold); --strict adds"
+            " details['parse_error']=True and a report-level"
+            " parse_errors counter so dashboards can tell 'no"
+            " parseable score' apart from 'low score' failures."
+        ),
     ),
     endpoint: Optional[str] = typer.Option(
         None,
@@ -368,6 +375,31 @@ def evaluate(
     raise typer.Exit(code=2)
 
 
+_FEEDBACK_SNIPPET_MAX = 120
+
+
+def _format_feedback_snippet(
+    feedback: Optional[str], max_chars: int = _FEEDBACK_SNIPPET_MAX
+) -> Optional[str]:
+  """Return a single-line, bounded snippet of an LLM-judge justification.
+
+  Collapses internal whitespace runs (including newlines) to a single
+  space so the snippet fits on one CI log line, then truncates to
+  ``max_chars`` with a trailing ``…`` when the original was longer.
+  Returns ``None`` for empty / whitespace-only input so callers can
+  cleanly skip the field.
+  """
+  if not feedback:
+    return None
+  collapsed = " ".join(feedback.split())
+  if not collapsed:
+    return None
+  if len(collapsed) <= max_chars:
+    return collapsed
+  # Reserve one char for the ellipsis to keep the visual width capped.
+  return collapsed[: max_chars - 1].rstrip() + "\u2026"
+
+
 def _emit_evaluate_failures(
     report: EvaluationReport, max_sessions: int = 10
 ) -> None:
@@ -377,10 +409,14 @@ def _emit_evaluate_failures(
   Prefers the raw observed + budget pair (``CodeEvaluator`` prebuilts);
   falls back to score + threshold when the metric didn't declare
   observed/budget (custom ``add_metric`` users, ``LLMAsJudge``
-  criteria). A failing session is guaranteed to produce at least one
-  FAIL line — never just the summary header.
+  criteria). For LLM-judge failures the line also carries a bounded
+  ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback``
+  so CI logs explain *why* the judge said the session failed without
+  forcing the reader to chase the JSON output.
 
-  Capped at ``max_sessions`` most-recent failures so CI logs stay scannable.
+  A failing session is guaranteed to produce at least one FAIL line —
+  never just the summary header. Capped at ``max_sessions`` most-recent
+  failures so CI logs stay scannable.
   """
   failed = [s for s in report.session_scores if not s.passed]
   if not failed:
@@ -393,6 +429,7 @@ def _emit_evaluate_failures(
   )
   shown = failed[:max_sessions]
   for s in shown:
+    feedback_snippet = _format_feedback_snippet(s.llm_feedback)
     emitted_for_session = False
     for metric_name, score in s.scores.items():
       detail = s.details.get(f"metric_{metric_name}") or {}
@@ -433,6 +470,12 @@ def _emit_evaluate_failures(
       parts.append(f"score={score:.4g}")
       if threshold is not None and isinstance(threshold, (int, float)):
         parts.append(f"threshold={threshold:.4g}")
+      # LLM judges populate ``SessionScore.llm_feedback`` with the
+      # judge's justification. Surface a bounded snippet on the FAIL
+      # line so CI logs explain *why* without dumping the full JSON.
+      # Code-based metrics leave ``llm_feedback`` empty and skip this.
+      if feedback_snippet is not None:
+        parts.append(f'feedback="{feedback_snippet}"')
       typer.echo("  " + " ".join(parts), err=True)
       emitted_for_session = True
 
@@ -441,10 +484,12 @@ def _emit_evaluate_failures(
     # while the session itself is flagged failed (a bug upstream) — we
     # still point the reader at the session id.
     if not emitted_for_session:
-      typer.echo(
-          f"  FAIL session={s.session_id} (no per-metric detail available)",
-          err=True,
-      )
+      fallback = f"  FAIL session={s.session_id}"
+      if feedback_snippet is not None:
+        fallback += f' feedback="{feedback_snippet}"'
+      else:
+        fallback += " (no per-metric detail available)"
+      typer.echo(fallback, err=True)
   if len(failed) > len(shown):
     typer.echo(
         f"  ... {len(failed) - len(shown)} more failing session(s) "
