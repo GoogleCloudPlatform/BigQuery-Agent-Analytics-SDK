@@ -57,6 +57,7 @@ CYCLES=1
 EVAL_ONLY=false
 TRAFFIC_COUNT=10
 AGENT_CONFIG=""
+AUTO_CONTINUE=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -82,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       TRAFFIC_COUNT="$2"
       shift 2
       ;;
+    --no-auto)
+      AUTO_CONTINUE=false
+      shift
+      ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -89,6 +94,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --agent-config F   Path to agent's config.json"
       echo "                     (default: config.json)"
       echo "  --cycles N         Run N improvement cycles (default: 1)"
+      echo "  --no-auto          Always run all N cycles even if 100%"
+      echo "                     meaningful (default: stop early)"
       echo "  --eval-only        Only run evaluation (Steps 1-3), skip improvement"
       echo "  --app-name X       Override agent app name for BQ filtering"
       echo "  --traffic-count N  Number of synthetic questions per cycle (default: 10)"
@@ -353,9 +360,9 @@ for cycle in $(seq 1 "$CYCLES"); do
   # Retry with backoff for BigQuery streaming buffer propagation.
   echo "  Waiting 15s for BigQuery streaming buffer to flush..."
   echo ""
-  echo "  While we wait, here are the questions that were sent to the agent:"
-  jq -r '.eval_cases[] | "    [\(.id)] \(.question)"' "$TRAFFIC_JSON" 2>/dev/null || true
-  echo ""
+#  echo "  While we wait, here are the questions that were sent to the agent:"
+#  jq -r '.eval_cases[] | "    [\(.id)] \(.question)"' "$TRAFFIC_JSON" 2>/dev/null || true
+#  echo ""
   MAX_RETRIES=6
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     sleep 15
@@ -408,6 +415,15 @@ print(len(missing))
   echo ""
   echo "  Report saved to: $REPORT_JSON"
 
+  # Operational metrics baseline (V1 sessions)
+  echo ""
+  echo "  --- Operational Metrics Baseline (V${CURRENT_V}) ---"
+  BASELINE_METRICS_JSON="$REPORTS_DIR/operational_metrics_cycle_${cycle}_baseline.json"
+  $PY "$SCRIPT_DIR/eval/operational_metrics.py" \
+    --sessions "$EXPECTED_IDS" \
+    --label "V${CURRENT_V}" \
+    --output "$BASELINE_METRICS_JSON" || true
+
   step_end "Quality evaluation"
 
   # =========================================================================
@@ -428,8 +444,9 @@ print(len(missing))
   echo ""
   echo "  Goal:    Fix the prompt to address failed sessions"
   echo "  Method:  1. Extract failed cases into golden eval set"
-  echo "           2. Gemini generates improved prompt"
-  echo "           3. Regression gate: candidate must pass ALL golden"
+  echo "           2. Generate ground truth via teacher agent"
+  echo "           3. Vertex AI Prompt Optimizer generates improved prompt"
+  echo "           4. Regression gate: candidate must pass ALL golden"
   echo "              cases (original + extracted). Retry if any fail."
   echo ""
   step_start
@@ -581,10 +598,34 @@ print(len(missing))
   printf "  │  %-$((W - 2))s│\n" "$AFTER_LINE"
   printf "  └%s┘\n" "$HR"
 
+  # Operational metrics comparison (V1 vs V2 sessions)
+  echo ""
+  echo "  --- Operational Metrics: V${CURRENT_V} vs V${NEW_V} ---"
+  METRICS_JSON="$REPORTS_DIR/operational_metrics_cycle_${cycle}.json"
+  $PY "$SCRIPT_DIR/eval/operational_metrics.py" \
+    --before-sessions "$EXPECTED_IDS" \
+    --after-sessions "$FRESH_EXPECTED_IDS" \
+    --before-label "V${CURRENT_V}" \
+    --after-label "V${NEW_V}" \
+    --output "$METRICS_JSON" || true
+
   step_end "Measurement"
 
   echo ""
   echo "  Cycle $cycle complete."
+
+  # Auto-continue: stop early if 100% meaningful
+  if [[ "$AUTO_CONTINUE" == "true" ]]; then
+    A_UNHELPFUL=$(jq -r '.summary.unhelpful // 0' "$FRESH_REPORT")
+    A_PARTIAL=$(jq -r '.summary.partial // 0' "$FRESH_REPORT")
+    if [[ "$A_UNHELPFUL" == "0" && "$A_PARTIAL" == "0" ]]; then
+      echo ""
+      echo "  All sessions meaningful — stopping auto-continue."
+      break
+    elif [[ $cycle -lt $CYCLES ]]; then
+      echo "  ${A_UNHELPFUL} unhelpful + ${A_PARTIAL} partial remain — continuing to cycle $((cycle + 1))..."
+    fi
+  fi
 done
 
 # ---------------------------------------------------------------------------
@@ -600,7 +641,6 @@ FINAL_GOLDEN=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
 separator
 echo ""
 _show_prompt "FINAL PROMPT"
-separator
 echo ""
 
 separator
@@ -620,3 +660,10 @@ else
   echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
 fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
+echo ""
+echo "  To reset and run again: ./reset.sh"
+echo ""
+separator
+echo ""
+echo "  Total wall time: ${TOTAL_MIN}m ${TOTAL_SEC}s"
+echo ""

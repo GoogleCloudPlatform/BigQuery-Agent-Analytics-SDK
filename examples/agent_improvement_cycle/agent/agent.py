@@ -91,7 +91,18 @@ if _vertex_prompt_id:
     )
 
   _vx_client = _VertexClient(project=project_id, location=LOCATION)
-  _prompt_obj = _vx_client.prompts.get(prompt_id=_vertex_prompt_id)
+  try:
+    _prompt_obj = _vx_client.prompts.get(prompt_id=_vertex_prompt_id)
+  except Exception as _e:
+    raise RuntimeError(
+        f"Failed to load prompt from Vertex AI.\n"
+        f"  Prompt ID: {_vertex_prompt_id}\n"
+        f"  Project:   {project_id}\n"
+        f"  Location:  {LOCATION}\n"
+        f"  Error:     {_e}\n"
+        f"  The prompt resource may not exist. Run ./setup.sh to create it,\n"
+        f"  or ./reset.sh to recreate it from V1."
+    ) from _e
   _prompt_text = ""
   if (
       _prompt_obj.prompt_data

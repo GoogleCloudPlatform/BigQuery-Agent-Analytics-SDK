@@ -27,6 +27,7 @@ import logging
 import warnings
 
 warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="authlib")
 logging.getLogger("google.genai").setLevel(logging.ERROR)
 
 import asyncio

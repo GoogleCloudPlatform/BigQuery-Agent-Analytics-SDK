@@ -1,19 +1,10 @@
 <!-- TOC -->
 * [Agent Improvement Cycle Demo](#agent-improvement-cycle-demo)
+  * [The Demo Agent](#the-demo-agent)
   * [The Problem](#the-problem)
   * [The Solution: Learn from the Field](#the-solution-learn-from-the-field)
-    * [Why This Matters](#why-this-matters)
   * [Architecture](#architecture)
-    * [config.json](#configjson)
   * [How the Cycle Works](#how-the-cycle-works)
-    * [Prompt Storage: Vertex AI Prompt Registry](#prompt-storage-vertex-ai-prompt-registry)
-    * [Prompt Optimization: Vertex AI Prompt Optimizer](#prompt-optimization-vertex-ai-prompt-optimizer)
-    * [Teacher Agent and Synthetic Ground Truth](#teacher-agent-and-synthetic-ground-truth)
-    * [Two Eval Sets](#two-eval-sets)
-    * [The Agent](#the-agent)
-    * [V1 Flaws (by design)](#v1-flaws-by-design)
-    * [Step-by-Step](#step-by-step)
-    * [Guardrails](#guardrails)
   * [Quick Start](#quick-start)
     * [Prerequisites](#prerequisites)
     * [1. Configure environment](#1-configure-environment)
@@ -23,21 +14,77 @@
     * [Reset to V1](#reset-to-v1)
   * [Using with Other Agents](#using-with-other-agents)
   * [Configuration](#configuration)
-    * [config.json fields](#configjson-fields)
-    * [Environment variables (.env)](#environment-variables-env)
-    * [Cost notes](#cost-notes)
   * [Future / Next Steps](#future--next-steps)
 <!-- TOC -->
 
 # Agent Improvement Cycle Demo
 
-Demonstrates a closed-loop agent improvement cycle powered by the
-**BigQuery Agent Analytics SDK** and **Vertex AI Prompt Registry**.
-The cycle learns from real agent sessions logged in production, not
-just synthetic test cases. Prompts are stored, versioned, and
+A well-designed agent should learn from its own mistakes. This demo
+implements that paradigm: a continuous self-improvement cycle where
+the agent's real-world failures become the training data for its next
+version. It is powered by the **BigQuery Agent Analytics SDK** and
+**[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)**. Prompts are stored, versioned, and
 optimized in Vertex AI.
 
-For a guided walkthrough, see the [Demo Script](DEMO_SCRIPT.md).
+For a guided walkthrough, see the [Demo Narration](DEMO_NARRATION.md).
+
+![Demo](demo.png)
+## The Demo Agent
+
+The agent used in this demo is a **company policy Q&A assistant**,
+built with [Google ADK](https://google.github.io/adk-docs/) and the
+[BigQuery Agent Analytics Plugin](https://adk.dev/integrations/bigquery-agent-analytics/).
+
+It's deliberately simple: a single LLM agent with just two tools:
+
+- **`lookup_company_policy(topic)`** — retrieves detailed policy data
+  on PTO, sick leave, remote work, expenses, benefits, and holidays.
+- **`get_current_date()`** — returns today's date and day of the week,
+  so the agent can answer date-relative questions like "Is next Friday
+  a holiday?"
+
+The agent's job is to answer employee questions — "How many PTO days
+do I get?", "What's the meal reimbursement limit?", "When is the next
+company holiday?", and so on.
+
+### V1 Flaws (by design)
+
+The V1 prompt is **intentionally flawed**. It tells the agent to
+"answer from the knowledge above" — a short, incomplete summary baked
+into the prompt — and to say "I don't know, contact HR" for anything
+not listed. The result: the agent ignores its own tools, even though
+those tools have all the answers. Users get vague deflections instead
+of useful information.
+
+| Flaw | Effect |
+|------|--------|
+| "Answer from knowledge above" | Agent ignores its tools entirely |
+| No expense/holiday info in prompt | Agent says "I don't know" instead of looking it up |
+| Vague "competitive benefits" | Agent deflects or hallucinates benefit details |
+| No date handling guidance | Agent cannot resolve "next Friday" |
+
+The tools have all the data. The flaw is that the prompt discourages
+the agent from using them. By running the self-improvement cycle,
+the system detects these failures, generates correct answers using a
+teacher agent, optimizes the prompt through the Vertex AI Prompt
+Optimizer, and produces a new version that actually uses the tools.
+The agent fixes itself.
+
+> **Note: observed model behavior with V1.** The model does not fail
+> uniformly across all topics. For topics **mentioned** in V1's inline
+> knowledge (PTO, sick leave, remote work), the model often calls
+> `lookup_company_policy` anyway — even though the prompt says "answer
+> from the knowledge above." The inline mention acts as a signal that
+> the topic is valid, which encourages the model to explore available
+> tools for more detail. For topics **not mentioned** in the prompt
+> (expenses, holidays, parental leave), the explicit fallback
+> instruction — "tell the user you do not have that information and
+> suggest they contact HR" — overrides tool exploration. The model
+> obeys the refusal rule because nothing in the prompt hints that the
+> tool could answer the question. This means the V1 failures are
+> concentrated on topics absent from the prompt, not on all topics.
+> The improvement cycle discovers these gaps through synthetic traffic
+> and fixes them by rewriting the prompt to always use tools first.
 
 ## The Problem
 
@@ -49,14 +96,20 @@ predicted.
 
 ## The Solution: Learn from the Field
 
-This demo shows how to close that gap using three components:
+This demo shows how to close that gap using four components:
 
 1. **[`BigQueryAgentAnalyticsPlugin`](https://adk.dev/integrations/bigquery-agent-analytics/)** captures every real agent session
    (questions, tool calls, responses) into BigQuery automatically.
-2. **[`quality_report.py`](../../scripts/quality_report.py)** (the SDK's evaluation script) reads those
-   logged sessions back from BigQuery, evaluates quality, and produces
-   structured reports that can drive automated improvement.
-3. **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)** stores and versions the agent's prompt
+2. **[`SDK quality_report.py`](../../scripts/quality_report.py)** (the SDK's evaluation script) reads those
+   logged sessions back from BigQuery, evaluates quality using an LLM
+   judge, and produces structured reports that drive automated
+   improvement.
+3. **[`SDK CodeEvaluator`](../../bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
+   operational metrics — latency, token efficiency, and turn count —
+   on the same sessions. No LLM calls needed, just math on the data
+   already in BigQuery. This ensures the improved prompt doesn't trade
+   quality for cost.
+4. **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)** stores and versions the agent's prompt
    in the cloud. The **[Vertex AI Prompt Optimizer](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/prompts/prompt-optimizer)** generates improved
    prompts using synthetic ground truth from a teacher model.
 
@@ -76,7 +129,16 @@ The full cycle:
     - **Validate (Regression Gate):** The candidate is tested against the full golden eval set.
 5. **MEASURE IMPROVEMENT:** Verify the improved prompt against fresh traffic to quantify the quality jump.
 
-Run multiple cycles with `--cycles N` to iterate until performance stabilizes.
+At each evaluation step (3 and 5), the SDK's deterministic
+`CodeEvaluator` also checks latency, token efficiency, and turn count.
+Step 3 establishes the operational baseline; Step 5 shows the
+before/after comparison to verify the improved prompt didn't regress
+on cost or performance. No extra agent runs — just math on the session
+data already in BigQuery.
+
+Run multiple cycles with `--cycles N`. By default, the cycle stops
+early once all synthetic traffic scores 100% meaningful. Use
+`--no-auto` to force all N cycles to run regardless.
 
 The hero moment: quality typically climbs from ~40% to ~100% in a single cycle
 (results vary due to non-deterministic LLM output).
@@ -110,6 +172,7 @@ eval/
   eval_cases.json        # Golden eval set (regression gate, grows each cycle)
   generate_traffic.py    # Generates synthetic user traffic via Gemini
   run_eval.py            # Runs eval/traffic cases via ADK InMemoryRunner
+  operational_metrics.py # Deterministic metrics gate (latency, tokens, turns)
 
 agent_improvement/       # Reusable improvement module (works with any ADK agent)
   config.py              # ImprovementConfig dataclass
@@ -211,17 +274,22 @@ structured optimization pipeline backed by real failure data.
 
 ### Teacher Agent and Synthetic Ground Truth
 
-The Vertex AI Prompt Optimizer needs examples of correct output to
-learn from. But where do those come from? You do not have
-hand-written reference answers for every possible user question ...
-especially not for questions discovered from synthetic traffic that
-you never anticipated.
+The Vertex AI Prompt Optimizer needs **labeled examples** — pairs of
+(input, expected_output) — to learn from. This is the same principle
+as supervised learning in ML: you can't improve a model without
+showing it what "correct" looks like.
 
-The solution is the **teacher agent**. It is built from the same
-`agent_factory` and runs with the **same tools and the same model**
-as the target agent. The only difference is the prompt: instead of
-the flawed V1 instruction, the teacher gets a short, direct
-instruction that explicitly requires tool usage:
+But where do the expected outputs come from? You don't have
+hand-written reference answers for every possible user question,
+especially not for questions discovered from synthetic traffic that
+you never anticipated. Writing golden answers manually doesn't
+scale — and the whole point is to handle questions you didn't predict.
+
+The solution is the **teacher agent**. It borrows a concept from
+**knowledge distillation** in ML, where a "teacher" model generates
+training data for a "student" model. Here the teacher isn't a bigger
+model — it's the **same model with the same tools**, just with a
+different prompt:
 
 ```
 You are an expert assistant. For EVERY question, you MUST call
@@ -230,11 +298,17 @@ know' or defer the user elsewhere. ALWAYS use the tools first, then answer
 based on the tool results. Be specific and thorough.
 ```
 
-The insight: the V1 agent fails not because the tools are broken or
-the model is incapable, but because the V1 prompt actively
-**discourages** tool use ("answer from the knowledge above"). The
-teacher prompt removes that barrier, so the teacher produces correct,
-tool-grounded answers to the same questions the target agent failed.
+The teacher's job is narrow: **produce correct, tool-grounded answers
+to questions the target agent failed on.** It's not a replacement for
+the target agent — it's a data generator. Think of it as an oracle
+that knows how to use the tools correctly, but has no domain-specific
+personality, formatting, or routing logic.
+
+The key insight: the V1 agent fails not because the tools are broken
+or the model is incapable, but because the V1 prompt actively
+**discourages** tool use. The teacher prompt removes that barrier.
+The teacher calls `lookup_company_policy("expenses")` and gets a
+correct answer; the target agent with V1 never tries.
 
 The full flow:
 
@@ -243,18 +317,18 @@ Failed sessions from quality report
         |
         v
   Teacher agent re-answers each failed question
-  (same tools, same model, better prompt)
+  (same tools, same model, tool-first prompt)
         |
         v
-  Produces triples:
+  Produces labeled triples:
     (question, bad_response, ground_truth)
         |
         v
   Vertex AI Prompt Optimizer
-  (target_response mode)
+  (target_response mode — learns from the triples)
         |
         v
-  Optimized prompt that steers the agent
+  Optimized prompt that steers the target agent
   toward tool-grounded answers
 ```
 
@@ -263,12 +337,39 @@ for inspection. Each entry contains the original question, the bad
 response from the target agent, and the teacher's ground truth
 answer.
 
-**Why not just use the teacher prompt directly?** The teacher prompt
-is generic ... it works for any agent with any tools. The optimized
-prompt is specific: it learns the domain vocabulary, the tool names,
-the response style, and the edge cases from the ground truth
-examples. The optimizer produces a prompt that is both correct and
-tailored to the agent's actual use case.
+#### Why not just use the teacher prompt directly?
+
+This is the natural question: if the teacher works, why not deploy it?
+
+The teacher prompt is **generic** — "always use tools, be thorough."
+It works for producing correct answers but it lacks everything a
+production agent needs:
+
+- **Topic routing:** A complex agent with 10+ tools needs to know
+  which tool to call for which question. "Use tools" doesn't tell
+  the agent to call `lookup_company_policy("benefits")` when someone
+  asks about their 401k.
+- **Response style:** The teacher gives verbose, unstructured answers.
+  A production prompt defines formatting, tone, and what to include
+  or omit.
+- **Edge case handling:** The teacher doesn't know about policy
+  exceptions, date-relative logic, or when to combine multiple tool
+  calls.
+- **Domain vocabulary:** The teacher doesn't know that "WFH" means
+  remote work, or that "time off" maps to PTO.
+
+The optimizer reads the ground truth examples and produces a prompt
+that is both **correct** (uses tools) and **tailored** (knows the
+domain mappings, response format, and edge cases). The teacher
+generates the training data; the optimizer generates the production
+prompt.
+
+In this demo, the agent is simple enough that the distinction is
+subtle — the teacher's generic prompt happens to work well for 2
+tools and 6 topics. In a real system with complex tool routing,
+multi-step workflows, and nuanced response requirements, the gap
+between "generic tool-first" and "optimized domain-specific" is
+significant.
 
 ### Two Eval Sets
 
@@ -281,31 +382,6 @@ This demo uses two distinct sets of questions:
 - **Synthetic traffic**: Generated fresh each cycle by Gemini. These
   simulate diverse, unpredictable user questions that differ from the
   golden set. They are the source of new failures that drive improvement.
-
-### The Agent
-
-A Q&A agent built with Google ADK. It has two tools:
-
-- `lookup_company_policy(topic)` - retrieves detailed policy data
-- `get_current_date()` - returns today's date for relative date questions
-
-Every session is logged to BigQuery via the `BigQueryAgentAnalyticsPlugin`,
-capturing the full conversation trace: user question, tool calls, and
-agent response.
-
-### V1 Flaws (by design)
-
-The v1 prompt has intentional problems that cause ~70% of sessions to fail:
-
-| Flaw | Effect |
-|------|--------|
-| "Answer from knowledge above" | Agent ignores its tools entirely |
-| No expense/holiday info in prompt | Agent says "I don't know" instead of looking it up |
-| Vague "competitive benefits" | Agent deflects or hallucinates benefit details |
-| No date handling guidance | Agent cannot resolve "next Friday" |
-
-The tools themselves have all the data. The flaw is that the prompt
-discourages the agent from using them.
 
 ### Step-by-Step
 
@@ -320,6 +396,9 @@ using ADK's `InMemoryRunner`. Sessions are logged to BigQuery via the
 **Step 3: Evaluate Quality** -- The SDK's `quality_report.py` reads
 sessions from BigQuery and scores each one on response_usefulness
 (meaningful/partial/unhelpful) and task_grounding (grounded/ungrounded).
+The SDK's `CodeEvaluator` also runs deterministic checks on the same
+sessions — latency, token efficiency, and turn count — to establish
+an operational baseline.
 
 **Step 4: Improve Prompt** -- An ADK LoopAgent wrapping an LlmAgent
 with six tools:
@@ -338,7 +417,20 @@ runs the full golden eval set. The `write_prompt` tool persists the
 validated prompt to the Vertex AI Prompt Registry.
 
 **Step 5: Measure Improvement** -- Fresh synthetic traffic is generated
-and scored against the improved prompt via BigQuery.
+and scored against the improved prompt via BigQuery. The deterministic
+evaluators then compare V1 and V2 sessions side by side:
+
+| Metric | What it checks | Default budget |
+|--------|----------------|----------------|
+| `latency` | Average response time per session | 10,000 ms |
+| `token_efficiency` | Total tokens consumed per session | 50,000 tokens |
+| `turn_count` | Number of conversational turns | 10 turns |
+
+This verifies the improved prompt didn't trade quality for cost — a
+prompt that makes the agent chattier or triggers more retries would
+show up here even if the quality score is 100%. The data is already in
+BigQuery from Steps 2 and 5; no additional agent runs are needed. See
+`eval/operational_metrics.py`.
 
 ### Guardrails
 
@@ -398,8 +490,11 @@ git tracking.
 # Single improvement cycle
 ./run_cycle.sh
 
-# Full demo: 3 cycles, watch the score climb from ~40% to ~100%
+# Up to 3 cycles, stops early when 100% meaningful (default behavior)
 ./run_cycle.sh --cycles 3
+
+# Force all 3 cycles even if 100% is reached early
+./run_cycle.sh --cycles 3 --no-auto
 
 # Eval only (no improvement step)
 ./run_cycle.sh --eval-only
@@ -495,6 +590,11 @@ calls + N judge calls per attempt, up to `max_attempts` retries).
 After several cycles, the golden set can reach 20+ cases, increasing
 both cost and runtime of the validation step. For long-running
 deployments, consider periodically pruning redundant golden cases.
+
+## Further Reading
+
+- [Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed) — Using the SDK's `CodeEvaluator` and `categorical-eval` CLI to gate PRs against production traces. Covers the same deterministic evaluators (latency, token efficiency, turn count, error rate) this demo uses in Steps 3 and 5.
+- [BigQuery Agent Analytics: From Logs to Graphs](https://medium.com/google-cloud/bigquery-agent-analytics-from-logs-to-graphs-ab0bc34e1418) — Visualizing agent session traces as interactive graphs. Shows how the `BigQueryAgentAnalyticsPlugin` captures the data that powers this improvement cycle.
 
 ## Future / Next Steps
 

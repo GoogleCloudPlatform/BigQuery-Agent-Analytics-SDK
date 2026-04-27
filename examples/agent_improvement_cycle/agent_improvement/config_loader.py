@@ -68,6 +68,23 @@ def load_agent_module(config_path: str) -> tuple:
     cfg = json.load(f)
 
   cfg = _resolve_paths(cfg, agent_root)
+
+  print(f"\n  Config: {config_path}")
+  print(f"  Agent module: {cfg['agent_module']}")
+  print(f"  Prompt storage: {cfg.get('prompt_storage', 'python_file')}")
+  if cfg.get("prompt_storage") == "vertex":
+    prompt_id = cfg.get("vertex_prompt_id") or os.environ.get(
+        "VERTEX_PROMPT_ID", ""
+    )
+    print(f"  Vertex prompt ID: {prompt_id or '(not set)'}")
+    print(
+        f"  Vertex project: {cfg.get('vertex_project') or os.environ.get('PROJECT_ID', '(from gcloud default)')}"
+    )
+    print(f"  Vertex location: {cfg.get('vertex_location', 'us-central1')}")
+  print(f"  Model: {cfg.get('model_id', 'gemini-2.5-flash')}")
+  print(f"  Eval cases: {cfg.get('eval_cases_path', '(not set)')}")
+  print()
+
   mod = _import_module(cfg["agent_module"], agent_root)
   return mod, cfg
 

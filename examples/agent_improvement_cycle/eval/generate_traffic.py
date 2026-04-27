@@ -66,7 +66,8 @@ The chatbot also has a tool that returns today's date.
 1. ONLY ask questions that the data above can answer. Do NOT ask about topics outside this data (e.g., mileage, home office equipment, gym memberships, tuition, sabbaticals).
 2. Mix direct factual questions ("What is the meal limit?") with situational ones ("I have a $40 dinner receipt from a client meeting -- do I need to submit it?").
 3. Include 1-2 date-related questions that require knowing today's date (e.g., "Is there a holiday coming up this month?", "When is the next company holiday?").
-4. Cover all six topics. Vary the phrasing naturally.
+4. Cover all six topics but **weight toward expenses, benefits, and holidays** -- at least 6 out of {count} questions should be about these three topics (2+ each). The remaining questions can cover pto, sick_leave, or remote_work. This weighting ensures the traffic stresses topics that are harder for the agent.
+5. Vary the phrasing naturally.
 
 ## Existing questions to AVOID duplicating
 {existing_questions}

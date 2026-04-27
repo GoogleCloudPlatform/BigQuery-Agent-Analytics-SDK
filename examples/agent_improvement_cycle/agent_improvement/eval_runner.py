@@ -184,8 +184,19 @@ class EvalRunner:
       result = await self.run_single_case(runner, case, user_id="eval")
       result = await self.judge_case(case, result)
       tag = "PASS" if result["pass"] else "FAIL"
-      suffix = "" if result["pass"] else f" - {result['reason']}"
-      print(f"    {tag}: {case['id']}{suffix}")
+      tools_called = ", ".join(result.get("tools_called", [])) or "none"
+      expected_tool = case.get("expected_tool", "unknown")
+      answer = result["response"].replace("\n", " ").strip()
+      if len(answer) > 120:
+        answer = answer[:120] + "..."
+      print(f"    {tag}: {case['id']}")
+      print(f"         Question: {case['question']}")
+      print(f"         Answer: {answer}")
+      print(
+          f"         Tools called: {tools_called} | Expected: {expected_tool}"
+      )
+      if not result["pass"]:
+        print(f"         Reason: {result['reason']}")
       return result
 
     results = list(await asyncio.gather(*[_eval_one(c) for c in cases]))
