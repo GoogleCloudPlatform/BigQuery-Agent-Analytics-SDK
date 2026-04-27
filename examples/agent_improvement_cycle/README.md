@@ -123,6 +123,13 @@ The full cycle:
     - **Validate (Regression Gate):** The candidate is tested against the full golden eval set.
 5. **MEASURE IMPROVEMENT:** Verify the improved prompt against fresh traffic to quantify the quality jump.
 
+At each evaluation step (3 and 5), the SDK's deterministic
+`CodeEvaluator` also checks latency, token efficiency, and turn count.
+Step 3 establishes the operational baseline; Step 5 shows the
+before/after comparison to verify the improved prompt didn't regress
+on cost or performance. No extra agent runs — just math on the session
+data already in BigQuery.
+
 Run multiple cycles with `--cycles N` to iterate until performance stabilizes.
 
 The hero moment: quality typically climbs from ~40% to ~100% in a single cycle
@@ -157,6 +164,7 @@ eval/
   eval_cases.json        # Golden eval set (regression gate, grows each cycle)
   generate_traffic.py    # Generates synthetic user traffic via Gemini
   run_eval.py            # Runs eval/traffic cases via ADK InMemoryRunner
+  operational_metrics.py # Deterministic metrics gate (latency, tokens, turns)
 
 agent_improvement/       # Reusable improvement module (works with any ADK agent)
   config.py              # ImprovementConfig dataclass
@@ -380,6 +388,9 @@ using ADK's `InMemoryRunner`. Sessions are logged to BigQuery via the
 **Step 3: Evaluate Quality** -- The SDK's `quality_report.py` reads
 sessions from BigQuery and scores each one on response_usefulness
 (meaningful/partial/unhelpful) and task_grounding (grounded/ungrounded).
+The SDK's `CodeEvaluator` also runs deterministic checks on the same
+sessions — latency, token efficiency, and turn count — to establish
+an operational baseline.
 
 **Step 4: Improve Prompt** -- An ADK LoopAgent wrapping an LlmAgent
 with six tools:
@@ -398,7 +409,20 @@ runs the full golden eval set. The `write_prompt` tool persists the
 validated prompt to the Vertex AI Prompt Registry.
 
 **Step 5: Measure Improvement** -- Fresh synthetic traffic is generated
-and scored against the improved prompt via BigQuery.
+and scored against the improved prompt via BigQuery. The deterministic
+evaluators then compare V1 and V2 sessions side by side:
+
+| Metric | What it checks | Default budget |
+|--------|----------------|----------------|
+| `latency` | Average response time per session | 10,000 ms |
+| `token_efficiency` | Total tokens consumed per session | 50,000 tokens |
+| `turn_count` | Number of conversational turns | 10 turns |
+
+This verifies the improved prompt didn't trade quality for cost — a
+prompt that makes the agent chattier or triggers more retries would
+show up here even if the quality score is 100%. The data is already in
+BigQuery from Steps 2 and 5; no additional agent runs are needed. See
+`eval/operational_metrics.py`.
 
 ### Guardrails
 

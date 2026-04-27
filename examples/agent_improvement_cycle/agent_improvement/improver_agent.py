@@ -517,170 +517,61 @@ def write_prompt(candidate_prompt: str, changes_summary: str) -> str:
 
 _REQUIRED_CASE_KEYS = {"id", "question", "category", "expected_tool"}
 
-# Common words that cause false-positive keyword matches.
-_CLASSIFIER_STOP = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "are",
-        "was",
-        "get",
-        "set",
-        "not",
-        "one",
-        "use",
-        "per",
-        "any",
-        "all",
-        "can",
-        "may",
-        "has",
-        "had",
-        "its",
-        "our",
-        "out",
-        "who",
-        "did",
-        "now",
-        "her",
-        "his",
-        "with",
-        "from",
-        "this",
-        "that",
-        "have",
-        "will",
-        "been",
-        "into",
-        "over",
-        "also",
-        "than",
-        "them",
-        "then",
-        "they",
-        "what",
-        "when",
-        "each",
-        "some",
-        "only",
-        "such",
-        "more",
-        "most",
-        "many",
-        "much",
-        "must",
-        "here",
-        "well",
-        "very",
-        "does",
-        "done",
-        "just",
-        "like",
-        "make",
-        "take",
-        "give",
-        "come",
-        "back",
-        "after",
-        "about",
-        "could",
-        "would",
-        "should",
-        "args",
-        "string",
-        "returns",
-        "dictionary",
-        "error",
-        "message",
-        "found",
-        "available",
-        "requested",
-    }
-)
-
-
-def _word_forms(word: str) -> list[str]:
-  """Return the word plus common de-suffixed forms (plural, -ing, -ly, -ies)."""
-  forms = [word]
-  if len(word) > 4:
-    if word.endswith("ies"):
-      forms.append(word[:-3] + "y")  # policies -> policy
-    elif word.endswith("ing"):
-      forms.append(word[:-3])  # working -> work
-    elif word.endswith("ly"):
-      forms.append(word[:-2])  # remotely -> remote
-    elif word.endswith("ed"):
-      forms.append(word[:-2])  # requested -> request
-  if len(word) > 3 and word.endswith("s") and not word.endswith("ies"):
-    forms.append(word[:-1])  # expenses -> expense
-  return forms
+_CLASSIFY_MODEL = "gemini-2.5-flash"
 
 
 def _classify_question(question: str, tools: list) -> tuple[str, str]:
-  """Infer category and expected_tool from available tools.
+  """Infer category (topic) and expected_tool using an LLM.
 
-  Matches question words against tool names and full docstrings
-  (including parameter descriptions) to determine which tool should
-  handle the question. Uses word-boundary splitting, basic plural
-  normalization, and scoring to pick the best match.
-
-  Returns ``("unknown", "unknown")`` if no tool matches.
+  Sends the question and available tool signatures to a fast model.
+  Returns ``(category, expected_tool)`` where category is the topic
+  (e.g. "benefits", "sick_leave") and expected_tool is the tool name.
+  Returns ``("unknown", "unknown")`` if classification fails.
   """
   if not tools:
     return "unknown", "unknown"
 
-  # Single tool: always the expected tool
   if len(tools) == 1:
     name = getattr(tools[0], "__name__", "unknown")
     return name, name
 
-  # Build a set of normalized question words.
-  q_words: set[str] = set()
-  for w in re.split(r"\W+", question.lower()):
-    if w:
-      q_words.update(_word_forms(w))
-
-  best_tool = None
-  best_score = 0
-
+  tool_descriptions = []
   for tool in tools:
-    name = getattr(tool, "__name__", "")
-    doc = (getattr(tool, "__doc__", "") or "").lower()
+    name = getattr(tool, "__name__", "unknown")
+    doc = getattr(tool, "__doc__", "") or ""
+    tool_descriptions.append(f"- {name}: {doc.strip()}")
+  tools_text = "\n".join(tool_descriptions)
 
-    # Extract keywords from tool name (> 3 chars to skip "get", "set").
-    name_keywords = [
-        w
-        for w in name.lower().replace("_", " ").split()
-        if len(w) > 3 and w not in _CLASSIFIER_STOP
-    ]
+  prompt = (
+      f"Given the following user question and available tools, determine:\n"
+      f"1. The topic category (e.g. pto, sick_leave, remote_work, expenses, "
+      f"benefits, holidays, date)\n"
+      f"2. Which tool is needed to answer it\n\n"
+      f"Question: {question}\n\n"
+      f"Available tools:\n{tools_text}\n\n"
+      f"Respond with JSON: {{\"category\": \"<topic>\", \"tool\": \"<tool_name>\"}}\n"
+      f"If no tool is relevant, use \"unknown\" for both."
+  )
 
-    # Extract from full docstring (>= 3 chars, filtered by stop words).
-    doc_words: list[str] = []
-    for token in doc.replace(",", " ").replace(".", " ").split():
-      token = token.strip("()[]:'\"")
-      if "_" in token:
-        doc_words.extend(
-            w
-            for w in token.split("_")
-            if len(w) > 2 and w not in _CLASSIFIER_STOP
-        )
-      elif len(token) > 2 and token not in _CLASSIFIER_STOP:
-        doc_words.append(token)
+  try:
+    client = genai.Client()
+    response = client.models.generate_content(
+        model=_CLASSIFY_MODEL,
+        contents=prompt,
+        config=GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+        ),
+    )
+    result = json.loads(response.text)
+    category = result.get("category", "unknown").strip()
+    tool_name = result.get("tool", "unknown").strip()
+    valid_names = {getattr(t, "__name__", "") for t in tools}
+    if tool_name in valid_names:
+      return category, tool_name
+  except Exception:
+    logging.warning("LLM classification failed for: %s", question[:80])
 
-    # Build normalized keyword set (original + de-suffixed forms).
-    keywords: set[str] = set()
-    for kw in name_keywords + doc_words:
-      keywords.update(_word_forms(kw))
-
-    # Score by counting keyword/question word overlaps.
-    score = len(keywords & q_words)
-    if score > best_score or (score == best_score and name < (best_tool or "")):
-      best_score = score
-      best_tool = name
-
-  if best_tool:
-    return best_tool, best_tool
   return "unknown", "unknown"
 
 

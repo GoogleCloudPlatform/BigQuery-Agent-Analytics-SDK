@@ -353,9 +353,9 @@ for cycle in $(seq 1 "$CYCLES"); do
   # Retry with backoff for BigQuery streaming buffer propagation.
   echo "  Waiting 15s for BigQuery streaming buffer to flush..."
   echo ""
-  echo "  While we wait, here are the questions that were sent to the agent:"
-  jq -r '.eval_cases[] | "    [\(.id)] \(.question)"' "$TRAFFIC_JSON" 2>/dev/null || true
-  echo ""
+#  echo "  While we wait, here are the questions that were sent to the agent:"
+#  jq -r '.eval_cases[] | "    [\(.id)] \(.question)"' "$TRAFFIC_JSON" 2>/dev/null || true
+#  echo ""
   MAX_RETRIES=6
   for attempt in $(seq 1 "$MAX_RETRIES"); do
     sleep 15
@@ -408,6 +408,15 @@ print(len(missing))
   echo ""
   echo "  Report saved to: $REPORT_JSON"
 
+  # Operational metrics baseline (V1 sessions)
+  echo ""
+  echo "  --- Operational Metrics Baseline (V${CURRENT_V}) ---"
+  BASELINE_METRICS_JSON="$REPORTS_DIR/operational_metrics_cycle_${cycle}_baseline.json"
+  $PY "$SCRIPT_DIR/eval/operational_metrics.py" \
+    --sessions "$EXPECTED_IDS" \
+    --label "V${CURRENT_V}" \
+    --output "$BASELINE_METRICS_JSON" || true
+
   step_end "Quality evaluation"
 
   # =========================================================================
@@ -428,8 +437,9 @@ print(len(missing))
   echo ""
   echo "  Goal:    Fix the prompt to address failed sessions"
   echo "  Method:  1. Extract failed cases into golden eval set"
-  echo "           2. Gemini generates improved prompt"
-  echo "           3. Regression gate: candidate must pass ALL golden"
+  echo "           2. Generate ground truth via teacher agent"
+  echo "           3. Vertex AI Prompt Optimizer generates improved prompt"
+  echo "           4. Regression gate: candidate must pass ALL golden"
   echo "              cases (original + extracted). Retry if any fail."
   echo ""
   step_start
@@ -581,6 +591,17 @@ print(len(missing))
   printf "  │  %-$((W - 2))s│\n" "$AFTER_LINE"
   printf "  └%s┘\n" "$HR"
 
+  # Operational metrics comparison (V1 vs V2 sessions)
+  echo ""
+  echo "  --- Operational Metrics: V${CURRENT_V} vs V${NEW_V} ---"
+  METRICS_JSON="$REPORTS_DIR/operational_metrics_cycle_${cycle}.json"
+  $PY "$SCRIPT_DIR/eval/operational_metrics.py" \
+    --before-sessions "$EXPECTED_IDS" \
+    --after-sessions "$FRESH_EXPECTED_IDS" \
+    --before-label "V${CURRENT_V}" \
+    --after-label "V${NEW_V}" \
+    --output "$METRICS_JSON" || true
+
   step_end "Measurement"
 
   echo ""
@@ -600,7 +621,6 @@ FINAL_GOLDEN=$(jq '.eval_cases | length' "$EVAL_CASES_PATH")
 separator
 echo ""
 _show_prompt "FINAL PROMPT"
-separator
 echo ""
 
 separator

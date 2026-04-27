@@ -57,6 +57,12 @@ The improvement cycle proceeds through five steps:
 5. **Measure** the improvement against fresh, unseen traffic — and
    iterate if needed.
 
+At each evaluation step (3 and 5), the SDK's **deterministic
+evaluators** also check latency, token efficiency, and turn count.
+Step 3 establishes the operational baseline; Step 5 shows the
+before/after comparison to verify the improved prompt didn't regress
+on cost or performance.
+
 ---
 
 ## Setup (1 min)
@@ -203,6 +209,12 @@ an LLM judge scores each one on two dimensions:
 The baseline score lands around 50% meaningful. Several sessions are
 marked unhelpful — the agent deflected instead of using its tools.
 
+Below the quality score, the SDK's deterministic `CodeEvaluator` runs
+on the same sessions — average latency, total tokens per session, and
+turn count. These are the **operational baselines**. No LLM calls
+needed, just math on the data already in BigQuery. These numbers will
+be compared against V2 sessions after the improvement.
+
 ### Step 4: Improve Prompt (~1-2 min)
 
 This is the core of the cycle.
@@ -302,6 +314,28 @@ direct, tool-grounded answers. No more "contact HR."
 
 From 50% to 100% in one automated cycle, scored from BigQuery on
 entirely new questions.
+
+Right below the quality results, the operational metrics comparison
+appears — the same deterministic evaluators from the Step 3 baseline,
+now run on the V2 sessions and shown side by side:
+
+```
+  Metric                    V1              V2          Budget    Status
+  ──────────────────  ────  ──────────────  ──────────────  ──────────────  ────────
+  Avg latency            ↓    3200.0 ms       2800.0 ms     10000 ms        PASS
+  Total tokens           ↓    4500 tokens     3200 tokens   50000 tokens    PASS
+  Turn count             =    2 turns         2 turns       10 turns        PASS
+```
+
+This verifies the improved prompt didn't trade quality for cost. A
+prompt that makes the agent chattier, triggers more retries, or
+produces longer responses would show up here even if quality scored
+100%. These are the same `CodeEvaluator` metrics that power the
+`bq-agent-sdk evaluate` CLI command — the one described in the blog
+post
+*[Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed)*.
+In the demo they serve as a post-improvement sanity check; in CI they
+become a hard gate on every PR.
 
 ---
 
