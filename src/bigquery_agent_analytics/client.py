@@ -78,6 +78,7 @@ from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import EvaluationReport
 from .evaluators import LLM_JUDGE_BATCH_QUERY
 from .evaluators import LLMAsJudge
+from .evaluators import render_ai_generate_judge_query
 from .evaluators import SESSION_SUMMARY_QUERY
 from .evaluators import SessionScore
 from .evaluators import split_judge_prompt_template
@@ -1089,12 +1090,13 @@ class Client:
         bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
     ]
 
-    query = AI_GENERATE_JUDGE_BATCH_QUERY.format(
+    query = render_ai_generate_judge_query(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
         where=where,
         endpoint=self.endpoint,
+        connection_id=self.connection_id,
     )
     job_config = bq.QueryJobConfig(
         query_parameters=judge_params,

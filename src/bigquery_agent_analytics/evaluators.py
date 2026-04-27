@@ -862,7 +862,7 @@ GROUP BY session_id
 LIMIT @trace_limit
 """
 
-AI_GENERATE_JUDGE_BATCH_QUERY = """\
+_AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE = """\
 WITH session_traces AS (
   SELECT
     session_id,
@@ -891,24 +891,77 @@ SELECT
   session_id,
   trace_text,
   final_response,
-  result.*
-FROM session_traces,
-AI.GENERATE(
-  -- Substitute the full Python prompt_template at SQL time:
-  -- prefix ++ trace_text ++ middle ++ final_response ++ suffix.
-  -- Each segment is a separate query parameter so we preserve the
-  -- exact Python template (including the per-criterion output-format
-  -- spec) that the API-fallback path uses.
-  prompt => CONCAT(
-    @judge_prompt_prefix, trace_text,
-    @judge_prompt_middle, COALESCE(final_response, 'N/A'),
-    @judge_prompt_suffix
-  ),
-  endpoint => '{endpoint}',
-  model_params => JSON '{{"temperature": 0.1, "max_output_tokens": 500}}',
-  output_schema => 'score INT64, justification STRING'
-) AS result
+  gen.score AS score,
+  gen.justification AS justification,
+  gen.status AS gen_status
+FROM (
+  SELECT
+    session_id,
+    trace_text,
+    final_response,
+    AI.GENERATE(
+      -- The Python prompt template is rebuilt at SQL time:
+      --   prefix ++ trace_text ++ middle ++ final_response ++ suffix
+      -- Each segment is a separate query parameter so AI.GENERATE
+      -- sees the exact full Python template (including the
+      -- per-criterion output-format spec) the API-fallback path uses.
+      prompt => CONCAT(
+        @judge_prompt_prefix, trace_text,
+        @judge_prompt_middle, COALESCE(final_response, 'N/A'),
+        @judge_prompt_suffix
+      ),
+      endpoint => '{endpoint}',{connection_arg}
+      model_params => JSON '{{"generationConfig": {{"temperature": 0.1, "maxOutputTokens": 1024}}}}',
+      output_schema => 'score INT64, justification STRING'
+    ) AS gen
+  FROM session_traces
+)
 """
+
+
+def render_ai_generate_judge_query(
+    *,
+    project: str,
+    dataset: str,
+    table: str,
+    where: str,
+    endpoint: str,
+    connection_id: Optional[str] = None,
+) -> str:
+  """Render the AI.GENERATE judge batch query for a given config.
+
+  ``AI.GENERATE`` is BigQuery's scalar generative function (it returns a
+  ``STRUCT<score, justification, full_response, status, ...>`` shaped
+  by ``output_schema``). The function call lives inside a regular
+  ``SELECT`` — it is *not* a table-valued function, so the surrounding
+  ``FROM session_traces, AI.GENERATE(...)`` lateral-join syntax used
+  by older SDK versions does not parse against current BigQuery.
+
+  ``connection_id`` is optional. When supplied (e.g.
+  ``"us.bqaa_ai_generate"``) the call uses that connection's service
+  account; when omitted, AI.GENERATE runs against the end-user
+  credentials of whichever account submits the job. Both shapes are
+  documented forms of the same function.
+  """
+  if connection_id:
+    connection_arg = f"\n      connection_id => '{connection_id}',"
+  else:
+    connection_arg = ""
+  return _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE.format(
+      project=project,
+      dataset=dataset,
+      table=table,
+      where=where,
+      endpoint=endpoint,
+      connection_arg=connection_arg,
+  )
+
+
+# Public alias kept for downstream code that imports the raw template
+# string (e.g. for inspection / docs). Callers building queries should
+# use ``render_ai_generate_judge_query`` instead so the optional
+# ``connection_id`` arg is wired correctly.
+AI_GENERATE_JUDGE_BATCH_QUERY = _AI_GENERATE_JUDGE_BATCH_QUERY_TEMPLATE
 
 # Legacy template kept for backward compatibility with pre-created
 # BQ ML models.
