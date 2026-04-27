@@ -792,6 +792,18 @@ async def run_improvement(
       with open(report_path) as f:
         report = json.load(f)
 
+  # Keep only unhelpful/partial sessions — the improvement pipeline only
+  # needs failures.  Dropping meaningful sessions avoids loading potentially X
+  # of OK answers into memory and into the LLM context at scale.
+  if "sessions" in report:
+    report["sessions"] = [
+        s for s in report["sessions"]
+        if s.get("metrics", {})
+        .get("response_usefulness", {})
+        .get("category", "")
+        in ("unhelpful", "partial")
+    ]
+
   _, old_version = config.prompt_adapter.read_prompt()
   rate = report["summary"]["meaningful_rate"]
   print("")

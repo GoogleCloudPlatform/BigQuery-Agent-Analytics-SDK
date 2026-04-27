@@ -26,7 +26,7 @@ version. It is powered by the **BigQuery Agent Analytics SDK** and
 **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)**. Prompts are stored, versioned, and
 optimized in Vertex AI.
 
-For a guided walkthrough, see the [Demo Script](DEMO_SCRIPT.md).
+For a guided walkthrough, see the [Demo Narration](DEMO_NARRATION.md).
 
 ![Demo](demo.png)
 ## The Demo Agent
@@ -585,6 +585,11 @@ calls + N judge calls per attempt, up to `max_attempts` retries).
 After several cycles, the golden set can reach 20+ cases, increasing
 both cost and runtime of the validation step. For long-running
 deployments, consider periodically pruning redundant golden cases.
+
+## Further Reading
+
+- [Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed) — Using the SDK's `CodeEvaluator` and `categorical-eval` CLI to gate PRs against production traces. Covers the same deterministic evaluators (latency, token efficiency, turn count, error rate) this demo uses in Steps 3 and 5.
+- [BigQuery Agent Analytics: From Logs to Graphs](https://medium.com/google-cloud/bigquery-agent-analytics-from-logs-to-graphs-ab0bc34e1418) — Visualizing agent session traces as interactive graphs. Shows how the `BigQueryAgentAnalyticsPlugin` captures the data that powers this improvement cycle.
 
 ## Future / Next Steps
 

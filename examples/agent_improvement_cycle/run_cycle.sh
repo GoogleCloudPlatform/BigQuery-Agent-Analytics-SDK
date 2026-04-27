@@ -642,3 +642,8 @@ fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
 echo ""
 echo "  To reset and run again: ./reset.sh"
+echo ""
+separator
+echo ""
+echo "  Total wall time: ${TOTAL_MIN}m ${TOTAL_SEC}s"
+echo ""
