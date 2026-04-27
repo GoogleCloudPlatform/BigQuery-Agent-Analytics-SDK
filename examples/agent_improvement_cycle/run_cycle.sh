@@ -640,3 +640,5 @@ else
   echo "    git diff $(basename "$PROMPTS_PATH")   # prompt evolution"
 fi
 echo "    git diff $(basename "$EVAL_CASES_PATH")   # new regression cases"
+echo ""
+echo "  To reset and run again: ./reset.sh"

@@ -63,6 +63,7 @@ METRICS = {
     "latency": {"threshold": 10000, "unit": "ms", "label": "Avg latency"},
     "token_efficiency": {"threshold": 50000, "unit": "tokens", "label": "Total tokens"},
     "turn_count": {"threshold": 10, "unit": "turns", "label": "Turn count"},
+    "error_rate": {"threshold": 0.1, "unit": "rate", "label": "Tool error rate"},
 }
 
 
@@ -102,6 +103,8 @@ def run_metrics(session_ids: list[str]) -> dict:
             evaluator = CodeEvaluator.token_efficiency(max_tokens=cfg["threshold"])
         elif metric_name == "turn_count":
             evaluator = CodeEvaluator.turn_count(max_turns=cfg["threshold"])
+        elif metric_name == "error_rate":
+            evaluator = CodeEvaluator.error_rate(max_error_rate=cfg["threshold"])
         else:
             continue
 

@@ -96,14 +96,20 @@ predicted.
 
 ## The Solution: Learn from the Field
 
-This demo shows how to close that gap using three components:
+This demo shows how to close that gap using four components:
 
 1. **[`BigQueryAgentAnalyticsPlugin`](https://adk.dev/integrations/bigquery-agent-analytics/)** captures every real agent session
    (questions, tool calls, responses) into BigQuery automatically.
-2. **[`quality_report.py`](../../scripts/quality_report.py)** (the SDK's evaluation script) reads those
-   logged sessions back from BigQuery, evaluates quality, and produces
-   structured reports that can drive automated improvement.
-3. **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)** stores and versions the agent's prompt
+2. **[`SDK quality_report.py`](../../scripts/quality_report.py)** (the SDK's evaluation script) reads those
+   logged sessions back from BigQuery, evaluates quality using an LLM
+   judge, and produces structured reports that drive automated
+   improvement.
+3. **[`SDK CodeEvaluator`](../../bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
+   operational metrics — latency, token efficiency, and turn count —
+   on the same sessions. No LLM calls needed, just math on the data
+   already in BigQuery. This ensures the improved prompt doesn't trade
+   quality for cost.
+4. **[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)** stores and versions the agent's prompt
    in the cloud. The **[Vertex AI Prompt Optimizer](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/prompts/prompt-optimizer)** generates improved
    prompts using synthetic ground truth from a teacher model.
 
