@@ -192,7 +192,9 @@ class EvalRunner:
       print(f"    {tag}: {case['id']}")
       print(f"         Question: {case['question']}")
       print(f"         Answer: {answer}")
-      print(f"         Tools called: {tools_called} | Expected: {expected_tool}")
+      print(
+          f"         Tools called: {tools_called} | Expected: {expected_tool}"
+      )
       if not result["pass"]:
         print(f"         Reason: {result['reason']}")
       return result

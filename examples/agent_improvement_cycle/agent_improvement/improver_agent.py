@@ -549,8 +549,8 @@ def _classify_question(question: str, tools: list) -> tuple[str, str]:
       f"2. Which tool is needed to answer it\n\n"
       f"Question: {question}\n\n"
       f"Available tools:\n{tools_text}\n\n"
-      f"Respond with JSON: {{\"category\": \"<topic>\", \"tool\": \"<tool_name>\"}}\n"
-      f"If no tool is relevant, use \"unknown\" for both."
+      f'Respond with JSON: {{"category": "<topic>", "tool": "<tool_name>"}}\n'
+      f'If no tool is relevant, use "unknown" for both.'
   )
 
   try:
@@ -797,7 +797,8 @@ async def run_improvement(
   # of OK answers into memory and into the LLM context at scale.
   if "sessions" in report:
     report["sessions"] = [
-        s for s in report["sessions"]
+        s
+        for s in report["sessions"]
         if s.get("metrics", {})
         .get("response_usefulness", {})
         .get("category", "")
