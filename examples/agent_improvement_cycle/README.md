@@ -23,11 +23,12 @@ A well-designed agent should learn from its own mistakes. This demo
 implements that paradigm: a continuous self-improvement cycle where
 the agent's real-world failures become the training data for its next
 version. It is powered by the **BigQuery Agent Analytics SDK** and
-**Vertex AI Prompt Registry**. Prompts are stored, versioned, and
+**[Vertex AI Prompt Registry](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/prompt-classes)**. Prompts are stored, versioned, and
 optimized in Vertex AI.
 
 For a guided walkthrough, see the [Demo Script](DEMO_SCRIPT.md).
 
+![Demo](demo.png)
 ## The Demo Agent
 
 The agent used in this demo is a **company policy Q&A assistant**,
