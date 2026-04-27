@@ -1,0 +1,78 @@
+# .github/workflows/evaluate_thresholds.yml
+#
+# Reference GitHub Actions workflow that gates every PR against the
+# last 24 hours of production traces stored in an `agent_events`
+# BigQuery table. Four deterministic budgets run as separate steps
+# so a red PR status tells you which gate regressed.
+#
+# Companion to the Medium post "Your Agent Events Table Is Also a
+# Test Suite." See the post for the narrative and for the sidebar
+# on picking initial threshold values from 30-day production data.
+#
+# Requires bigquery-agent-analytics >= 0.2.2 — the first release
+# with the raw-budget `--threshold` semantics and the tight
+# `--exit-code` failure output this workflow depends on.
+#
+# To adopt this workflow in your own agent repo:
+#   1. Copy this file to .github/workflows/evaluate_thresholds.yml.
+#   2. Set repo variables PROJECT_ID and DATASET_ID to the GCP
+#      project + BigQuery dataset where your agent_events table
+#      lives.
+#   3. Set the repo secret GCP_SA_KEY to a service account JSON
+#      with bigquery.jobUser + bigquery.dataViewer on the dataset.
+#   4. Replace `calendar_assistant` with your agent's name in all
+#      four --agent-id flags.
+#   5. Tune the four --threshold numbers against your own
+#      production distribution. A defensible starting point for
+#      each is "p95 of last 30 days + 10% buffer"; revisit after
+#      week one of CI gating.
+
+name: Agent quality gate
+
+on:
+  pull_request:
+    paths:
+      - 'agents/**'
+      - 'prompts/**'
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install 'bigquery-agent-analytics>=0.2.2,<0.3.0'
+      - uses: google-github-actions/auth@v2
+        with: { credentials_json: '${{ secrets.GCP_SA_KEY }}' }
+      - name: Latency budget
+        run: >
+          bq-agent-sdk evaluate --evaluator=latency --threshold=5000
+          --last=24h --agent-id=calendar_assistant --exit-code
+          --project-id=${{ vars.PROJECT_ID }}
+          --dataset-id=${{ vars.DATASET_ID }}
+      - name: Token budget
+        # Tune this to your agent's real token distribution. A short
+        # system prompt + few-turn sessions will land in the low
+        # thousands; production agents with longer instructions and
+        # multi-turn tool chains typically want tens of thousands.
+        # Run `bq-agent-sdk evaluate --evaluator=token_efficiency
+        # --last=30d` without `--exit-code` once to see your own
+        # baseline before picking a number.
+        run: >
+          bq-agent-sdk evaluate --evaluator=token_efficiency --threshold=5000
+          --last=24h --agent-id=calendar_assistant --exit-code
+          --project-id=${{ vars.PROJECT_ID }}
+          --dataset-id=${{ vars.DATASET_ID }}
+      - name: Tool error rate
+        run: >
+          bq-agent-sdk evaluate --evaluator=error_rate --threshold=0.1
+          --last=24h --agent-id=calendar_assistant --exit-code
+          --project-id=${{ vars.PROJECT_ID }}
+          --dataset-id=${{ vars.DATASET_ID }}
+      - name: Turn count
+        run: >
+          bq-agent-sdk evaluate --evaluator=turn_count --threshold=10
+          --last=24h --agent-id=calendar_assistant --exit-code
+          --project-id=${{ vars.PROJECT_ID }}
+          --dataset-id=${{ vars.DATASET_ID }}

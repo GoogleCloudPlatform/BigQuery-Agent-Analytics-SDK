@@ -78,8 +78,10 @@ from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import EvaluationReport
 from .evaluators import LLM_JUDGE_BATCH_QUERY
 from .evaluators import LLMAsJudge
+from .evaluators import render_ai_generate_judge_query
 from .evaluators import SESSION_SUMMARY_QUERY
 from .evaluators import SessionScore
+from .evaluators import split_judge_prompt_template
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -975,14 +977,27 @@ class Client:
     then falls back to the Gemini API.  Each path evaluates
     every criterion in the evaluator and merges the per-session
     scores into a single report.
+
+    Stamps ``report.details["execution_mode"]`` with one of
+    ``ai_generate``, ``ml_generate_text``, ``api_fallback`` so the
+    caller (and CI gates) can audit which path actually ran.
+    When an earlier tier raised before a later tier succeeded,
+    ``report.details["fallback_reason"]`` carries the chained
+    exception messages in attempt order. (The naming mirrors the
+    categorical evaluator's ``execution_mode`` value space for
+    consistency.)
     """
     criteria = evaluator._criteria
     if not criteria:
-      return _build_report(
+      report = _build_report(
           evaluator_name=evaluator.name,
           dataset=f"{self._table_ref} WHERE {where}",
           session_scores=[],
       )
+      report.details["execution_mode"] = "no_op"
+      return report
+
+    fallback_reasons: list[str] = []
 
     # Try AI.GENERATE (new path) when endpoint is not a legacy ref
     if not self._is_legacy_model_ref(self.endpoint):
@@ -997,17 +1012,20 @@ class Client:
               params,
           )
           criterion_reports.append((criterion, report))
-        return _merge_criterion_reports(
+        merged = _merge_criterion_reports(
             evaluator.name,
             f"{self._table_ref} WHERE {where}",
             criteria,
             criterion_reports,
         )
+        merged.details["execution_mode"] = "ai_generate"
+        return merged
       except Exception as e:
         logger.debug(
             "AI.GENERATE judge failed, trying legacy: %s",
             e,
         )
+        fallback_reasons.append(f"ai_generate: {e}")
 
     # Try legacy BQML batch evaluation
     text_model = (
@@ -1028,20 +1046,29 @@ class Client:
             text_model,
         )
         criterion_reports.append((criterion, report))
-      return _merge_criterion_reports(
+      merged = _merge_criterion_reports(
           evaluator.name,
           f"{self._table_ref} WHERE {where}",
           criteria,
           criterion_reports,
       )
+      merged.details["execution_mode"] = "ml_generate_text"
+      if fallback_reasons:
+        merged.details["fallback_reason"] = "; ".join(fallback_reasons)
+      return merged
     except Exception as e:
       logger.debug(
           "BQML judge failed, falling back to API: %s",
           e,
       )
+      fallback_reasons.append(f"ml_generate_text: {e}")
 
     # Fallback: fetch traces using same table/filter, evaluate via API
-    return self._api_judge(evaluator, table, where, params)
+    api_report = self._api_judge(evaluator, table, where, params)
+    api_report.details["execution_mode"] = "api_fallback"
+    if fallback_reasons:
+      api_report.details["fallback_reason"] = "; ".join(fallback_reasons)
+    return api_report
 
   def _ai_generate_judge(
       self,
@@ -1054,20 +1081,22 @@ class Client:
     """Evaluates using BigQuery AI.GENERATE with typed output."""
     from google.cloud import bigquery as bq
 
+    prefix, middle, suffix = split_judge_prompt_template(
+        criterion.prompt_template
+    )
     judge_params = list(params) + [
-        bq.ScalarQueryParameter(
-            "judge_prompt",
-            "STRING",
-            criterion.prompt_template.split("{trace_text}")[0],
-        ),
+        bq.ScalarQueryParameter("judge_prompt_prefix", "STRING", prefix),
+        bq.ScalarQueryParameter("judge_prompt_middle", "STRING", middle),
+        bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
     ]
 
-    query = AI_GENERATE_JUDGE_BATCH_QUERY.format(
+    query = render_ai_generate_judge_query(
         project=self.project_id,
         dataset=self.dataset_id,
         table=table,
         where=where,
         endpoint=self.endpoint,
+        connection_id=self.connection_id,
     )
     job_config = bq.QueryJobConfig(
         query_parameters=judge_params,
@@ -1121,12 +1150,13 @@ class Client:
     """Evaluates using BigQuery ML.GENERATE_TEXT."""
     from google.cloud import bigquery as bq
 
+    prefix, middle, suffix = split_judge_prompt_template(
+        criterion.prompt_template
+    )
     judge_params = list(params) + [
-        bq.ScalarQueryParameter(
-            "judge_prompt",
-            "STRING",
-            criterion.prompt_template.split("{trace_text}")[0],
-        ),
+        bq.ScalarQueryParameter("judge_prompt_prefix", "STRING", prefix),
+        bq.ScalarQueryParameter("judge_prompt_middle", "STRING", middle),
+        bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
     ]
 
     query = LLM_JUDGE_BATCH_QUERY.format(

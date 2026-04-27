@@ -421,6 +421,202 @@ class TestEvaluate:
     assert "score=0.3" in combined
 
   @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_llm_judge_emits_feedback_snippet(
+      self, mock_build
+  ):
+    """LLM-judge failures expose ``SessionScore.llm_feedback`` in the
+    FAIL line as a bounded ``feedback="..."`` snippet.
+
+    Without this, post #2's deterministic FAIL output story carries
+    over to LLM-judge, but the differentiator vs. a hand-rolled judge
+    ("the score is *explained*") has nothing visible in CI logs.
+    """
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="correctness_judge",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"correctness": 0.3},
+                passed=False,
+                details={},
+                llm_feedback=(
+                    "The agent confirmed a booking but the booking"
+                    " tool never ran for that session."
+                ),
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=llm-judge",
+            "--criterion=correctness",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    # Existing fields still present.
+    assert "FAIL session=bad" in combined
+    assert "metric=correctness" in combined
+    assert "score=0.3" in combined
+    # Feedback snippet appears, quoted, with the actual justification.
+    assert 'feedback="' in combined
+    assert "booking tool never ran" in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_llm_judge_truncates_long_feedback(
+      self, mock_build
+  ):
+    """Justifications longer than the snippet bound are truncated with U+2026."""
+    long_feedback = "word " * 200  # ~1000 chars
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="correctness_judge",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"correctness": 0.0},
+                passed=False,
+                details={},
+                llm_feedback=long_feedback,
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=llm-judge",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    # Look at the FAIL line itself: feedback="...". The snippet stays
+    # under the configured cap (120 chars between the quotes).
+    fail_line = next(
+        line for line in combined.splitlines() if line.startswith("  FAIL")
+    )
+    assert 'feedback="' in fail_line
+    quoted = fail_line.split('feedback="', 1)[1].rsplit('"', 1)[0]
+    assert len(quoted) <= 120
+    assert quoted.endswith("\u2026")
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_collapses_newlines_in_feedback(self, mock_build):
+    """Multi-line judge feedback collapses to a single CI log line."""
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="correctness_judge",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"correctness": 0.2},
+                passed=False,
+                details={},
+                llm_feedback="Line one.\nLine two.\n\nLine three.",
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=llm-judge",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    fail_line = next(
+        line for line in combined.splitlines() if line.startswith("  FAIL")
+    )
+    quoted = fail_line.split('feedback="', 1)[1].rsplit('"', 1)[0]
+    assert "Line one. Line two. Line three." == quoted
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_evaluate_exit_code_code_metric_omits_feedback(self, mock_build):
+    """Code-based metrics leave llm_feedback empty -> no feedback field."""
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="latency_evaluator",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="bad",
+                scores={"latency": 0.0},
+                passed=False,
+                details={
+                    "metric_latency": {
+                        "observed": 7000,
+                        "budget": 5000,
+                        "threshold": 1.0,
+                        "score": 0.0,
+                        "passed": False,
+                    }
+                },
+                llm_feedback=None,
+            ),
+        ],
+    )
+    client = MagicMock()
+    client.evaluate.return_value = report
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=latency",
+            "--exit-code",
+        ],
+    )
+    assert result.exit_code == 1
+    combined = (result.stderr or "") + (result.output or "")
+    assert "observed=7000" in combined
+    assert "budget=5000" in combined
+    # No feedback field should be emitted for code-based metrics.
+    assert "feedback=" not in combined
+
+  @patch("bigquery_agent_analytics.cli._build_client")
   def test_evaluate_exit_code_on_pass(self, mock_build):
     client = MagicMock()
     client.evaluate.return_value = _mock_report(10, 10)
@@ -565,6 +761,47 @@ class TestEvaluate:
         ],
     )
     assert result.exit_code == 2
+
+
+class TestFormatFeedbackSnippet:
+  """Direct unit tests for _format_feedback_snippet."""
+
+  def test_none_input_returns_none(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    assert _format_feedback_snippet(None) is None
+
+  def test_empty_input_returns_none(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    assert _format_feedback_snippet("") is None
+    assert _format_feedback_snippet("   \n\t  ") is None
+
+  def test_short_input_passes_through_unchanged(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    assert _format_feedback_snippet("Short and useful.") == "Short and useful."
+
+  def test_collapses_internal_whitespace_runs(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet("First.\n\n  Second.\tThird.")
+    assert out == "First. Second. Third."
+
+  def test_truncates_with_ellipsis_at_max_chars(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    text = "x" * 500
+    out = _format_feedback_snippet(text, max_chars=120)
+    assert len(out) == 120
+    assert out.endswith("\u2026")
+
+  def test_max_chars_param_respected(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet("y" * 200, max_chars=50)
+    assert len(out) == 50
+    assert out.endswith("\u2026")
 
 
 # ------------------------------------------------------------------ #
