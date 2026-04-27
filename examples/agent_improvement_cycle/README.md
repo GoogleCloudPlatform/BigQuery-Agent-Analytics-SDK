@@ -1,19 +1,10 @@
 <!-- TOC -->
 * [Agent Improvement Cycle Demo](#agent-improvement-cycle-demo)
   * [The Demo Agent](#the-demo-agent)
-    * [V1 Flaws (by design)](#v1-flaws-by-design)
   * [The Problem](#the-problem)
   * [The Solution: Learn from the Field](#the-solution-learn-from-the-field)
-    * [Why This Matters](#why-this-matters)
   * [Architecture](#architecture)
-    * [config.json](#configjson)
   * [How the Cycle Works](#how-the-cycle-works)
-    * [Prompt Storage: Vertex AI Prompt Registry](#prompt-storage-vertex-ai-prompt-registry)
-    * [Prompt Optimization: Vertex AI Prompt Optimizer](#prompt-optimization-vertex-ai-prompt-optimizer)
-    * [Teacher Agent and Synthetic Ground Truth](#teacher-agent-and-synthetic-ground-truth)
-    * [Two Eval Sets](#two-eval-sets)
-    * [Step-by-Step](#step-by-step)
-    * [Guardrails](#guardrails)
   * [Quick Start](#quick-start)
     * [Prerequisites](#prerequisites)
     * [1. Configure environment](#1-configure-environment)
@@ -23,9 +14,6 @@
     * [Reset to V1](#reset-to-v1)
   * [Using with Other Agents](#using-with-other-agents)
   * [Configuration](#configuration)
-    * [config.json fields](#configjson-fields)
-    * [Environment variables (.env)](#environment-variables-env)
-    * [Cost notes](#cost-notes)
   * [Future / Next Steps](#future--next-steps)
 <!-- TOC -->
 
@@ -80,6 +68,22 @@ the system detects these failures, generates correct answers using a
 teacher agent, optimizes the prompt through the Vertex AI Prompt
 Optimizer, and produces a new version that actually uses the tools.
 The agent fixes itself.
+
+> **Note: observed model behavior with V1.** The model does not fail
+> uniformly across all topics. For topics **mentioned** in V1's inline
+> knowledge (PTO, sick leave, remote work), the model often calls
+> `lookup_company_policy` anyway — even though the prompt says "answer
+> from the knowledge above." The inline mention acts as a signal that
+> the topic is valid, which encourages the model to explore available
+> tools for more detail. For topics **not mentioned** in the prompt
+> (expenses, holidays, parental leave), the explicit fallback
+> instruction — "tell the user you do not have that information and
+> suggest they contact HR" — overrides tool exploration. The model
+> obeys the refusal rule because nothing in the prompt hints that the
+> tool could answer the question. This means the V1 failures are
+> concentrated on topics absent from the prompt, not on all topics.
+> The improvement cycle discovers these gaps through synthetic traffic
+> and fixes them by rewriting the prompt to always use tools first.
 
 ## The Problem
 
@@ -253,17 +257,22 @@ structured optimization pipeline backed by real failure data.
 
 ### Teacher Agent and Synthetic Ground Truth
 
-The Vertex AI Prompt Optimizer needs examples of correct output to
-learn from. But where do those come from? You do not have
-hand-written reference answers for every possible user question ...
-especially not for questions discovered from synthetic traffic that
-you never anticipated.
+The Vertex AI Prompt Optimizer needs **labeled examples** — pairs of
+(input, expected_output) — to learn from. This is the same principle
+as supervised learning in ML: you can't improve a model without
+showing it what "correct" looks like.
 
-The solution is the **teacher agent**. It is built from the same
-`agent_factory` and runs with the **same tools and the same model**
-as the target agent. The only difference is the prompt: instead of
-the flawed V1 instruction, the teacher gets a short, direct
-instruction that explicitly requires tool usage:
+But where do the expected outputs come from? You don't have
+hand-written reference answers for every possible user question,
+especially not for questions discovered from synthetic traffic that
+you never anticipated. Writing golden answers manually doesn't
+scale — and the whole point is to handle questions you didn't predict.
+
+The solution is the **teacher agent**. It borrows a concept from
+**knowledge distillation** in ML, where a "teacher" model generates
+training data for a "student" model. Here the teacher isn't a bigger
+model — it's the **same model with the same tools**, just with a
+different prompt:
 
 ```
 You are an expert assistant. For EVERY question, you MUST call
@@ -272,11 +281,17 @@ know' or defer the user elsewhere. ALWAYS use the tools first, then answer
 based on the tool results. Be specific and thorough.
 ```
 
-The insight: the V1 agent fails not because the tools are broken or
-the model is incapable, but because the V1 prompt actively
-**discourages** tool use ("answer from the knowledge above"). The
-teacher prompt removes that barrier, so the teacher produces correct,
-tool-grounded answers to the same questions the target agent failed.
+The teacher's job is narrow: **produce correct, tool-grounded answers
+to questions the target agent failed on.** It's not a replacement for
+the target agent — it's a data generator. Think of it as an oracle
+that knows how to use the tools correctly, but has no domain-specific
+personality, formatting, or routing logic.
+
+The key insight: the V1 agent fails not because the tools are broken
+or the model is incapable, but because the V1 prompt actively
+**discourages** tool use. The teacher prompt removes that barrier.
+The teacher calls `lookup_company_policy("expenses")` and gets a
+correct answer; the target agent with V1 never tries.
 
 The full flow:
 
@@ -285,18 +300,18 @@ Failed sessions from quality report
         |
         v
   Teacher agent re-answers each failed question
-  (same tools, same model, better prompt)
+  (same tools, same model, tool-first prompt)
         |
         v
-  Produces triples:
+  Produces labeled triples:
     (question, bad_response, ground_truth)
         |
         v
   Vertex AI Prompt Optimizer
-  (target_response mode)
+  (target_response mode — learns from the triples)
         |
         v
-  Optimized prompt that steers the agent
+  Optimized prompt that steers the target agent
   toward tool-grounded answers
 ```
 
@@ -305,12 +320,39 @@ for inspection. Each entry contains the original question, the bad
 response from the target agent, and the teacher's ground truth
 answer.
 
-**Why not just use the teacher prompt directly?** The teacher prompt
-is generic ... it works for any agent with any tools. The optimized
-prompt is specific: it learns the domain vocabulary, the tool names,
-the response style, and the edge cases from the ground truth
-examples. The optimizer produces a prompt that is both correct and
-tailored to the agent's actual use case.
+#### Why not just use the teacher prompt directly?
+
+This is the natural question: if the teacher works, why not deploy it?
+
+The teacher prompt is **generic** — "always use tools, be thorough."
+It works for producing correct answers but it lacks everything a
+production agent needs:
+
+- **Topic routing:** A complex agent with 10+ tools needs to know
+  which tool to call for which question. "Use tools" doesn't tell
+  the agent to call `lookup_company_policy("benefits")` when someone
+  asks about their 401k.
+- **Response style:** The teacher gives verbose, unstructured answers.
+  A production prompt defines formatting, tone, and what to include
+  or omit.
+- **Edge case handling:** The teacher doesn't know about policy
+  exceptions, date-relative logic, or when to combine multiple tool
+  calls.
+- **Domain vocabulary:** The teacher doesn't know that "WFH" means
+  remote work, or that "time off" maps to PTO.
+
+The optimizer reads the ground truth examples and produces a prompt
+that is both **correct** (uses tools) and **tailored** (knows the
+domain mappings, response format, and edge cases). The teacher
+generates the training data; the optimizer generates the production
+prompt.
+
+In this demo, the agent is simple enough that the distinction is
+subtle — the teacher's generic prompt happens to work well for 2
+tools and 6 topics. In a real system with complex tool routing,
+multi-step workflows, and nuanced response requirements, the gap
+between "generic tool-first" and "optimized domain-specific" is
+significant.
 
 ### Two Eval Sets
 
