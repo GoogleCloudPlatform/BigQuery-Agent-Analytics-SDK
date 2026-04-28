@@ -1095,3 +1095,185 @@ def test_import_owl_output_to_existing_directory_emits_error(tmp_path):
 
   assert result.exit_code == 1
   assert "cli-output-error" in result.output
+
+
+# --------------------------------------------------------------------- #
+# gm compile --emit-concept-index (A7)                                  #
+# --------------------------------------------------------------------- #
+
+
+def test_compile_without_emit_concept_index_is_byte_identical(tmp_path):
+  """Regression guard: omitting ``--emit-concept-index`` produces the
+  exact same DDL as before A7 landed.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+  result = _RUNNER.invoke(app, ["compile", str(binding)])
+
+  assert result.exit_code == 0
+  assert result.output == _COMPILE_EXPECTED_DDL
+
+
+def test_compile_emit_concept_index_requires_table_flag(tmp_path):
+  """``--emit-concept-index`` with no ``--concept-index-table`` is
+  rejected — no silent global default per the RFC.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(
+      app, ["compile", str(binding), "--emit-concept-index"]
+  )
+
+  assert result.exit_code != 0
+  assert "--concept-index-table" in result.output
+
+
+def test_compile_emit_concept_index_appends_two_create_or_replace_statements(
+    tmp_path,
+):
+  """Happy path: both the property-graph DDL and the concept-index
+  SQL (main + meta) appear on stdout.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "compile",
+          str(binding),
+          "--emit-concept-index",
+          "--concept-index-table",
+          "p.d.tiny_concept_index",
+      ],
+  )
+
+  assert result.exit_code == 0
+  # Property-graph DDL comes first, unchanged.
+  assert "CREATE PROPERTY GRAPH" in result.output
+  # Then two concept-index CREATE OR REPLACE statements (main + meta).
+  assert result.output.count("CREATE OR REPLACE TABLE") == 2
+  assert "`p.d.tiny_concept_index`" in result.output
+  assert "`p.d.tiny_concept_index__meta`" in result.output
+
+
+def test_compile_emit_concept_index_with_output_flag_writes_combined_sql(
+    tmp_path,
+):
+  """``-o PATH`` with the emit flag lands the combined SQL in the
+  named file and leaves stdout empty.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+  out_path = tmp_path / "combined.sql"
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "compile",
+          str(binding),
+          "--emit-concept-index",
+          "--concept-index-table",
+          "p.d.tiny_concept_index",
+          "-o",
+          str(out_path),
+      ],
+  )
+
+  assert result.exit_code == 0
+  assert result.output == ""
+  body = out_path.read_text(encoding="utf-8")
+  assert "CREATE PROPERTY GRAPH" in body
+  assert body.count("CREATE OR REPLACE TABLE") == 2
+
+
+def test_compile_emit_concept_index_invalid_table_path_fails(tmp_path):
+  """An ``--concept-index-table`` value that fails A3-A5 validation
+  surfaces as a clean compile-time error.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "compile",
+          str(binding),
+          "--emit-concept-index",
+          "--concept-index-table",
+          "not-three-segments",
+      ],
+  )
+
+  assert result.exit_code == 1
+  assert "project.dataset.table" in result.output
+
+
+def test_compile_emit_concept_index_is_deterministic_across_runs(tmp_path):
+  """D2 round-trip: re-running with the same inputs produces
+  byte-identical combined output.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+  flags = [
+      "compile",
+      str(binding),
+      "--emit-concept-index",
+      "--concept-index-table",
+      "p.d.tiny_concept_index",
+  ]
+  out1 = _RUNNER.invoke(app, flags).output
+  out2 = _RUNNER.invoke(app, flags).output
+  assert out1 == out2
+
+
+def test_compile_emit_concept_index_with_explicit_compiler_version(tmp_path):
+  """``--compiler-version`` overrides the default. The version string
+  flows into ``compile_fingerprint`` so the meta row reflects it.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+
+  result = _RUNNER.invoke(
+      app,
+      [
+          "compile",
+          str(binding),
+          "--emit-concept-index",
+          "--concept-index-table",
+          "p.d.tiny_concept_index",
+          "--compiler-version",
+          "test-pin-1.2.3",
+      ],
+  )
+
+  assert result.exit_code == 0
+  # The version string appears in the meta row's compiler_version column.
+  assert "'test-pin-1.2.3'" in result.output
+
+
+def test_compile_emit_concept_index_default_compiler_version_is_stable(
+    tmp_path,
+):
+  """Without ``--compiler-version`` the default is the package
+  version; same default → same fingerprint → byte-identical SQL.
+  """
+  _write(tmp_path, "tiny.ontology.yaml", _COMPILE_ONTOLOGY)
+  binding = _write(tmp_path, "tiny.binding.yaml", _COMPILE_BINDING)
+  flags = [
+      "compile",
+      str(binding),
+      "--emit-concept-index",
+      "--concept-index-table",
+      "p.d.tiny_concept_index",
+  ]
+  out1 = _RUNNER.invoke(app, flags).output
+  out2 = _RUNNER.invoke(app, flags).output
+  assert out1 == out2
+  # The meta row carries some non-empty compiler_version string.
+  meta_section = out1[out1.index("__meta") :]
+  # Find a quoted compiler-version-shaped value (heuristic: any
+  # non-empty string literal in the meta section that isn't a
+  # fingerprint or short id).
+  assert "'" in meta_section

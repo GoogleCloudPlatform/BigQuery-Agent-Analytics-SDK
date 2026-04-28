@@ -47,11 +47,36 @@ import yaml
 from .binding_loader import load_binding
 from .binding_loader import load_binding_from_string
 from .binding_models import Binding
+from .graph_ddl_compiler import compile_concept_index
 from .graph_ddl_compiler import compile_graph
 from .ontology_loader import load_ontology
 from .ontology_loader import load_ontology_from_string
 from .ontology_models import Ontology
 from .scaffold import scaffold
+
+
+def _default_compiler_version() -> str:
+  """Return the canonical compiler-version string for fingerprints.
+
+  Resolves the installed ``bigquery-agent-analytics`` distribution
+  version via ``importlib.metadata``. Falls back to ``"unknown"``
+  when running from a checkout that hasn't been installed (rare; the
+  fallback is deterministic so byte-identical emission still holds).
+
+  Format is ``"bigquery_ontology X.Y.Z"`` so the meta row's
+  ``compiler_version`` column is human-readable and matches the
+  pattern used in design docs and tests.
+  """
+  try:
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    return f"bigquery_ontology {_pkg_version('bigquery-agent-analytics')}"
+  except PackageNotFoundError:
+    return "bigquery_ontology unknown"
+  except Exception:  # pragma: no cover - defensive
+    return "bigquery_ontology unknown"
+
 
 app = typer.Typer(
     name="gm",
@@ -326,6 +351,35 @@ def compile_command(
         "--json",
         help="Emit structured JSON errors on stderr.",
     ),
+    emit_concept_index: bool = typer.Option(
+        False,
+        "--emit-concept-index",
+        help=(
+            "Also emit ``CREATE OR REPLACE TABLE`` SQL for the concept "
+            "index + ``__meta`` sibling, consumed at runtime by "
+            "``OntologyRuntime`` resolvers and verification. Requires "
+            "``--concept-index-table``."
+        ),
+    ),
+    concept_index_table: str | None = typer.Option(
+        None,
+        "--concept-index-table",
+        help=(
+            "Fully-qualified destination for the concept index, "
+            "``project.dataset.table``. Required when "
+            "``--emit-concept-index`` is set; no silent global default."
+        ),
+    ),
+    compiler_version: str | None = typer.Option(
+        None,
+        "--compiler-version",
+        help=(
+            "Override the compiler-version string flowed into the "
+            "concept index's ``compile_fingerprint``. Defaults to the "
+            "installed package version. Only honored with "
+            "``--emit-concept-index``."
+        ),
+    ),
 ) -> None:
   """Compile a binding to BigQuery ``CREATE PROPERTY GRAPH`` DDL.
 
@@ -336,6 +390,13 @@ def compile_command(
   The input must be a binding YAML file. Ontology files cannot be
   compiled on their own (they're backend-neutral; they need a
   binding to pick up physical tables and columns).
+
+  When ``--emit-concept-index`` is set, the output additionally
+  contains two ``CREATE OR REPLACE TABLE`` statements (the concept
+  index and its ``__meta`` sibling) appended after the property-graph
+  DDL. The two atomic-per-statement tables are pair-consistent via
+  a shared ``compile_fingerprint``; see
+  ``docs/entity_resolution_primitives.md`` §4.2 / §5.
   """
   file_path = Path(file)
   if not file_path.exists() or not file_path.is_file():
@@ -402,6 +463,49 @@ def compile_command(
     )
     raise typer.Exit(code=2)
 
+  # Concept-index flags must be checked before any compilation work,
+  # so we can fail fast with a clear error rather than computing DDL
+  # the caller will discard.
+  if emit_concept_index and concept_index_table is None:
+    _emit_errors(
+        [
+            {
+                "file": file,
+                "line": 0,
+                "col": 0,
+                "rule": "cli-missing-flag",
+                "severity": "error",
+                "message": (
+                    "--emit-concept-index requires --concept-index-table "
+                    "<project.dataset.table>; no silent global default."
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+  if concept_index_table is not None and not emit_concept_index:
+    # Bare ``--concept-index-table`` without the emit flag is almost
+    # certainly an authoring mistake. Surface it instead of silently
+    # ignoring the value.
+    _emit_errors(
+        [
+            {
+                "file": file,
+                "line": 0,
+                "col": 0,
+                "rule": "cli-orphan-flag",
+                "severity": "error",
+                "message": (
+                    "--concept-index-table requires --emit-concept-index; "
+                    "the flag is ignored without it."
+                ),
+            }
+        ],
+        as_json=json_output,
+    )
+    raise typer.Exit(code=2)
+
   resolved_ontology = Path(ontology_path) if ontology_path is not None else None
   ontology, binding = _load_ontology_and_binding(
       file_path, ontology_path=resolved_ontology, json_output=json_output
@@ -409,6 +513,18 @@ def compile_command(
 
   try:
     ddl = compile_graph(ontology, binding)
+    if emit_concept_index:
+      version_str = compiler_version or _default_compiler_version()
+      concept_sql = compile_concept_index(
+          ontology,
+          binding,
+          output_table=concept_index_table,  # type: ignore[arg-type]
+          compiler_version=version_str,
+      )
+      # The property-graph DDL ends with ``;\n``; append a blank line
+      # before the concept-index statements so the two sections are
+      # visually distinct.
+      ddl = ddl + "\n" + concept_sql
   except ValueError as exc:
     _emit_errors(
         _collect_errors(file, exc, kind="compile"),

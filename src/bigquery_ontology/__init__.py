@@ -27,6 +27,7 @@ from .binding_models import Binding
 from .binding_models import EntityBinding
 from .binding_models import PropertyBinding
 from .binding_models import RelationshipBinding
+from .graph_ddl_compiler import compile_concept_index
 from .graph_ddl_compiler import compile_graph
 from .ontology_loader import load_ontology
 from .ontology_loader import load_ontology_from_string
@@ -53,6 +54,7 @@ __all__ = [
     "PropertyType",
     "Relationship",
     "RelationshipBinding",
+    "compile_concept_index",
     "compile_graph",
     "load_binding",
     "load_binding_from_string",
