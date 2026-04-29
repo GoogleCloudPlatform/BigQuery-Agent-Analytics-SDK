@@ -52,6 +52,10 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --model gemini-2.5-pro  # use a specific model
 ./scripts/quality_report.sh --samples 20            # show 20 sessions per category
 ./scripts/quality_report.sh --samples all           # show all sessions per category
+./scripts/quality_report.sh --app-name my_agent     # filter to a specific agent app
+./scripts/quality_report.sh --session-ids-file ids.json  # evaluate specific sessions
+./scripts/quality_report.sh --output-json report.json    # write structured JSON output
+./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
 ```
 
 Or run the Python script directly:
@@ -73,6 +77,21 @@ python scripts/quality_report.py --limit 50 --report
 all the above in a structured markdown format suitable for sharing or archiving.
 
 **Log files** are saved to `scripts/reports/` for each eval run.
+
+### Filtering
+
+By default, the script evaluates the most recent sessions by time. Two
+additional filters are available for targeted evaluation:
+
+- **`--app-name`** filters to sessions from a specific agent. Matches the
+  `root_agent_name` attribute set by `BigQueryAgentAnalyticsPlugin`.
+- **`--session-ids-file`** evaluates only the sessions listed in a JSON file.
+  Accepts either a list of `{"session_id": "..."}` objects (the output of
+  `run_eval.py`) or a plain list of ID strings. When session IDs are provided,
+  the script filters directly by ID instead of relying on time-based queries,
+  which avoids picking up stale sessions from prior runs.
+
+These filters can be combined (e.g. `--app-name my_agent --session-ids-file ids.json`).
 
 ### Metrics
 
