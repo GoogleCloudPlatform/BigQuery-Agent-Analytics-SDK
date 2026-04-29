@@ -147,7 +147,8 @@ def generate_traffic(count: int = 10) -> list[dict]:
               f" retrying ({attempt + 1}/3)..."
           )
           continue
-      return cases
+      # Gemini may return more cases than requested; truncate to count.
+      return cases[:count]
     except json.JSONDecodeError:
       if attempt < 2:
         print(

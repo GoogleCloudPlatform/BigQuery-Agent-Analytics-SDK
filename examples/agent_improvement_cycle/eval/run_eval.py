@@ -109,35 +109,39 @@ async def run_all_cases(
       plugins=[mod.bq_logging_plugin],
   )
 
+  # Limit concurrent LLM calls to avoid 429 rate-limit errors and timeouts.
+  semaphore = asyncio.Semaphore(5)
+
   async def _run_one(i: int, case: dict) -> dict:
-    try:
-      result = await asyncio.wait_for(
-          run_single_case(runner, case), timeout=120
-      )
-      resp_text = result["response"].replace("\n", " ").strip()
-      print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
-      print(f"           -> {resp_text}")
-      return result
-    except asyncio.TimeoutError:
-      print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
-      print(f"           -> TIMEOUT (120s)")
-      return {
-          "case_id": case["id"],
-          "question": case["question"],
-          "category": case.get("category", ""),
-          "response": "ERROR: Timeout after 120s",
-          "session_id": "",
-      }
-    except Exception as e:
-      print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
-      print(f"           -> ERROR: {e}")
-      return {
-          "case_id": case["id"],
-          "question": case["question"],
-          "category": case.get("category", ""),
-          "response": f"ERROR: {e}",
-          "session_id": "",
-      }
+    async with semaphore:
+      try:
+        result = await asyncio.wait_for(
+            run_single_case(runner, case), timeout=120
+        )
+        resp_text = result["response"].replace("\n", " ").strip()
+        print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
+        print(f"           -> {resp_text}")
+        return result
+      except asyncio.TimeoutError:
+        print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
+        print(f"           -> TIMEOUT (120s)")
+        return {
+            "case_id": case["id"],
+            "question": case["question"],
+            "category": case.get("category", ""),
+            "response": "ERROR: Timeout after 120s",
+            "session_id": "",
+        }
+      except Exception as e:
+        print(f"  [{i}/{len(cases)}] {case['id']}: {case['question']}")
+        print(f"           -> ERROR: {e}")
+        return {
+            "case_id": case["id"],
+            "question": case["question"],
+            "category": case.get("category", ""),
+            "response": f"ERROR: {e}",
+            "session_id": "",
+        }
 
   results = await asyncio.gather(
       *[_run_one(i, case) for i, case in enumerate(cases, 1)]
