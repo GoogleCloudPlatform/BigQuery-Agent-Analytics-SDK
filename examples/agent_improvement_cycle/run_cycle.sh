@@ -330,9 +330,20 @@ for cycle in $(seq 1 "$CYCLES"); do
   echo ""
   step_start
 
+  # Timeouts/errors on individual cases are expected at high traffic
+  # volumes — don't let them abort the whole cycle.
+  set +e
   $PY "$SCRIPT_DIR/eval/run_eval.py" \
     $AGENT_CONFIG_FLAG \
     --eval-cases "$TRAFFIC_JSON"
+  TRAFFIC_EXIT=$?
+  set -e
+
+  if [[ $TRAFFIC_EXIT -ne 0 ]]; then
+    echo ""
+    echo "  Note: $TRAFFIC_EXIT exit code from run_eval.py (some cases may have timed out)."
+    echo "  Continuing — timed-out cases are excluded from quality scoring."
+  fi
 
   # Save expected session IDs from this run for verification in Step 3.
   EXPECTED_IDS="$REPORTS_DIR/expected_session_ids_cycle_${cycle}.json"
@@ -370,7 +381,7 @@ for cycle in $(seq 1 "$CYCLES"); do
     $PY "$REPO_ROOT/scripts/quality_report.py" \
       --app-name "$APP_NAME" \
       --output-json "$REPORT_JSON" \
-      --limit "$ACTUAL_TRAFFIC_COUNT" \
+      --session-ids-file "$EXPECTED_IDS" \
       --time-period 24h || { rm -f "$REPORT_JSON"; true; }
 
     if [[ -f "$REPORT_JSON" ]]; then
@@ -498,9 +509,18 @@ print(len(missing))
   ACTUAL_FRESH_COUNT=$(jq '.eval_cases | length' "$FRESH_TRAFFIC")
 
   # 5c: Run fresh traffic through the improved agent (WITH BQ logging)
+  set +e
   $PY "$SCRIPT_DIR/eval/run_eval.py" \
     $AGENT_CONFIG_FLAG \
     --eval-cases "$FRESH_TRAFFIC"
+  FRESH_EXIT=$?
+  set -e
+
+  if [[ $FRESH_EXIT -ne 0 ]]; then
+    echo ""
+    echo "  Note: some fresh traffic cases may have timed out (exit $FRESH_EXIT)."
+    echo "  Continuing — timed-out cases are excluded from quality scoring."
+  fi
 
   # Save expected session IDs for Step 5 verification.
   FRESH_EXPECTED_IDS="$REPORTS_DIR/expected_session_ids_cycle_${cycle}_fresh.json"
@@ -526,7 +546,7 @@ print(len(missing))
     $PY "$REPO_ROOT/scripts/quality_report.py" \
       --app-name "$APP_NAME" \
       --output-json "$FRESH_REPORT" \
-      --limit "$ACTUAL_FRESH_COUNT" \
+      --session-ids-file "$FRESH_EXPECTED_IDS" \
       --time-period 24h || { rm -f "$FRESH_REPORT"; true; }
 
     # Guard: ensure NO old session IDs from Step 3 appear in the

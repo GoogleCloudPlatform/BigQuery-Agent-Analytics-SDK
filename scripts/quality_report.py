@@ -364,7 +364,8 @@ def resolve_trace_responses(traces):
 # ---------------------------------------------------------------------------
 
 def run_evaluation(
-    time_range=None, limit=100, model=None, persist=False, app_name=None
+    time_range=None, limit=100, model=None, persist=False, app_name=None,
+    session_ids=None,
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig, TraceFilter
 
@@ -381,17 +382,28 @@ def run_evaluation(
       results_table="quality_eval_results" if persist else None,
   )
 
-  effective_time_range = time_range
-  if effective_time_range and effective_time_range.lower() == "all":
-    effective_time_range = None
-
-  if effective_time_range:
-    trace_filter = TraceFilter.from_cli_args(last=effective_time_range)
+  # When explicit session IDs are provided, filter directly by them
+  # instead of relying on time-based queries that can pick up stale
+  # sessions from prior runs.
+  if session_ids:
+    trace_filter = TraceFilter(
+        session_ids=session_ids,
+        limit=len(session_ids),
+    )
+    if app_name:
+      trace_filter.root_agent_name = app_name
   else:
-    trace_filter = TraceFilter()
-  trace_filter.limit = limit
-  if app_name:
-    trace_filter.root_agent_name = app_name
+    effective_time_range = time_range
+    if effective_time_range and effective_time_range.lower() == "all":
+      effective_time_range = None
+
+    if effective_time_range:
+      trace_filter = TraceFilter.from_cli_args(last=effective_time_range)
+    else:
+      trace_filter = TraceFilter()
+    trace_filter.limit = limit
+    if app_name:
+      trace_filter.root_agent_name = app_name
 
   report = client.evaluate_categorical(config=cat_config, filters=trace_filter)
 
@@ -511,6 +523,20 @@ def run_eval(args):
       args.samples or "default (10/5/3)",
   )
 
+  # Load session IDs from file if provided
+  session_ids = None
+  if args.session_ids_file:
+    import json as _json
+    with open(args.session_ids_file) as _f:
+      _data = _json.load(_f)
+    # Accepts either a list of objects with "session_id" keys
+    # (run_eval.py output) or a plain list of strings.
+    if _data and isinstance(_data[0], dict):
+      session_ids = [r["session_id"] for r in _data if r.get("session_id")]
+    else:
+      session_ids = [s for s in _data if s]
+    logger.info("Filtering to %d session IDs from %s", len(session_ids), args.session_ids_file)
+
   t0 = time.time()
   try:
     result = run_evaluation(
@@ -519,6 +545,7 @@ def run_eval(args):
         model=model,
         persist=args.persist,
         app_name=args.app_name,
+        session_ids=session_ids,
     )
   except Exception:
     logger.exception("Evaluation failed")
@@ -1150,6 +1177,16 @@ Examples:
       type=float,
       default=10.0,
       help="Unhelpful rate warning threshold in %% (default: 10)",
+  )
+  parser.add_argument(
+      "--session-ids-file",
+      type=str,
+      default=None,
+      metavar="PATH",
+      help="JSON file containing session IDs to evaluate. Expects a list of "
+           "objects with 'session_id' fields (e.g. the output of run_eval.py). "
+           "When set, only these sessions are evaluated — --limit and "
+           "--time-period are ignored.",
   )
 
   args = parser.parse_args()
