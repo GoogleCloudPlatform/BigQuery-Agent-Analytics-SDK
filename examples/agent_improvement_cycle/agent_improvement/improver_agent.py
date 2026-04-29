@@ -924,6 +924,16 @@ async def run_improvement(
   else:
     print("  No failed cases to extract.")
 
+  # Narrow the report to only the extracted cases so the optimizer
+  # generates ground truth for the same subset used in the golden
+  # eval set, not for every failure in the report.
+  if failed_cases:
+    extracted_questions = {c["question"] for c in failed_cases}
+    report["sessions"] = [
+        s for s in report["sessions"]
+        if s.get("question", "") in extracted_questions
+    ]
+
   # Set shared state for tool functions
   _state["config"] = config
   _state["report"] = report

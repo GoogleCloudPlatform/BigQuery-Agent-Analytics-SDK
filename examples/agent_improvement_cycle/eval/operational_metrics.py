@@ -133,6 +133,10 @@ def run_metrics(session_ids: list[str]) -> dict:
     avg_observed = (
         sum(observed_values) / len(observed_values) if observed_values else 0
     )
+    if cfg.get("fmt") == "int":
+      avg_observed = int(round(avg_observed))
+    else:
+      avg_observed = round(avg_observed, 1)
 
     results[metric_name] = {
         "label": cfg["label"],
@@ -142,7 +146,7 @@ def run_metrics(session_ids: list[str]) -> dict:
         "passed": report.passed_sessions,
         "failed": report.failed_sessions,
         "pass_rate": report.pass_rate,
-        "avg_observed": round(avg_observed, 1),
+        "avg_observed": avg_observed,
     }
 
   return results
@@ -165,8 +169,7 @@ def print_baseline(metrics: dict, label: str):
     else:
       status = "PASS"
 
-    fmt_val = int(val) if cfg.get("fmt") == "int" and isinstance(val, (int, float)) else val
-    v_str = f"{fmt_val} {unit}" if isinstance(val, (int, float)) else str(val)
+    v_str = f"{val} {unit}" if isinstance(val, (int, float)) else str(val)
     t_str = f"{threshold} {unit}"
     print(f"  {cfg['label']:<18}  {v_str:>14}  {t_str:>14}  {status:>8}")
 
@@ -207,11 +210,8 @@ def print_comparison(
     if status == "WARN":
       all_pass = False
 
-    is_int = cfg.get("fmt") == "int"
-    fmt_b = int(b_val) if is_int and isinstance(b_val, (int, float)) else b_val
-    fmt_a = int(a_val) if is_int and isinstance(a_val, (int, float)) else a_val
-    b_str = f"{fmt_b} {unit}" if isinstance(b_val, (int, float)) else str(b_val)
-    a_str = f"{fmt_a} {unit}" if isinstance(a_val, (int, float)) else str(a_val)
+    b_str = f"{b_val} {unit}" if isinstance(b_val, (int, float)) else str(b_val)
+    a_str = f"{a_val} {unit}" if isinstance(a_val, (int, float)) else str(a_val)
     t_str = f"{threshold} {unit}"
 
     print(
