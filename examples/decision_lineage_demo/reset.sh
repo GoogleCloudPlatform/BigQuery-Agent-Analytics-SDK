@@ -20,7 +20,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
-RENDERED="$SCRIPT_DIR/bq_studio_queries.gql"
+RENDERED_QUERIES="$SCRIPT_DIR/bq_studio_queries.gql"
+RENDERED_DDL="$SCRIPT_DIR/property_graph.gql"
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "No .env found at $ENV_FILE — nothing to reset."
@@ -43,6 +44,6 @@ if [[ "$confirm_lc" != "y" && "$confirm_lc" != "yes" ]]; then
 fi
 
 bq rm -r -f --dataset "${PROJECT_ID}:${DATASET_ID}" || true
-rm -f "$ENV_FILE" "$RENDERED"
+rm -f "$ENV_FILE" "$RENDERED_QUERIES" "$RENDERED_DDL"
 rm -rf "$SCRIPT_DIR/.venv"
 echo "Reset complete. Re-run ./setup.sh to seed and rebuild."

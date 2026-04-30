@@ -151,6 +151,8 @@ decision_lineage_demo/
 ├── render_queries.sh          # sed-renders the .gql template
 ├── bq_studio_queries.gql.tpl  # 6 GQL blocks (placeholders)
 ├── bq_studio_queries.gql      # rendered (gitignored, by setup)
+├── property_graph.gql.tpl     # standalone CREATE PROPERTY GRAPH DDL (placeholders)
+├── property_graph.gql         # rendered (gitignored, by setup)
 ├── agent/                     # the live ADK agent
 │   ├── agent.py               # root_agent + bq_logging_plugin
 │   ├── tools.py               # 5 decision-commit tools

@@ -152,6 +152,57 @@ bundle without rewriting the SDK side:
 | `agent_events` is empty after step 6 | The plugin failed to flush. Re-run `./.venv/bin/python3 run_agent.py` and confirm the script's `Flushing BQ AA Plugin so all spans land in BigQuery...` line completes without warnings. |
 | BQ Studio's Graph tab is missing on Block 2 | The result needs to render once before the tab appears; rerun the query. |
 
+## Recreate the property graph from existing tables
+
+If the seven backing tables are already populated (a prior
+`./setup.sh` run, a clone of someone else's dataset, or a manual
+INSERT-from-SELECT into a new project) you can recreate just the
+property graph layer without rerunning the agent or `AI.GENERATE`.
+
+The bundle ships `property_graph.gql.tpl` — a parameterized
+`CREATE OR REPLACE PROPERTY GRAPH` DDL that wires the seven
+backing tables into `agent_context_graph` exactly the way the SDK
+does (byte-identical to
+`ContextGraphManager.get_decision_property_graph_ddl()` at default
+config).
+
+Two ways to apply it:
+
+```bash
+# Option 1 — use the rendered file written by setup.sh (or by
+# render_queries.sh) and apply it with bq:
+bq query \
+  --use_legacy_sql=false \
+  --location="${DATASET_LOCATION:-us-central1}" \
+  < property_graph.gql
+
+# Option 2 — paste property_graph.gql into a BigQuery Studio query
+# tab and click Run.
+```
+
+The DDL is a single atomic `CREATE OR REPLACE PROPERTY GRAPH`
+statement, so re-applying is safe. If your dataset uses non-default
+table names (e.g. you overrode `TABLE_ID` or chose different
+`ContextGraphConfig` table names), edit `property_graph.gql.tpl`
+to match before rendering — the table names are intentionally
+inlined to keep the rendered file paste-and-run.
+
+Pre-flight check that all seven tables exist:
+
+```bash
+bq query \
+  --use_legacy_sql=false \
+  --location="${DATASET_LOCATION:-us-central1}" \
+  "SELECT table_name FROM \`${PROJECT_ID}.${DATASET_ID}\`.INFORMATION_SCHEMA.TABLES
+   WHERE table_name IN ('agent_events','extracted_biz_nodes','context_cross_links',
+                        'decision_points','candidates','made_decision_edges',
+                        'candidate_edges')
+   ORDER BY table_name"
+# Expect 7 rows. If any are missing, run setup.sh / build_graph.py
+# instead — the property graph DDL needs every backing table to
+# exist before it will compile.
+```
+
 ## Tear down
 
 ```bash
