@@ -49,14 +49,14 @@ PER_SESSION_TIMEOUT_S = int(os.getenv("DEMO_SESSION_TIMEOUT_S", "300"))
 
 async def _run_one(
     runner: InMemoryRunner, campaign: str, brief: str, idx: int, total: int
-) -> tuple[str, int]:
+) -> tuple[str, int, bool]:
   """Run one campaign brief end-to-end.
 
   Returns:
-      (session_id, event_count) — event_count is how many events the
-      runner streamed for this invocation (a coarse activity check;
-      the authoritative span count lives in BigQuery once the plugin
-      flushes).
+      ``(session_id, event_count, succeeded)``. ``succeeded`` is
+      False when the runner raised an exception or streamed zero
+      events. Callers must drop unsuccessful sessions; their plugin
+      output (if any) cannot be relied on.
   """
   session = await runner.session_service.create_session(
       app_name=runner.app_name,
@@ -69,6 +69,7 @@ async def _run_one(
 
   start = time.monotonic()
   event_count = 0
+  errored = False
   try:
     async for _event in runner.run_async(
         user_id=USER_ID,
@@ -77,19 +78,28 @@ async def _run_one(
     ):
       event_count += 1
   except Exception as exc:  # pylint: disable=broad-except
+    errored = True
     print(
         f"          ! agent run errored after {event_count} events: {exc}",
         file=sys.stderr,
     )
   elapsed = time.monotonic() - start
+  succeeded = (not errored) and event_count > 0
+  status = "ok" if succeeded else ("errored" if errored else "no-events")
   print(
-      f"          done — {event_count} runner events streamed, "
+      f"          {status} — {event_count} runner events streamed, "
       f"{elapsed:.1f}s wall."
   )
-  return session_id, event_count
+  return session_id, event_count, succeeded
 
 
-async def _run_all() -> list[str]:
+async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
+  """Run every campaign brief.
+
+  Returns:
+      ``(succeeded_session_ids, failures)`` where ``failures`` is a
+      list of ``(campaign, reason)`` for diagnosis.
+  """
   briefs = CAMPAIGN_BRIEFS
   print(f"Running {len(briefs)} campaign briefs through the agent...")
   print(
@@ -104,20 +114,31 @@ async def _run_all() -> list[str]:
       plugins=[bq_logging_plugin],
   )
 
-  session_ids: list[str] = []
+  succeeded: list[str] = []
+  failures: list[tuple[str, str]] = []
   for idx, brief in enumerate(briefs, start=1):
     try:
-      session_id, _ = await asyncio.wait_for(
+      session_id, event_count, ok = await asyncio.wait_for(
           _run_one(runner, brief.campaign, brief.brief, idx, len(briefs)),
           timeout=PER_SESSION_TIMEOUT_S,
       )
-      session_ids.append(session_id)
+      if ok:
+        succeeded.append(session_id)
+      else:
+        reason = (
+            "agent run raised an exception"
+            if event_count == 0
+            else "runner streamed zero events"
+        )
+        failures.append((brief.campaign, reason))
     except asyncio.TimeoutError:
+      msg = f"timeout after {PER_SESSION_TIMEOUT_S}s"
       print(
           f"  [{idx}/{len(briefs)}] TIMEOUT after "
           f"{PER_SESSION_TIMEOUT_S}s for {brief.campaign!r}",
           file=sys.stderr,
       )
+      failures.append((brief.campaign, msg))
 
   print()
   print("Flushing BQ AA Plugin so all spans land in BigQuery...")
@@ -131,7 +152,7 @@ async def _run_all() -> list[str]:
   except Exception as exc:  # pylint: disable=broad-except
     print(f"  shutdown() warning: {exc}", file=sys.stderr)
 
-  return session_ids
+  return succeeded, failures
 
 
 def _record_first_session_id(session_ids: list[str]) -> None:
@@ -154,14 +175,26 @@ def _record_first_session_id(session_ids: list[str]) -> None:
 
 
 def main() -> int:
-  session_ids = asyncio.run(_run_all())
+  succeeded, failures = asyncio.run(_run_all())
   print()
-  print(f"Completed {len(session_ids)} sessions.")
-  for sid in session_ids:
-    print(f"  - {sid}")
+  print(f"Sessions: {len(succeeded)} succeeded, {len(failures)} failed.")
+  for sid in succeeded:
+    print(f"  ok  - {sid}")
+  for campaign, reason in failures:
+    print(f"  FAIL- {campaign}: {reason}")
   print()
-  _record_first_session_id(session_ids)
-  if not session_ids:
+  _record_first_session_id(succeeded)
+  if failures:
+    print(
+        f"ERROR: {len(failures)} of {len(succeeded) + len(failures)} "
+        "campaign runs failed. Setup will not proceed with a partial "
+        "demo. Re-run ./setup.sh after addressing the failures above "
+        "(typical causes: Vertex AI quota / permissions, model "
+        "endpoint outages, or network).",
+        file=sys.stderr,
+    )
+    return 1
+  if not succeeded:
     print("ERROR: zero sessions produced traces.", file=sys.stderr)
     return 1
   return 0

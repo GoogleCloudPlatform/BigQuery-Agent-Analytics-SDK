@@ -176,7 +176,11 @@ def main() -> int:
     return 1
 
   decisions = results.get("decision_points_count", 0)
-  expected_decisions = 5 * len(session_ids)  # 5 decisions per session
+  # Each session's prompt instructs the agent to make 5 decisions, so
+  # the loose target is 5 per session. AI.GENERATE often surfaces the
+  # same decision under more than one decision_type label (variance),
+  # so the actual count tends to land at-or-above this target.
+  expected_decisions = 5 * len(session_ids)
   min_acceptable = max(3, len(session_ids))
   if decisions == 0:
     print()
@@ -190,7 +194,7 @@ def main() -> int:
     print()
     print(
         f"WARNING: AI.GENERATE returned {decisions} decision points "
-        f"across {len(session_ids)} sessions (expected ~"
+        f"across {len(session_ids)} sessions (target ~"
         f"{expected_decisions}). Graph will look thin; consider "
         f"re-running build_graph.py.",
         file=sys.stderr,
@@ -198,10 +202,11 @@ def main() -> int:
   elif decisions < expected_decisions:
     print()
     print(
-        f"NOTE: AI.GENERATE extracted {decisions} of "
-        f"~{expected_decisions} seeded decisions across "
-        f"{len(session_ids)} sessions. This is normal model variance; "
-        f"the demo narration is written to be count-agnostic.",
+        f"NOTE: AI.GENERATE extracted {decisions} decision points "
+        f"across {len(session_ids)} sessions (target ~"
+        f"{expected_decisions}, 5 per agent run). This is normal "
+        f"model variance; the demo narration is written to be "
+        f"count-agnostic.",
         file=sys.stderr,
     )
 

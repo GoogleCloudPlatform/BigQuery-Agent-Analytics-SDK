@@ -52,7 +52,7 @@ artifacts that demonstrate SDK capabilities.
 | Directory | Description |
 |-----------|-------------|
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
-| [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): seeded traces → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → four GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram) |
+| [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
 
 ## Reference Artifacts
 

@@ -145,6 +145,10 @@ ORDER BY dropped_count DESC;
 -- chosen option. Works at the portfolio level by including session
 -- and decision context.
 -- ====================================================================
+-- DISTINCT collapses the cartesian product when a DecisionPoint
+-- has multiple SELECTED or DROPPED candidates that bind separately
+-- in the two MATCH legs above; without it the same close-call tuple
+-- repeats once per (sel, drop) pairing on the same DecisionPoint.
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[:CandidateEdge]->(sel:CandidateNode),
@@ -152,7 +156,7 @@ MATCH
 WHERE sel.status = 'SELECTED'
   AND drop.status = 'DROPPED'
   AND sel.score - drop.score < 0.05
-RETURN
+RETURN DISTINCT
   dp.session_id,
   dp.decision_type,
   sel.name AS selected_name,
