@@ -136,6 +136,10 @@ A talk track and a click-by-click walkthrough live alongside:
   audit, human oversight, reproducibility, systemic-pattern audit)
   with BQ Conversational Analytics prompts and verified GQL:
   [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)
+- How the seven backing tables produce the eight graph elements
+  (TechNode / BizNode / DecisionPoint / CandidateNode and the four
+  edge labels), step by step:
+  [`DATA_LINEAGE.md`](DATA_LINEAGE.md)
 
 ## File map
 
@@ -146,6 +150,7 @@ decision_lineage_demo/
 ├── DEMO_NARRATION.md          # 5-min leadership pitch around the 5 EU questions
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
 ├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
+├── DATA_LINEAGE.md            # how the 7 tables produce the 8 graph elements
 ├── setup.sh                   # one-shot bootstrap
 ├── reset.sh                   # tear down dataset + rendered files
 ├── render_queries.sh          # sed-renders the .gql template
