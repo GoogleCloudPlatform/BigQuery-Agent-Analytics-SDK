@@ -38,7 +38,14 @@ build_graph.py —  ContextGraphManager.build_context_graph(
    │                                                 (biz nodes,
    │                                                  decisions)
    ▼
-agent_context_graph  ←  query with GQL in BigQuery Studio
+agent_context_graph  (canonical SDK graph)
+   │
+   ▼
+build_rich_graph.py — SQL-only presentation layer
+   │                   (CampaignRun, DecisionType,
+   │                    CandidateStatus, RejectionReason)
+   ▼
+rich_agent_context_graph  ←  query with GQL in BigQuery Studio
 ```
 
 ## What you'll show in BigQuery Studio
@@ -48,8 +55,8 @@ session inlined) holds six blocks:
 
 | Block | Surface | Scope |
 |-------|---------|-------|
-| 1 | Portfolio inventory — five COUNT GQLs (TechNode, BizNode, DecisionPoint, CandidateNode, plus DecisionPoints per session) | All sessions |
-| 2 | Visualize ONE session's reasoning — path GQL renders as an interactive graph diagram | First session |
+| 1 | Portfolio inventory — counts across CampaignRun, TechNode, BizNode, DecisionPoint, CandidateNode, DecisionType, CandidateStatus, RejectionReason, plus decisions per session | All sessions |
+| 2 | Visualize ONE session's reasoning — CampaignRun → DecisionPoint → CandidateNode → CandidateStatus, plus optional RejectionReason fan-out | First session |
 | 3 | EU-audit traversal — same shape `mgr.get_eu_audit_gql` ships, scoped to that session | First session |
 | 4 | Dropped candidates — detail view across the portfolio | All sessions |
 | 4b | Dropped roll-up — `COUNT(cand)` + `AVG(cand.score)` by decision type | All sessions |
@@ -83,7 +90,7 @@ export PROJECT_ID=your-gcp-project   # or rely on `gcloud config`
 3. Creates a per-demo `./.venv/` and installs `google-adk`,
    `google-cloud-aiplatform`, `google-cloud-bigquery`,
    `python-dotenv`, plus the SDK editable from the repo root.
-4. Creates the `decision_lineage_demo` dataset (regional, default
+4. Creates the `decision_lineage_rich_demo` dataset (regional, default
    `us-central1` so Vertex AI calls work).
 5. Writes `.env` with project / dataset / model config.
 6. Runs `run_agent.py` — six live ADK invocations against six
@@ -95,7 +102,9 @@ export PROJECT_ID=your-gcp-project   # or rely on `gcloud config`
 7. Runs `build_graph.py` — discovers every session in
    `agent_events`, calls `mgr.build_context_graph(...)`, prints
    per-session counts.
-8. Renders `bq_studio_queries.gql` with the first session's id
+8. Runs `build_rich_graph.py` — derives demo-only presentation
+   tables and creates `rich_agent_context_graph`.
+9. Renders `bq_studio_queries.gql` with the first session's id
    inlined for paste-and-run.
 
 Override defaults via env vars before `./setup.sh`:
@@ -103,7 +112,7 @@ Override defaults via env vars before `./setup.sh`:
 | Var | Default | Used by |
 |---|---|---|
 | `PROJECT_ID` | `gcloud config get-value project` | every step |
-| `DATASET_ID` | `decision_lineage_demo` | BQ |
+| `DATASET_ID` | `decision_lineage_rich_demo` | BQ |
 | `DATASET_LOCATION` | `us-central1` | BQ |
 | `TABLE_ID` | `agent_events` | plugin + extraction |
 | `DEMO_AGENT_LOCATION` | `us-central1` | live agent |
@@ -116,11 +125,13 @@ After setup:
 
 1. Open BigQuery Studio:
    `https://console.cloud.google.com/bigquery?project=<PROJECT_ID>`
-2. In the Explorer pane, expand the `decision_lineage_demo` dataset.
-   You should see the property graph **`agent_context_graph`** plus
-   seven backing tables (`agent_events`, `extracted_biz_nodes`,
-   `context_cross_links`, `decision_points`, `candidates`,
-   `made_decision_edges`, `candidate_edges`).
+2. In the Explorer pane, expand the `decision_lineage_rich_demo` dataset.
+   You should see the demo property graph
+   **`rich_agent_context_graph`**. The canonical SDK graph
+   **`agent_context_graph`** is also created as the source layer.
+   The dataset includes the seven SDK backing tables plus derived
+   demo tables such as `campaign_runs`, `rich_decision_types`,
+   `rich_candidate_statuses`, and `rich_rejection_reasons`.
 3. Open `bq_studio_queries.gql` in a text editor and paste each
    block (delimited by `==` headers) into a new BQ Studio query
    tab. Run them in order while you narrate.
@@ -136,9 +147,9 @@ A talk track and a click-by-click walkthrough live alongside:
   audit, human oversight, reproducibility, systemic-pattern audit)
   with BQ Conversational Analytics prompts and verified GQL:
   [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)
-- How the seven backing tables produce the eight graph elements
-  (TechNode / BizNode / DecisionPoint / CandidateNode and the four
-  edge labels), step by step:
+- How the seven SDK backing tables feed the richer demo graph
+  (`CampaignRun`, `DecisionType`, `CandidateStatus`, and
+  `RejectionReason` included), step by step:
   [`DATA_LINEAGE.md`](DATA_LINEAGE.md)
 
 ## File map
@@ -150,7 +161,7 @@ decision_lineage_demo/
 ├── DEMO_NARRATION.md          # 5-min leadership pitch around the 5 EU questions
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
 ├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
-├── DATA_LINEAGE.md            # how the 7 tables produce the 8 graph elements
+├── DATA_LINEAGE.md            # canonical graph + richer demo graph lineage
 ├── setup.sh                   # one-shot bootstrap
 ├── reset.sh                   # tear down dataset + rendered files
 ├── render_queries.sh          # sed-renders the .gql template
@@ -158,6 +169,8 @@ decision_lineage_demo/
 ├── bq_studio_queries.gql      # rendered (gitignored, by setup)
 ├── property_graph.gql.tpl     # standalone CREATE PROPERTY GRAPH DDL (placeholders)
 ├── property_graph.gql         # rendered (gitignored, by setup)
+├── rich_property_graph.gql.tpl # richer demo CREATE PROPERTY GRAPH DDL
+├── rich_property_graph.gql    # rendered (gitignored, by setup)
 ├── agent/                     # the live ADK agent
 │   ├── agent.py               # root_agent + bq_logging_plugin
 │   ├── tools.py               # 5 decision-commit tools
@@ -165,8 +178,9 @@ decision_lineage_demo/
 ├── campaigns.py               # 6 campaign briefs
 ├── run_agent.py               # multi-session driver (one session
 │                              # per brief, real plugin writes spans)
-└── build_graph.py             # mgr.build_context_graph(...) over
-                               # every session in agent_events
+├── build_graph.py             # mgr.build_context_graph(...) over
+│                              # every session in agent_events
+└── build_rich_graph.py        # SQL-only richer graph for the demo
 ```
 
 ## A note on AI.GENERATE non-determinism
@@ -179,13 +193,16 @@ see:
 - Variation in `decision_type` strings (e.g.
   `audience_selection` vs `audience_choice`).
 - Occasional missed candidates if the model under-summarizes.
-- Per-session decision counts that fluctuate around the seeded
+- Per-session decision counts that fluctuate around the prompted
   five.
 
-The graph **structure** is stable: TechNode, BizNode, DecisionPoint,
-CandidateNode + four edge labels. If a run produces zero decisions
-for a session (rare), `build_graph.py` warns and you can re-run it
-without re-running the agent.
+The canonical SDK graph structure is stable: TechNode, BizNode,
+DecisionPoint, CandidateNode + four edge labels. The demo graph is
+richer but still deterministic: `build_rich_graph.py` projects
+CampaignRun / DecisionType / CandidateStatus / RejectionReason nodes
+from those same tables. If a run produces zero decisions for a
+session (rare), `build_graph.py` warns and you can re-run it without
+re-running the agent.
 
 ## Tear down
 

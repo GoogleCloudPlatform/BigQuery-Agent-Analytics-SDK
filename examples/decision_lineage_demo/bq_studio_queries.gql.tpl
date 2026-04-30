@@ -7,11 +7,11 @@
 -- headers) into a new query tab, and run. Block 2 returns paths and
 -- renders as an interactive graph diagram.
 --
--- The graph is `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`,
--- built by `build_graph.py` calling
--- `ContextGraphManager.build_context_graph(use_ai_generate=True,
--- include_decisions=True)` against every session captured by
--- `run_agent.py`.
+-- The graph is `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`.
+-- `build_graph.py` first creates the SDK's canonical
+-- `agent_context_graph`; `build_rich_graph.py` then derives demo
+-- presentation nodes (CampaignRun, DecisionType, CandidateStatus,
+-- RejectionReason) and creates this richer graph.
 --
 -- Cross-session blocks (1, 4, 4b, 5) span every session in the
 -- dataset. Per-session blocks (2, 3) are scoped to the first
@@ -22,35 +22,55 @@
 -- ====================================================================
 -- Block 1: Portfolio inventory — what did the SDK extract?
 --
--- Counts every node label across every session. The TechNode count
--- is deterministic (= total spans the BQ AA Plugin wrote). BizNode /
--- DecisionPoint / CandidateNode counts come from AI.GENERATE and
--- vary run-to-run; the demo cares that each is non-zero and roughly
--- proportional to the session count.
+-- Counts every node label across every session. CampaignRun and
+-- TechNode are deterministic. BizNode / DecisionPoint / CandidateNode
+-- come from AI.GENERATE. DecisionType / CandidateStatus /
+-- RejectionReason are SQL-only demo projections over those extracted
+-- rows.
 -- ====================================================================
 
--- 1a. TechNodes (every span the BQ AA Plugin wrote)
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+-- 1a. CampaignRuns (one per campaign brief)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
+MATCH (n:CampaignRun)
+RETURN COUNT(n) AS campaignRuns;
+
+-- 1b. TechNodes (every span the BQ AA Plugin wrote)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH (n:TechNode)
 RETURN COUNT(n) AS techNodes;
 
--- 1b. BizNodes (entities AI.GENERATE found across all sessions)
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+-- 1c. BizNodes (entities AI.GENERATE found across all sessions)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH (n:BizNode)
 RETURN COUNT(n) AS bizNodes;
 
--- 1c. DecisionPoints (decisions across all sessions)
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+-- 1d. DecisionPoints (decisions across all sessions)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH (n:DecisionPoint)
 RETURN COUNT(n) AS decisions;
 
--- 1d. CandidateNodes (every option considered, SELECTED and DROPPED)
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+-- 1e. CandidateNodes (every option considered, SELECTED and DROPPED)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH (n:CandidateNode)
 RETURN COUNT(n) AS candidates;
 
--- 1e. DecisionPoints per session (sanity check: ~5 per session)
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+-- 1f. DecisionTypes (normalized labels AI.GENERATE assigned)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
+MATCH (n:DecisionType)
+RETURN COUNT(n) AS decisionTypes;
+
+-- 1g. CandidateStatuses (normally SELECTED and DROPPED)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
+MATCH (n:CandidateStatus)
+RETURN COUNT(n) AS candidateStatuses;
+
+-- 1h. RejectionReasons (distinct dropped-candidate rationales)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
+MATCH (n:RejectionReason)
+RETURN COUNT(n) AS rejectionReasons;
+
+-- 1i. DecisionPoints per campaign run (sanity check: ~5 per session)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH (n:DecisionPoint)
 RETURN n.session_id, COUNT(n) AS decisions
 GROUP BY n.session_id
@@ -59,18 +79,30 @@ ORDER BY decisions DESC;
 -- ====================================================================
 -- Block 2: Visualize ONE session's reasoning
 --
--- Returns paths from each span that made a decision, through the
--- decision, out to its candidates — all scoped to a single session
--- so the graph diagram stays readable. BigQuery Studio renders this
--- as an interactive graph.
+-- Returns a richer campaign-level path:
+-- CampaignRun -> DecisionPoint -> CandidateNode -> CandidateStatus.
+-- This promotes the accepted/rejected state into visible graph nodes
+-- instead of hiding it only as a CandidateNode property.
 --
 -- To visualize a different session, swap '__SESSION_ID__' with any
--- other id Block 1e returned.
+-- other id Block 1i returned.
 -- ====================================================================
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH p =
-  (s:TechNode)-[:MadeDecision]->(dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-WHERE dp.session_id = '__SESSION_ID__'
+  (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint)
+    -[:CandidateEdge]->(c:CandidateNode)-[:HasCandidateStatus]->(st:CandidateStatus)
+WHERE cr.session_id = '__SESSION_ID__'
+RETURN p;
+
+-- Optional: dropped-candidate rationale fan-out for the same campaign.
+-- This second path keeps the main visualization readable while still
+-- making rejection reasons first-class nodes when the audience asks
+-- "why did it reject those options?"
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
+MATCH p =
+  (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint)
+    -[:CandidateEdge]->(c:CandidateNode)-[:RejectedBecause]->(rr:RejectionReason)
+WHERE cr.session_id = '__SESSION_ID__'
 RETURN p;
 
 -- ====================================================================
@@ -80,7 +112,7 @@ RETURN p;
 -- one row per (decision, candidate) the SDK extracted for the
 -- session, with rejection rationale on dropped ones.
 -- ====================================================================
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH
   (step:TechNode)-[md:MadeDecision]->(dp:DecisionPoint)
     -[ce:CandidateEdge]->(cand:CandidateNode)
@@ -110,7 +142,7 @@ ORDER BY dp.decision_id, cand.score DESC;
 -- rows for the same key (e.g. legacy data from before the
 -- store_decision_points dedupe fix).
 -- ====================================================================
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
 WHERE ce.edge_type = 'DROPPED_CANDIDATE'
@@ -137,9 +169,9 @@ ORDER BY dp.session_id, dp.decision_type, cand.score DESC;
 --   CREATE OR REPLACE TABLE T AS SELECT * EXCEPT(rn) FROM
 --     (SELECT *, ROW_NUMBER() OVER (PARTITION BY candidate_id) AS rn FROM T)
 --     WHERE rn = 1;
--- and re-apply property_graph.gql.
+-- and re-apply rich_property_graph.gql.
 -- ====================================================================
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
 WHERE ce.edge_type = 'DROPPED_CANDIDATE'
@@ -163,7 +195,7 @@ ORDER BY dropped_count DESC;
 -- has multiple SELECTED or DROPPED candidates that bind separately
 -- in the two MATCH legs above; without it the same close-call tuple
 -- repeats once per (sel, drop) pairing on the same DecisionPoint.
-GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+GRAPH `__PROJECT_ID__.__DATASET_ID__.rich_agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[:CandidateEdge]->(sel:CandidateNode),
   (dp)-[:CandidateEdge]->(drop:CandidateNode)

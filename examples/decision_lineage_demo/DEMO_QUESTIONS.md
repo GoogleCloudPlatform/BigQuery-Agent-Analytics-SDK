@@ -1,7 +1,7 @@
 # EU-Compliance Demo Questions
 
 Five business-shaped questions you can run against
-`<PROJECT_ID>.decision_lineage_demo.agent_context_graph` to demonstrate
+`<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph` to demonstrate
 the property graph as an audit surface for the **EU AI Act**, **GDPR
 Art. 22** (automated decision-making), and **DSA Art. 26**
 (advertising transparency).
@@ -28,8 +28,14 @@ Each question is paired with:
 Replace `<PROJECT_ID>` with your project (or copy the rendered
 queries straight out of [`bq_studio_queries.gql`](bq_studio_queries.gql)
 after `./setup.sh`). Session ids vary per run — list yours with
-Block 1e from `bq_studio_queries.gql` or from the `build_graph.py`
+Block 1i from `bq_studio_queries.gql` or from the `build_graph.py`
 output.
+
+The queries below target the richer demo graph. It keeps the SDK's
+canonical labels (`TechNode`, `BizNode`, `DecisionPoint`,
+`CandidateNode`) and adds presentation labels (`CampaignRun`,
+`DecisionType`, `CandidateStatus`, `RejectionReason`) so the same
+audit facts are easier to visualize and narrate in BigQuery Studio.
 
 ---
 
@@ -42,20 +48,21 @@ output.
 
 **BQ Conversational Analytics:**
 
-> "For session `<SESSION_ID>` in the agent_context_graph, show
+> "For session `<SESSION_ID>` in the rich_agent_context_graph, show
 > every audience-selection decision: the SELECTED audience, every
 > alternative DROPPED, and the rejection rationale on each."
 
 **GQL:**
 
 ```sql
-GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
+GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
 MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
+      -[:HasCandidateStatus]->(st:CandidateStatus)
 WHERE dp.session_id = '<SESSION_ID>'
   AND LOWER(dp.decision_type) LIKE '%audience%'
 RETURN DISTINCT
-  c.status, c.name AS audience, c.score, c.rejection_rationale
-ORDER BY c.status DESC, c.score DESC;
+  st.status, c.name AS audience, c.score, c.rejection_rationale
+ORDER BY st.status DESC, c.score DESC;
 ```
 
 **Live answer (illustrative):**
@@ -83,16 +90,17 @@ demand, for any campaign.
 
 **BQ Conversational Analytics:**
 
-> "In the agent_context_graph, list every DROPPED CandidateNode
+> "In the rich_agent_context_graph, list every DROPPED CandidateNode
 > whose rejection_rationale mentions age, demographic, youth,
 > gender, or contains an explicit age range. Group by decision_type."
 
 **GQL:**
 
 ```sql
-GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
+GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
 MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-WHERE c.status = 'DROPPED'
+      -[:HasCandidateStatus]->(st:CandidateStatus)
+WHERE st.status = 'DROPPED'
   AND (LOWER(c.rejection_rationale) LIKE '%age %'
        OR LOWER(c.rejection_rationale) LIKE '%demographic%'
        OR LOWER(c.rejection_rationale) LIKE '%youth%'
@@ -132,16 +140,17 @@ the framing is legitimate or a proxy for discrimination.
 
 **BQ Conversational Analytics:**
 
-> "Across all sessions in the agent_context_graph, find every
+> "Across all sessions in the rich_agent_context_graph, find every
 > SELECTED CandidateNode with score below 0.7. Sort by score
 > ascending."
 
 **GQL:**
 
 ```sql
-GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
+GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
 MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-WHERE c.status = 'SELECTED'
+      -[:HasCandidateStatus]->(st:CandidateStatus)
+WHERE st.status = 'SELECTED'
   AND c.score < 0.7
 RETURN DISTINCT
   dp.session_id, dp.decision_type, c.name AS selected, c.score
@@ -178,13 +187,15 @@ nominal threshold passed.
 **GQL:**
 
 ```sql
-GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
-MATCH (step:TechNode)-[:MadeDecision]->(dp:DecisionPoint)
+GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
+MATCH (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint),
+      (step:TechNode)-[:MadeDecision]->(dp)
       -[:CandidateEdge]->(c:CandidateNode)
 WHERE dp.session_id = '<SESSION_ID>'
   AND LOWER(dp.decision_type) LIKE '%creative%'
   AND step.event_type = 'LLM_RESPONSE'
 RETURN DISTINCT
+  cr.campaign,
   dp.span_id AS evidence_span_id,
   c.status, c.name AS theme, c.score, c.rejection_rationale
 ORDER BY c.status DESC, c.score DESC;
@@ -216,21 +227,23 @@ shape required by Art. 12 is one query, not a forensic exercise.
 
 **BQ Conversational Analytics:**
 
-> "In the agent_context_graph, count DROPPED CandidateNodes per
+> "In the rich_agent_context_graph, count DROPPED CandidateNodes per
 > decision_type and report the average dropped score. Sort by
 > rejection count descending."
 
 **GQL:**
 
 ```sql
-GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
-MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-WHERE c.status = 'DROPPED'
+GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
+MATCH (dp:DecisionPoint)-[:HasDecisionType]->(dt:DecisionType),
+      (dp)-[:CandidateEdge]->(c:CandidateNode)
+        -[:HasCandidateStatus]->(st:CandidateStatus)
+WHERE st.status = 'DROPPED'
 RETURN
-  dp.decision_type,
+  dt.decision_type,
   COUNT(c) AS rejections,
   AVG(c.score) AS avg_dropped_score
-GROUP BY dp.decision_type
+GROUP BY dt.decision_type
 ORDER BY rejections DESC
 LIMIT 10;
 ```
@@ -243,7 +256,7 @@ If your dataset predates that fix and shows duplicate-key rows,
 reseat the table with `CREATE OR REPLACE TABLE T AS SELECT *
 EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY
 candidate_id) AS rn FROM T) WHERE rn = 1` and re-apply
-`property_graph.gql`.
+`rich_property_graph.gql`.
 
 **Live answer (illustrative — top categories):**
 
@@ -270,7 +283,7 @@ patterns. Loop back to **Q2** with `LOWER(dp.decision_type) LIKE
 
 ## How to demo this with BigQuery Conversational Analytics
 
-1. Open BigQuery Studio with the `decision_lineage_demo` dataset
+1. Open BigQuery Studio with the `decision_lineage_rich_demo` dataset
    selected and click the **Gemini / Conversational Analytics**
    panel.
 2. For each Q above, type the natural-language **BQ CA prompt** and

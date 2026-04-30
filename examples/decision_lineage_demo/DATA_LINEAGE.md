@@ -1,8 +1,8 @@
-# Data Lineage — how the seven tables produce the property graph
+# Data Lineage — how the demo tables produce the rich graph
 
 A step-by-step map of how the demo's BigQuery dataset is built and
-how every node label / edge label in `agent_context_graph` traces
-back to a specific table and writer.
+how every node label / edge label in `rich_agent_context_graph`
+traces back to a specific table and writer.
 
 Useful for: explaining the architecture to leadership, onboarding
 someone running setup for the first time, or proving to a reviewer
@@ -10,7 +10,14 @@ exactly where any given graph element comes from.
 
 ---
 
-## Step 1 — Three writers populate seven tables
+The SDK first builds the canonical `agent_context_graph` from seven
+SDK tables. The demo then adds SQL-only projection tables and creates
+`rich_agent_context_graph`, the graph presenters open in BigQuery
+Studio.
+
+---
+
+## Step 1 — Three writers populate the seven SDK tables
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -103,11 +110,30 @@ Once the node tables are populated:
       `SELECTED_CANDIDATE` or `DROPPED_CANDIDATE` and the
       `rejection_rationale` carried on the edge).
 
+### 1e. `build_rich_graph.py` — SQL-only presentation layer
+
+After the SDK tables exist, `build_rich_graph.py` creates demo-only
+projection tables:
+
+  * `campaign_runs` — one row per session, joined to the campaign
+    metadata in `campaigns.py`.
+  * `rich_decision_types` — one row per normalized decision type.
+  * `rich_candidate_statuses` — normally `SELECTED` and `DROPPED`.
+  * `rich_rejection_reasons` — one row per distinct dropped-candidate
+    rationale.
+  * `rich_campaign_span_edges`, `rich_campaign_decision_edges`,
+    `rich_decision_type_edges`, `rich_candidate_status_edges`, and
+    `rich_candidate_reason_edges` — edges from those presentation
+    nodes back to the SDK-owned facts.
+
+No live agent call and no `AI.GENERATE` call happens in this step.
+It is deterministic SQL plus one load job for `campaign_runs`.
+
 ---
 
-## Step 2 — `CREATE OR REPLACE PROPERTY GRAPH` wires the tables into eight graph elements
+## Step 2 — Property graph DDL wires tables into two graph surfaces
 
-The complete contract from `property_graph.gql.tpl`:
+The SDK-shaped graph from `property_graph.gql.tpl` is compact:
 
 ```
 CREATE OR REPLACE PROPERTY GRAPH agent_context_graph
@@ -146,6 +172,21 @@ populate both a node label and an edge label.
 | **MadeDecision** | `made_decision_edges` | `span_id` → `decision_id` | which span produced which decision |
 | **CandidateEdge** | `candidate_edges` | `decision_id` → `candidate_id` | which candidates the decision weighed (with `edge_type` SELECTED/DROPPED + rationale on the edge) |
 
+The richer demo graph from `rich_property_graph.gql.tpl` keeps all
+of those labels and adds presentation labels:
+
+| Rich graph element | Comes from table | KEY column | Why it exists in the demo |
+|---|---|---|---|
+| **CampaignRun** | `campaign_runs` | `session_id` | Makes each campaign run visible as the root of a graph visualization |
+| **DecisionType** | `rich_decision_types` | `decision_type_id` | Groups equivalent decision categories for portfolio questions |
+| **CandidateStatus** | `rich_candidate_statuses` | `status_id` | Promotes SELECTED / DROPPED from a property into visible graph nodes |
+| **RejectionReason** | `rich_rejection_reasons` | `reason_id` | Promotes dropped-candidate rationale into visible "why rejected" nodes |
+| **CampaignSpan** | `rich_campaign_span_edges` | `session_id` → `span_id` | Connects a campaign run to its raw plugin spans |
+| **CampaignDecision** | `rich_campaign_decision_edges` | `session_id` → `decision_id` | Connects a campaign run directly to extracted decisions |
+| **HasDecisionType** | `rich_decision_type_edges` | `decision_id` → `decision_type_id` | Connects each decision to its normalized type |
+| **HasCandidateStatus** | `rich_candidate_status_edges` | `candidate_id` → `status_id` | Connects each candidate to SELECTED or DROPPED |
+| **RejectedBecause** | `rich_candidate_reason_edges` | `candidate_id` → `reason_id` | Connects dropped candidates to rationale nodes |
+
 ---
 
 ## Step 3 — Worked example: how Block 2 (the visualization GQL) traverses these
@@ -153,28 +194,33 @@ populate both a node label and an edge label.
 Block 2 from `bq_studio_queries.gql`:
 
 ```sql
-GRAPH `<P>.<D>.agent_context_graph`
+GRAPH `<P>.<D>.rich_agent_context_graph`
 MATCH p =
-  (s:TechNode)-[:MadeDecision]->(dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-WHERE dp.session_id = '<SESSION_ID>'
+  (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint)
+    -[:CandidateEdge]->(c:CandidateNode)-[:HasCandidateStatus]->(st:CandidateStatus)
+WHERE cr.session_id = '<SESSION_ID>'
 RETURN p;
 ```
 
 What the engine does, table by table:
 
-  1. **TechNode binding** — scans `agent_events` for spans whose
-     `span_id` exists in `made_decision_edges.span_id`. (162 →
-     ~5 rows for one session.)
-  2. **MadeDecision edge** — joins `made_decision_edges` on
-     `span_id`. Each match produces one TechNode → DecisionPoint
-     pair.
+  1. **CampaignRun binding** — scans `campaign_runs` for the selected
+     `session_id`.
+  2. **CampaignDecision edge** — joins
+     `rich_campaign_decision_edges` on `session_id`; each edge points
+     at one extracted decision.
   3. **DecisionPoint binding** — joins `decision_points` on
-     `decision_id` and filters where `session_id = '<SESSION_ID>'`.
+     `decision_id`.
   4. **CandidateEdge edge** — joins `candidate_edges` on
-     `decision_id`. Each decision fans out to its candidate edges.
+     `decision_id`; each decision fans out to its selected and
+     dropped candidates.
   5. **CandidateNode binding** — joins `candidates` on
-     `candidate_id`. The terminal node of each path.
-  6. **Result** — paths bound to `p` with all four columns.
+     `candidate_id`.
+  6. **HasCandidateStatus edge** — joins
+     `rich_candidate_status_edges` so SELECTED / DROPPED appear as
+     graph nodes, not just properties.
+  7. **Result** — paths bound to `p` with campaign, decision,
+     candidate, and status nodes.
      BigQuery Studio's **Graph** tab renders these as fan-outs
      (one per decision) of branches (one per candidate), with
      `edge_type` and node properties available in the click-through
@@ -186,27 +232,31 @@ What the engine does, table by table:
 
 | Question ([`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)) | Tables touched | Why |
 |---|---|---|
-| **Q1** Right to explanation for one campaign | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Per-decision, walks edges to surface SELECTED + DROPPED + rationale |
-| **Q2** Bias audit (rationales citing age / demo) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | LIKE-filter on `candidates.rejection_rationale` (extracted from the LLM trace text by AI.GENERATE; exact wording can vary across runs — see [`README.md`](README.md)) |
-| **Q3** Human-oversight trigger (score < 0.7) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Filter on `candidates.score`; empty result is the audit artifact |
-| **Q4** Reproducibility (one decision's full lineage) | `agent_events` ⋈ `made_decision_edges` ⋈ `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Walks from TechNode through MadeDecision and CandidateEdge back to the evidence span (`Caused` and `Evaluated` are reachable but not used in the shipped Q4 GQL) |
-| **Q5** Pattern audit (rejection counts by type) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | `GROUP BY decision_type` with `COUNT(c)` + `AVG(c.score)` |
+| **Q1** Right to explanation for one campaign | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ `rich_candidate_status_edges` ⋈ `rich_candidate_statuses` | Per-decision, walks edges to surface SELECTED + DROPPED + rationale |
+| **Q2** Bias audit (rationales citing age / demo) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | LIKE-filter on `candidates.rejection_rationale` (extracted from the LLM trace text by AI.GENERATE; exact wording can vary across runs — see [`README.md`](README.md)) |
+| **Q3** Human-oversight trigger (score < 0.7) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | Filter on selected candidates with `score < 0.7`; empty result is the audit artifact |
+| **Q4** Reproducibility (one decision's full lineage) | `campaign_runs` ⋈ `decision_points` plus `agent_events` ⋈ `made_decision_edges` ⋈ `candidate_edges` ⋈ `candidates` | Walks from CampaignRun and TechNode through the decision and candidates back to the evidence span (`Caused` and `Evaluated` are reachable but not used in the shipped Q4 GQL) |
+| **Q5** Pattern audit (rejection counts by type) | `decision_points` ⋈ `rich_decision_type_edges` ⋈ `rich_decision_types` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | `GROUP BY DecisionType` with `COUNT(c)` + `AVG(c.score)` |
 
 Every regulator-shaped question is a walk over a fixed subset of
-the seven tables, expressed as GQL against the eight graph
-elements — no bespoke ETL, no per-question table writes, no new
-tables to maintain. **The seven tables are the audit substrate;
-the property graph is a query view over them.**
+the SDK tables plus deterministic rich projections, expressed as GQL
+against graph labels — no bespoke ETL and no per-question table
+writes. **The seven SDK tables are the audit substrate; the rich
+property graph is the presenter-friendly query view over them.**
 
 ---
 
 ## Step 5 — Recreate the graph from existing tables
 
-If the seven backing tables are already populated (a previous
+If the seven SDK backing tables are already populated (a previous
 setup run, a clone of someone else's dataset, or a manual
 INSERT-from-SELECT into a new project) and you just need the
 graph layer, `property_graph.gql.tpl` is a standalone `CREATE OR
 REPLACE PROPERTY GRAPH` you apply with one `bq query` against the
 existing tables. `setup.sh` renders it next to
-`bq_studio_queries.gql`. See [`SETUP_NEW_PROJECT.md`](SETUP_NEW_PROJECT.md)
+`bq_studio_queries.gql`.
+
+For the richer graph, run `build_rich_graph.py` first so the
+derived tables exist, then apply `rich_property_graph.gql`. See
+[`SETUP_NEW_PROJECT.md`](SETUP_NEW_PROJECT.md)
 → "Recreate the property graph from existing tables".

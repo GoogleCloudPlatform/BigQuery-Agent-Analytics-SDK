@@ -14,6 +14,9 @@
 #                           rebuilds the graph from the seven
 #                           backing tables without rerunning the
 #                           agent or AI.GENERATE)
+#   rich_property_graph.gql (CREATE OR REPLACE PROPERTY GRAPH DDL —
+#                            rebuilds the richer demo presentation
+#                            graph from the base + derived tables)
 
 set -euo pipefail
 
@@ -40,6 +43,7 @@ render_one() {
   sed \
     -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
     -e "s|__DATASET_ID__|${DATASET_ID}|g" \
+    -e "s|__RICH_GRAPH_NAME__|rich_agent_context_graph|g" \
     -e "s|__SESSION_ID__|${DEMO_SESSION_ID}|g" \
     "$tpl" > "$out"
   echo "Rendered $out"
@@ -58,4 +62,9 @@ if [[ -f "$SCRIPT_DIR/property_graph.gql.tpl" ]]; then
   render_one \
     "$SCRIPT_DIR/property_graph.gql.tpl" \
     "$SCRIPT_DIR/property_graph.gql"
+fi
+if [[ -f "$SCRIPT_DIR/rich_property_graph.gql.tpl" ]]; then
+  render_one \
+    "$SCRIPT_DIR/rich_property_graph.gql.tpl" \
+    "$SCRIPT_DIR/rich_property_graph.gql"
 fi

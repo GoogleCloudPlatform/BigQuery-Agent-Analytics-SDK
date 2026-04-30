@@ -26,9 +26,10 @@ cd examples/decision_lineage_demo
 ```
 
 This runs the live ADK agent against six campaign briefs, has the
-SDK extract decisions from the resulting traces, and renders the
-GQL bundle. ~5-10 minutes total. See **README.md → Setup** for
-prerequisites and override env vars.
+SDK extract decisions from the resulting traces, builds the richer
+demo presentation graph, and renders the GQL bundle. ~5-10 minutes
+total. See **README.md → Setup** for prerequisites and override env
+vars.
 
 When setup finishes, confirm:
 
@@ -81,20 +82,26 @@ open DEMO_QUESTIONS.md
 > agent produced. Twenty-seven events per session, one-sixty-two
 > total. Then a single `AI.GENERATE` call extracted the decisions
 > the agent made and every alternative it considered, with the
-> rejection rationale on each dropped option. Every node in the
-> graph you're about to see traces back to a real plugin-written
-> span."
+> rejection rationale on each dropped option.
+>
+> The SDK's canonical graph is intentionally compact: spans,
+> business entities, decisions, candidates, and the edges between
+> them. For this demo, we add a SQL-only presentation graph on top:
+> CampaignRun, DecisionType, CandidateStatus, and RejectionReason
+> become visible nodes. That richer graph is what makes the BigQuery
+> Studio picture readable without changing the underlying audit
+> data."
 
 **[Open BigQuery Studio. Run Block 2 from `bq_studio_queries.gql`.
 Click the Graph tab.]**
 
-> "This is one campaign visualized. Five fan-outs — one per
-> decision the agent made. Center of each fan-out is the decision.
-> Right side is every option the agent weighed: green for selected,
-> red for dropped, the dropped ones carrying the agent's rejection
-> reasoning right on the node properties. **This is the audit
-> surface.** From here, every regulator question we ask becomes a
-> graph traversal."
+> "This is one campaign visualized. One fan-out per extracted
+> decision. The run is on the left, the decisions are in the middle,
+> every option the agent weighed is on the right, and selected versus
+> dropped is visible as its own status node. If we run the optional
+> rationale fan-out, every dropped option links to the extracted
+> rejection reason. **This is the audit surface.** From here, every
+> regulator question we ask becomes a graph traversal."
 
 ---
 
@@ -219,7 +226,7 @@ Analytics panel and the natural-language prompt — your choice).
 
 | If they ask | Short answer |
 |---|---|
-| "How long to deploy this?" | The plugin is already on our agent path. The SDK pipeline is `mgr.build_context_graph(...)` — one method. The DDL is committed; CI runs it. We're talking days, not quarters. |
+| "How long to deploy this?" | The plugin is already on our agent path. The SDK pipeline is `mgr.build_context_graph(...)` — one method. The richer demo graph is SQL-only projection DDL over those outputs. We're talking days, not quarters. |
 | "What about agents we haven't instrumented yet?" | Same plugin, same plug-in point. The graph schema doesn't care which agent wrote the spans, only that the BQ AA Plugin wrote them. |
 | "Cost?" | Two `AI.GENERATE` calls per build run, plus standard BQ query cost. A handful of cents per build for our scale. |
 | "What happens when AI.GENERATE misses a decision?" | The build script reports per-session counts. If a session is thin we re-run extraction (no need to re-run the agent — traces are already in `agent_events`). The narration is count-agnostic for exactly this reason. |

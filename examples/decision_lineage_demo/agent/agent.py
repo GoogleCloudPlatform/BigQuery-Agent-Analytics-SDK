@@ -54,8 +54,8 @@ if os.path.exists(_env_path):
 
 _, _auth_project = google.auth.default()
 PROJECT_ID = os.getenv("PROJECT_ID") or _auth_project
-DATASET_ID = os.getenv("DATASET_ID", "decision_lineage_demo")
-DATASET_LOCATION = os.getenv("DATASET_LOCATION", "US")
+DATASET_ID = os.getenv("DATASET_ID", "decision_lineage_rich_demo")
+DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 TABLE_ID = os.getenv("TABLE_ID", "agent_events")
 MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-2.5-pro")
 AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "us-central1")

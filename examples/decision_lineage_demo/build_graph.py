@@ -62,7 +62,7 @@ if os.path.exists(_env_path):
   load_dotenv(dotenv_path=_env_path)
 
 PROJECT_ID = os.getenv("PROJECT_ID")
-DATASET_ID = os.getenv("DATASET_ID", "decision_lineage_demo")
+DATASET_ID = os.getenv("DATASET_ID", "decision_lineage_rich_demo")
 DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 TABLE_ID = os.getenv("TABLE_ID", "agent_events")
 ENDPOINT = os.getenv("DEMO_AI_ENDPOINT", "gemini-2.5-flash")

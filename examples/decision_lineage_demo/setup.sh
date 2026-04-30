@@ -35,7 +35,10 @@
 #      writes BizNode + DecisionPoint + Candidate rows, builds the
 #      cross-link / decision edges, and emits CREATE OR REPLACE
 #      PROPERTY GRAPH.
-#   8. Render bq_studio_queries.gql with project/dataset/session
+#   8. Run build_rich_graph.py — derives demo presentation nodes
+#      (CampaignRun, DecisionType, CandidateStatus, RejectionReason)
+#      and creates rich_agent_context_graph.
+#   9. Render bq_studio_queries.gql with project/dataset/session
 #      values inlined for copy-paste into BigQuery Studio. The
 #      session id is the first session run_agent.py created.
 #
@@ -56,7 +59,7 @@ echo "============================================"
 echo ""
 
 # 1. Tooling
-echo "[1/8] Checking python3 and gcloud..."
+echo "[1/9] Checking python3 and gcloud..."
 if ! command -v python3 &>/dev/null; then
   echo "ERROR: python3 is required." >&2
   exit 1
@@ -81,7 +84,7 @@ fi
 
 # 2. APIs
 echo ""
-echo "[2/8] Enabling BigQuery + Vertex AI APIs..."
+echo "[2/9] Enabling BigQuery + Vertex AI APIs..."
 gcloud services enable bigquery.googleapis.com --project="$PROJECT_ID" 2>/dev/null
 echo "  BigQuery API: enabled"
 gcloud services enable aiplatform.googleapis.com --project="$PROJECT_ID" 2>/dev/null
@@ -89,7 +92,7 @@ echo "  Vertex AI API: enabled"
 
 # 3. Dependencies
 echo ""
-echo "[3/8] Installing Python dependencies into ./.venv..."
+echo "[3/9] Installing Python dependencies into ./.venv..."
 # Use a per-demo venv so PEP 668 (Homebrew Python) doesn't block
 # installs and so the demo doesn't pollute the system interpreter.
 VENV_DIR="$SCRIPT_DIR/.venv"
@@ -116,8 +119,8 @@ echo "  Dependencies installed in $VENV_DIR"
 
 # 4. Dataset + .env
 echo ""
-echo "[4/8] Configuring environment..."
-DATASET_ID="${DATASET_ID:-decision_lineage_demo}"
+echo "[4/9] Configuring environment..."
+DATASET_ID="${DATASET_ID:-decision_lineage_rich_demo}"
 # Vertex AI for the live agent runs needs a regional location, not
 # multi-region "US". Default to us-central1 for both the dataset and
 # the agent. If a user-set location overrides, we use that.
@@ -147,26 +150,31 @@ echo "  Wrote $ENV_FILE"
 
 # 5. Run the live agent (BQ AA Plugin writes spans to agent_events)
 echo ""
-echo "[5/8] Running the media-planner agent against every campaign "
+echo "[5/9] Running the media-planner agent against every campaign "
 echo "      brief — this is real ADK + BQ AA Plugin (3-7 minutes)..."
 cd "$SCRIPT_DIR"
 "$VENV_PY" run_agent.py
 
 # 6. Build graph (AI.GENERATE)
 echo ""
-echo "[6/8] Building the property graph via the SDK extraction "
+echo "[6/9] Building the canonical SDK property graph via extraction "
 echo "      pipeline across every session (AI.GENERATE — this can "
 echo "      take 30-90s)..."
 "$VENV_PY" build_graph.py
 
-# 7. Render BQ Studio queries
+# 7. Build rich demo graph (SQL-only over canonical outputs)
 echo ""
-echo "[7/8] Rendering BigQuery Studio query bundle..."
+echo "[7/9] Building the richer demo presentation graph..."
+"$VENV_PY" build_rich_graph.py
+
+# 8. Render BQ Studio queries
+echo ""
+echo "[8/9] Rendering BigQuery Studio query bundle..."
 "$SCRIPT_DIR/render_queries.sh"
 
-# 8. Done
+# 9. Done
 echo ""
-echo "[8/8] Done."
+echo "[9/9] Done."
 echo ""
 echo "============================================"
 echo "  Setup complete!"
@@ -176,7 +184,7 @@ echo "Next:"
 echo "  1. Open BigQuery Studio in your browser:"
 echo "     https://console.cloud.google.com/bigquery?project=${PROJECT_ID}"
 echo "  2. Navigate to dataset: ${DATASET_ID}"
-echo "     (the property graph 'agent_context_graph' shows in the Explorer pane)"
+echo "     (the rich graph 'rich_agent_context_graph' shows in the Explorer pane)"
 echo "  3. Open ${SCRIPT_DIR}/bq_studio_queries.gql"
 echo "     in a text editor and paste each block into BQ Studio."
 echo ""
@@ -184,6 +192,8 @@ echo "To re-run just the agent (extra sessions):"
 echo "  ./.venv/bin/python3 run_agent.py"
 echo "To re-run just the AI.GENERATE pipeline (e.g. after a flaky run):"
 echo "  ./.venv/bin/python3 build_graph.py"
+echo "To re-run just the rich presentation graph:"
+echo "  ./.venv/bin/python3 build_rich_graph.py"
 echo ""
 echo "Talk track + timing: see DEMO_NARRATION.md"
 echo "Tear down:           ./reset.sh"
