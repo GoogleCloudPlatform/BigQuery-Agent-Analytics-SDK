@@ -19,9 +19,8 @@ JSON string compatible with ``AI.GENERATE``.  The generated schema
 instructs the LLM to return a structured object with ``nodes`` and
 ``edges`` arrays, each typed according to the ontology.
 
-The schema uses the same JSON Schema dialect proven in V3's
-``_DECISION_POINT_OUTPUT_SCHEMA`` (nested ARRAY<OBJECT> with typed
-property fields).
+The schema uses a JSON Schema dialect (nested ARRAY<OBJECT> with
+typed property fields).
 
 Example usage::
 

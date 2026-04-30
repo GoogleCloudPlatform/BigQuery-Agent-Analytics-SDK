@@ -461,15 +461,29 @@ class TestContextGraphManager:
     result = mgr.traverse_causal_chain(session_id="sess-1")
     assert result == []
 
-  def test_extract_query_has_output_schema(self):
+  def test_extract_query_uses_prompt_only_extraction(self):
+    """Biz-node extraction relies on prompt-shaped JSON output, not on
+    AI.GENERATE's ``output_schema`` parameter.
+
+    Background: the current BigQuery AI.GENERATE parser rejects the
+    JSON-Schema strings the SDK previously passed via ``output_schema``
+    (it now expects a SQL-style column list like ``'foo STRING'``).
+    The SDK instead asks the model in-prompt to return a JSON array
+    and parses the response with markdown-fence stripping +
+    ``JSON_EXTRACT_ARRAY``.
+    """
     self._make_manager()
-    from bigquery_agent_analytics.context_graph import _BIZ_NODE_OUTPUT_SCHEMA
     from bigquery_agent_analytics.context_graph import _EXTRACT_BIZ_NODES_QUERY
 
-    assert "output_schema =>" in _EXTRACT_BIZ_NODES_QUERY
-    assert "entity_type" in _BIZ_NODE_OUTPUT_SCHEMA
-    assert "entity_value" in _BIZ_NODE_OUTPUT_SCHEMA
-    assert "confidence" in _BIZ_NODE_OUTPUT_SCHEMA
+    # No output_schema kwarg in the AI.GENERATE call.
+    assert "output_schema =>" not in _EXTRACT_BIZ_NODES_QUERY
+    # Prompt enumerates the field contract.
+    assert "entity_type" in _EXTRACT_BIZ_NODES_QUERY
+    assert "entity_value" in _EXTRACT_BIZ_NODES_QUERY
+    assert "confidence" in _EXTRACT_BIZ_NODES_QUERY
+    # Markdown-fence stripping + JSON_EXTRACT_ARRAY parse pipeline.
+    assert "JSON_EXTRACT_ARRAY" in _EXTRACT_BIZ_NODES_QUERY
+    assert "REGEXP_REPLACE" in _EXTRACT_BIZ_NODES_QUERY
 
   def test_property_graph_ddl_has_artifact_uri(self):
     mgr = self._make_manager()
@@ -1087,14 +1101,32 @@ class TestDecisionSemantics:
     assert len(trail[0]["candidates"]) == 1
     assert trail[0]["candidates"][0]["status"] == "SELECTED"
 
-  def test_decision_output_schema_has_required_fields(self):
-    from bigquery_agent_analytics.context_graph import _DECISION_POINT_OUTPUT_SCHEMA
+  def test_decision_extraction_prompt_specifies_required_fields(self):
+    """Decision extraction enumerates its field contract in the prompt.
 
-    assert "decision_type" in _DECISION_POINT_OUTPUT_SCHEMA
-    assert "candidates" in _DECISION_POINT_OUTPUT_SCHEMA
-    assert "score" in _DECISION_POINT_OUTPUT_SCHEMA
-    assert "status" in _DECISION_POINT_OUTPUT_SCHEMA
-    assert "rejection_rationale" in _DECISION_POINT_OUTPUT_SCHEMA
+    The SDK no longer passes ``output_schema`` to ``AI.GENERATE``
+    (the current BigQuery parser rejects the JSON-Schema string the
+    SDK used to send). Instead the prompt itself names every field
+    AI.GENERATE must return, and the Python side parses the result
+    JSON.
+    """
+    from bigquery_agent_analytics.context_graph import (
+        _EXTRACT_DECISION_POINTS_AI_QUERY,
+    )
+
+    assert "output_schema =>" not in _EXTRACT_DECISION_POINTS_AI_QUERY
+    for field in (
+        "decision_type",
+        "description",
+        "candidates",
+        "name",
+        "score",
+        "status",
+        "rejection_rationale",
+    ):
+      assert field in _EXTRACT_DECISION_POINTS_AI_QUERY, (
+          f"prompt must enumerate {field!r}"
+      )
 
   def test_decision_property_graph_ddl_includes_base_pillars(self):
     """Decision DDL still includes TechNode, BizNode, Caused, Evaluated."""

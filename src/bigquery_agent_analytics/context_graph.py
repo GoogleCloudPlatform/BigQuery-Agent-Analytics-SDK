@@ -21,9 +21,11 @@ entities extracted via ``AI.GENERATE``).
 
 Key capabilities:
 
-- **Business entity extraction** — Use ``AI.GENERATE`` with
-  ``output_schema`` to extract structured entities (e.g. Products,
-  Targeting segments, Campaigns) from unstructured agent payloads.
+- **Business entity extraction** — Use ``AI.GENERATE`` to extract
+  structured entities (e.g. Products, Targeting segments, Campaigns)
+  from unstructured agent payloads. The model is prompted to return
+  a JSON array; the SQL strips markdown fences and JSON_EXTRACT_ARRAY
+  parses each entity.
 - **Property Graph DDL** — Generate ``CREATE PROPERTY GRAPH`` DDL
   that formalizes Tech nodes, Biz nodes, ``CAUSED`` edges (parent→child
   span linkage), and ``EVALUATED`` cross-links.
@@ -271,28 +273,6 @@ class ContextGraphConfig(BaseModel):
 
 
 # ------------------------------------------------------------------ #
-# Constants                                                             #
-# ------------------------------------------------------------------ #
-
-_BIZ_NODE_OUTPUT_SCHEMA = (
-    '{"type": "ARRAY", "items": {"type": "OBJECT", "properties": '
-    '{"entity_type": {"type": "STRING"}, '
-    '"entity_value": {"type": "STRING"}, '
-    '"confidence": {"type": "NUMBER"}}}}'
-)
-
-_DECISION_POINT_OUTPUT_SCHEMA = (
-    '{"type": "ARRAY", "items": {"type": "OBJECT", "properties": '
-    '{"decision_type": {"type": "STRING"}, '
-    '"description": {"type": "STRING"}, '
-    '"candidates": {"type": "ARRAY", "items": {"type": "OBJECT", '
-    '"properties": {"name": {"type": "STRING"}, '
-    '"score": {"type": "NUMBER"}, '
-    '"status": {"type": "STRING"}, '
-    '"rejection_rationale": {"type": "STRING"}}}}}}}'
-)
-
-# ------------------------------------------------------------------ #
 # SQL Templates                                                        #
 # ------------------------------------------------------------------ #
 
@@ -337,8 +317,7 @@ USING (
               TO_JSON_STRING(base.content)
             )
           ),
-          endpoint => '{endpoint}',
-          output_schema => '{output_schema}'
+          endpoint => '{endpoint}'
         ).result,
         r'^```(?:json)?\\s*', ''),
       r'\\s*```$', '')
@@ -534,8 +513,7 @@ SELECT
             TO_JSON_STRING(base.content)
           )
         ),
-        endpoint => '{endpoint}',
-        output_schema => '{output_schema}'
+        endpoint => '{endpoint}'
       ).result,
       r'^```(?:json)?\\s*', ''),
     r'\\s*```$', '')
@@ -1092,7 +1070,6 @@ class ContextGraphManager:
         biz_table=self.config.biz_nodes_table,
         endpoint=self._resolve_endpoint(),
         entity_types=entity_types_str,
-        output_schema=_BIZ_NODE_OUTPUT_SCHEMA,
     )
 
     job_config = bigquery.QueryJobConfig(
@@ -1906,9 +1883,12 @@ class ContextGraphManager:
     """Extracts decision points and candidates from agent traces.
 
     When *use_ai_generate* is True, uses BigQuery AI.GENERATE
-    with ``_DECISION_POINT_OUTPUT_SCHEMA`` to extract structured
+    with a prompt-shaped JSON contract (no ``output_schema``,
+    just instructions in the prompt) to extract structured
     decision data server-side, including candidates with scores,
-    selection status, and rejection rationale.
+    selection status, and rejection rationale. The result is a
+    JSON array; the SQL strips markdown fences and the Python
+    side parses it.
 
     When False, fetches payloads for client-side extraction;
     each payload becomes a DecisionPoint stub with no candidates.
@@ -1935,7 +1915,6 @@ class ContextGraphManager:
         dataset=self.dataset_id,
         table=self.table_id,
         endpoint=self._resolve_endpoint(),
-        output_schema=_DECISION_POINT_OUTPUT_SCHEMA,
     )
 
     job_config = bigquery.QueryJobConfig(
