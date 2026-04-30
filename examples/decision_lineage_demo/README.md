@@ -57,6 +57,12 @@ session inlined) holds five blocks:
 
 ## Setup
 
+> **Reproducing this on a different / clean GCP project?** See
+> [`SETUP_NEW_PROJECT.md`](SETUP_NEW_PROJECT.md) for the step-by-step
+> guide (prerequisites, env-var overrides, post-setup verification,
+> common-issue recovery, and how to swap in a different agent /
+> campaign mix).
+
 Prerequisites:
 
 - Python 3.10+
@@ -136,7 +142,8 @@ A talk track and a click-by-click walkthrough live alongside:
 ```
 decision_lineage_demo/
 ├── README.md                  # this file
-├── DEMO_NARRATION.md          # talk track + timing
+├── SETUP_NEW_PROJECT.md       # reproduction guide for a fresh GCP project
+├── DEMO_NARRATION.md          # 5-min leadership pitch around the 5 EU questions
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
 ├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
 ├── setup.sh                   # one-shot bootstrap
