@@ -187,9 +187,9 @@ What the engine does, table by table:
 | Question ([`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)) | Tables touched | Why |
 |---|---|---|
 | **Q1** Right to explanation for one campaign | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Per-decision, walks edges to surface SELECTED + DROPPED + rationale |
-| **Q2** Bias audit (rationales citing age / demo) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | LIKE-filter on `candidates.rejection_rationale` (preserved verbatim from the LLM trace) |
+| **Q2** Bias audit (rationales citing age / demo) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | LIKE-filter on `candidates.rejection_rationale` (extracted from the LLM trace text by AI.GENERATE; exact wording can vary across runs — see [`README.md`](README.md)) |
 | **Q3** Human-oversight trigger (score < 0.7) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Filter on `candidates.score`; empty result is the audit artifact |
-| **Q4** Reproducibility (one decision's full lineage) | `agent_events` ⋈ `made_decision_edges` ⋈ `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Walks all four edge labels back to a single span_id |
+| **Q4** Reproducibility (one decision's full lineage) | `agent_events` ⋈ `made_decision_edges` ⋈ `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | Walks from TechNode through MadeDecision and CandidateEdge back to the evidence span (`Caused` and `Evaluated` are reachable but not used in the shipped Q4 GQL) |
 | **Q5** Pattern audit (rejection counts by type) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` | `GROUP BY decision_type` with `COUNT(c)` + `AVG(c.score)` |
 
 Every regulator-shaped question is a walk over a fixed subset of
