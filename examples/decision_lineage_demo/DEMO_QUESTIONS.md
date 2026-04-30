@@ -6,6 +6,14 @@ the property graph as an audit surface for the **EU AI Act**, **GDPR
 Art. 22** (automated decision-making), and **DSA Art. 26**
 (advertising transparency).
 
+> Note on regulatory status: the EU AI Act's obligations are phasing
+> in — high-risk-system rules from 2 August 2026, full rollout by
+> 2 August 2027 (per the [EU AI Act implementation timeline](https://ai-act-service-desk.ec.europa.eu/en/ai-act/eu-ai-act-implementation-timeline)).
+> The framing below is "this provides audit evidence the
+> corresponding article will ask for", not "this satisfies the
+> article". Talk to your legal team for the official compliance
+> reading on your specific deployment.
+
 Each question is paired with:
 
 - the **compliance scenario** a regulator or auditor would ask;
@@ -219,11 +227,23 @@ GRAPH `<PROJECT_ID>.decision_lineage_demo.agent_context_graph`
 MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
 WHERE c.status = 'DROPPED'
 RETURN
-  dp.decision_type, COUNT(c) AS rejections, AVG(c.score) AS avg_dropped_score
+  dp.decision_type,
+  COUNT(c) AS rejections,
+  AVG(c.score) AS avg_dropped_score
 GROUP BY dp.decision_type
 ORDER BY rejections DESC
 LIMIT 10;
 ```
+
+`COUNT(c)` is correct as long as the backing `candidates` table
+has one row per `candidate_id` (the graph KEY). The SDK enforces
+this at write time via `_dedupe_rows_by_key` in
+[`store_decision_points`](../../src/bigquery_agent_analytics/context_graph.py).
+If your dataset predates that fix and shows duplicate-key rows,
+reseat the table with `CREATE OR REPLACE TABLE T AS SELECT *
+EXCEPT(rn) FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY
+candidate_id) AS rn FROM T) WHERE rn = 1` and re-apply
+`property_graph.gql`.
 
 **Live answer (illustrative — top categories):**
 

@@ -12,12 +12,15 @@
 --   * You're moving / cloning the dataset to another project and
 --     want to recreate the graph layer there.
 --
--- The DDL is byte-identical to what
+-- The DDL is schema-equivalent to what
 -- `ContextGraphManager.get_decision_property_graph_ddl()` emits at
--- the SDK default config; `setup.sh` renders this template into
--- `property_graph.gql` with your project and dataset inlined, but
--- you can also paste it directly into BigQuery Studio after
--- substituting `__PROJECT_ID__` and `__DATASET_ID__` by hand.
+-- the SDK default config — same NODE TABLES, same EDGE TABLES, same
+-- KEY / SOURCE KEY / DESTINATION KEY / LABEL / PROPERTIES — though
+-- inline comments, line wrapping, and the trailing semicolon differ.
+-- `setup.sh` renders this template into `property_graph.gql` with
+-- your project and dataset inlined; you can also paste it directly
+-- into BigQuery Studio after substituting `__PROJECT_ID__` and
+-- `__DATASET_ID__` by hand.
 --
 -- Idempotent: `CREATE OR REPLACE PROPERTY GRAPH` is a single atomic
 -- DDL.

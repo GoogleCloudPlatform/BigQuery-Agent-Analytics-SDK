@@ -161,10 +161,13 @@ property graph layer without rerunning the agent or `AI.GENERATE`.
 
 The bundle ships `property_graph.gql.tpl` — a parameterized
 `CREATE OR REPLACE PROPERTY GRAPH` DDL that wires the seven
-backing tables into `agent_context_graph` exactly the way the SDK
-does (byte-identical to
+backing tables into `agent_context_graph` with the same schema the
+SDK emits (same NODE TABLES, EDGE TABLES, KEY / SOURCE KEY /
+DESTINATION KEY / LABEL / PROPERTIES — schema-equivalent to
 `ContextGraphManager.get_decision_property_graph_ddl()` at default
-config).
+config; comments, wrapping, and the trailing semicolon differ
+because this file is hand-curated for paste-and-run rather than
+generated).
 
 Two ways to apply it:
 

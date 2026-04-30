@@ -47,14 +47,15 @@ open DEMO_QUESTIONS.md
 
 ## Section 1 — The opening (~45s)
 
-> "The EU AI Act took full effect this year. For automated systems
-> that decide who sees an ad, who gets shown a price, what
-> creative gets served — three things are now non-negotiable:
-> every decision must be **explainable** on demand; **bias**
-> patterns must be detectable post-market; and decisions made with
-> **low confidence** must be subject to human oversight. Skipping
-> any of these isn't a paperwork problem — fines run up to seven
-> percent of global revenue.
+> "The EU AI Act's obligations are phasing in — high-risk-system
+> rules from August 2026, full rollout by August 2027. For
+> automated systems that decide who sees an ad, who gets shown a
+> price, what creative gets served — three things are landing as
+> hard requirements: every decision must be **explainable** on
+> demand; **bias** patterns must be detectable post-market; and
+> decisions made with **low confidence** must support human
+> oversight. The penalty ceiling is up to seven percent of global
+> revenue.
 >
 > Most agent demos produce a recommendation and ask you to trust
 > it. We did something different. We took our media-planner
@@ -118,8 +119,9 @@ Analytics panel and the natural-language prompt — your choice).
 > conversion. **Every reason is in the agent's own words. One
 > query. Zero forensic effort.**
 >
-> EU AI Act Article 86, GDPR Article 22 — both satisfied with the
-> data we already have."
+> EU AI Act Article 86 and GDPR Article 22 both ask for an
+> explanation pathway like this — and the data backing the
+> answer comes from systems we already run."
 
 ### Q2 — Bias audit (40s)
 

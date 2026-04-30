@@ -316,6 +316,55 @@ class TestContextGraphManager:
     result = mgr.store_biz_nodes(nodes)
     assert result is False
 
+  def test_store_biz_nodes_dedupes_by_biz_node_id(self):
+    """The BizNode KEY in the property graph is biz_node_id, so the
+    backing table must have at most one row per id; ``store_biz_nodes``
+    dedupes (last-wins) before insert, regardless of how the input
+    list got duplicates (re-runs, AI.GENERATE variance).
+    """
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_client.query.return_value = mock_job
+    mock_client.insert_rows_json.return_value = []
+    mgr = self._make_manager(mock_client)
+
+    # Three BizNode objects, two of which produce the same composite
+    # biz_node_id (same span / type / value); confidence differs so
+    # we can verify last-wins.
+    nodes = [
+        BizNode(
+            span_id="s1",
+            session_id="sess-1",
+            node_type="Product",
+            node_value="Homepage",
+            confidence=0.5,
+        ),
+        BizNode(
+            span_id="s1",
+            session_id="sess-1",
+            node_type="Product",
+            node_value="Homepage",
+            confidence=0.9,  # later — should win
+        ),
+        BizNode(
+            span_id="s2",
+            session_id="sess-1",
+            node_type="Product",
+            node_value="Other",
+        ),
+    ]
+    assert mgr.store_biz_nodes(nodes) is True
+    inserted = mock_client.insert_rows_json.call_args[0][1]
+    biz_ids = [r["biz_node_id"] for r in inserted]
+    assert len(biz_ids) == len(
+        set(biz_ids)
+    ), f"insert_rows_json received duplicate biz_node_id keys: {biz_ids}"
+    # Last-wins: the duplicated key keeps the higher confidence.
+    dup_row = next(
+        r for r in inserted if r["biz_node_id"] == "s1:Product:Homepage"
+    )
+    assert dup_row["confidence"] == 0.9
+
   def test_detect_world_changes_no_drift(self):
     mock_client = MagicMock()
     mock_job = MagicMock()
@@ -847,6 +896,84 @@ class TestDecisionSemantics:
     assert result is True
     # 2 insert_rows_json calls (one for DPs, one for candidates)
     assert mock_client.insert_rows_json.call_count == 2
+
+  def test_store_decision_points_dedupes_by_id(self):
+    """The DecisionPoint and CandidateNode KEYs in the property
+    graph are decision_id and candidate_id; the backing tables must
+    have at most one row per id. ``store_decision_points`` dedupes
+    (last-wins) before insert.
+
+    This guards against duplicate-key inserts when:
+      * AI.GENERATE returns overlapping items in a single
+        extraction;
+      * a re-run during the BigQuery streaming-insert buffer
+        window leaves prior rows that the DML DELETE could not
+        evict.
+    """
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_client.query.return_value = mock_job
+    mock_client.insert_rows_json.return_value = []
+    mgr = self._make_manager(mock_client)
+
+    dps = [
+        DecisionPoint(
+            decision_id="dp-1",
+            session_id="sess-1",
+            span_id="s5",
+            decision_type="audience_selection",
+            description="first",
+        ),
+        DecisionPoint(
+            decision_id="dp-1",  # duplicate id — last wins
+            session_id="sess-1",
+            span_id="s5",
+            decision_type="audience_selection",
+            description="second",
+        ),
+        DecisionPoint(
+            decision_id="dp-2",
+            session_id="sess-1",
+            span_id="s6",
+            decision_type="budget_allocation",
+        ),
+    ]
+    candidates = [
+        Candidate(
+            candidate_id="c-1",
+            decision_id="dp-1",
+            session_id="sess-1",
+            name="A",
+            score=0.5,
+            status="SELECTED",
+        ),
+        Candidate(
+            candidate_id="c-1",  # duplicate id — last wins
+            decision_id="dp-1",
+            session_id="sess-1",
+            name="A",
+            score=0.95,
+            status="SELECTED",
+        ),
+    ]
+    assert mgr.store_decision_points(dps, candidates) is True
+    # First insert_rows_json call is decision_points; second is
+    # candidates.
+    dp_rows = mock_client.insert_rows_json.call_args_list[0][0][1]
+    cand_rows = mock_client.insert_rows_json.call_args_list[1][0][1]
+    dp_ids = [r["decision_id"] for r in dp_rows]
+    cand_ids = [r["candidate_id"] for r in cand_rows]
+    assert len(dp_ids) == len(
+        set(dp_ids)
+    ), f"decision_id keys not unique: {dp_ids}"
+    assert len(cand_ids) == len(
+        set(cand_ids)
+    ), f"candidate_id keys not unique: {cand_ids}"
+    dp_dup = next(r for r in dp_rows if r["decision_id"] == "dp-1")
+    cand_dup = next(r for r in cand_rows if r["candidate_id"] == "c-1")
+    # Last-wins on both
+    assert dp_dup["description"] == "second"
+    assert cand_dup["score"] == 0.95
 
   def test_store_decision_points_dp_insert_error(self):
     mock_client = MagicMock()

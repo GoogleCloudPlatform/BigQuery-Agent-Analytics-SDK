@@ -105,12 +105,16 @@ ORDER BY dp.decision_id, cand.score DESC;
 -- One row per dropped candidate across every session. Same shape
 -- the SDK ships as `mgr.get_dropped_candidates_gql()`, with the
 -- session_id filter dropped so it spans the portfolio.
+-- DISTINCT collapses graph-traversal duplicates that arise when
+-- the underlying decision_points / candidates tables have multiple
+-- rows for the same key (e.g. legacy data from before the
+-- store_decision_points dedupe fix).
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
 WHERE ce.edge_type = 'DROPPED_CANDIDATE'
-RETURN
+RETURN DISTINCT
   dp.session_id,
   dp.decision_type,
   cand.name AS candidate_name,
@@ -121,9 +125,19 @@ ORDER BY dp.session_id, dp.decision_type, cand.score DESC;
 -- ====================================================================
 -- Block 4b: Dropped-candidate roll-up by decision_type
 --
--- Same predicate as Block 4 but aggregated: COUNT(c) and AVG(score)
--- per decision_type across every session. The portfolio metric
--- product teams want to track.
+-- Same predicate as Block 4 but aggregated: COUNT(cand) and
+-- AVG(cand.score) per decision_type across every session. The
+-- portfolio metric product teams want to track.
+--
+-- This count is correct as long as the backing `candidates` table
+-- has one row per `candidate_id` (the property graph KEY). The
+-- SDK enforces this at write time via _dedupe_rows_by_key in
+-- store_decision_points; if you suspect legacy duplicate-key data
+-- (run before that fix landed), reseat the table with:
+--   CREATE OR REPLACE TABLE T AS SELECT * EXCEPT(rn) FROM
+--     (SELECT *, ROW_NUMBER() OVER (PARTITION BY candidate_id) AS rn FROM T)
+--     WHERE rn = 1;
+-- and re-apply property_graph.gql.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH

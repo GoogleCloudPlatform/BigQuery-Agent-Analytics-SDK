@@ -934,6 +934,31 @@ LIMIT @result_limit
 """
 
 
+def _dedupe_rows_by_key(
+    rows: list[dict[str, Any]], key: str
+) -> list[dict[str, Any]]:
+  """Return ``rows`` with one entry per ``rows[i][key]``, last-wins.
+
+  The property-graph DDL declares ``decision_id`` and
+  ``candidate_id`` (and ``biz_node_id``) as ``KEY``, so the backing
+  tables must have at most one row per key. ``AI.GENERATE`` can
+  return multiple objects that the SDK maps to the same composite
+  key (e.g. the same ``(session_id, span_id, idx)`` triple
+  surfacing from a re-run that overlapped BigQuery's streaming-
+  insert buffer window). Dedupe here so ``insert_rows_json`` never
+  produces a key collision.
+
+  Last-wins lets a re-extraction in the same Python process
+  override an earlier object with the same key — which matches the
+  ``DELETE FROM ... WHERE session_id IN ...`` idempotency intent
+  on the BigQuery side.
+  """
+  seen: dict[Any, dict[str, Any]] = {}
+  for row in rows:
+    seen[row[key]] = row
+  return list(seen.values())
+
+
 # ------------------------------------------------------------------ #
 # ContextGraphManager                                                  #
 # ------------------------------------------------------------------ #
@@ -1208,6 +1233,10 @@ class ContextGraphManager:
         }
         for n in nodes
     ]
+    # The BizNode property-graph KEY is biz_node_id; dedupe before
+    # insert so multiple BizNode objects mapping to the same
+    # composite id never produce a duplicate row in the table.
+    rows = _dedupe_rows_by_key(rows, "biz_node_id")
 
     table_ref = (
         f"{self.project_id}.{self.dataset_id}" f".{self.config.biz_nodes_table}"
@@ -1218,7 +1247,7 @@ class ContextGraphManager:
       if errors:
         logger.error("Failed to insert biz nodes: %s", errors)
         return False
-      logger.info("Stored %d biz nodes", len(nodes))
+      logger.info("Stored %d biz nodes", len(rows))
       return True
     except Exception as e:
       logger.warning("Failed to store biz nodes: %s", e)
@@ -2081,6 +2110,8 @@ class ContextGraphManager:
           }
           for dp in decision_points
       ]
+      # The DecisionPoint KEY is decision_id; dedupe before insert.
+      dp_rows = _dedupe_rows_by_key(dp_rows, "decision_id")
       dp_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.decision_points_table}"
@@ -2107,6 +2138,8 @@ class ContextGraphManager:
           }
           for c in candidates
       ]
+      # The CandidateNode KEY is candidate_id; dedupe before insert.
+      cand_rows = _dedupe_rows_by_key(cand_rows, "candidate_id")
       cand_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.candidates_table}"
@@ -2121,7 +2154,8 @@ class ContextGraphManager:
         return False
 
     logger.info(
-        "Stored %d decision points, %d candidates",
+        "Stored %d decision points, %d candidates "
+        "(post-dedupe; some inputs may have shared a key)",
         len(decision_points),
         len(candidates),
     )
