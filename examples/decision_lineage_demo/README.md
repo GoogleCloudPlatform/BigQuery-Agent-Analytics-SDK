@@ -123,11 +123,12 @@ A talk track and a click-by-click walkthrough live alongside:
 
 - Click-by-click steps for BigQuery Studio:
   [`BQ_STUDIO_WALKTHROUGH.md`](BQ_STUDIO_WALKTHROUGH.md)
-- Talk track with per-block narration:
+- 5-minute leadership-pitched narrative for the EU-compliance
+  Q&A (script + anticipated questions):
   [`DEMO_NARRATION.md`](DEMO_NARRATION.md)
-- Five EU-compliance questions (right to explanation, bias audit,
-  human oversight, reproducibility, systemic-pattern audit) you can
-  ask in BQ Conversational Analytics and verify against direct GQL:
+- The five EU-compliance questions (right to explanation, bias
+  audit, human oversight, reproducibility, systemic-pattern audit)
+  with BQ Conversational Analytics prompts and verified GQL:
   [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)
 
 ## File map
