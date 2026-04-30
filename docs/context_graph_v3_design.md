@@ -6,6 +6,22 @@
 
 ---
 
+> **Implementation update (PR #99, 2026-04).** The current BigQuery
+> `AI.GENERATE` parser no longer accepts JSON-Schema strings via the
+> `output_schema =>` argument; it now expects a SQL-style column
+> list. Both the BizNode extraction and the Decision-Point extraction
+> in `ContextGraphManager` were updated to drop the `output_schema =>`
+> argument entirely. The model is asked in-prompt to return a JSON
+> array; the SQL strips markdown code fences and `JSON_EXTRACT_ARRAY`
+> parses each row. Sections **§3.1** and **§3.2** below describe the
+> design intent (typed entity / decision extraction) and remain
+> accurate at that level, but the literal SQL examples reference the
+> historical `output_schema =>` form. For the current SQL templates,
+> see `_EXTRACT_BIZ_NODES_QUERY` and `_EXTRACT_DECISION_POINTS_AI_QUERY`
+> in `src/bigquery_agent_analytics/context_graph.py`.
+
+---
+
 ## 1. Overview
 
 This document describes the design and implementation of Context Graph V3, which extends the V2 **System of Reasoning** layer with **Decision Semantics** — a structured model for agent decision points, candidate scoring, and rejection rationale. Built on the BigQuery Agent Analytics SDK, V3 constructs a 6-pillar BigQuery Property Graph that cross-links technical execution traces (from ADK) with business-domain entities (extracted via AI.GENERATE), decision points, and candidate options. This enables causal reasoning, GQL-based trace reconstruction, world-change detection, and EU-compliant audit trails for long-running agent-to-agent (A2A) tasks.
@@ -16,7 +32,7 @@ The demo provides a production-ready interactive prototype showcasing how organi
 
 - **6-Pillar Property Graph** — TechNode (ADK spans) + BizNode (AI.GENERATE extracted) + DecisionPoint (decision nodes) + CandidateNode (candidate options) + Caused edges (span lineage) + Evaluated cross-links (artifact lineage) + MadeDecision edges (span→decision) + CandidateEdge edges (decision→candidate)
 - **Decision Semantics** — Model agent decisions with candidates, scores, selection status (SELECTED/DROPPED), and rejection rationale for EU audit compliance
-- **AI.GENERATE with output_schema** — Strict structured entity and decision extraction using `output_schema` parameter for guaranteed JSON schema conformance
+- **AI.GENERATE for typed extraction** — Structured entity and decision extraction by asking `AI.GENERATE` in-prompt to return a JSON array; the SQL strips markdown fences and `JSON_EXTRACT_ARRAY` parses each row. (Historically passed via `output_schema =>` — see Implementation update at the top of this doc.)
 - **GQL trace reconstruction** — Native Graph Query Language replaces recursive CTEs for quantified-path traversal
 - **EU audit trail** — Forward GQL traversal from TechNode through DecisionPoint to CandidateNode for regulatory compliance
 - **World-change detection** — Pre-HITL safety check with fail-closed semantics (query/callback errors → `check_failed=True, is_safe_to_approve=False`)
@@ -33,7 +49,7 @@ The demo provides a production-ready interactive prototype showcasing how organi
 | Data Warehouse | Google BigQuery |
 | Graph Engine | BigQuery Property Graphs (`CREATE PROPERTY GRAPH` DDL) |
 | Query Language | GQL (Graph Query Language) with quantified-path patterns |
-| AI Functions | `AI.GENERATE` with `output_schema` for structured extraction |
+| AI Functions | `AI.GENERATE` (prompt-shaped JSON contract; see Implementation update) |
 | Tracing | OpenTelemetry (`trace_id`, `span_id`, `parent_span_id`) |
 | Streaming | BigQuery Storage Write API |
 | SDK | `bigquery-agent-analytics` Python package |

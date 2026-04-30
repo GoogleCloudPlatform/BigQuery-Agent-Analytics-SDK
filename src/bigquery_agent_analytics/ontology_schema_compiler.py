@@ -19,9 +19,15 @@ JSON string compatible with ``AI.GENERATE``.  The generated schema
 instructs the LLM to return a structured object with ``nodes`` and
 ``edges`` arrays, each typed according to the ontology.
 
-The schema uses the same JSON Schema dialect proven in V3's
-``_DECISION_POINT_OUTPUT_SCHEMA`` (nested ARRAY<OBJECT> with typed
-property fields).
+The schema uses a JSON Schema dialect (nested ARRAY<OBJECT> with
+typed property fields).
+
+The current BigQuery ``AI.GENERATE`` parser rejects JSON-Schema
+strings passed via ``output_schema =>``; consumers must instead
+concatenate the schema text into the prompt itself, ask the model
+to return JSON conforming to it, and parse the result with
+``JSON_EXTRACT_*``. This is what ``ontology_graph.OntologyGraphManager``
+already does.
 
 Example usage::
 
@@ -32,7 +38,9 @@ Example usage::
 
     spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     schema_json = compile_output_schema(spec)
-    # Use in: AI.GENERATE(..., output_schema => '{schema_json}')
+    # Concatenate into the AI.GENERATE prompt; do NOT pass it via
+    # `output_schema =>` (current BQ rejects JSON-Schema strings).
+    prompt = base_prompt + "\\n\\nReturn a single JSON object:\\n" + schema_json
 """
 
 from __future__ import annotations

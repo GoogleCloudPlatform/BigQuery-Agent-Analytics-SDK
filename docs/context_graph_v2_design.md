@@ -6,6 +6,19 @@
 
 ---
 
+> **Implementation update (PR #99, 2026-04).** The BizNode extraction
+> path described in this V2 design no longer passes `output_schema =>`
+> to `AI.GENERATE` — current BigQuery rejects JSON-Schema strings.
+> The SDK now asks the model in-prompt for a JSON array and parses
+> the result with `JSON_EXTRACT_ARRAY`. The design intent (typed
+> entity extraction; one row per `(span_id, node_type, node_value)`)
+> is unchanged. The current SQL is `_EXTRACT_BIZ_NODES_QUERY` in
+> `src/bigquery_agent_analytics/context_graph.py`. The same change
+> is documented at the top of `context_graph_v3_design.md`, which
+> extends this V2 design.
+
+---
+
 ## 1. Overview
 
 This document describes the design and implementation of Context Graph V2, a **System of Reasoning** layer for agentic advertising built on the BigQuery Agent Analytics SDK. The system constructs a BigQuery Property Graph that cross-links technical execution traces (from ADK) with business-domain entities (extracted via AI.GENERATE), enabling causal reasoning, GQL-based trace reconstruction, and world-change detection for long-running agent-to-agent (A2A) tasks.
@@ -15,7 +28,7 @@ The demo provides a production-ready interactive prototype showcasing how organi
 ### 1.1 Key Capabilities
 
 - **4-Pillar Property Graph** — TechNode (ADK spans) + BizNode (AI.GENERATE extracted) + Caused edges (span lineage) + Evaluated cross-links (artifact lineage)
-- **AI.GENERATE with output_schema** — Strict structured entity extraction using `output_schema` parameter for guaranteed JSON schema conformance
+- **AI.GENERATE for typed extraction** — Structured entity extraction by asking `AI.GENERATE` in-prompt for JSON output; the SQL strips markdown fences and `JSON_EXTRACT_ARRAY` parses each row. (Historically passed via `output_schema =>`; see the Implementation update at the top of this doc.)
 - **GQL trace reconstruction** — Native Graph Query Language replaces recursive CTEs for quantified-path traversal
 - **World-change detection** — Pre-HITL safety check with fail-closed semantics (query/callback errors → `check_failed=True, is_safe_to_approve=False`)
 - **Artifact lineage** — `artifact_uri` on BizNode and Evaluated edge for GCS object tracking
@@ -31,7 +44,7 @@ The demo provides a production-ready interactive prototype showcasing how organi
 | Data Warehouse | Google BigQuery |
 | Graph Engine | BigQuery Property Graphs (`CREATE PROPERTY GRAPH` DDL) |
 | Query Language | GQL (Graph Query Language) with quantified-path patterns |
-| AI Functions | `AI.GENERATE` with `output_schema` for structured extraction |
+| AI Functions | `AI.GENERATE` (prompt-shaped JSON contract; see Implementation update) |
 | Tracing | OpenTelemetry (`trace_id`, `span_id`, `parent_span_id`) |
 | Streaming | BigQuery Storage Write API |
 | SDK | `bigquery-agent-analytics` Python package |

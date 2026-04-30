@@ -1,0 +1,5 @@
+.env
+.venv/
+bq_studio_queries.gql
+property_graph.gql
+__pycache__/

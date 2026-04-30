@@ -21,9 +21,11 @@ entities extracted via ``AI.GENERATE``).
 
 Key capabilities:
 
-- **Business entity extraction** — Use ``AI.GENERATE`` with
-  ``output_schema`` to extract structured entities (e.g. Products,
-  Targeting segments, Campaigns) from unstructured agent payloads.
+- **Business entity extraction** — Use ``AI.GENERATE`` to extract
+  structured entities (e.g. Products, Targeting segments, Campaigns)
+  from unstructured agent payloads. The model is prompted to return
+  a JSON array; the SQL strips markdown fences and JSON_EXTRACT_ARRAY
+  parses each entity.
 - **Property Graph DDL** — Generate ``CREATE PROPERTY GRAPH`` DDL
   that formalizes Tech nodes, Biz nodes, ``CAUSED`` edges (parent→child
   span linkage), and ``EVALUATED`` cross-links.
@@ -271,28 +273,6 @@ class ContextGraphConfig(BaseModel):
 
 
 # ------------------------------------------------------------------ #
-# Constants                                                             #
-# ------------------------------------------------------------------ #
-
-_BIZ_NODE_OUTPUT_SCHEMA = (
-    '{"type": "ARRAY", "items": {"type": "OBJECT", "properties": '
-    '{"entity_type": {"type": "STRING"}, '
-    '"entity_value": {"type": "STRING"}, '
-    '"confidence": {"type": "NUMBER"}}}}'
-)
-
-_DECISION_POINT_OUTPUT_SCHEMA = (
-    '{"type": "ARRAY", "items": {"type": "OBJECT", "properties": '
-    '{"decision_type": {"type": "STRING"}, '
-    '"description": {"type": "STRING"}, '
-    '"candidates": {"type": "ARRAY", "items": {"type": "OBJECT", '
-    '"properties": {"name": {"type": "STRING"}, '
-    '"score": {"type": "NUMBER"}, '
-    '"status": {"type": "STRING"}, '
-    '"rejection_rationale": {"type": "STRING"}}}}}}}'
-)
-
-# ------------------------------------------------------------------ #
 # SQL Templates                                                        #
 # ------------------------------------------------------------------ #
 
@@ -337,8 +317,7 @@ USING (
               TO_JSON_STRING(base.content)
             )
           ),
-          endpoint => '{endpoint}',
-          output_schema => '{output_schema}'
+          endpoint => '{endpoint}'
         ).result,
         r'^```(?:json)?\\s*', ''),
       r'\\s*```$', '')
@@ -400,6 +379,11 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{biz_table}` (
   confidence FLOAT64,
   artifact_uri STRING
 )
+"""
+
+_DELETE_BIZ_NODES_FOR_SESSIONS_QUERY = """\
+DELETE FROM `{project}.{dataset}.{biz_table}`
+WHERE session_id IN UNNEST(@session_ids)
 """
 
 _INSERT_BIZ_NODES_QUERY = """\
@@ -534,8 +518,7 @@ SELECT
             TO_JSON_STRING(base.content)
           )
         ),
-        endpoint => '{endpoint}',
-        output_schema => '{output_schema}'
+        endpoint => '{endpoint}'
       ).result,
       r'^```(?:json)?\\s*', ''),
     r'\\s*```$', '')
@@ -956,6 +939,29 @@ LIMIT @result_limit
 """
 
 
+def _dedupe_rows_by_key(
+    rows: list[dict[str, Any]], key: str
+) -> list[dict[str, Any]]:
+  """Return ``rows`` with one entry per ``rows[i][key]``, last-wins.
+
+  The property-graph DDL declares ``decision_id`` and
+  ``candidate_id`` (and ``biz_node_id``) as ``KEY``, so the backing
+  tables must have at most one row per key. This helper handles
+  the **in-batch** duplicate case: ``AI.GENERATE`` can return
+  multiple objects that the SDK maps to the same composite key
+  (e.g. the same decision surfacing from two LLM_RESPONSE rows).
+
+  The cross-batch / rerun case (a prior load is invisible to a
+  subsequent ``DELETE``) is handled by writing through
+  ``_append_rows_via_load_job`` — load jobs write to managed
+  storage, not the streaming buffer.
+  """
+  seen: dict[Any, dict[str, Any]] = {}
+  for row in rows:
+    seen[row[key]] = row
+  return list(seen.values())
+
+
 # ------------------------------------------------------------------ #
 # ContextGraphManager                                                  #
 # ------------------------------------------------------------------ #
@@ -1080,6 +1086,77 @@ class ContextGraphManager:
     job = self.client.query(ddl, job_config=job_config)
     job.result()
 
+  def _delete_biz_nodes_for_sessions(self, session_ids: list[str]) -> None:
+    """Deletes existing BizNode rows for the given sessions.
+
+    Mirrors ``_delete_decision_data_for_sessions``. Without this
+    step ``store_biz_nodes`` is not rerun-idempotent: load-job
+    appends would stack rows with duplicate ``biz_node_id`` keys,
+    violating the ``BizNode KEY (biz_node_id)`` graph contract.
+
+    Swallows "table does not exist" errors so the first run
+    against an empty dataset is not a failure.
+    """
+    if not session_ids:
+      return
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
+        ]
+    )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
+    delete_query = _DELETE_BIZ_NODES_FOR_SESSIONS_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        biz_table=self.config.biz_nodes_table,
+    )
+    try:
+      job = self.client.query(delete_query, job_config=job_config)
+      job.result()
+    except Exception as e:  # pylint: disable=broad-except
+      msg = str(e).lower()
+      if "not found" in msg or "does not exist" in msg:
+        logger.debug("biz_nodes table does not exist yet: %s", e)
+      else:
+        logger.warning("biz_nodes delete failed: %s", e)
+
+  def _append_rows_via_load_job(
+      self,
+      table_ref: str,
+      rows: list[dict[str, Any]],
+      feature_label: str,
+  ) -> bool:
+    """Append ``rows`` to ``table_ref`` via a BigQuery load job.
+
+    Load jobs write rows directly to managed storage, so a
+    subsequent ``DELETE`` DML in the same Python session sees the
+    rows and can evict them. The legacy streaming insert path
+    (``insert_rows_json``) buffers writes for ~30 minutes and the
+    DML cannot see buffered rows during that window — that gap is
+    what produced duplicate-key data on rerun before this fix.
+
+    Returns False (and logs a warning) on any load-job failure.
+    """
+    if not rows:
+      return True
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+    )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
+    try:
+      job = self.client.load_table_from_json(
+          rows, table_ref, job_config=job_config
+      )
+      job.result()
+      logger.info("Loaded %d %s into %s", len(rows), feature_label, table_ref)
+      return True
+    except Exception as e:  # pylint: disable=broad-except
+      logger.warning(
+          "Load job for %s failed (%s): %s", feature_label, table_ref, e
+      )
+      return False
+
   def _extract_via_ai_generate(self, session_ids: list[str]) -> list[BizNode]:
     """Server-side extraction using AI.GENERATE with MERGE upsert."""
     self._ensure_biz_nodes_table()
@@ -1092,7 +1169,6 @@ class ContextGraphManager:
         biz_table=self.config.biz_nodes_table,
         endpoint=self._resolve_endpoint(),
         entity_types=entity_types_str,
-        output_schema=_BIZ_NODE_OUTPUT_SCHEMA,
     )
 
     job_config = bigquery.QueryJobConfig(
@@ -1231,21 +1307,28 @@ class ContextGraphManager:
         }
         for n in nodes
     ]
+    # The BizNode property-graph KEY is biz_node_id; dedupe before
+    # the load so multiple BizNode objects mapping to the same
+    # composite id never produce a duplicate row in the table.
+    rows = _dedupe_rows_by_key(rows, "biz_node_id")
+
+    # Idempotent rerun: delete prior BizNode rows for the sessions
+    # we are about to load. Without this, a re-call of
+    # store_biz_nodes() would stack appended rows with the same
+    # biz_node_id and violate the BizNode KEY graph contract. The
+    # delete + load pair must run in order; load_table_from_json
+    # writes to managed storage so the just-issued DELETE is
+    # visible by the time the load lands.
+    session_ids = list({r["session_id"] for r in rows if r["session_id"]})
+    self._delete_biz_nodes_for_sessions(session_ids)
 
     table_ref = (
         f"{self.project_id}.{self.dataset_id}" f".{self.config.biz_nodes_table}"
     )
 
-    try:
-      errors = self.client.insert_rows_json(table_ref, rows)
-      if errors:
-        logger.error("Failed to insert biz nodes: %s", errors)
-        return False
-      logger.info("Stored %d biz nodes", len(nodes))
-      return True
-    except Exception as e:
-      logger.warning("Failed to store biz nodes: %s", e)
-      return False
+    return self._append_rows_via_load_job(
+        table_ref, rows, feature_label="biz nodes"
+    )
 
   # -------------------------------------------------------------- #
   # Cross-Link Generation                                            #
@@ -1906,9 +1989,12 @@ class ContextGraphManager:
     """Extracts decision points and candidates from agent traces.
 
     When *use_ai_generate* is True, uses BigQuery AI.GENERATE
-    with ``_DECISION_POINT_OUTPUT_SCHEMA`` to extract structured
+    with a prompt-shaped JSON contract (no ``output_schema``,
+    just instructions in the prompt) to extract structured
     decision data server-side, including candidates with scores,
-    selection status, and rejection rationale.
+    selection status, and rejection rationale. The result is a
+    JSON array; the SQL strips markdown fences and the Python
+    side parses it.
 
     When False, fetches payloads for client-side extraction;
     each payload becomes a DecisionPoint stub with no candidates.
@@ -1927,7 +2013,13 @@ class ContextGraphManager:
   def _extract_decisions_via_ai_generate(
       self, session_ids: list[str]
   ) -> tuple[list[DecisionPoint], list[Candidate]]:
-    """Server-side extraction using AI.GENERATE with output_schema."""
+    """Server-side decision extraction using AI.GENERATE.
+
+    The model is asked in-prompt to return a JSON array; the SQL
+    strips markdown fences and this method parses each row's
+    ``decisions_json`` text into ``DecisionPoint`` + ``Candidate``
+    records. No ``output_schema`` arg is passed to ``AI.GENERATE``.
+    """
     import json as _json
 
     query = _EXTRACT_DECISION_POINTS_AI_QUERY.format(
@@ -1935,7 +2027,6 @@ class ContextGraphManager:
         dataset=self.dataset_id,
         table=self.table_id,
         endpoint=self._resolve_endpoint(),
-        output_schema=_DECISION_POINT_OUTPUT_SCHEMA,
     )
 
     job_config = bigquery.QueryJobConfig(
@@ -2096,17 +2187,15 @@ class ContextGraphManager:
           }
           for dp in decision_points
       ]
+      # The DecisionPoint KEY is decision_id; dedupe before the load.
+      dp_rows = _dedupe_rows_by_key(dp_rows, "decision_id")
       dp_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.decision_points_table}"
       )
-      try:
-        errors = self.client.insert_rows_json(dp_table, dp_rows)
-        if errors:
-          logger.error("Failed to insert decision points: %s", errors)
-          return False
-      except Exception as e:
-        logger.warning("Failed to store decision points: %s", e)
+      if not self._append_rows_via_load_job(
+          dp_table, dp_rows, feature_label="decision points"
+      ):
         return False
 
     if candidates:
@@ -2122,21 +2211,20 @@ class ContextGraphManager:
           }
           for c in candidates
       ]
+      # The CandidateNode KEY is candidate_id; dedupe before the load.
+      cand_rows = _dedupe_rows_by_key(cand_rows, "candidate_id")
       cand_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.candidates_table}"
       )
-      try:
-        errors = self.client.insert_rows_json(cand_table, cand_rows)
-        if errors:
-          logger.error("Failed to insert candidates: %s", errors)
-          return False
-      except Exception as e:
-        logger.warning("Failed to store candidates: %s", e)
+      if not self._append_rows_via_load_job(
+          cand_table, cand_rows, feature_label="candidates"
+      ):
         return False
 
     logger.info(
-        "Stored %d decision points, %d candidates",
+        "Stored %d decision points, %d candidates "
+        "(post-dedupe; some inputs may have shared a key)",
         len(decision_points),
         len(candidates),
     )
