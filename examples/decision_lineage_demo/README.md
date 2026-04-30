@@ -85,11 +85,11 @@ export PROJECT_ID=your-gcp-project   # or rely on `gcloud config`
 ./setup.sh
 ```
 
-`setup.sh` creates a `decision_lineage_demo` dataset, installs the
-SDK from the local checkout, seeds traces, runs the SDK pipeline
-(two `AI.GENERATE` calls — biz entities then decisions — taking
-30-60 seconds), and renders `bq_studio_queries.gql` with values
-inlined.
+`setup.sh` creates a `decision_lineage_demo` dataset, creates a
+local virtualenv at `./.venv`, installs the SDK from the local
+checkout into it, seeds traces, runs the SDK pipeline (two
+`AI.GENERATE` calls — biz entities then decisions — taking 30-60
+seconds), and renders `bq_studio_queries.gql` with values inlined.
 
 Override defaults via env vars before `./setup.sh`:
 

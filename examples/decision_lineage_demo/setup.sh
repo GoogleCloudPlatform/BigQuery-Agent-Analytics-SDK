@@ -83,11 +83,20 @@ echo "  Vertex AI API: enabled"
 
 # 3. Dependencies
 echo ""
-echo "[3/8] Installing Python dependencies..."
-pip install "google-cloud-bigquery>=3.13.0" "python-dotenv>=1.0.0" --quiet
+echo "[3/8] Installing Python dependencies into ./.venv..."
+# Use a per-demo venv so PEP 668 (Homebrew Python) doesn't block
+# installs and so the demo doesn't pollute the system interpreter.
+VENV_DIR="$SCRIPT_DIR/.venv"
+if [[ ! -d "$VENV_DIR" ]]; then
+  python3 -m venv "$VENV_DIR"
+fi
+VENV_PY="$VENV_DIR/bin/python3"
+"$VENV_PY" -m pip install --upgrade pip --quiet
+"$VENV_PY" -m pip install "google-cloud-bigquery>=3.13.0" \
+  "python-dotenv>=1.0.0" --quiet
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-pip install -e "$REPO_ROOT" --quiet
-echo "  Dependencies installed."
+"$VENV_PY" -m pip install -e "$REPO_ROOT" --quiet
+echo "  Dependencies installed in $VENV_DIR"
 
 # 4. Dataset + .env
 echo ""
@@ -119,13 +128,13 @@ echo "  Wrote $ENV_FILE"
 echo ""
 echo "[5/8] Seeding plugin-shape trace rows into agent_events..."
 cd "$SCRIPT_DIR"
-python3 seed_traces.py
+"$VENV_PY" seed_traces.py
 
 # 6. Build graph (AI.GENERATE)
 echo ""
 echo "[6/8] Building the property graph via the SDK extraction "
 echo "      pipeline (AI.GENERATE — this can take 30-60s)..."
-python3 build_graph.py
+"$VENV_PY" build_graph.py
 
 # 7. Render BQ Studio queries
 echo ""
@@ -147,6 +156,9 @@ echo "  2. Navigate to dataset: ${DATASET_ID}"
 echo "     (the property graph 'agent_context_graph' shows in the Explorer pane)"
 echo "  3. Open ${SCRIPT_DIR}/bq_studio_queries.gql"
 echo "     in a text editor and paste each block into BQ Studio."
+echo ""
+echo "To re-run just the AI.GENERATE pipeline (e.g. after a flaky run):"
+echo "  ./.venv/bin/python3 build_graph.py"
 echo ""
 echo "Talk track + timing: see DEMO_NARRATION.md"
 echo "Tear down:           ./reset.sh"

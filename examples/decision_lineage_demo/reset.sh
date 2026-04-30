@@ -44,4 +44,5 @@ fi
 
 bq rm -r -f --dataset "${PROJECT_ID}:${DATASET_ID}" || true
 rm -f "$ENV_FILE" "$RENDERED"
+rm -rf "$SCRIPT_DIR/.venv"
 echo "Reset complete. Re-run ./setup.sh to seed and rebuild."

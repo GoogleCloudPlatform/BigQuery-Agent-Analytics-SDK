@@ -1,2 +1,4 @@
 .env
+.venv/
 bq_studio_queries.gql
+__pycache__/
