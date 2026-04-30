@@ -376,6 +376,62 @@ class TestContextGraphManager:
     )
     assert dup_row["confidence"] == 0.9
 
+  def test_store_biz_nodes_is_rerun_idempotent_via_session_delete(self):
+    """Calling store_biz_nodes twice with the same nodes must not
+    duplicate biz_node_id rows.
+
+    The append-only load-job path is not idempotent on its own —
+    the BizNode KEY (biz_node_id) graph contract would be violated.
+    store_biz_nodes() therefore issues a DELETE FROM ... WHERE
+    session_id IN UNNEST(@session_ids) before the load, so the
+    second call evicts the first call's rows before appending.
+    """
+    mock_client = MagicMock()
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
+    mgr = self._make_manager(mock_client)
+
+    nodes = [
+        BizNode(
+            span_id="s1",
+            session_id="sess-1",
+            node_type="Product",
+            node_value="Homepage",
+        ),
+    ]
+    assert mgr.store_biz_nodes(nodes) is True
+    # Capture all query() calls — the per-session DELETE is one of
+    # them (the other being the table-create DDL).
+    delete_calls_run_1 = [
+        c
+        for c in mock_client.query.call_args_list
+        if "DELETE FROM" in c[0][0]
+        and self._make_manager().config.biz_nodes_table in c[0][0]
+    ]
+    assert len(delete_calls_run_1) == 1, (
+        "store_biz_nodes should issue exactly one biz_nodes DELETE"
+        " before its load on each call; got"
+        f" {len(delete_calls_run_1)}"
+    )
+
+    # Re-invoke. The second call must also DELETE before load.
+    assert mgr.store_biz_nodes(nodes) is True
+    delete_calls_total = [
+        c
+        for c in mock_client.query.call_args_list
+        if "DELETE FROM" in c[0][0]
+        and self._make_manager().config.biz_nodes_table in c[0][0]
+    ]
+    assert len(delete_calls_total) == 2, (
+        "second store_biz_nodes call must also DELETE for idempotency;"
+        f" total observed: {len(delete_calls_total)}"
+    )
+    # Both load-job calls must have happened — but both with the
+    # same single deduped row (the second one repeats the first).
+    assert mock_client.load_table_from_json.call_count == 2
+
   def test_detect_world_changes_no_drift(self):
     mock_client = MagicMock()
     mock_job = MagicMock()

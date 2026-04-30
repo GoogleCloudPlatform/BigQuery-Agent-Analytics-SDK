@@ -381,6 +381,11 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{biz_table}` (
 )
 """
 
+_DELETE_BIZ_NODES_FOR_SESSIONS_QUERY = """\
+DELETE FROM `{project}.{dataset}.{biz_table}`
+WHERE session_id IN UNNEST(@session_ids)
+"""
+
 _INSERT_BIZ_NODES_QUERY = """\
 INSERT INTO `{project}.{dataset}.{biz_table}`
   (biz_node_id, span_id, session_id, node_type, node_value, confidence)
@@ -1081,6 +1086,40 @@ class ContextGraphManager:
     job = self.client.query(ddl, job_config=job_config)
     job.result()
 
+  def _delete_biz_nodes_for_sessions(self, session_ids: list[str]) -> None:
+    """Deletes existing BizNode rows for the given sessions.
+
+    Mirrors ``_delete_decision_data_for_sessions``. Without this
+    step ``store_biz_nodes`` is not rerun-idempotent: load-job
+    appends would stack rows with duplicate ``biz_node_id`` keys,
+    violating the ``BizNode KEY (biz_node_id)`` graph contract.
+
+    Swallows "table does not exist" errors so the first run
+    against an empty dataset is not a failure.
+    """
+    if not session_ids:
+      return
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("session_ids", "STRING", session_ids),
+        ]
+    )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
+    delete_query = _DELETE_BIZ_NODES_FOR_SESSIONS_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        biz_table=self.config.biz_nodes_table,
+    )
+    try:
+      job = self.client.query(delete_query, job_config=job_config)
+      job.result()
+    except Exception as e:  # pylint: disable=broad-except
+      msg = str(e).lower()
+      if "not found" in msg or "does not exist" in msg:
+        logger.debug("biz_nodes table does not exist yet: %s", e)
+      else:
+        logger.warning("biz_nodes delete failed: %s", e)
+
   def _append_rows_via_load_job(
       self,
       table_ref: str,
@@ -1272,6 +1311,16 @@ class ContextGraphManager:
     # the load so multiple BizNode objects mapping to the same
     # composite id never produce a duplicate row in the table.
     rows = _dedupe_rows_by_key(rows, "biz_node_id")
+
+    # Idempotent rerun: delete prior BizNode rows for the sessions
+    # we are about to load. Without this, a re-call of
+    # store_biz_nodes() would stack appended rows with the same
+    # biz_node_id and violate the BizNode KEY graph contract. The
+    # delete + load pair must run in order; load_table_from_json
+    # writes to managed storage so the just-issued DELETE is
+    # visible by the time the load lands.
+    session_ids = list({r["session_id"] for r in rows if r["session_id"]})
+    self._delete_biz_nodes_for_sessions(session_ids)
 
     table_ref = (
         f"{self.project_id}.{self.dataset_id}" f".{self.config.biz_nodes_table}"
