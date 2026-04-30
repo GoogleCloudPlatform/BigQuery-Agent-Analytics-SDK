@@ -47,6 +47,13 @@ artifacts that demonstrate SDK capabilities.
 | [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example |
 | [ci_eval_pipeline.sh](ci_eval_pipeline.sh) | CI evaluation pipeline |
 
+## Demo Bundles
+
+| Directory | Description |
+|-----------|-------------|
+| [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
+| [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): seeded traces → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → four GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram) |
+
 ## Reference Artifacts
 
 | File | Description |
