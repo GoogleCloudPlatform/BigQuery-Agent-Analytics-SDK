@@ -941,17 +941,15 @@ def _dedupe_rows_by_key(
 
   The property-graph DDL declares ``decision_id`` and
   ``candidate_id`` (and ``biz_node_id``) as ``KEY``, so the backing
-  tables must have at most one row per key. ``AI.GENERATE`` can
-  return multiple objects that the SDK maps to the same composite
-  key (e.g. the same ``(session_id, span_id, idx)`` triple
-  surfacing from a re-run that overlapped BigQuery's streaming-
-  insert buffer window). Dedupe here so ``insert_rows_json`` never
-  produces a key collision.
+  tables must have at most one row per key. This helper handles
+  the **in-batch** duplicate case: ``AI.GENERATE`` can return
+  multiple objects that the SDK maps to the same composite key
+  (e.g. the same decision surfacing from two LLM_RESPONSE rows).
 
-  Last-wins lets a re-extraction in the same Python process
-  override an earlier object with the same key — which matches the
-  ``DELETE FROM ... WHERE session_id IN ...`` idempotency intent
-  on the BigQuery side.
+  The cross-batch / rerun case (a prior load is invisible to a
+  subsequent ``DELETE``) is handled by writing through
+  ``_append_rows_via_load_job`` — load jobs write to managed
+  storage, not the streaming buffer.
   """
   seen: dict[Any, dict[str, Any]] = {}
   for row in rows:
@@ -1082,6 +1080,43 @@ class ContextGraphManager:
     )
     job = self.client.query(ddl, job_config=job_config)
     job.result()
+
+  def _append_rows_via_load_job(
+      self,
+      table_ref: str,
+      rows: list[dict[str, Any]],
+      feature_label: str,
+  ) -> bool:
+    """Append ``rows`` to ``table_ref`` via a BigQuery load job.
+
+    Load jobs write rows directly to managed storage, so a
+    subsequent ``DELETE`` DML in the same Python session sees the
+    rows and can evict them. The legacy streaming insert path
+    (``insert_rows_json``) buffers writes for ~30 minutes and the
+    DML cannot see buffered rows during that window — that gap is
+    what produced duplicate-key data on rerun before this fix.
+
+    Returns False (and logs a warning) on any load-job failure.
+    """
+    if not rows:
+      return True
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+    )
+    job_config = with_sdk_labels(job_config, feature="context-graph")
+    try:
+      job = self.client.load_table_from_json(
+          rows, table_ref, job_config=job_config
+      )
+      job.result()
+      logger.info("Loaded %d %s into %s", len(rows), feature_label, table_ref)
+      return True
+    except Exception as e:  # pylint: disable=broad-except
+      logger.warning(
+          "Load job for %s failed (%s): %s", feature_label, table_ref, e
+      )
+      return False
 
   def _extract_via_ai_generate(self, session_ids: list[str]) -> list[BizNode]:
     """Server-side extraction using AI.GENERATE with MERGE upsert."""
@@ -1234,7 +1269,7 @@ class ContextGraphManager:
         for n in nodes
     ]
     # The BizNode property-graph KEY is biz_node_id; dedupe before
-    # insert so multiple BizNode objects mapping to the same
+    # the load so multiple BizNode objects mapping to the same
     # composite id never produce a duplicate row in the table.
     rows = _dedupe_rows_by_key(rows, "biz_node_id")
 
@@ -1242,16 +1277,9 @@ class ContextGraphManager:
         f"{self.project_id}.{self.dataset_id}" f".{self.config.biz_nodes_table}"
     )
 
-    try:
-      errors = self.client.insert_rows_json(table_ref, rows)
-      if errors:
-        logger.error("Failed to insert biz nodes: %s", errors)
-        return False
-      logger.info("Stored %d biz nodes", len(rows))
-      return True
-    except Exception as e:
-      logger.warning("Failed to store biz nodes: %s", e)
-      return False
+    return self._append_rows_via_load_job(
+        table_ref, rows, feature_label="biz nodes"
+    )
 
   # -------------------------------------------------------------- #
   # Cross-Link Generation                                            #
@@ -2110,19 +2138,15 @@ class ContextGraphManager:
           }
           for dp in decision_points
       ]
-      # The DecisionPoint KEY is decision_id; dedupe before insert.
+      # The DecisionPoint KEY is decision_id; dedupe before the load.
       dp_rows = _dedupe_rows_by_key(dp_rows, "decision_id")
       dp_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.decision_points_table}"
       )
-      try:
-        errors = self.client.insert_rows_json(dp_table, dp_rows)
-        if errors:
-          logger.error("Failed to insert decision points: %s", errors)
-          return False
-      except Exception as e:
-        logger.warning("Failed to store decision points: %s", e)
+      if not self._append_rows_via_load_job(
+          dp_table, dp_rows, feature_label="decision points"
+      ):
         return False
 
     if candidates:
@@ -2138,19 +2162,15 @@ class ContextGraphManager:
           }
           for c in candidates
       ]
-      # The CandidateNode KEY is candidate_id; dedupe before insert.
+      # The CandidateNode KEY is candidate_id; dedupe before the load.
       cand_rows = _dedupe_rows_by_key(cand_rows, "candidate_id")
       cand_table = (
           f"{self.project_id}.{self.dataset_id}"
           f".{self.config.candidates_table}"
       )
-      try:
-        errors = self.client.insert_rows_json(cand_table, cand_rows)
-        if errors:
-          logger.error("Failed to insert candidates: %s", errors)
-          return False
-      except Exception as e:
-        logger.warning("Failed to store candidates: %s", e)
+      if not self._append_rows_via_load_job(
+          cand_table, cand_rows, feature_label="candidates"
+      ):
         return False
 
     logger.info(

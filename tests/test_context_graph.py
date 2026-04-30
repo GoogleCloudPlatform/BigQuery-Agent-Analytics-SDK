@@ -281,9 +281,10 @@ class TestContextGraphManager:
 
   def test_store_biz_nodes_success(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     nodes = [
@@ -296,13 +297,17 @@ class TestContextGraphManager:
     ]
     result = mgr.store_biz_nodes(nodes)
     assert result is True
-    mock_client.insert_rows_json.assert_called_once()
+    mock_client.load_table_from_json.assert_called_once()
+    # Streaming insert path must NOT be used — that's the buffered
+    # write path that breaks rerun idempotency.
+    mock_client.insert_rows_json.assert_not_called()
 
   def test_store_biz_nodes_insert_error(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = [{"errors": ["insert failed"]}]
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    # Load job raises — surfaces as False from store_biz_nodes.
+    mock_client.load_table_from_json.side_effect = Exception("load failed")
     mgr = self._make_manager(mock_client)
 
     nodes = [
@@ -316,21 +321,26 @@ class TestContextGraphManager:
     result = mgr.store_biz_nodes(nodes)
     assert result is False
 
-  def test_store_biz_nodes_dedupes_by_biz_node_id(self):
+  def test_store_biz_nodes_dedupes_by_biz_node_id_and_uses_load_job(self):
     """The BizNode KEY in the property graph is biz_node_id, so the
-    backing table must have at most one row per id; ``store_biz_nodes``
-    dedupes (last-wins) before insert, regardless of how the input
-    list got duplicates (re-runs, AI.GENERATE variance).
+    backing table must have at most one row per id. ``store_biz_nodes``
+    dedupes (last-wins) before insert AND writes via a load job, not
+    via the streaming-insert API.
+
+    The streaming insert path was the source of the duplicate-key
+    rerun bug (PR #99 follow-up): its buffer is invisible to DML
+    DELETE for ~30 minutes, so a re-run within that window would
+    add duplicates against rows the DELETE could not evict. Load
+    jobs write to managed storage, so the DELETE in the same Python
+    session sees the rows.
     """
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
-    # Three BizNode objects, two of which produce the same composite
-    # biz_node_id (same span / type / value); confidence differs so
-    # we can verify last-wins.
     nodes = [
         BizNode(
             span_id="s1",
@@ -354,14 +364,15 @@ class TestContextGraphManager:
         ),
     ]
     assert mgr.store_biz_nodes(nodes) is True
-    inserted = mock_client.insert_rows_json.call_args[0][1]
-    biz_ids = [r["biz_node_id"] for r in inserted]
+    mock_client.insert_rows_json.assert_not_called()
+    args, _ = mock_client.load_table_from_json.call_args
+    loaded_rows = args[0]
+    biz_ids = [r["biz_node_id"] for r in loaded_rows]
     assert len(biz_ids) == len(
         set(biz_ids)
-    ), f"insert_rows_json received duplicate biz_node_id keys: {biz_ids}"
-    # Last-wins: the duplicated key keeps the higher confidence.
+    ), f"load_table_from_json received duplicate biz_node_id keys: {biz_ids}"
     dup_row = next(
-        r for r in inserted if r["biz_node_id"] == "s1:Product:Homepage"
+        r for r in loaded_rows if r["biz_node_id"] == "s1:Product:Homepage"
     )
     assert dup_row["confidence"] == 0.9
 
@@ -684,9 +695,10 @@ class TestContextGraphManager:
 
   def test_store_biz_nodes_persists_artifact_uri(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     nodes = [
@@ -700,9 +712,9 @@ class TestContextGraphManager:
     ]
     result = mgr.store_biz_nodes(nodes)
     assert result is True
-    call_args = mock_client.insert_rows_json.call_args
-    inserted_rows = call_args[0][1]
-    assert inserted_rows[0]["artifact_uri"] == "gs://bucket/artifact.json"
+    call_args = mock_client.load_table_from_json.call_args
+    loaded_rows = call_args[0][0]
+    assert loaded_rows[0]["artifact_uri"] == "gs://bucket/artifact.json"
 
   def test_create_cross_links_fails_on_real_delete_error(self):
     mock_client = MagicMock()
@@ -859,9 +871,10 @@ class TestDecisionSemantics:
 
   def test_store_decision_points_success(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     dps = [
@@ -894,26 +907,31 @@ class TestDecisionSemantics:
     ]
     result = mgr.store_decision_points(dps, candidates)
     assert result is True
-    # 2 insert_rows_json calls (one for DPs, one for candidates)
-    assert mock_client.insert_rows_json.call_count == 2
+    # Two load jobs (one for decision_points, one for candidates).
+    assert mock_client.load_table_from_json.call_count == 2
+    # Streaming insert path must not be used.
+    mock_client.insert_rows_json.assert_not_called()
 
-  def test_store_decision_points_dedupes_by_id(self):
+  def test_store_decision_points_dedupes_by_id_and_uses_load_job(self):
     """The DecisionPoint and CandidateNode KEYs in the property
     graph are decision_id and candidate_id; the backing tables must
     have at most one row per id. ``store_decision_points`` dedupes
-    (last-wins) before insert.
+    (last-wins) before insert AND writes via load jobs, not via the
+    streaming-insert API.
 
-    This guards against duplicate-key inserts when:
-      * AI.GENERATE returns overlapping items in a single
-        extraction;
-      * a re-run during the BigQuery streaming-insert buffer
-        window leaves prior rows that the DML DELETE could not
-        evict.
+    Both halves are needed: the in-Python dedupe handles the
+    in-batch duplicate case (AI.GENERATE returning overlapping
+    items in a single extraction), and the load-job path handles
+    the cross-batch / rerun case (a prior ``DELETE`` is invisible
+    to the next streaming insert because of the ~30 minute legacy
+    streaming buffer; load jobs write to managed storage so the
+    DELETE in the same Python session sees the rows).
     """
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     dps = [
@@ -957,29 +975,31 @@ class TestDecisionSemantics:
         ),
     ]
     assert mgr.store_decision_points(dps, candidates) is True
-    # First insert_rows_json call is decision_points; second is
-    # candidates.
-    dp_rows = mock_client.insert_rows_json.call_args_list[0][0][1]
-    cand_rows = mock_client.insert_rows_json.call_args_list[1][0][1]
+    # No streaming insert path.
+    mock_client.insert_rows_json.assert_not_called()
+    # Two load-job calls: first DPs, second candidates.
+    dp_args, _ = mock_client.load_table_from_json.call_args_list[0]
+    cand_args, _ = mock_client.load_table_from_json.call_args_list[1]
+    dp_rows = dp_args[0]
+    cand_rows = cand_args[0]
     dp_ids = [r["decision_id"] for r in dp_rows]
     cand_ids = [r["candidate_id"] for r in cand_rows]
     assert len(dp_ids) == len(
         set(dp_ids)
-    ), f"decision_id keys not unique: {dp_ids}"
+    ), f"load_table_from_json received duplicate decision_id keys: {dp_ids}"
     assert len(cand_ids) == len(
         set(cand_ids)
-    ), f"candidate_id keys not unique: {cand_ids}"
+    ), f"load_table_from_json received duplicate candidate_id keys: {cand_ids}"
     dp_dup = next(r for r in dp_rows if r["decision_id"] == "dp-1")
     cand_dup = next(r for r in cand_rows if r["candidate_id"] == "c-1")
-    # Last-wins on both
     assert dp_dup["description"] == "second"
     assert cand_dup["score"] == 0.95
 
   def test_store_decision_points_dp_insert_error(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = [{"errors": ["insert failed"]}]
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_client.load_table_from_json.side_effect = Exception("load failed")
     mgr = self._make_manager(mock_client)
 
     dps = [
@@ -1414,17 +1434,20 @@ class TestDecisionSemantics:
 
   def test_store_candidates_insert_error(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    # First load (decision_points) succeeds; second (candidates) raises.
     call_count = {"n": 0}
 
-    def insert_side_effect(table, rows):
+    def load_side_effect(rows, table_ref, job_config=None):
       call_count["n"] += 1
       if call_count["n"] == 2:
-        return [{"errors": ["insert failed"]}]
-      return []
+        raise Exception("candidates load failed")
+      job = MagicMock()
+      job.result.return_value = None
+      return job
 
-    mock_client.insert_rows_json.side_effect = insert_side_effect
+    mock_client.load_table_from_json.side_effect = load_side_effect
     mgr = self._make_manager(mock_client)
 
     dps = [
@@ -1640,10 +1663,11 @@ class TestDecisionSemantics:
 
   def test_build_context_graph_with_decisions(self):
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_job.result.return_value = []
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_query_job.result.return_value = []
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     results = mgr.build_context_graph(
@@ -1691,11 +1715,17 @@ class TestDecisionSemantics:
     assert parsed[0]["decision_type"] == "audience"
 
   def test_store_decision_points_deletes_before_insert(self):
-    """Verifies idempotency: delete queries run before inserts."""
+    """Verifies idempotency: delete queries run before the load job.
+
+    Writes go through a load job (managed storage), not the
+    streaming-insert API — so the DELETE issued just above is
+    visible to the load that follows in the same Python session.
+    """
     mock_client = MagicMock()
-    mock_job = MagicMock()
-    mock_client.query.return_value = mock_job
-    mock_client.insert_rows_json.return_value = []
+    mock_query_job = MagicMock()
+    mock_client.query.return_value = mock_query_job
+    mock_load_job = MagicMock()
+    mock_client.load_table_from_json.return_value = mock_load_job
     mgr = self._make_manager(mock_client)
 
     dps = [
@@ -1707,9 +1737,12 @@ class TestDecisionSemantics:
         ),
     ]
     mgr.store_decision_points(dps, [])
-    # Queries: 4 table creates + 4 deletes + 1 insert_rows_json
-    # At minimum, query was called for ensures + deletes
+    # Queries: 4 table creates + 4 deletes; at minimum the
+    # DELETEs ran. The load-job for DPs ran via
+    # load_table_from_json.
     assert mock_client.query.call_count >= 4
+    mock_client.load_table_from_json.assert_called_once()
+    mock_client.insert_rows_json.assert_not_called()
 
   def test_decision_ddl_edge_source_dest_types(self):
     """MadeDecision: TechNode->DecisionPoint,

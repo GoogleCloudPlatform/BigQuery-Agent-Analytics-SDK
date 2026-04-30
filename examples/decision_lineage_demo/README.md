@@ -44,7 +44,7 @@ agent_context_graph  ←  query with GQL in BigQuery Studio
 ## What you'll show in BigQuery Studio
 
 `bq_studio_queries.gql` (rendered by setup with project / dataset /
-session inlined) holds five blocks:
+session inlined) holds six blocks:
 
 | Block | Surface | Scope |
 |-------|---------|-------|
