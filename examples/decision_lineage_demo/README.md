@@ -3,8 +3,8 @@
 > Issue [#98](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/98) — *Unboxing the AI Agent: Decision Lineage with BigQuery Context Graphs*.
 
 A demo where the BigQuery Agent Analytics SDK consumes a media-planner
-agent's traces, has `AI.GENERATE` extract every decision and every
-candidate the agent considered, and persists it all as a BigQuery
+agent's traces, has `AI.GENERATE` extract decisions and the candidates
+the agent considered, and persists the extracted facts as a BigQuery
 **Property Graph** you query — with GQL — in **BigQuery Studio**.
 
 The demo surface is BigQuery Studio. Setup runs once locally; the
@@ -63,7 +63,7 @@ come from `AI.GENERATE` running against the seeded text.
 |-------|----------|---------|
 | 1 | What did the SDK extract? | Four COUNT GQL queries — one per node label. Expect 23 TechNodes plus a non-zero count for each of BizNode / DecisionPoint / CandidateNode (exact counts vary; see "AI.GENERATE non-determinism" below) |
 | 2 | Visualize the agent's reasoning | Path GQL — Studio renders the diagram as fan-outs of candidates from each extracted decision |
-| 3 | EU-audit traversal | The exact GQL `mgr.get_eu_audit_gql` ships — every decision, every candidate, every rejection rationale |
+| 3 | EU-audit traversal | The exact GQL `mgr.get_eu_audit_gql` ships — each extracted decision with its candidates and the rejection rationale on dropped ones |
 | 4 | Dropped candidates | Detail view (matches `mgr.get_dropped_candidates_gql`) plus an optional Block 4b roll-up — `COUNT` and `AVG(score)` per decision type |
 
 All four blocks run against `agent_context_graph` and live as a

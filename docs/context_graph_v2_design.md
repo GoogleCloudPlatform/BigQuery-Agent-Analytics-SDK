@@ -6,6 +6,19 @@
 
 ---
 
+> **Implementation update (PR #99, 2026-04).** The BizNode extraction
+> path described in this V2 design no longer passes `output_schema =>`
+> to `AI.GENERATE` — current BigQuery rejects JSON-Schema strings.
+> The SDK now asks the model in-prompt for a JSON array and parses
+> the result with `JSON_EXTRACT_ARRAY`. The design intent (typed
+> entity extraction; one row per `(span_id, node_type, node_value)`)
+> is unchanged. The current SQL is `_EXTRACT_BIZ_NODES_QUERY` in
+> `src/bigquery_agent_analytics/context_graph.py`. The same change
+> is documented at the top of `context_graph_v3_design.md`, which
+> extends this V2 design.
+
+---
+
 ## 1. Overview
 
 This document describes the design and implementation of Context Graph V2, a **System of Reasoning** layer for agentic advertising built on the BigQuery Agent Analytics SDK. The system constructs a BigQuery Property Graph that cross-links technical execution traces (from ADK) with business-domain entities (extracted via AI.GENERATE), enabling causal reasoning, GQL-based trace reconstruction, and world-change detection for long-running agent-to-agent (A2A) tasks.

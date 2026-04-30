@@ -49,10 +49,10 @@ Have these open before you start:
 > "We've all seen agent demos that produce an answer and ask you to
 > trust it. This is a demo about what's underneath. The agent we're
 > looking at planned a Nike Summer Run media campaign — multiple
-> decisions, every alternative it considered, every reason it
-> rejected something. Each of those rejections is now a queryable
-> row in BigQuery, extracted from the agent's own traces by the
-> SDK."
+> decisions, the alternatives it considered for each, and the
+> reasons it rejected the dropped ones. The extracted facts are
+> now queryable rows in BigQuery, pulled from the agent's own
+> traces by the SDK."
 
 ---
 
@@ -82,7 +82,7 @@ sequentially.
 Paste Block 2 from `bq_studio_queries.gql` into a new tab and run.
 
 This returns paths from each span that made a decision through to
-every candidate. **BigQuery Studio renders this as an interactive
+its candidates. **BigQuery Studio renders this as an interactive
 graph diagram.**
 
 > "This is the same property graph we just counted, rendered as a
@@ -111,7 +111,8 @@ graph diagram.**
 
 Paste Block 3 from `bq_studio_queries.gql` and run.
 
-Output is a table: per decision, every candidate with rationale.
+Output is a table: one row per (decision, candidate) the SDK
+extracted, with rationale on dropped ones.
 
 > "This GQL is what the SDK ships as
 > `mgr.get_eu_audit_gql(session_id=...)` — the audit traversal a
