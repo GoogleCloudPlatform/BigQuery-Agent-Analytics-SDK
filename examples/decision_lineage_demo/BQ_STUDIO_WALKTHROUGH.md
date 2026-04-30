@@ -139,6 +139,21 @@ The same GQL the SDK ships as `mgr.get_eu_audit_gql(session_id=...)`.
    session, so you can drill back into Block 2 / Block 3 for any
    of these "close call" sessions.
 
+## Step 6 — EU-compliance Q&A in BQ Conversational Analytics (optional, ~3-5 min)
+
+Five business-shaped questions that frame the same graph as an
+audit surface for the EU AI Act, GDPR, and DSA — covering right to
+explanation, bias audit, human-oversight trigger, decision
+reproducibility, and systemic-pattern audit.
+
+1. Open the **Gemini / Conversational Analytics** panel in BQ
+   Studio with the `decision_lineage_demo` dataset selected.
+2. Open [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md) in a side editor.
+3. For each Q1-Q5, paste the natural-language prompt into BQ CA,
+   run, then paste the explicit GQL into a query tab and compare.
+   The "regulatory anchor" line under each question names the
+   article(s) the answer addresses.
+
 ## Recovering from common issues
 
 | Symptom | Fix |

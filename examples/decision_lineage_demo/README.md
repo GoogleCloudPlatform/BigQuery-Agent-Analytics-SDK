@@ -125,6 +125,10 @@ A talk track and a click-by-click walkthrough live alongside:
   [`BQ_STUDIO_WALKTHROUGH.md`](BQ_STUDIO_WALKTHROUGH.md)
 - Talk track with per-block narration:
   [`DEMO_NARRATION.md`](DEMO_NARRATION.md)
+- Five EU-compliance questions (right to explanation, bias audit,
+  human oversight, reproducibility, systemic-pattern audit) you can
+  ask in BQ Conversational Analytics and verify against direct GQL:
+  [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)
 
 ## File map
 
@@ -133,6 +137,7 @@ decision_lineage_demo/
 ├── README.md                  # this file
 ├── DEMO_NARRATION.md          # talk track + timing
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
+├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
 ├── setup.sh                   # one-shot bootstrap
 ├── reset.sh                   # tear down dataset + rendered files
 ├── render_queries.sh          # sed-renders the .gql template
