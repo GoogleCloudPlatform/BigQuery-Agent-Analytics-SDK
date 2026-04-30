@@ -87,10 +87,12 @@ open DEMO_QUESTIONS.md
 > The SDK's canonical graph is intentionally compact: spans,
 > business entities, decisions, candidates, and the edges between
 > them. For this demo, we add a SQL-only presentation graph on top:
-> CampaignRun, DecisionType, CandidateStatus, and RejectionReason
-> become visible nodes. That richer graph is what makes the BigQuery
-> Studio picture readable without changing the underlying audit
-> data."
+> CampaignRun, PlanningDecision, DecisionOption, OptionOutcome, and
+> DropReason become visible nodes. The edge labels read like the
+> business story too: the campaign has decisions, each decision
+> weighed options, and each option has an outcome. That richer graph
+> is what makes the BigQuery Studio picture readable without changing
+> the underlying audit data."
 
 **[Open BigQuery Studio. Run Block 2 from `bq_studio_queries.gql`.
 Click the Graph tab.]**

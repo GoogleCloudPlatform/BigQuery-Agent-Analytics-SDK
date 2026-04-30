@@ -110,13 +110,25 @@ Once the node tables are populated:
       `SELECTED_CANDIDATE` or `DROPPED_CANDIDATE` and the
       `rejection_rationale` carried on the edge).
 
-### 1e. `build_rich_graph.py` — SQL-only presentation layer
+### 1e. `campaign_runs` — exact campaign/session mapping
+
+`run_agent.py` writes `campaign_runs` after all six sessions finish
+successfully. This avoids relying on timestamp order to infer which
+session belonged to which campaign. Each row stores the exact
+`session_id`, campaign name, brand, full campaign brief, run order,
+and streamed event count.
+
+### 1f. `build_rich_graph.py` — SQL-only presentation layer
 
 After the SDK tables exist, `build_rich_graph.py` creates demo-only
 projection tables:
 
-  * `campaign_runs` — one row per session, joined to the campaign
-    metadata in `campaigns.py`.
+  * `campaign_runs` — reused from `run_agent.py` when present;
+    synthesized only as a fallback for legacy or cloned datasets.
+  * `rich_agent_steps` — one row per distinct `span_id`, deduped from
+    `agent_events` so the rich graph's AgentStep / NextStep labels
+    satisfy BigQuery's KEY contract even when the raw plugin table has
+    duplicate span rows.
   * `rich_decision_types` — one row per normalized decision type.
   * `rich_candidate_statuses` — normally `SELECTED` and `DROPPED`.
   * `rich_rejection_reasons` — one row per distinct dropped-candidate
@@ -127,7 +139,8 @@ projection tables:
     nodes back to the SDK-owned facts.
 
 No live agent call and no `AI.GENERATE` call happens in this step.
-It is deterministic SQL plus one load job for `campaign_runs`.
+It is deterministic SQL, plus a fallback load job for `campaign_runs`
+only when `run_agent.py` did not already write that table.
 
 ---
 
@@ -172,20 +185,29 @@ populate both a node label and an edge label.
 | **MadeDecision** | `made_decision_edges` | `span_id` → `decision_id` | which span produced which decision |
 | **CandidateEdge** | `candidate_edges` | `decision_id` → `candidate_id` | which candidates the decision weighed (with `edge_type` SELECTED/DROPPED + rationale on the edge) |
 
-The richer demo graph from `rich_property_graph.gql.tpl` keeps all
-of those labels and adds presentation labels:
+The richer demo graph from `rich_property_graph.gql.tpl` keeps the
+same underlying tables but uses ads-domain labels for the presenter
+surface:
 
 | Rich graph element | Comes from table | KEY column | Why it exists in the demo |
 |---|---|---|---|
 | **CampaignRun** | `campaign_runs` | `session_id` | Makes each campaign run visible as the root of a graph visualization |
-| **DecisionType** | `rich_decision_types` | `decision_type_id` | Groups equivalent decision categories for portfolio questions |
-| **CandidateStatus** | `rich_candidate_statuses` | `status_id` | Promotes SELECTED / DROPPED from a property into visible graph nodes |
-| **RejectionReason** | `rich_rejection_reasons` | `reason_id` | Promotes dropped-candidate rationale into visible "why rejected" nodes |
-| **CampaignSpan** | `rich_campaign_span_edges` | `session_id` → `span_id` | Connects a campaign run to its raw plugin spans |
+| **AgentStep** | `rich_agent_steps` | `span_id` | Business-readable, key-clean name for a plugin-recorded span |
+| **MediaEntity** | `extracted_biz_nodes` | `biz_node_id` | Audience, channel, creative, budget, or other media-planning entity |
+| **PlanningDecision** | `decision_points` | `decision_id` | One choice the agent made during campaign planning |
+| **DecisionCategory** | `rich_decision_types` | `decision_type_id` | Groups equivalent decision categories for portfolio questions |
+| **DecisionOption** | `candidates` | `candidate_id` | One option the agent selected or dropped |
+| **OptionOutcome** | `rich_candidate_statuses` | `status_id` | Promotes SELECTED / DROPPED from a property into visible graph nodes |
+| **DropReason** | `rich_rejection_reasons` | `reason_id` | Promotes dropped-option rationale into visible "why rejected" nodes |
+| **CampaignActivity** | `rich_campaign_span_edges` | `session_id` → `span_id` | Connects a campaign run to its raw plugin spans |
+| **NextStep** | `rich_agent_steps` | `parent_span_id` → `span_id` | Parent → child sequence in the agent run |
+| **ConsideredEntity** | `context_cross_links` | `span_id` → `biz_node_id` | Which agent step produced or considered which media entity |
+| **DecidedAt** | `made_decision_edges` | `span_id` → `decision_id` | Span where the planning decision committed |
 | **CampaignDecision** | `rich_campaign_decision_edges` | `session_id` → `decision_id` | Connects a campaign run directly to extracted decisions |
-| **HasDecisionType** | `rich_decision_type_edges` | `decision_id` → `decision_type_id` | Connects each decision to its normalized type |
-| **HasCandidateStatus** | `rich_candidate_status_edges` | `candidate_id` → `status_id` | Connects each candidate to SELECTED or DROPPED |
-| **RejectedBecause** | `rich_candidate_reason_edges` | `candidate_id` → `reason_id` | Connects dropped candidates to rationale nodes |
+| **InCategory** | `rich_decision_type_edges` | `decision_id` → `decision_type_id` | Connects each decision to its normalized category |
+| **WeighedOption** | `candidate_edges` | `decision_id` → `candidate_id` | Connects each planning decision to the options it weighed |
+| **HasOutcome** | `rich_candidate_status_edges` | `candidate_id` → `status_id` | Connects each option to SELECTED or DROPPED |
+| **RejectedBecause** | `rich_candidate_reason_edges` | `candidate_id` → `reason_id` | Connects dropped options to rationale nodes |
 
 ---
 
@@ -196,8 +218,8 @@ Block 2 from `bq_studio_queries.gql`:
 ```sql
 GRAPH `<P>.<D>.rich_agent_context_graph`
 MATCH p =
-  (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint)
-    -[:CandidateEdge]->(c:CandidateNode)-[:HasCandidateStatus]->(st:CandidateStatus)
+  (cr:CampaignRun)-[:CampaignDecision]->(dp:PlanningDecision)
+    -[:WeighedOption]->(c:DecisionOption)-[:HasOutcome]->(st:OptionOutcome)
 WHERE cr.session_id = '<SESSION_ID>'
 RETURN p;
 ```
@@ -209,14 +231,14 @@ What the engine does, table by table:
   2. **CampaignDecision edge** — joins
      `rich_campaign_decision_edges` on `session_id`; each edge points
      at one extracted decision.
-  3. **DecisionPoint binding** — joins `decision_points` on
+  3. **PlanningDecision binding** — joins `decision_points` on
      `decision_id`.
-  4. **CandidateEdge edge** — joins `candidate_edges` on
+  4. **WeighedOption edge** — joins `candidate_edges` on
      `decision_id`; each decision fans out to its selected and
      dropped candidates.
-  5. **CandidateNode binding** — joins `candidates` on
+  5. **DecisionOption binding** — joins `candidates` on
      `candidate_id`.
-  6. **HasCandidateStatus edge** — joins
+  6. **HasOutcome edge** — joins
      `rich_candidate_status_edges` so SELECTED / DROPPED appear as
      graph nodes, not just properties.
   7. **Result** — paths bound to `p` with campaign, decision,
@@ -235,8 +257,8 @@ What the engine does, table by table:
 | **Q1** Right to explanation for one campaign | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ `rich_candidate_status_edges` ⋈ `rich_candidate_statuses` | Per-decision, walks edges to surface SELECTED + DROPPED + rationale |
 | **Q2** Bias audit (rationales citing age / demo) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | LIKE-filter on `candidates.rejection_rationale` (extracted from the LLM trace text by AI.GENERATE; exact wording can vary across runs — see [`README.md`](README.md)) |
 | **Q3** Human-oversight trigger (score < 0.7) | `decision_points` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | Filter on selected candidates with `score < 0.7`; empty result is the audit artifact |
-| **Q4** Reproducibility (one decision's full lineage) | `campaign_runs` ⋈ `decision_points` plus `agent_events` ⋈ `made_decision_edges` ⋈ `candidate_edges` ⋈ `candidates` | Walks from CampaignRun and TechNode through the decision and candidates back to the evidence span (`Caused` and `Evaluated` are reachable but not used in the shipped Q4 GQL) |
-| **Q5** Pattern audit (rejection counts by type) | `decision_points` ⋈ `rich_decision_type_edges` ⋈ `rich_decision_types` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | `GROUP BY DecisionType` with `COUNT(c)` + `AVG(c.score)` |
+| **Q4** Reproducibility (one decision's full lineage) | `campaign_runs` ⋈ `decision_points` plus `agent_events` ⋈ `made_decision_edges` ⋈ `candidate_edges` ⋈ `candidates` | Walks from CampaignRun and AgentStep through the decision and options back to the evidence span (`NextStep` and `ConsideredEntity` are reachable but not used in the shipped Q4 GQL) |
+| **Q5** Pattern audit (rejection counts by type) | `decision_points` ⋈ `rich_decision_type_edges` ⋈ `rich_decision_types` ⋈ `candidate_edges` ⋈ `candidates` ⋈ status tables | `GROUP BY DecisionCategory` with `COUNT(c)` + `AVG(c.score)` |
 
 Every regulator-shaped question is a walk over a fixed subset of
 the SDK tables plus deterministic rich projections, expressed as GQL

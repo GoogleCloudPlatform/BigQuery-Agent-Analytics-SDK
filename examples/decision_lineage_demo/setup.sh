@@ -36,7 +36,7 @@
 #      cross-link / decision edges, and emits CREATE OR REPLACE
 #      PROPERTY GRAPH.
 #   8. Run build_rich_graph.py — derives demo presentation nodes
-#      (CampaignRun, DecisionType, CandidateStatus, RejectionReason)
+#      (CampaignRun, DecisionCategory, OptionOutcome, DropReason)
 #      and creates rich_agent_context_graph.
 #   9. Render bq_studio_queries.gql with project/dataset/session
 #      values inlined for copy-paste into BigQuery Studio. The

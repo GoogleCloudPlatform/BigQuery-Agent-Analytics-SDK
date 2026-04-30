@@ -42,8 +42,9 @@ agent_context_graph  (canonical SDK graph)
    │
    ▼
 build_rich_graph.py — SQL-only presentation layer
-   │                   (CampaignRun, DecisionType,
-   │                    CandidateStatus, RejectionReason)
+   │                   (AgentStep, MediaEntity,
+   │                    PlanningDecision, DecisionOption,
+   │                    DecisionCategory, OptionOutcome, DropReason)
    ▼
 rich_agent_context_graph  ←  query with GQL in BigQuery Studio
 ```
@@ -55,8 +56,8 @@ session inlined) holds six blocks:
 
 | Block | Surface | Scope |
 |-------|---------|-------|
-| 1 | Portfolio inventory — counts across CampaignRun, TechNode, BizNode, DecisionPoint, CandidateNode, DecisionType, CandidateStatus, RejectionReason, plus decisions per session | All sessions |
-| 2 | Visualize ONE session's reasoning — CampaignRun → DecisionPoint → CandidateNode → CandidateStatus, plus optional RejectionReason fan-out | First session |
+| 1 | Portfolio inventory — counts across CampaignRun, AgentStep, MediaEntity, PlanningDecision, DecisionOption, DecisionCategory, OptionOutcome, DropReason, plus decisions per session | All sessions |
+| 2 | Visualize ONE session's reasoning — CampaignRun → PlanningDecision → DecisionOption → OptionOutcome, plus optional DropReason fan-out | First session |
 | 3 | EU-audit traversal — same shape `mgr.get_eu_audit_gql` ships, scoped to that session | First session |
 | 4 | Dropped candidates — detail view across the portfolio | All sessions |
 | 4b | Dropped roll-up — `COUNT(cand)` + `AVG(cand.score)` by decision type | All sessions |
@@ -98,7 +99,8 @@ export PROJECT_ID=your-gcp-project   # or rely on `gcloud config`
    latency). Each invocation produces an `INVOCATION_STARTING` →
    `AGENT_STARTING` → `LLM_REQUEST`/`LLM_RESPONSE` per decision →
    `TOOL_STARTING`/`TOOL_COMPLETED` per tool call →
-   `INVOCATION_COMPLETED` chain in `agent_events`.
+   `INVOCATION_COMPLETED` chain in `agent_events`, and writes the
+   exact session → campaign mapping into `campaign_runs`.
 7. Runs `build_graph.py` — discovers every session in
    `agent_events`, calls `mgr.build_context_graph(...)`, prints
    per-session counts.
@@ -130,8 +132,9 @@ After setup:
    **`rich_agent_context_graph`**. The canonical SDK graph
    **`agent_context_graph`** is also created as the source layer.
    The dataset includes the seven SDK backing tables plus derived
-   demo tables such as `campaign_runs`, `rich_decision_types`,
-   `rich_candidate_statuses`, and `rich_rejection_reasons`.
+   demo tables such as `campaign_runs`, `rich_agent_steps`,
+   `rich_decision_types`, `rich_candidate_statuses`, and
+   `rich_rejection_reasons`.
 3. Open `bq_studio_queries.gql` in a text editor and paste each
    block (delimited by `==` headers) into a new BQ Studio query
    tab. Run them in order while you narrate.
@@ -148,8 +151,9 @@ A talk track and a click-by-click walkthrough live alongside:
   with BQ Conversational Analytics prompts and verified GQL:
   [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md)
 - How the seven SDK backing tables feed the richer demo graph
-  (`CampaignRun`, `DecisionType`, `CandidateStatus`, and
-  `RejectionReason` included), step by step:
+  (`CampaignRun`, `AgentStep`, `PlanningDecision`,
+  `DecisionOption`, `OptionOutcome`, and `DropReason` included),
+  step by step:
   [`DATA_LINEAGE.md`](DATA_LINEAGE.md)
 
 ## File map
@@ -199,7 +203,8 @@ see:
 The canonical SDK graph structure is stable: TechNode, BizNode,
 DecisionPoint, CandidateNode + four edge labels. The demo graph is
 richer but still deterministic: `build_rich_graph.py` projects
-CampaignRun / DecisionType / CandidateStatus / RejectionReason nodes
+ads-domain labels such as CampaignRun / PlanningDecision /
+DecisionOption / OptionOutcome / DropReason nodes
 from those same tables. If a run produces zero decisions for a
 session (rare), `build_graph.py` warns and you can re-run it without
 re-running the agent.

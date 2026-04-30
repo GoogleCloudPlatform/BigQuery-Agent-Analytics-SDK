@@ -32,10 +32,10 @@ Block 1i from `bq_studio_queries.gql` or from the `build_graph.py`
 output.
 
 The queries below target the richer demo graph. It keeps the SDK's
-canonical labels (`TechNode`, `BizNode`, `DecisionPoint`,
-`CandidateNode`) and adds presentation labels (`CampaignRun`,
-`DecisionType`, `CandidateStatus`, `RejectionReason`) so the same
-audit facts are easier to visualize and narrate in BigQuery Studio.
+canonical tables but exposes ads-domain labels (`AgentStep`,
+`MediaEntity`, `PlanningDecision`, `DecisionOption`,
+`DecisionCategory`, `OptionOutcome`, `DropReason`) so the same audit
+facts are easier to visualize and narrate in BigQuery Studio.
 
 ---
 
@@ -56,8 +56,8 @@ audit facts are easier to visualize and narrate in BigQuery Studio.
 
 ```sql
 GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
-MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-      -[:HasCandidateStatus]->(st:CandidateStatus)
+MATCH (dp:PlanningDecision)-[:WeighedOption]->(c:DecisionOption)
+      -[:HasOutcome]->(st:OptionOutcome)
 WHERE dp.session_id = '<SESSION_ID>'
   AND LOWER(dp.decision_type) LIKE '%audience%'
 RETURN DISTINCT
@@ -90,7 +90,7 @@ demand, for any campaign.
 
 **BQ Conversational Analytics:**
 
-> "In the rich_agent_context_graph, list every DROPPED CandidateNode
+> "In the rich_agent_context_graph, list every DROPPED DecisionOption
 > whose rejection_rationale mentions age, demographic, youth,
 > gender, or contains an explicit age range. Group by decision_type."
 
@@ -98,8 +98,8 @@ demand, for any campaign.
 
 ```sql
 GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
-MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-      -[:HasCandidateStatus]->(st:CandidateStatus)
+MATCH (dp:PlanningDecision)-[:WeighedOption]->(c:DecisionOption)
+      -[:HasOutcome]->(st:OptionOutcome)
 WHERE st.status = 'DROPPED'
   AND (LOWER(c.rejection_rationale) LIKE '%age %'
        OR LOWER(c.rejection_rationale) LIKE '%demographic%'
@@ -141,15 +141,15 @@ the framing is legitimate or a proxy for discrimination.
 **BQ Conversational Analytics:**
 
 > "Across all sessions in the rich_agent_context_graph, find every
-> SELECTED CandidateNode with score below 0.7. Sort by score
+> SELECTED DecisionOption with score below 0.7. Sort by score
 > ascending."
 
 **GQL:**
 
 ```sql
 GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
-MATCH (dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)
-      -[:HasCandidateStatus]->(st:CandidateStatus)
+MATCH (dp:PlanningDecision)-[:WeighedOption]->(c:DecisionOption)
+      -[:HasOutcome]->(st:OptionOutcome)
 WHERE st.status = 'SELECTED'
   AND c.score < 0.7
 RETURN DISTINCT
@@ -181,16 +181,16 @@ nominal threshold passed.
 **BQ Conversational Analytics:**
 
 > "For session `<SESSION_ID>`, show the LLM_RESPONSE span_id that
-> produced the creative-theme decision, plus every CandidateNode
+> produced the creative-theme decision, plus every DecisionOption
 > the agent considered with status, score, and rejection rationale."
 
 **GQL:**
 
 ```sql
 GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
-MATCH (cr:CampaignRun)-[:CampaignDecision]->(dp:DecisionPoint),
-      (step:TechNode)-[:MadeDecision]->(dp)
-      -[:CandidateEdge]->(c:CandidateNode)
+MATCH (cr:CampaignRun)-[:CampaignDecision]->(dp:PlanningDecision),
+      (step:AgentStep)-[:DecidedAt]->(dp)
+      -[:WeighedOption]->(c:DecisionOption)
 WHERE dp.session_id = '<SESSION_ID>'
   AND LOWER(dp.decision_type) LIKE '%creative%'
   AND step.event_type = 'LLM_RESPONSE'
@@ -227,7 +227,7 @@ shape required by Art. 12 is one query, not a forensic exercise.
 
 **BQ Conversational Analytics:**
 
-> "In the rich_agent_context_graph, count DROPPED CandidateNodes per
+> "In the rich_agent_context_graph, count DROPPED DecisionOptions per
 > decision_type and report the average dropped score. Sort by
 > rejection count descending."
 
@@ -235,9 +235,9 @@ shape required by Art. 12 is one query, not a forensic exercise.
 
 ```sql
 GRAPH `<PROJECT_ID>.decision_lineage_rich_demo.rich_agent_context_graph`
-MATCH (dp:DecisionPoint)-[:HasDecisionType]->(dt:DecisionType),
-      (dp)-[:CandidateEdge]->(c:CandidateNode)
-        -[:HasCandidateStatus]->(st:CandidateStatus)
+MATCH (dp:PlanningDecision)-[:InCategory]->(dt:DecisionCategory),
+      (dp)-[:WeighedOption]->(c:DecisionOption)
+        -[:HasOutcome]->(st:OptionOutcome)
 WHERE st.status = 'DROPPED'
 RETURN
   dt.decision_type,

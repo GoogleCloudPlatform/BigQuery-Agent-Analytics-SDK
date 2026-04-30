@@ -46,17 +46,18 @@ cd examples/decision_lineage_demo
 6. **Runs the live ADK media-planner agent against six campaign
    briefs** (the slow step — typically 3-7 minutes; six
    invocations of Gemini 2.5 Pro). The BQ AA Plugin streams every
-   span (~27 per session, ~162 total) into `agent_events`. Failures
-   abort the run via a non-zero exit so setup does not proceed
-   with a partial portfolio.
+   span (~27 per session, ~162 total) into `agent_events`.
+   `run_agent.py` also writes the exact session → campaign mapping
+   into `campaign_runs`. Failures abort the run via a non-zero exit
+   so setup does not proceed with a partial portfolio.
 7. Runs `build_graph.py` — discovers every session in
    `agent_events` and calls `mgr.build_context_graph(
    use_ai_generate=True, include_decisions=True)`. Two
    `AI.GENERATE` calls (biz nodes, then decisions). ~30-90 seconds.
 8. Runs `build_rich_graph.py` — creates SQL-only presentation
-   tables (`campaign_runs`, `rich_decision_types`,
-   `rich_candidate_statuses`, `rich_rejection_reasons`, plus edge
-   tables) and creates `rich_agent_context_graph`.
+   tables (`rich_decision_types`, `rich_candidate_statuses`,
+   `rich_rejection_reasons`, plus edge tables) and creates
+   `rich_agent_context_graph`.
 9. Renders `bq_studio_queries.gql` with your project + dataset +
    first-session id inlined for paste-and-run in BQ Studio.
 
@@ -109,8 +110,8 @@ backing tables (`agent_events`, `extracted_biz_nodes`,
 `context_cross_links`, `decision_points`, `candidates`,
 `made_decision_edges`, `candidate_edges`) and the richer demo
 projection tables (`campaign_runs`, `rich_decision_types`,
-`rich_candidate_statuses`, `rich_rejection_reasons`, and their
-edge tables).
+`rich_candidate_statuses`, `rich_rejection_reasons`,
+`rich_agent_steps`, and their edge tables).
 
 ## Run the demo
 
@@ -241,13 +242,13 @@ bq query \
   --use_legacy_sql=false \
   --location="${DATASET_LOCATION:-us-central1}" \
   "SELECT table_name FROM \`${PROJECT_ID}.${DATASET_ID}\`.INFORMATION_SCHEMA.TABLES
-   WHERE table_name IN ('campaign_runs','rich_decision_types',
+   WHERE table_name IN ('campaign_runs','rich_agent_steps','rich_decision_types',
                         'rich_candidate_statuses','rich_rejection_reasons',
                         'rich_campaign_span_edges','rich_campaign_decision_edges',
                         'rich_decision_type_edges','rich_candidate_status_edges',
                         'rich_candidate_reason_edges')
    ORDER BY table_name"
-# Expect 9 rows. If any are missing, run build_rich_graph.py.
+# Expect 10 rows. If any are missing, run build_rich_graph.py.
 ```
 
 ## Tear down

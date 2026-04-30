@@ -45,8 +45,9 @@ The demo also assumes:
 3. You should see the property graph **`rich_agent_context_graph`** in
    the dataset listing. The canonical **`agent_context_graph`** and
    seven SDK backing tables are also present. The richer graph adds
-   presentation nodes for campaign runs, decision types, candidate
-   statuses, and rejection reasons.
+   ads-domain labels for campaign runs, agent steps, media entities,
+   planning decisions, decision options, option outcomes, and drop
+   reasons.
 
 > *Optional:* click the property graph itself — Studio shows the
 > schema in the details pane.
@@ -59,20 +60,20 @@ extraction landed on every layer of the graph.
 1. **+ Compose new query** in BigQuery Studio.
 2. Paste **block 1a** (CampaignRun count). **Run.** Expect 6
    campaign runs by default.
-3. Paste **block 1b** (TechNode count). **Run.** Expect a TechNode
+3. Paste **block 1b** (AgentStep count). **Run.** Expect an AgentStep
    count in the low hundreds — the live agent runs produced this
    many spans, deterministic given how many sessions ran.
-4. Paste **block 1c** (BizNode count). **Run.** Expect a positive
+4. Paste **block 1c** (MediaEntity count). **Run.** Expect a positive
    number; exact count varies with `AI.GENERATE`.
-5. Paste **block 1d** (DecisionPoint count). **Run.** Expect a
+5. Paste **block 1d** (PlanningDecision count). **Run.** Expect a
    non-zero count — typically several per session, so a few dozen
    total across 6 sessions. Some variance.
-6. Paste **block 1e** (CandidateNode count). **Run.** Expect
-   roughly 3 × the DecisionPoint count.
+6. Paste **block 1e** (DecisionOption count). **Run.** Expect
+   roughly 3 × the PlanningDecision count.
 7. Paste **blocks 1f → 1h**. **Run.** These count the richer
-   presentation labels: decision types, candidate statuses, and
-   rejection-reason nodes.
-8. Paste **block 1i** (DecisionPoints per session). **Run.** Expect
+   presentation labels: decision categories, option outcomes, and
+   drop-reason nodes.
+8. Paste **block 1i** (PlanningDecisions per session). **Run.** Expect
    one row per session that actually produced decisions, with the
    per-session decision count in the right column. Note the session
    ids — Block 2 visualizes one of them (the first by default; you
@@ -95,13 +96,13 @@ an interactive diagram.
 4. After the query completes, click the **Graph** tab in the
    results pane (next to **Table**, **JSON**, **Execution details**).
 5. The result renders as one fan-out per extracted decision in the
-   chosen session — CampaignRun → DecisionPoint → CandidateNode →
-   CandidateStatus.
-6. Click any **CandidateNode**. The right-hand properties pane
+   chosen session — CampaignRun → PlanningDecision → DecisionOption
+   → OptionOutcome.
+6. Click any **DecisionOption**. The right-hand properties pane
    shows `name`, `score`, `status`, and `rejection_rationale`.
    Click a DROPPED candidate to surface the rationale.
 7. Optionally run the second Block 2 query to show the
-   CandidateNode → RejectionReason fan-out. It keeps the main graph
+   DecisionOption → DropReason fan-out. It keeps the main graph
    readable but gives reviewers a visible "why rejected" node when
    needed.
 8. To visualize a different campaign run instead, swap the
@@ -122,7 +123,7 @@ The same GQL the SDK ships as `mgr.get_eu_audit_gql(session_id=...)`.
 3. Studio shows a tabular result: one row per (decision, candidate)
    the SDK extracted for the session, with `decision_type`,
    `candidate_name`, `candidate_score`, `candidate_status`,
-   `rejection_rationale`, and the linked TechNode span info.
+   `rejection_rationale`, and the linked AgentStep span info.
 4. Walk the room through the table from top to bottom. Roughly
    two-thirds of rows are DROPPED (the agent's prompt asked for
    one SELECTED + two DROPPED per decision, so each decision row

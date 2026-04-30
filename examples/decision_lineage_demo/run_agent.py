@@ -22,7 +22,9 @@ BigQuery before downstream extraction starts.
 
 Records the first session id back into ``.env`` (as ``DEMO_SESSION_ID``)
 so ``render_queries.sh`` can wire it into the per-session GQL block in
-``bq_studio_queries.gql``.
+``bq_studio_queries.gql``. Also writes ``campaign_runs`` so the rich
+demo graph has an exact campaign ↔ session mapping instead of
+inferring it from event timestamps.
 """
 
 from __future__ import annotations
@@ -35,8 +37,12 @@ import time
 from agent import APP_NAME
 from agent import bq_logging_plugin
 from agent import root_agent
+from agent.agent import DATASET_ID
+from agent.agent import DATASET_LOCATION
+from agent.agent import PROJECT_ID
 from campaigns import CAMPAIGN_BRIEFS
 from google.adk.runners import InMemoryRunner
+from google.cloud import bigquery
 from google.genai.types import Content
 from google.genai.types import Part
 
@@ -45,6 +51,17 @@ _ENV_PATH = os.path.join(_HERE, ".env")
 
 USER_ID = os.getenv("DEMO_USER_ID", "u-demo-mediabuyer")
 PER_SESSION_TIMEOUT_S = int(os.getenv("DEMO_SESSION_TIMEOUT_S", "300"))
+
+_CREATE_CAMPAIGN_RUNS_TABLE = """\
+CREATE OR REPLACE TABLE `{project}.{dataset}.campaign_runs` (
+  session_id STRING,
+  campaign STRING,
+  brand STRING,
+  brief STRING,
+  run_order INT64,
+  event_count INT64
+)
+"""
 
 
 async def _run_one(
@@ -103,11 +120,11 @@ async def _run_one(
   return session_id, event_count, error_reason
 
 
-async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
+async def _run_all() -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
   """Run every campaign brief.
 
   Returns:
-      ``(succeeded_session_ids, failures)`` where ``failures`` is a
+      ``(succeeded_campaign_runs, failures)`` where ``failures`` is a
       list of ``(campaign, reason)`` for diagnosis.
   """
   briefs = CAMPAIGN_BRIEFS
@@ -124,16 +141,25 @@ async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
       plugins=[bq_logging_plugin],
   )
 
-  succeeded: list[str] = []
+  succeeded: list[dict[str, object]] = []
   failures: list[tuple[str, str]] = []
   for idx, brief in enumerate(briefs, start=1):
     try:
-      session_id, _event_count, error_reason = await asyncio.wait_for(
+      session_id, event_count, error_reason = await asyncio.wait_for(
           _run_one(runner, brief.campaign, brief.brief, idx, len(briefs)),
           timeout=PER_SESSION_TIMEOUT_S,
       )
       if error_reason is None:
-        succeeded.append(session_id)
+        succeeded.append(
+            {
+                "session_id": session_id,
+                "campaign": brief.campaign,
+                "brand": brief.campaign.split()[0],
+                "brief": brief.brief,
+                "run_order": idx,
+                "event_count": event_count,
+            }
+        )
       else:
         failures.append((brief.campaign, error_reason))
     except asyncio.TimeoutError:
@@ -160,11 +186,11 @@ async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
   return succeeded, failures
 
 
-def _record_first_session_id(session_ids: list[str]) -> None:
+def _record_first_session_id(runs: list[dict[str, object]]) -> None:
   """Append DEMO_SESSION_ID to .env if a first session is available."""
-  if not session_ids:
+  if not runs:
     return
-  first = session_ids[0]
+  first = str(runs[0]["session_id"])
   lines: list[str] = []
   if os.path.exists(_ENV_PATH):
     with open(_ENV_PATH, encoding="utf-8") as f:
@@ -179,12 +205,33 @@ def _record_first_session_id(session_ids: list[str]) -> None:
   print(f"  Wrote DEMO_SESSION_ID={first} to {_ENV_PATH}")
 
 
+def _write_campaign_runs(runs: list[dict[str, object]]) -> None:
+  """Write exact campaign/session mapping for the rich demo graph."""
+  if not runs:
+    return
+
+  client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
+  client.query(
+      _CREATE_CAMPAIGN_RUNS_TABLE.format(
+          project=PROJECT_ID,
+          dataset=DATASET_ID,
+      )
+  ).result()
+  table_ref = f"{PROJECT_ID}.{DATASET_ID}.campaign_runs"
+  job_config = bigquery.LoadJobConfig(
+      write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+      source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+  )
+  client.load_table_from_json(runs, table_ref, job_config=job_config).result()
+  print(f"  Wrote {len(runs)} campaign_runs rows to {table_ref}")
+
+
 def main() -> int:
   succeeded, failures = asyncio.run(_run_all())
   print()
   print(f"Sessions: {len(succeeded)} succeeded, {len(failures)} failed.")
-  for sid in succeeded:
-    print(f"  ok  - {sid}")
+  for run in succeeded:
+    print(f"  ok  - {run['session_id']}")
   for campaign, reason in failures:
     print(f"  FAIL- {campaign}: {reason}")
   print()
@@ -202,6 +249,7 @@ def main() -> int:
   if not succeeded:
     print("ERROR: zero sessions produced traces.", file=sys.stderr)
     return 1
+  _write_campaign_runs(succeeded)
   return 0
 
 

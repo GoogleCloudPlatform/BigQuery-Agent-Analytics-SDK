@@ -16,7 +16,8 @@ This script adds demo-only presentation tables and creates
 ``rich_agent_context_graph`` with extra labels that make the BigQuery
 Studio visualization read like the talk track:
 
-  CampaignRun, DecisionType, CandidateStatus, RejectionReason
+  CampaignRun, AgentStep, MediaEntity, PlanningDecision,
+  DecisionCategory, DecisionOption, OptionOutcome, DropReason
 
 The derived tables are deterministic SQL/load-job projections over the
 seven SDK backing tables. No new AI calls run here.
@@ -61,7 +62,8 @@ CREATE OR REPLACE TABLE `{project}.{dataset}.campaign_runs` (
   campaign STRING,
   brand STRING,
   brief STRING,
-  run_order INT64
+  run_order INT64,
+  event_count INT64
 )
 """
 
@@ -102,6 +104,28 @@ WHERE status = 'DROPPED'
 GROUP BY reason_id, rejection_rationale, reason_excerpt
 """
 
+_CREATE_RICH_AGENT_STEPS = """\
+CREATE OR REPLACE TABLE `{project}.{dataset}.rich_agent_steps` AS
+SELECT
+  span_id,
+  parent_span_id,
+  event_type,
+  agent,
+  timestamp,
+  session_id,
+  invocation_id,
+  content,
+  latency_ms,
+  status,
+  error_message
+FROM `{project}.{dataset}.{table}`
+WHERE span_id IS NOT NULL
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY span_id
+  ORDER BY timestamp DESC, event_type DESC
+) = 1
+"""
+
 _CREATE_RICH_CAMPAIGN_SPAN_EDGES = """\
 CREATE OR REPLACE TABLE `{project}.{dataset}.rich_campaign_span_edges` AS
 SELECT
@@ -110,7 +134,7 @@ SELECT
   span_id,
   event_type,
   timestamp
-FROM `{project}.{dataset}.{table}`
+FROM `{project}.{dataset}.rich_agent_steps`
 WHERE session_id IS NOT NULL
   AND span_id IS NOT NULL
 """
@@ -184,9 +208,31 @@ def _fetch_sessions(client: bigquery.Client) -> list[tuple[str, int]]:
   return [(row.session_id, int(row.event_count)) for row in rows]
 
 
+def _campaign_runs_has_rows(client: bigquery.Client) -> bool:
+  query = """\
+SELECT COUNT(*) AS n
+FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
+WHERE table_name = 'campaign_runs'
+""".format(
+      project=PROJECT_ID, dataset=DATASET_ID
+  )
+  rows = list(client.query(query).result())
+  if not rows or not rows[0].n:
+    return False
+
+  count_query = """\
+SELECT COUNT(*) AS n
+FROM `{project}.{dataset}.campaign_runs`
+""".format(
+      project=PROJECT_ID, dataset=DATASET_ID
+  )
+  count_rows = list(client.query(count_query).result())
+  return bool(count_rows and count_rows[0].n)
+
+
 def _campaign_rows(sessions: list[tuple[str, int]]) -> list[dict[str, object]]:
   rows: list[dict[str, object]] = []
-  for idx, (session_id, _event_count) in enumerate(sessions):
+  for idx, (session_id, event_count) in enumerate(sessions):
     brief = CAMPAIGN_BRIEFS[idx % len(CAMPAIGN_BRIEFS)]
     brand = brief.campaign.split()[0]
     rows.append(
@@ -196,6 +242,7 @@ def _campaign_rows(sessions: list[tuple[str, int]]) -> list[dict[str, object]]:
             "brand": brand,
             "brief": brief.brief,
             "run_order": idx + 1,
+            "event_count": event_count,
         }
     )
   return rows
@@ -204,6 +251,10 @@ def _campaign_rows(sessions: list[tuple[str, int]]) -> list[dict[str, object]]:
 def _write_campaign_runs(
     client: bigquery.Client, sessions: list[tuple[str, int]]
 ) -> None:
+  if _campaign_runs_has_rows(client):
+    print("  - campaign_runs (existing from run_agent.py)")
+    return
+
   print("  - campaign_runs")
   client.query(_format(_CREATE_CAMPAIGN_RUNS_TABLE)).result()
   table_ref = f"{PROJECT_ID}.{DATASET_ID}.campaign_runs"
@@ -256,6 +307,7 @@ def main() -> int:
       ("rich_decision_types", _CREATE_RICH_DECISION_TYPES),
       ("rich_candidate_statuses", _CREATE_RICH_CANDIDATE_STATUSES),
       ("rich_rejection_reasons", _CREATE_RICH_REJECTION_REASONS),
+      ("rich_agent_steps", _CREATE_RICH_AGENT_STEPS),
       ("rich_campaign_span_edges", _CREATE_RICH_CAMPAIGN_SPAN_EDGES),
       ("rich_campaign_decision_edges", _CREATE_RICH_CAMPAIGN_DECISION_EDGES),
       ("rich_decision_type_edges", _CREATE_RICH_DECISION_TYPE_EDGES),
