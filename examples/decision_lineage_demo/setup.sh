@@ -18,12 +18,17 @@
 # Steps:
 #   1. Verify python3 + gcloud are available, app-default creds exist.
 #   2. Enable BigQuery + Vertex AI APIs.
-#   3. Install Python dependencies (SDK installed editable from the
-#      repo root so `bigquery_agent_analytics` resolves locally).
+#   3. Install Python dependencies (google-adk + the BQ AA Plugin
+#      surface; the SDK is installed editable from the repo root so
+#      `bigquery_agent_analytics` resolves locally).
 #   4. Create the BigQuery dataset if missing.
-#   5. Write a .env file the seed/build/render scripts read.
-#   6. Run seed_traces.py — INSERTs plugin-shape trace rows.
-#   7. Run build_graph.py — calls
+#   5. Write a .env file the agent / build / render scripts read.
+#   6. Run run_agent.py — runs the media-planner ADK agent end-to-end
+#      against every campaign brief in campaigns.py, with the BQ AA
+#      Plugin attached to the runner so every span is written to
+#      agent_events.
+#   7. Run build_graph.py — discovers every session in agent_events
+#      and calls
 #        ContextGraphManager.build_context_graph(use_ai_generate=True,
 #                                                include_decisions=True)
 #      which invokes AI.GENERATE twice (biz nodes, then decisions),
@@ -31,12 +36,13 @@
 #      cross-link / decision edges, and emits CREATE OR REPLACE
 #      PROPERTY GRAPH.
 #   8. Render bq_studio_queries.gql with project/dataset/session
-#      values inlined for copy-paste into BigQuery Studio.
+#      values inlined for copy-paste into BigQuery Studio. The
+#      session id is the first session run_agent.py created.
 #
 # Required IAM roles for the authenticated user/service account:
 #   - roles/bigquery.dataEditor
 #   - roles/bigquery.jobUser
-#   - roles/aiplatform.user        (AI.GENERATE during build_graph.py)
+#   - roles/aiplatform.user        (live agent + AI.GENERATE)
 
 set -euo pipefail
 
@@ -92,8 +98,18 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 VENV_PY="$VENV_DIR/bin/python3"
 "$VENV_PY" -m pip install --upgrade pip --quiet
-"$VENV_PY" -m pip install "google-cloud-bigquery>=3.13.0" \
-  "python-dotenv>=1.0.0" --quiet
+# Remove standalone vertexai if present — it conflicts with the one
+# bundled in google-cloud-aiplatform and shadows the newer version
+# (same workaround other demos in this repo use).
+"$VENV_PY" -m pip show vertexai 2>/dev/null | grep -q "^Version:" && \
+  "$VENV_PY" -m pip uninstall vertexai -y --quiet 2>/dev/null || true
+"$VENV_PY" -m pip install \
+  "google-cloud-bigquery>=3.13.0" \
+  "google-cloud-aiplatform>=1.148.0" \
+  "google-adk>=1.21.0" \
+  "google-genai>=1.0.0" \
+  "python-dotenv>=1.0.0" \
+  --quiet
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 "$VENV_PY" -m pip install -e "$REPO_ROOT" --quiet
 echo "  Dependencies installed in $VENV_DIR"
@@ -102,9 +118,13 @@ echo "  Dependencies installed in $VENV_DIR"
 echo ""
 echo "[4/8] Configuring environment..."
 DATASET_ID="${DATASET_ID:-decision_lineage_demo}"
-DATASET_LOCATION="${DATASET_LOCATION:-${BQ_LOCATION:-US}}"
+# Vertex AI for the live agent runs needs a regional location, not
+# multi-region "US". Default to us-central1 for both the dataset and
+# the agent. If a user-set location overrides, we use that.
+DATASET_LOCATION="${DATASET_LOCATION:-${BQ_LOCATION:-us-central1}}"
 TABLE_ID="${TABLE_ID:-agent_events}"
-DEMO_SESSION_ID="${DEMO_SESSION_ID:-sess-nike-summer-2026}"
+DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-us-central1}"
+DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-2.5-pro}"
 DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
 
 if ! bq show "${PROJECT_ID}:${DATASET_ID}" &>/dev/null 2>&1; then
@@ -119,21 +139,24 @@ PROJECT_ID=$PROJECT_ID
 DATASET_ID=$DATASET_ID
 DATASET_LOCATION=$DATASET_LOCATION
 TABLE_ID=$TABLE_ID
-DEMO_SESSION_ID=$DEMO_SESSION_ID
+DEMO_AGENT_LOCATION=$DEMO_AGENT_LOCATION
+DEMO_AGENT_MODEL=$DEMO_AGENT_MODEL
 DEMO_AI_ENDPOINT=$DEMO_AI_ENDPOINT
 EOF
 echo "  Wrote $ENV_FILE"
 
-# 5. Seed traces
+# 5. Run the live agent (BQ AA Plugin writes spans to agent_events)
 echo ""
-echo "[5/8] Seeding plugin-shape trace rows into agent_events..."
+echo "[5/8] Running the media-planner agent against every campaign "
+echo "      brief — this is real ADK + BQ AA Plugin (3-7 minutes)..."
 cd "$SCRIPT_DIR"
-"$VENV_PY" seed_traces.py
+"$VENV_PY" run_agent.py
 
 # 6. Build graph (AI.GENERATE)
 echo ""
 echo "[6/8] Building the property graph via the SDK extraction "
-echo "      pipeline (AI.GENERATE — this can take 30-60s)..."
+echo "      pipeline across every session (AI.GENERATE — this can "
+echo "      take 30-90s)..."
 "$VENV_PY" build_graph.py
 
 # 7. Render BQ Studio queries
@@ -157,6 +180,8 @@ echo "     (the property graph 'agent_context_graph' shows in the Explorer pane)
 echo "  3. Open ${SCRIPT_DIR}/bq_studio_queries.gql"
 echo "     in a text editor and paste each block into BQ Studio."
 echo ""
+echo "To re-run just the agent (extra sessions):"
+echo "  ./.venv/bin/python3 run_agent.py"
 echo "To re-run just the AI.GENERATE pipeline (e.g. after a flaky run):"
 echo "  ./.venv/bin/python3 build_graph.py"
 echo ""

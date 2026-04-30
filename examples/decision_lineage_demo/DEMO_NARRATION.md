@@ -4,22 +4,22 @@ Total runtime: about **4 minutes** of speaking, plus a few seconds
 of query latency per block. Setup runs once before the demo on your
 laptop. The narrated portion happens in BigQuery Studio.
 
-## The trace
+## The data behind this demo
 
-One media-planner agent invocation, **23 plugin-shape spans**:
-INVOCATION_STARTING / AGENT_STARTING bookends, a user message, five
-LLM_REQUEST→LLM_RESPONSE pairs (one per decision the planner makes),
-three TOOL_STARTING→TOOL_COMPLETED pairs linked by `tool_call_id`,
-an HITL final-approval request and confirmation, AGENT_COMPLETED,
-and INVOCATION_COMPLETED.
+A real ADK media-planner agent — `agent/agent.py` — was run against
+six different campaign briefs from `campaigns.py`. The
+**BigQuery Agent Analytics Plugin** was attached to the runner, so
+every span (INVOCATION, AGENT, LLM_REQUEST, LLM_RESPONSE, TOOL_*,
+HITL) the agent produced is in `agent_events`.
 
-The seeded narrative covers five decisions with three candidates
-each (one SELECTED, two DROPPED with explicit rejection rationale).
-**The actual decision and candidate counts in the graph depend on
-what `AI.GENERATE` extracts at build time** — typically all five
-decisions and fifteen candidates, occasionally one fewer when the
-model consolidates two decisions or skips a borderline case. The
-talk track below reads naturally either way.
+The SDK's `ContextGraphManager.build_context_graph(...)` then ran
+across every session: `AI.GENERATE` extracted business entities into
+BizNodes and decisions/candidates into DecisionPoints + CandidateNodes
++ rejection rationale, the SQL-only edges and property-graph DDL
+were emitted, and the result is `agent_context_graph` in
+`decision_lineage_demo`.
+
+Nothing on the demo path is hand-baked.
 
 ## Pre-roll setup (do once, before the demo)
 
@@ -28,10 +28,10 @@ cd examples/decision_lineage_demo
 ./setup.sh
 ```
 
-Setup seeds traces, runs the SDK extraction pipeline (two
-`AI.GENERATE` calls — biz entities then decisions, 30-60s), and
-writes `bq_studio_queries.gql` with your project / dataset / session
-already substituted in.
+Setup runs the live agent (3-7 minutes — six ADK invocations),
+builds the graph via `AI.GENERATE` (30-90s), and writes
+`bq_studio_queries.gql` with your project / dataset / first-session
+inlined.
 
 Have these open before you start:
 
@@ -47,120 +47,100 @@ Have these open before you start:
 ## Pre-roll narration (15s)
 
 > "We've all seen agent demos that produce an answer and ask you to
-> trust it. This is a demo about what's underneath. The agent we're
-> looking at planned a Nike Summer Run media campaign — multiple
-> decisions, the alternatives it considered for each, and the
-> reasons it rejected the dropped ones. The extracted facts are
-> now queryable rows in BigQuery, pulled from the agent's own
-> traces by the SDK."
+> trust it. This is a demo about what's underneath. We ran a real
+> ADK media-planner agent against six campaign briefs — Nike, Adidas,
+> Puma, Reebok, Lululemon. The BQ AA Plugin recorded every span.
+> The SDK then extracted decisions and candidates from the trace
+> text. What's in BigQuery now is everything the agent reasoned
+> through, queryable as a property graph."
 
 ---
 
-## Block 1 — What did the SDK extract? (~30s)
+## Block 1 — What did the SDK extract? (~45s)
 
-Paste the four COUNT queries from Block 1 in `bq_studio_queries.gql`
-(1a → 1d) into a single BigQuery Studio tab and run them
-sequentially.
+Paste the five COUNT queries (1a → 1e) into BigQuery Studio tabs
+and run sequentially.
 
-> "Setup ran the SDK's `build_context_graph` pipeline against 23
-> seeded plugin-shape trace rows. Two `AI.GENERATE` calls did all
-> the downstream work: one extracted business entities the agent
-> reasoned about, the other extracted decisions and the candidates
-> the agent weighed.
+> "Setup did two things. First it ran the live ADK agent six times,
+> with the BQ AA Plugin attached — every span landed in
+> `agent_events`. Then `build_context_graph` ran two `AI.GENERATE`
+> calls across all sessions: one extracted business entities, the
+> other extracted decisions and the candidates the agent weighed.
 >
-> Counts confirm the graph is populated: 23 TechNodes for the
-> spans you'd expect, plus a non-zero count for each of the new
-> layers — BizNode, DecisionPoint, CandidateNode. The exact
-> numbers depend on what the model returned this run, but every
-> decision the agent made is here, with each candidate it
-> considered. No manual instrumentation in the agent."
+> Counts confirm the graph is populated: TechNodes for every span
+> the plugin wrote, BizNodes for entities the model identified,
+> DecisionPoints across the six sessions — typically several per
+> session — and the matching CandidateNodes.
+>
+> Block 1e is the per-session breakdown — one row per session,
+> showing how many decisions the model extracted from each
+> campaign run."
 
 ---
 
-## Block 2 — Visualize the agent's reasoning (~80s)
+## Block 2 — Visualize ONE session (~75s)
 
-Paste Block 2 from `bq_studio_queries.gql` into a new tab and run.
+Paste Block 2 and run.
 
-This returns paths from each span that made a decision through to
-its candidates. **BigQuery Studio renders this as an interactive
-graph diagram.**
+This returns paths from the chosen session's spans through to its
+candidates. **BigQuery Studio renders this as an interactive graph
+diagram.**
 
-> "This is the same property graph we just counted, rendered as a
-> diagram. One fan-out per decision: audience selection, budget
-> allocation, creative selection, channel strategy, launch
-> scheduling — whatever the model extracted from the trace this
-> run. The middle node is the DecisionPoint. The fan-out is every
-> candidate the agent considered, labelled SELECTED or DROPPED on
-> the edge.
+> "We scoped the visualization to a single session so the diagram
+> stays readable. Each fan-out is one decision the agent made.
+> Middle node is the DecisionPoint. Right side is every candidate
+> the agent considered for that decision, labelled SELECTED or
+> DROPPED on the edge.
 >
-> Pick a dropped candidate — say, the TikTok Spark Ads node. Its
-> properties pane shows the score the agent assigned and the
-> rejection rationale extracted verbatim from the agent's
-> reasoning: 'channel overlap with Instagram Reels for the same
-> demographic; Q1 retention 18% lower at matched spend.'
->
-> Two things to notice. First, this is the agent's reasoning, not a
-> highlight reel — the dropped candidates are first-class nodes
-> with the same edge weight as the selected ones. Second, every
-> single one of these nodes was extracted from raw trace text by
-> `AI.GENERATE`. Drop in the BQ AA Plugin and the SDK does the rest."
+> Pick a dropped candidate and click it. Its properties pane shows
+> the score the agent assigned and the rejection rationale extracted
+> verbatim from the agent's reasoning. None of this is hand-baked —
+> it came from `AI.GENERATE` reading the LLM_RESPONSE text the
+> plugin captured."
+
+(To visualize a different campaign, swap the session id in Block 2
+with any other id from Block 1e and re-run.)
 
 ---
 
-## Block 3 — EU-audit traversal (~80s)
+## Block 3 — EU-audit traversal (~75s)
 
-Paste Block 3 from `bq_studio_queries.gql` and run.
+Paste Block 3 and run.
 
-Output is a table: one row per (decision, candidate) the SDK
-extracted, with rationale on dropped ones.
-
-> "This GQL is what the SDK ships as
-> `mgr.get_eu_audit_gql(session_id=...)` — the audit traversal a
-> compliance reviewer would run.
+> "Block 2 was the visual. Block 3 is the same data as a table —
+> the exact GQL the SDK ships as `mgr.get_eu_audit_gql(session_id)`.
+> One row per (decision, candidate) the SDK extracted, with the
+> rejection rationale on dropped ones.
 >
-> For the audience decision: `Athletes 18-35` was selected at the
-> top score. The agent considered `Casual fitness enthusiasts` and
-> dropped it for falling below the conversion threshold from the Q1
-> cohort study. It considered `General sports fans` and dropped it
-> on a brand-alignment audit.
->
-> For the budget decision: `Instagram Reels` selected. `TikTok Spark
-> Ads` dropped for channel overlap on the same demographic.
-> `YouTube Shorts` dropped on CPM ceiling — 32% above the cap.
->
-> For the creative theme: `Just Do It - Summer Edition` selected on
-> Q1 brand-recall lift. `Run Past Your Limits` dropped under the
-> recall floor. `The Daily Mile` dropped on tone alignment.
->
-> Channel strategy and scheduling round out the audit — Instagram-led
-> with TV reinforcement won over a TV-led plan that would have
-> needed an incremental $200K, and the May 27 launch beat a July 4
-> launch where CPMs would forecast 25% above ceiling.
->
-> A reviewer asking 'what did the agent reject and why?' has the
-> answer in one query. Not a screenshot, not a Slack thread — a
-> reproducible GQL traversal against the audit record."
+> Read off two or three of the rationales — the wording is the
+> demo. These are pulled out of trace text the agent produced; the
+> SDK didn't make any of them up."
 
 ---
 
-## Block 4 — Just the rejections (detail view) (~45s)
+## Block 4 — Dropped candidates across the portfolio (~45s)
 
-Paste Block 4 from `bq_studio_queries.gql` and run.
+Paste Block 4 and run, then Block 4b.
 
-Same shape as `mgr.get_dropped_candidates_gql()` — Block 3 narrowed
-to just the rejections.
-
-> "Block 3 gave us the full audit. Block 4 narrows to just the
-> rejections — one row per dropped candidate, ordered by decision
-> and score. The seeded narrative gave each decision two dropped
-> candidates, so you'll see roughly twice as many rows as
-> DecisionPoints.
+> "Up to now we've been inside one session. Block 4 spans every
+> session — one row per dropped candidate with rationale, sorted
+> by session and decision.
 >
-> Today this is one session. Drop the `session_id` filter and pivot
-> on a date range and you fan this out across every agent run — or
-> run the optional Block 4b instead, which aggregates this same
-> predicate by decision type with `COUNT` and `AVG(score)`. That's
-> the line product teams want to track."
+> Block 4b is the operational metric: across every campaign the
+> agent ran, how many candidates did it reject per decision type,
+> and at what average score? That's the line product teams want
+> to track over time."
+
+---
+
+## Block 5 — Close calls (~40s)
+
+Paste Block 5 and run.
+
+> "Last cut: every decision where the agent picked one candidate
+> over another by less than 0.05 points. These are the rows worth
+> a second look — the agent committed, but it was close. With this
+> graph schema the question is one GQL query."
 
 ---
 
@@ -168,11 +148,13 @@ to just the rejections.
 
 > "Three things to take away:
 >
-> 1. The graph is built by the SDK from agent traces — no agent-side
->    instrumentation beyond the BQ AA Plugin.
-> 2. The audit query is one method on the SDK, served as GQL.
->    BigQuery Studio renders it both as a graph diagram and as a
->    table — pick whichever surface your audience needs.
+> 1. The graph is built end-to-end by the SDK from real ADK +
+>    plugin traces. No instrumentation in the agent beyond
+>    attaching the plugin to the runner.
+> 2. Every audit query is GQL. BigQuery Studio renders both as
+>    a graph diagram and as a table — pick whichever surface your
+>    audience needs.
 > 3. The schema composes with the rest of the SDK — same session
->    IDs, same span IDs, same agent_events row shape your ADK
->    plugin already writes."
+>    IDs, same span IDs, same agent_events row shape. If you've
+>    already got the plugin in production, this is one
+>    `build_context_graph` call away."

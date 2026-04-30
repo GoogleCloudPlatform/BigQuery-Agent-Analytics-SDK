@@ -13,20 +13,26 @@ cd examples/decision_lineage_demo
 ./setup.sh
 ```
 
-Setup writes `bq_studio_queries.gql` next to this file with your
-project / dataset / session inlined. Keep that file open in a side
-editor — you'll copy each block out of it during the demo.
+Setup:
+
+1. Runs the live ADK media-planner agent against every campaign
+   brief in `campaigns.py` (6 sessions, ~3-7 minutes total). The
+   BQ AA Plugin writes every span to `agent_events`.
+2. Calls `mgr.build_context_graph(...)` across every session in
+   `agent_events` (two `AI.GENERATE` calls — biz nodes, then
+   decisions, ~30-90s).
+3. Renders `bq_studio_queries.gql` next to this file with your
+   project / dataset / first-session id inlined.
 
 The demo also assumes:
 
 - BigQuery API and Vertex AI API are enabled on the project.
 - The active user / service account has
   `roles/bigquery.dataEditor`, `roles/bigquery.jobUser`, and
-  `roles/aiplatform.user`.
+  `roles/aiplatform.user` (the live agent + `AI.GENERATE` both
+  hit Vertex AI).
 - `setup.sh` printed `property_graph_created   True` and a non-zero
-  `decision_points_count` (5 expected; it can vary slightly with
-  `AI.GENERATE` non-determinism — re-run `python3 build_graph.py`
-  if the count is zero).
+  `decision_points_count`.
 
 ## Step 0 — Open BigQuery Studio (10s)
 
@@ -41,151 +47,109 @@ The demo also assumes:
    `candidate_edges`).
 
 > *Optional:* click the property graph itself — Studio shows the
-> schema in the details pane. Use this to anchor the demo: "this is
-> the graph we'll query in a moment."
+> schema in the details pane.
 
-## Step 1 — Confirm the SDK populated the graph (~30s)
+## Step 1 — Confirm the SDK populated the graph (~45s)
 
-This step is the "is anything actually here?" check. Four tiny GQL
-queries, each counts one node label in the session.
+Run blocks 1a → 1e from `bq_studio_queries.gql` to confirm the
+extraction landed on every layer of the graph.
 
-1. In the BigQuery Studio top bar, click **+ Compose new query**
-   (or hit `Cmd / Ctrl + Enter` after pasting).
-2. Open `bq_studio_queries.gql` in your editor and copy
-   **block 1a** (TechNode count). Paste it into the query tab.
-3. Click **Run**. Expect `techNodes = 23` (deterministic — that's
-   exactly the seeded span count).
-4. Replace the query with **block 1b** (BizNode count) and run.
-   Expect a positive number; the exact count varies with
-   `AI.GENERATE`.
-5. Replace with **block 1c** (DecisionPoint count) and run. Expect
-   a non-zero count, typically 4-5 (the seeded narrative contains
-   5 distinct decisions; `AI.GENERATE` may consolidate or miss one
-   on a given run).
-6. Replace with **block 1d** (CandidateNode count) and run. Expect
+1. **+ Compose new query** in BigQuery Studio.
+2. Paste **block 1a** (TechNode count). **Run.** Expect a TechNode
+   count in the low hundreds — the live agent runs produced this
+   many spans, deterministic given how many sessions ran.
+3. Paste **block 1b** (BizNode count). **Run.** Expect a positive
+   number; exact count varies with `AI.GENERATE`.
+4. Paste **block 1c** (DecisionPoint count). **Run.** Expect a
+   non-zero count — typically several per session, so a few dozen
+   total across 6 sessions. Some variance.
+5. Paste **block 1d** (CandidateNode count). **Run.** Expect
    roughly 3 × the DecisionPoint count.
+6. Paste **block 1e** (DecisionPoints per session). **Run.** Expect
+   one row per session that actually produced decisions, with the
+   per-session decision count in the right column. Note the session
+   ids — Block 2 visualizes one of them (the first by default; you
+   can swap in any other).
 
-> Talk track: "Setup ran the SDK's `build_context_graph` against 23
-> seeded plugin-shape spans. `AI.GENERATE` extracted business
-> entities and decision points; the counts you see are what the
-> model returned this run."
+> Talk track: "Setup ran the live agent against six campaign briefs
+> — every span the BQ AA Plugin wrote is here, the SDK extracted
+> decisions and candidates from each session, and Block 1e shows
+> how many decisions came out of each campaign run."
 
-## Step 2 — Visualize the agent's reasoning (~80s)
+## Step 2 — Visualize ONE session (~75s)
 
 The visual hook of the demo. BigQuery Studio renders graph paths as
 an interactive diagram.
 
 1. **+ Compose new query** in BigQuery Studio.
 2. Copy **block 2** from `bq_studio_queries.gql` (the path query
-   `MATCH p = (s:TechNode)-[:MadeDecision]->(dp:DecisionPoint)-[:CandidateEdge]->(c:CandidateNode)`).
+   filtered to the first session).
 3. Paste and **Run**.
-4. After the query completes, Studio shows results in the bottom
-   pane. Click the **Graph** tab (next to **Table**, **JSON**,
-   **Execution details**).
-5. The result renders as one fan-out per extracted decision,
-   branching from the LLM_RESPONSE TechNode, through the
-   DecisionPoint, out to its CandidateNode endpoints (typically
-   three per decision, matching the seeded narrative).
+4. After the query completes, click the **Graph** tab in the
+   results pane (next to **Table**, **JSON**, **Execution details**).
+5. The result renders as one fan-out per extracted decision in the
+   chosen session — TechNode → DecisionPoint → CandidateNodes.
 6. Click any **CandidateNode**. The right-hand properties pane
    shows `name`, `score`, `status`, and `rejection_rationale`.
-   Click a DROPPED candidate to surface the rationale (the seeded
-   text includes lines like `Casual fitness enthusiasts`,
-   `TikTok Spark Ads`, `YouTube Shorts` — exact names depend on
-   what `AI.GENERATE` extracted).
+   Click a DROPPED candidate to surface the rationale.
+7. To visualize a different campaign run instead, swap the
+   `__SESSION_ID__` value in Block 2 with any other id Block 1e
+   returned and re-run.
 
-> Talk track: "Each fan-out is one decision. The selected candidate
-> sits next to the dropped ones with the same edge weight — the
-> graph treats rejections as first-class facts. Click a dropped
-> node and the rationale pops up: this is what the agent reasoned
-> through, extracted from raw trace text by `AI.GENERATE`."
+> Talk track: "Each fan-out is one decision. Selected and dropped
+> candidates are first-class nodes with the same edge weight.
+> Click any dropped node and the rationale pops up — extracted
+> from raw trace text by `AI.GENERATE`."
 
-## Step 3 — Run the EU-audit GQL (~80s)
+## Step 3 — Run the EU-audit GQL (~75s)
 
 The same GQL the SDK ships as `mgr.get_eu_audit_gql(session_id=...)`.
 
 1. **+ Compose new query**.
 2. Copy **block 3** from `bq_studio_queries.gql`. Paste and **Run**.
 3. Studio shows a tabular result: one row per (decision, candidate)
-   with `decision_type`, `candidate_name`, `candidate_score`,
-   `candidate_status`, `rejection_rationale`, and the linked TechNode
-   span info.
-4. Walk the room through the table from top to bottom — one row
-   per (decision, candidate). Roughly two-thirds of the rows are
-   DROPPED (the seeded narrative gave each decision three
-   candidates: one SELECTED, two DROPPED).
+   the SDK extracted for the session, with `decision_type`,
+   `candidate_name`, `candidate_score`, `candidate_status`,
+   `rejection_rationale`, and the linked TechNode span info.
+4. Walk the room through the table from top to bottom. Roughly
+   two-thirds of rows are DROPPED (the agent's prompt asked for
+   one SELECTED + two DROPPED per decision, so each decision row
+   group has one selected and two rejection rationales).
 
-> Talk track: see the per-decision narration in
-> [`DEMO_NARRATION.md`](DEMO_NARRATION.md), Block 3 section. Read
-> off two or three rejection rationales aloud — the wording is the
-> demo: "channel overlap on the same demographic; Q1 retention 18%
-> lower at matched spend."
-
-## Step 4 — Just the rejections (detail view) (~45s)
+## Step 4 — Just the rejections, across the portfolio (~45s)
 
 1. **+ Compose new query**.
 2. Copy **block 4** from `bq_studio_queries.gql`. Paste and **Run**.
-3. The result is one row per dropped candidate, ordered by
-   decision and score — the same shape the SDK ships as
-   `mgr.get_dropped_candidates_gql`.
+3. Result: one row per dropped candidate **across every session**,
+   ordered by session, decision, and score.
+4. Optional follow-up — paste **block 4b** in a new tab and **Run**.
+   That's the GQL aggregation: dropped count + average score per
+   decision type, across the portfolio.
 
-> Talk track: "Every rejected candidate, with rationale, in one
-> query. Drop the `session_id` filter and replace it with a date
-> range and you fan this view out across every agent run."
+> Talk track: "Block 4 spans every session. Block 4b is the
+> portfolio metric — which decision categories reject the most
+> candidates and at what scores."
 
-### Optional: Block 4b — roll-up by decision type
-
-Same predicate as Block 4 but aggregates: `COUNT(cand)` and
-`AVG(score)` per decision_type. Useful when the audience wants the
-portfolio metric directly.
+## Step 5 — Close calls (optional, ~40s)
 
 1. **+ Compose new query**.
-2. Copy **block 4b** from `bq_studio_queries.gql`. Paste and **Run**.
-3. Result is one row per decision_type with `dropped_count` and
-   `avg_dropped_score`.
-
-## Step 5 (optional) — Improvise an ad-hoc query (~30s)
-
-Useful if the audience asks "can you find X?". Two starter queries
-you can adapt live:
-
-**5a. Most-rejected decision type:**
-
-```sql
-GRAPH `<PROJECT>.<DATASET>.agent_context_graph`
-MATCH (dp:DecisionPoint)-[ce:CandidateEdge]->(c:CandidateNode)
-WHERE ce.edge_type = 'DROPPED_CANDIDATE'
-RETURN dp.decision_type, COUNT(c) AS rejected
-GROUP BY dp.decision_type
-ORDER BY rejected DESC;
-```
-
-**5b. Decisions where the top dropped candidate was within 0.05
-of the selected one:**
-
-```sql
-GRAPH `<PROJECT>.<DATASET>.agent_context_graph`
-MATCH
-  (dp:DecisionPoint)-[:CandidateEdge]->(sel:CandidateNode),
-  (dp)-[:CandidateEdge]->(drop:CandidateNode)
-WHERE sel.status = 'SELECTED'
-  AND drop.status = 'DROPPED'
-  AND sel.score - drop.score < 0.05
-RETURN dp.decision_type, sel.name, sel.score, drop.name, drop.score
-ORDER BY sel.score - drop.score ASC;
-```
-
-(Substitute `<PROJECT>` / `<DATASET>` to match your environment, or
-copy from the rendered `bq_studio_queries.gql`.)
+2. Copy **block 5** from `bq_studio_queries.gql`. Paste and **Run**.
+3. Result: every decision where the agent picked one candidate over
+   another by less than 0.05 points. The first column is the
+   session, so you can drill back into Block 2 / Block 3 for any
+   of these "close call" sessions.
 
 ## Recovering from common issues
 
 | Symptom | Fix |
 |---|---|
-| Block 1c returns `decisions = 0` | `AI.GENERATE` returned no decisions; re-run `./.venv/bin/python3 build_graph.py` (no need to re-seed traces) |
-| Block 1c returns 1-3 (below the seeded 5) | `AI.GENERATE` consolidated or missed a decision — accept it for the talk track or re-run `build_graph.py` for a different draw |
-| Block 2 shows no Graph tab | Make sure the result rendered — sometimes the tab takes a second to appear after the first run; or re-run the query |
+| Block 1c (decisions) returns 0 | `AI.GENERATE` returned no decisions; re-run `./.venv/bin/python3 build_graph.py` (no need to re-run the agent) |
+| Block 1c is much smaller than 5 × session count | Some sessions had few extracted decisions; either accept it (the talk track is count-agnostic) or re-run `build_graph.py` |
+| Block 2 shows no Graph tab | Make sure the result rendered; the tab takes a second to appear after the first run |
+| Block 2 has nothing to draw | The `__SESSION_ID__` baked in by `setup.sh` may not have produced decisions — swap with a different session id from Block 1e |
 | "Property graph not found" | `setup.sh` did not finish; check that `build_graph.py` printed `property_graph_created True` |
-| Permission errors on `AI.GENERATE` | Missing `roles/aiplatform.user` on the running identity |
+| `run_agent.py` fails with permission errors | Missing `roles/aiplatform.user` on the running identity (the live agent calls Vertex AI) |
+| `agent_events` table is empty after `run_agent.py` | The plugin may not have flushed; re-run `./.venv/bin/python3 run_agent.py` and verify the script's "Flushing BQ AA Plugin..." line completes without warnings |
 
 ## Tear down
 
@@ -193,6 +157,6 @@ copy from the rendered `bq_studio_queries.gql`.)
 ./reset.sh
 ```
 
-Drops the dataset (graph + tables) and removes the rendered
-`bq_studio_queries.gql` and `.env`. Re-run `./setup.sh` for a clean
-state.
+Drops the dataset (graph + tables), removes the rendered
+`bq_studio_queries.gql`, the `.venv`, and the `.env`. Re-run
+`./setup.sh` for a clean state.

@@ -3,54 +3,69 @@
 --
 -- BigQuery Studio query bundle for the decision-lineage demo.
 --
--- Open BigQuery Studio, paste each block (delimited by the
--- "==" headers) into a new query tab, and run. Block 2 returns
--- paths and renders as an interactive graph diagram.
+-- Open BigQuery Studio, paste each block (delimited by the "=="
+-- headers) into a new query tab, and run. Block 2 returns paths and
+-- renders as an interactive graph diagram.
 --
--- The graph is `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
--- and was built by `build_graph.py` calling
+-- The graph is `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`,
+-- built by `build_graph.py` calling
 -- `ContextGraphManager.build_context_graph(use_ai_generate=True,
--- include_decisions=True)` against the seeded traces.
-
--- ====================================================================
--- Block 1: What did the SDK extract?
+-- include_decisions=True)` against every session captured by
+-- `run_agent.py`.
 --
--- Four tiny GQL queries — run each, confirm non-zero rows. These
--- prove AI.GENERATE actually populated the decision tables before
--- you start the visual demo.
+-- Cross-session blocks (1, 4, 4b, 5) span every session in the
+-- dataset. Per-session blocks (2, 3) are scoped to the first
+-- session run_agent.py created — `__SESSION_ID__`. Replace it with
+-- a different session id (the build output prints them all) to
+-- visualize / audit a different campaign run.
+
+-- ====================================================================
+-- Block 1: Portfolio inventory — what did the SDK extract?
+--
+-- Counts every node label across every session. The TechNode count
+-- is deterministic (= total spans the BQ AA Plugin wrote). BizNode /
+-- DecisionPoint / CandidateNode counts come from AI.GENERATE and
+-- vary run-to-run; the demo cares that each is non-zero and roughly
+-- proportional to the session count.
 -- ====================================================================
 
--- 1a. TechNodes (agent execution spans, written by the BQ AA Plugin)
+-- 1a. TechNodes (every span the BQ AA Plugin wrote)
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH (n:TechNode)
-WHERE n.session_id = '__SESSION_ID__'
 RETURN COUNT(n) AS techNodes;
 
--- 1b. BizNodes (business entities AI.GENERATE found in the traces)
+-- 1b. BizNodes (entities AI.GENERATE found across all sessions)
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH (n:BizNode)
-WHERE n.session_id = '__SESSION_ID__'
 RETURN COUNT(n) AS bizNodes;
 
--- 1c. DecisionPoints (moments where the agent picked between options)
+-- 1c. DecisionPoints (decisions across all sessions)
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH (n:DecisionPoint)
-WHERE n.session_id = '__SESSION_ID__'
 RETURN COUNT(n) AS decisions;
 
 -- 1d. CandidateNodes (every option considered, SELECTED and DROPPED)
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH (n:CandidateNode)
-WHERE n.session_id = '__SESSION_ID__'
 RETURN COUNT(n) AS candidates;
 
+-- 1e. DecisionPoints per session (sanity check: ~5 per session)
+GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+MATCH (n:DecisionPoint)
+RETURN n.session_id, COUNT(n) AS decisions
+GROUP BY n.session_id
+ORDER BY decisions DESC;
+
 -- ====================================================================
--- Block 2: Visualize the agent's reasoning
+-- Block 2: Visualize ONE session's reasoning
 --
 -- Returns paths from each span that made a decision, through the
--- decision, out to every candidate. BigQuery Studio renders this as
--- an interactive graph — DROPPED candidates show up as branches off
--- the decision node alongside the SELECTED one.
+-- decision, out to its candidates — all scoped to a single session
+-- so the graph diagram stays readable. BigQuery Studio renders this
+-- as an interactive graph.
+--
+-- To visualize a different session, swap '__SESSION_ID__' with any
+-- other id Block 1e returned.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH p =
@@ -59,12 +74,11 @@ WHERE dp.session_id = '__SESSION_ID__'
 RETURN p;
 
 -- ====================================================================
--- Block 3: EU-audit traversal
+-- Block 3: EU-audit traversal for ONE session
 --
--- The same query the SDK ships as `mgr.get_eu_audit_gql(session_id)`.
--- For one session, returns every decision with every candidate and
--- the rejection rationale on dropped ones. This is the "show your
--- work" panel a compliance reviewer would run.
+-- Same shape the SDK ships as `mgr.get_eu_audit_gql(session_id)`:
+-- one row per (decision, candidate) the SDK extracted for the
+-- session, with rejection rationale on dropped ones.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
@@ -86,43 +100,64 @@ RETURN
 ORDER BY dp.decision_id, cand.score DESC;
 
 -- ====================================================================
--- Block 4: Dropped candidates — detail view
+-- Block 4: Dropped candidates — detail view across the portfolio
 --
--- Filters Block 3 down to just the rejections, ordered by decision and
--- score. One row per dropped candidate. The same shape the SDK ships
--- as `mgr.get_dropped_candidates_gql()`. Drop the session_id filter
--- and replace it with a date-range filter on the underlying
--- agent_events table to fan this out across every agent run.
+-- One row per dropped candidate across every session. Same shape
+-- the SDK ships as `mgr.get_dropped_candidates_gql()`, with the
+-- session_id filter dropped so it spans the portfolio.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
-WHERE dp.session_id = '__SESSION_ID__'
-  AND ce.edge_type = 'DROPPED_CANDIDATE'
+WHERE ce.edge_type = 'DROPPED_CANDIDATE'
 RETURN
-  dp.decision_id,
+  dp.session_id,
   dp.decision_type,
-  dp.description AS decision_description,
   cand.name AS candidate_name,
   cand.score AS candidate_score,
   cand.rejection_rationale
-ORDER BY dp.decision_id, cand.score DESC;
+ORDER BY dp.session_id, dp.decision_type, cand.score DESC;
 
 -- ====================================================================
--- Block 4b (optional): Dropped-candidate roll-up by decision type
+-- Block 4b: Dropped-candidate roll-up by decision_type
 --
--- Same predicate as Block 4, but aggregates: COUNT(c) and AVG(score)
--- per decision_type. Useful for portfolio-level metrics across many
--- sessions — drop the session_id filter and replace with a date range.
+-- Same predicate as Block 4 but aggregated: COUNT(c) and AVG(score)
+-- per decision_type across every session. The portfolio metric
+-- product teams want to track.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
   (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
-WHERE dp.session_id = '__SESSION_ID__'
-  AND ce.edge_type = 'DROPPED_CANDIDATE'
+WHERE ce.edge_type = 'DROPPED_CANDIDATE'
 RETURN
   dp.decision_type,
   COUNT(cand) AS dropped_count,
   AVG(cand.score) AS avg_dropped_score
 GROUP BY dp.decision_type
 ORDER BY dropped_count DESC;
+
+-- ====================================================================
+-- Block 5: Sessions whose top dropped candidate was within 0.05 of
+-- the SELECTED one — "close calls" worth a second look
+--
+-- Joins each decision's SELECTED candidate to its DROPPED candidates
+-- and flags the cases where the agent only narrowly preferred the
+-- chosen option. Works at the portfolio level by including session
+-- and decision context.
+-- ====================================================================
+GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+MATCH
+  (dp:DecisionPoint)-[:CandidateEdge]->(sel:CandidateNode),
+  (dp)-[:CandidateEdge]->(drop:CandidateNode)
+WHERE sel.status = 'SELECTED'
+  AND drop.status = 'DROPPED'
+  AND sel.score - drop.score < 0.05
+RETURN
+  dp.session_id,
+  dp.decision_type,
+  sel.name AS selected_name,
+  sel.score AS selected_score,
+  drop.name AS dropped_name,
+  drop.score AS dropped_score,
+  drop.rejection_rationale
+ORDER BY sel.score - drop.score ASC;

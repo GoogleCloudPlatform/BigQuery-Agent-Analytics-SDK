@@ -12,28 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Build the decision-lineage property graph from seeded traces.
+"""Build the decision-lineage property graph from real plugin traces.
 
-Calls the SDK's end-to-end pipeline:
+Discovers every ``session_id`` already in ``agent_events`` (written by
+the BQ AA Plugin during ``run_agent.py``) and runs the SDK's end-to-end
+extraction pipeline across all of them in one call:
 
   ``mgr.build_context_graph(
-      session_ids,
+      session_ids=<all sessions>,
       use_ai_generate=True,
       include_decisions=True,
   )``
 
 Which runs:
-  1. ``extract_biz_nodes`` — AI.GENERATE pulls business entities.
+  1. ``extract_biz_nodes`` — AI.GENERATE pulls business entities from
+     every span in every session.
   2. ``create_cross_links`` — Evaluated edges TechNode -> BizNode.
   3. ``extract_decision_points`` — AI.GENERATE pulls DecisionPoints
      and Candidates with rejection rationale.
   4. ``store_decision_points`` — writes the extracted rows.
   5. ``create_decision_edges`` — MadeDecision + CandidateEdge rows.
-  6. ``create_property_graph(include_decisions=True)`` — the
-     ``CREATE OR REPLACE PROPERTY GRAPH`` DDL with all four labels.
+  6. ``create_property_graph(include_decisions=True)`` — emits
+     ``CREATE OR REPLACE PROPERTY GRAPH`` with all four node labels.
 
-Reports per-step row counts so you can confirm AI.GENERATE actually
-extracted decisions before opening BigQuery Studio.
+Reports per-step row counts plus a per-session breakdown so you can
+confirm AI.GENERATE actually extracted decisions for each session
+before opening BigQuery Studio.
 
 Note: AI.GENERATE results are non-deterministic. Re-running may yield
 slightly different rejection-rationale wording or candidate counts.
@@ -47,6 +51,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from google.cloud import bigquery
 
 from bigquery_agent_analytics.context_graph import ContextGraphConfig
 from bigquery_agent_analytics.context_graph import ContextGraphManager
@@ -58,8 +63,8 @@ if os.path.exists(_env_path):
 
 PROJECT_ID = os.getenv("PROJECT_ID")
 DATASET_ID = os.getenv("DATASET_ID", "decision_lineage_demo")
+DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 TABLE_ID = os.getenv("TABLE_ID", "agent_events")
-SESSION_ID = os.getenv("DEMO_SESSION_ID", "sess-nike-summer-2026")
 ENDPOINT = os.getenv("DEMO_AI_ENDPOINT", "gemini-2.5-flash")
 
 if not PROJECT_ID:
@@ -70,19 +75,65 @@ if not PROJECT_ID:
   sys.exit(2)
 
 
+_DISTINCT_SESSIONS_QUERY = """\
+SELECT
+  session_id,
+  COUNT(*) AS event_count,
+  MIN(timestamp) AS first_event_at
+FROM `{project}.{dataset}.{table}`
+WHERE session_id IS NOT NULL
+GROUP BY session_id
+ORDER BY first_event_at
+"""
+
+
+def _fetch_sessions(client: bigquery.Client) -> list[tuple[str, int]]:
+  query = _DISTINCT_SESSIONS_QUERY.format(
+      project=PROJECT_ID, dataset=DATASET_ID, table=TABLE_ID
+  )
+  rows = list(client.query(query).result())
+  return [(r.session_id, int(r.event_count)) for r in rows]
+
+
 def main() -> int:
   print(f"Project : {PROJECT_ID}")
   print(f"Dataset : {DATASET_ID}")
-  print(f"Session : {SESSION_ID}")
   print(f"Endpoint: {ENDPOINT}")
   print()
+
+  client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
+
+  try:
+    sessions = _fetch_sessions(client)
+  except Exception as exc:  # pylint: disable=broad-except
+    print(
+        f"ERROR: could not list sessions in "
+        f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}: {exc}",
+        file=sys.stderr,
+    )
+    return 1
+
+  if not sessions:
+    print(
+        "ERROR: no sessions found in agent_events. Did run_agent.py "
+        "finish? Re-run ./setup.sh.",
+        file=sys.stderr,
+    )
+    return 1
+
+  print(f"Found {len(sessions)} session(s):")
+  for sid, n in sessions:
+    print(f"  - {sid}  ({n} events)")
+  print()
+
+  session_ids = [sid for sid, _ in sessions]
   print(
       "Running ContextGraphManager.build_context_graph "
       "(AI.GENERATE on, decisions on)..."
   )
   print(
-      "This calls AI.GENERATE twice — once for biz entities, once "
-      "for decision points. Expect ~30-60s."
+      "AI.GENERATE runs twice across all sessions (biz nodes, then "
+      "decisions). Expect ~30-90s."
   )
   print()
 
@@ -92,10 +143,12 @@ def main() -> int:
       dataset_id=DATASET_ID,
       table_id=TABLE_ID,
       config=config,
+      client=client,
+      location=DATASET_LOCATION,
   )
 
   results = mgr.build_context_graph(
-      session_ids=[SESSION_ID],
+      session_ids=session_ids,
       use_ai_generate=True,
       include_decisions=True,
   )
@@ -123,11 +176,8 @@ def main() -> int:
     return 1
 
   decisions = results.get("decision_points_count", 0)
-  # The seeded narrative carries 5 distinct decisions; AI.GENERATE
-  # may consolidate or skip one on a given run. Anything below 3 is
-  # too thin for the demo's talk track and worth re-running.
-  expected_decisions = 5
-  min_acceptable = 3
+  expected_decisions = 5 * len(session_ids)  # 5 decisions per session
+  min_acceptable = max(3, len(session_ids))
   if decisions == 0:
     print()
     print(
@@ -140,23 +190,24 @@ def main() -> int:
     print()
     print(
         f"WARNING: AI.GENERATE returned {decisions} decision points "
-        f"(seeded narrative has {expected_decisions}). The demo will "
-        f"work but the graph will look thin; consider re-running "
-        f"build_graph.py for a richer extraction.",
+        f"across {len(session_ids)} sessions (expected ~"
+        f"{expected_decisions}). Graph will look thin; consider "
+        f"re-running build_graph.py.",
         file=sys.stderr,
     )
   elif decisions < expected_decisions:
     print()
     print(
-        f"NOTE: AI.GENERATE extracted {decisions} of {expected_decisions} "
-        f"seeded decisions. This is normal model variance; the demo "
-        f"narration is written to be count-agnostic.",
+        f"NOTE: AI.GENERATE extracted {decisions} of "
+        f"~{expected_decisions} seeded decisions across "
+        f"{len(session_ids)} sessions. This is normal model variance; "
+        f"the demo narration is written to be count-agnostic.",
         file=sys.stderr,
     )
 
   print()
   print(f"Graph    : {mgr.config.graph_name}")
-  print("Browse it in BigQuery Studio under " f"{PROJECT_ID}.{DATASET_ID}.")
+  print(f"Browse it in BigQuery Studio under {PROJECT_ID}.{DATASET_ID}.")
   return 0
 
 
