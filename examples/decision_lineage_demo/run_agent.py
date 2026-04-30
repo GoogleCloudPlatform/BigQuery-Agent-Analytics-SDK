@@ -49,14 +49,15 @@ PER_SESSION_TIMEOUT_S = int(os.getenv("DEMO_SESSION_TIMEOUT_S", "300"))
 
 async def _run_one(
     runner: InMemoryRunner, campaign: str, brief: str, idx: int, total: int
-) -> tuple[str, int, bool]:
+) -> tuple[str, int, str | None]:
   """Run one campaign brief end-to-end.
 
   Returns:
-      ``(session_id, event_count, succeeded)``. ``succeeded`` is
-      False when the runner raised an exception or streamed zero
-      events. Callers must drop unsuccessful sessions; their plugin
-      output (if any) cannot be relied on.
+      ``(session_id, event_count, error_reason)``. ``error_reason``
+      is ``None`` on success and a short string explaining the
+      failure cause (exception or zero events) otherwise. Callers
+      must drop unsuccessful sessions; their plugin output (if any)
+      cannot be relied on.
   """
   session = await runner.session_service.create_session(
       app_name=runner.app_name,
@@ -69,7 +70,7 @@ async def _run_one(
 
   start = time.monotonic()
   event_count = 0
-  errored = False
+  exception_msg: str | None = None
   try:
     async for _event in runner.run_async(
         user_id=USER_ID,
@@ -78,19 +79,28 @@ async def _run_one(
     ):
       event_count += 1
   except Exception as exc:  # pylint: disable=broad-except
-    errored = True
+    exception_msg = f"{type(exc).__name__}: {exc}"
     print(
         f"          ! agent run errored after {event_count} events: {exc}",
         file=sys.stderr,
     )
   elapsed = time.monotonic() - start
-  succeeded = (not errored) and event_count > 0
-  status = "ok" if succeeded else ("errored" if errored else "no-events")
+  if exception_msg is not None:
+    error_reason: str | None = (
+        f"agent run raised an exception ({exception_msg})"
+    )
+    status = "errored"
+  elif event_count == 0:
+    error_reason = "runner streamed zero events"
+    status = "no-events"
+  else:
+    error_reason = None
+    status = "ok"
   print(
       f"          {status} — {event_count} runner events streamed, "
       f"{elapsed:.1f}s wall."
   )
-  return session_id, event_count, succeeded
+  return session_id, event_count, error_reason
 
 
 async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
@@ -118,19 +128,14 @@ async def _run_all() -> tuple[list[str], list[tuple[str, str]]]:
   failures: list[tuple[str, str]] = []
   for idx, brief in enumerate(briefs, start=1):
     try:
-      session_id, event_count, ok = await asyncio.wait_for(
+      session_id, _event_count, error_reason = await asyncio.wait_for(
           _run_one(runner, brief.campaign, brief.brief, idx, len(briefs)),
           timeout=PER_SESSION_TIMEOUT_S,
       )
-      if ok:
+      if error_reason is None:
         succeeded.append(session_id)
       else:
-        reason = (
-            "agent run raised an exception"
-            if event_count == 0
-            else "runner streamed zero events"
-        )
-        failures.append((brief.campaign, reason))
+        failures.append((brief.campaign, error_reason))
     except asyncio.TimeoutError:
       msg = f"timeout after {PER_SESSION_TIMEOUT_S}s"
       print(

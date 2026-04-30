@@ -49,7 +49,7 @@ The demo provides a production-ready interactive prototype showcasing how organi
 | Data Warehouse | Google BigQuery |
 | Graph Engine | BigQuery Property Graphs (`CREATE PROPERTY GRAPH` DDL) |
 | Query Language | GQL (Graph Query Language) with quantified-path patterns |
-| AI Functions | `AI.GENERATE` with `output_schema` for structured extraction |
+| AI Functions | `AI.GENERATE` (prompt-shaped JSON contract; see Implementation update) |
 | Tracing | OpenTelemetry (`trace_id`, `span_id`, `parent_span_id`) |
 | Streaming | BigQuery Storage Write API |
 | SDK | `bigquery-agent-analytics` Python package |
