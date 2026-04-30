@@ -1110,9 +1110,7 @@ class TestDecisionSemantics:
     AI.GENERATE must return, and the Python side parses the result
     JSON.
     """
-    from bigquery_agent_analytics.context_graph import (
-        _EXTRACT_DECISION_POINTS_AI_QUERY,
-    )
+    from bigquery_agent_analytics.context_graph import _EXTRACT_DECISION_POINTS_AI_QUERY
 
     assert "output_schema =>" not in _EXTRACT_DECISION_POINTS_AI_QUERY
     for field in (
@@ -1124,9 +1122,9 @@ class TestDecisionSemantics:
         "status",
         "rejection_rationale",
     ):
-      assert field in _EXTRACT_DECISION_POINTS_AI_QUERY, (
-          f"prompt must enumerate {field!r}"
-      )
+      assert (
+          field in _EXTRACT_DECISION_POINTS_AI_QUERY
+      ), f"prompt must enumerate {field!r}"
 
   def test_decision_property_graph_ddl_includes_base_pillars(self):
     """Decision DDL still includes TechNode, BizNode, Caused, Evaluated."""

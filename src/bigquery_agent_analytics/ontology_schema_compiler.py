@@ -22,6 +22,13 @@ instructs the LLM to return a structured object with ``nodes`` and
 The schema uses a JSON Schema dialect (nested ARRAY<OBJECT> with
 typed property fields).
 
+The current BigQuery ``AI.GENERATE`` parser rejects JSON-Schema
+strings passed via ``output_schema =>``; consumers must instead
+concatenate the schema text into the prompt itself, ask the model
+to return JSON conforming to it, and parse the result with
+``JSON_EXTRACT_*``. This is what ``ontology_graph.OntologyGraphManager``
+already does.
+
 Example usage::
 
     from bigquery_agent_analytics.resolved_spec import load_resolved_graph
@@ -31,7 +38,9 @@ Example usage::
 
     spec = load_resolved_graph("examples/ymgo_graph_spec.yaml", env="p.d")
     schema_json = compile_output_schema(spec)
-    # Use in: AI.GENERATE(..., output_schema => '{schema_json}')
+    # Concatenate into the AI.GENERATE prompt; do NOT pass it via
+    # `output_schema =>` (current BQ rejects JSON-Schema strings).
+    prompt = base_prompt + "\\n\\nReturn a single JSON object:\\n" + schema_json
 """
 
 from __future__ import annotations

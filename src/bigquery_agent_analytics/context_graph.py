@@ -1907,7 +1907,13 @@ class ContextGraphManager:
   def _extract_decisions_via_ai_generate(
       self, session_ids: list[str]
   ) -> tuple[list[DecisionPoint], list[Candidate]]:
-    """Server-side extraction using AI.GENERATE with output_schema."""
+    """Server-side decision extraction using AI.GENERATE.
+
+    The model is asked in-prompt to return a JSON array; the SQL
+    strips markdown fences and this method parses each row's
+    ``decisions_json`` text into ``DecisionPoint`` + ``Candidate``
+    records. No ``output_schema`` arg is passed to ``AI.GENERATE``.
+    """
     import json as _json
 
     query = _EXTRACT_DECISION_POINTS_AI_QUERY.format(

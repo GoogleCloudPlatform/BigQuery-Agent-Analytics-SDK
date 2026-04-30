@@ -76,10 +76,14 @@ def main() -> int:
   print(f"Session : {SESSION_ID}")
   print(f"Endpoint: {ENDPOINT}")
   print()
-  print("Running ContextGraphManager.build_context_graph "
-        "(AI.GENERATE on, decisions on)...")
-  print("This calls AI.GENERATE twice — once for biz entities, once "
-        "for decision points. Expect ~30-60s.")
+  print(
+      "Running ContextGraphManager.build_context_graph "
+      "(AI.GENERATE on, decisions on)..."
+  )
+  print(
+      "This calls AI.GENERATE twice — once for biz entities, once "
+      "for decision points. Expect ~30-60s."
+  )
   print()
 
   config = ContextGraphConfig(endpoint=ENDPOINT)
@@ -118,7 +122,13 @@ def main() -> int:
     )
     return 1
 
-  if results.get("decision_points_count", 0) == 0:
+  decisions = results.get("decision_points_count", 0)
+  # The seeded narrative carries 5 distinct decisions; AI.GENERATE
+  # may consolidate or skip one on a given run. Anything below 3 is
+  # too thin for the demo's talk track and worth re-running.
+  expected_decisions = 5
+  min_acceptable = 3
+  if decisions == 0:
     print()
     print(
         "WARNING: AI.GENERATE returned zero decision points. The graph "
@@ -126,11 +136,27 @@ def main() -> int:
         "build_graph.py — this is a non-determinism artifact.",
         file=sys.stderr,
     )
+  elif decisions < min_acceptable:
+    print()
+    print(
+        f"WARNING: AI.GENERATE returned {decisions} decision points "
+        f"(seeded narrative has {expected_decisions}). The demo will "
+        f"work but the graph will look thin; consider re-running "
+        f"build_graph.py for a richer extraction.",
+        file=sys.stderr,
+    )
+  elif decisions < expected_decisions:
+    print()
+    print(
+        f"NOTE: AI.GENERATE extracted {decisions} of {expected_decisions} "
+        f"seeded decisions. This is normal model variance; the demo "
+        f"narration is written to be count-agnostic.",
+        file=sys.stderr,
+    )
 
   print()
   print(f"Graph    : {mgr.config.graph_name}")
-  print("Browse it in BigQuery Studio under "
-        f"{PROJECT_ID}.{DATASET_ID}.")
+  print("Browse it in BigQuery Studio under " f"{PROJECT_ID}.{DATASET_ID}.")
   return 0
 
 

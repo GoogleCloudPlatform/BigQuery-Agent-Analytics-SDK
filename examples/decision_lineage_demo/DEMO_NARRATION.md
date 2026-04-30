@@ -8,13 +8,18 @@ laptop. The narrated portion happens in BigQuery Studio.
 
 One media-planner agent invocation, **23 plugin-shape spans**:
 INVOCATION_STARTING / AGENT_STARTING bookends, a user message, five
-LLM_REQUEST→LLM_RESPONSE pairs (one per decision), three
-TOOL_STARTING→TOOL_COMPLETED pairs linked by `tool_call_id`, an HITL
-final-approval request and confirmation, AGENT_COMPLETED, and
-INVOCATION_COMPLETED.
+LLM_REQUEST→LLM_RESPONSE pairs (one per decision the planner makes),
+three TOOL_STARTING→TOOL_COMPLETED pairs linked by `tool_call_id`,
+an HITL final-approval request and confirmation, AGENT_COMPLETED,
+and INVOCATION_COMPLETED.
 
-Five decisions, three candidates each: **15 candidates total** —
-five SELECTED and ten DROPPED with explicit rejection rationale.
+The seeded narrative covers five decisions with three candidates
+each (one SELECTED, two DROPPED with explicit rejection rationale).
+**The actual decision and candidate counts in the graph depend on
+what `AI.GENERATE` extracts at build time** — typically all five
+decisions and fifteen candidates, occasionally one fewer when the
+model consolidates two decisions or skips a borderline case. The
+talk track below reads naturally either way.
 
 ## Pre-roll setup (do once, before the demo)
 
@@ -43,10 +48,11 @@ Have these open before you start:
 
 > "We've all seen agent demos that produce an answer and ask you to
 > trust it. This is a demo about what's underneath. The agent we're
-> looking at planned a Nike Summer Run media campaign — five
-> decisions, fifteen candidates considered, ten rejected with
-> reasoning. Every one of those rejections is now a queryable row
-> in BigQuery, extracted from the agent's own traces by the SDK."
+> looking at planned a Nike Summer Run media campaign — multiple
+> decisions, every alternative it considered, every reason it
+> rejected something. Each of those rejections is now a queryable
+> row in BigQuery, extracted from the agent's own traces by the
+> SDK."
 
 ---
 
@@ -63,9 +69,11 @@ sequentially.
 > the agent weighed.
 >
 > Counts confirm the graph is populated: 23 TechNodes for the
-> spans, BizNodes for the entities, around five DecisionPoints,
-> and around fifteen CandidateNodes — selected and dropped together.
-> No manual instrumentation in the agent."
+> spans you'd expect, plus a non-zero count for each of the new
+> layers — BizNode, DecisionPoint, CandidateNode. The exact
+> numbers depend on what the model returned this run, but every
+> decision the agent made is here, with each candidate it
+> considered. No manual instrumentation in the agent."
 
 ---
 
@@ -78,16 +86,18 @@ every candidate. **BigQuery Studio renders this as an interactive
 graph diagram.**
 
 > "This is the same property graph we just counted, rendered as a
-> diagram. Five fan-outs. Each is one decision: audience selection,
-> budget allocation, creative selection, channel strategy, launch
-> scheduling. The middle node is the DecisionPoint. The fan-out is
-> every candidate the agent considered, labelled SELECTED or DROPPED
-> on the edge.
+> diagram. One fan-out per decision: audience selection, budget
+> allocation, creative selection, channel strategy, launch
+> scheduling — whatever the model extracted from the trace this
+> run. The middle node is the DecisionPoint. The fan-out is every
+> candidate the agent considered, labelled SELECTED or DROPPED on
+> the edge.
 >
-> Click the dropped TikTok Spark Ads candidate. Its properties pane
-> shows the score the agent assigned and the rejection rationale —
-> 'channel overlap with Instagram Reels for the same demographic;
-> Q1 retention 18% lower at matched spend.'
+> Pick a dropped candidate — say, the TikTok Spark Ads node. Its
+> properties pane shows the score the agent assigned and the
+> rejection rationale extracted verbatim from the agent's
+> reasoning: 'channel overlap with Instagram Reels for the same
+> demographic; Q1 retention 18% lower at matched spend.'
 >
 > Two things to notice. First, this is the agent's reasoning, not a
 > highlight reel — the dropped candidates are first-class nodes
@@ -132,7 +142,7 @@ Output is a table: per decision, every candidate with rationale.
 
 ---
 
-## Block 4 — All dropped candidates (~45s)
+## Block 4 — Just the rejections (detail view) (~45s)
 
 Paste Block 4 from `bq_studio_queries.gql` and run.
 
@@ -140,15 +150,16 @@ Same shape as `mgr.get_dropped_candidates_gql()` — Block 3 narrowed
 to just the rejections.
 
 > "Block 3 gave us the full audit. Block 4 narrows to just the
-> rejections — ten of them, two per decision — and is the
-> operational view: 'show me the candidates the agent threw out, by
-> decision type, with rationale.'
+> rejections — one row per dropped candidate, ordered by decision
+> and score. The seeded narrative gave each decision two dropped
+> candidates, so you'll see roughly twice as many rows as
+> DecisionPoints.
 >
 > Today this is one session. Drop the `session_id` filter and pivot
-> on a date range and you get a portfolio metric: across every
-> agent run last quarter, which decision categories are rejecting
-> the most candidates, and at what scores? That's the line product
-> teams want to track."
+> on a date range and you fan this out across every agent run — or
+> run the optional Block 4b instead, which aggregates this same
+> predicate by decision type with `COUNT` and `AVG(score)`. That's
+> the line product teams want to track."
 
 ---
 

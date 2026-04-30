@@ -86,13 +86,13 @@ RETURN
 ORDER BY dp.decision_id, cand.score DESC;
 
 -- ====================================================================
--- Block 4: All dropped candidates with rationale
+-- Block 4: Dropped candidates — detail view
 --
--- Filters Block 3 down to just the rejections, grouped by decision
--- type. The same shape the SDK ships as
--- `mgr.get_dropped_candidates_gql()`. Drop the session_id filter and
--- replace it with a date-range filter on the underlying agent_events
--- table to roll this up across every agent run.
+-- Filters Block 3 down to just the rejections, ordered by decision and
+-- score. One row per dropped candidate. The same shape the SDK ships
+-- as `mgr.get_dropped_candidates_gql()`. Drop the session_id filter
+-- and replace it with a date-range filter on the underlying
+-- agent_events table to fan this out across every agent run.
 -- ====================================================================
 GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
 MATCH
@@ -107,3 +107,22 @@ RETURN
   cand.score AS candidate_score,
   cand.rejection_rationale
 ORDER BY dp.decision_id, cand.score DESC;
+
+-- ====================================================================
+-- Block 4b (optional): Dropped-candidate roll-up by decision type
+--
+-- Same predicate as Block 4, but aggregates: COUNT(c) and AVG(score)
+-- per decision_type. Useful for portfolio-level metrics across many
+-- sessions — drop the session_id filter and replace with a date range.
+-- ====================================================================
+GRAPH `__PROJECT_ID__.__DATASET_ID__.agent_context_graph`
+MATCH
+  (dp:DecisionPoint)-[ce:CandidateEdge]->(cand:CandidateNode)
+WHERE dp.session_id = '__SESSION_ID__'
+  AND ce.edge_type = 'DROPPED_CANDIDATE'
+RETURN
+  dp.decision_type,
+  COUNT(cand) AS dropped_count,
+  AVG(cand.score) AS avg_dropped_score
+GROUP BY dp.decision_type
+ORDER BY dropped_count DESC;

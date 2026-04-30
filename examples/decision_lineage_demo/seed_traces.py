@@ -52,12 +52,12 @@ Plugin-shape conventions matched here (cross-checked against
 
 from __future__ import annotations
 
-import json
-import os
-import sys
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+import json
+import os
+import sys
 from typing import Any
 
 from dotenv import load_dotenv
@@ -712,9 +712,7 @@ def _delete_existing_demo_rows(client: bigquery.Client) -> None:
   )
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
-          bigquery.ScalarQueryParameter(
-              "session_id", "STRING", SESSION_ID
-          ),
+          bigquery.ScalarQueryParameter("session_id", "STRING", SESSION_ID),
       ]
   )
   try:
@@ -773,8 +771,10 @@ def main() -> int:
   _ensure_agent_events_table(client)
   print("[2/3] Clearing prior demo rows for this session (idempotent)...")
   _delete_existing_demo_rows(client)
-  print(f"[3/3] Inserting {len(SPANS)} plugin-shape trace rows "
-        f"covering 5 decisions, 15 candidates...")
+  print(
+      f"[3/3] Inserting {len(SPANS)} plugin-shape trace rows "
+      f"covering 5 decisions, 15 candidates..."
+  )
   _insert_events(client)
   print()
   print("Trace seed complete.")

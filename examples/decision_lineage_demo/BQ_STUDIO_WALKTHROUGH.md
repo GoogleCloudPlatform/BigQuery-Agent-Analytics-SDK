@@ -53,18 +53,22 @@ queries, each counts one node label in the session.
    (or hit `Cmd / Ctrl + Enter` after pasting).
 2. Open `bq_studio_queries.gql` in your editor and copy
    **block 1a** (TechNode count). Paste it into the query tab.
-3. Click **Run**. Expect `techNodes = 23`.
+3. Click **Run**. Expect `techNodes = 23` (deterministic — that's
+   exactly the seeded span count).
 4. Replace the query with **block 1b** (BizNode count) and run.
-   Expect a positive number — typically 6-12, depending on what
-   `AI.GENERATE` extracts.
+   Expect a positive number; the exact count varies with
+   `AI.GENERATE`.
 5. Replace with **block 1c** (DecisionPoint count) and run. Expect
-   `decisions ≈ 5`.
+   a non-zero count, typically 4-5 (the seeded narrative contains
+   5 distinct decisions; `AI.GENERATE` may consolidate or miss one
+   on a given run).
 6. Replace with **block 1d** (CandidateNode count) and run. Expect
-   `candidates ≈ 15`.
+   roughly 3 × the DecisionPoint count.
 
 > Talk track: "Setup ran the SDK's `build_context_graph` against 23
-> seeded plugin-shape spans. `AI.GENERATE` did the rest — five
-> decisions extracted, fifteen candidates pulled out with rationale."
+> seeded plugin-shape spans. `AI.GENERATE` extracted business
+> entities and decision points; the counts you see are what the
+> model returned this run."
 
 ## Step 2 — Visualize the agent's reasoning (~80s)
 
@@ -78,13 +82,16 @@ an interactive diagram.
 4. After the query completes, Studio shows results in the bottom
    pane. Click the **Graph** tab (next to **Table**, **JSON**,
    **Execution details**).
-5. The result renders as five fan-outs — one per decision —
+5. The result renders as one fan-out per extracted decision,
    branching from the LLM_RESPONSE TechNode, through the
-   DecisionPoint, out to three CandidateNode endpoints.
+   DecisionPoint, out to its CandidateNode endpoints (typically
+   three per decision, matching the seeded narrative).
 6. Click any **CandidateNode**. The right-hand properties pane
    shows `name`, `score`, `status`, and `rejection_rationale`.
-   Click a DROPPED candidate (e.g. `Casual fitness enthusiasts`,
-   `TikTok Spark Ads`, `YouTube Shorts`) to surface the rationale.
+   Click a DROPPED candidate to surface the rationale (the seeded
+   text includes lines like `Casual fitness enthusiasts`,
+   `TikTok Spark Ads`, `YouTube Shorts` — exact names depend on
+   what `AI.GENERATE` extracted).
 
 > Talk track: "Each fan-out is one decision. The selected candidate
 > sits next to the dropped ones with the same edge weight — the
@@ -102,8 +109,10 @@ The same GQL the SDK ships as `mgr.get_eu_audit_gql(session_id=...)`.
    with `decision_type`, `candidate_name`, `candidate_score`,
    `candidate_status`, `rejection_rationale`, and the linked TechNode
    span info.
-4. Walk the room through the table from top to bottom — five
-   decisions, three candidates each, ten of fifteen are DROPPED.
+4. Walk the room through the table from top to bottom — one row
+   per (decision, candidate). Roughly two-thirds of the rows are
+   DROPPED (the seeded narrative gave each decision three
+   candidates: one SELECTED, two DROPPED).
 
 > Talk track: see the per-decision narration in
 > [`DEMO_NARRATION.md`](DEMO_NARRATION.md), Block 3 section. Read
@@ -111,18 +120,28 @@ The same GQL the SDK ships as `mgr.get_eu_audit_gql(session_id=...)`.
 > demo: "channel overlap on the same demographic; Q1 retention 18%
 > lower at matched spend."
 
-## Step 4 — Operational view: just the rejections (~45s)
+## Step 4 — Just the rejections (detail view) (~45s)
 
 1. **+ Compose new query**.
 2. Copy **block 4** from `bq_studio_queries.gql`. Paste and **Run**.
-3. The result is ten rows — every dropped candidate, ordered by
-   decision and score.
+3. The result is one row per dropped candidate, ordered by
+   decision and score — the same shape the SDK ships as
+   `mgr.get_dropped_candidates_gql`.
 
-> Talk track: "Ten rejections, two per decision. Drop the
-> `session_id` filter and pivot on a date range and you have a
-> portfolio metric — across every agent run last quarter, which
-> decision categories reject the most candidates and at what
-> scores. That's the line product teams want to track."
+> Talk track: "Every rejected candidate, with rationale, in one
+> query. Drop the `session_id` filter and replace it with a date
+> range and you fan this view out across every agent run."
+
+### Optional: Block 4b — roll-up by decision type
+
+Same predicate as Block 4 but aggregates: `COUNT(cand)` and
+`AVG(score)` per decision_type. Useful when the audience wants the
+portfolio metric directly.
+
+1. **+ Compose new query**.
+2. Copy **block 4b** from `bq_studio_queries.gql`. Paste and **Run**.
+3. Result is one row per decision_type with `dropped_count` and
+   `avg_dropped_score`.
 
 ## Step 5 (optional) — Improvise an ad-hoc query (~30s)
 
@@ -162,7 +181,8 @@ copy from the rendered `bq_studio_queries.gql`.)
 
 | Symptom | Fix |
 |---|---|
-| Block 1c returns `decisions = 0` | `AI.GENERATE` non-determinism; re-run `python3 build_graph.py` (no need to re-seed traces) |
+| Block 1c returns `decisions = 0` | `AI.GENERATE` returned no decisions; re-run `./.venv/bin/python3 build_graph.py` (no need to re-seed traces) |
+| Block 1c returns 1-3 (below the seeded 5) | `AI.GENERATE` consolidated or missed a decision — accept it for the talk track or re-run `build_graph.py` for a different draw |
 | Block 2 shows no Graph tab | Make sure the result rendered — sometimes the tab takes a second to appear after the first run; or re-run the query |
 | "Property graph not found" | `setup.sh` did not finish; check that `build_graph.py` printed `property_graph_created True` |
 | Permission errors on `AI.GENERATE` | Missing `roles/aiplatform.user` on the running identity |

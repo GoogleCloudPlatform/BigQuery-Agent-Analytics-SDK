@@ -61,10 +61,10 @@ come from `AI.GENERATE` running against the seeded text.
 
 | Block | Question | Surface |
 |-------|----------|---------|
-| 1 | What did the SDK extract? | Four COUNT GQL queries — one per node label. Expect ~23 TechNodes, several BizNodes, ~5 DecisionPoints, ~15 CandidateNodes |
-| 2 | Visualize the agent's reasoning | Path GQL — Studio renders the diagram with five decision fan-outs of three candidates each |
+| 1 | What did the SDK extract? | Four COUNT GQL queries — one per node label. Expect 23 TechNodes plus a non-zero count for each of BizNode / DecisionPoint / CandidateNode (exact counts vary; see "AI.GENERATE non-determinism" below) |
+| 2 | Visualize the agent's reasoning | Path GQL — Studio renders the diagram as fan-outs of candidates from each extracted decision |
 | 3 | EU-audit traversal | The exact GQL `mgr.get_eu_audit_gql` ships — every decision, every candidate, every rejection rationale |
-| 4 | All dropped candidates | Same shape as `mgr.get_dropped_candidates_gql` — 10 dropped candidates rolled up by decision type |
+| 4 | Dropped candidates | Detail view (matches `mgr.get_dropped_candidates_gql`) plus an optional Block 4b roll-up — `COUNT` and `AVG(score)` per decision type |
 
 All four blocks run against `agent_context_graph` and live as a
 single annotated bundle in `bq_studio_queries.gql` (rendered by
@@ -162,7 +162,7 @@ queries file, and the local `.env`. Re-run `./setup.sh` to start over.
 
 ## Cost
 
-One small dataset, six trace rows, two `AI.GENERATE` queries during
+One small dataset, 23 trace rows, two `AI.GENERATE` queries during
 setup. Expect well under a cent of slot time + token cost per setup
 run; the GQL queries the demo runs against the prebuilt graph are
 near-free.
