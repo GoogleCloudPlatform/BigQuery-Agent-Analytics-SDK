@@ -156,7 +156,7 @@ A talk track and a click-by-click walkthrough live alongside:
   step by step:
   [`DATA_LINEAGE.md`](DATA_LINEAGE.md)
 - Leadership-ready slide deck (Marp; renders to PDF / PPTX / HTML
-  via `marp SLIDES.md --pdf`) covering the same 5-question
+  via `marp SLIDES.md --html --pdf`) covering the same 5-question
   narrative with the ads-domain vocabulary:
   [`SLIDES.md`](SLIDES.md)
 
