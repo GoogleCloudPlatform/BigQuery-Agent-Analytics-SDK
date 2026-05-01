@@ -170,7 +170,9 @@ decision_lineage_demo/
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
 ├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
 ├── DATA_LINEAGE.md            # canonical graph + richer demo graph lineage
-├── SLIDES.md                  # Marp deck — leadership / Google-Next-style
+├── SLIDES.md                  # Marp deck source — leadership / Google-Next-style
+├── SLIDES.html                # rendered HTML (open in browser, no install needed)
+├── SLIDES.pptx                # rendered PowerPoint (editable in Google Slides / Keynote / PPT)
 ├── setup.sh                   # one-shot bootstrap
 ├── reset.sh                   # tear down dataset + rendered files
 ├── render_queries.sh          # sed-renders the .gql template

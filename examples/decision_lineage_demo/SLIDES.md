@@ -270,6 +270,16 @@ Render with Marp (https://marp.app):
   marp SLIDES.md --html --pptx    # SLIDES.pptx
   marp SLIDES.md --html           # SLIDES.html
   marp SLIDES.md --watch --html   # live preview
+
+`SLIDES.html` and `SLIDES.pptx` are checked in alongside this
+source so reviewers can open the deck without installing Marp.
+After editing this file, regenerate both with:
+
+  npx -y @marp-team/marp-cli@latest SLIDES.md --html
+  npx -y @marp-team/marp-cli@latest SLIDES.md --html --pptx --no-stdin
+
+(or `marp SLIDES.md --html --pptx` if you have Marp installed
+globally via `npm install -g @marp-team/marp-cli`).
 -->
 
 <!-- _class: hero -->
