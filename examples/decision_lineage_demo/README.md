@@ -155,6 +155,10 @@ A talk track and a click-by-click walkthrough live alongside:
   `DecisionOption`, `OptionOutcome`, and `DropReason` included),
   step by step:
   [`DATA_LINEAGE.md`](DATA_LINEAGE.md)
+- Leadership-ready slide deck (Marp; renders to PDF / PPTX / HTML
+  via `marp SLIDES.md --pdf`) covering the same 5-question
+  narrative with the ads-domain vocabulary:
+  [`SLIDES.md`](SLIDES.md)
 
 ## File map
 
@@ -166,6 +170,7 @@ decision_lineage_demo/
 ├── BQ_STUDIO_WALKTHROUGH.md   # click-by-click in BQ Studio
 ├── DEMO_QUESTIONS.md          # 5 EU-compliance questions: BQ CA vs. direct GQL
 ├── DATA_LINEAGE.md            # canonical graph + richer demo graph lineage
+├── SLIDES.md                  # Marp deck — leadership / Google-Next-style
 ├── setup.sh                   # one-shot bootstrap
 ├── reset.sh                   # tear down dataset + rendered files
 ├── render_queries.sh          # sed-renders the .gql template
