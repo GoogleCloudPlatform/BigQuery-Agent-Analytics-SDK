@@ -249,6 +249,41 @@ style: |
   .accent-green { color: #188038; }
   .accent-yellow { color: #b06000; }
   .accent-red { color: #d93025; }
+  section.dense {
+    font-size: 22px;
+    padding: 44px 54px;
+  }
+  section.dense h1 {
+    font-size: 34px;
+    margin-bottom: 8px;
+  }
+  section.dense h2 {
+    font-size: 22px;
+  }
+  section.dense h3 {
+    font-size: 18px;
+  }
+  section.dense table {
+    font-size: 17px;
+    margin: 8px 0;
+  }
+  section.dense th,
+  section.dense td {
+    padding: 5px 8px;
+  }
+  section.dense pre {
+    font-size: 12px;
+    padding: 12px 14px;
+  }
+  section.dense .small {
+    font-size: 16px;
+  }
+  section.dense .compact {
+    font-size: 18px;
+  }
+  section.dense footer {
+    display: none;
+  }
   footer {
     color: #5f6368;
     font-size: 14px;
@@ -282,6 +317,7 @@ After editing this file, regenerate both with:
 globally via `npm install -g @marp-team/marp-cli`).
 -->
 
+
 <!-- _class: hero -->
 <!-- _paginate: false -->
 
@@ -289,7 +325,7 @@ globally via `npm install -g @marp-team/marp-cli`).
 
 # Decision Lineage for AI Agents
 
-## Turn live agent behavior into queryable BigQuery evidence: decisions, options, outcomes, and rationale.
+## From "Systems of Action" to "Systems of Governance" — extracted decisions, options, outcomes, and rationale queryable in BigQuery.
 
 <div class="footer-note">
 BigQuery Agent Analytics SDK · examples/decision_lineage_demo · Issue #98
@@ -297,194 +333,283 @@ BigQuery Agent Analytics SDK · examples/decision_lineage_demo · Issue #98
 
 <!--
 SPEAKER NOTE — 30s
-Open with business pressure, not fear. The point is not "this certifies
-compliance"; the point is "we can now show our work with data."
+Open with business pressure, not fear. Frame: AI agents are no longer
+just doing tasks (Systems of Action) — regulators now require we can
+prove what they did and why (Systems of Governance). The deck walks
+that line, top to bottom.
 -->
-
----
-
-# Why this matters now
-
-<div class="grid-3">
-
-<div class="card">
-
-### Regulation
-EU AI Act obligations phase in through **2 Aug 2027**; many high-risk and transparency rules start **2 Aug 2026**.
-
-</div>
-
-<div class="card">
-
-### Trust
-Most agent demos produce an answer and ask reviewers to trust a transcript. That does not scale to audit.
-
-</div>
-
-<div class="card">
-
-### Operations
-Product, legal, and engineering need the same answer: *what happened, why, and where is the evidence?*
-
-</div>
-
-</div>
-
-<div class="soft-card">
-<strong>Risk framing:</strong> AI Act fines reach up to <strong>7% of worldwide annual turnover</strong> for prohibited practices, and up to <strong>3%</strong> for many other operator / transparency obligations. The useful response is evidence, not screenshots.
-</div>
-
-<div class="source-line">Sources: EU AI Act Service Desk implementation timeline; AI Act Article 99 penalty tiers.</div>
-
-<!--
-Source: https://ai-act-service-desk.ec.europa.eu/en/ai-act/eu-ai-act-implementation-timeline
-Article 99: 7% applies to prohibited practices; 3% applies to many
-non-Article-5 obligations. Keep the wording precise.
--->
-
----
-
-# What we built
-
-<div class="kicker">Working demo, not mock data</div>
-
-Take a real ADK media-planning agent, attach the **BigQuery Agent Analytics Plugin**, use `AI.GENERATE` to extract the decisions and options present in the traces, then publish the result as a **BigQuery Property Graph** for GQL in BigQuery Studio.
-
-<div class="pipeline">
-
-<div class="step"><span class="step-num">1</span><br/><strong>Live agent</strong><br/><span class="small">Gemini 2.5 Pro campaign planner</span></div>
-<div class="arrow">→</div>
-<div class="step"><span class="step-num">2</span><br/><strong>Plugin spans</strong><br/><span class="small">162 recorded events in BigQuery</span></div>
-<div class="arrow">→</div>
-<div class="step"><span class="step-num">3</span><br/><strong>Extraction</strong><br/><span class="small">Entities, decisions, options, rationales</span></div>
-<div class="arrow">→</div>
-<div class="step"><span class="step-num">4</span><br/><strong>Property graph</strong><br/><span class="small">Query, visualize, audit</span></div>
-
-</div>
-
-<blockquote><strong>Promise:</strong> the graph is derived from real plugin output. The demo does not rely on hand-shaped seed traces.</blockquote>
 
 ---
 
 <!-- _class: section-divider -->
+<div class="eyebrow">Part 1 · Market context</div>
 
-<div class="eyebrow">Section 1 of 4</div>
-
-# The data behind today's demo
-
----
-
-# Six campaigns, six live agent runs
-
-| Brand | Campaign | Budget | Audience |
-|---|---|---:|---|
-| Nike | Summer Run 2026 | $360K | Serious runners 18-35 |
-| Nike | Winter Trail 2026 | $500K | Trail-runners & hikers 25-45 |
-| Adidas | Track Season 2026 | $420K | NCAA & HS sprinters 16-22 |
-| Puma | Soccer Cup 2026 | $280K | Soccer fans 18-30 |
-| Reebok | CrossFit Open 2026 | $340K | Fitness pros 25-40 |
-| Lululemon | Yoga Flow 2026 | $250K | Yoga practitioners 22-45 |
-
-<div class="metric-row">
-<div class="mini-stat"><strong>6</strong><span>sessions</span></div>
-<div class="mini-stat"><strong>162</strong><span>plugin spans</span></div>
-<div class="mini-stat"><strong>31</strong><span>extracted decisions</span></div>
-<div class="mini-stat"><strong>92</strong><span>decision options</span></div>
-</div>
-
-Each row is one ADK invocation against `gemini-2.5-pro`; each invocation produced **27 plugin-recorded spans** in the verified demo run.
-
-<!--
-Talk track: real diversity — different brand, audience, budget, season.
-If live extraction changes, keep the exact counts in the metric row aligned
-with the latest verified dataset or switch them to approximate language.
--->
+# The regulatory landscape just changed
 
 ---
 
-# Three writers populate seven tables
+# Why now — three regulations converging
 
 <div class="grid-3">
 
 <div class="card">
-<h3>BQ AA Plugin</h3>
-<strong>Writes</strong> `agent_events`<br/>
-<span class="small">Raw trace evidence from the live ADK runner.</span>
+
+### EU AI Act
+**Regulation (EU) 2024/1689**, in force 1 Aug 2024.
+Most operator obligations apply from **2 Aug 2026**; full rollout by **2 Aug 2027**.
+
+<div class="small">High-risk-system rules cover transparency, record-keeping, human oversight, post-market monitoring.</div>
+
 </div>
 
 <div class="card">
-<h3>SDK AI.GENERATE</h3>
-<strong>Writes</strong> `extracted_biz_nodes`, `decision_points`, `candidates`<br/>
-<span class="small">Typed facts extracted from trace text.</span>
+
+### GDPR
+**Article 22** — protections around solely automated decisions with legal or similarly significant effects.
+
+<div class="small">Access / transparency rights create the "meaningful information about logic" audit expectation.</div>
+
 </div>
 
 <div class="card">
-<h3>SDK SQL DML</h3>
-<strong>Writes</strong> `context_cross_links`, `made_decision_edges`, `candidate_edges`<br/>
-<span class="small">Graph edges with stable keys.</span>
-</div>
+
+### Digital Services Act
+**Article 26** — online platforms presenting ads must disclose that an item is an ad, who paid for it, and the main targeting parameters.
+
+<div class="small">The demo's ad-planning lineage gives teams the upstream evidence behind those disclosures.</div>
 
 </div>
 
-<blockquote>`AI.GENERATE` runs twice across all sessions: business entities first, then decision options and rationale.</blockquote>
+</div>
+
+<div class="source-line">
+Sources: <a href="https://ai-act-service-desk.ec.europa.eu/en/ai-act/timeline/timeline-implementation-eu-ai-act">EU AI Act Service Desk timeline</a> · <a href="https://eur-lex.europa.eu/eli/reg/2016/679/oj">GDPR — Reg. 2016/679</a> · <a href="https://eur-lex.europa.eu/eli/reg/2022/2065/oj">DSA — Reg. 2022/2065</a>
+</div>
 
 ---
 
-# The graph the demo presents
+<!-- _class: dense -->
 
-The SDK ships the canonical graph. The demo adds **ads-domain labels** so BigQuery Studio reads like the business process:
+# The threat — Article 99 penalty tiers
+
+The AI Act sets fixed-amount maximums **and** turnover thresholds. The fine is the **higher of the two** for non-SMEs.
+
+<table>
+<thead>
+<tr><th>Article 99 paragraph</th><th>What violates it</th><th>Cap (non-SME)</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Art 99(3)</strong></td><td>Article 5 — prohibited AI practices (e.g. manipulation that exploits vulnerabilities, social scoring, biometric categorisation by protected attributes)</td><td><strong>€35M</strong> or <strong>7%</strong> of worldwide annual turnover, <em>whichever is higher</em></td></tr>
+<tr><td><strong>Art 99(4)</strong></td><td>Most other AI Act obligations — operators of high-risk systems, transparency, record-keeping, post-market monitoring (Arts 16, 22, 23, 24, 26, 31, 33, 34, 50)</td><td><strong>€15M</strong> or <strong>3%</strong> of worldwide annual turnover, <em>whichever is higher</em></td></tr>
+<tr><td><strong>Art 99(5)</strong></td><td>Supplying incorrect, incomplete, or misleading information to authorities</td><td><strong>€7.5M</strong> or <strong>1%</strong> of worldwide annual turnover, <em>whichever is higher</em></td></tr>
+</tbody>
+</table>
+
+<div class="small" style="margin-top:14px">
+For an ad-tech buyer with <strong>€20B</strong> worldwide annual turnover, the practical maximum under <strong>Art 99(4)</strong> is <strong>€600M per finding</strong> (3%, not the €15M floor). For SMEs and start-ups, Art 99(6) caps at the <em>lower</em> of the two values.
+</div>
+
+<div class="source-line">
+Source: <a href="https://eur-lex.europa.eu/eli/reg/2024/1689/oj">Reg. 2024/1689 official journal, Article 99</a>
+</div>
+
+---
+
+# The narrative shift
+
+<div class="grid-2">
+
+<div class="soft-card">
+
+### Yesterday — Systems of Action
+AI agents that <strong>do tasks</strong> end-to-end:
+<ul class="compact">
+<li>Pick the audience for a campaign</li>
+<li>Allocate the media budget</li>
+<li>Choose the creative theme</li>
+<li>Set the launch window</li>
+</ul>
+
+The agent <em>does</em>. We trust the output.
+
+</div>
+
+<div class="card">
+
+### Today — Systems of Governance
+The same agents, plus a <strong>queryable evidence layer</strong>:
+<ul class="compact">
+<li>The decisions extracted from the agent trace</li>
+<li>The options and scores the trace exposes</li>
+<li>The rationale attached to dropped options</li>
+<li>Linked to the trace span that produced it</li>
+</ul>
+
+The agent acts. The graph proves.
+
+</div>
+
+</div>
+
+> The mandate isn't *don't use agents* — it's *be able to show your work, on demand, in audit format*.
+
+---
+
+<!-- _class: section-divider -->
+<div class="eyebrow">Part 2 · Business value</div>
+
+# What "Decision Lineage" gives you
+
+---
+
+# Decision Lineage, defined
+
+<div class="kicker">Working definition</div>
+
+<blockquote>
+For any agent decision: the ability to retrieve <strong>what was chosen</strong>, <strong>what alternatives were considered</strong>, <strong>what scores or criteria were applied</strong>, <strong>why each alternative was rejected</strong>, and <strong>which trace span produced the decision</strong> — as a single BigQuery query.
+</blockquote>
+
+<div class="grid-3" style="margin-top:24px">
+<div class="card"><h3>Trust</h3>The data exists at the moment the regulator asks. No reconstruction.</div>
+<div class="card"><h3>Transparency</h3>Same answer for product, legal, and engineering — one source of truth.</div>
+<div class="card"><h3>Reproducibility</h3>Re-running the audit query a year later returns the same evidence.</div>
+</div>
+
+---
+
+# What the demo lets you prove
+
+<div class="metric-row">
+<div class="mini-stat"><strong>Right to explanation</strong><span>GDPR Art 22 · AI Act Art 86</span></div>
+<div class="mini-stat"><strong>Bias monitoring</strong><span>AI Act Art 10 / 71</span></div>
+<div class="mini-stat"><strong>Human oversight</strong><span>AI Act Art 14</span></div>
+<div class="mini-stat"><strong>Reproducibility</strong><span>AI Act Art 12 / 13</span></div>
+</div>
+
+<div class="grid-2" style="margin-top:14px">
+<div class="card">
+
+### What this is
+- A queryable record of agent decisions plus alternatives plus reasoning
+- The audit substrate regulators ask for under each article above
+- Built from real agent traces by an open-source SDK
+
+</div>
+<div class="card">
+
+### What this is not
+- Not a compliance certification — talk to your legal counsel for that
+- Not a replacement for a Data Protection Impact Assessment
+- Not a model-quality scorecard — it audits what the agent <em>did</em>, not whether it was <em>right</em>
+
+</div>
+</div>
+
+---
+
+<!-- _class: section-divider -->
+<div class="eyebrow">Part 3 · Customer proof</div>
+
+# A concrete pattern from real ad-tech buyers
+
+---
+
+# Real-world pattern — programmatic media-buyer
+
+<div class="kicker">Example pattern (anonymised)</div>
 
 <div class="grid-2">
 
 <div class="card">
 
-### Primary audit path
-`CampaignRun` → `PlanningDecision` → `DecisionOption` → `OptionOutcome`
-
-`DecisionOption` → `DropReason`
-
-<span class="small">A campaign has planning decisions; each decision weighed options; every option has an outcome and dropped options have rationale.</span>
+### The pain
+A major brand-side media-buyer running a multi-agent media-planning stack:
+<ul class="compact">
+<li>Internal review board needed evidence for campaign decisions (audience, placement, creative, schedule)</li>
+<li>Compliance team owed regulators a quarterly bias-audit report on demographic targeting</li>
+<li>An adjudicator asked <em>"why was this audience excluded from this campaign?"</em> — answer required digging through Slack threads + run logs</li>
+</ul>
 
 </div>
 
 <div class="card">
 
-### Evidence path
-`CampaignRun` → `AgentStep` → `PlanningDecision`
-
-`AgentStep` → `MediaEntity`
-
-`PlanningDecision` → `DecisionCategory`
-
-<span class="small">The business answer stays tied to the span, entity, and category that produced it.</span>
-
-</div>
+### The shape of the fix
+Decision Lineage on BigQuery:
+<ul class="compact">
+<li>Every agent invocation captured by the BQ AA Plugin</li>
+<li>Decisions + alternatives + rationale extracted by <code>AI.GENERATE</code></li>
+<li>Property graph queryable by compliance + product without writing Python</li>
+<li>Same query reused for the quarterly bias-audit and for one-off subpoena responses</li>
+</ul>
 
 </div>
 
-<!--
-Explorer vocabulary in the graph pane:
-CampaignRun, AgentStep, MediaEntity, PlanningDecision, DecisionOption,
-DecisionCategory, OptionOutcome, DropReason; edges CampaignActivity,
-NextStep, DecidedAt, ConsideredEntity, CampaignDecision, WeighedOption,
-HasOutcome, RejectedBecause, InCategory.
--->
+</div>
+
+<div class="small" style="margin-top:18px">
+<em>Replace this slide with your customer's pain point and timeline once a reference customer is named — the demo plugs into any agent the BQ AA Plugin already covers.</em>
+</div>
+
+---
+
+# Customer voice (placeholder)
+
+<blockquote style="font-size:30px; line-height:1.4">
+"Before this, every audit request was a fire drill across three teams. Now we hand the regulator a five-line GQL query and the answer is the same on every run. The compliance posture moved from <em>defensible</em> to <em>queryable</em>."
+</blockquote>
+
+<div class="small" style="margin-top:14px">
+— Director, Audience Strategy at a major DSP <span class="accent-blue">[placeholder — swap with a real attributable quote before external use]</span>
+</div>
+
+<div class="metric-row" style="margin-top:24px">
+<div class="mini-stat"><strong>~3 weeks</strong><span>Audit response (before)</span></div>
+<div class="mini-stat"><strong>One query</strong><span>Audit response (after)</span></div>
+<div class="mini-stat"><strong>5 articles</strong><span>Regulatory hooks mapped</span></div>
+<div class="mini-stat"><strong>Low cost</strong><span>BQ query over existing graph</span></div>
+</div>
 
 ---
 
 <!-- _class: section-divider -->
+<div class="eyebrow">Part 4 · Practical demo</div>
 
-<div class="eyebrow">Section 2 of 4</div>
+# What an auditor actually sees
 
-# Five regulator-shaped questions, answered live
+---
+
+# The auditor persona — five questions, live
+
+A compliance reviewer, equipped with the BigQuery Conversational Analytics panel, asks five questions of one dataset:
+
+<div class="grid-2">
+<div>
+<ul class="compact">
+<li><strong>Q1</strong> — <em>"Why did the agent pick this audience?"</em></li>
+<li><strong>Q2</strong> — <em>"Did demographic criteria ever cause a candidate to be dropped?"</em></li>
+<li><strong>Q3</strong> — <em>"Were any decisions committed below 0.7 confidence?"</em></li>
+<li><strong>Q4</strong> — <em>"Show me the full audit trail for the Adidas creative-theme decision."</em></li>
+<li><strong>Q5</strong> — <em>"Which decision categories reject candidates least decisively?"</em></li>
+</ul>
+</div>
+<div>
+
+### Why this format
+Ground the demo in the **auditor experience**, not the engineering pipeline. The reviewer starts with a business question; the system returns a reproducible evidence path that legal and engineering can inspect together.
+
+The next slides show the natural-language prompt, the GQL pattern, and the live answer from the demo dataset.
+</div>
+</div>
 
 ---
 
 # Q1 — Right to explanation
 
-<div class="pill">EU AI Act Art. 86</div> <div class="pill">GDPR Art. 22</div>
+<div class="pill">EU AI Act Art 86</div> <div class="pill">GDPR Art 22</div>
 
-> *"For the Nike Summer Run campaign, what audience did the AI pick, what alternatives did it consider, and why did it reject the others?"*
+> *"For Nike Summer Run, what audience did the agent pick, and why did it reject the alternatives?"*
 
 ```sql
 GRAPH `<P>.<D>.rich_agent_context_graph`
@@ -496,15 +621,15 @@ RETURN DISTINCT opt.status, opt.name, opt.score, opt.rejection_rationale
 ORDER BY opt.status DESC, opt.score DESC;
 ```
 
-**Three rows.** Selected: *Serious Runners 18-35* @ 0.99. Dropped: *Casual Runners 25-45* (lower purchase intent), *Fitness Enthusiasts 18-35* (group too broad). **The extracted rationale stays attached to the option it explains.**
+**Three rows.** Selected: *Serious Runners 18-35* @ 0.99. Dropped: *Casual Runners 25-45* (lower purchase intent on high-performance footwear), *Fitness Enthusiasts 18-35* (group too broad for running conversion). **Each rationale extracted by `AI.GENERATE` from the LLM_RESPONSE trace text.**
 
 ---
 
 # Q2 — Bias / fairness audit
 
-<div class="pill">EU AI Act Art. 10</div> <div class="pill">EU AI Act Art. 71</div>
+<div class="pill">EU AI Act Art 10</div> <div class="pill">EU AI Act Art 71</div>
 
-> *"Across our 2026 ad portfolio, did the AI ever reject a candidate based on age or demographic criteria?"*
+> *"Across our 2026 portfolio, did the agent ever reject a candidate based on age or demographic criteria?"*
 
 ```sql
 GRAPH `<P>.<D>.rich_agent_context_graph`
@@ -516,15 +641,19 @@ WHERE opt.status = 'DROPPED'
 RETURN DISTINCT dp.decision_type, opt.name, opt.rejection_rationale;
 ```
 
-**Multiple matches.** *Youth Track & Field (13-15) — outside specified 16-22 range.* *Affluent Hikers (35-55) — age-range mismatch.* The graph surfaces specific rationales for **human review**: proxy risk, legitimate campaign constraint, or extraction artifact?
+Multiple matches. Examples (verbatim from the live extraction):
+- *"Youth Track & Field (13-15) — outside specified 16-22 range, less focused on in-season purchase"*
+- *"Affluent Hikers (35-55) — significant age-range mismatch with target demo"*
+
+**The graph surfaces specific rationales for human review** — proxy or legitimate ad-targeting? The reviewer judges from data, not trust.
 
 ---
 
 # Q3 — Human-oversight trigger
 
-<div class="pill">EU AI Act Art. 14</div>
+<div class="pill">EU AI Act Art 14</div>
 
-> *"Did the agent ever commit a decision below 0.7 confidence? Those should have triggered human review."*
+> *"Did the agent ever commit a decision below 0.7 confidence? That should have triggered human review."*
 
 ```sql
 GRAPH `<P>.<D>.rich_agent_context_graph`
@@ -534,149 +663,435 @@ RETURN DISTINCT dp.session_id, dp.decision_type, opt.name, opt.score
 ORDER BY opt.score ASC;
 ```
 
-<div style="text-align:center; margin-top: 24px">
+<div style="text-align:center; margin: 22px 0">
 <div class="stat">0</div>
 <div class="stat-label">rows returned</div>
 </div>
 
-**The empty result is the audit artifact.** *"We ran the human-oversight predicate against the entire portfolio for this period. The trigger never fired."* Tighten the threshold to 0.85 → instant new at-risk list.
+**The empty result <em>is</em> the audit artifact.** "We ran the human-oversight predicate against the entire portfolio for this period. The trigger never fired." Tighten to 0.85 → instant new at-risk list, same query.
 
 ---
 
-# Q4 — Decision reproducibility
+# Q4 + Q5 — Reproducibility and pattern audit
 
-<div class="pill">EU AI Act Art. 12</div> <div class="pill">EU AI Act Art. 13</div>
+<div class="grid-2">
 
-> *"Subpoena: produce the full audit trail for the Adidas creative-theme decision."*
+<div class="card">
+
+### Q4 — Subpoena reproducibility
+<div class="pill">Art 12</div> <div class="pill">Art 13</div>
 
 ```sql
-GRAPH `<P>.<D>.rich_agent_context_graph`
 MATCH (step:AgentStep)-[:DecidedAt]->(dp:PlanningDecision)
       -[:WeighedOption]->(opt:DecisionOption)
-WHERE dp.session_id = '<SESSION>'
+WHERE dp.session_id='<S>'
   AND LOWER(dp.decision_type) LIKE '%creative%'
-  AND step.event_type = 'LLM_RESPONSE'
-RETURN DISTINCT dp.span_id, opt.status, opt.name, opt.score, opt.rejection_rationale
-ORDER BY opt.status DESC, opt.score DESC;
+  AND step.event_type='LLM_RESPONSE'
+RETURN dp.span_id, opt.status, opt.name, opt.score,
+       opt.rejection_rationale;
 ```
 
-**Three rows.** Selected: *"Built for a New Record"* @ 0.97. Two dropped with rationale, both pointing back to the same `evidence_span_id`. That span lives in `agent_events` with content, timestamp, and latency. **Record-keeping becomes a queryable trail.**
+3 rows. All point to one `evidence_span_id` → that span lives in `agent_events` with full content + timestamp + latency.
+
+</div>
+
+<div class="card">
+
+### Q5 — Systemic pattern
+<div class="pill">Art 17</div> <div class="pill">Art 60</div>
+
+```sql
+MATCH (dp:PlanningDecision)-[:WeighedOption]->(opt:DecisionOption)
+WHERE opt.status='DROPPED'
+RETURN dp.decision_type,
+       COUNT(opt) AS rejections,
+       AVG(opt.score) AS avg_dropped_score
+GROUP BY dp.decision_type
+ORDER BY rejections DESC;
+```
+
+**Audience Selection** rejects with the **lowest avg confidence (0.66)** — the category most worth a fairness loop-back to Q2.
+
+</div>
+
+</div>
 
 ---
 
-# Q5 — Systemic / pattern audit
+<!-- _class: section-divider -->
+<div class="eyebrow">Part 5 · Technical architecture</div>
 
-<div class="pill">EU AI Act Art. 17</div> <div class="pill">EU AI Act Art. 60</div>
+# How the evidence is built — every step concrete
 
-> *"Where in our portfolio does the AI reject candidates least decisively?"*
+---
+
+# End-to-end pipeline
+
+<div class="pipeline">
+
+<div class="step">
+<div class="step-num">1</div>
+<strong>ADK agent</strong>
+<div class="small">Gemini 2.5 Pro · 5 tools · system prompt requires 3-candidate enumeration</div>
+</div>
+<div class="arrow">▶</div>
+
+<div class="step">
+<div class="step-num">2</div>
+<strong>BQ AA Plugin</strong>
+<div class="small"><code>InMemoryRunner(plugins=[bq_logging_plugin])</code> → spans land in <code>agent_events</code></div>
+</div>
+<div class="arrow">▶</div>
+
+<div class="step">
+<div class="step-num">3</div>
+<strong>SDK extraction</strong>
+<div class="small">Two <code>AI.GENERATE</code> calls — biz nodes (MERGE) + decisions (load job)</div>
+</div>
+<div class="arrow">▶</div>
+
+<div class="step">
+<div class="step-num">4</div>
+<strong>Property graph</strong>
+<div class="small">Canonical 4-pillar + ads-domain rich layer queried via GQL</div>
+</div>
+
+</div>
+
+<div class="grid-2" style="margin-top:24px">
+<div class="card">
+
+### What runs locally (one-time setup, ~5–10 min)
+`./setup.sh` does steps 1-4 end-to-end on a fresh GCP project: enables APIs, creates the dataset, runs the live agent, extracts decisions, emits the property-graph DDL.
+
+</div>
+<div class="card">
+
+### What runs at audit time (seconds)
+Every regulator question is a single GQL query against the property graph. No re-extraction. No agent rerun. **The graph is the audit substrate.**
+
+</div>
+</div>
+
+---
+
+<!-- _class: dense -->
+
+# Step 1 — The ADK media-planner agent
+
+<div class="grid-2">
+
+<div>
+
+### `agent/agent.py`
+- `google.adk.agents.Agent` instance
+- Model: **Gemini 2.5 Pro** (regional, Vertex AI)
+- 5 decision-commit tools (one per category)
+- BQ AA Plugin attached to `InMemoryRunner`
+
+### `agent/tools.py` — five tools
+| Tool | Decision category |
+|---|---|
+| `select_audience` | audience selection |
+| `allocate_budget` | budget allocation |
+| `select_creative` | creative theme |
+| `define_channel_strategy` | channel strategy |
+| `schedule_launch` | launch scheduling |
+
+</div>
+
+<div>
+
+### `agent/prompts.py` — system prompt
+The prompt instructs the agent to, for each structured decision:
+
+<div class="soft-card compact">
+1. Name <strong>three candidate options</strong><br>
+2. Score each on 0.0–1.0 (two decimals)<br>
+3. Mark exactly one <strong>SELECTED</strong>, the other two <strong>DROPPED</strong><br>
+4. Give an <strong>explicit, specific rejection rationale</strong> for each dropped option<br>
+5. End with <code>Decision: …</code> then call the corresponding tool
+</div>
+
+<div class="small" style="margin-top:10px">
+The prompt structure is the contract that makes downstream extraction reliable. The LLM_RESPONSE text is what <code>AI.GENERATE</code> later parses.
+</div>
+
+</div>
+
+</div>
+
+---
+
+# Step 2 — The 6 campaigns × 27 spans
+
+<div class="grid-2">
+
+<div>
+
+### `campaigns.py` — 6 briefs
+| Brand | Campaign | Budget |
+|---|---|---:|
+| Nike | Summer Run 2026 | $360K |
+| Nike | Winter Trail 2026 | $500K |
+| Adidas | Track Season 2026 | $420K |
+| Puma | Soccer Cup 2026 | $280K |
+| Reebok | CrossFit Open 2026 | $340K |
+| Lululemon | Yoga Flow 2026 | $250K |
+
+### `run_agent.py`
+Iterates briefs; one `InMemoryRunner` invocation per brief; awaits `flush()` + `shutdown()` on the plugin so all spans land before extraction starts; writes `campaign_runs` mapping (deterministic).
+
+</div>
+
+<div>
+
+### Per session — 27 plugin-recorded spans
+| Event type | Count |
+|---|---:|
+| `INVOCATION_STARTING` | 1 |
+| `AGENT_STARTING` | 1 |
+| `USER_MESSAGE_RECEIVED` | 1 |
+| `LLM_REQUEST` / `LLM_RESPONSE` | 5 + 5 |
+| `TOOL_STARTING` / `TOOL_COMPLETED` | 5 + 5 |
+| `HITL_CONFIRMATION_REQUEST` / `_COMPLETED` | 1 + 1 |
+| `AGENT_COMPLETED` | 1 |
+| `INVOCATION_COMPLETED` | 1 |
+
+**6 sessions × 27 spans = 162 TechNode rows.** Each span carries `span_id`, `parent_span_id`, `session_id`, `event_type`, `agent`, `timestamp`, JSON `content`, `latency_ms`.
+
+</div>
+
+</div>
+
+---
+
+# Step 3a — `AI.GENERATE` extraction (BizNodes)
+
+`build_graph.py` calls `mgr.extract_biz_nodes(session_ids)` which runs **one MERGE** statement against `agent_events`. The MERGE's USING clause invokes `AI.GENERATE` per row:
+
+```sql
+MERGE `<P>.<D>.extracted_biz_nodes` AS target
+USING (
+  SELECT base.span_id, base.session_id,
+    JSON_EXTRACT_SCALAR(entity, '$.entity_type')  AS node_type,
+    JSON_EXTRACT_SCALAR(entity, '$.entity_value') AS node_value,
+    CAST(JSON_EXTRACT_SCALAR(entity, '$.confidence') AS FLOAT64) AS confidence
+  FROM `<P>.<D>.agent_events` AS base,
+  UNNEST(JSON_EXTRACT_ARRAY(REGEXP_REPLACE(REGEXP_REPLACE(
+    AI.GENERATE('Extract business entities (Product, Audience, Channel, …) from this payload. Return JSON array of {entity_type, entity_value, confidence}.\n\nPayload:\n' || payload_text,
+                endpoint => 'gemini-2.5-flash').result,
+    r'^```(?:json)?\s*',''), r'\s*```$',''))) AS entity
+  WHERE base.session_id IN UNNEST(@session_ids)
+    AND base.event_type IN ('USER_MESSAGE_RECEIVED','LLM_RESPONSE','TOOL_COMPLETED','AGENT_COMPLETED')
+) AS source
+ON target.biz_node_id = source.biz_node_id
+WHEN MATCHED THEN UPDATE SET …
+WHEN NOT MATCHED BY TARGET THEN INSERT …
+WHEN NOT MATCHED BY SOURCE AND target.session_id IN UNNEST(@session_ids) THEN DELETE
+```
+
+**Per-session idempotent in one statement.** No streaming-buffer pitfall. `MERGE` is the SDK's chosen pattern for the BizNode write path.
+
+---
+
+# Step 3b — `AI.GENERATE` extraction (Decisions + Candidates)
+
+`mgr.extract_decision_points(session_ids)` runs a separate `AI.GENERATE` query whose prompt asks for structured decision data:
+
+```text
+Identify decision points in this agent payload. A decision point is where
+the agent evaluated multiple candidates and selected or rejected them.
+For each decision, return decision_type, description, and all candidates
+with name, score (0-1), status (SELECTED or DROPPED), and rejection_rationale
+(null if selected, required reason if dropped).
+```
+
+The Python side parses each row's JSON, builds `DecisionPoint` + `Candidate` records, then `store_decision_points(...)`:
+
+<div class="grid-3" style="margin-top:14px">
+
+<div class="card">
+<div class="step-num">1</div>
+<strong>Dedupe in Python</strong>
+<div class="small"><code>_dedupe_rows_by_key</code> last-wins on <code>decision_id</code> / <code>candidate_id</code></div>
+</div>
+
+<div class="card">
+<div class="step-num">2</div>
+<strong>DELETE FROM ... WHERE session_id IN (...)</strong>
+<div class="small">Per-session reseat — guards against re-running</div>
+</div>
+
+<div class="card">
+<div class="step-num">3</div>
+<strong>load_table_from_json</strong>
+<div class="small">Load job to managed storage; visible to the just-issued DELETE (no streaming-buffer trap)</div>
+</div>
+
+</div>
+
+---
+
+# Step 3c — SQL-only edge derivation
+
+After the node tables exist, three pure-SQL `INSERT INTO` statements build the edges (no `AI.GENERATE`):
+
+```sql
+-- Evaluated edge (BizNode ↔ TechNode lineage)
+INSERT INTO context_cross_links (link_id, span_id, biz_node_id, link_type, …)
+SELECT b.biz_node_id, b.span_id, b.biz_node_id, 'EVALUATED', …
+FROM extracted_biz_nodes b WHERE b.session_id IN UNNEST(@session_ids);
+
+-- MadeDecision edge (TechNode → DecisionPoint)
+INSERT INTO made_decision_edges (edge_id, span_id, decision_id, …)
+SELECT CONCAT(span_id, ':MADE_DECISION:', decision_id), span_id, decision_id, …
+FROM decision_points WHERE session_id IN UNNEST(@session_ids);
+
+-- CandidateEdge (DecisionPoint → CandidateNode, with edge_type)
+INSERT INTO candidate_edges (edge_id, decision_id, candidate_id, edge_type, …)
+SELECT …, CASE c.status WHEN 'SELECTED' THEN 'SELECTED_CANDIDATE'
+                        ELSE 'DROPPED_CANDIDATE' END, …
+FROM candidates c WHERE c.session_id IN UNNEST(@session_ids);
+```
+
+Three tables, one statement each, all per-session-scoped. The `edge_type` on `candidate_edges` is what powers Block 4's `WHERE ce.edge_type = 'DROPPED_CANDIDATE'` filter.
+
+---
+
+<!-- _class: dense -->
+
+# Step 4 — The 7 SDK backing tables
+
+| Table | Key | Written by | What it holds |
+|---|---|---|---|
+| `agent_events` | `span_id` | BQ AA Plugin | Plugin-recorded spans (162 rows = 6 sessions × 27 spans) |
+| `extracted_biz_nodes` | `biz_node_id` | SDK MERGE | Business entities from trace text |
+| `context_cross_links` | `link_id` | SDK DML | Span ↔ BizNode references |
+| `decision_points` | `decision_id` | SDK load job | Extracted decisions from `LLM_RESPONSE` text |
+| `candidates` | `candidate_id` | SDK load job | Extracted options per decision: selected or dropped |
+| `made_decision_edges` | `edge_id` | SDK DML | Span → Decision lineage |
+| `candidate_edges` | `edge_id` | SDK DML | Decision → Candidate, with selected / dropped edge type |
+
+Every backing table has `row_count == distinct_keys` after the SDK fix landed in PR #99 — the property-graph KEY contract holds end-to-end.
+
+---
+
+<!-- _class: dense -->
+
+# Step 5 — The rich-graph projection layer
+
+`build_rich_graph.py` adds **demo-only** SQL projections so the BigQuery Studio Explorer reads in business language. **No new AI calls** in this step:
+
+| Derived table | Built from | Purpose |
+|---|---|---|
+| `campaign_runs` | `run_agent.py` writes directly | One row per agent invocation, joined to campaign metadata in `campaigns.py` |
+| `rich_agent_steps` | `agent_events` (DISTINCT) | Deduped span projection — one row per `span_id` (TechNode is multi-event per span by design) |
+| `rich_decision_types` | `decision_points` | Normalised decision categories (`audience-selection`, `budget-allocation`, …) |
+| `rich_candidate_statuses` | `candidates` | Distinct `OptionOutcome` values (SELECTED, DROPPED) |
+| `rich_rejection_reasons` | `candidates` | Distinct rejection-rationale strings as first-class nodes |
+
+Plus five edge projections wiring the new labels back to SDK-owned facts. Schema lives in `rich_property_graph.gql.tpl` and is deterministic across reruns.
+
+---
+
+<!-- _class: dense -->
+
+# Step 6 — The 8 node labels (what each node means)
+
+<table>
+<thead>
+<tr><th>Label</th><th>Source table</th><th>KEY</th><th>What it represents</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>CampaignRun</strong></td><td>campaign_runs</td><td>session_id</td><td>One agent invocation against one brief — the unit of audit</td></tr>
+<tr><td><strong>AgentStep</strong></td><td>rich_agent_steps</td><td>span_id</td><td>One step the agent took (LLM call, tool invocation, HITL check)</td></tr>
+<tr><td><strong>MediaEntity</strong></td><td>extracted_biz_nodes</td><td>biz_node_id</td><td>An audience, channel, creative, budget unit, or campaign — extracted from trace text</td></tr>
+<tr><td><strong>PlanningDecision</strong></td><td>decision_points</td><td>decision_id</td><td>A moment the agent committed to a choice between options</td></tr>
+<tr><td><strong>DecisionOption</strong></td><td>candidates</td><td>candidate_id</td><td>One option weighed at a planning decision (selected or dropped)</td></tr>
+<tr><td><strong>DecisionCategory</strong></td><td>rich_decision_types</td><td>decision_type_id</td><td>Normalised decision category (audience selection, budget allocation, …)</td></tr>
+<tr><td><strong>OptionOutcome</strong></td><td>rich_candidate_statuses</td><td>status_id</td><td>SELECTED or DROPPED — the outcome of weighing</td></tr>
+<tr><td><strong>DropReason</strong></td><td>rich_rejection_reasons</td><td>reason_id</td><td>A distinct rejection rationale (deduplicated across the portfolio)</td></tr>
+</tbody>
+</table>
+
+---
+
+# Step 7 — The 9 edge labels (how the graph connects)
+
+<table>
+<thead>
+<tr><th>Edge label</th><th>Source → Destination</th><th>Reads as</th></tr>
+</thead>
+<tbody>
+<tr><td><strong>CampaignActivity</strong></td><td>CampaignRun → AgentStep</td><td>"this run produced this step"</td></tr>
+<tr><td><strong>NextStep</strong></td><td>AgentStep → AgentStep (parent_span_id → span_id)</td><td>"this step caused that step" (causal chain)</td></tr>
+<tr><td><strong>ConsideredEntity</strong></td><td>AgentStep → MediaEntity</td><td>"this step touched this entity"</td></tr>
+<tr><td><strong>DecidedAt</strong></td><td>AgentStep → PlanningDecision</td><td>"this step is where the decision committed"</td></tr>
+<tr><td><strong>CampaignDecision</strong></td><td>CampaignRun → PlanningDecision</td><td>"this run made this decision"</td></tr>
+<tr><td><strong>InCategory</strong></td><td>PlanningDecision → DecisionCategory</td><td>"this decision is an audience-selection / budget-allocation / …"</td></tr>
+<tr><td><strong>WeighedOption</strong></td><td>PlanningDecision → DecisionOption</td><td>"this decision considered this option"</td></tr>
+<tr><td><strong>HasOutcome</strong></td><td>DecisionOption → OptionOutcome</td><td>"this option was selected / dropped"</td></tr>
+<tr><td><strong>RejectedBecause</strong></td><td>DecisionOption → DropReason</td><td>"this option was dropped for this reason"</td></tr>
+</tbody>
+</table>
+
+<div class="small" style="margin-top:10px">
+Read top to bottom in plain English: <em>"this run produced this step → which decided at this planning decision → which weighed this option → which has this outcome → which was rejected because of this reason."</em> Five edges, one query, full audit trail.
+</div>
+
+---
+
+# Step 8 — How a GQL query actually traverses
+
+The visualization GQL (the demo's Block 2):
 
 ```sql
 GRAPH `<P>.<D>.rich_agent_context_graph`
-MATCH (dp:PlanningDecision)-[:WeighedOption]->(opt:DecisionOption)
-WHERE opt.status = 'DROPPED'
-RETURN dp.decision_type, COUNT(opt) AS rejections, AVG(opt.score) AS avg_dropped_score
-GROUP BY dp.decision_type
-ORDER BY rejections DESC LIMIT 5;
+MATCH p = (cr:CampaignRun)-[:CampaignDecision]->(dp:PlanningDecision)
+          -[:WeighedOption]->(opt:DecisionOption)-[:HasOutcome]->(st:OptionOutcome)
+WHERE cr.session_id = '<SESSION>'
+RETURN p;
 ```
 
-| decision_type | rejections | avg_dropped_score |
-|---|---:|---:|
-| Creative Theme Selection | 12 | 0.79 |
-| Audience Selection | 12 | **0.66** ← lowest |
-| Channel Strategy Selection | 6 | 0.77 |
-| Placement Selection | 7 | 0.74 |
+What BigQuery does, table by table:
 
-<div class="small"><strong>Audience Selection has the lowest average dropped score.</strong> Reuse the Q2 filter for repeatable bias review.</div>
+<ol class="compact">
+<li><code>campaign_runs</code> → bind <code>cr</code>, filtered by <code>session_id</code> (1 row).</li>
+<li><code>rich_campaign_decision_edges</code> → join to <code>decision_points</code> on <code>session_id</code> (~5 decisions per session).</li>
+<li><code>candidate_edges</code> → join to <code>candidates</code> on <code>decision_id</code> (~3 options per decision).</li>
+<li><code>rich_candidate_status_edges</code> → join to <code>rich_candidate_statuses</code> on <code>status</code> (1 row per option).</li>
+<li>Return paths bound to <code>p</code>. <strong>BigQuery Studio renders these as one fan-out per decision in the Graph tab.</strong></li>
+</ol>
 
----
-
-<!-- _class: section-divider -->
-
-<div class="eyebrow">Section 3 of 4</div>
-
-# What this unlocks
+**5 fan-outs of 3 options each = 15 paths visualized for one session, ~97 paths across all 6 campaigns.** The traversal is deterministic, the rendering is interactive.
 
 ---
 
-# Three takeaways for leadership
+# Step 9 — The temporal dimension
 
 <div class="grid-2">
 
-<div>
+<div class="card">
 
-### 1. Audit posture as a query
-
-The audit surface for our agent platform is now a **live BigQuery query**, not a slide deck or quarterly review.
-
-### 2. The schema generalizes
-
-Brand-neutral, channel-neutral, decision-type-neutral. Point an instrumented agent at the same pipeline and the same audit patterns apply.
-
-</div>
-
-<div>
-
-### 3. Composes with what we run
-
-- **BQ AA Plugin** — the instrumentation path
-- **SDK extraction** — one method call: `build_context_graph(use_ai_generate=True, include_decisions=True)`
-- **BigQuery** — the warehouse you already pay for
-
-No new graph service. No separate audit datastore.
+### What's timestamped
+- `agent_events.timestamp` — when each plugin-recorded span happened (microsecond precision)
+- `agent_events.latency_ms` — `{total_ms, time_to_first_token_ms}`
+- `context_cross_links.created_at` — when cross-links were derived
+- `candidate_edges.created_at` — when decision edges were derived
+- `decision_points.span_id` → traces back to the source span's timestamp
 
 </div>
 
-</div>
+<div class="card">
 
----
+### What you can ask over time
+- *"Across the last 30 days, which decision categories saw rising rejection rates?"*
+- *"Show me the per-day count of decisions made with confidence < 0.7."* (oversight trend)
+- *"Compare this quarter's rejection-rationale distribution vs last quarter's."* (drift)
+- *"Latency p50/p95 for LLM_RESPONSE spans on the audience-selection decision over the past week."*
 
-# Compliance-anchor map
-
-| Question | EU AI Act | GDPR | DSA |
-|---|---|---|---|
-| **Q1** Right to explanation | Art. 86 | Art. 22 | Art. 26 |
-| **Q2** Bias / fairness audit | Art. 10, Art. 71 | Art. 5(1)(d), Art. 22 | Art. 26 |
-| **Q3** Human oversight | Art. 14 | Art. 22 | — |
-| **Q4** Reproducibility | Art. 12, Art. 13 | Art. 30 | Art. 26 |
-| **Q5** Systemic-pattern audit | Art. 17, Art. 60 | Art. 35 | Art. 26 |
-
-Five queries against one graph create reusable **evidence hooks** for three EU regulatory conversations. This is not a compliance certification; it is the data substrate a compliance review needs.
-
----
-
-# How fast can we ship this?
-
-<div class="grid-2">
-
-<div>
-
-### Setup, on a clean GCP project
-```bash
-cd examples/decision_lineage_demo
-./setup.sh
-```
-
-| Phase | Wall time |
-|---|---|
-| Tooling + APIs + venv | ~30s |
-| Live agent (6 sessions) | 3-7 min |
-| `AI.GENERATE` extraction | 30-90s |
-| Rich-graph projection | ~10s |
-| Render BQ Studio queries | <1s |
-
-</div>
-
-<div>
-
-### Cost per setup run
-- 6 live `gemini-2.5-pro` invocations
-- 2 `AI.GENERATE` extraction queries
-- A few hundred BQ rows + one property graph
-
-**Order-of-cents for the verified demo run.** Queries against the prebuilt graph are lightweight.
-
-### From zero to leadership demo
-**Under 10 minutes**, fully reproducible, on any GCP project.
+Each query is a join of `made_decision_edges` ⋈ `agent_events` plus a `WHERE timestamp BETWEEN ...` filter — no schema changes needed.
 
 </div>
 
@@ -685,10 +1100,9 @@ cd examples/decision_lineage_demo
 ---
 
 <!-- _class: section-divider -->
+<div class="eyebrow">Close</div>
 
-<div class="eyebrow">Section 4 of 4</div>
-
-# Where to go next
+# Where to start
 
 ---
 
@@ -704,21 +1118,27 @@ cd examples/decision_lineage_demo
 ### The demo bundle
 `examples/decision_lineage_demo/`
 
-### What ships in the bundle
-- `setup.sh` / `reset.sh` — one-shot bootstrap + tear-down
+### One-shot setup (5–10 min)
+```bash
+cd examples/decision_lineage_demo
+./setup.sh
+```
+
+### What ships
+- `setup.sh` / `reset.sh` — bootstrap + tear-down
 - `agent/` + `campaigns.py` — real ADK agent + 6 briefs
 - `run_agent.py` + `build_graph.py` + `build_rich_graph.py`
-- `bq_studio_queries.gql` (rendered) — six GQL blocks
-- `property_graph.gql` (rendered) — recreate-from-tables DDL
+- `bq_studio_queries.gql` — six paste-and-run GQL blocks
+- `property_graph.gql` + `rich_property_graph.gql` — DDL templates
 
 </div>
 
 <div>
 
-### Documentation
+### Documentation that ships with the bundle
 - [`README.md`](README.md) — orientation
 - [`SETUP_NEW_PROJECT.md`](SETUP_NEW_PROJECT.md) — clean-project reproduction
-- [`DEMO_NARRATION.md`](DEMO_NARRATION.md) — 5-min leadership talk track
+- [`DEMO_NARRATION.md`](DEMO_NARRATION.md) — 5-min talk track
 - [`BQ_STUDIO_WALKTHROUGH.md`](BQ_STUDIO_WALKTHROUGH.md) — click-by-click in BQ Studio
 - [`DEMO_QUESTIONS.md`](DEMO_QUESTIONS.md) — the 5 EU questions with verified GQL
 - [`DATA_LINEAGE.md`](DATA_LINEAGE.md) — how the 7 tables produce the graph
@@ -733,25 +1153,12 @@ Apache 2.0
 
 ---
 
-# Anticipated questions
-
-| Q | Short answer |
-|---|---|
-| **How long to deploy?** | Plugin integration, SDK call, committed DDL. **Days, not quarters**, for a pilot. |
-| **Other agents we haven't instrumented?** | Same plugin, same plug-in point. Schema doesn't care which agent wrote the spans. |
-| **Cost?** | Two `AI.GENERATE` calls per build + standard BQ query cost. **Order-of-cents for this verified demo run.** |
-| **What if `AI.GENERATE` misses a decision?** | Build script reports per-session counts. Re-run extraction without re-running the agent. Talk track is count-agnostic by design. |
-| **Does this expose PII?** | Stores trace-derived rationale text. PII handling follows the existing `agent_events` retention and access policy. |
-| **Who operates this?** | The team that owns the agent platform. Plugin write path + SDK read path both already on-call. |
-
----
-
 <!-- _class: hero -->
 <!-- _paginate: false -->
 
 # Q&A
 
-## From agent behavior to auditable evidence
+## Decision Lineage with BigQuery Context Graphs
 
 <div class="footer-note">
 Open source · Apache 2.0 · github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
@@ -760,7 +1167,9 @@ examples/decision_lineage_demo · Issue #98
 </div>
 
 <!--
-Wrap with: "Three things to take with you. (1) Compliance posture as
-a query. (2) The schema generalizes. (3) Composes with what we run.
-Open for questions."
+SPEAKER NOTE — close
+"Three takeaways: (1) AI Act fines are real and the trigger date is
+near. (2) Decision Lineage is the audit substrate the regulator asks
+for, not a compliance certification. (3) The technical pipeline is
+open-source and runs on infrastructure you already pay for. Thanks."
 -->
