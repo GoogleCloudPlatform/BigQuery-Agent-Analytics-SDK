@@ -328,7 +328,7 @@ globally via `npm install -g @marp-team/marp-cli`).
 ## From "Systems of Action" to "Systems of Governance" — extracted decisions, options, outcomes, and rationale queryable in BigQuery.
 
 <div class="footer-note">
-BigQuery Agent Analytics SDK · examples/decision_lineage_demo · Issue #98
+BigQuery Agent Analytics SDK · examples/decision_lineage_demo
 </div>
 
 <!--
@@ -1163,7 +1163,7 @@ Apache 2.0
 <div class="footer-note">
 Open source · Apache 2.0 · github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
 <br/>
-examples/decision_lineage_demo · Issue #98
+examples/decision_lineage_demo
 </div>
 
 <!--
