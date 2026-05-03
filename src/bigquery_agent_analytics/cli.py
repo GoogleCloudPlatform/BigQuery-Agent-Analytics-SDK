@@ -1238,6 +1238,16 @@ def ontology_build(
     no_ai_generate: bool = typer.Option(
         False, help="Skip AI.GENERATE; fetch raw payloads instead."
     ),
+    skip_property_graph: bool = typer.Option(
+        False,
+        "--skip-property-graph",
+        help=(
+            "Skip CREATE OR REPLACE PROPERTY GRAPH. Use when the caller "
+            "owns their own property-graph DDL and only wants the SDK to "
+            "populate base tables. CLI exits 0 with "
+            "property_graph_status='skipped:user_requested'."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1261,6 +1271,7 @@ def ontology_build(
         table_id=table_id,
         endpoint=endpoint,
         use_ai_generate=not no_ai_generate,
+        skip_property_graph=skip_property_graph,
     )
 
     output = {
@@ -1271,9 +1282,19 @@ def ontology_build(
         "tables_created": result["tables_created"],
         "rows_materialized": result["rows_materialized"],
         "property_graph_created": result["property_graph_created"],
+        "property_graph_status": result.get(
+            "property_graph_status",
+            "created" if result["property_graph_created"] else "failed",
+        ),
     }
     typer.echo(format_output(output, fmt))
 
+    # Distinguish "user-requested skip" (exit 0) from "creation failed"
+    # (exit 1). Same property_graph_created=False, different operator
+    # intent — JSON consumers read property_graph_status to tell them
+    # apart without parsing stderr.
+    if result.get("skipped_reason") == "user_requested":
+      return
     if not result["property_graph_created"]:
       typer.echo(
           "Error: Property Graph creation failed. "

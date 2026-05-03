@@ -328,6 +328,167 @@ class TestPropertyGraph:
     assert len(rows) > 0, "GQL query returned 0 rows"
 
 
+class TestSkipPropertyGraph:
+  """Live test that --skip-property-graph does not run CREATE PROPERTY GRAPH.
+
+  Issue #104 acceptance: "creates a pre-existing property graph, runs
+  ontology-build --skip-property-graph against pre-existing base tables,
+  and verifies the user's graph definition is unchanged after the run."
+
+  Verified by:
+    - Capturing a timestamp after creating the user's CREATE PROPERTY
+      GRAPH directly (not via the SDK).
+    - Running build_ontology_graph(..., skip_property_graph=True).
+    - Querying INFORMATION_SCHEMA.JOBS_BY_PROJECT for any
+      'CREATE OR REPLACE PROPERTY GRAPH' jobs in the post-timestamp
+      window. Asserting zero.
+    - Asserting the GQL query against the user's graph still works
+      after the SDK run (graph object intact, base tables refreshed).
+  """
+
+  def test_skip_property_graph_issues_no_create_graph_job(
+      self, ontology_and_binding, lineage_config, scratch_dataset
+  ):
+    from google.cloud import bigquery
+
+    from bigquery_agent_analytics.ontology_materializer import (
+        OntologyMaterializer,
+    )
+    from bigquery_agent_analytics.ontology_orchestrator import (
+        build_ontology_graph,
+    )
+    from bigquery_agent_analytics.ontology_orchestrator import (
+        compile_showcase_gql,
+    )
+    from bigquery_agent_analytics.ontology_property_graph import (
+        OntologyPropertyGraphCompiler,
+    )
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    ontology, binding = ontology_and_binding
+    spec = resolve(ontology, binding, lineage_config=lineage_config)
+
+    # Step 1: create base tables (idempotent), then create the user's
+    # property graph via direct SQL (simulating Terraform/dbt-managed
+    # DDL the SDK should NOT touch when --skip-property-graph is set).
+    mat = OntologyMaterializer.from_ontology_binding(
+        ontology=ontology,
+        binding=binding,
+        lineage_config=lineage_config,
+        write_mode="batch_load",
+    )
+    mat.create_tables()
+
+    compiler = OntologyPropertyGraphCompiler.from_ontology_binding(
+        ontology=ontology,
+        binding=binding,
+        lineage_config=lineage_config,
+    )
+    assert compiler.create_property_graph() is True
+
+    # Step 2: capture the "before" timestamp AFTER the authored DDL
+    # has finished so the JOBS_BY_PROJECT filter does not catch our
+    # own setup job. Bind via a SQL CURRENT_TIMESTAMP() round-trip so
+    # the timestamp is BQ-aligned.
+    client = bigquery.Client(project=_PROJECT, location=_LOCATION)
+    before_ts_row = next(
+        iter(client.query("SELECT CURRENT_TIMESTAMP() AS ts").result())
+    )
+    before_skip_build_ts = before_ts_row.ts
+
+    # Step 3: run build_ontology_graph with skip_property_graph=True.
+    # Extraction reads from the real _DATASET.agent_events table where
+    # the YMGO ADCP session data lives. Materialization writes to
+    # scratch_dataset because spec entity sources are already
+    # 3-part-qualified to binding.target.dataset = scratch_dataset
+    # (see _qualify_source at resolved_spec.py:141), so the
+    # materializer ignores its dataset_id parameter for output table
+    # location. The result: extract from prod-like, materialize to
+    # scratch — exactly the user-facing flow the test should exercise.
+    result = build_ontology_graph(
+        spec=spec,
+        session_ids=[_SESSION],
+        project_id=_PROJECT,
+        dataset_id=_DATASET,
+        table_id=_TABLE,
+        graph_name=spec.name,
+        location=_LOCATION,
+        skip_property_graph=True,
+    )
+
+    assert result["property_graph_created"] is False
+    assert result["property_graph_status"] == "skipped:user_requested"
+    assert result["skipped_reason"] == "user_requested"
+    # Phases 1-4 must have actually populated the scratch tables.
+    # Catches the silent-empty-graph trap where extraction can fail
+    # (e.g. wrong source dataset) and ontology_graph.py:683 returns
+    # an empty ExtractedGraph rather than raising.
+    rows_total = sum(result["rows_materialized"].values())
+    assert rows_total > 0, (
+        "Expected at least 1 row materialized after skip-flag run, "
+        f"got rows_materialized={result['rows_materialized']!r}. "
+        "Extraction may have silently returned an empty graph."
+    )
+
+    # Step 4: assert no CREATE OR REPLACE PROPERTY GRAPH job ran for
+    # *this scratch dataset's graph* in the post-timestamp window.
+    # Filter by both the DDL keyword and the fully-qualified graph
+    # reference so the test does not false-fail on an unrelated
+    # CREATE OR REPLACE PROPERTY GRAPH issued by another developer
+    # or test running concurrently in the same project.
+    expected_graph_ref = f"{_PROJECT}.{scratch_dataset}.{spec.name}"
+    region_qual = f"`region-{_LOCATION.lower()}`"
+    jobs_query = f"""
+    SELECT job_id, query, creation_time
+    FROM {region_qual}.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+    WHERE creation_time > @before
+      AND UPPER(query) LIKE '%CREATE OR REPLACE PROPERTY GRAPH%'
+      AND query LIKE @graph_ref_pattern
+    """
+    job = client.query(
+        jobs_query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter(
+                    "before", "TIMESTAMP", before_skip_build_ts
+                ),
+                bigquery.ScalarQueryParameter(
+                    "graph_ref_pattern",
+                    "STRING",
+                    f"%{expected_graph_ref}%",
+                ),
+            ]
+        ),
+    )
+    create_graph_jobs = list(job.result())
+    assert len(create_graph_jobs) == 0, (
+        "Expected zero CREATE OR REPLACE PROPERTY GRAPH jobs after "
+        f"build_ontology_graph(skip_property_graph=True), got "
+        f"{len(create_graph_jobs)}: "
+        f"{[j.job_id for j in create_graph_jobs]}"
+    )
+
+    # Step 5: assert the user's graph object still works. Run the
+    # showcase GQL query — it should succeed (graph definition is
+    # intact) even though it may return zero rows if the test
+    # session_id has no matching edges in this scratch dataset.
+    gql = compile_showcase_gql(spec, _PROJECT, scratch_dataset)
+    gql_job = client.query(
+        gql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter(
+                    "session_id", "STRING", _SESSION
+                ),
+                bigquery.ScalarQueryParameter("result_limit", "INT64", 50),
+            ]
+        ),
+    )
+    # Result iteration confirms BigQuery accepted the GQL against
+    # the user's pre-existing property graph.
+    list(gql_job.result())
+
+
 class TestLineageEndToEnd:
   """Live lineage detection + GQL via from_ontology_binding."""
 
