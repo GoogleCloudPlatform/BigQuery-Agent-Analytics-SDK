@@ -419,8 +419,23 @@ def validate_binding_against_bigquery(
         )
 
     # Per-key-column checks (REPEATED + strict-only nullability).
+    # Build a {column: yaml_index} map for keys that map to a bound
+    # property, so REPEATED / NULLABLE failures on those columns
+    # carry a real binding YAML path. Falls back to a pseudo path
+    # only for keys that are not bound properties (ontology
+    # generally requires keys to be properties; this is defensive).
+    column_to_yaml_idx: dict[str, int] = {}
+    for prop in entity.properties:
+      yaml_j = prop_yaml_idx.get(prop.logical_name)
+      if yaml_j is not None:
+        column_to_yaml_idx[prop.column] = yaml_j
+
     for key_col in entity.key_columns:
-      key_path = f"{binding_root}.<key>.{key_col}"
+      yaml_j = column_to_yaml_idx.get(key_col)
+      if yaml_j is not None:
+        key_path = f"{binding_root}.properties[{yaml_j}].column"
+      else:
+        key_path = f"{binding_root}.<key>.{key_col}"
       bq_field = bq_columns.get(key_col)
       if bq_field is None:
         # Already reported as MISSING_COLUMN above when the key was
@@ -469,6 +484,65 @@ def validate_binding_against_bigquery(
                 f"is NULLABLE; under --strict this is a hard failure"
             ),
             strict_only=True,
+        )
+
+    # SDK metadata columns. The materializer's _entity_columns()
+    # (ontology_materializer.py:154) hard-codes session_id STRING +
+    # extracted_at TIMESTAMP for every entity table, and routing
+    # writes those fields unconditionally on every materialize() call
+    # (ontology_materializer.py:258). A user-predefined table missing
+    # either column would validate clean here without this check,
+    # then fail at load_table_from_json / INSERT time.
+    for meta_col, meta_type in (
+        ("session_id", "STRING"),
+        ("extracted_at", "TIMESTAMP"),
+    ):
+      meta_path = f"{binding_root}.<metadata>.{meta_col}"
+      meta_field = bq_columns.get(meta_col)
+      if meta_field is None:
+        emit(
+            FailureCode.MISSING_COLUMN,
+            binding_element=entity.name,
+            binding_path=meta_path,
+            bq_ref=f"{entity.source}.{meta_col}",
+            expected=meta_col,
+            detail=(
+                f"SDK metadata column {meta_col!r} not found on "
+                f"{entity.source}; the materializer writes this on "
+                f"every materialize() call (ontology_materializer.py:"
+                f"159) so the table must carry it"
+            ),
+        )
+        continue
+      if getattr(meta_field, "mode", "NULLABLE") == "REPEATED":
+        emit(
+            FailureCode.UNEXPECTED_REPEATED_MODE,
+            binding_element=entity.name,
+            binding_path=meta_path,
+            bq_ref=f"{entity.source}.{meta_col}",
+            expected="NULLABLE or REQUIRED",
+            observed="REPEATED",
+            detail=(
+                f"SDK metadata column {meta_col!r} on {entity.source} "
+                f"is REPEATED; metadata columns must be scalar"
+            ),
+        )
+        continue
+      if meta_field.field_type.upper() not in _COMPATIBLE_BQ_TYPES.get(
+          meta_type, frozenset()
+      ):
+        emit(
+            FailureCode.TYPE_MISMATCH,
+            binding_element=entity.name,
+            binding_path=meta_path,
+            bq_ref=f"{entity.source}.{meta_col}",
+            expected=meta_type,
+            observed=meta_field.field_type,
+            detail=(
+                f"SDK metadata column {meta_col!r} on {entity.source} "
+                f"has BQ type {meta_field.field_type!r}, but the "
+                f"materializer writes {meta_type}"
+            ),
         )
 
   # ---- Per-relationship checks --------------------------------- #
@@ -587,9 +661,14 @@ def validate_binding_against_bigquery(
                 ),
             )
 
-          # (2) Physical cross-table check. Use the table_cache so
-          # we don't double-fetch the node table when the per-entity
-          # loop already did.
+          # (2) Physical cross-table check. Fires only when it adds
+          # information beyond (1) — specifically, only when the
+          # node table has *drifted* from its ontology declaration
+          # AND that drift causes the edge to disagree with the
+          # node's actual storage. In the common edge-only-drift
+          # case (edge wrong, node correct), (1) already conveys the
+          # same expected/observed pair, so emitting this would be
+          # pure double-reporting.
           node_source = entity_source_by_name.get(endpoint_entity_name)
           if node_source is not None:
             node_table = table_cache.get(node_source)
@@ -599,10 +678,10 @@ def validate_binding_against_bigquery(
               if node_field is not None:
                 edge_t = bq_field.field_type.upper()
                 node_t = node_field.field_type.upper()
-                # Only flag when edge and node disagree AND the
-                # disagreement is real (not a mere legacy alias like
-                # INTEGER vs INT64 — those both map to the same SDK
-                # type and are equivalent at storage).
+                expected_ddl = _expected_ddl_type(expected_sdk)
+                # Map each BQ type to its canonical (modern) form
+                # so legacy aliases like INTEGER/INT64 don't trip
+                # the comparison.
                 edge_canonical = next(
                     (
                         canon
@@ -619,7 +698,15 @@ def validate_binding_against_bigquery(
                     ),
                     node_t,
                 )
-                if edge_canonical != node_canonical:
+                # Only emit when the node has actually drifted from
+                # the ontology spec AND the edge disagrees with the
+                # node. If node_canonical == expected_ddl, the node
+                # is on-spec and (1) already covers the edge's
+                # disagreement with the same expected/observed pair.
+                node_has_drifted = (
+                    expected_ddl is not None and node_canonical != expected_ddl
+                )
+                if node_has_drifted and edge_canonical != node_canonical:
                   emit(
                       FailureCode.ENDPOINT_TYPE_MISMATCH,
                       binding_element=rel.name,
@@ -633,7 +720,9 @@ def validate_binding_against_bigquery(
                           f"type {bq_field.field_type!r}, but the "
                           f"referenced node table "
                           f"{node_source}.{endpoint_key_cols[j]} has "
-                          f"BQ type {node_field.field_type!r}. "
+                          f"BQ type {node_field.field_type!r} "
+                          f"(node has drifted from ontology spec, "
+                          f"which expected {expected_ddl!r}). "
                           f"Edges with this mismatch will fail to "
                           f"join the node at query time."
                       ),
@@ -712,6 +801,65 @@ def validate_binding_against_bigquery(
                 f"{prop.logical_name!r} (sdk_type={prop.sdk_type!r}) "
                 f"to column {prop.column!r}, but BQ reports type "
                 f"{bq_field.field_type!r}"
+            ),
+        )
+
+    # SDK metadata columns on the edge table. The materializer's
+    # _relationship_columns() (ontology_materializer.py:164) hard-
+    # codes session_id STRING + extracted_at TIMESTAMP for every
+    # relationship table. Same trap as on entities — a user-
+    # predefined edge table missing these columns would validate
+    # clean here and fail at INSERT time.
+    for meta_col, meta_type in (
+        ("session_id", "STRING"),
+        ("extracted_at", "TIMESTAMP"),
+    ):
+      meta_path = f"{binding_root}.<metadata>.{meta_col}"
+      meta_field = bq_columns.get(meta_col)
+      if meta_field is None:
+        emit(
+            FailureCode.MISSING_COLUMN,
+            binding_element=rel.name,
+            binding_path=meta_path,
+            bq_ref=f"{rel.source}.{meta_col}",
+            expected=meta_col,
+            detail=(
+                f"SDK metadata column {meta_col!r} not found on "
+                f"edge table {rel.source}; the materializer writes "
+                f"this on every materialize() call "
+                f"(ontology_materializer.py:164) so the table must "
+                f"carry it"
+            ),
+        )
+        continue
+      if getattr(meta_field, "mode", "NULLABLE") == "REPEATED":
+        emit(
+            FailureCode.UNEXPECTED_REPEATED_MODE,
+            binding_element=rel.name,
+            binding_path=meta_path,
+            bq_ref=f"{rel.source}.{meta_col}",
+            expected="NULLABLE or REQUIRED",
+            observed="REPEATED",
+            detail=(
+                f"SDK metadata column {meta_col!r} on {rel.source} "
+                f"is REPEATED; metadata columns must be scalar"
+            ),
+        )
+        continue
+      if meta_field.field_type.upper() not in _COMPATIBLE_BQ_TYPES.get(
+          meta_type, frozenset()
+      ):
+        emit(
+            FailureCode.TYPE_MISMATCH,
+            binding_element=rel.name,
+            binding_path=meta_path,
+            bq_ref=f"{rel.source}.{meta_col}",
+            expected=meta_type,
+            observed=meta_field.field_type,
+            detail=(
+                f"SDK metadata column {meta_col!r} on {rel.source} "
+                f"has BQ type {meta_field.field_type!r}, but the "
+                f"materializer writes {meta_type}"
             ),
         )
 

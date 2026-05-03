@@ -164,26 +164,49 @@ def _ontology_and_binding(
   return ontology, binding
 
 
+def _meta_fields() -> list[_FakeField]:
+  """SDK metadata columns the materializer writes on every table.
+
+  Tests building schemas directly (rather than mutating
+  ``_good_schemas()``) must include these — otherwise the validator
+  flags MISSING_COLUMN for session_id / extracted_at and pollutes
+  the failure count.
+  """
+  return [
+      _FakeField("session_id", "STRING"),
+      _FakeField("extracted_at", "TIMESTAMP"),
+  ]
+
+
 def _good_schemas() -> dict[str, list[_FakeField]]:
   """All tables present with matching column types — clean baseline.
 
   Models tables produced by ``OntologyMaterializer.create_tables()``:
   NULLABLE everywhere (no NOT NULL), correct types per
-  ``_DDL_TYPE_MAP``.
+  ``_DDL_TYPE_MAP``, and the SDK metadata columns
+  (``session_id STRING`` + ``extracted_at TIMESTAMP``) the
+  materializer writes on every materialize() call.
+
+  Each table gets its own metadata-field instances via
+  ``_meta_fields()`` so tests that mutate metadata fields on one
+  table do not silently affect the others.
   """
   return {
       "p.d.decision_points": [
           _FakeField("decision_id", "STRING"),
           _FakeField("confidence", "FLOAT64"),
-      ],
+      ]
+      + _meta_fields(),
       "p.d.outcomes": [
           _FakeField("outcome_id", "STRING"),
-      ],
+      ]
+      + _meta_fields(),
       "p.d.candidate_edges": [
           _FakeField("decision_id", "STRING"),
           _FakeField("outcome_id", "STRING"),
           _FakeField("weight", "FLOAT64"),
-      ],
+      ]
+      + _meta_fields(),
   }
 
 
@@ -241,15 +264,18 @@ class TestSdkCreatedTablesRegression:
         "p.d.decision_points": [
             _FakeField("decision_id", _DDL_TYPE_MAP["string"]),
             _FakeField("confidence", _DDL_TYPE_MAP["double"]),
-        ],
+        ]
+        + _meta_fields(),
         "p.d.outcomes": [
             _FakeField("outcome_id", _DDL_TYPE_MAP["string"]),
-        ],
+        ]
+        + _meta_fields(),
         "p.d.candidate_edges": [
             _FakeField("decision_id", _DDL_TYPE_MAP["string"]),
             _FakeField("outcome_id", _DDL_TYPE_MAP["string"]),
             _FakeField("weight", _DDL_TYPE_MAP["double"]),
-        ],
+        ]
+        + _meta_fields(),
     }
     client = _FakeBQClient(schemas)
 
@@ -329,17 +355,23 @@ class TestMissingColumn:
 
     ontology, binding = _ontology_and_binding()
     schemas = _good_schemas()
-    # Drop the 'confidence' column from decision_points.
+    # Drop the 'confidence' column from decision_points; keep the
+    # other property and metadata columns intact so the test isolates
+    # the missing-property failure.
     schemas["p.d.decision_points"] = [
         _FakeField("decision_id", "STRING"),
-    ]
+    ] + _meta_fields()
     client = _FakeBQClient(schemas)
 
     report = validate_binding_against_bigquery(
         ontology=ontology, binding=binding, bq_client=client
     )
 
-    miss = [f for f in report.failures if f.code == FailureCode.MISSING_COLUMN]
+    miss = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.MISSING_COLUMN and "confidence" in f.bq_ref
+    ]
     assert len(miss) == 1
     assert miss[0].binding_element == "Decision"
     assert miss[0].bq_ref == "p.d.decision_points.confidence"
@@ -426,20 +458,338 @@ class TestEndpointTypeMismatch:
         for f in report.failures
         if f.code == FailureCode.ENDPOINT_TYPE_MISMATCH
     ]
-    # Two complementary mismatches expected: spec-level + physical.
-    assert len(mismatches) == 2
-    assert all(m.binding_element == "HasOutcome" for m in mismatches)
-    assert all("from_columns[0]" in m.binding_path for m in mismatches)
-    assert all(m.observed == "INT64" for m in mismatches)
+    # Edge-only drift: only the spec-level (1) check fires. The
+    # physical (2) check is suppressed because the node table is
+    # on-spec — emitting it would be pure double-reporting with the
+    # same expected/observed pair as (1).
+    assert len(mismatches) == 1
+    assert mismatches[0].binding_element == "HasOutcome"
+    assert "from_columns[0]" in mismatches[0].binding_path
+    assert mismatches[0].observed == "INT64"
+    assert mismatches[0].expected == "STRING"
+    assert "physical cross-table" not in mismatches[0].detail
 
-    spec_level = [
-        m for m in mismatches if "physical cross-table" not in m.detail
+
+class TestMetadataColumns:
+
+  def test_missing_session_id_on_entity_flagged(self):
+    """The materializer writes session_id on every materialize()
+    call (ontology_materializer.py:159) so a user-predefined table
+    without it would fail at INSERT time. Validator must catch it
+    pre-flight."""
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+
+    ontology, binding = _ontology_and_binding()
+    schemas = _good_schemas()
+    # Drop session_id from decision_points.
+    schemas["p.d.decision_points"] = [
+        f for f in schemas["p.d.decision_points"] if f.name != "session_id"
     ]
-    physical = [m for m in mismatches if "physical cross-table" in m.detail]
-    assert len(spec_level) == 1
-    assert len(physical) == 1
-    assert spec_level[0].expected == "STRING"  # ontology-derived DDL type
-    assert physical[0].expected == "STRING"  # actual node BQ field type
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    miss = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.MISSING_COLUMN and "session_id" in f.bq_ref
+    ]
+    assert len(miss) == 1
+    assert miss[0].binding_element == "Decision"
+    assert "<metadata>.session_id" in miss[0].binding_path
+
+  def test_missing_extracted_at_on_relationship_flagged(self):
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+
+    ontology, binding = _ontology_and_binding()
+    schemas = _good_schemas()
+    schemas["p.d.candidate_edges"] = [
+        f for f in schemas["p.d.candidate_edges"] if f.name != "extracted_at"
+    ]
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    miss = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.MISSING_COLUMN and "extracted_at" in f.bq_ref
+    ]
+    assert len(miss) == 1
+    assert miss[0].binding_element == "HasOutcome"
+    assert "<metadata>.extracted_at" in miss[0].binding_path
+
+  def test_metadata_column_with_wrong_type_flagged(self):
+    """If session_id is INT64 instead of STRING, the materializer's
+    INSERT will fail. The validator must catch the type mismatch."""
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+
+    ontology, binding = _ontology_and_binding()
+    schemas = _good_schemas()
+    for f in schemas["p.d.decision_points"]:
+      if f.name == "session_id":
+        f.field_type = "INT64"  # wrong; should be STRING
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    mismatches = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.TYPE_MISMATCH and "session_id" in f.bq_ref
+    ]
+    assert len(mismatches) == 1
+    assert mismatches[0].expected == "STRING"
+    assert mismatches[0].observed == "INT64"
+
+
+class TestTypeMapExhaustiveCoverage:
+
+  def test_every_ddl_type_is_in_compatible_bq_types(self):
+    """Force a corresponding update to _COMPATIBLE_BQ_TYPES whenever
+    _DDL_TYPE_MAP grows. If the materializer adds a new SDK→BQ DDL
+    type but the validator's compatibility table doesn't recognize
+    it, every column with that type will silently mismatch.
+
+    Each canonical DDL type emitted by the materializer must:
+      (a) be present as a key in _COMPATIBLE_BQ_TYPES, and
+      (b) accept itself as a compatible BQ field_type.
+    """
+    from bigquery_agent_analytics.binding_validation import _COMPATIBLE_BQ_TYPES
+    from bigquery_agent_analytics.ontology_materializer import _DDL_TYPE_MAP
+
+    for sdk_type, ddl_type in _DDL_TYPE_MAP.items():
+      assert ddl_type in _COMPATIBLE_BQ_TYPES, (
+          f"_DDL_TYPE_MAP maps {sdk_type!r} → {ddl_type!r} but "
+          f"_COMPATIBLE_BQ_TYPES does not list {ddl_type!r}. "
+          f"Update binding_validation._COMPATIBLE_BQ_TYPES alongside "
+          f"any change to ontology_materializer._DDL_TYPE_MAP."
+      )
+      assert ddl_type in _COMPATIBLE_BQ_TYPES[ddl_type], (
+          f"_COMPATIBLE_BQ_TYPES[{ddl_type!r}] does not accept "
+          f"{ddl_type!r} as a compatible BQ field_type — circular "
+          f"identity check failed."
+      )
+
+
+class TestCompositeKey:
+
+  def test_composite_primary_key_validates(self):
+    """#105 calls out composite endpoint keys explicitly. A two-
+    column primary key on a node table must be matched positionally
+    against the edge's two-column from_columns, with a per-column
+    type check at each position. Required because real ontologies
+    routinely have (session_id, span_id) or (decision_id, version)
+    composite keys."""
+    import pathlib
+    import tempfile
+
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="bind_validate_ck_"))
+    (tmp / "ont.yaml").write_text(
+        "ontology: TestGraph\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decision_id, version]\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        type: string\n"
+        "      - name: version\n"
+        "        type: integer\n"
+        "  - name: Outcome\n"
+        "    keys:\n"
+        "      primary: [outcome_id]\n"
+        "    properties:\n"
+        "      - name: outcome_id\n"
+        "        type: string\n"
+        "relationships:\n"
+        "  - name: HasOutcome\n"
+        "    from: Decision\n"
+        "    to: Outcome\n"
+        "    properties: []\n",
+        encoding="utf-8",
+    )
+    (tmp / "bnd.yaml").write_text(
+        "binding: test_bind\n"
+        "ontology: TestGraph\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    source: decisions\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        column: decision_id\n"
+        "      - name: version\n"
+        "        column: version\n"
+        "  - name: Outcome\n"
+        "    source: outcomes\n"
+        "    properties:\n"
+        "      - name: outcome_id\n"
+        "        column: outcome_id\n"
+        "relationships:\n"
+        "  - name: HasOutcome\n"
+        "    source: edges\n"
+        "    from_columns: [decision_id, version]\n"
+        "    to_columns: [outcome_id]\n"
+        "    properties: []\n",
+        encoding="utf-8",
+    )
+
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+
+    meta = [
+        _FakeField("session_id", "STRING"),
+        _FakeField("extracted_at", "TIMESTAMP"),
+    ]
+    schemas = {
+        "p.d.decisions": [
+            _FakeField("decision_id", "STRING"),
+            _FakeField("version", "INT64"),
+        ]
+        + meta,
+        "p.d.outcomes": [_FakeField("outcome_id", "STRING")] + meta,
+        "p.d.edges": [
+            _FakeField("decision_id", "STRING"),
+            _FakeField("version", "INT64"),  # second composite key column
+            _FakeField("outcome_id", "STRING"),
+        ]
+        + meta,
+    }
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    assert report.ok is True, (
+        "Composite key validation should pass when both edge endpoint "
+        f"columns match the node's positional types. Got failures: "
+        f"{[(f.code, f.detail) for f in report.failures]}"
+    )
+
+  def test_composite_key_second_column_type_mismatch(self):
+    """If the second column of a composite key disagrees in type,
+    the validator must flag ENDPOINT_TYPE_MISMATCH at position 1."""
+    import pathlib
+    import tempfile
+
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="bind_validate_ck2_"))
+    (tmp / "ont.yaml").write_text(
+        "ontology: TestGraph\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decision_id, version]\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        type: string\n"
+        "      - name: version\n"
+        "        type: integer\n"
+        "  - name: Outcome\n"
+        "    keys:\n"
+        "      primary: [outcome_id]\n"
+        "    properties:\n"
+        "      - name: outcome_id\n"
+        "        type: string\n"
+        "relationships:\n"
+        "  - name: HasOutcome\n"
+        "    from: Decision\n"
+        "    to: Outcome\n"
+        "    properties: []\n",
+        encoding="utf-8",
+    )
+    (tmp / "bnd.yaml").write_text(
+        "binding: test_bind\n"
+        "ontology: TestGraph\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    source: decisions\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        column: decision_id\n"
+        "      - name: version\n"
+        "        column: version\n"
+        "  - name: Outcome\n"
+        "    source: outcomes\n"
+        "    properties:\n"
+        "      - name: outcome_id\n"
+        "        column: outcome_id\n"
+        "relationships:\n"
+        "  - name: HasOutcome\n"
+        "    source: edges\n"
+        "    from_columns: [decision_id, version]\n"
+        "    to_columns: [outcome_id]\n"
+        "    properties: []\n",
+        encoding="utf-8",
+    )
+
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+
+    meta = [
+        _FakeField("session_id", "STRING"),
+        _FakeField("extracted_at", "TIMESTAMP"),
+    ]
+    schemas = {
+        "p.d.decisions": [
+            _FakeField("decision_id", "STRING"),
+            _FakeField("version", "INT64"),
+        ]
+        + meta,
+        "p.d.outcomes": [_FakeField("outcome_id", "STRING")] + meta,
+        "p.d.edges": [
+            _FakeField("decision_id", "STRING"),
+            # Second composite key column has the wrong type
+            # (STRING instead of INT64).
+            _FakeField("version", "STRING"),
+            _FakeField("outcome_id", "STRING"),
+        ]
+        + meta,
+    }
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    mismatches = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.ENDPOINT_TYPE_MISMATCH
+    ]
+    assert len(mismatches) == 1
+    # The mismatch must point at the SECOND column (position [1])
+    # of from_columns, not the first.
+    assert "from_columns[1]" in mismatches[0].binding_path
+    assert mismatches[0].expected == "INT64"
+    assert mismatches[0].observed == "STRING"
 
 
 class TestEndpointPhysicalCrossTableCheck:
@@ -711,9 +1061,12 @@ class TestBindingPathYamlOrder:
     ontology = load_ontology(str(tmp / "ont.yaml"))
     binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
 
-    # Drop confidence — its bound column is missing on BQ.
+    # Drop confidence — its bound column is missing on BQ. Keep
+    # decision_id and SDK metadata columns so the test isolates the
+    # missing-property failure for confidence.
     schemas = {
-        "p.d.decision_points": [_FakeField("decision_id", "STRING")],
+        "p.d.decision_points": [_FakeField("decision_id", "STRING")]
+        + _meta_fields(),
     }
     client = _FakeBQClient(schemas)
 
@@ -721,7 +1074,11 @@ class TestBindingPathYamlOrder:
         ontology=ontology, binding=binding, bq_client=client
     )
 
-    miss = [f for f in report.failures if f.code == FailureCode.MISSING_COLUMN]
+    miss = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.MISSING_COLUMN and "confidence" in f.bq_ref
+    ]
     assert len(miss) == 1
     # The failure path index must be 0 (binding YAML's index for
     # 'confidence'), not 1 (the resolved-side index — Decision's
@@ -792,11 +1149,13 @@ class TestCrossProjectSource:
 
     # Validator should look for the table at source-project, not
     # target-project. Place the table at the correct location and
-    # leave target-project empty.
+    # leave target-project empty. Include SDK metadata columns so
+    # the test does not false-fail on missing-metadata-column.
     schemas = {
         "source-project.source-dataset.decisions": [
             _FakeField("decision_id", "STRING"),
-        ],
+        ]
+        + _meta_fields(),
     }
     client = _FakeBQClient(schemas)
 
