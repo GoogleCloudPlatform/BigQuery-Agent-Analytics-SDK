@@ -351,18 +351,10 @@ class TestSkipPropertyGraph:
   ):
     from google.cloud import bigquery
 
-    from bigquery_agent_analytics.ontology_materializer import (
-        OntologyMaterializer,
-    )
-    from bigquery_agent_analytics.ontology_orchestrator import (
-        build_ontology_graph,
-    )
-    from bigquery_agent_analytics.ontology_orchestrator import (
-        compile_showcase_gql,
-    )
-    from bigquery_agent_analytics.ontology_property_graph import (
-        OntologyPropertyGraphCompiler,
-    )
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+    from bigquery_agent_analytics.ontology_orchestrator import build_ontology_graph
+    from bigquery_agent_analytics.ontology_orchestrator import compile_showcase_gql
+    from bigquery_agent_analytics.ontology_property_graph import OntologyPropertyGraphCompiler
     from bigquery_agent_analytics.resolved_spec import resolve
 
     ontology, binding = ontology_and_binding
@@ -499,9 +491,7 @@ class TestSkipPropertyGraph:
         gql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter(
-                    "session_id", "STRING", _SESSION
-                ),
+                bigquery.ScalarQueryParameter("session_id", "STRING", _SESSION),
                 bigquery.ScalarQueryParameter("result_limit", "INT64", 50),
             ]
         ),

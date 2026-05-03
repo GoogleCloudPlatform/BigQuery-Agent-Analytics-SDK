@@ -2548,9 +2548,7 @@ class TestOntologyBuild:
     assert kwargs["skip_property_graph"] is False
 
   @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
-  def test_skip_property_graph_status_visible_in_text_format(
-      self, mock_build
-  ):
+  def test_skip_property_graph_status_visible_in_text_format(self, mock_build):
     """--format=text exposes property_graph_status to non-JSON consumers.
 
     Pins the contract that property_graph_status is not JSON-only:
