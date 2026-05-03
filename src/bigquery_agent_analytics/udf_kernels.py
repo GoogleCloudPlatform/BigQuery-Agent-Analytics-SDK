@@ -25,7 +25,7 @@ here:
 These kernels serve two purposes:
 
 1. They are the single source of truth shared by both the Python SDK
-   (``CodeEvaluator`` factories in ``evaluators.py``) and the BigQuery
+   (``SystemEvaluator`` factories in ``evaluators.py``) and the BigQuery
    Python UDF registration SQL.
 2. They can be tested in isolation with simple scalar assertions.
 

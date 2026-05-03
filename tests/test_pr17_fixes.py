@@ -224,7 +224,7 @@ class TestGoldenDatasetRemoved:
 
   def test_evaluate_still_works(self):
     """evaluate() should still work with remaining params."""
-    from bigquery_agent_analytics import CodeEvaluator
+    from bigquery_agent_analytics import SystemEvaluator
 
     client = Client(
         project_id="p",
@@ -246,7 +246,7 @@ class TestGoldenDatasetRemoved:
             ]
         ),
     )
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     report = client.evaluate(evaluator)
     assert report.total_sessions == 1
 

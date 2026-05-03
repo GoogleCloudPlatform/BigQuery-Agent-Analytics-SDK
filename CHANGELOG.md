@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `SystemEvaluator` as the preferred name for deterministic/code-defined metrics.
+- Kept `CodeEvaluator` as a backward-compatible alias (deprecated but supported).
+
 - **``bqaa-revalidate-extractors`` CLI** in
   `bigquery_agent_analytics.extractor_compilation.cli_revalidate`
   and
