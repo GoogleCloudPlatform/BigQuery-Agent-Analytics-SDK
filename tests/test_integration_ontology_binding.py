@@ -431,19 +431,39 @@ class TestSkipPropertyGraph:
     )
 
     # Step 4: assert no CREATE OR REPLACE PROPERTY GRAPH job ran for
-    # *this scratch dataset's graph* in the post-timestamp window.
-    # Filter by both the DDL keyword and the fully-qualified graph
-    # reference so the test does not false-fail on an unrelated
-    # CREATE OR REPLACE PROPERTY GRAPH issued by another developer
-    # or test running concurrently in the same project.
-    expected_graph_ref = f"{_PROJECT}.{scratch_dataset}.{spec.name}"
+    # *this test's graph* in the post-timestamp window.
+    #
+    # Filter design:
+    #   1. timestamp > the post-DDL baseline (closes the trap from
+    #      #107 cell 1.3 where the user's own setup CREATE PROPERTY
+    #      GRAPH would otherwise be caught).
+    #   2. DDL keyword.
+    #   3. graph name (spec.name) — the graph name is in the DDL
+    #      string regardless of which dataset the compiler would
+    #      target. If skip_property_graph regresses, the compiler
+    #      runs with dataset_id=_DATASET (the orchestrator's
+    #      argument), so the regressed DDL would target
+    #      _PROJECT._DATASET.<spec.name>, NOT
+    #      _PROJECT.<scratch_dataset>.<spec.name>. Filtering on the
+    #      graph name (rather than the fully-qualified ref) catches
+    #      the regression in either dataset.
+    #   4. sdk_feature='ontology-gql' label — only SDK-issued
+    #      property-graph jobs carry this label
+    #      (ontology_property_graph.py:465), so unrelated user-
+    #      authored CREATE PROPERTY GRAPH DDLs (including the test's
+    #      own setup job in step 1, which was not labeled this way)
+    #      do not trip the assertion.
     region_qual = f"`region-{_LOCATION.lower()}`"
     jobs_query = f"""
     SELECT job_id, query, creation_time
-    FROM {region_qual}.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+    FROM {region_qual}.INFORMATION_SCHEMA.JOBS_BY_PROJECT AS j
     WHERE creation_time > @before
       AND UPPER(query) LIKE '%CREATE OR REPLACE PROPERTY GRAPH%'
-      AND query LIKE @graph_ref_pattern
+      AND query LIKE @graph_name_pattern
+      AND EXISTS (
+        SELECT 1 FROM UNNEST(j.labels) AS l
+        WHERE l.key = 'sdk_feature' AND l.value = 'ontology-gql'
+      )
     """
     job = client.query(
         jobs_query,
@@ -453,9 +473,9 @@ class TestSkipPropertyGraph:
                     "before", "TIMESTAMP", before_skip_build_ts
                 ),
                 bigquery.ScalarQueryParameter(
-                    "graph_ref_pattern",
+                    "graph_name_pattern",
                     "STRING",
-                    f"%{expected_graph_ref}%",
+                    f"%{spec.name}%",
                 ),
             ]
         ),

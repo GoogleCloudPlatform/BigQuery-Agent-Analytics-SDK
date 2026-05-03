@@ -56,7 +56,7 @@ Without `--skip-property-graph`, the existing exit-1 behavior on graph-create fa
 ## When to use this
 
 - **You already manage `CREATE PROPERTY GRAPH` in Terraform / dbt / a SQL file.** The SDK's `CREATE OR REPLACE PROPERTY GRAPH` would clobber your DDL on every run.
-- **Your property graph definition uses options the SDK doesn't generate.** You hand-authored the graph DDL to express features (custom labels, additional indexes, dialect-specific options) the SDK's compiler doesn't emit.
+- **Your property graph definition uses DDL details the SDK compiler doesn't emit.** You hand-authored the graph DDL to express custom labels or other DDL details the SDK's compiler doesn't generate.
 - **You want to populate your tables on a different cadence than you redefine the graph.** The graph definition rarely changes; the data is refreshed continuously.
 
 For all other cases, leave the flag off and let the SDK manage the property graph end-to-end.
@@ -82,3 +82,7 @@ assert result["property_graph_created"] is False
 ```
 
 `skipped_reason` is only present when the phase was skipped; it is omitted when phase 5 ran (whether or not it succeeded).
+
+## Known limitation: `result["graph_ref"]` in split source/target setups
+
+`build_ontology_graph(...)` accepts a single `dataset_id` and uses it both for extraction (where `agent_events` lives) and for the `graph_ref` reported in the result dict (`{project_id}.{dataset_id}.{name}`). When `--skip-property-graph` is set and the caller's actual property graph lives in `binding.target.dataset` (different from the `dataset_id` used for extraction), `result["graph_ref"]` reports the **extraction dataset**, not the user-owned graph's dataset. The materialized base tables themselves still go to `binding.target.dataset` per the resolved spec — this only affects the reported `graph_ref` string. Tracked as a follow-up; not blocking for `--skip-property-graph` itself since the user already knows where their authored graph lives.
