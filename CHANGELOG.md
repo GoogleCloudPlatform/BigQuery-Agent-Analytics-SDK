@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `SystemEvaluator` as the preferred name for deterministic/code-defined metrics.
+- Kept `CodeEvaluator` as a backward-compatible alias (deprecated but supported).
+
 ## [0.3.4] - 2026-06-10
 
 ### Release highlights

@@ -164,7 +164,7 @@ src/bigquery_agent_analytics/
 │   └── formatter.py               # Output formatting (json/text/table)
 │
 ├── Evaluation
-│   ├── evaluators.py              # CodeEvaluator + LLMAsJudge
+│   ├── evaluators.py              # SystemEvaluator + LLMAsJudge
 │   ├── trace_evaluator.py         # Trajectory matching & replay
 │   ├── multi_trial.py             # Multi-trial runner + pass@k
 │   ├── grader_pipeline.py         # Grader composition pipeline

@@ -7,7 +7,7 @@ agent sessions into user-defined categories directly against traces stored in
 BigQuery, without relying on an external service.
 
 This should be implemented as a new categorical evaluation subsystem, not as
-an overload of the existing numeric `CodeEvaluator` / `LLMAsJudge` report
+an overload of the existing numeric `SystemEvaluator` / `LLMAsJudge` report
 path.
 
 The goal is to support Hatteras-like functionality inside the SDK:
@@ -22,7 +22,7 @@ The goal is to support Hatteras-like functionality inside the SDK:
 
 Today the SDK supports two major evaluation modes:
 
-- deterministic numeric scoring via `CodeEvaluator`
+- deterministic numeric scoring via `SystemEvaluator`
 - semantic numeric scoring via `LLMAsJudge`
 
 What is missing is a first-class way to answer questions like:
@@ -60,7 +60,7 @@ That capability is useful for:
 This design is not proposing:
 
 - a full clone of an external Hatteras service
-- a replacement for `CodeEvaluator`
+- a replacement for `SystemEvaluator`
 - a replacement for `LLMAsJudge`
 - a new remote function or Python UDF surface in the first phase
 - real-time ingestion-time classification in phase 1
