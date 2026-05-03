@@ -2472,3 +2472,111 @@ class TestOntologyBuild:
         ],
     )
     assert result.exit_code == 2
+
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_skip_property_graph_exits_zero_with_status(self, mock_build):
+    """--skip-property-graph: exit 0, status='skipped:user_requested'."""
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {"mako_DecisionPoint": "p.d.decision_points"},
+        "rows_materialized": {"mako_DecisionPoint": 2},
+        "property_graph_created": False,
+        "skipped_reason": "user_requested",
+        "property_graph_status": "skipped:user_requested",
+        "spec": MagicMock(),
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--spec-path={self._SPEC_PATH}",
+            "--session-ids=sess1",
+            "--env=p.d",
+            "--skip-property-graph",
+        ],
+    )
+    assert result.exit_code == 0
+    # Skip path must NOT print the "Property Graph creation failed" stderr.
+    assert "Property Graph creation failed" not in result.output
+    parsed = json.loads(result.output)
+    assert parsed["property_graph_created"] is False
+    assert parsed["property_graph_status"] == "skipped:user_requested"
+
+    # Flag is threaded through to the orchestrator.
+    _, kwargs = mock_build.call_args
+    assert kwargs["skip_property_graph"] is True
+
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_default_invocation_omits_skip_flag(self, mock_build):
+    """Default invocation passes skip_property_graph=False."""
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": True,
+        "property_graph_status": "created",
+        "spec": MagicMock(),
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--spec-path={self._SPEC_PATH}",
+            "--session-ids=sess1",
+            "--env=p.d",
+        ],
+    )
+    assert result.exit_code == 0
+    parsed = json.loads(result.output)
+    assert parsed["property_graph_status"] == "created"
+
+    _, kwargs = mock_build.call_args
+    assert kwargs["skip_property_graph"] is False
+
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_property_graph_failure_status_failed(self, mock_build):
+    """When the orchestrator reports failure, exit 1 with status='failed'.
+
+    Distinguishes the failure path from the user-requested-skip path by
+    asserting the status field, not just the exit code.
+    """
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": False,
+        "property_graph_status": "failed",
+        "spec": MagicMock(),
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--spec-path={self._SPEC_PATH}",
+            "--session-ids=sess1",
+            "--env=p.d",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Property Graph creation failed" in result.output
