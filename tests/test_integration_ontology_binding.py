@@ -449,10 +449,12 @@ class TestSkipPropertyGraph:
     #      the regression in either dataset.
     #   4. sdk_feature='ontology-gql' label — only SDK-issued
     #      property-graph jobs carry this label
-    #      (ontology_property_graph.py:465), so unrelated user-
-    #      authored CREATE PROPERTY GRAPH DDLs (including the test's
-    #      own setup job in step 1, which was not labeled this way)
-    #      do not trip the assertion.
+    #      (ontology_property_graph.py:465). The setup CREATE PROPERTY
+    #      GRAPH job in step 1 *also* uses this label (it goes through
+    #      OntologyPropertyGraphCompiler.create_property_graph()), but
+    #      it is excluded by the post-setup timestamp captured in
+    #      step 2. User-authored raw SQL DDL jobs without SDK labels
+    #      are excluded by this label filter.
     region_qual = f"`region-{_LOCATION.lower()}`"
     jobs_query = f"""
     SELECT job_id, query, creation_time
