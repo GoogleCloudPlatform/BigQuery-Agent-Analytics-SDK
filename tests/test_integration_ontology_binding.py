@@ -397,11 +397,20 @@ class TestSkipPropertyGraph:
     before_skip_build_ts = before_ts_row.ts
 
     # Step 3: run build_ontology_graph with skip_property_graph=True.
+    # Extraction reads from the real _DATASET.agent_events table where
+    # the YMGO ADCP session data lives. Materialization writes to
+    # scratch_dataset because spec entity sources are already
+    # 3-part-qualified to binding.target.dataset = scratch_dataset
+    # (see _qualify_source at resolved_spec.py:141), so the
+    # materializer ignores its dataset_id parameter for output table
+    # location. The result: extract from prod-like, materialize to
+    # scratch — exactly the user-facing flow the test should exercise.
     result = build_ontology_graph(
         spec=spec,
         session_ids=[_SESSION],
         project_id=_PROJECT,
-        dataset_id=scratch_dataset,
+        dataset_id=_DATASET,
+        table_id=_TABLE,
         graph_name=spec.name,
         location=_LOCATION,
         skip_property_graph=True,
@@ -410,15 +419,31 @@ class TestSkipPropertyGraph:
     assert result["property_graph_created"] is False
     assert result["property_graph_status"] == "skipped:user_requested"
     assert result["skipped_reason"] == "user_requested"
+    # Phases 1-4 must have actually populated the scratch tables.
+    # Catches the silent-empty-graph trap where extraction can fail
+    # (e.g. wrong source dataset) and ontology_graph.py:683 returns
+    # an empty ExtractedGraph rather than raising.
+    rows_total = sum(result["rows_materialized"].values())
+    assert rows_total > 0, (
+        "Expected at least 1 row materialized after skip-flag run, "
+        f"got rows_materialized={result['rows_materialized']!r}. "
+        "Extraction may have silently returned an empty graph."
+    )
 
-    # Step 4: assert no CREATE OR REPLACE PROPERTY GRAPH job ran in
-    # the post-timestamp window.
+    # Step 4: assert no CREATE OR REPLACE PROPERTY GRAPH job ran for
+    # *this scratch dataset's graph* in the post-timestamp window.
+    # Filter by both the DDL keyword and the fully-qualified graph
+    # reference so the test does not false-fail on an unrelated
+    # CREATE OR REPLACE PROPERTY GRAPH issued by another developer
+    # or test running concurrently in the same project.
+    expected_graph_ref = f"{_PROJECT}.{scratch_dataset}.{spec.name}"
     region_qual = f"`region-{_LOCATION.lower()}`"
     jobs_query = f"""
     SELECT job_id, query, creation_time
     FROM {region_qual}.INFORMATION_SCHEMA.JOBS_BY_PROJECT
     WHERE creation_time > @before
       AND UPPER(query) LIKE '%CREATE OR REPLACE PROPERTY GRAPH%'
+      AND query LIKE @graph_ref_pattern
     """
     job = client.query(
         jobs_query,
@@ -426,6 +451,11 @@ class TestSkipPropertyGraph:
             query_parameters=[
                 bigquery.ScalarQueryParameter(
                     "before", "TIMESTAMP", before_skip_build_ts
+                ),
+                bigquery.ScalarQueryParameter(
+                    "graph_ref_pattern",
+                    "STRING",
+                    f"%{expected_graph_ref}%",
                 ),
             ]
         ),

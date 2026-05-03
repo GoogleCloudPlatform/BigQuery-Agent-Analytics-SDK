@@ -36,6 +36,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [ontology/compilation.md](ontology/compilation.md) | Compilation — resolving ontology + binding into backend DDL |
 | [ontology/cli.md](ontology/cli.md) | CLI design for the `gm` tool (validate, compile, import-owl) |
 | [ontology/owl-import.md](ontology/owl-import.md) | OWL import — converting OWL ontologies to YAML format |
+| [ontology/ontology-build.md](ontology/ontology-build.md) | `bq-agent-sdk ontology-build` orchestrator + `--skip-property-graph` reference |
 
 ## Deployment Surfaces
 

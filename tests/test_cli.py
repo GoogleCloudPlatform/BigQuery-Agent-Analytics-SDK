@@ -2548,6 +2548,48 @@ class TestOntologyBuild:
     assert kwargs["skip_property_graph"] is False
 
   @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_skip_property_graph_status_visible_in_text_format(
+      self, mock_build
+  ):
+    """--format=text exposes property_graph_status to non-JSON consumers.
+
+    Pins the contract that property_graph_status is not JSON-only:
+    --format=table renders dict keys; --format=text falls back to a
+    readable representation. The status string must appear in either.
+    """
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": False,
+        "skipped_reason": "user_requested",
+        "property_graph_status": "skipped:user_requested",
+        "spec": MagicMock(),
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--spec-path={self._SPEC_PATH}",
+            "--session-ids=sess1",
+            "--env=p.d",
+            "--skip-property-graph",
+            "--format=text",
+        ],
+    )
+    assert result.exit_code == 0
+    # The status string must appear in the text-format output so non-
+    # JSON consumers can see why the graph was not created.
+    assert "skipped:user_requested" in result.output
+
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
   def test_property_graph_failure_status_failed(self, mock_build):
     """When the orchestrator reports failure, exit 1 with status='failed'.
 
