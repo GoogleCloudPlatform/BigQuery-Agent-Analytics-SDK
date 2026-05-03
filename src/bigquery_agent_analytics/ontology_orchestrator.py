@@ -300,6 +300,7 @@ def build_ontology_graph(
     endpoint: str = "gemini-2.5-flash",
     use_ai_generate: bool = True,
     location: Optional[str] = None,
+    skip_property_graph: bool = False,
 ) -> dict[str, Any]:
   """Run the full ontology graph pipeline end-to-end.
 
@@ -307,7 +308,8 @@ def build_ontology_graph(
   2. Extract an ``ExtractedGraph`` from agent telemetry.
   3. Create physical tables (if not exists).
   4. Materialize extracted nodes/edges into tables.
-  5. Create the BigQuery Property Graph.
+  5. Create the BigQuery Property Graph (skipped when
+     ``skip_property_graph=True``).
 
   Args:
       session_ids: Sessions to extract from.
@@ -323,10 +325,22 @@ def build_ontology_graph(
       endpoint: AI.GENERATE model endpoint.
       use_ai_generate: If True, uses server-side AI extraction.
       location: BigQuery location.
+      skip_property_graph: When True, skip phase 5 (do not run
+          ``CREATE OR REPLACE PROPERTY GRAPH``). Use this when the
+          caller owns their own property-graph DDL and only wants
+          the SDK to populate base tables. The result dict reports
+          ``property_graph_created=False`` with
+          ``skipped_reason="user_requested"`` and
+          ``property_graph_status="skipped:user_requested"``, which
+          callers (and the CLI) use to distinguish a deliberate
+          skip from a creation failure.
 
   Returns:
       A dict with keys: ``spec``, ``graph``, ``tables_created``,
       ``rows_materialized``, ``property_graph_created``,
+      ``property_graph_status`` (one of ``"created"``, ``"failed"``,
+      ``"skipped:user_requested"``), ``skipped_reason`` (only set
+      when phase 5 was skipped, e.g. ``"user_requested"``),
       ``graph_name``, ``graph_ref``.
   """
   from .ontology_graph import OntologyGraphManager
@@ -391,24 +405,36 @@ def build_ontology_graph(
   rows_materialized = materializer.materialize(graph, session_ids)
   logger.info("Rows materialized: %s", rows_materialized)
 
-  # 5. Create property graph.
-  compiler = OntologyPropertyGraphCompiler(
-      project_id=project_id,
-      dataset_id=dataset_id,
-      spec=spec,
-      location=location,
-  )
-  pg_created = compiler.create_property_graph(graph_name=name)
-
   graph_ref = f"{project_id}.{dataset_id}.{name}"
-  logger.info("Property Graph %r created=%s.", graph_ref, pg_created)
 
-  return {
+  # 5. Create property graph (or skip when caller owns the DDL).
+  result: dict[str, Any] = {
       "spec": spec,
       "graph": graph,
       "tables_created": tables_created,
       "rows_materialized": rows_materialized,
-      "property_graph_created": pg_created,
       "graph_name": name,
       "graph_ref": graph_ref,
   }
+  if skip_property_graph:
+    logger.info(
+        "Property Graph creation skipped (skip_property_graph=True); "
+        "caller owns the DDL for graph %r.",
+        graph_ref,
+    )
+    result["property_graph_created"] = False
+    result["skipped_reason"] = "user_requested"
+    result["property_graph_status"] = "skipped:user_requested"
+  else:
+    compiler = OntologyPropertyGraphCompiler(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        spec=spec,
+        location=location,
+    )
+    pg_created = compiler.create_property_graph(graph_name=name)
+    logger.info("Property Graph %r created=%s.", graph_ref, pg_created)
+    result["property_graph_created"] = pg_created
+    result["property_graph_status"] = "created" if pg_created else "failed"
+
+  return result

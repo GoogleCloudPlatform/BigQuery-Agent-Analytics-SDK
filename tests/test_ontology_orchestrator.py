@@ -469,3 +469,107 @@ class TestBuildOntologyGraph:
     # Materialize and property graph should NOT have been called.
     mock_mat_cls.return_value.materialize.assert_not_called()
     mock_pg_cls.return_value.create_property_graph.assert_not_called()
+
+  @patch(
+      "bigquery_agent_analytics.ontology_property_graph"
+      ".OntologyPropertyGraphCompiler"
+  )
+  @patch("bigquery_agent_analytics.ontology_materializer.OntologyMaterializer")
+  @patch("bigquery_agent_analytics.ontology_graph.OntologyGraphManager")
+  def test_skip_property_graph_does_not_construct_compiler(
+      self, mock_mgr_cls, mock_mat_cls, mock_pg_cls
+  ):
+    """When skip_property_graph=True, the compiler is never constructed."""
+    mock_mgr_cls.return_value.extract_graph.return_value = ExtractedGraph(
+        name="test"
+    )
+    mock_mat_cls.return_value.create_tables.return_value = dict(
+        _ALL_YMGO_TABLES
+    )
+    mock_mat_cls.return_value.materialize.return_value = {}
+
+    result = build_ontology_graph(
+        session_ids=["sess1"],
+        spec_path=_DEMO_SPEC_PATH,
+        project_id="proj",
+        dataset_id="ds",
+        env="p.d",
+        skip_property_graph=True,
+    )
+
+    # Compiler must not be constructed and create_property_graph must
+    # not be called when skip_property_graph=True.
+    mock_pg_cls.assert_not_called()
+    mock_pg_cls.return_value.create_property_graph.assert_not_called()
+
+    # Tables and rows still produced.
+    mock_mat_cls.return_value.create_tables.assert_called_once()
+    mock_mat_cls.return_value.materialize.assert_called_once()
+
+    # Result reports the skip distinctly from a creation failure.
+    assert result["property_graph_created"] is False
+    assert result["skipped_reason"] == "user_requested"
+    assert result["property_graph_status"] == "skipped:user_requested"
+
+  @patch(
+      "bigquery_agent_analytics.ontology_property_graph"
+      ".OntologyPropertyGraphCompiler"
+  )
+  @patch("bigquery_agent_analytics.ontology_materializer.OntologyMaterializer")
+  @patch("bigquery_agent_analytics.ontology_graph.OntologyGraphManager")
+  def test_property_graph_status_created_on_success(
+      self, mock_mgr_cls, mock_mat_cls, mock_pg_cls
+  ):
+    """Default flow with successful graph creation reports 'created'."""
+    mock_mgr_cls.return_value.extract_graph.return_value = ExtractedGraph(
+        name="test"
+    )
+    mock_mat_cls.return_value.create_tables.return_value = dict(
+        _ALL_YMGO_TABLES
+    )
+    mock_mat_cls.return_value.materialize.return_value = {}
+    mock_pg_cls.return_value.create_property_graph.return_value = True
+
+    result = build_ontology_graph(
+        session_ids=["sess1"],
+        spec_path=_DEMO_SPEC_PATH,
+        project_id="proj",
+        dataset_id="ds",
+        env="p.d",
+    )
+
+    assert result["property_graph_created"] is True
+    assert result["property_graph_status"] == "created"
+    assert "skipped_reason" not in result
+
+  @patch(
+      "bigquery_agent_analytics.ontology_property_graph"
+      ".OntologyPropertyGraphCompiler"
+  )
+  @patch("bigquery_agent_analytics.ontology_materializer.OntologyMaterializer")
+  @patch("bigquery_agent_analytics.ontology_graph.OntologyGraphManager")
+  def test_property_graph_status_failed_on_compiler_false(
+      self, mock_mgr_cls, mock_mat_cls, mock_pg_cls
+  ):
+    """Default flow where create_property_graph returns False reports
+    'failed' (distinct from 'skipped:user_requested')."""
+    mock_mgr_cls.return_value.extract_graph.return_value = ExtractedGraph(
+        name="test"
+    )
+    mock_mat_cls.return_value.create_tables.return_value = dict(
+        _ALL_YMGO_TABLES
+    )
+    mock_mat_cls.return_value.materialize.return_value = {}
+    mock_pg_cls.return_value.create_property_graph.return_value = False
+
+    result = build_ontology_graph(
+        session_ids=["sess1"],
+        spec_path=_DEMO_SPEC_PATH,
+        project_id="proj",
+        dataset_id="ds",
+        env="p.d",
+    )
+
+    assert result["property_graph_created"] is False
+    assert result["property_graph_status"] == "failed"
+    assert "skipped_reason" not in result
