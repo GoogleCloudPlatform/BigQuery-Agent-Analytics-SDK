@@ -53,7 +53,7 @@ from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
 
-from bigquery_agent_analytics.evaluators import strip_markdown_fences
+from bigquery_agent_analytics.utils import _parse_json_from_text, _extract_json_from_text, strip_markdown_fences
 
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
@@ -394,14 +394,14 @@ class EvaluationResult(BaseModel):
   )
 
 
-class BigQueryTraceEvaluator:
-  """Evaluates agent traces stored in BigQuery.
+class PerformanceEvaluator:
+  """Evaluates agent traces stored in BigQuery to assess performance.
 
   This evaluator retrieves trace data from BigQuery and computes various
   metrics including trajectory matching, response quality, and custom metrics.
 
   Example:
-      evaluator = BigQueryTraceEvaluator(
+      evaluator = PerformanceEvaluator(
           project_id="my-project",
           dataset_id="agent_analytics",
       )
@@ -453,59 +453,83 @@ class BigQueryTraceEvaluator:
   ORDER BY timestamp ASC
   """
 
-  # Default LLM judge prompt for trajectory evaluation
-  _LLM_JUDGE_PROMPT = """You are evaluating an AI agent's task execution trajectory.
+  # One-Sided LLM Judge Prompt (No golden response required)
+  _ONE_SIDED_JUDGE_PROMPT = """You are evaluating an AI agent's task execution trajectory and final response for sentiment and hallucination (faithfulness).
 
 ## Task Description
 {task_description}
 
-## Agent Trajectory
+## Agent Trajectory (Actual)
 {trajectory_json}
 
-## Expected Trajectory (if provided)
-{expected_trajectory}
-
-## Final Response
+## Final Response (Actual)
 {final_response}
 
-## Evaluation Criteria
-Score each criterion from 0 to 10:
-1. task_completion: Did the agent successfully complete the task?
-2. efficiency: Were the steps taken necessary and minimal?
-3. tool_usage: Were the right tools used with correct arguments?
-4. reasoning: Was the agent's reasoning sound?
-5. overall: Overall score averaging the above.
+## Instructions
+Score the following criteria from 0 to 10:
+1. sentiment: (0 to 10 scale) Was the tone positive, professional, helpful, and safe?
+2. hallucination: (0 to 10 scale) Does the final response contain claims that are NOT supported by the captured tool call trajectory (i.e., hallucinating facts not retrieved by tools)? Score 10 for perfect grounding (no hallucinations), 0 for severe hallucination.
 
-IMPORTANT: You MUST respond with ONLY a valid JSON object. No explanation before or after.
+IMPORTANT: You MUST respond with ONLY a valid JSON object matching the format below. No explanation before or after.
 Keep justification brief (under 100 characters).
 
 Required JSON format:
-{{"task_completion": 7, "efficiency": 8, "tool_usage": 9, "reasoning": 7, "overall": 8, "justification": "Brief reason"}}
+{{
+  "sentiment": 8,
+  "hallucination": 10,
+  "justification": "Brief reason explaining the scores"
+}}
+"""
+
+  # Side-by-Side LLM Judge Prompt (Golden response required)
+  _SIDE_BY_SIDE_JUDGE_PROMPT = """You are evaluating an AI agent's task execution trajectory and final response for correctness and efficiency against a golden reference response.
+
+## Task Description
+{task_description}
+
+## Agent Trajectory (Actual)
+{trajectory_json}
+
+## Expected Trajectory (Golden, if provided)
+{expected_trajectory}
+
+## Golden Response (Ground Truth)
+{golden_response}
+
+## Final Response (Actual)
+{final_response}
+
+## Instructions
+Evaluate the actual trajectory and response against the golden reference. You must score the following criteria:
+1. final_answer_correct: (Binary: 1 for yes/pass, or 0 for no/fail) Does the agent's final response accurately address the user's request and contain the key facts matching the golden response?
+2. tool_usage_correct: (Binary: 1 for yes/pass, or 0 for no/fail) Did the agent use the correct tools with correct arguments as recorded in the trajectory?
+3. sound_reasoning: (Binary: 1 for yes/pass, or 0 for no/fail) Was the agent's reasoning sound and logical throughout the conversation?
+4. efficiency: (Binary: 1 for yes/pass, or 0 for no/fail) Were all tool calls necessary and minimal? Fails (0) if there are redundant or excessive tool calls.
+
+IMPORTANT: You MUST respond with ONLY a valid JSON object matching the format below. No explanation before or after.
+Keep justification brief (under 100 characters).
+
+Required JSON format:
+{{
+  "final_answer_correct": 1,
+  "tool_usage_correct": 1,
+  "sound_reasoning": 1,
+  "efficiency": 1,
+  "justification": "Brief reason explaining the scores"
+}}
 """
 
   def __init__(
       self,
-      project_id: str,
-      dataset_id: str,
+      project_id: str = "proj",
+      dataset_id: str = "ds",
       table_id: str = "agent_events",
       client: Optional[bigquery.Client] = None,
       llm_judge_model: Optional[str] = None,
       include_event_types: Optional[list[str]] = None,
+      name: Optional[str] = None,
   ) -> None:
-    """Initializes the BigQueryTraceEvaluator.
-
-    Args:
-        project_id: Google Cloud project ID.
-        dataset_id: BigQuery dataset ID containing trace data.
-        table_id: BigQuery table ID. Defaults to "agent_events".
-        client: Optional BigQuery client. Created if not provided.
-        llm_judge_model: Optional model name for LLM-as-judge evaluation.
-        include_event_types: Optional list of event types to include
-            when fetching session traces.  Defaults to all standard
-            ADK event types including HITL and STATE_DELTA.  Pass a
-            custom list to restrict or extend the event types
-            evaluated without patching SQL templates.
-    """
+    """Initializes the PerformanceEvaluator."""
     self.project_id = project_id
     self.dataset_id = dataset_id
     self.table_id = table_id
@@ -514,6 +538,11 @@ Required JSON format:
     self._warned_unlabeled_client = False
     self.llm_judge_model = llm_judge_model or "gemini-2.5-flash"
     self.include_event_types = include_event_types or self._DEFAULT_EVENT_TYPES
+    self._custom_rubrics: list[dict[str, Any]] = []
+
+  @property
+  def name(self) -> str:
+    return "performance_evaluator"
 
   @property
   def client(self) -> bigquery.Client:
@@ -525,24 +554,43 @@ Required JSON format:
     ):
       if not self._warned_unlabeled_client:
         logger.warning(
-            "User-provided bigquery.Client is not a "
-            "LabeledBigQueryClient; SDK telemetry labels will not be "
-            "applied to jobs from this client. To opt in, construct "
-            "the client via bigquery_agent_analytics.make_bq_client() "
-            "or pass a LabeledBigQueryClient directly."
-        )
+             "User-provided bigquery.Client is not a "
+             "LabeledBigQueryClient; SDK telemetry labels will not be "
+             "applied to jobs from this client. To opt in, construct "
+             "the client via bigquery_agent_analytics.make_bq_client() "
+             "or pass a LabeledBigQueryClient directly."
+         )
         self._warned_unlabeled_client = True
     return self._client
 
-  async def get_session_trace(self, session_id: str) -> SessionTrace:
-    """Retrieves the complete trace for a session.
+  def add_rubric(
+      self,
+      name: str,
+      prompt_template: str,
+      score_key: str,
+      threshold: float = 0.5,
+  ) -> PerformanceEvaluator:
+    """Adds a custom LLM rubric to the PerformanceEvaluator.
 
     Args:
-        session_id: The session ID to retrieve.
+        name: Rubric metric name.
+        prompt_template: Prompt with {trace_text} and {final_response} placeholders.
+        score_key: JSON key in LLM response containing score.
+        threshold: Pass/fail threshold (0-1 scale).
 
     Returns:
-        SessionTrace containing all events for the session.
+        Self for chaining.
     """
+    self._custom_rubrics.append({
+        "name": name,
+        "prompt_template": prompt_template,
+        "score_key": score_key,
+        "threshold": threshold,
+    })
+    return self
+
+  async def get_session_trace(self, session_id: str) -> SessionTrace:
+    """Retrieves the complete trace for a session."""
     query = self._SESSION_TRACE_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -563,11 +611,8 @@ Required JSON format:
             ),
         ]
     )
-    # Apply labels BEFORE executor dispatch so they materialize on the
-    # QueryJobConfig in the caller's thread.
     job_config = with_sdk_labels(job_config, feature="trace-read")
 
-    # Run query in executor to avoid blocking
     loop = asyncio.get_event_loop()
     query_job = await loop.run_in_executor(
         None,
@@ -588,17 +633,53 @@ Required JSON format:
         events=events,
     )
 
-    # Extract tool trajectory and final response
     trace.extract_tool_trajectory()
     trace.final_response = trace.extract_final_response()
 
-    # Compute total latency
     if events:
       start = min(e.timestamp for e in events)
       end = max(e.timestamp for e in events)
       trace.total_latency_ms = int((end - start).total_seconds() * 1000)
 
     return trace
+
+  def evaluate_deterministic_trajectory(
+      self,
+      trace: SessionTrace,
+      golden_trajectory: list[dict[str, Any]],
+      match_type: MatchType = MatchType.EXACT,
+  ) -> dict[str, float]:
+    """Computes deterministic trajectory matching and step efficiency scores.
+
+    Args:
+        trace: The SessionTrace object containing actual tool calls.
+        golden_trajectory: Optimal tool calls expected.
+        match_type: Matching criteria strategy.
+
+    Returns:
+        A dict of computed deterministic scores.
+    """
+    scores: dict[str, float] = {}
+    if match_type == MatchType.EXACT:
+      scores["trajectory_exact_match"] = TrajectoryMetrics.compute_exact_match(
+          trace.tool_calls, golden_trajectory
+      )
+    elif match_type == MatchType.IN_ORDER:
+      scores["trajectory_in_order"] = TrajectoryMetrics.compute_in_order_match(
+          trace.tool_calls, golden_trajectory
+      )
+    elif match_type == MatchType.ANY_ORDER:
+      scores["trajectory_any_order"] = (
+          TrajectoryMetrics.compute_any_order_match(
+              trace.tool_calls, golden_trajectory
+          )
+      )
+
+    scores["step_efficiency"] = TrajectoryMetrics.compute_step_efficiency(
+        len(trace.tool_calls),
+        len(golden_trajectory),
+    )
+    return scores
 
   async def evaluate_session(
       self,
@@ -611,22 +692,7 @@ Required JSON format:
       custom_metrics: Optional[dict[str, Callable]] = None,
       thresholds: Optional[dict[str, float]] = None,
   ) -> EvaluationResult:
-    """Evaluates a single session against golden data.
-
-    Args:
-        session_id: The session ID to evaluate.
-        golden_trajectory: Expected tool call sequence.
-        golden_response: Expected final response.
-        match_type: Type of trajectory matching to use.
-        task_description: Description of the task for LLM judge.
-        use_llm_judge: Whether to use LLM-as-judge evaluation.
-        custom_metrics: Dict of custom metric functions.
-        thresholds: Dict of metric name to threshold for pass/fail.
-
-    Returns:
-        EvaluationResult with scores and status.
-    """
-    # Retrieve trace
+    """Evaluates a single session against golden data."""
     trace = await self.get_session_trace(session_id)
 
     scores: dict[str, float] = {}
@@ -637,51 +703,44 @@ Required JSON format:
         ),
     }
 
-    # Compute trajectory score
     if golden_trajectory is not None:
-      if match_type == MatchType.EXACT:
-        scores["trajectory_exact_match"] = (
-            TrajectoryMetrics.compute_exact_match(
-                trace.tool_calls, golden_trajectory
-            )
-        )
-      elif match_type == MatchType.IN_ORDER:
-        scores["trajectory_in_order"] = (
-            TrajectoryMetrics.compute_in_order_match(
-                trace.tool_calls, golden_trajectory
-            )
-        )
-      elif match_type == MatchType.ANY_ORDER:
-        scores["trajectory_any_order"] = (
-            TrajectoryMetrics.compute_any_order_match(
-                trace.tool_calls, golden_trajectory
-            )
-        )
-
-      # Step efficiency
-      if golden_trajectory:
-        scores["step_efficiency"] = TrajectoryMetrics.compute_step_efficiency(
-            len(trace.tool_calls),
-            len(golden_trajectory),
-        )
-
-    # Response matching (simple text comparison)
-    if golden_response is not None and trace.final_response is not None:
-      scores["response_match"] = self._compute_response_match(
-          trace.final_response, golden_response
+      scores.update(
+          self.evaluate_deterministic_trajectory(
+              trace, golden_trajectory, match_type
+          )
       )
 
-    # LLM-as-judge evaluation
     llm_feedback = None
     if use_llm_judge:
-      llm_scores, llm_feedback = await self._llm_judge_evaluate(
+      llm_scores, llm_feedback = await self.llm_judge_evaluate(
           trace=trace,
           task_description=task_description or "Complete the user's request.",
           expected_trajectory=golden_trajectory,
+          golden_response=golden_response,
       )
       scores.update(llm_scores)
 
-    # Custom metrics
+      # Custom LLM rubrics
+      if self._custom_rubrics:
+        trace_text = "\n".join(
+            f"{e.event_type}: {json.dumps(e.content)}"
+            for e in trace.events
+        )
+        feedback_parts = []
+        if llm_feedback:
+          feedback_parts.append(llm_feedback)
+        for rubric in self._custom_rubrics:
+          score, feedback = await self._evaluate_custom_rubric(
+              rubric,
+              trace_text,
+              trace.final_response,
+              golden_response,
+          )
+          scores[rubric["name"]] = score
+          if feedback:
+            feedback_parts.append(f"{rubric['name']}: {feedback}")
+        llm_feedback = "\n".join(feedback_parts)
+
     if custom_metrics:
       for metric_name, metric_fn in custom_metrics.items():
         try:
@@ -691,7 +750,6 @@ Required JSON format:
           logger.warning("Custom metric %s failed: %s", metric_name, e)
           scores[metric_name] = 0.0
 
-    # Determine overall status
     thresholds = thresholds or {}
     passed = True
     for metric_name, score in scores.items():
@@ -700,16 +758,11 @@ Required JSON format:
         passed = False
         details[f"{metric_name}_threshold"] = threshold
 
-    # Compute overall score as mean
-    overall_score = None
-    if scores:
-      overall_score = sum(scores.values()) / len(scores)
-
     return EvaluationResult(
         session_id=session_id,
         eval_status=EvalStatus.PASSED if passed else EvalStatus.FAILED,
         scores=scores,
-        overall_score=overall_score,
+        overall_score=scores.get("llm_judge_correctness"),
         details=details,
         llm_judge_feedback=llm_feedback,
     )
@@ -721,17 +774,7 @@ Required JSON format:
       use_llm_judge: bool = False,
       concurrency: int = 5,
   ) -> list[EvaluationResult]:
-    """Evaluates multiple sessions from an eval dataset.
-
-    Args:
-        eval_dataset: List of dicts with session_id, expected_trajectory, etc.
-        match_type: Type of trajectory matching.
-        use_llm_judge: Whether to use LLM judge.
-        concurrency: Max concurrent evaluations.
-
-    Returns:
-        List of EvaluationResult for each session.
-    """
+    """Evaluates multiple sessions from an eval dataset."""
     semaphore = asyncio.Semaphore(concurrency)
 
     async def evaluate_one(item: dict[str, Any]) -> EvaluationResult:
@@ -749,56 +792,14 @@ Required JSON format:
     tasks = [evaluate_one(item) for item in eval_dataset]
     return await asyncio.gather(*tasks)
 
-  def _compute_response_match(
-      self,
-      actual: str,
-      expected: str,
-  ) -> float:
-    """Computes simple response match score.
-
-    Args:
-        actual: Actual response text.
-        expected: Expected response text.
-
-    Returns:
-        Score between 0.0 and 1.0.
-    """
-    if not actual or not expected:
-      return 0.0 if actual != expected else 1.0
-
-    # Normalize strings
-    actual_norm = actual.lower().strip()
-    expected_norm = expected.lower().strip()
-
-    if actual_norm == expected_norm:
-      return 1.0
-
-    # Simple word overlap score
-    actual_words = set(actual_norm.split())
-    expected_words = set(expected_norm.split())
-
-    if not expected_words:
-      return 1.0 if not actual_words else 0.0
-
-    intersection = actual_words & expected_words
-    return len(intersection) / len(expected_words)
-
-  async def _llm_judge_evaluate(
+  async def llm_judge_evaluate(
       self,
       trace: SessionTrace,
       task_description: str,
       expected_trajectory: Optional[list[dict[str, Any]]],
+      golden_response: Optional[str] = None,
   ) -> tuple[dict[str, float], str]:
-    """Uses LLM as judge to evaluate the trace.
-
-    Args:
-        trace: The session trace to evaluate.
-        task_description: Description of the task.
-        expected_trajectory: Expected tool calls if available.
-
-    Returns:
-        Tuple of (scores dict, feedback string).
-    """
+    """Uses LLM as judge to evaluate the trace."""
     try:
       from google import genai
       from google.genai import types
@@ -806,7 +807,6 @@ Required JSON format:
       logger.warning("google-genai not installed, skipping LLM judge.")
       return {}, "LLM judge unavailable - google-genai not installed"
 
-    # Format trajectory for prompt
     trajectory_data = [
         {
             "tool": tc.tool_name,
@@ -816,104 +816,130 @@ Required JSON format:
         for tc in trace.tool_calls
     ]
 
-    prompt = self._LLM_JUDGE_PROMPT.format(
+    # Generate prompts
+    one_sided_prompt = self._ONE_SIDED_JUDGE_PROMPT.format(
         task_description=task_description,
         trajectory_json=json.dumps(trajectory_data, indent=2),
-        expected_trajectory=json.dumps(expected_trajectory, indent=2)
-        if expected_trajectory
-        else "Not provided",
         final_response=trace.final_response or "No response captured",
     )
 
+    side_by_side_prompt = None
+    if golden_response:
+      side_by_side_prompt = self._SIDE_BY_SIDE_JUDGE_PROMPT.format(
+          task_description=task_description,
+          trajectory_json=json.dumps(trajectory_data, indent=2),
+          expected_trajectory=json.dumps(expected_trajectory, indent=2)
+          if expected_trajectory
+          else "Not provided",
+          golden_response=golden_response,
+          final_response=trace.final_response or "No response captured",
+      )
+
+    scores = {}
+    feedback_parts = []
+
+    # 1. Run One-Sided Evaluation
     try:
+      client = genai.Client()
+      response = await client.aio.models.generate_content(
+          model=self.llm_judge_model,
+          contents=one_sided_prompt,
+          config=types.GenerateContentConfig(
+              temperature=0.1,
+              max_output_tokens=1024,
+          ),
+      )
+      response_text = (response.text or "").strip()
+      json_str = _extract_json_from_text(response_text)
+      if json_str:
+        result = json.loads(json_str)
+        sentiment = float(result.get("sentiment", 10)) / 10.0
+        hallucination = float(result.get("hallucination", 10)) / 10.0
+        scores["llm_judge_sentiment"] = sentiment
+        scores["llm_judge_hallucination"] = hallucination
+        feedback_parts.append(result.get("justification", response_text))
+    except Exception as e:
+      logger.warning("One-sided LLM evaluation failed: %s", e)
+
+    # 2. Run Side-by-Side Evaluation
+    if side_by_side_prompt:
+      try:
+        client = genai.Client()
+        response = await client.aio.models.generate_content(
+            model=self.llm_judge_model,
+            contents=side_by_side_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=1024,
+            ),
+        )
+        response_text = (response.text or "").strip()
+        json_str = _extract_json_from_text(response_text)
+        if json_str:
+          result = json.loads(json_str)
+          final_answer_correct = float(result.get("final_answer_correct", 0))
+          tool_usage_correct = float(result.get("tool_usage_correct", 0))
+          sound_reasoning = float(result.get("sound_reasoning", 0))
+          efficiency = float(result.get("efficiency", 0))
+
+          scores["llm_judge_final_answer_correct"] = final_answer_correct
+          scores["llm_judge_tool_usage_correct"] = tool_usage_correct
+          scores["llm_judge_sound_reasoning"] = sound_reasoning
+          scores["llm_judge_efficiency"] = efficiency
+
+          scores["llm_judge_correctness"] = 1.0 if (
+              final_answer_correct == 1.0 and
+              tool_usage_correct == 1.0 and
+              sound_reasoning == 1.0
+          ) else 0.0
+          feedback_parts.append(result.get("justification", response_text))
+      except Exception as e:
+        logger.warning("Side-by-side LLM evaluation failed: %s", e)
+
+    feedback = "\n".join(feedback_parts)
+    return scores, feedback
+
+  async def _evaluate_custom_rubric(
+      self,
+      rubric: dict[str, Any],
+      trace_text: str,
+      final_response: str,
+      golden_response: Optional[str] = None,
+  ) -> tuple[float, str]:
+    """Evaluates a custom LLM rubric."""
+    prompt = rubric["prompt_template"].format(
+        trace_text=trace_text,
+        final_response=final_response or "No response.",
+        golden_response=golden_response or "No golden response.",
+    )
+    try:
+      from google import genai
+      from google.genai import types
+
       client = genai.Client()
       response = await client.aio.models.generate_content(
           model=self.llm_judge_model,
           contents=prompt,
           config=types.GenerateContentConfig(
               temperature=0.1,
-              max_output_tokens=1024,
+              max_output_tokens=2048,
           ),
       )
-
-      response_text = response.text.strip()
-
-      # Strip markdown fences and extract JSON
-      if response_text.startswith("```"):
-        json_str = strip_markdown_fences(response_text)
-      else:
-        json_str = None
-      if not json_str:
-        # No fences found — try to extract JSON object directly
-        if "{" in response_text:
-          try:
-            start = response_text.index("{")
-            brace_count = 0
-            end = start
-            for i, char in enumerate(response_text[start:], start):
-              if char == "{":
-                brace_count += 1
-              elif char == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                  end = i + 1
-                  break
-            json_str = response_text[start:end]
-          except (ValueError, IndexError):
-            pass
-
-      if not json_str:
-        return {}, response_text
-
-      # Clean up the JSON string - handle common issues
-      json_str = json_str.strip()
-      # Remove control characters that break JSON parsing
-      json_str = "".join(
-          char for char in json_str if char >= " " or char in "\n\r\t"
-      )
-
-      try:
-        result = json.loads(json_str)
-      except json.JSONDecodeError:
-        # Try to fix common JSON issues
-        import re
-
-        # Replace unescaped newlines in strings
-        fixed_json = re.sub(r"(?<!\\)\\n", "\\\\n", json_str)
-        # Try again with fixed JSON
-        try:
-          result = json.loads(fixed_json)
-        except json.JSONDecodeError:
-          # Last resort: extract scores using regex
-          result = {}
-          for key in [
-              "task_completion",
-              "efficiency",
-              "tool_usage",
-              "reasoning",
-              "overall",
-          ]:
-            match = re.search(rf'"{key}"\s*:\s*(\d+(?:\.\d+)?)', json_str)
-            if match:
-              result[key] = float(match.group(1))
-          if not result:
-            return {}, f"Failed to parse LLM response: {response_text[:200]}"
-
-      scores = {}
-      for key in ["task_completion", "efficiency", "tool_usage", "reasoning"]:
-        if key in result:
-          # Normalize 0-10 scale to 0-1
-          scores[f"llm_judge_{key}"] = float(result[key]) / 10.0
-
-      if "overall" in result:
-        scores["llm_judge_overall"] = float(result["overall"]) / 10.0
-
-      feedback = result.get("justification", response_text)
-      return scores, feedback
-
+      text = response.text.strip()
+      result = _parse_json_from_text(text)
+      if result and rubric["score_key"] in result:
+        raw = float(result[rubric["score_key"]])
+        score = raw / 10.0 if raw > 1.0 else raw
+        justification = result.get("justification", "")
+        return score, justification
+      return 0.0, text
     except Exception as e:
-      logger.warning("LLM judge evaluation failed: %s", e)
-      return {}, f"LLM judge failed: {str(e)}"
+      logger.warning("Custom rubric %s failed: %s", rubric["name"], e)
+      return 0.0, str(e)
+
+
+# Keep aliases for backward compatibility
+BigQueryTraceEvaluator = PerformanceEvaluator
 
 
 @dataclass
@@ -1034,7 +1060,7 @@ class TraceReplayRunner:
     trace1 = await self.evaluator.get_session_trace(session_id_1)
     trace2 = await self.evaluator.get_session_trace(session_id_2)
 
-    differences = {
+    differences: dict[str, Any] = {
         "event_count_diff": len(trace1.events) - len(trace2.events),
         "tool_count_diff": len(trace1.tool_calls) - len(trace2.tool_calls),
         "tool_differences": [],
@@ -1065,9 +1091,11 @@ class TraceReplayRunner:
         )
 
     # Compare responses
-    if trace1.final_response and trace2.final_response:
+    r1 = trace1.final_response
+    r2 = trace2.final_response
+    if r1 and r2:
       differences["response_match"] = (
-          trace1.final_response.strip() == trace2.final_response.strip()
+          r1.strip() == r2.strip()
       )
 
     return differences

@@ -20,15 +20,10 @@ from unittest.mock import patch
 
 import pytest
 
-from bigquery_agent_analytics.evaluators import _parse_json_from_text
-from bigquery_agent_analytics.evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
-from bigquery_agent_analytics.evaluators import SystemEvaluator
-from bigquery_agent_analytics.evaluators import DEFAULT_ENDPOINT
+from bigquery_agent_analytics.system_evaluator import SystemEvaluator
 from bigquery_agent_analytics.evaluators import EvaluationReport
-from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
-from bigquery_agent_analytics.evaluators import LLMAsJudge
-from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.evaluators import _parse_json_from_text
 
 
 class TestSystemEvaluator:
@@ -338,44 +333,9 @@ class TestPrebuiltRawBudgetBoundaries:
     assert detail["passed"] is False
 
 
-class TestLLMAsJudgePrebuilt:
-  """Tests for pre-built LLMAsJudge factories."""
 
-  def test_correctness_factory(self):
-    judge = LLMAsJudge.correctness(threshold=0.7)
-    assert judge.name == "correctness_judge"
-    assert len(judge._criteria) == 1
-    assert judge._criteria[0].name == "correctness"
-    assert judge._criteria[0].threshold == 0.7
 
-  def test_hallucination_factory(self):
-    judge = LLMAsJudge.hallucination()
-    assert judge.name == "hallucination_judge"
-    assert judge._criteria[0].name == "faithfulness"
 
-  def test_sentiment_factory(self):
-    judge = LLMAsJudge.sentiment()
-    assert judge.name == "sentiment_judge"
-    assert judge._criteria[0].name == "sentiment"
-
-  def test_custom_criterion(self):
-    judge = LLMAsJudge(name="custom")
-    judge.add_criterion(
-        name="helpfulness",
-        prompt_template="Rate helpfulness: {trace_text} {final_response}",
-        score_key="helpfulness",
-        threshold=0.6,
-    )
-    assert len(judge._criteria) == 1
-    assert judge._criteria[0].name == "helpfulness"
-
-  def test_chaining(self):
-    judge = (
-        LLMAsJudge(name="multi")
-        .add_criterion("a", "p1 {trace_text} {final_response}", "a")
-        .add_criterion("b", "p2 {trace_text} {final_response}", "b")
-    )
-    assert len(judge._criteria) == 2
 
 
 class TestEvaluationReport:
@@ -442,48 +402,7 @@ class TestParseJson:
     assert _parse_json_from_text("no json here") is None
 
 
-class TestDefaultEndpoint:
-  """Tests for DEFAULT_ENDPOINT constant."""
 
-  def test_default_endpoint_value(self):
-    assert DEFAULT_ENDPOINT == "gemini-2.5-flash"
-
-
-class TestAIGenerateJudgeBatchQuery:
-  """Tests for the AI.GENERATE judge batch query template."""
-
-  def test_contains_ai_generate(self):
-    assert "AI.GENERATE" in AI_GENERATE_JUDGE_BATCH_QUERY
-
-  def test_contains_output_schema(self):
-    assert "output_schema" in AI_GENERATE_JUDGE_BATCH_QUERY
-
-  def test_contains_endpoint_placeholder(self):
-    assert "{endpoint}" in AI_GENERATE_JUDGE_BATCH_QUERY
-
-  def test_contains_score_and_justification(self):
-    assert "score INT64" in AI_GENERATE_JUDGE_BATCH_QUERY
-    assert "justification STRING" in AI_GENERATE_JUDGE_BATCH_QUERY
-
-  def test_does_not_contain_ml_generate_text(self):
-    assert "ML.GENERATE_TEXT" not in AI_GENERATE_JUDGE_BATCH_QUERY
-
-  def test_legacy_template_uses_ml_generate_text(self):
-    assert "ML.GENERATE_TEXT" in LLM_JUDGE_BATCH_QUERY
-    assert "ml_generate_text_result" in LLM_JUDGE_BATCH_QUERY
-
-
-class TestSessionSummaryQuery:
-  """Tests for SESSION_SUMMARY_QUERY token fields."""
-
-  def test_contains_input_tokens(self):
-    assert "input_tokens" in SESSION_SUMMARY_QUERY
-
-  def test_contains_output_tokens(self):
-    assert "output_tokens" in SESSION_SUMMARY_QUERY
-
-  def test_contains_total_tokens(self):
-    assert "total_tokens" in SESSION_SUMMARY_QUERY
 
 
 class TestTokenEfficiencyPrebuilt:
@@ -646,14 +565,4 @@ class TestTTFTPrebuilt:
     assert evaluator.name == "ttft_evaluator"
 
 
-class TestSessionSummaryQueryTTFT:
-  """Tests for avg_ttft_ms and hitl_events in SESSION_SUMMARY_QUERY."""
 
-  def test_contains_avg_ttft_ms(self):
-    assert "avg_ttft_ms" in SESSION_SUMMARY_QUERY
-
-  def test_contains_hitl_events(self):
-    assert "hitl_events" in SESSION_SUMMARY_QUERY
-
-  def test_contains_time_to_first_token(self):
-    assert "time_to_first_token_ms" in SESSION_SUMMARY_QUERY

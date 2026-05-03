@@ -14,17 +14,17 @@
 
 """Multi-trial evaluation runner with pass@k / pass^k metrics.
 
-Wraps any ``BigQueryTraceEvaluator`` to run N trials per task and
+Wraps any ``PerformanceEvaluator`` to run N trials per task and
 compute probabilistic pass-rate metrics that account for agent
 non-determinism.
 
 Example usage::
 
     from bigquery_agent_analytics import (
-        BigQueryTraceEvaluator, TrialRunner,
+        PerformanceEvaluator, TrialRunner,
     )
 
-    evaluator = BigQueryTraceEvaluator(
+    evaluator = PerformanceEvaluator(
         project_id="my-project",
         dataset_id="analytics",
     )
@@ -48,9 +48,9 @@ from typing import Any, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-from .trace_evaluator import BigQueryTraceEvaluator
-from .trace_evaluator import EvalStatus
-from .trace_evaluator import MatchType
+from .performance_evaluator import PerformanceEvaluator
+from .performance_evaluator import EvalStatus
+from .performance_evaluator import MatchType
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -178,17 +178,17 @@ def compute_pass_pow_k(
 # ------------------------------------------------------------------ #
 
 
-class TrialRunner:
-  """Runs multiple evaluation trials and computes aggregate metrics.
+class MultiTrialPerformanceEvaluator:
+  """Runs multiple evaluation trials and computes aggregate performance metrics.
 
-  Wraps a ``BigQueryTraceEvaluator`` and runs N trials per task,
+  Wraps a ``PerformanceEvaluator`` and runs N trials per task,
   computing pass@k and pass^k metrics that account for agent
   non-determinism (e.g. LLM judges produce different scores each
   call).
 
   Example::
 
-      runner = TrialRunner(evaluator, num_trials=5, concurrency=3)
+      runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=5, concurrency=3)
       report = await runner.run_trials(
           session_id="sess-123",
           golden_trajectory=[...],
@@ -197,14 +197,14 @@ class TrialRunner:
 
   def __init__(
       self,
-      evaluator: BigQueryTraceEvaluator,
+      evaluator: PerformanceEvaluator,
       num_trials: int = 5,
       concurrency: int = 3,
   ) -> None:
-    """Initializes the TrialRunner.
+    """Initializes the MultiTrialPerformanceEvaluator.
 
     Args:
-        evaluator: The trace evaluator to wrap.
+        evaluator: The PerformanceEvaluator to wrap.
         num_trials: Number of trials to run per task.
         concurrency: Maximum concurrent evaluations.
     """
@@ -222,20 +222,7 @@ class TrialRunner:
       use_llm_judge: bool = False,
       thresholds: Optional[dict[str, float]] = None,
   ) -> MultiTrialReport:
-    """Runs N trials of evaluation for a single session.
-
-    Args:
-        session_id: The session ID to evaluate.
-        golden_trajectory: Expected tool call sequence.
-        golden_response: Expected final response.
-        match_type: Type of trajectory matching.
-        task_description: Task description for LLM judge.
-        use_llm_judge: Whether to use LLM-as-judge.
-        thresholds: Metric thresholds for pass/fail.
-
-    Returns:
-        MultiTrialReport with aggregate metrics.
-    """
+    """Runs N trials of evaluation for a single session."""
     semaphore = asyncio.Semaphore(self.concurrency)
     trial_results: list[TrialResult] = []
 
@@ -268,17 +255,7 @@ class TrialRunner:
       match_type: MatchType = MatchType.EXACT,
       use_llm_judge: bool = False,
   ) -> list[MultiTrialReport]:
-    """Runs multi-trial evaluation for a batch of tasks.
-
-    Args:
-        eval_dataset: List of dicts with session_id,
-            expected_trajectory, etc.
-        match_type: Type of trajectory matching.
-        use_llm_judge: Whether to use LLM-as-judge.
-
-    Returns:
-        List of MultiTrialReport, one per task.
-    """
+    """Runs multi-trial evaluation for a batch of tasks."""
     reports = []
     for item in eval_dataset:
       report = await self.run_trials(
@@ -334,3 +311,7 @@ class TrialRunner:
         mean_scores=mean_scores,
         score_std_dev=score_std_dev,
     )
+
+
+# Keep aliases for backward compatibility
+TrialRunner = MultiTrialPerformanceEvaluator

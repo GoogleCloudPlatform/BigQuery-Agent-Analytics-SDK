@@ -71,17 +71,18 @@ from .categorical_evaluator import DEFAULT_RESULTS_TABLE
 from .categorical_evaluator import flatten_results_to_rows
 from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
-from .evaluators import _parse_json_from_text
-from .evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
-from .evaluators import CodeEvaluator, SystemEvaluator
-from .evaluators import DEFAULT_ENDPOINT
-from .evaluators import EvaluationReport
-from .evaluators import LLM_JUDGE_BATCH_QUERY
-from .evaluators import LLMAsJudge
-from .evaluators import render_ai_generate_judge_query
-from .evaluators import SESSION_SUMMARY_QUERY
-from .evaluators import SessionScore
-from .evaluators import split_judge_prompt_template
+from .system_evaluator import _parse_json_from_text
+from .system_evaluator import AI_GENERATE_JUDGE_BATCH_QUERY
+from .system_evaluator import CodeEvaluator, SystemEvaluator
+from .system_evaluator import DEFAULT_ENDPOINT
+from .system_evaluator import EvaluationReport
+from .system_evaluator import LLM_JUDGE_BATCH_QUERY
+from .system_evaluator import LLMAsJudge
+from .system_evaluator import render_ai_generate_judge_query
+from .system_evaluator import SESSION_SUMMARY_QUERY
+from .system_evaluator import SessionScore
+from .system_evaluator import split_judge_prompt_template
+from .performance_evaluator import PerformanceEvaluator, EvalStatus
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -869,7 +870,7 @@ class Client:
 
   def evaluate(
       self,
-      evaluator: SystemEvaluator | LLMAsJudge,
+      evaluator: SystemEvaluator | PerformanceEvaluator,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
       strict: bool = False,
@@ -877,12 +878,12 @@ class Client:
     """Runs batch evaluation over traces.
 
     Uses BigQuery native execution for scalable assessment.
-    ``CodeEvaluator`` metrics are computed from session
-    aggregates. ``LLMAsJudge`` metrics use BQML's
+    ``SystemEvaluator`` metrics are computed from session
+    aggregates. ``PerformanceEvaluator`` metrics use BQML's
     ``ML.GENERATE_TEXT`` for zero-ETL evaluation.
 
     Args:
-        evaluator: A CodeEvaluator or LLMAsJudge instance.
+        evaluator: A SystemEvaluator or PerformanceEvaluator instance.
         filters: Optional trace filters.
         dataset: Optional table name override.
         strict: When ``True``, sessions with unparseable or
@@ -907,17 +908,13 @@ class Client:
           where,
           params,
       )
-    elif isinstance(evaluator, LLMAsJudge):
-      report = self._evaluate_llm_judge(
+    elif isinstance(evaluator, PerformanceEvaluator):
+      return self._evaluate_performance(
           evaluator,
           table,
           where,
           params,
-          filt,
       )
-      if strict:
-        report = _apply_strict_mode(report)
-      return report
     else:
       raise TypeError(f"Unsupported evaluator type: {type(evaluator)}")
 
@@ -953,6 +950,76 @@ class Client:
         dataset=f"{self._table_ref} WHERE {where}",
         session_scores=session_scores,
     )
+
+  def _evaluate_performance(
+      self,
+      evaluator: PerformanceEvaluator,
+      table: str,
+      where: str,
+      params: list,
+  ) -> EvaluationReport:
+    """Runs performance evaluation using the folded PerformanceEvaluator."""
+    import asyncio
+    query = SESSION_SUMMARY_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=table,
+        where=where,
+    )
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="eval-performance",
+    )
+    results = list(self.bq_client.query(query, job_config=job_config).result())
+    session_ids = [row.get("session_id") for row in results if row.get("session_id")]
+
+    try:
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      try:
+        loop = asyncio.get_event_loop()
+      except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    async def evaluate_all():
+      tasks = []
+      for sid in session_ids:
+        tasks.append(evaluator.evaluate_session(
+            session_id=sid,
+            use_llm_judge=True,
+        ))
+      return await asyncio.gather(*tasks)
+
+    if loop.is_running():
+      import nest_asyncio
+      nest_asyncio.apply()
+
+    eval_results = loop.run_until_complete(evaluate_all())
+
+    session_scores = []
+    passed_count = 0
+    for er in eval_results:
+      score = SessionScore(
+          session_id=er.session_id,
+          scores=er.scores,
+          passed=(er.eval_status == EvalStatus.PASSED),
+          llm_feedback=er.llm_judge_feedback,
+      )
+      session_scores.append(score)
+      if score.passed:
+        passed_count += 1
+
+    report = EvaluationReport(
+        dataset=f"{self._table_ref} WHERE {where}",
+        evaluator_name=evaluator.name,
+        total_sessions=len(session_scores),
+        passed_sessions=passed_count,
+        failed_sessions=len(session_scores) - passed_count,
+    )
+    report.session_scores = session_scores
+    report.details = {"execution_mode": "performance_evaluator"}
+    return report
 
   @staticmethod
   def _is_legacy_model_ref(ref: str) -> bool:

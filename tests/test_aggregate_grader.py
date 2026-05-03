@@ -18,17 +18,16 @@ from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
-import pytest
-
-from bigquery_agent_analytics.evaluators import SystemEvaluator
-from bigquery_agent_analytics.evaluators import LLMAsJudge
+from bigquery_agent_analytics.aggregate_grader import AggregateGrader
+from bigquery_agent_analytics.aggregate_grader import AggregateVerdict
+from bigquery_agent_analytics.aggregate_grader import BinaryStrategy
+from bigquery_agent_analytics.aggregate_grader import GraderResult
+from bigquery_agent_analytics.aggregate_grader import MajorityStrategy
+from bigquery_agent_analytics.aggregate_grader import WeightedStrategy
 from bigquery_agent_analytics.evaluators import SessionScore
-from bigquery_agent_analytics.grader_pipeline import AggregateVerdict
-from bigquery_agent_analytics.grader_pipeline import BinaryStrategy
-from bigquery_agent_analytics.grader_pipeline import GraderPipeline
-from bigquery_agent_analytics.grader_pipeline import GraderResult
-from bigquery_agent_analytics.grader_pipeline import MajorityStrategy
-from bigquery_agent_analytics.grader_pipeline import WeightedStrategy
+from bigquery_agent_analytics.evaluators import SystemEvaluator
+from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
+import pytest
 
 # ------------------------------------------------------------------ #
 # Tests for WeightedStrategy                                           #
@@ -155,18 +154,42 @@ class TestMajorityStrategy:
     assert verdict.strategy_name == "majority"
 
 
+
+class TestAggregateVerdict:
+  """Tests for AggregateVerdict data model."""
+
+  def test_verdict_properties(self):
+    results = [
+        GraderResult(grader_name="latency", scores={"latency": 0.9}, passed=True),
+        GraderResult(grader_name="correctness", scores={"correctness": 0.8}, passed=True),
+    ]
+    verdict = AggregateVerdict(
+        passed=True,
+        final_score=0.85,
+        grader_results=results,
+        strategy_name="weighted",
+    )
+
+    assert verdict.passed is True
+    assert verdict.final_score == 0.85
+    assert len(verdict.grader_results) == 2
+    assert verdict.strategy_name == "weighted"
+    assert verdict.grader_results[0].grader_name == "latency"
+    assert verdict.grader_results[1].grader_name == "correctness"
+
+
 # ------------------------------------------------------------------ #
 # Tests for GraderPipeline                                             #
 # ------------------------------------------------------------------ #
 
 
-class TestGraderPipeline:
-  """Tests for GraderPipeline."""
+class TestAggregateGrader:
+  """Tests for AggregateGrader."""
 
   @pytest.mark.asyncio
-  async def test_code_grader(self):
-    """Test pipeline with a code grader."""
-    pipeline = GraderPipeline(WeightedStrategy(threshold=0.5)).add_code_grader(
+  async def test_system_grader(self):
+    """Test pipeline with a system grader."""
+    pipeline = AggregateGrader(WeightedStrategy(threshold=0.5)).add_system_grader(
         SystemEvaluator.latency(threshold_ms=5000)
     )
 
@@ -182,10 +205,10 @@ class TestGraderPipeline:
     assert verdict.grader_results[0].grader_name == "latency_evaluator"
 
   @pytest.mark.asyncio
-  async def test_llm_grader_mocked(self):
-    """Test pipeline with a mocked LLM grader."""
-    judge = LLMAsJudge(name="mock_judge")
-    judge.evaluate_session = AsyncMock(
+  async def test_performance_evaluator_mocked(self):
+    """Test pipeline with a mocked PerformanceEvaluator."""
+    evaluator = PerformanceEvaluator(name="mock_evaluator")
+    evaluator.evaluate_session = AsyncMock(
         return_value=SessionScore(
             session_id="",
             scores={"correctness": 0.8},
@@ -193,9 +216,9 @@ class TestGraderPipeline:
         )
     )
 
-    pipeline = GraderPipeline(WeightedStrategy(threshold=0.5)).add_llm_grader(
-        judge
-    )
+    pipeline = AggregateGrader(
+        WeightedStrategy(threshold=0.5)
+    ).add_performance_grader(evaluator)
 
     verdict = await pipeline.evaluate(
         trace_text="User: hi",
@@ -216,7 +239,7 @@ class TestGraderPipeline:
           passed=True,
       )
 
-    pipeline = GraderPipeline(
+    pipeline = AggregateGrader(
         WeightedStrategy(threshold=0.5)
     ).add_custom_grader("custom", my_grader)
 
@@ -227,9 +250,9 @@ class TestGraderPipeline:
 
   @pytest.mark.asyncio
   async def test_mixed_graders(self):
-    """Test pipeline with code + LLM graders."""
-    judge = LLMAsJudge(name="mock_judge")
-    judge.evaluate_session = AsyncMock(
+    """Test pipeline with system and performance graders."""
+    evaluator = PerformanceEvaluator(name="mock_evaluator")
+    evaluator.evaluate_session = AsyncMock(
         return_value=SessionScore(
             session_id="",
             scores={"correctness": 0.9},
@@ -238,9 +261,9 @@ class TestGraderPipeline:
     )
 
     pipeline = (
-        GraderPipeline(BinaryStrategy())
-        .add_code_grader(SystemEvaluator.latency(threshold_ms=5000))
-        .add_llm_grader(judge)
+        AggregateGrader(BinaryStrategy())
+        .add_system_grader(SystemEvaluator.latency(threshold_ms=5000))
+        .add_performance_grader(evaluator)
     )
 
     verdict = await pipeline.evaluate(
@@ -259,9 +282,9 @@ class TestGraderPipeline:
   async def test_chaining_api(self):
     """Test fluent builder chaining."""
     pipeline = (
-        GraderPipeline(WeightedStrategy())
-        .add_code_grader(SystemEvaluator.latency())
-        .add_code_grader(SystemEvaluator.error_rate())
+        AggregateGrader(WeightedStrategy())
+        .add_system_grader(SystemEvaluator.latency())
+        .add_system_grader(SystemEvaluator.error_rate())
     )
     # Verify chaining works
     assert len(pipeline._graders) == 2
@@ -273,7 +296,7 @@ class TestGraderPipeline:
     def bad_grader(ctx):
       raise ValueError("boom")
 
-    pipeline = GraderPipeline(
+    pipeline = AggregateGrader(
         WeightedStrategy(threshold=0.5)
     ).add_custom_grader("bad", bad_grader)
 

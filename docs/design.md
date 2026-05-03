@@ -151,8 +151,7 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
 **Phase 2 — Evaluation:**
 1. `Client.get_trace()` retrieves all events for a session
 2. `SystemEvaluator` preset factories assess latency, turn count, error rate, token efficiency
-3. `LLMAsJudge.correctness()` performs semantic evaluation via BigQuery `AI.GENERATE`
-4. `BigQueryTraceEvaluator.evaluate_session()` performs trajectory matching against golden tool sequences
+3. `PerformanceEvaluator` performs evaluates performance metrics
 
 **Phase 3 — Insights:**
 1. `Client.insights()` triggers the multi-stage pipeline
@@ -208,7 +207,7 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
    │ categorical_evaluator│  │ ontology_* (6 modules)│  │      cli         │
    │ categorical_views    │  │ (YAML → AI.GENERATE → │  │ (Typer commands) │
    │ (label evaluation)   │  │  tables → PG → GQL)   │  │                  │
-   └──────────────────┘  └──────────────────┘  └──────────────────┘
+   └──────────────────────┘  └──────────────────────┘  └──────────────────┘
 
    ┌──────────────────┐  ┌───────────────────┐
    │ udf_kernels      │  │ serialization     │
@@ -222,7 +221,7 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
 |-------|---------|----------------|
 | **Entry Point** | `client.py` | High-level sync API, BigQuery query orchestration |
 | **Core Data** | `trace.py` | Trace/Span reconstruction, DAG rendering, filtering |
-| **Evaluation Engine** | `evaluators.py`, `trace_evaluator.py`, `multi_trial.py`, `grader_pipeline.py` | Deterministic metrics, LLM-as-judge, trajectory matching, multi-trial statistics, grader composition |
+| **Evaluation Engine** | `system_evaluator.py`, `performance_evaluator.py`, `multi_trial_performance_evaluator.py`, `aggregate_grader.py` | Deterministic metrics, LLM-as-judge, trajectory matching, multi-trial statistics, grader composition |
 | **Categorical Evaluation** | `categorical_evaluator.py`, `categorical_views.py` | User-defined categorical classification with AI.GENERATE + Gemini fallback, dashboard views with dedup |
 | **Eval Governance** | `eval_suite.py`, `eval_validator.py` | Task lifecycle management, static quality validation |
 | **Feedback & Insights** | `feedback.py`, `insights.py` | Drift detection, question distribution, multi-stage analysis pipeline |
@@ -248,7 +247,7 @@ Aggregations, filtering, joins, and even LLM evaluation (via `AI.GENERATE`) are 
 LLM-based evaluation can run via (1) BigQuery `AI.GENERATE`, (2) legacy BigQuery ML `ML.GENERATE_TEXT`, or (3) the Gemini API directly. This maximizes compatibility across different GCP configurations.
 
 **Decision 4: Composition over inheritance.**
-The `GraderPipeline` composes `SystemEvaluator`, `LLMAsJudge`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
+The `AggregateGrader` composes `SystemEvaluator`, `PerformanceEvaluator`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
 
 ---
 
@@ -392,11 +391,7 @@ class TraceFilter:
 
 Each field generates a separate `AND` condition with a corresponding `bigquery.ScalarQueryParameter` or `bigquery.ArrayQueryParameter`. This is the **only** dynamic SQL in the SDK — everything else uses static templates.
 
-### 4.3 `evaluators.py` — Code & LLM Evaluation
-
-This module contains two evaluator classes and the SQL templates that power batch evaluation.
-
-#### 4.3.1 `SystemEvaluator`
+### 4.3 `system_evaluator.py` — System Metric Evaluation
 
 Deterministic evaluation using code-defined metric functions.
 
@@ -453,62 +448,11 @@ Aggregates per-session statistics from raw events:
 - `SUM(JSON_VALUE(content, '$.usage.total'))` as total_tokens
 - Turn count from `USER_MESSAGE_RECEIVED` events
 
-#### 4.3.2 `LLMAsJudge`
+### 4.4 `performance_evaluator.py` — Performance Metric Evaluation
 
-Semantic evaluation using an LLM as the scoring engine.
+#### 4.4.1 `PerformanceEvaluator`
 
-**Internal storage:**
-
-```python
-_criteria: list[dict]  # [{"name": str, "prompt_template": str, "score_key": str, "threshold": float}]
-```
-
-Prompt templates use `{trace_text}` and `{final_response}` placeholders.
-
-**Pre-built factory methods:**
-
-| Factory | Evaluates | Score Key |
-|---------|-----------|-----------|
-| `correctness(threshold)` | Factual accuracy and relevance | `correctness` |
-| `hallucination(threshold)` | Unsupported claims in response | `hallucination` |
-| `sentiment(threshold)` | Interaction tone and helpfulness | `sentiment` |
-
-**`evaluate_session(trace_text, final_response) -> SessionScore`** (async):
-
-For each criterion:
-1. Format prompt template with `trace_text` and `final_response`
-2. Call LLM (via `google-genai` API)
-3. Parse JSON response to extract numeric score
-4. Normalize to `[0.0, 1.0]` (divide by 10)
-
-**SQL template** (`AI_GENERATE_JUDGE_BATCH_QUERY`):
-
-Performs batch evaluation entirely within BigQuery:
-
-```sql
-WITH session_traces AS (
-    SELECT session_id,
-           STRING_AGG(... ORDER BY timestamp) AS trace_text,
-           ARRAY_REVERSE(ARRAY_AGG(... ORDER BY timestamp))[SAFE_OFFSET(0)] AS final_response
-    FROM `{table}` WHERE {where}
-    GROUP BY session_id
-)
-SELECT session_id, trace_text, final_response,
-    AI.GENERATE(
-        CONCAT(@judge_prompt, '\n\nTrace:\n', trace_text, '\n\nResponse:\n', final_response),
-        endpoint => @endpoint,
-        output_schema => STRUCT<score INT64, justification STRING>(...)
-    ).*
-FROM session_traces
-```
-
-This avoids transferring trace data out of BigQuery for evaluation.
-
-### 4.4 `trace_evaluator.py` — Trajectory Matching & Replay
-
-#### 4.4.1 `BigQueryTraceEvaluator`
-
-Evaluates agent behavior against expected tool-call trajectories.
+Evaluates performance metrics leverage agent-generated traces/responses and optionally, golden traces/responses.
 
 **`evaluate_session()` flow:**
 
@@ -518,7 +462,7 @@ Evaluates agent behavior against expected tool-call trajectories.
 3. Extract actual ToolCall sequence
 4. Compute trajectory score (based on MatchType)
 5. Compute step efficiency
-6. Optionally run LLM-as-judge on response quality
+6. Run LLM-based metrics to evaluate correctness, hallucination, sentiment, and efficiency.
 7. Determine pass/fail against thresholds
 8. Return EvaluationResult
 ```
@@ -566,11 +510,11 @@ Deterministic replay for debugging and comparison:
 - **`replay_session(session_id, replay_mode, step_callback)`**: Fetches trace, replays events in order. Modes: `"full"` (all events), `"step"` (with callback per event), `"tool_only"` (only tool events)
 - **`compare_replays(session_a, session_b)`**: Replays both sessions, diffs tool sequences and response similarity
 
-### 4.5 `multi_trial.py` — Statistical Evaluation
+### 4.5 `multi_trial_performance_evaluator.py` — Statistical Evaluation
 
-Agents are non-deterministic. A single evaluation run is not statistically meaningful. `TrialRunner` addresses this.
+Agents are non-deterministic. A single evaluation run is not statistically meaningful. `MultiTrialPerformanceEvaluator` addresses this.
 
-**`TrialRunner(evaluator, num_trials, concurrency)`:**
+**`MultiTrialPerformanceEvaluator(evaluator, num_trials, concurrency)`:**
 
 Runs N trials of the same evaluation task with bounded concurrency via `asyncio.Semaphore`.
 
@@ -610,7 +554,7 @@ class MultiTrialReport(BaseModel):
     trial_results: list[TrialResult]
 ```
 
-### 4.6 `grader_pipeline.py` — Grader Composition
+### 4.6 `aggregate_grader.py` — Grader Composition
 
 Combines heterogeneous evaluators into a unified verdict using a strategy pattern.
 
@@ -618,21 +562,21 @@ Combines heterogeneous evaluators into a unified verdict using a strategy patter
 
 ```
                     ┌──────────────────┐
-                    │  GraderPipeline  │
+                    │  AggregateGrader │
                     │                  │
                     │  strategy: ──────┼──► ScoringStrategy
                     │  graders: ───────┼──► list[_GraderEntry]
                     └────────┬─────────┘
                              │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-       SystemEvaluator   LLMAsJudge    Custom Fn
-        (sync)          (async)        (sync)
-              │              │              │
-              ▼              ▼              ▼
-         GraderResult   GraderResult   GraderResult
-              │              │              │
-              └──────────────┼──────────────┘
+              ┌──────────────┼─────────────────┐
+              ▼              ▼                 ▼
+       SystemEvaluator PerformanceEvaluator Custom Fn
+        (sync)          (async)              (sync)
+              │              │                 │
+              ▼              ▼                 ▼
+         GraderResult   GraderResult     GraderResult
+              │              │                 │
+              └──────────────┼─────────────────┘
                              ▼
                     ┌────────────────┐
                     │ScoringStrategy │
@@ -1219,10 +1163,10 @@ results = client.query(formatted, job_config=job_config)
 |--------|----------|---------|
 | `client.py` | `_SESSION_EVENTS_QUERY` | Fetch all events for a session |
 | `client.py` | `_LIST_SESSIONS_QUERY` | Discover sessions matching filter |
-| `evaluators.py` | `SESSION_SUMMARY_QUERY` | Aggregate session metrics for code evaluation |
-| `evaluators.py` | `AI_GENERATE_JUDGE_BATCH_QUERY` | Batch LLM-as-judge via AI.GENERATE |
-| `evaluators.py` | `LLM_JUDGE_BATCH_QUERY` | Legacy batch evaluation via ML.GENERATE_TEXT |
-| `trace_evaluator.py` | `_SESSION_TRACE_QUERY` | Fetch trace for trajectory matching |
+| `system_evaluator.py` | `SESSION_SUMMARY_QUERY` | Aggregate session metrics for code evaluation |
+| `system_evaluator.py` | `AI_GENERATE_JUDGE_BATCH_QUERY` | Batch LLM-as-judge via AI.GENERATE |
+| `system_evaluator.py` | `LLM_JUDGE_BATCH_QUERY` | Legacy batch evaluation via ML.GENERATE_TEXT |
+| `performance_evaluator.py` | `_SESSION_TRACE_QUERY` | Fetch trace for trajectory matching |
 | `insights.py` | `_SESSION_METADATA_QUERY` | Aggregate session metadata |
 | `insights.py` | `_SESSION_TRANSCRIPT_QUERY` | Build session transcripts |
 | `insights.py` | `_AI_GENERATE_FACET_EXTRACTION_QUERY` | Extract structured facets via AI.GENERATE |
@@ -1263,27 +1207,24 @@ Evaluation
 │   ├── Turn count
 │   ├── Error rate
 │   ├── Token efficiency
+│   ├── Time to first token
 │   ├── Cost per session
 │   └── Custom metric functions
 │
-├── Semantic (LLMAsJudge)
+├── Performance (PerformanceEvaluator)
 │   ├── Correctness
 │   ├── Hallucination
+│   ├── Efficiency
 │   ├── Sentiment
+│   ├── Trajectory matching (exact, in-order, any-order, step efficiency)
 │   └── Custom criteria with prompt templates
 │
-├── Trajectory (BigQueryTraceEvaluator)
-│   ├── Exact match
-│   ├── In-order match
-│   ├── Any-order match
-│   └── Step efficiency
-│
-├── Composite (GraderPipeline)
+├── Composite (AggregateGrader)
 │   ├── Weighted average
 │   ├── Binary (all-pass)
 │   └── Majority vote
 │
-└── Statistical (TrialRunner)
+└── Statistical (MultiTrialPerformanceEvaluator)
     ├── pass@k
     ├── pass^k
     └── Per-trial pass rate
@@ -1307,11 +1248,11 @@ All evaluation scores in the SDK are normalized to `[0.0, 1.0]`:
 | Mode | Evaluator | Where Computation Runs |
 |------|-----------|----------------------|
 | Single session (sync) | `SystemEvaluator.evaluate_session()` | Python |
-| Single session (async) | `LLMAsJudge.evaluate_session()` | Gemini API |
+| Single session (async) | `PerformanceEvaluator.evaluate_session()` | Python, Gemini API |
 | Batch via Client | `Client.evaluate()` | BigQuery (SQL + AI.GENERATE) |
-| Trajectory matching | `BigQueryTraceEvaluator.evaluate_session()` | BigQuery (fetch) + Python (matching) |
-| Multi-trial | `TrialRunner.run_trials()` | BigQuery (fetch) + Python (N iterations) |
-| Pipeline | `GraderPipeline.evaluate()` | Mixed (code=Python, LLM=API/BQ) |
+| Trajectory matching | `PerformanceEvaluator.evaluate_session()` | BigQuery (fetch) + Python (matching) |
+| Multi-trial | `MultiTrialPerformanceEvaluator.run_trials()` | BigQuery (fetch) + Python (N iterations) |
+| Pipeline | `AggregateGrader.evaluate()` | Mixed (code=Python, LLM=API/BQ) |
 | DataFrame | `BigFramesEvaluator.evaluate_sessions()` | BigQuery (BigFrames + AI.GENERATE) |
 
 ---
@@ -1411,12 +1352,11 @@ Synchronous (user-facing):
 └── BigFramesEvaluator.*
 
 Async (internal / advanced users):
-├── LLMAsJudge.evaluate_session()
-├── BigQueryTraceEvaluator.evaluate_session()
-├── BigQueryTraceEvaluator.evaluate_batch()
-├── TrialRunner.run_trials()
-├── TrialRunner.run_trials_batch()
-├── GraderPipeline.evaluate()
+├── PerformanceEvaluator.evaluate_session()
+├── PerformanceEvaluator.evaluate_batch()
+├── MultiTrialPerformanceEvaluator.run_trials()
+├── MultiTrialPerformanceEvaluator.run_trials_batch()
+├── AggregateGrader.evaluate()
 ├── BigQueryMemoryService.search_memory()
 ├── BigQueryMemoryService.get_session_context()
 ├── compute_drift()
@@ -1449,7 +1389,7 @@ async def _execute_query(self, query, params):
 
 ### 9.4 Concurrency Control
 
-`TrialRunner` and `BigQueryTraceEvaluator.evaluate_batch()` use `asyncio.Semaphore` for bounded concurrency:
+`MultiTrialPerformanceEvaluator` and `PerformanceEvaluator.evaluate_batch()` use `asyncio.Semaphore` for bounded concurrency:
 
 ```python
 semaphore = asyncio.Semaphore(concurrency)
@@ -1477,18 +1417,24 @@ evaluator = SystemEvaluator(name="custom").add_metric(
 
 The metric function receives the full session summary dict and returns `float` in `[0, 1]`.
 
-### 10.2 Custom Judge Criteria (LLMAsJudge)
+### 10.2 Custom Judge Criteria (PerformanceEvaluator)
 
 ```python
-judge = LLMAsJudge(name="custom").add_criterion(
-    name="domain_accuracy",
-    prompt_template="Evaluate accuracy...\n{trace_text}\n{final_response}",
-    score_key="accuracy",
-    threshold=0.8,
+evaluator = PerformanceEvaluator(
+    project_id="my-project",
+    dataset_id="agent_analytics",
+)
+
+# Register a custom semantic evaluation rubric with a pass/fail threshold
+evaluator.add_rubric(
+    name="brand_alignment",
+    prompt_template="Does the agent explicitly mention the company name and remain positive? Rate 1 to 5.",
+    score_key="brand_alignment",
+    threshold=4.0,
 )
 ```
 
-### 10.3 Custom Graders (GraderPipeline)
+### 10.3 Custom Graders (AggregateGrader)
 
 ```python
 def my_grader(context: dict) -> GraderResult:
@@ -1516,7 +1462,7 @@ Every class that uses BigQuery accepts an optional client parameter:
 
 ```python
 Client(project_id="...", dataset_id="...", bq_client=custom_client)
-BigQueryTraceEvaluator(..., bq_client=mock_client)
+BigQueryTraceEvaluator(..., bq_client=mock_client) -> PerformanceEvaluator(..., bq_client=mock_client)
 BigQueryAIClient(..., client=mock_client)
 ```
 
@@ -1571,7 +1517,7 @@ All tests mock BigQuery — no GCP credentials or live BigQuery access is needed
 ```
 tests/
 ├── test_sdk_client.py              # Client integration tests
-├── test_sdk_evaluators.py          # SystemEvaluator + LLMAsJudge
+├── test_sdk_evaluators.py          # SystemEvaluator + PerformanceEvaluator
 ├── test_sdk_trace.py               # Trace/Span reconstruction
 ├── test_sdk_feedback.py            # Drift detection
 ├── test_sdk_insights.py            # Insights pipeline

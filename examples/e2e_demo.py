@@ -57,13 +57,12 @@ from google.genai import types
 # ---------------------------------------------------------------------------
 # BigQuery Agent Analytics SDK (consumer side)
 # ---------------------------------------------------------------------------
-from bigquery_agent_analytics import BigQueryTraceEvaluator
+from bigquery_agent_analytics import PerformanceEvaluator
 from bigquery_agent_analytics import Client
-from bigquery_agent_analytics import CodeEvaluator
+from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import InsightsConfig
-from bigquery_agent_analytics import LLMAsJudge
 from bigquery_agent_analytics import TraceFilter
-from bigquery_agent_analytics.trace_evaluator import MatchType
+from bigquery_agent_analytics.performance_evaluator import MatchType
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -459,12 +458,12 @@ async def phase2_evaluate(
   print("\n--- 2b. Code-Based Evaluation ---\n")
   trace_filter = TraceFilter(session_ids=session_ids)
   presets = [
-      ("latency", CodeEvaluator.latency(threshold_ms=30000)),
-      ("turn_count", CodeEvaluator.turn_count(max_turns=10)),
-      ("error_rate", CodeEvaluator.error_rate(max_error_rate=0.1)),
+      ("latency", SystemEvaluator.latency(threshold_ms=30000)),
+      ("turn_count", SystemEvaluator.turn_count(max_turns=10)),
+      ("error_rate", SystemEvaluator.error_rate(max_error_rate=0.1)),
       (
           "token_efficiency",
-          CodeEvaluator.token_efficiency(max_tokens=100000),
+          SystemEvaluator.token_efficiency(max_tokens=100000),
       ),
   ]
   for preset_name, evaluator in presets:
@@ -481,18 +480,22 @@ async def phase2_evaluate(
   # ---- 2c. LLM-as-Judge --------------------------------------------- #
   print("\n--- 2c. LLM-as-Judge Evaluation ---\n")
   try:
-    judge = LLMAsJudge.correctness(threshold=0.6)
+    judge = PerformanceEvaluator(
+        project_id=PROJECT_ID,
+        dataset_id=DATASET_ID,
+        table_id=TABLE_ID,
+    )
     report = await asyncio.to_thread(
         client.evaluate, evaluator=judge, filters=trace_filter
     )
     print(report.summary())
   except Exception as exc:
-    logger.warning("LLM-as-Judge failed: %s", exc)
+    logger.warning("PerformanceEvaluator judge failed: %s", exc)
 
   # ---- 2d. Trajectory matching --------------------------------------- #
   print("\n--- 2d. Trajectory Matching ---\n")
   try:
-    evaluator = BigQueryTraceEvaluator(
+    evaluator = PerformanceEvaluator(
         project_id=PROJECT_ID,
         dataset_id=DATASET_ID,
         table_id=TABLE_ID,

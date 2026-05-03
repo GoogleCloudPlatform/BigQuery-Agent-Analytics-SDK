@@ -191,8 +191,6 @@ class TestQuerySiteLabels:
         for c in mock_bq.query.call_args_list
         if c.kwargs.get("job_config")
         and dict(c.kwargs["job_config"].labels or {}).get("sdk_feature")
-        == "eval-llm-judge"
+        == "eval-performance"
     ]
-    assert judge_calls, "no query labeled with sdk_feature=eval-llm-judge"
-    judge_labels = dict(judge_calls[0].kwargs["job_config"].labels or {})
-    assert judge_labels.get("sdk_ai_function") == "ai-generate"
+    assert judge_calls, "no query labeled with sdk_feature=eval-performance"

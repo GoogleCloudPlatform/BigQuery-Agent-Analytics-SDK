@@ -20,15 +20,15 @@ from unittest.mock import patch
 
 import pytest
 
-from bigquery_agent_analytics.multi_trial import compute_pass_at_k
-from bigquery_agent_analytics.multi_trial import compute_pass_pow_k
-from bigquery_agent_analytics.multi_trial import MultiTrialReport
-from bigquery_agent_analytics.multi_trial import TrialResult
-from bigquery_agent_analytics.multi_trial import TrialRunner
-from bigquery_agent_analytics.trace_evaluator import BigQueryTraceEvaluator
-from bigquery_agent_analytics.trace_evaluator import EvalStatus
-from bigquery_agent_analytics.trace_evaluator import EvaluationResult
-from bigquery_agent_analytics.trace_evaluator import MatchType
+from bigquery_agent_analytics.multi_trial_performance_evaluator import compute_pass_at_k
+from bigquery_agent_analytics.multi_trial_performance_evaluator import compute_pass_pow_k
+from bigquery_agent_analytics.multi_trial_performance_evaluator import MultiTrialReport
+from bigquery_agent_analytics.multi_trial_performance_evaluator import TrialResult
+from bigquery_agent_analytics.multi_trial_performance_evaluator import MultiTrialPerformanceEvaluator
+from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
+from bigquery_agent_analytics.performance_evaluator import EvalStatus
+from bigquery_agent_analytics.performance_evaluator import EvaluationResult
+from bigquery_agent_analytics.performance_evaluator import MatchType
 
 # ------------------------------------------------------------------ #
 # Tests for compute_pass_at_k                                          #
@@ -147,12 +147,12 @@ class TestMultiTrialReport:
 # ------------------------------------------------------------------ #
 
 
-class TestTrialRunner:
-  """Tests for TrialRunner class."""
+class TestMultiTrialPerformanceEvaluator:
+  """Tests for MultiTrialPerformanceEvaluator class."""
 
   def _make_evaluator(self, results):
     """Creates a mock evaluator returning given results."""
-    evaluator = MagicMock(spec=BigQueryTraceEvaluator)
+    evaluator = MagicMock(spec=PerformanceEvaluator)
     evaluator.evaluate_session = AsyncMock(side_effect=results)
     return evaluator
 
@@ -177,7 +177,7 @@ class TestTrialRunner:
         ),
     ]
     evaluator = self._make_evaluator(results)
-    runner = TrialRunner(evaluator, num_trials=3, concurrency=1)
+    runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=3, concurrency=1)
 
     report = await runner.run_trials(session_id="s1")
 
@@ -202,7 +202,7 @@ class TestTrialRunner:
         for _ in range(3)
     ]
     evaluator = self._make_evaluator(results)
-    runner = TrialRunner(evaluator, num_trials=3, concurrency=3)
+    runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=3, concurrency=3)
 
     report = await runner.run_trials(session_id="s1")
 
@@ -222,7 +222,7 @@ class TestTrialRunner:
         for _ in range(3)
     ]
     evaluator = self._make_evaluator(results)
-    runner = TrialRunner(evaluator, num_trials=3, concurrency=3)
+    runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=3, concurrency=3)
 
     report = await runner.run_trials(session_id="s1")
 
@@ -258,7 +258,7 @@ class TestTrialRunner:
         ),
     ]
     evaluator = self._make_evaluator(results)
-    runner = TrialRunner(evaluator, num_trials=2, concurrency=1)
+    runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=2, concurrency=1)
 
     dataset = [
         {"session_id": "s1"},
@@ -275,8 +275,8 @@ class TestTrialRunner:
   @pytest.mark.asyncio
   async def test_run_trials_zero_results(self):
     """Test edge case with 0 trials."""
-    evaluator = MagicMock(spec=BigQueryTraceEvaluator)
-    runner = TrialRunner(evaluator, num_trials=0, concurrency=1)
+    evaluator = MagicMock(spec=PerformanceEvaluator)
+    runner = MultiTrialPerformanceEvaluator(evaluator, num_trials=0, concurrency=1)
 
     report = await runner.run_trials(session_id="s1")
 

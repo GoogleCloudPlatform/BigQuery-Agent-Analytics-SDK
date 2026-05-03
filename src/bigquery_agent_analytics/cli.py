@@ -406,9 +406,9 @@ def _emit_evaluate_failures(
   """Emit readable FAIL lines for failing sessions before --exit-code exits.
 
   One line per (session_id, metric_name) that failed its threshold.
-  Prefers the raw observed + budget pair (``CodeEvaluator`` prebuilts);
+  Prefers the raw observed + budget pair (``SystemEvaluator`` prebuilts);
   falls back to score + threshold when the metric didn't declare
-  observed/budget (custom ``add_metric`` users, ``LLMAsJudge``
+  observed/budget (custom ``add_metric`` users, ``PerformanceEvaluator``
   criteria). For LLM-judge failures the line also carries a bounded
   ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback``
   so CI logs explain *why* the judge said the session failed without

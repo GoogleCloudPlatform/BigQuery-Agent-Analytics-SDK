@@ -97,8 +97,8 @@ These constraints drive several design decisions:
 2. Full `Client` reuse is not the right goal.
    Reason: `Client` is built around issuing BigQuery jobs, loading trace rows,
    and assembling rich Python objects such as `Trace`,
-   [`EvaluationReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py),
-   and [`InsightsReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/insights.py).
+    [`EvaluationReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py),
+    and [`InsightsReport`](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/insights.py).
 
 3. Python UDF support should be built around **small analytical kernels**,
    not around a UDF that internally reimplements the whole SDK client.
@@ -156,11 +156,11 @@ These parts of the SDK map well to Python UDFs:
 | Error detection | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Strong | `BOOL` helpers such as `is_error_event` |
 | Tool outcome classification | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Strong | `STRING` helpers such as `tool_outcome` |
 | Response text extraction | [event_semantics.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/event_semantics.py) | Good | parse-wrapper plus `STRING` extraction from a JSON-formatted `STRING` payload |
-| Latency scoring | [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py) | Strong | `FLOAT64` score kernel |
-| Turn-count scoring | [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py) | Strong | `FLOAT64` score kernel |
-| Error-rate scoring | [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py) | Strong | `FLOAT64` score kernel |
-| TTFT scoring | [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py) | Strong | `FLOAT64` score kernel |
-| Cost scoring | [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py) | Strong | wider `FLOAT64` score kernel over token and pricing inputs |
+| Latency scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Turn-count scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Error-rate scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| TTFT scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | `FLOAT64` score kernel |
+| Cost scoring | [system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py) | Strong | wider `FLOAT64` score kernel over token and pricing inputs |
 
 These kernels are exactly the kind of logic that benefits from direct SQL
 invocation with no external deployment surface.
@@ -204,8 +204,9 @@ Instead, the SDK should expose a new internal layer:
 ```text
 bigquery_agent_analytics/
   client.py               # BigQuery job orchestration
-  evaluators.py           # existing evaluator logic
   event_semantics.py      # existing canonical predicates
+  system_evaluator.py     # existing system metric evaluators
+  performance_evaluator.py  # existing performance metric evaluators
   udf_kernels.py          # new: pure functions reused by Python UDFs
   udf_serialization.py    # new: STRING envelope helpers if needed
 ```
@@ -225,7 +226,7 @@ That is maintainable. Reusing the entire client inside a Python UDF is not.
 The current evaluator score math is not implemented as standalone top-level
 functions today. It lives inside factory-method closures such as
 `SystemEvaluator.latency()` and `SystemEvaluator.error_rate()` in
-[evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py).
+[system_evaluator.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/system_evaluator.py).
 
 That means the first implementation step is a deliberate refactor:
 

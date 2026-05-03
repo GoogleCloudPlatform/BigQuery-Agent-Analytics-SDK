@@ -14,22 +14,20 @@
 
 """Grader composition pipeline for combining multiple evaluators.
 
-Composes ``SystemEvaluator``, ``LLMAsJudge``, and custom graders into a
-single verdict using configurable scoring strategies (weighted average,
+Composes ``SystemEvaluator``, ``PerformanceEvaluator``, and custom graders
+into a single verdict using configurable scoring strategies (weighted average,
 binary all-pass, or majority vote).
 
 Example usage::
 
-    from bigquery_agent_analytics import (
-        SystemEvaluator, GraderPipeline, LLMAsJudge, WeightedStrategy,
-    )
+    from bigquery_agent_analytics import SystemEvaluator, AggregateGrader
+    from bigquery_agent_analytics.aggregate_grader import WeightedStrategy
 
     pipeline = (
-        GraderPipeline(WeightedStrategy(
+        AggregateGrader(WeightedStrategy(
             weights={"latency": 0.3, "correctness": 0.7},
         ))
-        .add_code_grader(SystemEvaluator.latency(), weight=0.3)
-        .add_llm_grader(LLMAsJudge.correctness(), weight=0.7)
+        .add_system_grader(SystemEvaluator.latency(), weight=0.3)
     )
 
     verdict = await pipeline.evaluate(
@@ -48,7 +46,8 @@ from typing import Any, Callable
 from pydantic import BaseModel
 from pydantic import Field
 
-from .evaluators import CodeEvaluator, SystemEvaluator
+from .system_evaluator import SystemEvaluator
+from .performance_evaluator import PerformanceEvaluator
 from .evaluators import LLMAsJudge
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -247,18 +246,17 @@ class _GraderEntry:
     self.is_async = is_async
 
 
-class GraderPipeline:
+class AggregateGrader:
   """Composes multiple graders into a single evaluation pipeline.
 
-  Supports ``SystemEvaluator``, ``LLMAsJudge``, and arbitrary custom
+  Supports ``SystemEvaluator``, ``PerformanceEvaluator``, and arbitrary custom
   grader functions combined via a configurable ``ScoringStrategy``.
 
   Example::
 
       pipeline = (
-          GraderPipeline(WeightedStrategy(threshold=0.6))
-          .add_code_grader(SystemEvaluator.latency())
-          .add_llm_grader(LLMAsJudge.correctness())
+          AggregateGrader(WeightedStrategy(threshold=0.6))
+          .add_system_grader(SystemEvaluator.latency())
       )
       verdict = await pipeline.evaluate(
           session_summary={...},
@@ -268,7 +266,7 @@ class GraderPipeline:
   """
 
   def __init__(self, strategy: ScoringStrategy) -> None:
-    """Initializes the pipeline with a scoring strategy.
+    """Initializes the grader pipeline with a scoring strategy.
 
     Args:
         strategy: The strategy used to aggregate grader results.
@@ -276,11 +274,11 @@ class GraderPipeline:
     self.strategy = strategy
     self._graders: list[_GraderEntry] = []
 
-  def add_code_grader(
+  def add_system_grader(
       self,
       evaluator: SystemEvaluator,
       weight: float = 1.0,
-  ) -> GraderPipeline:
+  ) -> AggregateGrader:
     """Adds a SystemEvaluator grader to the pipeline.
 
     Args:
@@ -300,12 +298,27 @@ class GraderPipeline:
     )
     return self
 
+  def add_code_grader(
+      self,
+      evaluator: SystemEvaluator,
+      weight: float = 1.0,
+  ) -> AggregateGrader:
+    """Adds a code grader to the pipeline.
+
+    Note this grader is preserved for backwards compatibility, but isn't
+    recommended for use.
+    """
+    return self.add_system_grader(evaluator, weight=weight)
+
   def add_llm_grader(
       self,
       judge: LLMAsJudge,
       weight: float = 1.0,
-  ) -> GraderPipeline:
+  ) -> AggregateGrader:
     """Adds an LLMAsJudge grader to the pipeline.
+
+    Note this grader is preserved for backwards compatibility, but isn't
+    recommended for use.
 
     Args:
         judge: An LLMAsJudge instance.
@@ -324,12 +337,36 @@ class GraderPipeline:
     )
     return self
 
+  def add_performance_grader(
+      self,
+      evaluator: PerformanceEvaluator,
+      weight: float = 1.0,
+  ) -> AggregateGrader:
+    """Adds a PerformanceEvaluator grader to the pipeline.
+
+    Args:
+        evaluator: A PerformanceEvaluator instance.
+        weight: Weight for weighted strategies.
+
+    Returns:
+        Self for chaining.
+    """
+    self._graders.append(
+        _GraderEntry(
+            name=evaluator.name,
+            evaluate_fn=evaluator,
+            weight=weight,
+            is_async=True,
+        )
+    )
+    return self
+
   def add_custom_grader(
       self,
       name: str,
       fn: Callable[[dict[str, Any]], GraderResult],
       weight: float = 1.0,
-  ) -> GraderPipeline:
+  ) -> AggregateGrader:
     """Adds a custom grader function to the pipeline.
 
     The function receives a dict with ``session_summary``,
@@ -410,7 +447,7 @@ class GraderPipeline:
           passed=score.passed,
       )
 
-    if isinstance(evaluator, LLMAsJudge):
+    if isinstance(evaluator, PerformanceEvaluator):
       score = await evaluator.evaluate_session(
           trace_text=trace_text,
           final_response=final_response,
@@ -428,3 +465,7 @@ class GraderPipeline:
         "final_response": final_response,
     }
     return evaluator(context)
+
+
+# Keep aliases for backward compatibility
+GraderPipeline = AggregateGrader

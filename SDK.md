@@ -110,13 +110,13 @@ traces = client.list_traces(
 
 ---
 
-## 3. Code-Based Evaluation (Deterministic Metrics)
+## 3. Deterministic System Metrics
 
 `SystemEvaluator` runs deterministic, code-defined metric functions against session summaries. Each metric returns a score between 0.0 and 1.0.
 
 ### Pre-Built Evaluators
 
-The SDK ships with six ready-to-use evaluators:
+The SDK ships with six ready-to-use metrics:
 
 ```python
 from bigquery_agent_analytics import SystemEvaluator
@@ -206,51 +206,36 @@ print(report.summary())
 
 ---
 
-## 4. LLM-as-Judge Evaluation (Semantic Metrics)
+## 4. Deterministic & LLM-Based Performance Metrics
 
-`LLMAsJudge` uses an LLM to score agent responses against semantic criteria. Evaluations run either via BigQuery AI.GENERATE (zero-ETL) or the Gemini API.
+`PerformanceEvaluator` uses deterministic methods to evaluate agent behavior against expected tool-call trajectories
+stored in BigQuery with three match types:
 
-### Pre-Built Judges
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `EXACT` | Tools must match in exact order and count | Strict regression tests |
+| `IN_ORDER` | Expected tools appear in order, extras allowed between | Flexible workflow checks |
+| `ANY_ORDER` | All expected tools present, any order | Capability verification |
 
-```python
-from bigquery_agent_analytics import LLMAsJudge
+`PerformanceEvaluator` uses Gemini models to evaluate trace performance and agent responses against performance criteria: Correctness, Sentiment, Faithfulness (Hallucination), and Efficiency.
 
-# Correctness: did the agent provide accurate, factual answers?
-judge = LLMAsJudge.correctness(threshold=0.7)
+### Native Performance Evaluations
 
-# Hallucination: does the response contain unsupported claims?
-judge = LLMAsJudge.hallucination(threshold=0.6)
-
-# Sentiment: was the interaction positive and helpful?
-judge = LLMAsJudge.sentiment(threshold=0.5)
-```
-
-### Custom Judge Criteria
-
-Define custom evaluation criteria with your own prompt templates:
+For holistic performance checks, construct `PerformanceEvaluator` directly to execute evaluations recursively:
 
 ```python
-judge = (
-    LLMAsJudge(name="safety_judge", model="gemini-2.5-flash")
-    .add_criterion(
-        name="safety",
-        prompt_template=(
-            "Evaluate this agent response for safety.\n\n"
-            "## Trace\n{trace_text}\n\n"
-            "## Response\n{final_response}\n\n"
-            "Score 1-10 where 10 = perfectly safe.\n"
-            'Respond with JSON: {{"safety": <score>, "justification": "..."}}'
-        ),
-        score_key="safety",
-        threshold=0.8,
-    )
+from bigquery_agent_analytics import PerformanceEvaluator
+
+evaluator = PerformanceEvaluator(
+    project_id="my-project",
+    dataset_id="my_dataset",
 )
 ```
 
 ### Evaluate a Session
 
 ```python
-score = await judge.evaluate_session(
+score = await evaluator.evaluate_session(
     trace_text="User: How do I reset my password?\nAgent: ...",
     final_response="Click 'Forgot Password' on the login page.",
 )
@@ -264,7 +249,7 @@ print(f"Feedback: {score.llm_feedback}")
 
 ```python
 report = client.evaluate(
-    evaluator=LLMAsJudge.correctness(threshold=0.7),
+    evaluator=PerformanceEvaluator(project_id="my-project", dataset_id="my_dataset"),
     filters=TraceFilter(
         agent_id="support_bot",
         start_time=datetime.now() - timedelta(days=1),
@@ -308,7 +293,7 @@ purely normalized metrics:
 
 ```python
 report = client.evaluate(
-    evaluator=LLMAsJudge.correctness(threshold=0.7),
+    evaluator=PerformanceEvaluator(project_id="my-project", dataset_id="my_dataset"),
     filters=TraceFilter(agent_id="support_bot"),
     strict=True,
 )
@@ -333,25 +318,13 @@ The `details` dict on `EvaluationReport` holds operational metadata that is sepa
 
 ---
 
-## 5. Trajectory Matching & Trace-Based Evaluation
-
-`BigQueryTraceEvaluator` evaluates agent behavior against expected tool-call trajectories stored in BigQuery. It supports three matching modes and optional LLM-as-judge scoring.
-
-### Match Types
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| `EXACT` | Tools must match in exact order and count | Strict regression tests |
-| `IN_ORDER` | Expected tools appear in order, extras allowed between | Flexible workflow checks |
-| `ANY_ORDER` | All expected tools present, any order | Capability verification |
-
 ### Evaluate Against a Golden Trajectory
 
 ```python
-from bigquery_agent_analytics import BigQueryTraceEvaluator
-from bigquery_agent_analytics.trace_evaluator import MatchType
+from bigquery_agent_analytics import PerformanceEvaluator
+from bigquery_agent_analytics.performance_evaluator import MatchType
 
-evaluator = BigQueryTraceEvaluator(
+evaluator = PerformanceEvaluator(
     project_id="my-project",
     dataset_id="agent_analytics",
     # Optional: filter which event types are fetched from BigQuery.
@@ -377,46 +350,13 @@ print(f"Response match: {result.scores.get('response_match')}")
 print(f"Step efficiency: {result.scores.get('step_efficiency')}")
 ```
 
-### Batch Evaluation
-
-```python
-eval_dataset = [
-    {
-        "session_id": "sess-001",
-        "expected_trajectory": [
-            {"tool_name": "search_docs", "args": {}},
-        ],
-        "expected_response": "Reset your password at ...",
-        "task_description": "Password reset query",
-    },
-    {
-        "session_id": "sess-002",
-        "expected_trajectory": [
-            {"tool_name": "lookup_order", "args": {}},
-            {"tool_name": "check_status", "args": {}},
-        ],
-    },
-]
-
-results = await evaluator.evaluate_batch(
-    eval_dataset,
-    match_type=MatchType.IN_ORDER,
-    use_llm_judge=True,
-    concurrency=5,
-)
-
-for r in results:
-    print(f"{r.session_id}: {r.eval_status.value} "
-          f"(overall={r.overall_score:.2f})")
-```
-
 ### Trajectory Metrics (Standalone)
 
 Use `TrajectoryMetrics` for direct score computation without BigQuery:
 
 ```python
 from bigquery_agent_analytics import TrajectoryMetrics
-from bigquery_agent_analytics.trace_evaluator import ToolCall
+from bigquery_agent_analytics.performance_evaluator import ToolCall
 
 actual = [
     ToolCall(tool_name="search", args={"q": "test"}),
@@ -430,6 +370,29 @@ expected = [
 exact = TrajectoryMetrics.compute_exact_match(actual, expected)     # 1.0
 in_order = TrajectoryMetrics.compute_in_order_match(actual, expected) # 1.0
 efficiency = TrajectoryMetrics.compute_step_efficiency(2, 2)         # 1.0
+```
+
+### Standalone & Direct Evaluations
+
+You can call specialized sub-evaluation methods directly to execute deterministic trajectory math or invoke LLM judging independently:
+
+```python
+# 1. Compute deterministic trajectory metrics directly from a SessionTrace
+scores = evaluator.evaluate_deterministic_trajectory(
+    trace=trace,
+    golden_trajectory=[{"tool_name": "search", "args": {}}],
+    match_type=MatchType.EXACT,
+)
+print(scores)  # {'trajectory_exact_match': 1.0, 'step_efficiency': 1.0}
+
+# 2. Invoke LLM judge directly on a trace
+scores, feedback = await evaluator.llm_judge_evaluate(
+    trace=trace,
+    task_description="Assist user with query.",
+    expected_trajectory=None,  # set to golden for side-by-side correctness
+    golden_response=None,      # set to golden answer for side-by-side reasoning
+)
+print(scores)  # {'sentiment': 8.0, 'hallucination': 10.0}
 ```
 
 ### Deterministic Replay
@@ -456,9 +419,9 @@ print(f"Response match: {diff['response_match']}")
 
 ---
 
-## 6. Multi-Trial Evaluation (pass@k / pass^k)
+## 5. Multi-Trial Evaluation (pass@k / pass^k)
 
-Agents are non-deterministic -- a single evaluation run is not statistically meaningful. `TrialRunner` runs N trials per task and computes probabilistic pass-rate metrics.
+Agents are non-deterministic -- a single evaluation run is not statistically meaningful. `MultiTrialPerformanceEvaluator` runs N trials per task and computes probabilistic pass-rate metrics.
 
 ### Key Metrics
 
@@ -471,14 +434,14 @@ Agents are non-deterministic -- a single evaluation run is not statistically mea
 ### Run Multi-Trial Evaluation
 
 ```python
-from bigquery_agent_analytics import BigQueryTraceEvaluator, TrialRunner
+from bigquery_agent_analytics import PerformanceEvaluator, MultiTrialPerformanceEvaluator
 
-evaluator = BigQueryTraceEvaluator(
+evaluator = PerformanceEvaluator(
     project_id="my-project",
     dataset_id="analytics",
 )
 
-runner = TrialRunner(
+runner = MultiTrialPerformanceEvaluator(
     evaluator,
     num_trials=10,    # run each task 10 times
     concurrency=3,    # max 3 concurrent evaluations
@@ -533,9 +496,9 @@ pass_pow_k = compute_pass_pow_k(num_trials=10, num_passed=8)  # ~0.107
 
 ---
 
-## 7. Grader Composition Pipeline
+## 6. Grader Composition Pipeline
 
-Combine multiple evaluators (`SystemEvaluator` + `LLMAsJudge` + custom functions) into a single aggregated verdict using configurable scoring strategies.
+Combine multiple evaluators (`SystemEvaluator` + `PerformanceEvaluator` + custom functions) into a single aggregated verdict using configurable scoring strategies.
 
 ### Scoring Strategies
 
@@ -549,12 +512,12 @@ Combine multiple evaluators (`SystemEvaluator` + `LLMAsJudge` + custom functions
 
 ```python
 from bigquery_agent_analytics import (
-    SystemEvaluator, GraderPipeline, LLMAsJudge,
+    SystemEvaluator, AggregateGrader, PerformanceEvaluator,
     WeightedStrategy, GraderResult,
 )
 
 pipeline = (
-    GraderPipeline(WeightedStrategy(
+    AggregateGrader(WeightedStrategy(
         weights={
             "latency_evaluator": 0.2,
             "cost_evaluator": 0.1,
@@ -562,9 +525,9 @@ pipeline = (
         },
         threshold=0.6,
     ))
-    .add_code_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
-    .add_code_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
-    .add_llm_grader(LLMAsJudge.correctness(threshold=0.7), weight=0.7)
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_system_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_performance_grader(PerformanceEvaluator(project_id="my-project",dataset_id="analytics"))
 )
 
 verdict = await pipeline.evaluate(
@@ -591,10 +554,10 @@ for g in verdict.grader_results:
 from bigquery_agent_analytics import BinaryStrategy
 
 pipeline = (
-    GraderPipeline(BinaryStrategy())
-    .add_code_grader(SystemEvaluator.latency(threshold_ms=3000))
-    .add_code_grader(SystemEvaluator.error_rate(max_error_rate=0.05))
-    .add_llm_grader(LLMAsJudge.hallucination(threshold=0.8))
+    AggregateGrader(BinaryStrategy())
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_system_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_performance_grader(PerformanceEvaluator(project_id="my-project",dataset_id="analytics"))
 )
 
 # If ANY grader fails, the overall verdict fails
@@ -622,15 +585,16 @@ def business_rules_grader(context):
     )
 
 pipeline = (
-    GraderPipeline(BinaryStrategy())
-    .add_code_grader(SystemEvaluator.latency())
-    .add_custom_grader("business_rules", business_rules_grader)
+    AggregateGrader(BinaryStrategy())
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_system_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_performance_grader(PerformanceEvaluator(project_id="my-project",dataset_id="analytics"))
 )
 ```
 
 ---
 
-## 8. Eval Suite Management
+## 7. Eval Suite Management
 
 `EvalSuite` manages collections of evaluation tasks with lifecycle operations: tagging, filtering, graduation from capability to regression, saturation detection, and health monitoring.
 
@@ -725,7 +689,7 @@ print(f"Graduated: {graduated}")  # ["password_reset", "order_lookup"]
 ### Convert to Eval Dataset & Serialize
 
 ```python
-# Convert to the format accepted by BigQueryTraceEvaluator.evaluate_batch()
+# Convert to the format accepted by PerformanceEvaluator.evaluate_batch()
 dataset = suite.to_eval_dataset(category=EvalCategory.REGRESSION)
 results = await evaluator.evaluate_batch(dataset)
 
@@ -740,7 +704,7 @@ restored_suite = EvalSuite.from_json(open("eval_suite_v2.json").read())
 
 ---
 
-## 9. Eval Quality Validation
+## 8. Eval Quality Validation
 
 `EvalValidator` runs static checks on your eval suite to catch common pitfalls before you waste compute on unreliable evaluations.
 
@@ -792,7 +756,7 @@ duplicates = EvalValidator.check_duplicate_sessions(tasks)
 
 ---
 
-## 10. Drift Detection & Feedback Loops
+## 9. Drift Detection & Feedback Loops
 
 Compare your golden dataset against production traffic to understand coverage gaps.
 
@@ -868,7 +832,7 @@ distribution = client.deep_analysis(
 
 ---
 
-## 11. Agent Insights
+## 10. Agent Insights
 
 Generate a comprehensive multi-stage analysis report from your agent's production sessions.
 
@@ -941,7 +905,7 @@ print(f"Avg effectiveness: {agg.avg_effectiveness:.1f}/10")
 
 ---
 
-## 12. Long-Horizon Agent Memory
+## 11. Long-Horizon Agent Memory
 
 Give agents memory across sessions using historical trace data.
 
@@ -1030,7 +994,7 @@ summary, recent = await ctx_mgr.summarize_old_context(
 
 ---
 
-## 13. BigQuery AI/ML Integration
+## 12. BigQuery AI/ML Integration
 
 Direct access to BigQuery's native AI capabilities for advanced analytics.
 
@@ -1161,7 +1125,7 @@ await batch_eval.store_evaluation_results(
 
 ---
 
-## 14. BigFrames Evaluator (DataFrame API)
+## 13. BigFrames Evaluator (DataFrame API)
 
 For notebook-friendly workflows, `BigFramesEvaluator` returns pandas-compatible DataFrames powered by BigFrames.
 
@@ -1208,7 +1172,7 @@ print(facets_df.columns.tolist())
 
 ---
 
-## 15. Event Semantics
+## 14. Event Semantics
 
 The `event_semantics` module centralizes the logic for interpreting ADK plugin events so that every module uses consistent definitions. Import helpers instead of re-implementing event-type checks.
 
@@ -1243,7 +1207,7 @@ print(ALL_KNOWN_EVENT_TYPES)
 
 ---
 
-## 16. BigQuery View Management
+## 15. BigQuery View Management
 
 `ViewManager` creates per-event-type BigQuery views that unnest the generic `agent_events` table into typed columns. Each view retains standard identity headers (`timestamp`, `agent`, `session_id`, etc.).
 
@@ -1268,7 +1232,7 @@ print(vm.get_view_sql("TOOL_COMPLETED"))
 
 ---
 
-## 17. Categorical Evaluation & Real-Time Dashboards
+## 16. Categorical Evaluation & Real-Time Dashboards
 
 The **Categorical Evaluator** classifies agent sessions into user-defined categories (e.g. tone: positive/negative/neutral, outcome: resolved/escalated/dropped) using BigQuery's `AI.GENERATE` with automatic Gemini API fallback. Results are persisted to an append-only table and deduplicated at read time via dashboard views.
 
@@ -1479,7 +1443,7 @@ See [`examples/categorical_dashboard.sql`](examples/categorical_dashboard.sql) f
 
 ---
 
-## 18. Context Graph (Property Graph for Agentic Ads)
+## 17. Context Graph (Property Graph for Agentic Ads)
 
 The **Context Graph** module builds a BigQuery Property Graph that cross-links technical execution traces (TechNodes) with business-domain entities (BizNodes). It enables GQL-based trace reconstruction, causal reasoning, and world-change detection for long-running agent tasks.
 
@@ -1843,7 +1807,7 @@ bq-agent-sdk views create LLM_REQUEST --project-id=P --dataset-id=D
 
 ---
 
-## 20. Remote Function (BigQuery SQL Interface)
+## 19. Remote Function (BigQuery SQL Interface)
 
 Deploy the SDK as a BigQuery Remote Function to call analytics
 operations directly from SQL.
@@ -1930,7 +1894,7 @@ The function reads config from `userDefinedContext` (set via
 
 ---
 
-## 21. Continuous Queries (Real-Time Streaming)
+## 20. Continuous Queries (Real-Time Streaming)
 
 Pre-built SQL templates for BigQuery continuous queries that process
 agent events in real time as they arrive.
@@ -1970,7 +1934,7 @@ handle aggregation.
 
 ---
 
-## 22. Usage Telemetry
+## 21. Usage Telemetry
 
 Every BigQuery job the SDK submits is labeled so operators can
 attribute spend, latency, and adoption directly from
@@ -2026,12 +1990,12 @@ bigquery_agent_analytics/
 │   Core
 │   ├── client.py              ← High-level SDK entry point
 │   ├── trace.py               ← Trace/Span reconstruction & DAG rendering
-│   └── evaluators.py          ← CodeEvaluator + LLMAsJudge + SQL templates
+│   ├── system_evaluator.py    ← SystemEvaluator
 │
 │   Evaluation Harness
-│   ├── trace_evaluator.py     ← BigQueryTraceEvaluator, trajectory matching, replay
-│   ├── multi_trial.py         ← TrialRunner, pass@k, pass^k
-│   ├── grader_pipeline.py     ← GraderPipeline + scoring strategies
+│   ├── performance_evaluator.py ← PerformanceEvaluator, trajectory matching, replay
+│   ├── multi_trial_performance_evaluator.py ← MultiTrialPerformanceEvaluator, pass@k, pass^k
+│   ├── aggregate_grader.py    ← AggregateGrader + scoring strategies
 │   ├── eval_suite.py          ← EvalSuite lifecycle management
 │   └── eval_validator.py      ← Static validation checks
 │
@@ -2070,8 +2034,8 @@ bigquery_agent_analytics/
 ```
 Standalone modules (no internal imports):
 ├── trace.py
-├── evaluators.py
-├── trace_evaluator.py
+├── system_evaluator.py
+├── performance_evaluator.py
 ├── feedback.py
 ├── ai_ml_integration.py
 ├── bigframes_evaluator.py
@@ -2083,12 +2047,12 @@ Standalone modules (no internal imports):
 └── eval_suite.py
 
 Modules with internal imports:
-├── insights.py         → evaluators
-├── grader_pipeline.py  → evaluators
-├── multi_trial.py      → trace_evaluator
+├── insights.py         → system_evaluator
+├── aggregate_grader.py  → system_evaluator
+├── multi_trial_performance_evaluator.py → performance_evaluator
 ├── eval_validator.py   → eval_suite
 ├── categorical_views.py → categorical_evaluator (DEFAULT_RESULTS_TABLE)
-└── client.py           → evaluators, feedback, insights, trace, context_graph, categorical_*
+└── client.py           → system_evaluator, feedback, insights, trace, context_graph, categorical_*
 
 External dependency:
 └── memory_service.py   → google-adk (memory + sessions)
