@@ -20,10 +20,12 @@ at physically exist with the columns and types the binding requires,
 most common authoring error (binding YAML drifted out of sync with
 physical tables) before extraction wastes ``AI.GENERATE`` tokens.
 
-Different from :func:`bigquery_agent_analytics.graph_validation.
-validate_extracted_graph` (issue #76): that one validates extracted
-graph output against the spec. This one validates the binding against
-the live BigQuery schemas.
+Different from the planned extracted-graph validator in issue #76:
+that one will validate extracted graph output against the spec
+(post-extraction, pre-materialization). This one validates the
+binding against the live BigQuery schemas (pre-extraction). #76 has
+not landed yet, so do not import any symbol from a
+``graph_validation`` module — it does not exist on this PR.
 
 Usage::
 

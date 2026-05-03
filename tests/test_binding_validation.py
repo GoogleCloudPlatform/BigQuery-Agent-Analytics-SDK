@@ -429,12 +429,14 @@ class TestEndpointTypeMismatch:
       self,
   ):
     """Edge endpoint type disagrees with the referenced node's
-    ontology key type. Two ENDPOINT_TYPE_MISMATCH entries are
-    expected — one from the spec-level (1) check (edge BQ type vs
-    ontology-derived expected SDK type) and one from the physical
-    cross-table (2) check (edge BQ type vs node table's actual key
-    BQ type). Both are correct and complementary; users see both
-    descriptions and can act on either."""
+    ontology key type, but the node table itself is on-spec. One
+    ENDPOINT_TYPE_MISMATCH entry is expected — the spec-level (1)
+    check (edge BQ type vs ontology-derived expected SDK type).
+    The physical cross-table (2) check is suppressed because
+    emitting it would double-report the same expected/observed pair
+    with different detail wording. The node-drifted case where (2)
+    adds genuinely new information is covered by
+    TestEndpointPhysicalCrossTableCheck."""
     from bigquery_agent_analytics.binding_validation import FailureCode
     from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
 
