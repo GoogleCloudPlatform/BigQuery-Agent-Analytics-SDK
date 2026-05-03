@@ -172,7 +172,7 @@ primitive:
 
 | SDK area | Python UDF fit | Required redesign |
 |----------|----------------|-------------------|
-| `Client.evaluate(CodeEvaluator, filters)` | Partial | SQL builds per-session summaries first; UDF computes scores from summary fields |
+| `Client.evaluate(SystemEvaluator, filters)` | Partial | SQL builds per-session summaries first; UDF computes scores from summary fields |
 | `Client.deep_analysis()` / question distribution | Partial | SQL does grouping / embeddings / top-k; UDF can help with categorization or normalization |
 | `Client.drift_detection()` | Partial | SQL computes set logic; UDF may help with text normalization or thresholding |
 | `Client.insights()` | Partial | Best split into SQL extraction + optional UDF post-processing; not a direct port |
@@ -224,7 +224,7 @@ That is maintainable. Reusing the entire client inside a Python UDF is not.
 
 The current evaluator score math is not implemented as standalone top-level
 functions today. It lives inside factory-method closures such as
-`CodeEvaluator.latency()` and `CodeEvaluator.error_rate()` in
+`SystemEvaluator.latency()` and `SystemEvaluator.error_rate()` in
 [evaluators.py](/Users/haiyuancao/BigQuery-Agent-Analytics-SDK/src/bigquery_agent_analytics/evaluators.py).
 
 That means the first implementation step is a deliberate refactor:
@@ -281,7 +281,7 @@ the shared extraction helper.
 
 ### 7.2 Tier 2: code-evaluator score kernels
 
-These should map directly to the existing `CodeEvaluator` math:
+These should map directly to the existing `SystemEvaluator` math:
 
 ```sql
 CREATE FUNCTION `PROJECT.UDF_DATASET.bqaa_score_latency`(
@@ -497,7 +497,7 @@ Remote Function should still be described as:
 - Add `udf_kernels.py`
 - Move reusable evaluator math into standalone pure functions
 - Move reusable event semantic helpers into a UDF-safe layer
-- Add unit tests proving parity with existing `CodeEvaluator` behavior
+- Add unit tests proving parity with existing `SystemEvaluator` behavior
 
 ### Phase U2: Tier 1 and Tier 2 UDFs
 

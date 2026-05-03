@@ -39,7 +39,7 @@ from typing import Optional
 
 import typer
 
-from .evaluators import CodeEvaluator
+from .evaluators import CodeEvaluator, SystemEvaluator
 from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
 from .formatter import format_output
@@ -154,28 +154,28 @@ def _load_spec_from_args(
 
 _CODE_EVALUATORS = {
     "latency": (
-        lambda t: CodeEvaluator.latency(threshold_ms=t),
-        lambda: CodeEvaluator.latency(),
+        lambda t: SystemEvaluator.latency(threshold_ms=t),
+        lambda: SystemEvaluator.latency(),
     ),
     "error_rate": (
-        lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-        lambda: CodeEvaluator.error_rate(),
+        lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+        lambda: SystemEvaluator.error_rate(),
     ),
     "turn_count": (
-        lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-        lambda: CodeEvaluator.turn_count(),
+        lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+        lambda: SystemEvaluator.turn_count(),
     ),
     "token_efficiency": (
-        lambda t: CodeEvaluator.token_efficiency(max_tokens=int(t)),
-        lambda: CodeEvaluator.token_efficiency(),
+        lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
+        lambda: SystemEvaluator.token_efficiency(),
     ),
     "ttft": (
-        lambda t: CodeEvaluator.ttft(threshold_ms=t),
-        lambda: CodeEvaluator.ttft(),
+        lambda t: SystemEvaluator.ttft(threshold_ms=t),
+        lambda: SystemEvaluator.ttft(),
     ),
     "cost": (
-        lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
-        lambda: CodeEvaluator.cost_per_session(),
+        lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
+        lambda: SystemEvaluator.cost_per_session(),
     ),
 }
 

@@ -33,11 +33,11 @@ Example usage::
 
     # Run evaluation
     from bigquery_agent_analytics import (
-        CodeEvaluator, LLMAsJudge, TraceFilter,
+        SystemEvaluator, LLMAsJudge, TraceFilter,
     )
     report = client.evaluate(
         filters=TraceFilter(agent_id="my_agent"),
-        evaluator=CodeEvaluator.latency(threshold_ms=3000),
+        evaluator=SystemEvaluator.latency(threshold_ms=3000),
     )
     print(report.summary())
 """
@@ -73,7 +73,7 @@ from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
 from .evaluators import _parse_json_from_text
 from .evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
-from .evaluators import CodeEvaluator
+from .evaluators import CodeEvaluator, SystemEvaluator
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import EvaluationReport
 from .evaluators import LLM_JUDGE_BATCH_QUERY
@@ -869,7 +869,7 @@ class Client:
 
   def evaluate(
       self,
-      evaluator: CodeEvaluator | LLMAsJudge,
+      evaluator: SystemEvaluator | LLMAsJudge,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
       strict: bool = False,
@@ -900,7 +900,7 @@ class Client:
     filt = filters or TraceFilter()
     where, params = filt.to_sql_conditions()
 
-    if isinstance(evaluator, CodeEvaluator):
+    if isinstance(evaluator, SystemEvaluator):
       return self._evaluate_code(
           evaluator,
           table,
@@ -923,7 +923,7 @@ class Client:
 
   def _evaluate_code(
       self,
-      evaluator: CodeEvaluator,
+      evaluator: SystemEvaluator,
       table: str,
       where: str,
       params: list,

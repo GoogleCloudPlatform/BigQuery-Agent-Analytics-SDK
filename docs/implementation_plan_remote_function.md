@@ -219,13 +219,30 @@ Dispatch logic:
 ```python
 # Map CLI --evaluator to SDK factory
 EVALUATOR_FACTORIES = {
-    "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
-    "error_rate": lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-    "turn_count": lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-    "token_efficiency": lambda t: CodeEvaluator.token_efficiency(max_tokens=int(t)),
-    "ttft": lambda t: CodeEvaluator.ttft(threshold_ms=t),
-    "cost": lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
-    "llm-judge": None,  # special handling
+    "latency": (
+        lambda t: SystemEvaluator.latency(threshold_ms=t),
+        lambda: SystemEvaluator.latency(),
+    ),
+    "error_rate": (
+        lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+        lambda: SystemEvaluator.error_rate(),
+    ),
+    "turn_count": (
+        lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+        lambda: SystemEvaluator.turn_count(),
+    ),
+    "token_efficiency": (
+        lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
+        lambda: SystemEvaluator.token_efficiency(),
+    ),
+    "ttft": (
+        lambda t: SystemEvaluator.ttft(threshold_ms=t),
+        lambda: SystemEvaluator.ttft(),
+    ),
+    "cost": (
+        lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
+        lambda: SystemEvaluator.cost_per_session(),
+    ),
 }
 ```
 
@@ -289,7 +306,7 @@ import functions_framework
 from flask import jsonify
 
 from bigquery_agent_analytics import Client, serialize
-from bigquery_agent_analytics import CodeEvaluator, LLMAsJudge
+from bigquery_agent_analytics import SystemEvaluator, LLMAsJudge
 from bigquery_agent_analytics import TraceFilter
 
 
@@ -385,18 +402,18 @@ def _dispatch(client, operation, params):
 
 
 def _build_evaluator(params):
-    """Build CodeEvaluator from params dict."""
+    """Build SystemEvaluator from params dict."""
     metric = params.get("metric", "latency")
     threshold = params.get("threshold", 5000)
     factories = {
-        "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
-        "error_rate": lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-        "turn_count": lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-        "token_efficiency": lambda t: CodeEvaluator.token_efficiency(
+        "latency": lambda t: SystemEvaluator.latency(threshold_ms=t),
+        "error_rate": lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+        "turn_count": lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+        "token_efficiency": lambda t: SystemEvaluator.token_efficiency(
             max_tokens=int(t)
         ),
-        "ttft": lambda t: CodeEvaluator.ttft(threshold_ms=t),
-        "cost": lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
+        "ttft": lambda t: SystemEvaluator.ttft(threshold_ms=t),
+        "cost": lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
     }
     factory = factories.get(metric)
     if not factory:

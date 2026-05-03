@@ -69,6 +69,7 @@ try:
   from .evaluators import EvaluationReport
   from .evaluators import LLMAsJudge
   from .evaluators import SessionScore
+  from .evaluators import SystemEvaluator
   from .feedback import AnalysisConfig
   from .feedback import DriftReport
   from .feedback import QuestionDistribution
@@ -96,6 +97,7 @@ try:
           "TraceFilter",
           "ViewManager",
           "CodeEvaluator",
+          "SystemEvaluator",
           "LLMAsJudge",
           "EvaluationReport",
           "SessionScore",

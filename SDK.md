@@ -112,29 +112,29 @@ traces = client.list_traces(
 
 ## 3. Code-Based Evaluation (Deterministic Metrics)
 
-`CodeEvaluator` runs deterministic, code-defined metric functions against session summaries. Each metric returns a score between 0.0 and 1.0.
+`SystemEvaluator` runs deterministic, code-defined metric functions against session summaries. Each metric returns a score between 0.0 and 1.0.
 
 ### Pre-Built Evaluators
 
 The SDK ships with six ready-to-use evaluators:
 
 ```python
-from bigquery_agent_analytics import CodeEvaluator
+from bigquery_agent_analytics import SystemEvaluator
 
 # Latency: score degrades linearly as avg latency approaches threshold
-evaluator = CodeEvaluator.latency(threshold_ms=5000)
+evaluator = SystemEvaluator.latency(threshold_ms=5000)
 
 # Turn count: penalizes sessions with too many back-and-forth turns
-evaluator = CodeEvaluator.turn_count(max_turns=10)
+evaluator = SystemEvaluator.turn_count(max_turns=10)
 
 # Error rate: penalizes high tool error rates
-evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
 
 # Token efficiency: checks total token usage stays within budget
-evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
 
 # Cost per session: checks estimated USD cost stays under budget
-evaluator = CodeEvaluator.cost_per_session(
+evaluator = SystemEvaluator.cost_per_session(
     max_cost_usd=1.0,
     input_cost_per_1k=0.00025,
     output_cost_per_1k=0.00125,
@@ -147,7 +147,7 @@ Define your own metric functions and chain multiple metrics together:
 
 ```python
 evaluator = (
-    CodeEvaluator(name="my_quality_check")
+    SystemEvaluator(name="my_quality_check")
     .add_metric(
         name="latency",
         fn=lambda s: 1.0 - min(s.get("avg_latency_ms", 0) / 5000, 1.0),
@@ -190,7 +190,7 @@ Run evaluation across all sessions matching a filter:
 from bigquery_agent_analytics import TraceFilter
 
 report = client.evaluate(
-    evaluator=CodeEvaluator.latency(threshold_ms=3000),
+    evaluator=SystemEvaluator.latency(threshold_ms=3000),
     filters=TraceFilter(agent_id="my_agent"),
 )
 
@@ -535,7 +535,7 @@ pass_pow_k = compute_pass_pow_k(num_trials=10, num_passed=8)  # ~0.107
 
 ## 7. Grader Composition Pipeline
 
-Combine multiple evaluators (`CodeEvaluator` + `LLMAsJudge` + custom functions) into a single aggregated verdict using configurable scoring strategies.
+Combine multiple evaluators (`SystemEvaluator` + `LLMAsJudge` + custom functions) into a single aggregated verdict using configurable scoring strategies.
 
 ### Scoring Strategies
 
@@ -549,7 +549,7 @@ Combine multiple evaluators (`CodeEvaluator` + `LLMAsJudge` + custom functions) 
 
 ```python
 from bigquery_agent_analytics import (
-    CodeEvaluator, GraderPipeline, LLMAsJudge,
+    SystemEvaluator, GraderPipeline, LLMAsJudge,
     WeightedStrategy, GraderResult,
 )
 
@@ -562,8 +562,8 @@ pipeline = (
         },
         threshold=0.6,
     ))
-    .add_code_grader(CodeEvaluator.latency(threshold_ms=5000), weight=0.2)
-    .add_code_grader(CodeEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_code_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_code_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
     .add_llm_grader(LLMAsJudge.correctness(threshold=0.7), weight=0.7)
 )
 
@@ -592,8 +592,8 @@ from bigquery_agent_analytics import BinaryStrategy
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(CodeEvaluator.latency(threshold_ms=3000))
-    .add_code_grader(CodeEvaluator.error_rate(max_error_rate=0.05))
+    .add_code_grader(SystemEvaluator.latency(threshold_ms=3000))
+    .add_code_grader(SystemEvaluator.error_rate(max_error_rate=0.05))
     .add_llm_grader(LLMAsJudge.hallucination(threshold=0.8))
 )
 
@@ -623,7 +623,7 @@ def business_rules_grader(context):
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(CodeEvaluator.latency())
+    .add_code_grader(SystemEvaluator.latency())
     .add_custom_grader("business_rules", business_rules_grader)
 )
 ```

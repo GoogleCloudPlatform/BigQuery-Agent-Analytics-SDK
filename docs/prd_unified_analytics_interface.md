@@ -109,7 +109,7 @@ All operations go through a single multiplexed function:
 | Operation | SDK Method | Params (JSON keys) | Output |
 |-----------|-----------|---------------------|--------|
 | `analyze` | `Client.get_session_trace()` + metrics | `session_id` | JSON with span count, error count, latency, tool calls |
-| `evaluate` | `CodeEvaluator` | `session_id`, `metric`, `threshold` | JSON with passed, score, details |
+| `evaluate` | `SystemEvaluator` | `session_id`, `metric`, `threshold` | JSON with passed, score, details |
 | `judge` | `LLMAsJudge` | `session_id`, `criterion` | JSON with score, feedback |
 | `insights` | Facet extraction | `session_id` | JSON with intent, outcome, friction |
 | `drift` | Drift detection | `golden_dataset`, `agent_filter`, `start_date`, `end_date` | JSON with coverage, gaps |
@@ -443,7 +443,7 @@ import functions_framework
 import json
 import os
 from flask import jsonify
-from bigquery_agent_analytics import Client, CodeEvaluator, LLMAsJudge, TraceFilter
+from bigquery_agent_analytics import Client, SystemEvaluator, LLMAsJudge, TraceFilter
 
 # Initialized once per cold start. Config comes from userDefinedContext
 # (forwarded by BigQuery) or environment variables as fallback.
@@ -490,7 +490,7 @@ def _dispatch(client, operation, params):
             "final_response": trace.final_response,
         }
     elif operation == "evaluate":
-        evaluator = CodeEvaluator.latency(threshold_ms=params["threshold"])
+        evaluator = SystemEvaluator.latency(threshold_ms=params["threshold"])
         report = client.evaluate(evaluator=evaluator,
             filters=TraceFilter(session_ids=[params["session_id"]]))
         return report.details[0] if report.details else {}

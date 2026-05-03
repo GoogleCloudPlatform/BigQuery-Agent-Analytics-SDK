@@ -14,21 +14,21 @@
 
 """Grader composition pipeline for combining multiple evaluators.
 
-Composes ``CodeEvaluator``, ``LLMAsJudge``, and custom graders into a
+Composes ``SystemEvaluator``, ``LLMAsJudge``, and custom graders into a
 single verdict using configurable scoring strategies (weighted average,
 binary all-pass, or majority vote).
 
 Example usage::
 
     from bigquery_agent_analytics import (
-        CodeEvaluator, GraderPipeline, LLMAsJudge, WeightedStrategy,
+        SystemEvaluator, GraderPipeline, LLMAsJudge, WeightedStrategy,
     )
 
     pipeline = (
         GraderPipeline(WeightedStrategy(
             weights={"latency": 0.3, "correctness": 0.7},
         ))
-        .add_code_grader(CodeEvaluator.latency(), weight=0.3)
+        .add_code_grader(SystemEvaluator.latency(), weight=0.3)
         .add_llm_grader(LLMAsJudge.correctness(), weight=0.7)
     )
 
@@ -48,7 +48,7 @@ from typing import Any, Callable
 from pydantic import BaseModel
 from pydantic import Field
 
-from .evaluators import CodeEvaluator
+from .evaluators import CodeEvaluator, SystemEvaluator
 from .evaluators import LLMAsJudge
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -250,14 +250,14 @@ class _GraderEntry:
 class GraderPipeline:
   """Composes multiple graders into a single evaluation pipeline.
 
-  Supports ``CodeEvaluator``, ``LLMAsJudge``, and arbitrary custom
+  Supports ``SystemEvaluator``, ``LLMAsJudge``, and arbitrary custom
   grader functions combined via a configurable ``ScoringStrategy``.
 
   Example::
 
       pipeline = (
           GraderPipeline(WeightedStrategy(threshold=0.6))
-          .add_code_grader(CodeEvaluator.latency())
+          .add_code_grader(SystemEvaluator.latency())
           .add_llm_grader(LLMAsJudge.correctness())
       )
       verdict = await pipeline.evaluate(
@@ -278,13 +278,13 @@ class GraderPipeline:
 
   def add_code_grader(
       self,
-      evaluator: CodeEvaluator,
+      evaluator: SystemEvaluator,
       weight: float = 1.0,
   ) -> GraderPipeline:
-    """Adds a CodeEvaluator grader to the pipeline.
+    """Adds a SystemEvaluator grader to the pipeline.
 
     Args:
-        evaluator: A CodeEvaluator instance.
+        evaluator: A SystemEvaluator instance.
         weight: Weight for weighted strategies.
 
     Returns:
@@ -363,7 +363,7 @@ class GraderPipeline:
 
     Args:
         session_summary: Dict with session metrics (for
-            CodeEvaluator graders).
+            SystemEvaluator graders).
         trace_text: Formatted trace text (for LLMAsJudge
             graders).
         final_response: Final agent response.
@@ -402,7 +402,7 @@ class GraderPipeline:
     """Runs a single grader and returns its result."""
     evaluator = entry.evaluate_fn
 
-    if isinstance(evaluator, CodeEvaluator):
+    if isinstance(evaluator, SystemEvaluator):
       score = evaluator.evaluate_session(session_summary)
       return GraderResult(
           grader_name=entry.name,
