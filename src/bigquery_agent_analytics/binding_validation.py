@@ -44,8 +44,9 @@ Usage::
     for w in report.warnings:
         print(f"WARN: {w}")
 
-See ``docs/ontology/binding-validation.md`` for the full failure-code
-reference and CI usage patterns.
+The user-facing CLI surface (``bq-agent-sdk binding-validate``,
+``ontology-build --validate-binding[-strict]``) and the full
+failure-code documentation land in PR 2b of issue #105.
 """
 
 from __future__ import annotations
@@ -235,8 +236,27 @@ def validate_binding_against_bigquery(
   spec = resolve(ontology, binding, lineage_config=None)
 
   # Index binding entries by name so we can build precise paths.
+  # Critical: derive property/column indices from the binding YAML's
+  # own ordering (binding.entities[i].properties), NOT from the
+  # ResolvedEntity's properties tuple, because ResolvedEntity orders
+  # properties by ontology / effective-property order. With
+  # inheritance or a different binding-side ordering, the two
+  # orderings can diverge and a path like
+  # ``binding.entities[0].properties[1].column`` would point to the
+  # wrong YAML entry.
   entity_index = {b.name: i for i, b in enumerate(binding.entities)}
   relationship_index = {b.name: i for i, b in enumerate(binding.relationships)}
+
+  # Per-binding-element {logical_property_name: yaml_index} maps so
+  # paths reflect what the user actually wrote in YAML.
+  entity_prop_yaml_index: dict[str, dict[str, int]] = {
+      b.name: {p.name: j for j, p in enumerate(b.properties)}
+      for b in binding.entities
+  }
+  rel_prop_yaml_index: dict[str, dict[str, int]] = {
+      b.name: {p.name: j for j, p in enumerate(b.properties)}
+      for b in binding.relationships
+  }
 
   failures: list[BindingValidationFailure] = []
   warnings: list[BindingValidationWarning] = []
@@ -335,9 +355,20 @@ def validate_binding_against_bigquery(
     # Index BQ schema by column name.
     bq_columns = {f.name: f for f in table.schema}
 
-    # Check every bound property.
-    for j, prop in enumerate(entity.properties):
-      prop_path = f"{binding_root}.properties[{j}].column"
+    # Check every bound property. Path indices come from the binding
+    # YAML's ordering, not the ResolvedEntity's ordering, so paths
+    # point at the actual YAML entry the user wrote.
+    prop_yaml_idx = entity_prop_yaml_index.get(entity.name, {})
+    for prop in entity.properties:
+      yaml_j = prop_yaml_idx.get(prop.logical_name)
+      if yaml_j is None:
+        # Resolved property exists but has no matching binding-YAML
+        # entry — should not happen for a properly resolved spec, but
+        # if it does, fall back to a name-keyed path so the failure
+        # is still actionable.
+        prop_path = f"{binding_root}.properties[{prop.logical_name}].column"
+      else:
+        prop_path = f"{binding_root}.properties[{yaml_j}].column"
       bq_field = bq_columns.get(prop.column)
 
       if bq_field is None:
@@ -442,13 +473,23 @@ def validate_binding_against_bigquery(
 
   # ---- Per-relationship checks --------------------------------- #
 
-  # Index entity sdk_types per key_column for endpoint type matching.
+  # Index entity sdk_types and source tables per key_column so the
+  # endpoint check can do BOTH (a) the spec-level expected-type
+  # comparison and (b) the physical cross-table comparison against
+  # the referenced node table's actual BQ field type. Catches the
+  # case where a node table has drifted out of sync with its own
+  # ontology (the per-entity loop above flags that as TYPE_MISMATCH
+  # on the node), but the edge endpoint also disagrees with the
+  # node's actual storage type — we want the edge to surface
+  # ENDPOINT_TYPE_MISMATCH even when the node is itself broken.
   entity_key_types: dict[str, dict[str, str]] = {}
+  entity_source_by_name: dict[str, str] = {}
   for ent in spec.entities:
     cols = {p.column: p.sdk_type for p in ent.properties}
     entity_key_types[ent.name] = {
         k: cols.get(k, "string") for k in ent.key_columns
     }
+    entity_source_by_name[ent.name] = ent.source
 
   for rel in spec.relationships:
     binding_idx = relationship_index.get(rel.name)
@@ -508,10 +549,27 @@ def validate_binding_against_bigquery(
           )
           continue
 
-        # Endpoint type must match the referenced entity's key
-        # column type at the same position.
+        # Endpoint type checks. Two comparisons:
+        #
+        # (1) Spec-level: edge endpoint BQ type must match the
+        #     ontology-derived expected SDK type for the referenced
+        #     node's primary-key column at the same position.
+        # (2) Physical cross-table: when the referenced node table
+        #     is fetchable, the edge endpoint's BQ type must match
+        #     the actual BQ field type of the referenced key column
+        #     in the node table. Catches cases where the node table
+        #     has drifted away from its ontology declaration but
+        #     the edge has not — those would slip past (1) alone.
+        #
+        # Both comparisons emit ENDPOINT_TYPE_MISMATCH; (1)
+        # describes the spec-level disagreement, (2) describes the
+        # physical-table disagreement. The two checks are
+        # complementary, not redundant: (1) fires when only the
+        # edge is wrong; (2) fires when both are wrong but in
+        # different ways.
         if j < len(endpoint_key_cols):
           expected_sdk = endpoint_types[endpoint_key_cols[j]]
+          # (1) Spec-level type check.
           if not _bq_type_matches(expected_sdk, bq_field.field_type):
             emit(
                 FailureCode.ENDPOINT_TYPE_MISMATCH,
@@ -528,6 +586,58 @@ def validate_binding_against_bigquery(
                     f"{expected_sdk!r}"
                 ),
             )
+
+          # (2) Physical cross-table check. Use the table_cache so
+          # we don't double-fetch the node table when the per-entity
+          # loop already did.
+          node_source = entity_source_by_name.get(endpoint_entity_name)
+          if node_source is not None:
+            node_table = table_cache.get(node_source)
+            if node_table is not None:
+              node_columns = {f.name: f for f in node_table.schema}
+              node_field = node_columns.get(endpoint_key_cols[j])
+              if node_field is not None:
+                edge_t = bq_field.field_type.upper()
+                node_t = node_field.field_type.upper()
+                # Only flag when edge and node disagree AND the
+                # disagreement is real (not a mere legacy alias like
+                # INTEGER vs INT64 — those both map to the same SDK
+                # type and are equivalent at storage).
+                edge_canonical = next(
+                    (
+                        canon
+                        for canon, aliases in _COMPATIBLE_BQ_TYPES.items()
+                        if edge_t in aliases
+                    ),
+                    edge_t,
+                )
+                node_canonical = next(
+                    (
+                        canon
+                        for canon, aliases in _COMPATIBLE_BQ_TYPES.items()
+                        if node_t in aliases
+                    ),
+                    node_t,
+                )
+                if edge_canonical != node_canonical:
+                  emit(
+                      FailureCode.ENDPOINT_TYPE_MISMATCH,
+                      binding_element=rel.name,
+                      binding_path=col_path,
+                      bq_ref=f"{rel.source}.{col}",
+                      expected=node_field.field_type,
+                      observed=bq_field.field_type,
+                      detail=(
+                          f"physical cross-table mismatch: edge "
+                          f"column {col!r} on {rel.source} has BQ "
+                          f"type {bq_field.field_type!r}, but the "
+                          f"referenced node table "
+                          f"{node_source}.{endpoint_key_cols[j]} has "
+                          f"BQ type {node_field.field_type!r}. "
+                          f"Edges with this mismatch will fail to "
+                          f"join the node at query time."
+                      ),
+                  )
 
         # Strict-only: endpoint keys should be REQUIRED.
         if getattr(bq_field, "mode", "NULLABLE") == "NULLABLE":
@@ -548,9 +658,15 @@ def validate_binding_against_bigquery(
     _check_endpoint("from_columns", rel.from_columns, rel.from_entity)
     _check_endpoint("to_columns", rel.to_columns, rel.to_entity)
 
-    # Property column checks.
-    for j, prop in enumerate(rel.properties):
-      prop_path = f"{binding_root}.properties[{j}].column"
+    # Property column checks. Same path-correctness rule as
+    # entities: indices come from the binding YAML's ordering.
+    prop_yaml_idx = rel_prop_yaml_index.get(rel.name, {})
+    for prop in rel.properties:
+      yaml_j = prop_yaml_idx.get(prop.logical_name)
+      if yaml_j is None:
+        prop_path = f"{binding_root}.properties[{prop.logical_name}].column"
+      else:
+        prop_path = f"{binding_root}.properties[{yaml_j}].column"
       bq_field = bq_columns.get(prop.column)
 
       if bq_field is None:

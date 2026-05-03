@@ -222,6 +222,46 @@ class TestSdkCreatedTablesRegression:
     for w in report.warnings:
       assert w.code == FailureCode.KEY_COLUMN_NULLABLE
 
+  def test_expected_types_match_materializer_ddl_type_map(self):
+    """Stronger regression: expected types come directly from the
+    materializer's `_DDL_TYPE_MAP`, not from a hand-written fixture.
+    If a future change updates `_DDL_TYPE_MAP` (e.g. adds NUMERIC
+    support), this test forces a corresponding update to
+    `_COMPATIBLE_BQ_TYPES` in binding_validation, otherwise the
+    default-mode regression would silently start failing."""
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+    from bigquery_agent_analytics.ontology_materializer import _DDL_TYPE_MAP
+
+    ontology, binding = _ontology_and_binding()
+    # Build schemas using the materializer's own map so the test
+    # mirrors what the SDK would emit. confidence: double, all keys:
+    # string. If _DDL_TYPE_MAP changes type names, this construction
+    # automatically picks them up.
+    schemas = {
+        "p.d.decision_points": [
+            _FakeField("decision_id", _DDL_TYPE_MAP["string"]),
+            _FakeField("confidence", _DDL_TYPE_MAP["double"]),
+        ],
+        "p.d.outcomes": [
+            _FakeField("outcome_id", _DDL_TYPE_MAP["string"]),
+        ],
+        "p.d.candidate_edges": [
+            _FakeField("decision_id", _DDL_TYPE_MAP["string"]),
+            _FakeField("outcome_id", _DDL_TYPE_MAP["string"]),
+            _FakeField("weight", _DDL_TYPE_MAP["double"]),
+        ],
+    }
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    assert report.ok is True, (
+        f"Validator rejected materializer-DDL-derived schemas: "
+        f"{[(f.code, f.detail) for f in report.failures]}"
+    )
+
   def test_strict_mode_emits_warnings_as_failures(self):
     """The same SDK-created tables, run under strict=True, must
     surface NULLABLE key columns as KEY_COLUMN_NULLABLE failures."""
@@ -356,6 +396,13 @@ class TestEndpointTypeMismatch:
   def test_edge_endpoint_type_does_not_match_referenced_entity_key(
       self,
   ):
+    """Edge endpoint type disagrees with the referenced node's
+    ontology key type. Two ENDPOINT_TYPE_MISMATCH entries are
+    expected — one from the spec-level (1) check (edge BQ type vs
+    ontology-derived expected SDK type) and one from the physical
+    cross-table (2) check (edge BQ type vs node table's actual key
+    BQ type). Both are correct and complementary; users see both
+    descriptions and can act on either."""
     from bigquery_agent_analytics.binding_validation import FailureCode
     from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
 
@@ -379,11 +426,83 @@ class TestEndpointTypeMismatch:
         for f in report.failures
         if f.code == FailureCode.ENDPOINT_TYPE_MISMATCH
     ]
-    assert len(mismatches) == 1
-    assert mismatches[0].binding_element == "HasOutcome"
-    assert "from_columns[0]" in mismatches[0].binding_path
-    assert mismatches[0].observed == "INT64"
-    assert mismatches[0].expected == "STRING"
+    # Two complementary mismatches expected: spec-level + physical.
+    assert len(mismatches) == 2
+    assert all(m.binding_element == "HasOutcome" for m in mismatches)
+    assert all("from_columns[0]" in m.binding_path for m in mismatches)
+    assert all(m.observed == "INT64" for m in mismatches)
+
+    spec_level = [
+        m for m in mismatches if "physical cross-table" not in m.detail
+    ]
+    physical = [m for m in mismatches if "physical cross-table" in m.detail]
+    assert len(spec_level) == 1
+    assert len(physical) == 1
+    assert spec_level[0].expected == "STRING"  # ontology-derived DDL type
+    assert physical[0].expected == "STRING"  # actual node BQ field type
+
+
+class TestEndpointPhysicalCrossTableCheck:
+
+  def test_edge_endpoint_disagrees_with_node_actual_field_type(self):
+    """When the node table has drifted away from its ontology
+    declaration, the per-entity loop flags a TYPE_MISMATCH on the
+    node. But the edge endpoint may also disagree with the node's
+    *actual* storage type — in which case the join would fail at
+    query time. The validator must surface ENDPOINT_TYPE_MISMATCH
+    for that edge ↔ node disagreement, not just the spec-level one.
+
+    Setup: node's decision_id column is INT64 in BQ (drifted from
+    the ontology's STRING declaration). Edge's decision_id column
+    is STRING (matching ontology, but disagreeing with the node's
+    actual storage). The edge would fail to join the node.
+    """
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+
+    ontology, binding = _ontology_and_binding()
+    schemas = _good_schemas()
+    # Node decision_id has drifted to INT64.
+    schemas["p.d.decision_points"] = [
+        _FakeField("decision_id", "INT64"),
+        _FakeField("confidence", "FLOAT64"),
+    ]
+    # Edge decision_id is still STRING (ontology says so).
+    # candidate_edges already has decision_id as STRING in
+    # _good_schemas(), so no change needed there.
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    # Per-entity loop catches the node's drift.
+    node_mismatches = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.TYPE_MISMATCH
+        and f.binding_element == "Decision"
+    ]
+    assert len(node_mismatches) == 1
+
+    # Per-relationship loop catches the physical cross-table edge ↔
+    # node disagreement (edge=STRING, node=INT64). The detail must
+    # call out that this is a physical-table mismatch so users can
+    # tell it apart from the spec-level (1) check.
+    edge_mismatches = [
+        f
+        for f in report.failures
+        if f.code == FailureCode.ENDPOINT_TYPE_MISMATCH
+        and f.binding_element == "HasOutcome"
+    ]
+    assert len(edge_mismatches) >= 1
+    assert any(
+        "physical cross-table mismatch" in m.detail for m in edge_mismatches
+    ), (
+        "Expected at least one ENDPOINT_TYPE_MISMATCH detail to call "
+        "out the physical cross-table mismatch; got: "
+        f"{[m.detail for m in edge_mismatches]}"
+    )
 
 
 class TestUnexpectedRepeatedMode:
@@ -529,6 +648,91 @@ class TestKeyColumnNullable:
 # ------------------------------------------------------------------ #
 # Cross-cutting: cross-project source                                  #
 # ------------------------------------------------------------------ #
+
+
+class TestBindingPathYamlOrder:
+
+  def test_path_index_uses_binding_yaml_order_not_resolved_order(self):
+    """A binding YAML that lists properties in a different order
+    than the ontology must produce paths using the binding's index,
+    not the ResolvedEntity's. Otherwise tooling pointed at
+    ``binding.entities[0].properties[1].column`` would land on the
+    wrong YAML entry.
+
+    Setup: ontology declares (decision_id, confidence). Binding
+    YAML lists them in reverse order (confidence, decision_id).
+    The bound 'confidence' column is missing on the BQ table. The
+    failure path must be ``properties[0]`` (the binding's index for
+    confidence), not ``properties[1]`` (the resolved-side index).
+    """
+    import pathlib
+    import tempfile
+
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="bind_validate_order_"))
+    (tmp / "ont.yaml").write_text(
+        "ontology: TestGraph\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decision_id]\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        type: string\n"
+        "      - name: confidence\n"
+        "        type: double\n"
+        "relationships: []\n",
+        encoding="utf-8",
+    )
+    # Binding lists confidence FIRST, decision_id SECOND.
+    (tmp / "bnd.yaml").write_text(
+        "binding: test_bind\n"
+        "ontology: TestGraph\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    source: decision_points\n"
+        "    properties:\n"
+        "      - name: confidence\n"
+        "        column: confidence\n"
+        "      - name: decision_id\n"
+        "        column: decision_id\n"
+        "relationships: []\n",
+        encoding="utf-8",
+    )
+
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+
+    # Drop confidence — its bound column is missing on BQ.
+    schemas = {
+        "p.d.decision_points": [_FakeField("decision_id", "STRING")],
+    }
+    client = _FakeBQClient(schemas)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+
+    miss = [f for f in report.failures if f.code == FailureCode.MISSING_COLUMN]
+    assert len(miss) == 1
+    # The failure path index must be 0 (binding YAML's index for
+    # 'confidence'), not 1 (the resolved-side index — Decision's
+    # ontology order is (decision_id, confidence)).
+    assert miss[0].binding_path == (
+        "binding.entities[0].properties[0].column"
+    ), (
+        f"Path {miss[0].binding_path!r} should reflect binding YAML "
+        f"order (confidence is properties[0]), not resolved-side "
+        f"order (where confidence is properties[1])."
+    )
 
 
 class TestCrossProjectSource:
