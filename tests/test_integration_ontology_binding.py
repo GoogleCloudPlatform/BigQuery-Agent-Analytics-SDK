@@ -614,3 +614,216 @@ class TestLineageEndToEnd:
     )
     rows = list(job.result())
     assert len(rows) > 0, "Lineage GQL returned 0 rows"
+
+
+# ------------------------------------------------------------------ #
+# Binding-validator live test (issue #105 PR 2a)                       #
+# ------------------------------------------------------------------ #
+
+
+class TestBindingValidationLive:
+  """Live validation that ``validate_binding_against_bigquery``
+  behaves correctly against real BigQuery.
+
+  Self-contained: uses its own per-test scratch dataset (rather
+  than the module-scoped fixture) because the third phase of this
+  test deliberately drops a column via ALTER TABLE, and running
+  destructive SQL against a shared dataset would interfere with
+  other tests in this file.
+
+  Phases:
+    1. Materialize real tables via OntologyMaterializer.
+    2. Default-mode validation: report.ok must be True; warnings
+       contain only KEY_COLUMN_NULLABLE entries (because the SDK's
+       CREATE TABLE IF NOT EXISTS emits NULLABLE keys).
+    3. Strict-mode validation: same input must surface those
+       warnings as KEY_COLUMN_NULLABLE failures, with warnings
+       empty (escalated, not duplicated).
+    4. Drop the 'confidence' column via real ALTER TABLE; default-
+       mode re-validation must emit exactly one MISSING_COLUMN
+       failure pointing at the dropped column.
+  """
+
+  @pytest.fixture(scope="function")
+  def isolated_scratch(self):
+    """Per-test scratch dataset; cleaned up unconditionally."""
+    from google.cloud import bigquery
+
+    run_id = uuid.uuid4().hex[:8]
+    ds_id = f"bind_validate_live_{run_id}"
+    client = bigquery.Client(project=_PROJECT, location=_LOCATION)
+    ds = bigquery.Dataset(f"{_PROJECT}.{ds_id}")
+    ds.location = _LOCATION
+    ds.default_table_expiration_ms = 3600000
+    client.create_dataset(ds, exists_ok=True)
+    try:
+      yield client, ds_id
+    finally:
+      client.delete_dataset(
+          f"{_PROJECT}.{ds_id}",
+          delete_contents=True,
+          not_found_ok=True,
+      )
+
+  @pytest.fixture(scope="function")
+  def isolated_ontology_and_binding(self, isolated_scratch, tmp_path_factory):
+    """Per-test ontology+binding pointing at the isolated scratch."""
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    _, ds_id = isolated_scratch
+    tmp = tmp_path_factory.mktemp("bind_validate_live")
+
+    ont_path = tmp / "ontology.yaml"
+    ont_path.write_text(
+        "ontology: BindValidatorLive\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decision_id]\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        type: string\n"
+        "      - name: confidence\n"
+        "        type: double\n"
+        "  - name: Outcome\n"
+        "    keys:\n"
+        "      primary: [outcome_id]\n"
+        "    properties:\n"
+        "      - name: outcome_id\n"
+        "        type: string\n"
+        "relationships:\n"
+        "  - name: HasOutcome\n"
+        "    from: Decision\n"
+        "    to: Outcome\n"
+        "    properties:\n"
+        "      - name: weight\n"
+        "        type: double\n",
+        encoding="utf-8",
+    )
+
+    bnd_path = tmp / "binding.yaml"
+    bnd_path.write_text(
+        f"binding: live_check\n"
+        f"ontology: BindValidatorLive\n"
+        f"target:\n"
+        f"  backend: bigquery\n"
+        f"  project: {_PROJECT}\n"
+        f"  dataset: {ds_id}\n"
+        f"entities:\n"
+        f"  - name: Decision\n"
+        f"    source: decisions\n"
+        f"    properties:\n"
+        f"      - name: decision_id\n"
+        f"        column: decision_id\n"
+        f"      - name: confidence\n"
+        f"        column: confidence\n"
+        f"  - name: Outcome\n"
+        f"    source: outcomes\n"
+        f"    properties:\n"
+        f"      - name: outcome_id\n"
+        f"        column: outcome_id\n"
+        f"relationships:\n"
+        f"  - name: HasOutcome\n"
+        f"    source: edges\n"
+        f"    from_columns: [decision_id]\n"
+        f"    to_columns: [outcome_id]\n"
+        f"    properties:\n"
+        f"      - name: weight\n"
+        f"        column: weight\n",
+        encoding="utf-8",
+    )
+
+    ontology = load_ontology(str(ont_path))
+    binding = load_binding(str(bnd_path), ontology=ontology)
+    return ontology, binding
+
+  def test_validator_end_to_end_against_real_bigquery(
+      self, isolated_scratch, isolated_ontology_and_binding
+  ):
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.binding_validation import validate_binding_against_bigquery
+    from bigquery_agent_analytics.ontology_materializer import OntologyMaterializer
+
+    client, ds_id = isolated_scratch
+    ontology, binding = isolated_ontology_and_binding
+
+    # Phase 1: materialize real tables.
+    mat = OntologyMaterializer.from_ontology_binding(
+        ontology=ontology,
+        binding=binding,
+        lineage_config=None,
+        write_mode="batch_load",
+    )
+    tables = mat.create_tables()
+    assert set(tables.keys()) == {
+        "Decision",
+        "Outcome",
+        "HasOutcome",
+    }, f"Unexpected tables created: {sorted(tables.keys())}"
+
+    # Phase 2: default-mode validation. SDK-created tables must
+    # validate clean; the only signal is advisory warnings on
+    # NULLABLE keys.
+    default_report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+    assert default_report.ok is True, (
+        f"Default mode rejected SDK-created tables. Failures: "
+        f"{[(f.code, f.detail) for f in default_report.failures]}"
+    )
+    assert all(
+        w.code == FailureCode.KEY_COLUMN_NULLABLE
+        for w in default_report.warnings
+    ), (
+        "Only KEY_COLUMN_NULLABLE warnings expected against SDK-"
+        "created tables. Got: "
+        f"{[w.code for w in default_report.warnings]}"
+    )
+    # Decision.decision_id, Outcome.outcome_id (entity primary keys)
+    # plus HasOutcome.from_columns[0]=decision_id and
+    # HasOutcome.to_columns[0]=outcome_id (relationship endpoints).
+    assert len(default_report.warnings) == 4
+
+    # Phase 3: strict-mode escalation.
+    strict_report = validate_binding_against_bigquery(
+        ontology=ontology,
+        binding=binding,
+        bq_client=client,
+        strict=True,
+    )
+    assert (
+        strict_report.ok is False
+    ), "Strict mode should reject NULLABLE primary-key columns"
+    assert all(
+        f.code == FailureCode.KEY_COLUMN_NULLABLE
+        for f in strict_report.failures
+    )
+    assert len(strict_report.failures) == 4
+    assert strict_report.warnings == (), (
+        "Strict mode must escalate warnings into failures, not "
+        "double-emit them"
+    )
+
+    # Phase 4: drop a non-key property column via real ALTER TABLE
+    # and assert the validator catches the resulting drift.
+    table_ref = f"{_PROJECT}.{ds_id}.decisions"
+    client.query(f"ALTER TABLE `{table_ref}` DROP COLUMN confidence").result()
+
+    broken_report = validate_binding_against_bigquery(
+        ontology=ontology, binding=binding, bq_client=client
+    )
+    miss = [
+        f
+        for f in broken_report.failures
+        if f.code == FailureCode.MISSING_COLUMN and "confidence" in f.bq_ref
+    ]
+    assert len(miss) == 1, (
+        f"Expected exactly 1 MISSING_COLUMN for confidence, got "
+        f"failures: "
+        f"{[(f.code, f.bq_ref) for f in broken_report.failures]}"
+    )
+    # Path must reflect binding YAML order. Decision's binding lists
+    # decision_id at properties[0] and confidence at properties[1].
+    assert miss[0].binding_path == ("binding.entities[0].properties[1].column")
+    assert miss[0].bq_ref == f"{table_ref}.confidence"
