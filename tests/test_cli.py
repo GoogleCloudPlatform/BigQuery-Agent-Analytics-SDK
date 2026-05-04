@@ -2826,6 +2826,33 @@ class TestBindingValidate:
     )
     assert result.exit_code == 2
 
+  @patch("google.cloud.bigquery.Client")
+  def test_location_threaded_to_bigquery_client(
+      self, mock_client_cls, tmp_path
+  ):
+    """binding-validate --location=EU constructs the BQ client with
+    location='EU' so the validator queries the EU multi-region's
+    INFORMATION_SCHEMA."""
+    ont, bnd = self._write_specs(tmp_path)
+
+    with self._patched_validator_returning(ok=True):
+      result = runner.invoke(
+          app,
+          [
+              "binding-validate",
+              "--project-id=proj",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--location=EU",
+          ],
+      )
+
+    assert result.exit_code == 0
+    # Confirm bigquery.Client was constructed with location="EU".
+    _, kwargs = mock_client_cls.call_args
+    assert kwargs.get("location") == "EU"
+    assert kwargs.get("project") == "proj"
+
 
 # ------------------------------------------------------------------ #
 # ontology-build --validate-binding[-strict]                           #
@@ -3053,3 +3080,103 @@ class TestOntologyBuildValidateBindingFlag:
         ],
     )
     assert result.exit_code == 2
+
+  @patch("google.cloud.bigquery.Client")
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_validate_binding_warnings_only_proceeds_to_build(
+      self, mock_build, _mock_client, tmp_path
+  ):
+    """Warning-only validation path: --validate-binding emits the
+    warning to stderr (so it shows up in CI logs) but still allows
+    the build to proceed. Covers _run_binding_preflight()'s default-
+    mode advisory branch — failures short-circuit, warnings don't.
+    """
+    from bigquery_agent_analytics.binding_validation import BindingValidationReport
+    from bigquery_agent_analytics.binding_validation import BindingValidationWarning
+    from bigquery_agent_analytics.binding_validation import FailureCode
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    ont, bnd = self._write_specs(tmp_path)
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": True,
+        "property_graph_status": "created",
+        "spec": MagicMock(),
+    }
+
+    warning = BindingValidationWarning(
+        code=FailureCode.KEY_COLUMN_NULLABLE,
+        binding_element="Decision",
+        binding_path="binding.entities[0].properties[0].column",
+        bq_ref="p.d.decisions.decision_id",
+        detail="primary-key column 'decision_id' is NULLABLE",
+    )
+
+    with patch(
+        "bigquery_agent_analytics.binding_validation"
+        ".validate_binding_against_bigquery",
+        return_value=BindingValidationReport(warnings=(warning,)),
+    ):
+      result = runner.invoke(
+          app,
+          [
+              "ontology-build",
+              "--project-id=proj",
+              "--dataset-id=ds",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--session-ids=sess1",
+              "--validate-binding",
+          ],
+      )
+
+    assert result.exit_code == 0
+    # Build proceeded — the warning did not block extraction.
+    mock_build.assert_called_once()
+    # Warning is visible in CLI output (stderr is mixed into
+    # result.output by default).
+    assert "WARN: key_column_nullable" in result.output
+
+  @patch("google.cloud.bigquery.Client")
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_location_threaded_through_orchestrator(
+      self, mock_build, _mock_client, tmp_path
+  ):
+    """ontology-build --location=EU forwards to build_ontology_graph
+    so the orchestrator's BQ client targets the EU multi-region.
+    Catches the regression where the CLI built without forwarding
+    location."""
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    ont, bnd = self._write_specs(tmp_path)
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": True,
+        "property_graph_status": "created",
+        "spec": MagicMock(),
+    }
+
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--ontology={ont}",
+            f"--binding={bnd}",
+            "--session-ids=sess1",
+            "--location=EU",
+        ],
+    )
+
+    assert result.exit_code == 0
+    _, kwargs = mock_build.call_args
+    assert kwargs["location"] == "EU"

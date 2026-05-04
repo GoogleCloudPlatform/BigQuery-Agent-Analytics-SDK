@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bq-agent-sdk binding-validate` CLI** — pre-flight validator that
+  checks whether a binding YAML's referenced BigQuery tables
+  physically exist with the columns and types the binding requires,
+  before extraction wastes ``AI.GENERATE`` tokens. Emits a structured
+  JSON report (failures + warnings) and exits 0 / 1 / 2. Supports
+  `--strict` to escalate `KEY_COLUMN_NULLABLE` warnings to hard
+  failures. See [issue #105](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/105)
+  and `docs/ontology/binding-validation.md`.
+- **`bq-agent-sdk ontology-build --validate-binding` and
+  `--validate-binding-strict`** opt-in flags. Run the binding
+  pre-flight before phase 2 (extraction). On any failure, the build
+  short-circuits before any `AI.GENERATE` call fires; default-mode
+  warnings print to stderr but don't block. The two flags are
+  mutually exclusive; both incompatible with the deprecated
+  `--spec-path` form because the validator needs the unresolved
+  `Ontology` + `Binding` pair.
+- **`bq-agent-sdk ontology-build --location`** — BigQuery location
+  (e.g. `US`, `EU`) threaded through to `build_ontology_graph()`.
+  The Python API has supported `location` since 0.2.3; this adds
+  the matching CLI flag.
+- **`validate_binding_against_bigquery(...)` Python API** in
+  `bigquery_agent_analytics.binding_validation`. Same surface the
+  CLI calls: takes `Ontology` + `Binding` + `bq_client`, returns a
+  `BindingValidationReport` with `failures` + `warnings` lists and
+  an `ok` property. Issue [#105](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/105).
+
 ## [0.2.3] - 2026-04-27
 
 ### Fixed

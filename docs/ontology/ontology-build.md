@@ -53,7 +53,33 @@ The CLI's `property_graph_status` field has three values:
 
 Without `--skip-property-graph`, the existing exit-1 behavior on graph-create failure is preserved exactly.
 
-## When to use this
+## BigQuery location
+
+`--location` (e.g. `--location=US`, `--location=EU`) is forwarded to the orchestrator's BigQuery client. Required when the bound tables live outside the default location, especially in combination with `--validate-binding[-strict]` (the pre-flight validator queries `INFORMATION_SCHEMA` in the same region).
+
+```
+bq-agent-sdk ontology-build \
+  --project-id my-project \
+  --dataset-id my-dataset \
+  --ontology my.ontology.yaml \
+  --binding my-bq-prod.binding.yaml \
+  --session-ids sess-1 \
+  --location EU \
+  --validate-binding
+```
+
+## Pre-flight binding validation
+
+`--validate-binding` and `--validate-binding-strict` run the binding validator before extraction, short-circuiting the build if the binding YAML drifted from the physical tables. See [binding-validation.md](binding-validation.md) for the full reference.
+
+```
+bq-agent-sdk ontology-build ... --validate-binding         # default mode
+bq-agent-sdk ontology-build ... --validate-binding-strict  # strict mode
+```
+
+The two flags are mutually exclusive and incompatible with the deprecated `--spec-path` form.
+
+## When to use `--skip-property-graph`
 
 - **You already manage `CREATE PROPERTY GRAPH` in Terraform / dbt / a SQL file.** The SDK's `CREATE OR REPLACE PROPERTY GRAPH` would clobber your DDL on every run.
 - **Your property graph definition uses DDL details the SDK compiler doesn't emit.** You hand-authored the graph DDL to express custom labels or other DDL details the SDK's compiler doesn't generate.

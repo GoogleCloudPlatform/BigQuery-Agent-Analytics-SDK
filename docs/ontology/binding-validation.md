@@ -70,23 +70,32 @@ The two flags are mutually exclusive. Both are incompatible with the deprecated 
 
 The validator returns a `BindingValidationReport` with two collections: `failures` (always blocking) and `warnings` (advisory in default mode, escalated under `--strict`). Each entry carries `code`, `binding_element`, `binding_path`, `bq_ref`, `expected`, `observed`, and `detail`.
 
+The CLI emits failure codes as **lowercase strings** in the JSON report (e.g., `"missing_table"`, not `"MISSING_TABLE"`). Use the lowercase form when filtering with `jq` or other JSON tools. The Python `FailureCode` enum exposes both forms — `FailureCode.MISSING_TABLE.value == "missing_table"`.
+
 ### Default-mode failure codes (always blocking)
 
-| Code | What it means | Typical fix |
-|---|---|---|
-| `MISSING_TABLE` | The bound `source` table doesn't exist in BigQuery. | Create the table, or fix the binding's `source`. |
-| `MISSING_COLUMN` | A bound column (property, key, or SDK metadata column like `session_id` / `extracted_at`) doesn't exist on the table. | Add the column, or fix the binding's `column` mapping. |
-| `TYPE_MISMATCH` | A bound column exists but its BigQuery type doesn't match the ontology-derived expected type. | Change the BQ column's type, or change the ontology property's type. |
-| `ENDPOINT_TYPE_MISMATCH` | An edge's `from_columns` or `to_columns` entry disagrees with the referenced node's primary-key column type. Two flavors: spec-level (edge vs ontology) and physical (edge vs node's actual storage). | Align the edge endpoint's type with the node's primary-key type. |
-| `UNEXPECTED_REPEATED_MODE` | A scalar property/key column is in REPEATED (ARRAY) mode in BigQuery. | Restructure the table — the SDK can't bind scalar properties to ARRAY columns. |
-| `MISSING_DATASET` | The bound table's dataset doesn't exist. | Create the dataset, or fix the binding's `target.dataset` / fully-qualified `source`. |
-| `INSUFFICIENT_PERMISSIONS` | The calling identity can't read the table. | Grant `bigquery.tables.get` on the dataset, or run as an identity that already has it. |
+| Python `FailureCode` | JSON `code` value | What it means | Typical fix |
+|---|---|---|---|
+| `MISSING_TABLE` | `"missing_table"` | The bound `source` table doesn't exist in BigQuery. | Create the table, or fix the binding's `source`. |
+| `MISSING_COLUMN` | `"missing_column"` | A bound column (property, key, or SDK metadata column like `session_id` / `extracted_at`) doesn't exist on the table. | Add the column, or fix the binding's `column` mapping. |
+| `TYPE_MISMATCH` | `"type_mismatch"` | A bound column exists but its BigQuery type doesn't match the ontology-derived expected type. | Change the BQ column's type, or change the ontology property's type. |
+| `ENDPOINT_TYPE_MISMATCH` | `"endpoint_type_mismatch"` | An edge's `from_columns` or `to_columns` entry disagrees with the referenced node's primary-key column type. Two flavors: spec-level (edge vs ontology) and physical (edge vs node's actual storage). | Align the edge endpoint's type with the node's primary-key type. |
+| `UNEXPECTED_REPEATED_MODE` | `"unexpected_repeated_mode"` | A scalar property/key column is in REPEATED (ARRAY) mode in BigQuery. | Restructure the table — the SDK can't bind scalar properties to ARRAY columns. |
+| `MISSING_DATASET` | `"missing_dataset"` | The bound table's dataset doesn't exist. | Create the dataset, or fix the binding's `target.dataset` / fully-qualified `source`. |
+| `INSUFFICIENT_PERMISSIONS` | `"insufficient_permissions"` | The calling identity can't read the table. | Grant `bigquery.tables.get` on the dataset, or run as an identity that already has it. |
 
 ### Strict-only code (warning by default, failure under `--strict`)
 
-| Code | What it means | Why it's strict-only |
-|---|---|---|
-| `KEY_COLUMN_NULLABLE` | A primary-key or endpoint-key column is in NULLABLE mode. | The SDK's own `CREATE TABLE IF NOT EXISTS` DDL emits NULLABLE key columns. A default-mode hard failure here would reject SDK-created tables. Use `--strict` in CI to enforce REQUIRED keys when you control the DDL. |
+| Python `FailureCode` | JSON `code` value | What it means | Why it's strict-only |
+|---|---|---|---|
+| `KEY_COLUMN_NULLABLE` | `"key_column_nullable"` | A primary-key or endpoint-key column is in NULLABLE mode. | The SDK's own `CREATE TABLE IF NOT EXISTS` DDL emits NULLABLE key columns. A default-mode hard failure here would reject SDK-created tables. Use `--strict` in CI to enforce REQUIRED keys when you control the DDL. |
+
+Example `jq` filter for failed builds:
+
+```bash
+bq-agent-sdk binding-validate ... --format=json \
+  | jq '.failures[] | select(.code == "missing_column") | .bq_ref'
+```
 
 ## CI usage pattern
 
