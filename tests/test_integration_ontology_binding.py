@@ -748,6 +748,18 @@ class TestBindingValidationLive:
     client, ds_id = isolated_scratch
     ontology, binding = isolated_ontology_and_binding
 
+    # Cheap fixture-scope sanity check: the binding YAML the second
+    # fixture wrote must point at the dataset the first fixture
+    # created. If a future refactor flips either fixture to module
+    # scope by accident, the binding would race with whichever
+    # dataset was created first and this assert would catch it
+    # before any BQ call runs.
+    assert binding.target.dataset == ds_id, (
+        f"binding.target.dataset={binding.target.dataset!r} but "
+        f"isolated_scratch yielded {ds_id!r}; fixture scopes are "
+        f"out of sync"
+    )
+
     # Phase 1: materialize real tables.
     mat = OntologyMaterializer.from_ontology_binding(
         ontology=ontology,
