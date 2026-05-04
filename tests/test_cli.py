@@ -2831,8 +2831,8 @@ class TestBindingValidate:
       self, mock_client_cls, tmp_path
   ):
     """binding-validate --location=EU constructs the BQ client with
-    location='EU' so the validator queries the EU multi-region's
-    INFORMATION_SCHEMA."""
+    location='EU' so the validator uses that client (and its
+    location) to fetch each bound table's metadata."""
     ont, bnd = self._write_specs(tmp_path)
 
     with self._patched_validator_returning(ok=True):

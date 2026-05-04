@@ -55,7 +55,7 @@ Without `--skip-property-graph`, the existing exit-1 behavior on graph-create fa
 
 ## BigQuery location
 
-`--location` (e.g. `--location=US`, `--location=EU`) is forwarded to the orchestrator's BigQuery client. Required when the bound tables live outside the default location, especially in combination with `--validate-binding[-strict]` (the pre-flight validator queries `INFORMATION_SCHEMA` in the same region).
+`--location` (e.g. `--location=US`, `--location=EU`) is forwarded to the orchestrator's BigQuery client. Required when the bound tables live outside the default location, especially in combination with `--validate-binding[-strict]` (the pre-flight validator uses the BigQuery client with the requested location to fetch each bound table's metadata).
 
 ```
 bq-agent-sdk ontology-build \
