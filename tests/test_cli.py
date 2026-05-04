@@ -2620,3 +2620,436 @@ class TestOntologyBuild:
     )
     assert result.exit_code == 1
     assert "Property Graph creation failed" in result.output
+
+
+# ------------------------------------------------------------------ #
+# binding-validate (issue #105 PR 2b)                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestBindingValidate:
+  """CLI behavior for `bq-agent-sdk binding-validate`."""
+
+  _ONT_YAML = (
+      "ontology: TestGraph\n"
+      "entities:\n"
+      "  - name: Decision\n"
+      "    keys:\n"
+      "      primary: [decision_id]\n"
+      "    properties:\n"
+      "      - name: decision_id\n"
+      "        type: string\n"
+      "relationships: []\n"
+  )
+  _BND_YAML = (
+      "binding: test_bind\n"
+      "ontology: TestGraph\n"
+      "target:\n"
+      "  backend: bigquery\n"
+      "  project: p\n"
+      "  dataset: d\n"
+      "entities:\n"
+      "  - name: Decision\n"
+      "    source: decisions\n"
+      "    properties:\n"
+      "      - name: decision_id\n"
+      "        column: decision_id\n"
+      "relationships: []\n"
+  )
+
+  def _write_specs(self, tmp_path):
+    ont = tmp_path / "ontology.yaml"
+    bnd = tmp_path / "binding.yaml"
+    ont.write_text(self._ONT_YAML, encoding="utf-8")
+    bnd.write_text(self._BND_YAML, encoding="utf-8")
+    return ont, bnd
+
+  def _patched_validator_returning(self, ok=True, failures=(), warnings=()):
+    """Build a context-manager patch chain.
+
+    The CLI imports ``validate_binding_against_bigquery`` at call
+    time from ``bigquery_agent_analytics.binding_validation``. We
+    patch that symbol so the test never touches BQ.
+    """
+    from bigquery_agent_analytics.binding_validation import BindingValidationReport
+
+    return patch(
+        "bigquery_agent_analytics.binding_validation"
+        ".validate_binding_against_bigquery",
+        return_value=BindingValidationReport(
+            failures=tuple(failures), warnings=tuple(warnings)
+        ),
+    )
+
+  @patch("google.cloud.bigquery.Client")
+  def test_clean_validation_exits_zero(self, _mock_client, tmp_path):
+    ont, bnd = self._write_specs(tmp_path)
+
+    with self._patched_validator_returning(ok=True):
+      result = runner.invoke(
+          app,
+          [
+              "binding-validate",
+              "--project-id=proj",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+          ],
+      )
+
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["ok"] is True
+    assert parsed["failures"] == []
+    assert parsed["warnings"] == []
+    assert parsed["strict"] is False
+
+  @patch("google.cloud.bigquery.Client")
+  def test_failures_exit_one_with_payload(self, _mock_client, tmp_path):
+    from bigquery_agent_analytics.binding_validation import BindingValidationFailure
+    from bigquery_agent_analytics.binding_validation import FailureCode
+
+    ont, bnd = self._write_specs(tmp_path)
+    fail = BindingValidationFailure(
+        code=FailureCode.MISSING_TABLE,
+        binding_element="Decision",
+        binding_path="binding.entities[0].source",
+        bq_ref="p.d.decisions",
+        detail="404 Not found",
+    )
+
+    with self._patched_validator_returning(failures=[fail]):
+      result = runner.invoke(
+          app,
+          [
+              "binding-validate",
+              "--project-id=proj",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+          ],
+      )
+
+    assert result.exit_code == 1
+    parsed = json.loads(result.output)
+    assert parsed["ok"] is False
+    assert len(parsed["failures"]) == 1
+    assert parsed["failures"][0]["code"] == "missing_table"
+    assert parsed["failures"][0]["bq_ref"] == "p.d.decisions"
+    assert parsed["failures"][0]["binding_path"] == (
+        "binding.entities[0].source"
+    )
+
+  @patch("google.cloud.bigquery.Client")
+  def test_warnings_print_to_stderr_but_do_not_flip_exit(
+      self, _mock_client, tmp_path
+  ):
+    """Default mode: warnings go to stderr, exit code stays 0."""
+    from bigquery_agent_analytics.binding_validation import BindingValidationWarning
+    from bigquery_agent_analytics.binding_validation import FailureCode
+
+    ont, bnd = self._write_specs(tmp_path)
+    warn = BindingValidationWarning(
+        code=FailureCode.KEY_COLUMN_NULLABLE,
+        binding_element="Decision",
+        binding_path="binding.entities[0].properties[0].column",
+        bq_ref="p.d.decisions.decision_id",
+        detail="primary-key column 'decision_id' is NULLABLE",
+    )
+
+    with self._patched_validator_returning(warnings=[warn]):
+      result = runner.invoke(
+          app,
+          [
+              "binding-validate",
+              "--project-id=proj",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+          ],
+      )
+
+    assert result.exit_code == 0
+    # The CliRunner mixes stderr into result.output by default, so
+    # the WARN line shows up alongside the JSON payload. Split on
+    # the WARN sentinel before parsing the JSON.
+    json_part = result.output.split("WARN:", 1)[0]
+    parsed = json.loads(json_part)
+    assert parsed["ok"] is True
+    assert len(parsed["warnings"]) == 1
+    # Warning is printed (stderr) so CI logs surface it.
+    assert "WARN: key_column_nullable" in result.output
+
+  @patch("google.cloud.bigquery.Client")
+  def test_strict_flag_threaded_through(self, _mock_client, tmp_path):
+    ont, bnd = self._write_specs(tmp_path)
+
+    with self._patched_validator_returning(ok=True) as mock_validate:
+      result = runner.invoke(
+          app,
+          [
+              "binding-validate",
+              "--project-id=proj",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--strict",
+          ],
+      )
+
+    assert result.exit_code == 0
+    _, kwargs = mock_validate.call_args
+    assert kwargs["strict"] is True
+    parsed = json.loads(result.output)
+    assert parsed["strict"] is True
+
+  def test_missing_required_flags_exit_2(self):
+    """typer enforces required --ontology / --binding."""
+    result = runner.invoke(
+        app,
+        [
+            "binding-validate",
+            "--project-id=proj",
+        ],
+    )
+    assert result.exit_code == 2
+
+  @patch("google.cloud.bigquery.Client")
+  def test_load_failure_exits_two(self, _mock_client, tmp_path):
+    """Missing ontology file → exit 2 (loader raises)."""
+    bnd = tmp_path / "binding.yaml"
+    bnd.write_text(self._BND_YAML, encoding="utf-8")
+    result = runner.invoke(
+        app,
+        [
+            "binding-validate",
+            "--project-id=proj",
+            "--ontology=/nonexistent/ontology.yaml",
+            f"--binding={bnd}",
+        ],
+    )
+    assert result.exit_code == 2
+
+
+# ------------------------------------------------------------------ #
+# ontology-build --validate-binding[-strict]                           #
+# ------------------------------------------------------------------ #
+
+
+class TestOntologyBuildValidateBindingFlag:
+  """CLI behavior for ontology-build's pre-flight binding validation.
+
+  Verifies that --validate-binding[-strict] short-circuits before
+  any AI.GENERATE call (i.e., before build_ontology_graph is
+  invoked) when the validator reports failures.
+  """
+
+  _SPEC_PATH = os.path.join(
+      os.path.dirname(__file__),
+      "..",
+      "examples",
+      "ymgo_graph_spec.yaml",
+  )
+
+  def _write_specs(self, tmp_path):
+    ont_yaml = (
+        "ontology: TestGraph\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decision_id]\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        type: string\n"
+        "relationships: []\n"
+    )
+    bnd_yaml = (
+        "binding: test_bind\n"
+        "ontology: TestGraph\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    source: decisions\n"
+        "    properties:\n"
+        "      - name: decision_id\n"
+        "        column: decision_id\n"
+        "relationships: []\n"
+    )
+    ont = tmp_path / "ontology.yaml"
+    bnd = tmp_path / "binding.yaml"
+    ont.write_text(ont_yaml, encoding="utf-8")
+    bnd.write_text(bnd_yaml, encoding="utf-8")
+    return ont, bnd
+
+  @patch("google.cloud.bigquery.Client")
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_validate_binding_short_circuits_on_failure_before_build(
+      self, mock_build, _mock_client, tmp_path
+  ):
+    """When the validator reports a failure, build_ontology_graph
+    must NOT be called — extraction never starts and AI.GENERATE
+    tokens are not spent."""
+    from bigquery_agent_analytics.binding_validation import BindingValidationFailure
+    from bigquery_agent_analytics.binding_validation import BindingValidationReport
+    from bigquery_agent_analytics.binding_validation import FailureCode
+
+    ont, bnd = self._write_specs(tmp_path)
+
+    with patch(
+        "bigquery_agent_analytics.binding_validation"
+        ".validate_binding_against_bigquery",
+        return_value=BindingValidationReport(
+            failures=(
+                BindingValidationFailure(
+                    code=FailureCode.MISSING_TABLE,
+                    binding_element="Decision",
+                    binding_path="binding.entities[0].source",
+                    bq_ref="p.d.decisions",
+                    detail="404 Not found",
+                ),
+            ),
+        ),
+    ):
+      result = runner.invoke(
+          app,
+          [
+              "ontology-build",
+              "--project-id=proj",
+              "--dataset-id=ds",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--session-ids=sess1",
+              "--validate-binding",
+          ],
+      )
+
+    assert result.exit_code == 1
+    # The orchestrator must not have been invoked — extraction
+    # would have spent AI.GENERATE tokens.
+    mock_build.assert_not_called()
+    assert "binding validation failed" in result.output
+
+  @patch("google.cloud.bigquery.Client")
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_validate_binding_strict_short_circuits_on_nullable_keys(
+      self, mock_build, _mock_client, tmp_path
+  ):
+    """--validate-binding-strict: a NULLABLE primary-key column
+    should escalate from advisory warning to hard failure and
+    short-circuit before extraction."""
+    from bigquery_agent_analytics.binding_validation import BindingValidationFailure
+    from bigquery_agent_analytics.binding_validation import BindingValidationReport
+    from bigquery_agent_analytics.binding_validation import FailureCode
+
+    ont, bnd = self._write_specs(tmp_path)
+
+    with patch(
+        "bigquery_agent_analytics.binding_validation"
+        ".validate_binding_against_bigquery",
+        return_value=BindingValidationReport(
+            failures=(
+                BindingValidationFailure(
+                    code=FailureCode.KEY_COLUMN_NULLABLE,
+                    binding_element="Decision",
+                    binding_path="binding.entities[0].properties[0].column",
+                    bq_ref="p.d.decisions.decision_id",
+                    detail="primary-key column is NULLABLE",
+                ),
+            ),
+        ),
+    ) as mock_validate:
+      result = runner.invoke(
+          app,
+          [
+              "ontology-build",
+              "--project-id=proj",
+              "--dataset-id=ds",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--session-ids=sess1",
+              "--validate-binding-strict",
+          ],
+      )
+
+    assert result.exit_code == 1
+    mock_build.assert_not_called()
+    _, kwargs = mock_validate.call_args
+    assert kwargs["strict"] is True
+
+  @patch("google.cloud.bigquery.Client")
+  @patch("bigquery_agent_analytics.ontology_orchestrator.build_ontology_graph")
+  def test_validate_binding_clean_proceeds_to_build(
+      self, mock_build, _mock_client, tmp_path
+  ):
+    """Clean validation lets the build proceed normally."""
+    from bigquery_agent_analytics.binding_validation import BindingValidationReport
+    from bigquery_agent_analytics.ontology_models import ExtractedGraph
+
+    ont, bnd = self._write_specs(tmp_path)
+    mock_build.return_value = {
+        "graph_name": "g",
+        "graph_ref": "proj.ds.g",
+        "graph": ExtractedGraph(name="test"),
+        "tables_created": {},
+        "rows_materialized": {},
+        "property_graph_created": True,
+        "property_graph_status": "created",
+        "spec": MagicMock(),
+    }
+
+    with patch(
+        "bigquery_agent_analytics.binding_validation"
+        ".validate_binding_against_bigquery",
+        return_value=BindingValidationReport(),  # ok=True
+    ):
+      result = runner.invoke(
+          app,
+          [
+              "ontology-build",
+              "--project-id=proj",
+              "--dataset-id=ds",
+              f"--ontology={ont}",
+              f"--binding={bnd}",
+              "--session-ids=sess1",
+              "--validate-binding",
+          ],
+      )
+
+    assert result.exit_code == 0
+    mock_build.assert_called_once()
+
+  def test_validate_binding_with_spec_path_rejected(self, tmp_path):
+    """--validate-binding requires --ontology/--binding (separated
+    form). Combined --spec-path is incompatible because the
+    validator needs the unresolved Ontology+Binding pair."""
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--spec-path={self._SPEC_PATH}",
+            "--session-ids=sess1",
+            "--env=p.d",
+            "--validate-binding",
+        ],
+    )
+    assert result.exit_code == 2
+
+  def test_both_flags_rejected(self, tmp_path):
+    """--validate-binding and --validate-binding-strict are
+    mutually exclusive."""
+    ont, bnd = self._write_specs(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "ontology-build",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--ontology={ont}",
+            f"--binding={bnd}",
+            "--session-ids=sess1",
+            "--validate-binding",
+            "--validate-binding-strict",
+        ],
+    )
+    assert result.exit_code == 2

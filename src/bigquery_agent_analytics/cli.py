@@ -83,6 +83,67 @@ def _build_client(
   )
 
 
+def _run_binding_preflight(
+    *,
+    ontology_path: str | None,
+    binding_path: str | None,
+    project_id: str,
+    location: str | None,
+    strict: bool,
+) -> None:
+  """Run the binding-vs-BQ pre-flight validator.
+
+  On any failure (default mode) or any failure including escalated
+  warnings (strict mode), prints a structured report to stderr and
+  raises ``typer.Exit(code=1)`` so extraction never starts.
+
+  Advisory warnings in default mode print to stderr but do not flip
+  the exit code — they are informational, not blocking.
+  """
+  if ontology_path is None or binding_path is None:
+    raise typer.BadParameter(
+        "Binding validation requires --ontology PATH and " "--binding PATH."
+    )
+
+  from google.cloud import bigquery
+
+  from bigquery_ontology import load_binding
+  from bigquery_ontology import load_ontology
+
+  from .binding_validation import validate_binding_against_bigquery
+
+  ontology = load_ontology(ontology_path)
+  binding = load_binding(binding_path, ontology=ontology)
+  bq_client = bigquery.Client(project=project_id, location=location)
+
+  report = validate_binding_against_bigquery(
+      ontology=ontology,
+      binding=binding,
+      bq_client=bq_client,
+      strict=strict,
+  )
+
+  for w in report.warnings:
+    typer.echo(
+        f"WARN: {w.code.value} at {w.binding_path} "
+        f"({w.bq_ref}): {w.detail}",
+        err=True,
+    )
+
+  if not report.ok:
+    typer.echo(
+        f"Error: binding validation failed "
+        f"({len(report.failures)} failure(s)).",
+        err=True,
+    )
+    for f in report.failures:
+      typer.echo(
+          f"  {f.code.value} at {f.binding_path} ({f.bq_ref}): " f"{f.detail}",
+          err=True,
+      )
+    raise typer.Exit(code=1)
+
+
 def _load_spec_from_args(
     spec_path: str | None,
     ontology_path: str | None,
@@ -1248,6 +1309,39 @@ def ontology_build(
             "property_graph_status='skipped:user_requested'."
         ),
     ),
+    validate_binding: bool = typer.Option(
+        False,
+        "--validate-binding",
+        help=(
+            "Pre-flight: validate the binding against live BigQuery "
+            "tables before extraction. NULLABLE primary-key columns "
+            "emit advisory warnings (printed to stderr). Other "
+            "failures (missing tables/columns, type mismatches) "
+            "short-circuit the build before any AI.GENERATE call "
+            "fires. Requires --ontology + --binding."
+        ),
+    ),
+    validate_binding_strict: bool = typer.Option(
+        False,
+        "--validate-binding-strict",
+        help=(
+            "Pre-flight: validate the binding in strict mode. Same "
+            "as --validate-binding but escalates KEY_COLUMN_NULLABLE "
+            "warnings into hard failures. Use in CI when you want "
+            "every primary-key column to be REQUIRED. Mutually "
+            "exclusive with --validate-binding."
+        ),
+    ),
+    location: Optional[str] = typer.Option(
+        None,
+        "--location",
+        help=(
+            "BigQuery location (e.g. 'US', 'EU'). Used by the binding "
+            "pre-flight validator and forwarded downstream. Required "
+            "for --validate-binding[-strict] when the bound tables "
+            "live outside the default location."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1256,7 +1350,26 @@ def ontology_build(
 ) -> None:
   """Run the full ontology graph pipeline end-to-end."""
   try:
+    if validate_binding and validate_binding_strict:
+      raise typer.BadParameter(
+          "Use --validate-binding OR --validate-binding-strict, " "not both."
+      )
+    if (validate_binding or validate_binding_strict) and spec_path:
+      raise typer.BadParameter(
+          "Binding validation requires --ontology + --binding "
+          "(separated form). It is not supported with --spec-path."
+      )
+
     from .ontology_orchestrator import build_ontology_graph
+
+    if validate_binding or validate_binding_strict:
+      _run_binding_preflight(
+          ontology_path=ontology_path,
+          binding_path=binding_path,
+          project_id=project_id,
+          location=location,
+          strict=validate_binding_strict,
+      )
 
     loaded_spec = _load_spec_from_args(
         spec_path, ontology_path, binding_path, env
@@ -1272,6 +1385,7 @@ def ontology_build(
         endpoint=endpoint,
         use_ai_generate=not no_ai_generate,
         skip_property_graph=skip_property_graph,
+        location=location,
     )
 
     output = {
@@ -1302,6 +1416,130 @@ def ontology_build(
           "was not created.",
           err=True,
       )
+      raise typer.Exit(code=1)
+  except typer.Exit:
+    raise
+  except Exception as exc:
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
+# ------------------------------------------------------------------ #
+# binding-validate                                                     #
+# ------------------------------------------------------------------ #
+
+
+@app.command("binding-validate")
+def binding_validate(
+    project_id: str = typer.Option(
+        ..., envvar="BQ_AGENT_PROJECT", help=_PROJECT_HELP
+    ),
+    ontology_path: str = typer.Option(
+        ...,
+        "--ontology",
+        help="Path to ontology YAML file.",
+    ),
+    binding_path: str = typer.Option(
+        ...,
+        "--binding",
+        help="Path to binding YAML file.",
+    ),
+    location: Optional[str] = typer.Option(
+        None,
+        "--location",
+        help="BigQuery location (e.g. 'US', 'EU').",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "Strict mode: KEY_COLUMN_NULLABLE warnings escalate to "
+            "hard failures. Use in CI when you want every primary-key "
+            "column to be REQUIRED."
+        ),
+    ),
+    fmt: str = typer.Option(
+        "json",
+        "--format",
+        help="Output format: json|text|table.",
+    ),
+) -> None:
+  """Pre-flight validate a binding YAML against live BigQuery tables.
+
+  Catches the most common authoring error (binding YAML drifted out
+  of sync with physical tables) before extraction wastes
+  AI.GENERATE tokens. Loads the ontology + binding, queries
+  BigQuery for each referenced table's actual schema, and reports
+  any drift as structured failures.
+
+  Exit codes:
+      0 — report.ok is True (no failures; warnings allowed in
+          default mode and printed to stderr).
+      1 — report.ok is False (failures present).
+      2 — unexpected error (load failure, missing flag, etc.).
+
+  See bq-agent-sdk binding-validate --help for all flags.
+  """
+  try:
+    from google.cloud import bigquery
+
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    from .binding_validation import validate_binding_against_bigquery
+
+    ontology = load_ontology(ontology_path)
+    binding = load_binding(binding_path, ontology=ontology)
+    bq_client = bigquery.Client(project=project_id, location=location)
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology,
+        binding=binding,
+        bq_client=bq_client,
+        strict=strict,
+    )
+
+    output = {
+        "ok": report.ok,
+        "strict": strict,
+        "failures": [
+            {
+                "code": f.code.value,
+                "binding_element": f.binding_element,
+                "binding_path": f.binding_path,
+                "bq_ref": f.bq_ref,
+                "expected": f.expected,
+                "observed": f.observed,
+                "detail": f.detail,
+            }
+            for f in report.failures
+        ],
+        "warnings": [
+            {
+                "code": w.code.value,
+                "binding_element": w.binding_element,
+                "binding_path": w.binding_path,
+                "bq_ref": w.bq_ref,
+                "expected": w.expected,
+                "observed": w.observed,
+                "detail": w.detail,
+            }
+            for w in report.warnings
+        ],
+    }
+    typer.echo(format_output(output, fmt))
+
+    # Warnings always print to stderr (one line per warning) so CI
+    # logs surface advisory drift even in JSON-format runs that
+    # consume stdout for the report.
+    for w in report.warnings:
+      typer.echo(
+          f"WARN: {w.code.value} at {w.binding_path} "
+          f"({w.bq_ref}): {w.detail}",
+          err=True,
+      )
+
+    if not report.ok:
       raise typer.Exit(code=1)
   except typer.Exit:
     raise
