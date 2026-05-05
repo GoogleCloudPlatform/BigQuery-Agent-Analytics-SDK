@@ -55,6 +55,8 @@ import uuid
 
 from google.cloud import bigquery
 
+from ._ontology_routing import build_name_to_column
+from ._ontology_routing import parse_key_segment
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
@@ -278,11 +280,10 @@ def _route_node(
   properties at INSERT time.
   """
   # Build {accepted_name: physical_column} so we route renamed
-  # logical names to the actual BQ column.
-  name_to_col: dict[str, str] = {}
-  for prop in entity_spec.properties:
-    name_to_col[prop.column] = prop.column
-    name_to_col[prop.logical_name] = prop.column
+  # logical names to the actual BQ column. Uses the shared two-pass
+  # helper so collision precedence (logical name wins) matches the
+  # validator's _build_property_lookup exactly.
+  name_to_col = build_name_to_column(entity_spec.properties)
 
   row: dict = {}
   for prop in node.properties:
@@ -294,25 +295,11 @@ def _route_node(
   return row
 
 
-def _parse_key_segment(node_id: str) -> dict[str, str]:
-  """Parse the key segment from a node ID.
-
-  Node IDs look like ``{session_id}:{entity_name}:{k1=v1,k2=v2}``.
-  Returns a dict of key-value pairs from the last segment, or empty
-  dict if the format is unexpected (e.g. index-based fallback IDs).
-  """
-  parts = node_id.split(":")
-  if len(parts) < 3:
-    return {}
-  key_segment = parts[-1]
-  if "=" not in key_segment:
-    return {}
-  result = {}
-  for pair in key_segment.split(","):
-    if "=" in pair:
-      k, v = pair.split("=", 1)
-      result[k] = v
-  return result
+# Backward-compat re-export. Older callers (and tests) import
+# ``_parse_key_segment`` from this module directly; the canonical
+# implementation now lives in ``_ontology_routing`` so the validator
+# and materializer share one source of truth.
+_parse_key_segment = parse_key_segment
 
 
 def _route_edge(
@@ -332,7 +319,7 @@ def _route_edge(
   # Map from-entity keys.  from_columns are a subset of the source
   # entity's primary keys, so the column names match the key names
   # in the parsed node ID segment.
-  from_keys = _parse_key_segment(edge.from_node_id)
+  from_keys = parse_key_segment(edge.from_node_id)
   if rel.from_columns:
     for col in rel.from_columns:
       row[col] = from_keys.get(col, "")
@@ -340,7 +327,7 @@ def _route_edge(
     row.update(from_keys)
 
   # Map to-entity keys (same logic).
-  to_keys = _parse_key_segment(edge.to_node_id)
+  to_keys = parse_key_segment(edge.to_node_id)
   if rel.to_columns:
     for col in rel.to_columns:
       row[col] = to_keys.get(col, "")
@@ -348,14 +335,9 @@ def _route_edge(
     row.update(to_keys)
 
   # Edge properties — only include properties declared in the spec.
-  # Extra AI-emitted fields are dropped to prevent insert failures.
-  # Same logical-name-or-column resolution as ``_route_node``: the
-  # validator and materializer must agree on what an extractor is
-  # allowed to emit (per issue #76).
-  edge_name_to_col: dict[str, str] = {}
-  for prop in rel.properties:
-    edge_name_to_col[prop.column] = prop.column
-    edge_name_to_col[prop.logical_name] = prop.column
+  # Same shared helper as ``_route_node`` so collision precedence
+  # (logical name wins) matches the validator exactly.
+  edge_name_to_col = build_name_to_column(rel.properties)
   for prop in edge.properties:
     physical = edge_name_to_col.get(prop.name)
     if physical is not None:

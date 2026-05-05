@@ -708,6 +708,106 @@ class TestRenamedColumnRoundTrip:
     row = _route_node(node, decision_entity, session_id="sess1")
     assert row.get("conf_score") == 0.9
 
+  def test_logical_name_wins_on_column_collision(self):
+    """Edge case: one property's ``column`` happens to equal another
+    property's ``logical_name``. Validator and materializer must
+    pick the same property — logical-name lookup wins on collision
+    per the shared two-pass build_property_lookup. Without the
+    shared helper, the materializer's earlier single-loop build
+    would let property order decide the winner; this test asserts
+    the validator and materializer agree.
+
+    Setup: prop A has logical_name='x' / column='x_col'.
+            prop B has logical_name='y' / column='x' (collides).
+    An extracted property with name='x' must route to prop A, not
+    prop B, in both validator and materializer.
+    """
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+    from bigquery_agent_analytics.ontology_materializer import _route_node
+    from bigquery_agent_analytics.resolved_spec import resolve
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    ont_yaml = (
+        "ontology: CollisionTest\n"
+        "entities:\n"
+        "  - name: Thing\n"
+        "    keys:\n"
+        "      primary: [thing_id]\n"
+        "    properties:\n"
+        "      - name: thing_id\n"
+        "        type: string\n"
+        # Property A: logical_name='x', column='x_col'.
+        "      - name: x\n"
+        "        type: string\n"
+        # Property B: logical_name='y', column='x' — collides
+        # with property A's logical_name.
+        "      - name: y\n"
+        "        type: string\n"
+        "relationships: []\n"
+    )
+    bnd_yaml = (
+        "binding: collision\n"
+        "ontology: CollisionTest\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Thing\n"
+        "    source: things\n"
+        "    properties:\n"
+        "      - name: thing_id\n"
+        "        column: thing_id\n"
+        "      - name: x\n"
+        "        column: x_col\n"  # A: logical='x', column='x_col'
+        "      - name: y\n"
+        "        column: x\n"  # B: logical='y', column='x' (collides)
+        "relationships: []\n"
+    )
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="collision_"))
+    (tmp / "ont.yaml").write_text(ont_yaml, encoding="utf-8")
+    (tmp / "bnd.yaml").write_text(bnd_yaml, encoding="utf-8")
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+    spec = resolve(ontology, binding)
+    thing_entity = next(e for e in spec.entities if e.name == "Thing")
+
+    # Extractor emits name='x'. Logical-name 'x' belongs to
+    # property A (column='x_col'). Both validator and materializer
+    # must resolve to A.
+    node = ExtractedNode(
+        node_id="sess1:Thing:thing_id=t1",
+        entity_name="Thing",
+        labels=["Thing"],
+        properties=[
+            ExtractedProperty(name="thing_id", value="t1"),
+            ExtractedProperty(name="x", value="value-from-A"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    # Validator accepts the extraction.
+    report = validate_extracted_graph(spec, graph)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+    # Materializer must route 'x' → 'x_col' (property A's
+    # physical column), not to 'x' (property B's column).
+    row = _route_node(node, thing_entity, session_id="sess1")
+    assert row.get("x_col") == "value-from-A", (
+        f"materializer routed to the wrong physical column on "
+        f"logical-name/column collision; row={row!r}"
+    )
+    # Property B's column 'x' should be absent from the row
+    # because the extraction targeted property A, not B.
+    assert (
+        "x" not in row
+    ), f"materializer also wrote to the colliding column; row={row!r}"
+
 
 class TestOntologyAdapter:
 

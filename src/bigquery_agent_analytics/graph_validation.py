@@ -67,11 +67,12 @@ import enum
 import re
 from typing import Any, Optional
 
+from ._ontology_routing import build_property_lookup
+from ._ontology_routing import parse_key_segment
 from .extracted_models import ExtractedEdge
 from .extracted_models import ExtractedGraph
 from .extracted_models import ExtractedNode
 from .extracted_models import ExtractedProperty
-from .ontology_materializer import _parse_key_segment
 from .resolved_spec import ResolvedEntity
 from .resolved_spec import ResolvedGraph
 from .resolved_spec import ResolvedProperty
@@ -220,23 +221,15 @@ def _value_matches_sdk_type(value: Any, sdk_type: str) -> bool:
 def _build_property_lookup(
     properties: tuple[ResolvedProperty, ...],
 ) -> dict[str, ResolvedProperty]:
-  """Build a ``{name: ResolvedProperty}`` lookup.
+  """Thin wrapper around the shared ``build_property_lookup``.
 
-  Per issue #76: ``ExtractedProperty.name`` is matched against
-  ``ResolvedProperty.logical_name`` first (the ontology-level
-  name an LLM extractor naturally produces) and falls back to
-  ``ResolvedProperty.column`` (the physical column name from the
-  binding). Both forms are accepted.
+  Kept as a one-line module-private alias so the rest of this file
+  reads naturally. The shared implementation in
+  ``_ontology_routing`` is the single source of truth for
+  precedence (logical name wins on collision); both this module
+  and ``ontology_materializer`` consume the same helper.
   """
-  out: dict[str, ResolvedProperty] = {}
-  # Logical-name index wins on conflict (very rare; would require
-  # one property's column to collide with another property's
-  # logical_name).
-  for prop in properties:
-    out[prop.column] = prop
-  for prop in properties:
-    out[prop.logical_name] = prop
-  return out
+  return build_property_lookup(properties)
 
 
 # ------------------------------------------------------------------ #
@@ -489,19 +482,20 @@ def _validate_edge(
 
     # Endpoint-key presence. The relationship's from_columns /
     # to_columns must be readable from the edge's node-id segment
-    # via the SAME parsing the materializer uses
-    # (ontology_materializer._parse_key_segment). The materializer
-    # builds FK column values from the node-id segment, not from
-    # the endpoint node's properties — so a node-id like 'd1' that
-    # parses to {} silently produces empty FK columns at INSERT
-    # time. Validating against the parsed segment closes that
-    # silent-corruption gap.
+    # via the same parser the materializer uses
+    # (``parse_key_segment`` in ``_ontology_routing``, shared by
+    # both modules). The materializer builds FK column values from
+    # the node-id segment, not from the endpoint node's
+    # properties — so a node-id like 'd1' that parses to {}
+    # silently produces empty FK columns at INSERT time.
+    # Validating against the parsed segment closes that silent-
+    # corruption gap.
     cols = (
         spec_relationship.from_columns
         if direction == "from_node_id"
         else spec_relationship.to_columns
     )
-    parsed_keys = _parse_key_segment(edge_node_id)
+    parsed_keys = parse_key_segment(edge_node_id)
     for key_col in cols:
       value = parsed_keys.get(key_col, "")
       if not value:
