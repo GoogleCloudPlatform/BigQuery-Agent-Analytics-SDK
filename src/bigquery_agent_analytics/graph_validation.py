@@ -364,9 +364,14 @@ def _validate_node(
   # specific drift explicit.
   if node.node_id:
     nid_parts = node.node_id.split(":", 2)
-    if len(nid_parts) >= 2:
+    # Only check 3-part ids (the documented shape). Short-form
+    # fallbacks like 'd1' have no entity segment to compare. An
+    # empty entity segment is a 3-part id that fails the
+    # comparison — same rule as the permissive-mode endpoint
+    # check, which also rejects 'sess1::outcome_id=o1'.
+    if len(nid_parts) >= 3:
       observed_entity = nid_parts[1]
-      if observed_entity and observed_entity != node.entity_name:
+      if observed_entity != node.entity_name:
         failures.append(
             ValidationFailure(
                 scope=FallbackScope.NODE,

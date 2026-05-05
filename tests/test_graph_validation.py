@@ -482,6 +482,33 @@ class TestNodeScopeCodes:
     assert failures[0].observed == "Outcome"
     assert failures[0].expected == "Decision"
 
+  def test_key_mismatch_catches_empty_node_id_entity_segment(self):
+    """Companion to the permissive-endpoint empty-entity test: an
+    empty entity segment (``sess1::decision_id=d1``) is a 3-part
+    node_id whose ``observed_entity`` is ``""``. The previous
+    truthiness guard skipped this case; the same id from an
+    external endpoint would have failed, leaving the two paths
+    inconsistent. Both paths now emit ``key_mismatch`` /
+    ``wrong_endpoint_entity`` on empty entity segments."""
+    from bigquery_agent_analytics.graph_validation import FallbackScope
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[_node("sess1::decision_id=d1", "Decision", decision_id="d1")]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [
+        f
+        for f in report.failures
+        if f.code == "key_mismatch" and f.path.endswith(".node_id")
+    ]
+    assert len(failures) == 1
+    assert failures[0].scope is FallbackScope.NODE
+    assert failures[0].observed == ""
+    assert failures[0].expected == "Decision"
+
   def test_parse_key_segment_preserves_colon_in_value(self):
     """``parse_key_segment`` must split the node_id on ``:`` at
     most twice so a primary-key value containing a literal ``:``
