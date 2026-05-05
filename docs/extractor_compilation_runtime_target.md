@@ -40,27 +40,41 @@ Reproduced from #75 P0.2 with current-tree references.
 
 ## Decision — Phase 1: Option A
 
-Phase 1 ships compiled extractors as **plain Python**, executed
-client-side via the existing `run_structured_extractors()` hook.
-Concretely:
+Phase 1 ships compiled extractors as **plain Python** intended to
+execute client-side via the existing `run_structured_extractors()`
+hook. Concretely, the decision settles three things and three only:
 
-- Compile harness (PR 4b) emits one `.py` module per
-  `(event_type, fingerprint)` plus a manifest. Modules live under
-  the SDK-using repo at `compiled_extractors/<fingerprint>/` (path
-  configurable; default chosen in PR 4b).
-- Runtime loads the manifest, imports the bundle, registers each
-  generated function into the `extractors` dict that
-  `run_structured_extractors()` already accepts at
-  `structured_extraction.py:198–232`. No change to the function's
-  signature, no change to its callers.
-- `ontology_graph.py`'s session-aggregated `AI.GENERATE` SQL is
-  unchanged. The compiled path runs **alongside** the existing
-  hand-written registry, which keeps acting as the Phase-0 fallback
-  for any `event_type` without a compiled bundle. Per-field /
-  per-node / per-edge fallback uses the validator from #76;
-  per-event fallback (re-running the whole event through the
-  hand-written or `AI.GENERATE` path) is the C2 wrapper's job, not
-  PR 4b's.
+1. **Compile target language.** Generated bundles are pure Python
+   modules — not SQL, not Cloud Run packages. Field-kind templates
+   from ontology v0 emit Python source.
+2. **Callable ABI.** A compiled extractor is a Python callable
+   matching the `StructuredExtractor` signature already accepted
+   by `run_structured_extractors()` at
+   `structured_extraction.py:198–232` (one event dict + spec in,
+   one `StructuredExtractionResult` out). No change to that
+   function's signature, no change to its callers.
+3. **No new BQ surface for Phase 1.** `ontology_graph.py`'s
+   session-aggregated `AI.GENERATE` SQL is unchanged. No Remote
+   Function deploy pipeline. No new BQ object types.
+
+What this decision **does not** settle (deferred to the PRs below):
+
+- Bundle storage layout — local repo path, BQ-table mirror, or
+  both — stays an [open question on #75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75).
+  PR 4b picks a default for **local bundle layout** so the harness
+  has somewhere to write; runtime discovery and any BQ-table
+  mirror are explicit C2 concerns.
+- The runtime loader that imports a bundle and registers its
+  callables into the `extractors` dict the orchestrator hands to
+  `run_structured_extractors()` is **C2 work**, not PR 4b. PR 4b
+  ships compile + smoke-test in isolation; PR 4c measures one
+  compiled extractor by invoking the callable directly. The
+  orchestrator integration only matters once the C1 measurements
+  clear the F1 / fallback gate.
+- Per-event fallback (re-running the whole event through the
+  hand-written or `AI.GENERATE` path) is the C2 wrapper's job.
+  Per-field / per-node / per-edge fallback uses the validator from
+  #76 and is also wired in C2.
 
 The compile target is therefore: **Python source filling field-kind
 templates from ontology v0**, AST-validated, smoke-tested against a
@@ -137,25 +151,61 @@ Option B remains off the table.
 The Phase 2 RFC will inherit the framing here and only need to
 record the C-vs-A choice for the new tier.
 
-## Implementation surface this commits to (PR 4b)
+## Implementation surface this commits to
 
-Per the working plan's PR 4b scope:
+### Phase 1 PR 4b — compile harness + smoke-test runner
+
+Per the [#96 working plan](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/96#issuecomment-4363301699),
+PR 4b ships **compile-time only** — no orchestrator integration:
 
 - New module: `src/bigquery_agent_analytics/extractor_compilation/`
   (final path TBD in PR 4b) containing the template-fill pipeline,
   AST validator, smoke-test runner, and fingerprint helper.
-- New manifest format describing
-  `{fingerprint, event_types, compiler_version, template_version}`
-  per bundle.
-- Hook: bundle loader called from the orchestrator before
-  `run_structured_extractors(...)`, inserting compiled functions
-  into `extractors` for any `event_type` whose fingerprint matches
-  the active `(ontology, binding, event_schema, …)`.
-- No changes to `ontology_graph.py`'s SQL. No new BQ object types.
-  No deploy pipeline.
+- Manifest schema: `{fingerprint, event_types, compiler_version,
+  template_version, ...}` per bundle. Exact fields finalized in
+  PR 4b once the fingerprint inputs from #75 are reified in code.
+- A default **local bundle layout** so the harness has somewhere
+  to write generated `.py` modules and the manifest. Runtime
+  discovery, BQ-table mirror, and the choice of in-repo vs
+  external storage are deliberately left open per #75 and revisited
+  in C2.
+- Callable ABI: each generated function matches the
+  `StructuredExtractor` signature `run_structured_extractors()`
+  already accepts.
+- Validation gates: AST check, smoke test against a sample of real
+  events, ontology validation through the #76 validator. Any
+  failure rejects the bundle.
+- No changes to `ontology_graph.py`'s SQL. No orchestrator hook,
+  no bundle loader, no deploy pipeline.
 
-PR 4c then uses this surface to compile `extract_bka_decision_event`
-as the first measured replacement.
+### Phase 1 PR 4c — first compiled extractor + measurement
+
+Compiles `extract_bka_decision_event` and measures F1 / per-event
+extractor latency / fallback rate against the hand-written and
+`AI.GENERATE` baselines. PR 4c invokes compiled callables directly
+from the measurement harness; it does not require the orchestrator
+loader either.
+
+### Milestone C2 (gated on C1 measurements) — runtime integration
+
+C2 owns the orchestrator-side integration that this RFC deliberately
+keeps out of PR 4b/4c:
+
+- Bundle loader called before `run_structured_extractors(...)`,
+  inserting compiled callables into the `extractors` dict for
+  every `event_type` whose fingerprint matches the active
+  `(ontology, binding, event_schema, …)`.
+- Runtime discovery — where the loader looks for bundles. The
+  in-repo / BQ-mirror / both question gets resolved here, informed
+  by what the SDK-using repos actually want.
+- Per-field / per-node / per-edge fallback wired through #76's
+  validator. Per-event fallback through the existing hand-written
+  or `AI.GENERATE` path.
+- Revalidation harness (scheduled / on-demand agreement check).
+
+The split keeps PR 4b/4c discardable if Phase 1 measurements miss
+the F1 ≥ 0.95 / fallback ≤ 10% gate — no orchestrator change is
+left behind to dismantle.
 
 ## Related
 
