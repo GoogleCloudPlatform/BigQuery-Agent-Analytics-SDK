@@ -103,9 +103,11 @@ compiler_package_version)` shape.
 
 3. **Matches the existing hand-written extractor pattern.**
    `structured_extraction.py` already runs typed Python extractors
-   client-side. Compiled Phase 1 bundles are a drop-in replacement
-   for one of those entries, not a parallel runtime. Reuses the
-   same merge / validation plumbing the registry already exercises.
+   client-side. Compiled Phase 1 callables use the same callable
+   shape as registry entries — measured as replacements in PR 4c —
+   so when C2 wires the runtime loader it slots into the same
+   merge / validation plumbing the registry already exercises,
+   not a parallel runtime.
 
 4. **Test surface is plain unit tests.** Option C's UDF path needs
    per-test BQ session orchestration; Option B's Remote Function
