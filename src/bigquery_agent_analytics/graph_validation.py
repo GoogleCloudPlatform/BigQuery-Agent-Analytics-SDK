@@ -354,6 +354,15 @@ def _validate_node(
   prop_by_name: dict[str, Any] = {p.name: p.value for p in node.properties}
   prop_lookup = _build_property_lookup(spec_entity.properties)
 
+  # The materializer writes the node row's primary-key columns from
+  # ``node.properties`` but writes edge FK columns from
+  # ``parse_key_segment(node_id)``. If those two sources of truth
+  # disagree, the validator will pass but the materialized graph
+  # will have edges pointing at non-existent rows. Pre-parse the
+  # node-id key segment once so the loop below can compare each
+  # key column against the extracted property value.
+  parsed_node_keys = parse_key_segment(node.node_id) if node.node_id else {}
+
   for key_col in spec_entity.key_columns:
     spec_key_prop = prop_lookup.get(key_col)
     # Accept either the key's logical name or its physical column
@@ -387,6 +396,40 @@ def _validate_node(
                   f"primary-key column {key_col!r} on entity "
                   f"{spec_entity.name!r} is missing or empty on the "
                   f"extracted node"
+              ),
+          )
+      )
+      continue
+
+    # ``key_mismatch``: parsed node-id key disagrees with the
+    # extracted property value. The materializer writes node rows
+    # from properties and edge FKs from the parsed node-id, so
+    # disagreement silently breaks edges. Also catches keys whose
+    # raw values contain ``,`` or ``=`` — ``_build_key_string`` is
+    # unescaped, so ``parse_key_segment`` truncates at the comma
+    # and the parsed value won't equal the property value.
+    parsed_value = parsed_node_keys.get(key_col)
+    if parsed_value is not None and parsed_value != str(found_value):
+      failures.append(
+          ValidationFailure(
+              scope=FallbackScope.NODE,
+              code="key_mismatch",
+              path=f"{base_path}.properties.<key:{key_col}>",
+              node_id=node.node_id,
+              event_id=event_id,
+              expected=str(found_value),
+              observed=parsed_value,
+              detail=(
+                  f"primary-key column {key_col!r} on entity "
+                  f"{spec_entity.name!r} disagrees between sources: "
+                  f"node_id key segment is {parsed_value!r} but the "
+                  f"extracted property value is {found_value!r}. "
+                  f"The materializer writes node rows from "
+                  f"properties and edge FK columns from the parsed "
+                  f"node_id segment — disagreement produces edges "
+                  f"pointing at non-existent rows. (If the property "
+                  f"value contains ',' or '=', that also triggers "
+                  f"this since the node-id format is unescaped.)"
               ),
           )
       )

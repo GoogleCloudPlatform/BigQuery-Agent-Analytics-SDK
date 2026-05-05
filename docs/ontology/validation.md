@@ -73,7 +73,7 @@ Filter by scope with `report.by_scope(FallbackScope.NODE)`.
 
 ## Failure codes
 
-11 codes ship in this validator's first landing. The `code` field on `ValidationFailure` is a stable string identifier callers can switch on.
+12 codes ship in this validator. The `code` field on `ValidationFailure` is a stable string identifier callers can switch on.
 
 ### NODE-scope codes
 
@@ -83,6 +83,7 @@ Filter by scope with `report.by_scope(FallbackScope.NODE)`.
 | `missing_node_id` | `node_id` is empty. |
 | `duplicate_node_id` | `node_id` collides with another node in the same graph. |
 | `missing_key` | A column listed in `ResolvedEntity.key_columns` is absent (or empty-string) on the node's properties. |
+| `key_mismatch` | The node-id key segment disagrees with the extracted property value for a primary-key column. The materializer writes the node row from `node.properties` but writes edge FK columns from `parse_key_segment(node_id)`; disagreement produces edges pointing at non-existent rows. Also fires when a key value contains `,` or `=` — `_build_key_string` is unescaped, so `parse_key_segment` truncates at the comma and the parsed value won't equal the property value. |
 
 ### FIELD-scope codes
 

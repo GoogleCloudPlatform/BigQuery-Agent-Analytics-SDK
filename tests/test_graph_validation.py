@@ -287,6 +287,69 @@ class TestNodeScopeCodes:
     failures = [f for f in report.failures if f.code == "missing_key"]
     assert len(failures) == 1
 
+  def test_key_mismatch_between_node_id_and_property(self):
+    """The materializer writes node table primary keys from
+    ``node.properties`` but writes edge FK columns from
+    ``parse_key_segment(node_id)``. If the two disagree, edges
+    point at non-existent rows. The validator catches this."""
+    from bigquery_agent_analytics.graph_validation import FallbackScope
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    # node_id segment says decision_id=d1; property says d2.
+    graph = _graph(
+        nodes=[
+            _node("sess1:Decision:decision_id=d1", "Decision", decision_id="d2")
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert len(failures) == 1
+    assert failures[0].scope is FallbackScope.NODE
+    assert failures[0].expected == "d2"
+    assert failures[0].observed == "d1"
+
+  def test_key_mismatch_catches_unescaped_comma_in_value(self):
+    """``_build_key_string`` is unescaped, so a property value
+    containing ',' truncates at the comma when re-parsed by
+    ``parse_key_segment``. Comparing parsed-vs-extracted catches
+    that silent corruption before materialization."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    # If a hand-built node_id encodes the comma raw and the property
+    # value carries the same comma-containing string, parse_key_segment
+    # truncates at ',' so parsed != property.
+    graph = _graph(
+        nodes=[
+            _node(
+                "sess1:Decision:decision_id=a,b", "Decision", decision_id="a,b"
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert len(failures) == 1
+    assert failures[0].observed == "a"  # truncated at ','
+    assert failures[0].expected == "a,b"
+
+  def test_key_mismatch_does_not_fire_when_node_id_lacks_key_segment(self):
+    """Short-form node-ids like 'd1' produce no parseable keys —
+    that's the materializer's index-fallback path. ``key_mismatch``
+    should only fire when the parsed segment actually carries the
+    column; otherwise other codes (missing_endpoint_key on the edge
+    side) cover it."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(nodes=[_node("d1", "Decision", decision_id="d1")])
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert failures == []
+
 
 # ------------------------------------------------------------------ #
 # FIELD-scope codes                                                    #
