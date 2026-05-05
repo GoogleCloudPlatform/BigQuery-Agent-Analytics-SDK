@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph)`** — adapter for callers holding upstream
   `Ontology` + `Binding` instead of a `ResolvedGraph`. Resolves
   internally then delegates.
+- **Compile-time scaffolding for structured-extractor compilation**
+  in `bigquery_agent_analytics.extractor_compilation` and
+  [`docs/extractor_compilation_scaffolding.md`](docs/extractor_compilation_scaffolding.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.1 — the deterministic contract layer the LLM-driven
+  template fill (PR 4b.2) plugs into. Public surface:
+  `compute_fingerprint(...)` over the #75 input tuple,
+  `Manifest` with JSON round-trip, `validate_source(...)` returning
+  an `AstReport` with stable failure codes (`syntax_error`,
+  `disallowed_import`, `disallowed_name`, `disallowed_attribute`,
+  `disallowed_async`, `disallowed_generator`, `disallowed_class`,
+  `disallowed_scope`, `top_level_side_effect`),
+  `run_smoke_test(...)` returning a `SmokeTestReport` gated on the
+  #76 `validate_extracted_graph` validator, and the end-to-end
+  `compile_extractor(...) -> CompileResult` pipeline that writes a
+  fingerprint-named bundle on disk iff every gate passes. **No LLM
+  call lives here** — that's PR 4b.2. Runtime loader / orchestrator
+  integration is deferred to C2 per the runtime-target RFC.
 - **Runtime-target decision recorded for compiled structured
   extractors** in
   [`docs/extractor_compilation_runtime_target.md`](docs/extractor_compilation_runtime_target.md).

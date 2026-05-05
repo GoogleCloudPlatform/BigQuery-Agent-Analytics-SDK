@@ -40,6 +40,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [ontology/binding-validation.md](ontology/binding-validation.md) | `bq-agent-sdk binding-validate` pre-flight + `ontology-build --validate-binding[-strict]` reference |
 | [ontology/validation.md](ontology/validation.md) | `validate_extracted_graph(spec, graph)` post-extraction validator with NODE/FIELD/EDGE-scope failure classification |
 | [extractor_compilation_runtime_target.md](extractor_compilation_runtime_target.md) | Phase 1 runtime-target decision for compiled structured extractors (issue #75 P0.2): client-side Python via the existing `run_structured_extractors()` hook |
+| [extractor_compilation_scaffolding.md](extractor_compilation_scaffolding.md) | Compile-time scaffolding for compiled structured extractors (issue #75 PR 4b.1): fingerprint, manifest, AST allowlist, smoke-test runner, end-to-end `compile_extractor`. LLM-driven template fill is PR 4b.2; runtime loading is C2. |
 
 ## Deployment Surfaces
 
