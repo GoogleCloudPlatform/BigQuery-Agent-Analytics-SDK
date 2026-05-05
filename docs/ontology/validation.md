@@ -106,7 +106,7 @@ The validator accepts these Python value shapes per `sdk_type`:
 
 Naive `datetime.datetime` (no `tzinfo`) is rejected for `timestamp` per the issue body — the materializer needs an explicit timezone.
 
-The validator narrows date/timestamp strings to the **BigQuery JSON-input shape** before semantic parsing. `datetime.fromisoformat` (Python 3.11+) accepts compact and week-date forms like `20260505`, `2026-W19-2`, `20260505T120000` that BigQuery JSON inserts reject. The validator gates on a regex first (dashed `YYYY-MM-DD` for `date`; dashed date + `T`/space + colon-separated time, optional fractional seconds, optional `Z` or `±HH:MM` offset for `timestamp`) and only reaches `fromisoformat` for the semantic check (valid month/day, valid time-of-day). This keeps the validator's contract aligned with what the materializer can actually `INSERT`.
+The validator narrows date/timestamp strings to the **BigQuery JSON-input shape** before semantic parsing. `datetime.fromisoformat` (Python 3.11+) accepts compact and week-date forms like `20260505`, `2026-W19-2`, `20260505T120000` that BigQuery JSON inserts reject. The validator gates on a regex first (dashed `YYYY-MM-DD` for `date`; dashed date + `T`/space + colon-separated time, **1–6 fractional-second digits**, optional `Z` or `±HH:MM` offset for `timestamp`) and only reaches `fromisoformat` for the semantic check (valid month/day, valid time-of-day). This keeps the validator's contract aligned with what the materializer can actually `INSERT`. BigQuery `TIMESTAMP` is microsecond precision, so nanosecond strings like `2026-05-05T12:00:00.123456789Z` are rejected up front.
 
 ### EDGE-scope codes
 

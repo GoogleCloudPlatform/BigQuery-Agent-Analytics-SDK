@@ -977,6 +977,48 @@ class TestNormalizationAndJsonRoundTrip:
     fails = [f for f in report.failures if f.code == "type_mismatch"]
     assert len(fails) == 1
 
+  def test_nanosecond_precision_timestamp_rejected(self):
+    """BigQuery TIMESTAMP is microsecond precision; nanosecond
+    strings like ``2026-05-05T12:00:00.123456789Z`` are rejected at
+    INSERT time so the validator must reject them up front."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[
+            _node(
+                "d1",
+                "Decision",
+                decision_id="d1",
+                occurred_at="2026-05-05T12:00:00.123456789Z",
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    fails = [f for f in report.failures if f.code == "type_mismatch"]
+    assert len(fails) == 1
+
+  def test_microsecond_precision_timestamp_accepted(self):
+    """Boundary case: 1-6 fractional digits are accepted (BigQuery
+    TIMESTAMP supports up to microsecond precision)."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[
+            _node(
+                "d1",
+                "Decision",
+                decision_id="d1",
+                occurred_at="2026-05-05T12:00:00.123456Z",
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    assert report.ok is True
+
   def test_sdk_type_alias_float64_is_type_checked(self):
     """``float64`` is an alias for ``double`` in
     ``ontology_materializer._DDL_TYPE_MAP``. The validator now
@@ -1171,6 +1213,32 @@ class TestExternalEndpoints:
     fails = [f for f in report.failures if f.code == "wrong_endpoint_entity"]
     assert len(fails) == 1
     assert fails[0].observed == "Decision"
+    assert fails[0].expected == "Outcome"
+
+  def test_external_endpoints_empty_entity_segment_fails(self):
+    """A node-id with an empty entity segment ('sess1::outcome_id=o1')
+    matches the documented '{session}:{entity}:k=v' shape's part
+    count but violates the requirement that ``entity`` be non-empty.
+    parse_key_segment still extracts 'outcome_id=o1' so
+    missing_endpoint_key wouldn't fire — the entity-segment check is
+    the only thing standing between this id and a silent route to
+    the wrong table."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    d_id = "sess1:Decision:decision_id=d1"
+    empty_entity_o_id = "sess1::outcome_id=o1"
+    graph = _graph(
+        nodes=[],
+        edges=[_edge("e1", "HasOutcome", d_id, empty_entity_o_id, weight=1.0)],
+    )
+
+    report = validate_extracted_graph(
+        spec, graph, allow_external_endpoints=True
+    )
+    fails = [f for f in report.failures if f.code == "wrong_endpoint_entity"]
+    assert len(fails) == 1
+    assert fails[0].observed == ""
     assert fails[0].expected == "Outcome"
 
 

@@ -59,10 +59,15 @@ from typing import Any
 # JSON inserts. The validator's contract is the BigQuery-accepted
 # shape, so we gate on these regexes first and only reach
 # ``fromisoformat`` for semantic checks (valid month/day/time).
+#
+# Fractional seconds are capped at 1-6 digits because BigQuery
+# TIMESTAMP is microsecond precision — nanosecond strings like
+# ``2026-05-05T12:00:00.123456789Z`` are rejected at INSERT time,
+# so the validator's contract must reject them up front.
 _BQ_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _BQ_DATETIME_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-    r"(?:\.\d+)?"
+    r"(?:\.\d{1,6})?"
     r"(?:Z|[+-]\d{2}:?\d{2})?$"
 )
 

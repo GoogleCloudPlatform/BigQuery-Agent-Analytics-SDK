@@ -475,13 +475,15 @@ def _validate_edge(
       # Permissive mode: we don't have the in-graph node, but the
       # node_id itself carries the entity segment ('{session}:
       # {entity}:k=v'). Compare that segment cheaply against
-      # expected_entity so obvious mismatches still fail. The
-      # endpoint-key parse still runs below so missing FK columns
-      # also fire per-column.
+      # expected_entity so obvious mismatches still fail. An empty
+      # entity segment ('sess1::outcome_id=o1') also fails — the
+      # documented shape requires a non-empty entity. The endpoint-
+      # key parse still runs below so missing FK columns also fire
+      # per-column.
       parts = edge_node_id.split(":")
       if len(parts) >= 3:
         observed_entity = parts[1]
-        if observed_entity and observed_entity != expected_entity:
+        if observed_entity != expected_entity:
           failures.append(
               ValidationFailure(
                   scope=FallbackScope.EDGE,
