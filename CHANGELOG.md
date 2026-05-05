@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `structured_extraction.py:198`. No SQL/UDF translation layer or
   Remote Function deploy surface is taken on for Phase 1; Phase 2
   re-opens the choice for the session-aggregated `AI.GENERATE`
-  tier with Option C (Python UDF) as the primary candidate.
+  tier with Option C (SQL / Python UDF) as the primary candidate.
   Unblocks the compile-harness PR.
 
 ## [0.2.3] - 2026-04-27
