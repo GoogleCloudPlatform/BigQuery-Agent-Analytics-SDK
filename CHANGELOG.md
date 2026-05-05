@@ -41,11 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failures classified by `FallbackScope` (`FIELD` / `NODE` /
   `EDGE`) so downstream consumers (notably the compiled-extractor
   runtime in #75) know the smallest safe unit of replacement.
-  Eleven failure codes ship: `unknown_entity`, `missing_node_id`,
-  `duplicate_node_id`, `missing_key`, `unknown_property`,
-  `type_mismatch`, `unsupported_type`, `unknown_relationship`,
-  `unresolved_endpoint`, `wrong_endpoint_entity`,
-  `missing_endpoint_key`. `EVENT` scope is reserved for #75 C2.
+  Twelve failure codes ship: `unknown_entity`, `missing_node_id`,
+  `duplicate_node_id`, `missing_key`, `key_mismatch`,
+  `unknown_property`, `type_mismatch`, `unsupported_type`,
+  `unknown_relationship`, `unresolved_endpoint`,
+  `wrong_endpoint_entity`, `missing_endpoint_key`. `EVENT` scope is
+  reserved for #75 C2.
   See [issue #76](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/76)
   and `docs/ontology/validation.md`.
 - **`validate_extracted_graph_from_ontology(ontology, binding,

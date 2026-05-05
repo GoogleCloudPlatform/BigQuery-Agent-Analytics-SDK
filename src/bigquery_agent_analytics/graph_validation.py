@@ -55,8 +55,8 @@ edge, or the whole event:
   EVENT failures** — that requires per-``event_type`` expectations
   that live in #75's compile-time inputs, not in ``ResolvedGraph``.
 
-Eleven codes ship in this module's first landing
-(NODE/FIELD/EDGE only); see the issue for the full rationale.
+Twelve codes ship (NODE/FIELD/EDGE only); see
+``docs/ontology/validation.md`` for the full table.
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ import datetime
 import enum
 from typing import Any, Optional
 
+from ._ontology_routing import build_name_to_column
 from ._ontology_routing import build_property_lookup
 from ._ontology_routing import parse_iso_date
 from ._ontology_routing import parse_iso_datetime
@@ -350,40 +351,42 @@ def _validate_node(
         )
     )
 
-  # Property name → value lookup so we can check key presence.
-  prop_by_name: dict[str, Any] = {p.name: p.value for p in node.properties}
-  prop_lookup = _build_property_lookup(spec_entity.properties)
-
   # The materializer writes the node row's primary-key columns from
   # ``node.properties`` but writes edge FK columns from
   # ``parse_key_segment(node_id)``. If those two sources of truth
   # disagree, the validator will pass but the materialized graph
   # will have edges pointing at non-existent rows. Pre-parse the
   # node-id key segment once so the loop below can compare each
-  # key column against the extracted property value.
+  # key column against the materializer-routed property value.
   parsed_node_keys = parse_key_segment(node.node_id) if node.node_id else {}
 
-  for key_col in spec_entity.key_columns:
-    spec_key_prop = prop_lookup.get(key_col)
-    # Accept either the key's logical name or its physical column
-    # in the extracted property list (per #76's name-resolution
-    # rule).
-    candidate_names = {key_col}
-    if spec_key_prop is not None:
-      candidate_names.add(spec_key_prop.logical_name)
+  # Mirror the materializer's name→physical-column routing. The
+  # materializer iterates ``node.properties`` in extraction order
+  # and writes each accepted name to its physical column — so two
+  # extracted properties whose names both route to the same key
+  # column ('decision_id' and a logical alias 'decisionId') both
+  # write that column, last-wins. The validator must use the same
+  # logic; otherwise it can validate clean against the first match
+  # while the materializer actually writes the second.
+  name_to_col = build_name_to_column(spec_entity.properties)
+  routed_values_by_col: dict[str, list[tuple[str, Any]]] = {}
+  for prop in node.properties:
+    physical = name_to_col.get(prop.name)
+    if physical is not None:
+      routed_values_by_col.setdefault(physical, []).append(
+          (prop.name, prop.value)
+      )
 
-    found_value = None
-    found_name = None
-    for name in candidate_names:
-      if name in prop_by_name:
-        found_value = prop_by_name[name]
-        found_name = name
-        break
+  for key_col in spec_entity.key_columns:
+    routed = routed_values_by_col.get(key_col, [])
+    # Effective materializer value = last write wins (matches
+    # ``ontology_materializer._route_node``).
+    found_value = routed[-1][1] if routed else None
 
     is_empty = found_value is None or (
         isinstance(found_value, str) and not found_value
     )
-    if found_name is None or is_empty:
+    if not routed or is_empty:
       failures.append(
           ValidationFailure(
               scope=FallbackScope.NODE,
@@ -401,13 +404,46 @@ def _validate_node(
       )
       continue
 
+    # Multiple extracted properties routing to the same key column
+    # with disagreeing values is itself a key_mismatch — the
+    # materializer would silently pick the last one and the
+    # extractor's intent is ambiguous. Surface the conflict
+    # directly so the extractor can be fixed.
+    distinct_values = {str(v) for _, v in routed}
+    if len(distinct_values) > 1:
+      observed_pairs = ", ".join(f"{n}={v!r}" for n, v in routed)
+      failures.append(
+          ValidationFailure(
+              scope=FallbackScope.NODE,
+              code="key_mismatch",
+              path=f"{base_path}.properties.<key:{key_col}>",
+              node_id=node.node_id or None,
+              event_id=event_id,
+              expected=key_col,
+              observed=str(found_value),
+              detail=(
+                  f"primary-key column {key_col!r} on entity "
+                  f"{spec_entity.name!r} is set by multiple "
+                  f"extracted properties with conflicting values "
+                  f"({observed_pairs}). The materializer writes "
+                  f"properties in extraction order and last-wins, "
+                  f"so this silently picks {found_value!r} — fix "
+                  f"the extractor so a key column has exactly one "
+                  f"source."
+              ),
+          )
+      )
+      continue
+
     # ``key_mismatch``: parsed node-id key disagrees with the
-    # extracted property value. The materializer writes node rows
-    # from properties and edge FKs from the parsed node-id, so
-    # disagreement silently breaks edges. Also catches keys whose
-    # raw values contain ``,`` or ``=`` — ``_build_key_string`` is
-    # unescaped, so ``parse_key_segment`` truncates at the comma
-    # and the parsed value won't equal the property value.
+    # materializer-routed property value. The materializer writes
+    # node rows from properties and edge FKs from the parsed
+    # node-id, so disagreement silently breaks edges. Also catches
+    # keys whose raw values contain ``,`` — ``_build_key_string``
+    # is unescaped on commas, so ``parse_key_segment`` truncates
+    # at the comma and the parsed value won't equal the property
+    # value. (``=`` is split-once, so ``key=a=b`` parses as
+    # ``{"key": "a=b"}`` and round-trips cleanly.)
     parsed_value = parsed_node_keys.get(key_col)
     if parsed_value is not None and parsed_value != str(found_value):
       failures.append(
@@ -427,9 +463,9 @@ def _validate_node(
                   f"The materializer writes node rows from "
                   f"properties and edge FK columns from the parsed "
                   f"node_id segment — disagreement produces edges "
-                  f"pointing at non-existent rows. (If the property "
-                  f"value contains ',' or '=', that also triggers "
-                  f"this since the node-id format is unescaped.)"
+                  f"pointing at non-existent rows. (If a property "
+                  f"value contains ',', that also triggers this "
+                  f"since the node-id format is unescaped.)"
               ),
           )
       )

@@ -83,7 +83,7 @@ Filter by scope with `report.by_scope(FallbackScope.NODE)`.
 | `missing_node_id` | `node_id` is empty. |
 | `duplicate_node_id` | `node_id` collides with another node in the same graph. |
 | `missing_key` | A column listed in `ResolvedEntity.key_columns` is absent (or empty-string) on the node's properties. |
-| `key_mismatch` | The node-id key segment disagrees with the extracted property value for a primary-key column. The materializer writes the node row from `node.properties` but writes edge FK columns from `parse_key_segment(node_id)`; disagreement produces edges pointing at non-existent rows. Also fires when a key value contains `,` or `=` — `_build_key_string` is unescaped, so `parse_key_segment` truncates at the comma and the parsed value won't equal the property value. |
+| `key_mismatch` | The materializer-routed primary-key value disagrees with the parsed `node_id` key segment, OR two extracted properties route to the same key column with conflicting values. The materializer writes node rows from `node.properties` (with last-wins on duplicate routing) but writes edge FK columns from `parse_key_segment(node_id)`; disagreement produces edges pointing at non-existent rows. Also fires when a key value contains `,` — `_build_key_string` doesn't escape commas, so `parse_key_segment` truncates at the first comma and the parsed value won't equal the property value. (`=` round-trips cleanly: `parse_key_segment` splits each pair on the *first* `=`, so `key=a=b` parses as `{"key": "a=b"}`.) |
 
 ### FIELD-scope codes
 

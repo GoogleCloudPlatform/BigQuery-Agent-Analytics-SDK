@@ -350,6 +350,130 @@ class TestNodeScopeCodes:
     failures = [f for f in report.failures if f.code == "key_mismatch"]
     assert failures == []
 
+  def _renamed_key_spec(self):
+    """Spec where Decision's primary-key logical name 'decisionId'
+    maps to the physical column 'decision_id' via the binding. Used
+    for tests that exercise the validator's matching of the
+    materializer's name→column routing for key columns."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    ont_yaml = (
+        "ontology: RenamedKeyTest\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    keys:\n"
+        "      primary: [decisionId]\n"
+        "    properties:\n"
+        "      - name: decisionId\n"
+        "        type: string\n"
+        "relationships: []\n"
+    )
+    bnd_yaml = (
+        "binding: renamed_key_test\n"
+        "ontology: RenamedKeyTest\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Decision\n"
+        "    source: decisions\n"
+        "    properties:\n"
+        "      - name: decisionId\n"
+        "        column: decision_id\n"  # renamed: logical decisionId → physical decision_id
+        "relationships: []\n"
+    )
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="renamed_key_test_"))
+    (tmp / "ont.yaml").write_text(ont_yaml, encoding="utf-8")
+    (tmp / "bnd.yaml").write_text(bnd_yaml, encoding="utf-8")
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+    return resolve(ontology, binding)
+
+  def test_key_mismatch_catches_duplicate_property_names_with_conflicting_values(
+      self,
+  ):
+    """When a key column is set by *two* extracted properties — one
+    under the logical name, one under the physical column — both
+    route to the same physical column. The materializer iterates
+    properties in extraction order, last-wins; if their values
+    disagree it silently picks one. The validator must surface
+    this conflict directly."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec = self._renamed_key_spec()
+    node = ExtractedNode(
+        node_id="sess1:Decision:decision_id=d2",
+        entity_name="Decision",
+        labels=["Decision"],
+        properties=[
+            ExtractedProperty(name="decision_id", value="d2"),
+            ExtractedProperty(name="decisionId", value="d1"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert len(failures) == 1
+    # The detail mentions both property names so the extractor can
+    # find and fix the duplicate.
+    assert "decision_id" in failures[0].detail
+    assert "decisionId" in failures[0].detail
+
+  def test_key_mismatch_compares_against_materializer_routed_value(self):
+    """When two properties route to the same key column with the
+    *same* value, no conflict — but the materializer-effective
+    value is what gets compared against the parsed node-id segment.
+    Here both properties say d1, node_id says d2: key_mismatch
+    fires once, with expected=d1 (the routed value)."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec = self._renamed_key_spec()
+    node = ExtractedNode(
+        node_id="sess1:Decision:decision_id=d2",
+        entity_name="Decision",
+        labels=["Decision"],
+        properties=[
+            ExtractedProperty(name="decision_id", value="d1"),
+            ExtractedProperty(name="decisionId", value="d1"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert len(failures) == 1
+    assert failures[0].expected == "d1"
+    assert failures[0].observed == "d2"
+
+  def test_key_mismatch_does_not_fire_for_equals_in_value(self):
+    """``parse_key_segment`` splits each ``k=v`` pair on the *first*
+    ``=``, so a value like ``a=b`` round-trips cleanly through
+    ``_build_key_string`` → ``parse_key_segment``. The validator
+    must not falsely flag this as key_mismatch — only commas
+    truncate."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[
+            _node(
+                "sess1:Decision:decision_id=a=b", "Decision", decision_id="a=b"
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert failures == []
+
 
 # ------------------------------------------------------------------ #
 # FIELD-scope codes                                                    #
