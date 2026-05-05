@@ -262,16 +262,33 @@ def _route_node(
 ) -> dict:
   """Convert an ``ExtractedNode`` to a row dict for ``insert_rows_json``.
 
-  Only properties declared in the entity spec are included.  Extra
+  Only properties declared in the entity spec are included. Extra
   properties emitted by AI.GENERATE (e.g. hallucinated fields or
   fields belonging to a different entity type) are silently dropped
   to prevent ``insert_rows_json`` failures on non-schema columns.
+
+  Property-name resolution accepts both ``ResolvedProperty.logical_name``
+  (the ontology-level name an LLM extractor naturally produces) and
+  ``ResolvedProperty.column`` (the physical column name from the
+  binding). This matches the contract of
+  ``graph_validation.validate_extracted_graph(...)`` (issue #76):
+  the validator says "logical-name extraction is OK," and the
+  materializer must honor the same contract — otherwise a
+  validator-clean extraction silently drops renamed-binding
+  properties at INSERT time.
   """
-  schema_props = {p.column for p in entity_spec.properties}
+  # Build {accepted_name: physical_column} so we route renamed
+  # logical names to the actual BQ column.
+  name_to_col: dict[str, str] = {}
+  for prop in entity_spec.properties:
+    name_to_col[prop.column] = prop.column
+    name_to_col[prop.logical_name] = prop.column
+
   row: dict = {}
   for prop in node.properties:
-    if prop.name in schema_props:
-      row[prop.name] = prop.value
+    physical = name_to_col.get(prop.name)
+    if physical is not None:
+      row[physical] = prop.value
   row["session_id"] = session_id
   row["extracted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
   return row
@@ -332,10 +349,17 @@ def _route_edge(
 
   # Edge properties — only include properties declared in the spec.
   # Extra AI-emitted fields are dropped to prevent insert failures.
-  schema_props = {p.column for p in rel.properties}
+  # Same logical-name-or-column resolution as ``_route_node``: the
+  # validator and materializer must agree on what an extractor is
+  # allowed to emit (per issue #76).
+  edge_name_to_col: dict[str, str] = {}
+  for prop in rel.properties:
+    edge_name_to_col[prop.column] = prop.column
+    edge_name_to_col[prop.logical_name] = prop.column
   for prop in edge.properties:
-    if prop.name in schema_props:
-      row[prop.name] = prop.value
+    physical = edge_name_to_col.get(prop.name)
+    if physical is not None:
+      row[physical] = prop.value
 
   # Determine session_id for delete-scoped ownership.
   # For lineage edges with to_session_column, session_id = to_session value

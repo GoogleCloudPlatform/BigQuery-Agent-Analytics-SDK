@@ -561,3 +561,26 @@ except ImportError as e:
       "Install bigframes to use this feature.",
       e,
   )
+
+# Graph Validator (issue #76)
+try:
+  from .graph_validation import FallbackScope
+  from .graph_validation import validate_extracted_graph
+  from .graph_validation import validate_extracted_graph_from_ontology
+  from .graph_validation import ValidationFailure
+  from .graph_validation import ValidationReport
+
+  __all__.extend(
+      [
+          "FallbackScope",
+          "ValidationFailure",
+          "ValidationReport",
+          "validate_extracted_graph",
+          "validate_extracted_graph_from_ontology",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import graph validator: %s.",
+      e,
+  )
