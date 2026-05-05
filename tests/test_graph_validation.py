@@ -453,6 +453,51 @@ class TestNodeScopeCodes:
     assert failures[0].expected == "d1"
     assert failures[0].observed == "d2"
 
+  def test_parse_key_segment_preserves_colon_in_value(self):
+    """``parse_key_segment`` must split the node_id on ``:`` at
+    most twice so a primary-key value containing a literal ``:``
+    survives the parse. Otherwise ``parts[-1]`` is the trailing
+    fragment and the whole segment fails the ``=`` check."""
+    from bigquery_agent_analytics._ontology_routing import parse_key_segment
+
+    # Single key value with embedded ':'.
+    assert parse_key_segment("sess1:Decision:decision_id=a:b") == {
+        "decision_id": "a:b"
+    }
+    # Compound key segment, value contains ':'.
+    assert parse_key_segment("sess1:Decision:decision_id=a:b,other=c") == {
+        "decision_id": "a:b",
+        "other": "c",
+    }
+    # Short-form fallback id still parses to {} (untouched).
+    assert parse_key_segment("d1") == {}
+    # Plain key still works.
+    assert parse_key_segment("sess1:Decision:decision_id=d1") == {
+        "decision_id": "d1"
+    }
+
+  def test_key_mismatch_does_not_fire_for_colon_in_value(self):
+    """Companion to :func:`test_parse_key_segment_preserves_colon_in_value`:
+    a node whose primary-key property value contains ``:`` must
+    validate clean against a node_id that encodes the same value
+    raw. Without the ``maxsplit=2`` fix the parsed segment would be
+    ``{}`` and ``key_mismatch`` wouldn't fire here, but downstream
+    edges would crash with ``missing_endpoint_key`` / corrupt FKs."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[
+            _node(
+                "sess1:Decision:decision_id=a:b", "Decision", decision_id="a:b"
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [f for f in report.failures if f.code == "key_mismatch"]
+    assert failures == []
+
   def test_key_mismatch_does_not_fire_for_equals_in_value(self):
     """``parse_key_segment`` splits each ``k=v`` pair on the *first*
     ``=``, so a value like ``a=b`` round-trips cleanly through

@@ -186,14 +186,21 @@ def parse_key_segment(node_id: str) -> dict[str, str]:
   the parsed key/value pairs, or an empty dict if the format
   doesn't match (e.g. an index-based fallback ID like ``d1``).
 
+  Splits on ``:`` *at most twice* so primary-key values that
+  contain a literal ``:`` survive the parse: a node_id like
+  ``sess1:Decision:decision_id=a:b`` parses to
+  ``{"decision_id": "a:b"}``. Without the ``maxsplit=2`` cap, the
+  trailing ``:b`` would be a separate ``parts`` element and the
+  whole segment would fail the ``=`` check.
+
   The materializer uses this to populate edge FK columns from
   endpoint node-ids; the validator uses it to verify that those
   columns will actually be readable at materialize time.
   """
-  parts = node_id.split(":")
+  parts = node_id.split(":", 2)
   if len(parts) < 3:
     return {}
-  key_segment = parts[-1]
+  key_segment = parts[2]
   if "=" not in key_segment:
     return {}
   result: dict[str, str] = {}
