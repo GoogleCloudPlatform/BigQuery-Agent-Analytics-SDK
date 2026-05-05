@@ -908,6 +908,75 @@ class TestNormalizationAndJsonRoundTrip:
     fails = [f for f in report.failures if f.code == "type_mismatch"]
     assert len(fails) == 1
 
+  def test_compact_date_string_rejected(self):
+    """``date.fromisoformat`` accepts compact ``20260505`` but
+    BigQuery JSON inserts only accept the dashed ``YYYY-MM-DD``
+    shape. The validator gates on the BigQuery shape first."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec = self._date_spec()
+    node = ExtractedNode(
+        node_id="sess1:Event:event_id=e1",
+        entity_name="Event",
+        labels=["Event"],
+        properties=[
+            ExtractedProperty(name="event_id", value="e1"),
+            ExtractedProperty(name="day", value="20260505"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    report = validate_extracted_graph(spec, graph)
+    fails = [f for f in report.failures if f.code == "type_mismatch"]
+    assert len(fails) == 1
+
+  def test_week_date_string_rejected(self):
+    """``date.fromisoformat`` (Python 3.11+) accepts ``2026-W19-2``
+    week dates; BigQuery JSON does not."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec = self._date_spec()
+    node = ExtractedNode(
+        node_id="sess1:Event:event_id=e1",
+        entity_name="Event",
+        labels=["Event"],
+        properties=[
+            ExtractedProperty(name="event_id", value="e1"),
+            ExtractedProperty(name="day", value="2026-W19-2"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    report = validate_extracted_graph(spec, graph)
+    fails = [f for f in report.failures if f.code == "type_mismatch"]
+    assert len(fails) == 1
+
+  def test_compact_timestamp_string_rejected(self):
+    """``datetime.fromisoformat`` (3.11+) accepts compact
+    ``20260505T120000``; BigQuery JSON requires the dashed/colon
+    form."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[
+            _node(
+                "d1",
+                "Decision",
+                decision_id="d1",
+                occurred_at="20260505T120000Z",
+            )
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    fails = [f for f in report.failures if f.code == "type_mismatch"]
+    assert len(fails) == 1
+
   def test_sdk_type_alias_float64_is_type_checked(self):
     """``float64`` is an alias for ``double`` in
     ``ontology_materializer._DDL_TYPE_MAP``. The validator now
@@ -1077,6 +1146,32 @@ class TestExternalEndpoints:
     )
     fails = [f for f in report.failures if f.code == "missing_endpoint_key"]
     assert len(fails) == 2  # decision_id and outcome_id both unparseable
+
+  def test_external_endpoints_catches_wrong_entity_segment(self):
+    """Permissive mode skips the in-graph node lookup but the
+    node_id itself carries an entity segment
+    ('{session}:{entity}:k=v'). An obvious mismatch like a Decision
+    node-id where the relationship expects an Outcome endpoint must
+    still emit ``wrong_endpoint_entity`` — otherwise lineage-edge
+    batches silently route to the wrong table."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    d_id = "sess1:Decision:decision_id=d1"
+    # to-endpoint should be Outcome, but we pass a Decision-shaped id.
+    wrong_o_id = "sess1:Decision:outcome_id=o1"
+    graph = _graph(
+        nodes=[],
+        edges=[_edge("e1", "HasOutcome", d_id, wrong_o_id, weight=1.0)],
+    )
+
+    report = validate_extracted_graph(
+        spec, graph, allow_external_endpoints=True
+    )
+    fails = [f for f in report.failures if f.code == "wrong_endpoint_entity"]
+    assert len(fails) == 1
+    assert fails[0].observed == "Decision"
+    assert fails[0].expected == "Outcome"
 
 
 class TestOntologyAdapter:

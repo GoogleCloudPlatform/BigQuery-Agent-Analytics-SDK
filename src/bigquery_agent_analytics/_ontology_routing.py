@@ -49,7 +49,22 @@ from __future__ import annotations
 
 import base64
 import datetime
+import re
 from typing import Any
+
+# BigQuery JSON-input shape constraints. ``date.fromisoformat`` /
+# ``datetime.fromisoformat`` are too permissive for our use: they
+# accept compact and week-date forms like ``20260505``,
+# ``2026-W19-2``, ``20260505T120000`` that BigQuery rejects in
+# JSON inserts. The validator's contract is the BigQuery-accepted
+# shape, so we gate on these regexes first and only reach
+# ``fromisoformat`` for semantic checks (valid month/day/time).
+_BQ_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BQ_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?$"
+)
 
 
 def build_property_lookup(properties):
@@ -87,12 +102,18 @@ def build_name_to_column(properties):
 
 
 def parse_iso_date(value: str) -> bool:
-  """Return True if *value* parses as an ISO-8601 date.
+  """Return True if *value* is a BigQuery-acceptable ISO date string.
 
-  Stricter than the earlier regex-only check: rejects shapes like
-  ``"2026-13-99"`` that match ``\\d{4}-\\d{2}-\\d{2}`` but aren't
-  valid dates and would fail at BigQuery INSERT time.
+  Two-stage check: first gate on ``_BQ_DATE_RE`` to reject compact
+  (``20260505``) and week-date (``2026-W19-2``) shapes that
+  ``fromisoformat`` accepts but BigQuery JSON inserts reject. Then
+  call ``date.fromisoformat`` for the semantic check (valid month
+  and day) which also catches things like ``"2026-13-99"``.
   """
+  if not isinstance(value, str):
+    return False
+  if not _BQ_DATE_RE.match(value):
+    return False
   try:
     datetime.date.fromisoformat(value)
     return True
@@ -101,13 +122,18 @@ def parse_iso_date(value: str) -> bool:
 
 
 def parse_iso_datetime(value: str) -> bool:
-  """Return True if *value* parses as an ISO-8601 datetime.
+  """Return True if *value* is a BigQuery-acceptable ISO datetime.
 
-  Accepts trailing ``Z`` (UTC) by translating it to ``+00:00``
-  before calling ``fromisoformat`` — Python <3.11 doesn't accept
-  ``Z`` natively. Stricter than the earlier regex-only check.
+  Two-stage check matching :func:`parse_iso_date`: first gate on
+  ``_BQ_DATETIME_RE`` to reject compact forms like
+  ``20260505T120000`` that ``fromisoformat`` would otherwise
+  accept. Then translate trailing ``Z`` (UTC) to ``+00:00`` —
+  Python <3.11 doesn't accept ``Z`` natively — and call
+  ``datetime.fromisoformat`` for the semantic check.
   """
   if not isinstance(value, str):
+    return False
+  if not _BQ_DATETIME_RE.match(value):
     return False
   candidate = value
   if candidate.endswith("Z"):

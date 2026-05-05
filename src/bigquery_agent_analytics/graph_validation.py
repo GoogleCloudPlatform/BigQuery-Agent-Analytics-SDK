@@ -472,12 +472,35 @@ def _validate_edge(
             )
         )
         continue
-      # Permissive mode: skip the wrong_endpoint_entity check
-      # (we don't have the node to compare entity_name) but
-      # still parse the node-id key segment below so endpoint-
-      # key presence is verified. If parse_key_segment returns
-      # {}, missing_endpoint_key fires per-column.
-      pass
+      # Permissive mode: we don't have the in-graph node, but the
+      # node_id itself carries the entity segment ('{session}:
+      # {entity}:k=v'). Compare that segment cheaply against
+      # expected_entity so obvious mismatches still fail. The
+      # endpoint-key parse still runs below so missing FK columns
+      # also fire per-column.
+      parts = edge_node_id.split(":")
+      if len(parts) >= 3:
+        observed_entity = parts[1]
+        if observed_entity and observed_entity != expected_entity:
+          failures.append(
+              ValidationFailure(
+                  scope=FallbackScope.EDGE,
+                  code="wrong_endpoint_entity",
+                  path=f"{base_path}.{direction}",
+                  edge_id=edge.edge_id or None,
+                  event_id=event_id,
+                  observed=observed_entity,
+                  expected=expected_entity,
+                  detail=(
+                      f"{direction}={edge_node_id!r} carries entity "
+                      f"segment {observed_entity!r}, but relationship "
+                      f"{spec_relationship.name!r} expects "
+                      f"{expected_entity!r} (permissive mode: parsed "
+                      f"from node_id since the endpoint node is not "
+                      f"in this graph)"
+                  ),
+              )
+          )
 
     if referenced is not None and referenced.entity_name != expected_entity:
       failures.append(

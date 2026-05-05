@@ -56,6 +56,8 @@ report = validate_extracted_graph(
 
 The endpoint-key parse (`missing_endpoint_key`) still runs in permissive mode — short-form node-ids that produce no parseable keys still fail, so silent FK-column corruption stays caught.
 
+The `wrong_endpoint_entity` check also still runs in permissive mode by parsing the entity segment from the node-id (`{session}:{entity}:k=v`). An external endpoint id whose entity segment doesn't match the relationship's declared `from_entity` / `to_entity` still fails — only the in-graph node lookup is skipped.
+
 ## Fallback scopes
 
 Each failure carries the smallest safe unit of replacement so downstream consumers (notably the compiled-extractor runtime in #75) know whether to re-extract a single field, a whole node, an edge, or — eventually — the whole event:
@@ -103,6 +105,8 @@ The validator accepts these Python value shapes per `sdk_type`:
 | `timestamp` | tz-aware `datetime.datetime` or ISO-8601 string |
 
 Naive `datetime.datetime` (no `tzinfo`) is rejected for `timestamp` per the issue body — the materializer needs an explicit timezone.
+
+The validator narrows date/timestamp strings to the **BigQuery JSON-input shape** before semantic parsing. `datetime.fromisoformat` (Python 3.11+) accepts compact and week-date forms like `20260505`, `2026-W19-2`, `20260505T120000` that BigQuery JSON inserts reject. The validator gates on a regex first (dashed `YYYY-MM-DD` for `date`; dashed date + `T`/space + colon-separated time, optional fractional seconds, optional `Z` or `±HH:MM` offset for `timestamp`) and only reaches `fromisoformat` for the semantic check (valid month/day, valid time-of-day). This keeps the validator's contract aligned with what the materializer can actually `INSERT`.
 
 ### EDGE-scope codes
 
