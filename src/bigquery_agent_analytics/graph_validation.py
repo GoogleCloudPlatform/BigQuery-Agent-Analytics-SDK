@@ -64,10 +64,11 @@ from __future__ import annotations
 import dataclasses
 import datetime
 import enum
-import re
 from typing import Any, Optional
 
 from ._ontology_routing import build_property_lookup
+from ._ontology_routing import parse_iso_date
+from ._ontology_routing import parse_iso_datetime
 from ._ontology_routing import parse_key_segment
 from .extracted_models import ExtractedEdge
 from .extracted_models import ExtractedGraph
@@ -134,16 +135,11 @@ class ValidationReport:
 # Type validators (per ResolvedProperty.sdk_type)                      #
 # ------------------------------------------------------------------ #
 
-# ISO-8601 date / datetime quick-accept regexes. We don't try to
-# parse — we only need a fast structural reject so a string clearly
-# not matching the shape is flagged. Real parsing would slow the
-# validator down without catching more bugs that callers care about.
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_ISO_DATETIME_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-    r"(?:\.\d+)?"
-    r"(?:Z|[+-]\d{2}:?\d{2})?$"
-)
+# ISO parsing is centralized in _ontology_routing so the validator
+# and the materializer-side normalization agree on what counts as
+# a parseable ISO date/timestamp. Earlier versions used regex-only
+# acceptance which let strings like '9999-99-99' pass as dates and
+# fail at BigQuery INSERT time.
 
 
 def _accepts_string(value: Any) -> bool:
@@ -178,8 +174,8 @@ def _accepts_date(value: Any) -> bool:
       value, datetime.datetime
   ):
     return True
-  if isinstance(value, str) and _ISO_DATE_RE.match(value):
-    return True
+  if isinstance(value, str):
+    return parse_iso_date(value)
   return False
 
 
@@ -187,17 +183,25 @@ def _accepts_timestamp(value: Any) -> bool:
   if isinstance(value, datetime.datetime):
     # Tz-aware required per the issue table.
     return value.tzinfo is not None
-  if isinstance(value, str) and _ISO_DATETIME_RE.match(value):
-    return True
+  if isinstance(value, str):
+    return parse_iso_datetime(value)
   return False
 
 
+# _DDL_TYPE_MAP supports SDK type aliases (``float64`` and ``bool``)
+# alongside the canonical names (``double`` and ``boolean``). The
+# GraphSpec adapter path can produce property metadata with either
+# form, so the validator must accept both — otherwise a property
+# typed ``float64`` would skip type-checking entirely (the unknown-
+# sdk-type fallback returns True for forward compatibility).
 _TYPE_ACCEPTORS: dict[str, Any] = {
     "string": _accepts_string,
     "bytes": _accepts_bytes,
     "int64": _accepts_int64,
     "double": _accepts_double,
+    "float64": _accepts_double,  # alias for double
     "boolean": _accepts_boolean,
+    "bool": _accepts_boolean,  # alias for boolean
     "date": _accepts_date,
     "timestamp": _accepts_timestamp,
 }
@@ -409,9 +413,16 @@ def _validate_edge(
     spec: ResolvedGraph,
     nodes_by_id: dict[str, ExtractedNode],
     event_id: Optional[str],
+    allow_external_endpoints: bool,
 ) -> list[ValidationFailure]:
   """Per-edge checks: endpoint resolution, endpoint entity match,
-  endpoint key presence, and per-property validation."""
+  endpoint key presence, and per-property validation.
+
+  When ``allow_external_endpoints`` is True, edges whose endpoints
+  are not in the same ``ExtractedGraph`` skip the in-graph
+  resolution check. The endpoint-key parse (``missing_endpoint_key``)
+  still runs so an unparseable node-id still fails.
+  """
   failures: list[ValidationFailure] = []
   base_path = f"edges[{edge_index}]"
 
@@ -439,29 +450,36 @@ def _validate_edge(
 
     referenced = nodes_by_id.get(edge_node_id)
     if referenced is None:
-      # External node-ref: accept if the relationship's endpoint
-      # entity exists in the spec (the extractor may legitimately
-      # reference a node materialized elsewhere). But we can't
-      # confirm the entity match without the node, so this is a
-      # warning-shaped failure: unresolved_endpoint with detail
-      # noting that no node with that id is in the graph.
-      failures.append(
-          ValidationFailure(
-              scope=FallbackScope.EDGE,
-              code="unresolved_endpoint",
-              path=f"{base_path}.{direction}",
-              edge_id=edge.edge_id or None,
-              event_id=event_id,
-              observed=edge_node_id,
-              detail=(
-                  f"{direction}={edge_node_id!r} does not match any "
-                  f"node in the extracted graph"
-              ),
-          )
-      )
-      continue
+      if not allow_external_endpoints:
+        # Strict mode: the endpoint must exist in the same
+        # ExtractedGraph. Lineage-edge batches that reference
+        # nodes materialized in earlier passes should opt into
+        # ``allow_external_endpoints=True``.
+        failures.append(
+            ValidationFailure(
+                scope=FallbackScope.EDGE,
+                code="unresolved_endpoint",
+                path=f"{base_path}.{direction}",
+                edge_id=edge.edge_id or None,
+                event_id=event_id,
+                observed=edge_node_id,
+                detail=(
+                    f"{direction}={edge_node_id!r} does not match "
+                    f"any node in the extracted graph (pass "
+                    f"allow_external_endpoints=True for lineage-"
+                    f"edge batches)"
+                ),
+            )
+        )
+        continue
+      # Permissive mode: skip the wrong_endpoint_entity check
+      # (we don't have the node to compare entity_name) but
+      # still parse the node-id key segment below so endpoint-
+      # key presence is verified. If parse_key_segment returns
+      # {}, missing_endpoint_key fires per-column.
+      pass
 
-    if referenced.entity_name != expected_entity:
+    if referenced is not None and referenced.entity_name != expected_entity:
       failures.append(
           ValidationFailure(
               scope=FallbackScope.EDGE,
@@ -544,6 +562,8 @@ def _validate_edge(
 def validate_extracted_graph(
     spec: ResolvedGraph,
     graph: ExtractedGraph,
+    *,
+    allow_external_endpoints: bool = False,
 ) -> ValidationReport:
   """Validate an extracted graph against a resolved spec.
 
@@ -554,6 +574,15 @@ def validate_extracted_graph(
       spec: The runtime-facing :class:`ResolvedGraph` (output of
           :func:`bigquery_agent_analytics.resolved_spec.resolve`).
       graph: The :class:`ExtractedGraph` to validate.
+      allow_external_endpoints: When False (default), edges whose
+          ``from_node_id`` / ``to_node_id`` does not match any node
+          in ``graph.nodes`` produce ``unresolved_endpoint``. When
+          True, those edges are accepted on the assumption that the
+          referenced node was materialized in an earlier pass — set
+          this for lineage-edge batches where ``graph.nodes`` is
+          empty by design. The endpoint-key parse
+          (``missing_endpoint_key``) still runs in both modes, so
+          unparseable node-ids still fail.
 
   Returns:
       A :class:`ValidationReport`.
@@ -646,6 +675,7 @@ def validate_extracted_graph(
             spec=spec,
             nodes_by_id=nodes_by_id,
             event_id=None,
+            allow_external_endpoints=allow_external_endpoints,
         )
     )
 
@@ -656,6 +686,8 @@ def validate_extracted_graph_from_ontology(
     ontology,
     binding,
     graph: ExtractedGraph,
+    *,
+    allow_external_endpoints: bool = False,
 ) -> ValidationReport:
   """Adapter: ``resolve(ontology, binding)`` then delegate.
 
@@ -665,4 +697,8 @@ def validate_extracted_graph_from_ontology(
   """
   from .resolved_spec import resolve
 
-  return validate_extracted_graph(resolve(ontology, binding), graph)
+  return validate_extracted_graph(
+      resolve(ontology, binding),
+      graph,
+      allow_external_endpoints=allow_external_endpoints,
+  )

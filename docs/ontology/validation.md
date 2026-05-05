@@ -44,6 +44,18 @@ For callers holding upstream `Ontology` + `Binding` instead of a `ResolvedGraph`
 report = validate_extracted_graph_from_ontology(ontology, binding, graph)
 ```
 
+### Lineage-edge batches: `allow_external_endpoints=True`
+
+Some pipelines materialize lineage edges in a graph with `nodes=[]` after the endpoint nodes were materialized in earlier passes. The default strict mode flags this as `unresolved_endpoint`. Pass `allow_external_endpoints=True` to skip the in-graph node lookup:
+
+```python
+report = validate_extracted_graph(
+    spec, lineage_edges_only_graph, allow_external_endpoints=True
+)
+```
+
+The endpoint-key parse (`missing_endpoint_key`) still runs in permissive mode — short-form node-ids that produce no parseable keys still fail, so silent FK-column corruption stays caught.
+
 ## Fallback scopes
 
 Each failure carries the smallest safe unit of replacement so downstream consumers (notably the compiled-extractor runtime in #75) know whether to re-extract a single field, a whole node, an edge, or — eventually — the whole event:

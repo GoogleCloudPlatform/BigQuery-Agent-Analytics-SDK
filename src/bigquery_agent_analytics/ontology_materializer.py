@@ -56,6 +56,7 @@ import uuid
 from google.cloud import bigquery
 
 from ._ontology_routing import build_name_to_column
+from ._ontology_routing import normalize_property_value
 from ._ontology_routing import parse_key_segment
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
@@ -284,12 +285,20 @@ def _route_node(
   # helper so collision precedence (logical name wins) matches the
   # validator's _build_property_lookup exactly.
   name_to_col = build_name_to_column(entity_spec.properties)
+  # Look up sdk_type per physical column for normalization. The
+  # validator legitimately accepts Python bytes / date / datetime
+  # for the corresponding SDK types, but insert_rows_json /
+  # load_table_from_json need JSON-compatible values; normalize
+  # before writing.
+  sdk_type_by_col = {p.column: p.sdk_type for p in entity_spec.properties}
 
   row: dict = {}
   for prop in node.properties:
     physical = name_to_col.get(prop.name)
     if physical is not None:
-      row[physical] = prop.value
+      row[physical] = normalize_property_value(
+          prop.value, sdk_type_by_col.get(physical, "string")
+      )
   row["session_id"] = session_id
   row["extracted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
   return row
@@ -336,12 +345,17 @@ def _route_edge(
 
   # Edge properties — only include properties declared in the spec.
   # Same shared helper as ``_route_node`` so collision precedence
-  # (logical name wins) matches the validator exactly.
+  # (logical name wins) matches the validator exactly. Same
+  # normalization step too so bytes / date / datetime values land
+  # as JSON-serializable forms.
   edge_name_to_col = build_name_to_column(rel.properties)
+  edge_sdk_type_by_col = {p.column: p.sdk_type for p in rel.properties}
   for prop in edge.properties:
     physical = edge_name_to_col.get(prop.name)
     if physical is not None:
-      row[physical] = prop.value
+      row[physical] = normalize_property_value(
+          prop.value, edge_sdk_type_by_col.get(physical, "string")
+      )
 
   # Determine session_id for delete-scoped ownership.
   # For lineage edges with to_session_column, session_id = to_session value

@@ -16,7 +16,7 @@
 
 The validator (``graph_validation.validate_extracted_graph``) and the
 materializer (``ontology_materializer._route_node`` / ``_route_edge``)
-must agree on two contracts:
+must agree on three contracts:
 
 1. **Property-name resolution.** An extracted property is matched
    against a spec property by either the property's
@@ -28,8 +28,16 @@ must agree on two contracts:
    are derived from the edge's ``from_node_id`` / ``to_node_id``
    string by splitting the trailing ``k1=v1,k2=v2`` segment.
 
-Putting both helpers in one module guarantees the two callers stay in
-lockstep — earlier versions had subtle precedence and parsing
+3. **Property value normalization.** ``insert_rows_json`` /
+   ``load_table_from_json`` only accept JSON-compatible values, but
+   the validator legitimately accepts Python ``bytes``, ``date``,
+   and tz-aware ``datetime`` for the corresponding SDK types. The
+   shared :func:`normalize_property_value` converts those to
+   JSON-compatible forms (ISO strings, base64) so a validator-clean
+   value never crashes the materializer.
+
+Putting these helpers in one module guarantees the two callers stay
+in lockstep — earlier versions had subtle precedence and parsing
 divergences that let validator-clean extractions silently corrupt at
 INSERT time.
 
@@ -38,6 +46,10 @@ public API surface; both caller modules treat it as internal plumbing.
 """
 
 from __future__ import annotations
+
+import base64
+import datetime
+from typing import Any
 
 
 def build_property_lookup(properties):
@@ -72,6 +84,67 @@ def build_name_to_column(properties):
   for prop in properties:
     out[prop.logical_name] = prop.column
   return out
+
+
+def parse_iso_date(value: str) -> bool:
+  """Return True if *value* parses as an ISO-8601 date.
+
+  Stricter than the earlier regex-only check: rejects shapes like
+  ``"2026-13-99"`` that match ``\\d{4}-\\d{2}-\\d{2}`` but aren't
+  valid dates and would fail at BigQuery INSERT time.
+  """
+  try:
+    datetime.date.fromisoformat(value)
+    return True
+  except (ValueError, TypeError):
+    return False
+
+
+def parse_iso_datetime(value: str) -> bool:
+  """Return True if *value* parses as an ISO-8601 datetime.
+
+  Accepts trailing ``Z`` (UTC) by translating it to ``+00:00``
+  before calling ``fromisoformat`` — Python <3.11 doesn't accept
+  ``Z`` natively. Stricter than the earlier regex-only check.
+  """
+  if not isinstance(value, str):
+    return False
+  candidate = value
+  if candidate.endswith("Z"):
+    candidate = candidate[:-1] + "+00:00"
+  try:
+    datetime.datetime.fromisoformat(candidate)
+    return True
+  except (ValueError, TypeError):
+    return False
+
+
+def normalize_property_value(value: Any, sdk_type: str) -> Any:
+  """Coerce *value* to a JSON-compatible representation.
+
+  ``insert_rows_json`` / ``load_table_from_json`` cannot serialize
+  Python ``bytes`` / ``date`` / ``datetime`` objects. The validator
+  legitimately accepts these for the corresponding SDK types, so
+  the materializer must normalize before writing. Pass-through for
+  everything else (including primitives the validator already
+  accepts as-is).
+
+  Conversions:
+    * ``bytes`` / ``bytearray``      → base64-encoded ``str``
+    * ``datetime.date`` (not datetime) → ``"YYYY-MM-DD"``
+    * ``datetime.datetime``          → ISO-8601 ``str``
+
+  Strings are passed through unchanged — if a caller already
+  emitted an ISO string for a date/timestamp, the validator
+  ensures it parses, and BigQuery handles the rest.
+  """
+  if isinstance(value, (bytes, bytearray)):
+    return base64.b64encode(bytes(value)).decode("ascii")
+  if isinstance(value, datetime.datetime):
+    return value.isoformat()
+  if isinstance(value, datetime.date):
+    return value.isoformat()
+  return value
 
 
 def parse_key_segment(node_id: str) -> dict[str, str]:

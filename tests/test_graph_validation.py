@@ -809,6 +809,276 @@ class TestRenamedColumnRoundTrip:
     ), f"materializer also wrote to the colliding column; row={row!r}"
 
 
+class TestNormalizationAndJsonRoundTrip:
+  """Validator-clean values must produce JSON-serializable
+  materializer rows. Earlier behavior accepted Python ``bytes``,
+  ``date``, and tz-aware ``datetime`` (correctly per the issue's
+  type table) but the materializer wrote them raw into the row
+  dict, which then failed at ``insert_rows_json`` /
+  ``load_table_from_json``. Normalization now bridges that gap."""
+
+  def test_bytes_value_normalizes_to_base64_string(self):
+    import json
+
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+    from bigquery_agent_analytics.ontology_materializer import _route_node
+
+    spec = self._bytes_spec()
+    entity = next(e for e in spec.entities if e.name == "Blob")
+
+    node = ExtractedNode(
+        node_id="sess1:Blob:blob_id=b1",
+        entity_name="Blob",
+        labels=["Blob"],
+        properties=[
+            ExtractedProperty(name="blob_id", value="b1"),
+            ExtractedProperty(name="payload", value=b"hello world"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    # (a) Validator accepts raw bytes.
+    report = validate_extracted_graph(spec, graph)
+    assert report.ok is True
+
+    # (b) Materializer normalizes to base64 string and the row
+    #     is JSON-serializable.
+    row = _route_node(node, entity, session_id="sess1")
+    assert isinstance(row["payload"], str)
+    json.dumps(row)  # must not raise
+
+  def test_date_value_normalizes_to_iso_string(self):
+    import datetime as dt
+    import json
+
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+    from bigquery_agent_analytics.ontology_materializer import _route_node
+
+    spec, _, _ = _resolved_spec()
+    decision = next(e for e in spec.entities if e.name == "Decision")
+
+    node = ExtractedNode(
+        node_id="sess1:Decision:decision_id=d1",
+        entity_name="Decision",
+        labels=["Decision"],
+        properties=[
+            ExtractedProperty(name="decision_id", value="d1"),
+            ExtractedProperty(
+                name="occurred_at",
+                value=dt.datetime(2026, 5, 5, 12, 0, 0, tzinfo=dt.timezone.utc),
+            ),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    assert validate_extracted_graph(spec, graph).ok
+
+    row = _route_node(node, decision, session_id="sess1")
+    assert isinstance(row["occurred_at"], str)
+    assert row["occurred_at"].startswith("2026-05-05")
+    json.dumps(row)
+
+  def test_invalid_iso_date_string_now_rejected(self):
+    """Earlier regex-only acceptance let '9999-99-99' match
+    ``\\d{4}-\\d{2}-\\d{2}``. The validator now uses
+    ``datetime.date.fromisoformat`` so genuinely-malformed dates
+    fail before BigQuery sees them."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec = self._date_spec()
+    node = ExtractedNode(
+        node_id="sess1:Event:event_id=e1",
+        entity_name="Event",
+        labels=["Event"],
+        properties=[
+            ExtractedProperty(name="event_id", value="e1"),
+            # Looks date-shaped but isn't a valid date.
+            ExtractedProperty(name="day", value="9999-99-99"),
+        ],
+    )
+    graph = _graph(nodes=[node])
+
+    report = validate_extracted_graph(spec, graph)
+    fails = [f for f in report.failures if f.code == "type_mismatch"]
+    assert len(fails) == 1
+
+  def test_sdk_type_alias_float64_is_type_checked(self):
+    """``float64`` is an alias for ``double`` in
+    ``ontology_materializer._DDL_TYPE_MAP``. The validator now
+    accepts the alias so a string value on a float64-typed property
+    fails type-check (instead of slipping through the unknown-type
+    fallback)."""
+    from bigquery_agent_analytics.graph_validation import _value_matches_sdk_type
+
+    assert _value_matches_sdk_type(3.14, "float64") is True
+    assert _value_matches_sdk_type(42, "float64") is True
+    assert _value_matches_sdk_type("not-a-number", "float64") is False
+
+  def test_sdk_type_alias_bool_is_type_checked(self):
+    """Same alias coverage for ``bool`` vs ``boolean``."""
+    from bigquery_agent_analytics.graph_validation import _value_matches_sdk_type
+
+    assert _value_matches_sdk_type(True, "bool") is True
+    assert _value_matches_sdk_type(False, "bool") is True
+    assert _value_matches_sdk_type("true", "bool") is False
+    assert _value_matches_sdk_type(1, "bool") is False  # int rejected
+
+  def _bytes_spec(self):
+    """Minimal spec with a bytes-typed property."""
+    import pathlib
+    import tempfile
+
+    from bigquery_agent_analytics.resolved_spec import resolve
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    ont_yaml = (
+        "ontology: BlobTest\n"
+        "entities:\n"
+        "  - name: Blob\n"
+        "    keys:\n"
+        "      primary: [blob_id]\n"
+        "    properties:\n"
+        "      - name: blob_id\n"
+        "        type: string\n"
+        "      - name: payload\n"
+        "        type: bytes\n"
+        "relationships: []\n"
+    )
+    bnd_yaml = (
+        "binding: blob_test\n"
+        "ontology: BlobTest\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Blob\n"
+        "    source: blobs\n"
+        "    properties:\n"
+        "      - name: blob_id\n"
+        "        column: blob_id\n"
+        "      - name: payload\n"
+        "        column: payload\n"
+        "relationships: []\n"
+    )
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="blob_test_"))
+    (tmp / "ont.yaml").write_text(ont_yaml, encoding="utf-8")
+    (tmp / "bnd.yaml").write_text(bnd_yaml, encoding="utf-8")
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+    return resolve(ontology, binding)
+
+  def _date_spec(self):
+    """Minimal spec with a date-typed property."""
+    import pathlib
+    import tempfile
+
+    from bigquery_agent_analytics.resolved_spec import resolve
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    ont_yaml = (
+        "ontology: DateTest\n"
+        "entities:\n"
+        "  - name: Event\n"
+        "    keys:\n"
+        "      primary: [event_id]\n"
+        "    properties:\n"
+        "      - name: event_id\n"
+        "        type: string\n"
+        "      - name: day\n"
+        "        type: date\n"
+        "relationships: []\n"
+    )
+    bnd_yaml = (
+        "binding: date_test\n"
+        "ontology: DateTest\n"
+        "target:\n"
+        "  backend: bigquery\n"
+        "  project: p\n"
+        "  dataset: d\n"
+        "entities:\n"
+        "  - name: Event\n"
+        "    source: events\n"
+        "    properties:\n"
+        "      - name: event_id\n"
+        "        column: event_id\n"
+        "      - name: day\n"
+        "        column: day\n"
+        "relationships: []\n"
+    )
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="date_test_"))
+    (tmp / "ont.yaml").write_text(ont_yaml, encoding="utf-8")
+    (tmp / "bnd.yaml").write_text(bnd_yaml, encoding="utf-8")
+    ontology = load_ontology(str(tmp / "ont.yaml"))
+    binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+    return resolve(ontology, binding)
+
+
+class TestExternalEndpoints:
+  """Lineage-edge batches (``graph.nodes=[]`` with edges referring to
+  nodes materialized in earlier passes) need
+  ``allow_external_endpoints=True`` to validate without false-failing
+  on ``unresolved_endpoint``."""
+
+  def test_external_endpoints_default_strict_mode_fails(self):
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    d_id = "sess1:Decision:decision_id=d1"
+    o_id = "sess1:Outcome:outcome_id=o1"
+    graph = _graph(
+        nodes=[],
+        edges=[_edge("e1", "HasOutcome", d_id, o_id, weight=1.0)],
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    assert any(f.code == "unresolved_endpoint" for f in report.failures)
+
+  def test_external_endpoints_permissive_mode_passes(self):
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    d_id = "sess1:Decision:decision_id=d1"
+    o_id = "sess1:Outcome:outcome_id=o1"
+    graph = _graph(
+        nodes=[],
+        edges=[_edge("e1", "HasOutcome", d_id, o_id, weight=1.0)],
+    )
+
+    report = validate_extracted_graph(
+        spec, graph, allow_external_endpoints=True
+    )
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_external_endpoints_still_validates_endpoint_key_format(self):
+    """Permissive mode skips the in-graph node lookup but the
+    endpoint-key parse still runs — short-form ids that produce
+    empty FK columns must still fail."""
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    graph = _graph(
+        nodes=[],
+        edges=[_edge("e1", "HasOutcome", "d1", "o1")],
+    )
+
+    report = validate_extracted_graph(
+        spec, graph, allow_external_endpoints=True
+    )
+    fails = [f for f in report.failures if f.code == "missing_endpoint_key"]
+    assert len(fails) == 2  # decision_id and outcome_id both unparseable
+
+
 class TestOntologyAdapter:
 
   def test_adapter_delegates_to_resolve(self):
