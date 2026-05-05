@@ -453,6 +453,35 @@ class TestNodeScopeCodes:
     assert failures[0].expected == "d1"
     assert failures[0].observed == "d2"
 
+  def test_key_mismatch_catches_node_id_entity_segment_disagreement(self):
+    """The node_id's entity segment must match ``ExtractedNode.entity_name``.
+    An in-graph edge would resolve through ``entity_name`` and pass
+    even if the segment lied; the same id seen from a lineage-only
+    batch would fail the permissive-mode entity-segment check. The
+    validator catches the disagreement at the node so both code
+    paths agree on what the id means."""
+    from bigquery_agent_analytics.graph_validation import FallbackScope
+    from bigquery_agent_analytics.graph_validation import validate_extracted_graph
+
+    spec, _, _ = _resolved_spec()
+    # node_id segment says Outcome but entity_name says Decision.
+    graph = _graph(
+        nodes=[
+            _node("sess1:Outcome:decision_id=d1", "Decision", decision_id="d1")
+        ]
+    )
+
+    report = validate_extracted_graph(spec, graph)
+    failures = [
+        f
+        for f in report.failures
+        if f.code == "key_mismatch" and f.path.endswith(".node_id")
+    ]
+    assert len(failures) == 1
+    assert failures[0].scope is FallbackScope.NODE
+    assert failures[0].observed == "Outcome"
+    assert failures[0].expected == "Decision"
+
   def test_parse_key_segment_preserves_colon_in_value(self):
     """``parse_key_segment`` must split the node_id on ``:`` at
     most twice so a primary-key value containing a literal ``:``

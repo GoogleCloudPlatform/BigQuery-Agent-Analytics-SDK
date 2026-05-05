@@ -351,6 +351,45 @@ def _validate_node(
         )
     )
 
+  # Node-id entity segment must match ``ExtractedNode.entity_name``.
+  # The documented shape is ``{session}:{entity}:k=v``. An in-graph
+  # edge resolves endpoints by ``ExtractedNode.entity_name`` and
+  # would pass the wrong_endpoint_entity check even if the node-id
+  # segment lies — but the same node id, referenced from a lineage-
+  # only batch, fails the permissive-mode entity-segment check
+  # (which has no in-graph node to consult). Catch the disagreement
+  # at the node so both code paths agree on what the id means.
+  # Folded under ``key_mismatch`` per the project's preference to
+  # not grow the failure-code surface; the detail makes the
+  # specific drift explicit.
+  if node.node_id:
+    nid_parts = node.node_id.split(":", 2)
+    if len(nid_parts) >= 2:
+      observed_entity = nid_parts[1]
+      if observed_entity and observed_entity != node.entity_name:
+        failures.append(
+            ValidationFailure(
+                scope=FallbackScope.NODE,
+                code="key_mismatch",
+                path=f"{base_path}.node_id",
+                node_id=node.node_id,
+                event_id=event_id,
+                expected=node.entity_name,
+                observed=observed_entity,
+                detail=(
+                    f"node_id entity segment is {observed_entity!r} "
+                    f"but ExtractedNode.entity_name is "
+                    f"{node.entity_name!r}. The same id seen from a "
+                    f"lineage-only batch would fail the permissive-"
+                    f"mode wrong_endpoint_entity check; in-graph "
+                    f"edges resolve through entity_name and would "
+                    f"silently disagree. Fix the extractor to emit "
+                    f"a node_id whose entity segment matches the "
+                    f"node's entity_name."
+                ),
+            )
+        )
+
   # The materializer writes the node row's primary-key columns from
   # ``node.properties`` but writes edge FK columns from
   # ``parse_key_segment(node_id)``. If those two sources of truth
