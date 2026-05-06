@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Retry-on-gate-failure orchestrator for compiled structured
+  extractors** in
+  `bigquery_agent_analytics.extractor_compilation.retry_loop` and
+  [`docs/extractor_compilation_retry_loop.md`](docs/extractor_compilation_retry_loop.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.2.c.2 — wires the resolver prompt + parser + renderer
+  + ``compile_extractor`` + diagnostic builders into a single
+  loop that retries the LLM with structured feedback on every
+  gate failure. Public surface:
+  ``compile_with_llm(extraction_rule, event_schema, llm_client,
+  compile_source, max_attempts)`` returning
+  ``RetryCompileResult`` (``ok`` / ``manifest`` / ``bundle_dir``
+  / ``attempts`` / ``reason``); ``AttemptRecord`` with one
+  failure channel populated per failed iteration
+  (``plan_parse_error`` / ``render_error`` / ``compile_result``)
+  so telemetry can route on field name; ``build_retry_prompt(*,
+  original_prompt, prior_response, diagnostic)`` as the pure
+  prompt-stitching function. ``max_attempts=1`` runs once with
+  no retry; values below 1 raise ``ValueError``. LLM-client
+  exceptions (auth / quota / network) propagate unchanged so the
+  loop never silently retries non-gate failures.
+  ``compile_source`` is a caller-supplied closure
+  ``(plan, source) -> CompileResult`` that wraps
+  ``compile_extractor`` with the per-call inputs (sample events,
+  spec, parent bundle dir, fingerprint inputs, etc.) — keeps the
+  loop signature narrow and makes the loop trivially testable
+  with stubs. End-to-end test in
+  ``tests/test_extractor_compilation_retry_loop.py`` wires the
+  real ``compile_extractor`` through the loop to prove the
+  parser/renderer/compiler stack lines up.
 - **Diagnostic builders for compiled-extractor retry feedback** in
   `bigquery_agent_analytics.extractor_compilation.diagnostics` and
   [`docs/extractor_compilation_diagnostics.md`](docs/extractor_compilation_diagnostics.md).

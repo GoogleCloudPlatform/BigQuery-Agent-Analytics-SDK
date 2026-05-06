@@ -59,6 +59,11 @@ from .plan_parser import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
 from .plan_resolver import build_resolution_prompt
 from .plan_resolver import LLMClient
 from .plan_resolver import PlanResolver
+from .retry_loop import AttemptRecord
+from .retry_loop import build_retry_prompt
+from .retry_loop import compile_with_llm
+from .retry_loop import CompileSource
+from .retry_loop import RetryCompileResult
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -71,7 +76,9 @@ from .template_renderer import SpanHandlingRule
 __all__ = [
     "AstFailure",
     "AstReport",
+    "AttemptRecord",
     "CompileResult",
+    "CompileSource",
     "FieldMapping",
     "LLMClient",
     "Manifest",
@@ -79,6 +86,7 @@ __all__ = [
     "PlanResolver",
     "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
     "ResolvedExtractorPlan",
+    "RetryCompileResult",
     "SmokeTestReport",
     "SpanHandlingRule",
     "build_ast_diagnostic",
@@ -86,8 +94,10 @@ __all__ = [
     "build_gate_diagnostic",
     "build_plan_parse_diagnostic",
     "build_resolution_prompt",
+    "build_retry_prompt",
     "build_smoke_diagnostic",
     "compile_extractor",
+    "compile_with_llm",
     "compute_fingerprint",
     "default_bundle_dir",
     "load_callable_from_source",

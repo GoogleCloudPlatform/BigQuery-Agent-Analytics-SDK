@@ -589,14 +589,18 @@ except ImportError as e:
 try:
   from .extractor_compilation import AstFailure
   from .extractor_compilation import AstReport
+  from .extractor_compilation import AttemptRecord
   from .extractor_compilation import build_ast_diagnostic
   from .extractor_compilation import build_compile_result_diagnostic
   from .extractor_compilation import build_gate_diagnostic
   from .extractor_compilation import build_plan_parse_diagnostic
   from .extractor_compilation import build_resolution_prompt
+  from .extractor_compilation import build_retry_prompt
   from .extractor_compilation import build_smoke_diagnostic
   from .extractor_compilation import compile_extractor
+  from .extractor_compilation import compile_with_llm
   from .extractor_compilation import CompileResult
+  from .extractor_compilation import CompileSource
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import LLMClient
@@ -607,6 +611,7 @@ try:
   from .extractor_compilation import render_extractor_source
   from .extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
   from .extractor_compilation import ResolvedExtractorPlan
+  from .extractor_compilation import RetryCompileResult
   from .extractor_compilation import run_smoke_test
   from .extractor_compilation import SmokeTestReport
   from .extractor_compilation import SpanHandlingRule
@@ -616,7 +621,9 @@ try:
       [
           "AstFailure",
           "AstReport",
+          "AttemptRecord",
           "CompileResult",
+          "CompileSource",
           "FieldMapping",
           "LLMClient",
           "Manifest",
@@ -624,6 +631,7 @@ try:
           "PlanResolver",
           "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
           "ResolvedExtractorPlan",
+          "RetryCompileResult",
           "SmokeTestReport",
           "SpanHandlingRule",
           "build_ast_diagnostic",
@@ -631,8 +639,10 @@ try:
           "build_gate_diagnostic",
           "build_plan_parse_diagnostic",
           "build_resolution_prompt",
+          "build_retry_prompt",
           "build_smoke_diagnostic",
           "compile_extractor",
+          "compile_with_llm",
           "compute_fingerprint",
           "parse_resolved_extractor_plan_json",
           "render_extractor_source",
