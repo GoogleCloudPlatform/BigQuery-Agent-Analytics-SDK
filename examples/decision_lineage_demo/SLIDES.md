@@ -1102,7 +1102,7 @@ Each query is a join of `made_decision_edges` ⋈ `agent_events` plus a `WHERE t
 <!-- _class: section-divider -->
 <div class="eyebrow">Part 6 · The four-guarantee roadmap</div>
 
-# After issue #107 lands — own, validate, extract cheaply, resolve
+# After #58 / #75 / #76 / #104 / #105 ship — own, validate, extract cheaply, resolve
 
 ---
 
@@ -1151,7 +1151,7 @@ The cost story sits in beat 3 — that's the slide finance teams care about.
 
 ---
 
-# What the user authors after #107
+# What the user authors after the four-guarantee roadmap ships
 
 <div class="kicker">Minimum hand-authored input</div>
 
@@ -1210,8 +1210,8 @@ Future option (not on the current roadmap): a packaged <code>@builtin:adk-events
 
 ### 2 · Validate — #105 + #76
 **Pre-flight:** `bq-agent-sdk binding-validate` runs in &lt;1 s; structured failures carry `binding_path` and `bq_ref`.
-**Post-extract:** every build emits a `ValidationReport` with `FallbackScope` ∈ {FIELD, NODE, EDGE, EVENT}.
-**Per-field AI fallback** re-extracts FIELD-scope failures; NODE / EDGE / EVENT bubble up to the operator.
+**Post-extract:** every build emits a `ValidationReport` with `FallbackScope` ∈ {FIELD, NODE, EDGE} from #76 (EVENT scope arrives with #75 C2's runtime wrapper).
+**Per-field AI fallback** re-extracts FIELD-scope failures; NODE / EDGE bubble up to the operator.
 
 </div>
 
@@ -1245,11 +1245,11 @@ Future option (not on the current roadmap): a packaged <code>@builtin:adk-events
 # 1. One file you author. Either form works.
 cat ontology.yaml                                   # or: gm import-owl my.ttl --out ontology.yaml
 
-# 2. Scaffold the binding + base-table DDL.
+# 2. Scaffold the binding + base-table DDL. (Emits gen/binding.yaml + gen/table_ddl.sql.)
 gm scaffold --ontology ontology.yaml --dataset campaigns --project my-proj --out gen/
 
-# 3. Author the property-graph DDL once. Apply it.
-bq query --nouse_legacy_sql < gen/property_graph.sql
+# 3. Author the property-graph DDL once (separate from scaffold's outputs). Apply it.
+bq query --nouse_legacy_sql < ddl/property_graph.sql
 
 # 4. Compile deterministic extractors for structured event types.
 gm compile-extractors --ontology ontology.yaml --binding gen/binding.yaml \
@@ -1310,7 +1310,7 @@ Steps 5 and 6 each produce a typed report; a failed gate stops the next step fro
 </div>
 
 <div class="metric-row" style="margin-top:14px">
-<div class="mini-stat"><strong>1 → 0</strong><span>AI calls per fully-compiled session</span></div>
+<div class="mini-stat"><strong>≈ 0</strong><span>Prompt tokens for fully-compiled sessions</span></div>
 <div class="mini-stat"><strong>F1 measured</strong><span>vs hand-written + AI baselines</span></div>
 <div class="mini-stat"><strong>Byte-identical</strong><span>recompile reproducibility</span></div>
 <div class="mini-stat"><strong>Per-field</strong><span>fallback granularity</span></div>
