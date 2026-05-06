@@ -38,13 +38,34 @@ end-to-end with fake clients producing pre-canned JSON.
 
 from __future__ import annotations
 
+import copy
 import json
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from .plan_parser import parse_resolved_extractor_plan_json
 from .plan_parser import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
 from .template_renderer import _ALLOWLIST_CALL_TARGETS
 from .template_renderer import ResolvedExtractorPlan
+
+
+def _dump_json_or_raise(value: Any, label: str) -> str:
+  """``json.dumps`` with ``sort_keys=True`` and a clear
+  ``TypeError`` on contract violation.
+
+  Builds the boundary error message — a Pydantic model or a
+  ``set`` slipping in produces a precise complaint that names
+  the field instead of the bare default
+  ``Object of type X is not JSON serializable``.
+  """
+  try:
+    return json.dumps(value, sort_keys=True, indent=2)
+  except TypeError as e:
+    raise TypeError(
+        f"{label} must be JSON-serializable (plain dicts of "
+        f"str/int/float/bool/None/list/dict); got {type(value).__name__} "
+        f"and json.dumps reported: {e}. Normalize Pydantic models / "
+        f"dataclasses / custom objects to plain dicts before calling."
+    ) from e
 
 
 class LLMClient(Protocol):
@@ -75,6 +96,31 @@ def build_resolution_prompt(
 ) -> str:
   """Build the deterministic prompt for the resolver step.
 
+  Args:
+    extraction_rule: The user's intent for one event_type
+      (target entity, key-field hint, etc.). **Must be JSON-
+      serializable** — typically a plain Python ``dict`` of
+      strings / numbers / lists / nested dicts. ``Mapping``
+      instances are accepted; arbitrary objects (Pydantic models,
+      dataclasses, custom classes) are not — the caller is
+      responsible for normalizing them to plain dicts before
+      calling.
+    event_schema: The event payload's typed structure (a
+      Mapping of field paths to type names). Same JSON-
+      serializability requirement as *extraction_rule*.
+
+  Returns:
+    A prompt string. Output is byte-stable for the same inputs
+    (``sort_keys=True`` on every embedded JSON serialization), so
+    plan resolution itself adds no nondeterminism beyond whatever
+    the LLM contributes.
+
+  Raises:
+    TypeError: if either input contains objects ``json.dumps``
+      can't serialize (e.g., a ``set``, a custom class, a Pydantic
+      model). The caller sees a clear contract message rather
+      than the bare ``Object of type X is not JSON serializable``.
+
   The prompt instructs the LLM to:
     * map only fields that exist in *event_schema* (no
       hallucinated paths);
@@ -85,13 +131,9 @@ def build_resolution_prompt(
     * omit uncertain optional fields rather than invent them;
     * emit JSON conforming to
       :data:`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA`.
-
-  Output is byte-stable for the same inputs (``sort_keys=True``
-  on every JSON serialization), so plan resolution itself doesn't
-  add nondeterminism beyond whatever the LLM contributes.
   """
-  rule_json = json.dumps(extraction_rule, sort_keys=True, indent=2)
-  schema_json = json.dumps(event_schema, sort_keys=True, indent=2)
+  rule_json = _dump_json_or_raise(extraction_rule, "extraction_rule")
+  schema_json = _dump_json_or_raise(event_schema, "event_schema")
   output_contract = json.dumps(
       RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA, sort_keys=True, indent=2
   )
@@ -184,7 +226,13 @@ class PlanResolver:
         errors, quota errors, or auth errors.
     """
     prompt = build_resolution_prompt(extraction_rule, event_schema)
-    response = self._llm_client.generate_json(
-        prompt, RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
-    )
+    # Deep-copy the schema before handing it to the client.
+    # Adapters that normalize provider-specific schema quirks
+    # (Gemini's ``response_schema`` not supporting ``$schema``
+    # / ``$defs``, etc.) may otherwise mutate the module-level
+    # global in place — affecting every future caller in the
+    # process. The deep copy is cheap (~tens of dict entries)
+    # and ensures the exported global stays read-only.
+    schema_copy = copy.deepcopy(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA)
+    response = self._llm_client.generate_json(prompt, schema_copy)
     return parse_resolved_extractor_plan_json(response)

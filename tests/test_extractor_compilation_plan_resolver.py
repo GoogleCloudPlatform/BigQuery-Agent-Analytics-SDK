@@ -201,6 +201,40 @@ class TestBuildResolutionPrompt:
     assert "ONLY paths that exist in the event_schema" in prompt
     assert "Do NOT" in prompt
 
+  @pytest.mark.parametrize(
+      "label, payload",
+      [
+          ("rule with set", {"key": {1, 2, 3}}),
+          ("rule with custom class", {"key": object()}),
+          ("rule itself a set", {1, 2, 3}),
+      ],
+  )
+  def test_non_json_serializable_extraction_rule_raises_clear_typeerror(
+      self, label, payload
+  ):
+    """The public contract is "JSON-serializable mappings".
+    Anything ``json.dumps`` can't handle (set, custom class,
+    Pydantic model, etc.) gets a clear ``TypeError`` naming the
+    offending field and the contract — not the bare default
+    ``Object of type X is not JSON serializable``."""
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(payload, _bka_event_schema())
+    assert "extraction_rule" in str(exc_info.value)
+    assert "JSON-serializable" in str(exc_info.value)
+
+  def test_non_json_serializable_event_schema_raises_clear_typeerror(self):
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(
+          _bka_extraction_rule(),
+          {"x": {"y": {1, 2}}},  # set, not serializable
+      )
+    assert "event_schema" in str(exc_info.value)
+    assert "JSON-serializable" in str(exc_info.value)
+
   def test_prompt_includes_identifier_safety_rules(self):
     from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
 
@@ -234,11 +268,11 @@ class TestPlanResolver:
     plan = resolver.resolve(_bka_extraction_rule(), _bka_event_schema())
     assert plan == _bka_handwritten_plan()
 
-  def test_schema_passed_through_to_client(self):
-    """The resolver passes the *exact* exported schema dict to
-    the LLM client so providers with structured-output mode can
-    constrain generation. ``is`` (identity) check, not ``==``,
-    so we know the resolver isn't deep-copying or rebuilding."""
+  def test_schema_passed_through_to_client_by_value(self):
+    """The resolver passes a copy of the exported schema (not
+    the global itself) so adapters can normalize provider-
+    specific quirks in place without mutating the module global.
+    ``==`` equality, not ``is`` identity."""
     from bigquery_agent_analytics.extractor_compilation import PlanResolver
     from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
 
@@ -246,7 +280,45 @@ class TestPlanResolver:
     resolver = PlanResolver(fake)
     resolver.resolve(_bka_extraction_rule(), _bka_event_schema())
     assert len(fake.calls) == 1
-    assert fake.calls[0]["schema"] is RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+    received = fake.calls[0]["schema"]
+    assert received == RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+    assert received is not RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+  def test_client_mutation_does_not_affect_global_schema(self):
+    """Adapters that normalize provider-specific schema quirks
+    (Gemini's ``response_schema`` doesn't accept ``$schema`` /
+    ``$defs``, etc.) sometimes mutate their input. The resolver
+    deep-copies the exported global so a misbehaving adapter
+    can't poison every future caller in the process. Verified
+    concretely with a fake client that mutates its received
+    schema."""
+    import copy
+
+    from bigquery_agent_analytics.extractor_compilation import PlanResolver
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    snapshot = copy.deepcopy(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA)
+
+    class _MutatingClient:
+
+      def __init__(self, response):
+        self.response = response
+
+      def generate_json(self, prompt, schema):
+        # An adapter "normalizing for provider X" by adding
+        # vendor-specific keys. With a deep copy this affects
+        # only the local schema; without one it would leak into
+        # the module global.
+        schema["__vendor_quirk__"] = True
+        schema["properties"]["__quirk__"] = {"type": "boolean"}
+        return self.response
+
+    resolver = PlanResolver(_MutatingClient(_bka_response_dict()))
+    resolver.resolve(_bka_extraction_rule(), _bka_event_schema())
+
+    assert (
+        RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA == snapshot
+    ), "client mutation leaked into the module-global schema"
 
   def test_prompt_passed_through_matches_builder(self):
     """The prompt the resolver hands to the client must equal

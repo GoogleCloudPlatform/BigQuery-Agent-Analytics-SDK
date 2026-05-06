@@ -42,9 +42,11 @@ class LLMClient(Protocol):
     def generate_json(self, prompt: str, schema: dict) -> dict: ...
 ```
 
-Structural typing — any object with a `generate_json` method matching the signature works. The resolver hands the schema (`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA`) through verbatim so providers that support structured-output mode (Gemini's `response_schema`, OpenAI's `response_format`) can constrain generation. Providers without that support can ignore `schema`; the parser's structural gate catches malformed responses regardless.
+Structural typing — any object with a `generate_json` method matching the signature works. The resolver hands a **deep copy** of the exported schema through to the client so adapters that normalize provider-specific quirks (Gemini's `response_schema` not accepting `$schema` / `$defs`, etc.) can mutate their input freely without poisoning the module global for future callers. Providers that support structured-output mode (Gemini's `response_schema`, OpenAI's `response_format`) get the actual schema constraints; providers without that support can ignore `schema` — the parser's structural gate catches malformed responses regardless.
 
 ### `build_resolution_prompt(extraction_rule, event_schema) -> str`
+
+**Inputs must be JSON-serializable** — typically plain Python dicts of strings / numbers / lists / nested dicts. Pydantic models, dataclasses, sets, custom classes, and other non-JSON-serializable objects raise `TypeError` with a clear contract message naming the offending field. Normalize them to plain dicts before calling.
 
 Pure function. Same inputs → byte-identical output (`sort_keys=True` on every embedded JSON). The prompt instructs the LLM to:
 
