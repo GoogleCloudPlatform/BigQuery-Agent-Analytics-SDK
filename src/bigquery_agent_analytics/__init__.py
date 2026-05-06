@@ -589,13 +589,16 @@ except ImportError as e:
 try:
   from .extractor_compilation import AstFailure
   from .extractor_compilation import AstReport
+  from .extractor_compilation import build_resolution_prompt
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import CompileResult
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import FieldMapping
+  from .extractor_compilation import LLMClient
   from .extractor_compilation import Manifest
   from .extractor_compilation import parse_resolved_extractor_plan_json
   from .extractor_compilation import PlanParseError
+  from .extractor_compilation import PlanResolver
   from .extractor_compilation import render_extractor_source
   from .extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
   from .extractor_compilation import ResolvedExtractorPlan
@@ -610,12 +613,15 @@ try:
           "AstReport",
           "CompileResult",
           "FieldMapping",
+          "LLMClient",
           "Manifest",
           "PlanParseError",
+          "PlanResolver",
           "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
           "ResolvedExtractorPlan",
           "SmokeTestReport",
           "SpanHandlingRule",
+          "build_resolution_prompt",
           "compile_extractor",
           "compute_fingerprint",
           "parse_resolved_extractor_plan_json",

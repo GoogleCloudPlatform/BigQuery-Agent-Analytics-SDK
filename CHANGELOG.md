@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LLM-driven plan resolver for compiled structured extractors**
+  in
+  `bigquery_agent_analytics.extractor_compilation.plan_resolver`
+  and
+  [`docs/extractor_compilation_plan_resolver.md`](docs/extractor_compilation_plan_resolver.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.2.b — wraps an injectable LLM client to map a raw
+  ``(extraction_rule, event_schema)`` pair into a
+  ``ResolvedExtractorPlan``. Public surface:
+  ``LLMClient`` ``Protocol`` with one method
+  (``generate_json(prompt, schema) -> dict``);
+  ``build_resolution_prompt(rule, schema)`` producing the
+  deterministic prompt (sort-keyed JSON throughout, embeds the
+  exported JSON Schema, instructs the LLM to use only paths that
+  exist in the schema, use Python-identifier-shaped names, omit
+  uncertain optional fields rather than invent them);
+  ``PlanResolver(llm_client).resolve(rule, schema)`` doing
+  prompt → LLM call → ``parse_resolved_extractor_plan_json``.
+  ``PlanParseError`` and any exception the LLM client raises
+  propagate unchanged so PR 4b.2.2.c can layer typed retry on
+  top. **Adapter-free** — no ``google-genai`` import; concrete
+  provider adapters and retry orchestration land in PR 4b.2.2.c
+  / PR 4c. Tests use fake ``LLMClient`` implementations with
+  pre-canned responses; no real LLM calls.
 - **JSON-to-plan parser for compiled structured extractors** in
   `bigquery_agent_analytics.extractor_compilation.plan_parser` and
   [`docs/extractor_compilation_plan_parser.md`](docs/extractor_compilation_plan_parser.md).

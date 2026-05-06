@@ -51,6 +51,9 @@ from .manifest import now_iso_utc
 from .plan_parser import parse_resolved_extractor_plan_json
 from .plan_parser import PlanParseError
 from .plan_parser import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+from .plan_resolver import build_resolution_prompt
+from .plan_resolver import LLMClient
+from .plan_resolver import PlanResolver
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -65,12 +68,15 @@ __all__ = [
     "AstReport",
     "CompileResult",
     "FieldMapping",
+    "LLMClient",
     "Manifest",
     "PlanParseError",
+    "PlanResolver",
     "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
     "ResolvedExtractorPlan",
     "SmokeTestReport",
     "SpanHandlingRule",
+    "build_resolution_prompt",
     "compile_extractor",
     "compute_fingerprint",
     "default_bundle_dir",
