@@ -113,7 +113,7 @@ build_retry_prompt(
 ) -> str
 ```
 
-Determinism: `prior_response` is serialized with `sort_keys=True`, so two semantically-equal dicts produce byte-identical retry prompts. For *malformed* responses where `sort_keys` can't serialize (e.g., a dict with mixed-type keys, which the parser rejects but the retry loop still has to echo back), the builder falls back to insertion-order JSON, then to `repr()` — losing byte-stability is acceptable on a degenerate input that already produced a parser failure. Without the fallback, the retry-prompt builder would crash on exactly the inputs the loop was designed to recover from.
+Determinism: `prior_response` is serialized with `sort_keys=True`, so two semantically-equal dicts produce byte-identical retry prompts. For *malformed* responses where strict serialization can't proceed — mixed-type keys (which raise `TypeError` on sort), unserializable types (`TypeError`), or circular references (`ValueError`) — the builder falls back to insertion-order JSON, then to `repr()`. Losing byte-stability is acceptable on a degenerate input that already produced a parser failure; without the fallback, the retry-prompt builder would crash on exactly the inputs the loop was designed to recover from.
 
 Output shape:
 
@@ -154,9 +154,9 @@ Per-iteration state. Stored in `RetryCompileResult.attempts` in 1-indexed order.
 - `attempts: tuple[AttemptRecord, ...]` — in 1-indexed iteration order.
 - `reason: str` — `"succeeded"` or `"max_attempts_reached"`.
 
-## Tests (20 cases in `tests/test_extractor_compilation_retry_loop.py`)
+## Tests (21 cases in `tests/test_extractor_compilation_retry_loop.py`)
 
-- **`TestBuildRetryPrompt`** (6) — original prompt embedded verbatim; `prior_response` serialized with sorted keys (byte-stable for equal dicts); diagnostic embedded verbatim; non-dict `prior_response` (list) renders cleanly; byte-stable for repeated calls; mixed-type keys (the failure shape that crashes plain `json.dumps(sort_keys=True)`) handled via the fallback path.
+- **`TestBuildRetryPrompt`** (7) — original prompt embedded verbatim; `prior_response` serialized with sorted keys (byte-stable for equal dicts); diagnostic embedded verbatim; non-dict `prior_response` (list) renders cleanly; byte-stable for repeated calls; mixed-type keys (the `TypeError` shape from `json.dumps(sort_keys=True)`) handled via the fallback path; circular references (the `ValueError` shape) fall through to the `repr()` tier.
 - **`TestCompileWithLlmArgs`** (2) — `max_attempts=0` and negative both raise `ValueError`.
 - **`TestCompileWithLlmHappyPath`** (1) — succeeds on first try; one LLM call, one compile call, single `AttemptRecord` with `compile_result.ok==True` and no diagnostic.
 - **`TestCompileWithLlmRecovery`** (3) — recovers after parser error, after compile failure (`invalid_event_types`), after renderer `ValueError` (monkeypatched). Each test asserts the right failure channel is populated and that the next attempt's prompt embeds the right diagnostic.

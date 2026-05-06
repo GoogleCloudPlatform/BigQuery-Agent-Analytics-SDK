@@ -247,6 +247,26 @@ class TestBuildRetryPrompt:
     assert "bka_decision" in out
     assert "bad" in out
 
+  def test_handles_circular_reference_without_crashing(self):
+    """``json.dumps`` raises ``ValueError`` (not ``TypeError``)
+    for circular references. The serialization helper has to fall
+    through to ``repr()`` rather than escaping the exception —
+    otherwise a pathological LLM client (or a test fake that
+    accidentally constructs a cycle) crashes the retry loop one
+    frame above the parser's structured rejection."""
+    from bigquery_agent_analytics.extractor_compilation import build_retry_prompt
+
+    cyclic = {"event_type": "bka_decision"}
+    cyclic["self"] = cyclic  # circular
+
+    # No exception, even though sort_keys AND insertion-order
+    # json.dumps both raise ValueError on this input.
+    out = build_retry_prompt(
+        original_prompt="P", prior_response=cyclic, diagnostic="D"
+    )
+    # Final fallback (repr) is always renderable.
+    assert "bka_decision" in out
+
 
 # ------------------------------------------------------------------ #
 # compile_with_llm — argument validation                              #

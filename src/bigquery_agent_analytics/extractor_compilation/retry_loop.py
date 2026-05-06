@@ -176,24 +176,34 @@ def _serialize_prior_response(value: Any) -> str:
   inputs. Falls back to insertion-order JSON when ``sort_keys``
   raises (mixed-type keys can't be sorted), and finally to
   ``repr()`` for anything ``json.dumps`` can't handle at all
-  (custom objects with weird ``__getitem__``, …).
+  (custom objects with weird ``__getitem__``, circular
+  references, …).
+
+  Both fallback steps catch ``(TypeError, ValueError)``:
+  ``json.dumps`` raises ``TypeError`` for unsortable keys /
+  unserializable types and ``ValueError`` for circular
+  references. Restricting to one or the other would leave a
+  failure mode escaping as an uncaught exception — and the whole
+  point of the helper is that a parser-rejected response (which
+  the retry loop is *designed* to recover from) must not crash
+  one frame above.
 
   This matters because the parser explicitly handles structurally
   malformed responses (mixed-type keys land as
   ``unknown_field`` / ``missing_required_field`` / similar) and
   the retry loop is supposed to feed those failures back to the
   LLM. Without the fallback, the retry-prompt builder would
-  raise ``TypeError`` on exactly the inputs the loop was designed
-  to recover from — turning a recoverable failure into an
-  unrecoverable crash one frame above.
+  raise on exactly the inputs the loop was designed to recover
+  from — turning a recoverable failure into an unrecoverable
+  crash one frame above.
   """
   try:
     return json.dumps(value, sort_keys=True, indent=2)
-  except TypeError:
+  except (TypeError, ValueError):
     pass
   try:
     return json.dumps(value, indent=2)
-  except TypeError:
+  except (TypeError, ValueError):
     return repr(value)
 
 
