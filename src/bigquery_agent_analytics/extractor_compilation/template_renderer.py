@@ -179,6 +179,15 @@ def render_extractor_source(plan: ResolvedExtractorPlan) -> str:
       f'  """Generated extractor for event_type='
       f'{plan.event_type!r} (entity={plan.target_entity_name!r})."""'
   )
+  # Top-of-function event_type guard: the orchestrator (C2) routes
+  # events by ``event.get("event_type")`` against the manifest's
+  # declared types, but a plan/manifest mismatch could silently
+  # attach an extractor to the wrong event type. Layering the
+  # check inside the generated body means the extractor itself
+  # enforces its declared coverage — even if invoked directly on
+  # a stray event.
+  body_lines.append(f"  if event.get('event_type') != {plan.event_type!r}:")
+  body_lines.append("    return StructuredExtractionResult()")
   body_lines.extend(_render_key_traversal(plan))
   body_lines.append("")
   body_lines.extend(_render_session_and_span_id(plan))

@@ -93,11 +93,11 @@ Per the runtime-target RFC and the PR 4b.2.1 sizing call:
 - **Edge extractors** — only nodes for now. `ExtractedEdge` import is in the call-target allowlist but the renderer doesn't emit edge construction; that's a future plan-shape extension.
 - **Composite property values** (lists, dicts) — ontology v0 explicitly defers these.
 
-## Tests (25 cases in `tests/test_extractor_compilation_template.py`)
+## Tests (39 cases in `tests/test_extractor_compilation_template.py`)
 
-- **`TestPlanValidation`** (12 cases): valid BKA plan renders; parametrized rejection of bad function names (path-traversal, leading digit, whitespace, empty, Python keywords, allowlist shadowing); empty `event_type` / `target_entity_name` / `key_field.source_path`; duplicate `property_name` (within `property_fields` and against the key).
-- **`TestGeneratedSourceClearsGates`** (4 cases): BKA source passes `validate_source`; BKA source compiles end-to-end via `compile_extractor` (subprocess smoke + #76 validator); rendered output matches `extract_bka_decision_event` on every sample event; render is deterministic (byte-identical for identical plans).
-- **`TestPlanShapeVariations`** (4 cases): plan with no `property_fields`; plan with no `span_handling`; plan with single-step paths (key directly on event root); plan with deep traversal path (length 3).
+- **`TestPlanValidation`** (27 cases): valid BKA plan renders; parametrized rejection of bad function names (path-traversal, leading digit, whitespace, empty, Python keywords, allowlist shadowing); empty / non-string `event_type` / `target_entity_name` / `key_field`; duplicate `property_name` (within `property_fields` and against the key); `target_entity_name` containing a quote rejected; non-identifier-shaped property names rejected (parametrized); non-string top-level fields and path segments rejected (parametrized).
+- **`TestGeneratedSourceClearsGates`** (5 cases): BKA source passes `validate_source`; BKA source compiles end-to-end via `compile_extractor` (subprocess smoke + #76 validator); rendered output matches `extract_bka_decision_event` on every sample event; **wrong-event-type input returns empty** (top-of-function guard); render is deterministic (byte-identical for identical plans).
+- **`TestPlanShapeVariations`** (7 cases): plan with no `property_fields`; plan with no `span_handling`; plan with single-step paths; plan with deep traversal path (length 3, including missing-intermediate negative case); deep optional property / `session_id_path` / `partial_when_path` with non-dict intermediate at depth 1.
 
 ## Related
 

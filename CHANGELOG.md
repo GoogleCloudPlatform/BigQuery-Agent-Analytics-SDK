@@ -23,12 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``ResolvedExtractorPlan`` dataclasses + ``render_extractor_source(plan)
   -> str``. The renderer is the deterministic boundary the LLM
   step in PR 4b.2.2 will plug into; **no LLM call lives here**.
-  Generated source matches ``extract_bka_decision_event``'s
-  runtime behavior on the BKA fixture's sample events, exercised
-  end-to-end by 25 unit tests covering plan validation, the AST
-  gate, the subprocess smoke runner, and plan-shape variations
-  (no property fields, no span handling, single-step paths,
-  deep traversal paths).
+  Generated source carries a top-of-function ``event_type``
+  guard that returns an empty result when the incoming event
+  doesn't match the plan's declared type, layered with the
+  orchestrator's manifest-driven dispatch so a plan/manifest
+  mismatch can't silently attach an extractor to the wrong
+  event type. Output otherwise matches
+  ``extract_bka_decision_event``'s runtime behavior on the BKA
+  fixture's sample events. Exercised end-to-end by 39 unit
+  tests covering plan validation, the AST gate, the subprocess
+  smoke runner, plan-shape variations (no property fields, no
+  span handling, single-step paths, deep traversal paths,
+  non-dict intermediates at every depth-3 traversal site), and
+  wrong-event-type rejection.
 - **`bq-agent-sdk binding-validate` CLI** — pre-flight validator that
   checks whether a binding YAML's referenced BigQuery tables
   physically exist with the columns and types the binding requires,

@@ -503,6 +503,64 @@ class TestGeneratedSourceClearsGates:
           auto
       ), f"rendered vs hand-written diverge on event {event!r}"
 
+  def test_wrong_event_type_returns_empty(self, tmp_path: pathlib.Path):
+    """Generated extractors carry a top-of-function event_type
+    guard so a plan/manifest mismatch can't silently attach one
+    extractor to another extractor's events. Without the guard,
+    an extractor for ``"bka_decision"`` would still emit a node
+    for ``{"event_type": "wrong", "decision_id": "1"}`` if the
+    key path happened to match.
+    """
+    from bigquery_agent_analytics.extractor_compilation import load_callable_from_source
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+
+    plan = _bka_plan()
+    src = render_extractor_source(plan)
+    source_path = tmp_path / "bka_guard.py"
+    source_path.write_text(src, encoding="utf-8")
+    extractor = load_callable_from_source(
+        source_path,
+        module_name=_unique_module_name(prefix="bka_guard_"),
+        function_name=plan.function_name,
+    )
+
+    # Right event_type: produces output.
+    matching = extractor(
+        {
+            "event_type": "bka_decision",
+            "session_id": "s1",
+            "span_id": "sp1",
+            "content": {"decision_id": "d1"},
+        },
+        None,
+    )
+    assert len(matching.nodes) == 1
+
+    # Wrong event_type: declines, even though the key path resolves.
+    wrong = extractor(
+        {
+            "event_type": "tool_completed",
+            "session_id": "s1",
+            "span_id": "sp1",
+            "content": {"decision_id": "d1"},
+        },
+        None,
+    )
+    assert wrong.nodes == []
+    assert wrong.fully_handled_span_ids == set()
+    assert wrong.partially_handled_span_ids == set()
+
+    # Missing event_type: declines.
+    missing = extractor(
+        {
+            "session_id": "s1",
+            "span_id": "sp1",
+            "content": {"decision_id": "d1"},
+        },
+        None,
+    )
+    assert missing.nodes == []
+
   def test_render_is_deterministic(self):
     """Identical plans produce byte-identical source. Important
     so the compile fingerprint stays stable across consecutive
@@ -655,7 +713,7 @@ class TestPlanShapeVariations:
 
     # event["a"] is a string, not a dict — must NOT raise.
     result = extractor(
-        {"decision_id": "d1", "a": "notadict"},
+        {"event_type": "deep", "decision_id": "d1", "a": "notadict"},
         None,
     )
     assert len(result.nodes) == 1
@@ -690,7 +748,7 @@ class TestPlanShapeVariations:
     )
 
     result = extractor(
-        {"decision_id": "d1", "a": "notadict"},
+        {"event_type": "deep", "decision_id": "d1", "a": "notadict"},
         None,
     )
     assert len(result.nodes) == 1
@@ -730,7 +788,12 @@ class TestPlanShapeVariations:
     )
 
     result = extractor(
-        {"decision_id": "d1", "span_id": "s1", "a": "notadict"},
+        {
+            "event_type": "deep",
+            "decision_id": "d1",
+            "span_id": "s1",
+            "a": "notadict",
+        },
         None,
     )
     assert result.fully_handled_span_ids == {"s1"}
