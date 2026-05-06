@@ -48,9 +48,22 @@ Rejected:
   - Decorators (run at definition time)
   - Non-constant default arguments (run at definition time)
   - Async / generators / class definitions / global / nonlocal
-  - ``while`` / ``raise`` / ``try`` / ``with`` (halting / flow
-    constructs that can hang the smoke runner or escape its
-    exception handler via ``SystemExit``)
+  - ``while`` / ``raise`` / ``try`` / ``with`` / ``match``
+    (halting / flow / pattern-binding constructs that can hang
+    the smoke runner, escape its exception handler via
+    ``SystemExit``, or smuggle name bindings past the shadowing
+    check)
+  - Lambda expressions (``disallowed_lambda``) — anonymous
+    callables defeat the static call-target allowlist
+  - Calls whose target isn't a Name or Attribute
+    (``Call(func=Lambda/Call/IfExp/...)``) — caught by
+    ``disallowed_call``
+  - Method calls outside the method-name allowlist
+    (``disallowed_method``)
+  - Local rebindings of a name in the call-target allowlist —
+    via assignment, AugAssign, AnnAssign, walrus, for-target,
+    comprehension target, function arg, or nested function def
+    (``disallowed_shadowing``)
 
 The allowlist is intentionally narrow for PR 4b.1; extending it as
 real templates require it (e.g., adding stdlib helpers) is a

@@ -17,29 +17,43 @@
 Stages, executed in order, with any failure short-circuiting and
 leaving any pre-existing valid bundle untouched:
 
-  1. Validate ``module_name`` / ``function_name`` are plain Python
-     identifiers (path-traversal safety) and not Python keywords.
-  2. Compute the #75 fingerprint over compile inputs.
-  3. **Cache hit candidate:** if ``<bundle_dir>/manifest.json``
-     already exists and matches the current request (fingerprint +
-     function_name + module_filename + event_types + on-disk
+  1. **Identifier safety.** ``module_name`` / ``function_name``
+     must be plain Python identifiers (path-traversal safety) and
+     not Python keywords.
+  2. **Declared ``event_types`` validation.** Non-empty tuple of
+     non-empty unique strings; sample events are dicts carrying a
+     non-empty string ``event_type``; every declared type has at
+     least one matching sample event. The manifest's
+     ``event_types`` is a public C2 contract, so these rules are
+     enforced before any expensive work.
+  3. Compute the #75 fingerprint over compile inputs.
+  4. **Cache hit candidate:** if ``<bundle_dir>/manifest.json``
+     already exists and matches the current request (fingerprint
+     + function_name + module_filename + event_types + on-disk
      source bytes), import the cached callable and re-run the
      smoke-test runner against the *current* sample events and
      resolved spec. If it passes, return the cached manifest
      without rewriting anything. If smoke fails on the current
      inputs, surface the failure — the on-disk bundle isn't
      rewritten (same source, only the test inputs are stricter).
-  4. AST-validate the candidate source.
-  5. **Stage** in a sibling temp directory under ``parent_bundle_dir``:
-     write source, import the module, look up the function, run the
-     smoke-test runner with the #76 validator gate, write the
-     manifest.
-  6. **Staged replace** the (possibly pre-existing) bundle
+  5. AST-validate the candidate source.
+  6. **Stage** in a sibling temp directory under
+     ``parent_bundle_dir``: write source, run the smoke-test
+     runner (subprocess by default; ``isolation=False`` for the
+     in-process path) with the #76 validator gate.
+  7. **Non-empty coverage gate.** Every declared event_type must
+     appear in ``smoke_report.nonempty_event_types`` — i.e., at
+     least one sample of that type produced non-empty output. A
+     manifest can't claim coverage for ``("x",)`` while only
+     ``"y"`` samples did the work.
+  8. Write the manifest.
+  9. **Staged replace** the (possibly pre-existing) bundle
      directory with the staged one (``rmtree`` then ``rename``).
      Not strictly atomic — a process crash between the two
-     filesystem ops would leave the target absent — but the bundle
-     is reproducible from inputs, so the next compile re-creates
-     it. Failed gates leave the pre-existing bundle untouched.
+     filesystem ops would leave the target absent — but the
+     bundle is reproducible from inputs, so the next compile
+     re-creates it. Failed gates leave the pre-existing bundle
+     untouched.
 
 The bundle directory is named after the fingerprint. Two compile
 runs on identical inputs land in the same directory; the second
