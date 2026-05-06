@@ -138,7 +138,7 @@ class EvaluationReport(BaseModel):
 class _MetricDef:
   """Internal definition of a code metric.
 
-  ``observed_key``, ``observed_fn``, and ``budget`` are optional
+  ``observed_key``, ``observed_fn``, ``detail_fn``, and ``budget`` are optional
   reporting metadata used by the prebuilt evaluators (latency,
   error_rate, turn_count, …) to surface the raw observed value and
   the user-supplied budget in ``SessionScore.details``. They don't
@@ -151,6 +151,10 @@ class _MetricDef:
   ``observed_key``; use it for metrics whose observed value is
   computed from multiple summary fields (e.g. ``tool_errors /
   tool_calls`` for error rate).
+
+  When ``detail_fn`` is set, its returned key/value pairs are merged
+  into the metric's detail payload after the common observed/budget/
+  threshold/score/passed fields are populated.
   """
 
   name: str
@@ -159,6 +163,7 @@ class _MetricDef:
   observed_key: Optional[str] = None
   budget: Optional[float] = None
   observed_fn: Optional[Callable[[dict[str, Any]], Any]] = None
+  detail_fn: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None
 
 
 class CodeEvaluator:
@@ -198,6 +203,7 @@ class CodeEvaluator:
       observed_key: Optional[str] = None,
       budget: Optional[float] = None,
       observed_fn: Optional[Callable[[dict[str, Any]], Any]] = None,
+      detail_fn: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
   ) -> CodeEvaluator:
     """Adds a custom metric function.
 
@@ -218,6 +224,8 @@ class CodeEvaluator:
             from the session summary. Used when the observed metric is
             computed (e.g. ``tool_errors/tool_calls``) rather than
             stored directly. Takes precedence over ``observed_key``.
+        detail_fn: Optional callable that derives additional
+            JSON-serializable detail fields from the session summary.
 
     Returns:
         Self for chaining.
@@ -230,6 +238,7 @@ class CodeEvaluator:
             observed_key=observed_key,
             budget=budget,
             observed_fn=observed_fn,
+            detail_fn=detail_fn,
         )
     )
     return self
@@ -272,16 +281,25 @@ class CodeEvaluator:
         try:
           observed_value = metric.observed_fn(session_summary)
         except Exception:  # pylint: disable=broad-except
+          logger.debug(
+              "Metric %s observed_fn failed", metric.name, exc_info=True
+          )
           observed_value = None
       elif metric.observed_key is not None:
         observed_value = session_summary.get(metric.observed_key)
-      details[f"metric_{metric.name}"] = {
+      metric_details = {
           "observed": observed_value,
           "budget": metric.budget,
           "threshold": metric.threshold,
           "score": scores[metric.name],
           "passed": metric_passed,
       }
+      if metric.detail_fn is not None:
+        try:
+          metric_details.update(metric.detail_fn(session_summary))
+        except Exception:  # pylint: disable=broad-except
+          logger.debug("Metric %s detail_fn failed", metric.name, exc_info=True)
+      details[f"metric_{metric.name}"] = metric_details
 
     return SessionScore(
         session_id=session_summary.get("session_id", "unknown"),
@@ -497,6 +515,116 @@ class CodeEvaluator:
         threshold=1.0,
         observed_fn=_observed,
         budget=max_cost_usd,
+    )
+    return evaluator
+
+  @staticmethod
+  def context_cache_hit_rate(
+      min_hit_rate: float = 0.5,
+      fail_on_missing_telemetry: bool = False,
+      cold_start_rate: float = 0.1,
+      warm_rate: float = 0.9,
+  ) -> CodeEvaluator:
+    """Pre-built evaluator for Gemini context cache prefix hit rate.
+
+    The observed rate is ``cached_tokens / input_tokens``. The session
+    summary should include ``input_tokens``, ``cached_tokens``, and
+    ideally ``cache_telemetry_events`` from ``SESSION_SUMMARY_QUERY``.
+    Missing cache telemetry is reported separately from a true 0-token
+    cache hit so older plugin data does not become a false failure by
+    default.
+
+    Args:
+        min_hit_rate: Minimum acceptable cached-token fraction.
+        fail_on_missing_telemetry: If ``True``, sessions with input
+            tokens but no cache telemetry fail. If ``False`` (default),
+            they pass with ``cache_state='no_cache_telemetry'``.
+        cold_start_rate: Rate below which detail marks the session as
+            ``"cold_start"``.
+        warm_rate: Rate at or above which detail marks the session as
+            ``"warm"``.
+
+    Returns:
+        CodeEvaluator configured for context cache efficiency.
+    """
+    try:
+      min_hit_rate = float(min_hit_rate)
+    except (TypeError, ValueError) as exc:
+      raise ValueError(
+          f"min_hit_rate must be a number, got {min_hit_rate!r}"
+      ) from exc
+    if not 0.0 <= min_hit_rate <= 1.0:
+      raise ValueError(
+          "min_hit_rate must satisfy 0 <= min_hit_rate <= 1, "
+          f"got {min_hit_rate}"
+      )
+    if not 0.0 <= cold_start_rate < warm_rate <= 1.0:
+      raise ValueError(
+          "cold_start_rate and warm_rate must satisfy "
+          "0 <= cold_start_rate < warm_rate <= 1"
+      )
+
+    def _number(value: Any, default: float = 0.0) -> float:
+      if value is None:
+        return default
+      try:
+        return float(value)
+      except (TypeError, ValueError):
+        return default
+
+    def _has_cache_telemetry(s: dict[str, Any]) -> bool:
+      if "cache_telemetry_events" in s:
+        return _number(s.get("cache_telemetry_events")) > 0
+      return s.get("cached_tokens") is not None
+
+    def _rate(s: dict[str, Any]) -> Optional[float]:
+      input_tokens = _number(s.get("input_tokens"))
+      if input_tokens <= 0:
+        return 1.0
+      if not _has_cache_telemetry(s):
+        return None
+      cached_tokens = _number(s.get("cached_tokens"))
+      return max(0.0, min(1.0, cached_tokens / input_tokens))
+
+    def _score(s: dict[str, Any]) -> float:
+      rate = _rate(s)
+      if rate is None:
+        return 0.0 if fail_on_missing_telemetry else 1.0
+      return rate
+
+    def _details(s: dict[str, Any]) -> dict[str, Any]:
+      input_tokens = _number(s.get("input_tokens"))
+      cached_tokens = _number(s.get("cached_tokens"))
+      telemetry_events = int(_number(s.get("cache_telemetry_events")))
+      rate = _rate(s)
+      if input_tokens <= 0:
+        cache_state = "no_llm_input"
+      elif rate is None:
+        cache_state = "no_cache_telemetry"
+      elif rate < cold_start_rate:
+        cache_state = "cold_start"
+      elif rate >= warm_rate:
+        cache_state = "warm"
+      else:
+        cache_state = "partial"
+      return {
+          "cached_tokens": int(cached_tokens),
+          "input_tokens": int(input_tokens),
+          "cache_telemetry_events": telemetry_events,
+          "cache_state": cache_state,
+          "cold_start_rate": cold_start_rate,
+          "warm_rate": warm_rate,
+          "fail_on_missing_telemetry": fail_on_missing_telemetry,
+      }
+
+    evaluator = CodeEvaluator(name="context_cache_hit_rate_evaluator")
+    evaluator.add_metric(
+        "context_cache_hit_rate",
+        _score,
+        threshold=min_hit_rate,
+        observed_fn=_rate,
+        budget=min_hit_rate,
+        detail_fn=_details,
     )
     return evaluator
 
@@ -839,6 +967,83 @@ SELECT
       attributes, '$.output_tokens'
     ) AS INT64)
   )) AS output_tokens,
+  SUM(COALESCE(
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.usage_metadata.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.context_cache_metadata.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.context_cache_metadata.cached_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.cache_metadata.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.cache_metadata.cached_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.cached_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      content, '$.usage_metadata.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      content, '$.context_cache_metadata.cached_content_token_count'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      content, '$.context_cache_metadata.cached_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      content, '$.usage.cached_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
+      content, '$.usage.prompt_tokens_details.cached_tokens'
+    ) AS INT64),
+    0
+  )) AS cached_tokens,
+  COUNTIF(COALESCE(
+    JSON_VALUE(
+      attributes, '$.usage_metadata.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      attributes, '$.context_cache_metadata.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      attributes, '$.context_cache_metadata.cached_tokens'
+    ),
+    JSON_VALUE(
+      attributes, '$.cache_metadata.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      attributes, '$.cache_metadata.cached_tokens'
+    ),
+    JSON_VALUE(
+      attributes, '$.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      attributes, '$.cached_tokens'
+    ),
+    JSON_VALUE(
+      content, '$.usage_metadata.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      content, '$.context_cache_metadata.cached_content_token_count'
+    ),
+    JSON_VALUE(
+      content, '$.context_cache_metadata.cached_tokens'
+    ),
+    JSON_VALUE(
+      content, '$.usage.cached_tokens'
+    ),
+    JSON_VALUE(
+      content, '$.usage.prompt_tokens_details.cached_tokens'
+    )
+  ) IS NOT NULL) AS cache_telemetry_events,
   SUM(COALESCE(
     CAST(JSON_VALUE(
       attributes, '$.usage_metadata.total_token_count'

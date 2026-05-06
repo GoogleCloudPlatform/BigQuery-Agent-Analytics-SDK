@@ -340,7 +340,8 @@ def evaluate(
         "latency",
         help=(
             "Evaluator: latency|error_rate|turn_count|"
-            "token_efficiency|ttft|cost|llm-judge."
+            "token_efficiency|context_cache_hit_rate|"
+            "ttft|cost|llm-judge."
         ),
     ),
     threshold: Optional[float] = typer.Option(
@@ -360,6 +361,14 @@ def evaluate(
         False,
         "--exit-code",
         help="Return exit code 1 on evaluation failure.",
+    ),
+    fail_on_missing_cache_telemetry: bool = typer.Option(
+        False,
+        "--fail-on-missing-cache-telemetry",
+        help=(
+            "For context_cache_hit_rate, fail sessions with input tokens"
+            " but no cache telemetry."
+        ),
     ),
     strict: bool = typer.Option(
         False,
@@ -388,6 +397,17 @@ def evaluate(
 ) -> None:
   """Run code-based or LLM evaluation over traces."""
   try:
+    if (
+        fail_on_missing_cache_telemetry
+        and evaluator != "context_cache_hit_rate"
+    ):
+      typer.echo(
+          "Error: --fail-on-missing-cache-telemetry only applies to "
+          "context_cache_hit_rate.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
+
     filters = TraceFilter.from_cli_args(
         last=last,
         agent_id=agent_id,
@@ -404,6 +424,13 @@ def evaluate(
         raise typer.Exit(code=2)
       with_t, without_t = entry
       ev = with_t(threshold) if threshold is not None else without_t()
+    elif evaluator == "context_cache_hit_rate":
+      kwargs = {
+          "fail_on_missing_telemetry": fail_on_missing_cache_telemetry,
+      }
+      if threshold is not None:
+        kwargs["min_hit_rate"] = threshold
+      ev = CodeEvaluator.context_cache_hit_rate(**kwargs)
     else:
       entry = _CODE_EVALUATORS.get(evaluator)
       if not entry:
@@ -525,6 +552,9 @@ def _emit_evaluate_failures(
           parts.append(f"budget={budget:.4g}")
         else:
           parts.append(f"budget={budget}")
+      cache_state = detail.get("cache_state")
+      if cache_state is not None:
+        parts.append(f"cache_state={cache_state}")
       # Always include score + threshold so the reader has numeric
       # context even when observed / budget weren't declared (custom
       # metrics, LLM judges).

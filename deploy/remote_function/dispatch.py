@@ -117,6 +117,15 @@ def dispatch(client, operation, params):
   raise ValueError(f"Unknown operation: {operation!r}")
 
 
+def _bool_param(value: Any) -> bool:
+  """Parse boolean-ish JSON or string values from remote function params."""
+  if isinstance(value, bool):
+    return value
+  if isinstance(value, str):
+    return value.strip().lower() in ("1", "true", "yes", "on")
+  return bool(value)
+
+
 def build_filters(params):
   """Build TraceFilter from params dict."""
   return TraceFilter.from_cli_args(
@@ -131,6 +140,9 @@ def build_evaluator(params):
   """Build CodeEvaluator from params dict."""
   metric = params.get("metric", "latency")
   threshold = params.get("threshold")
+  fail_on_missing_telemetry = _bool_param(
+      params.get("fail_on_missing_telemetry", False)
+  )
 
   factories_with_t = {
       "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
@@ -156,6 +168,12 @@ def build_evaluator(params):
       "ttft": CodeEvaluator.ttft,
       "cost": CodeEvaluator.cost_per_session,
   }
+
+  if metric == "context_cache_hit_rate":
+    kwargs = {"fail_on_missing_telemetry": fail_on_missing_telemetry}
+    if threshold is not None:
+      kwargs["min_hit_rate"] = threshold
+    return CodeEvaluator.context_cache_hit_rate(**kwargs)
 
   if metric not in factories_with_t:
     raise ValueError(f"Unknown metric: {metric!r}")

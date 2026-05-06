@@ -280,6 +280,7 @@ class TestEvaluate:
           "error_rate",
           "turn_count",
           "token_efficiency",
+          "context_cache_hit_rate",
           "ttft",
           "cost",
       ],
@@ -290,6 +291,33 @@ class TestEvaluate:
 
     result = rf.dispatch(client, "evaluate", {"metric": metric})
     json.dumps(result)
+
+  def test_context_cache_hit_rate_strict_missing_telemetry_param(self, rf):
+    client = MagicMock()
+    client.evaluate.return_value = _mock_report(5, 5)
+
+    result = rf.dispatch(
+        client,
+        "evaluate",
+        {
+            "metric": "context_cache_hit_rate",
+            "fail_on_missing_telemetry": True,
+        },
+    )
+    json.dumps(result)
+
+    evaluator = client.evaluate.call_args[1]["evaluator"]
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 0,
+        }
+    )
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["fail_on_missing_telemetry"] is True
 
   def test_unknown_metric(self, rf):
     client = MagicMock()

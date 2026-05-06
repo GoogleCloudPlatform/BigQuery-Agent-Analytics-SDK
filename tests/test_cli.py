@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from bigquery_agent_analytics.cli import _emit_evaluate_failures
 from bigquery_agent_analytics.cli import app
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import LLMAsJudge
@@ -616,6 +617,39 @@ class TestEvaluate:
     # No feedback field should be emitted for code-based metrics.
     assert "feedback=" not in combined
 
+  def test_emit_evaluate_failures_includes_cache_state(self, capsys):
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="context_cache_hit_rate_evaluator",
+        total_sessions=1,
+        passed_sessions=0,
+        failed_sessions=1,
+        created_at=_NOW,
+        session_scores=[
+            SessionScore(
+                session_id="cold",
+                scores={"context_cache_hit_rate": 0.05},
+                passed=False,
+                details={
+                    "metric_context_cache_hit_rate": {
+                        "observed": 0.05,
+                        "budget": 0.5,
+                        "threshold": 0.5,
+                        "score": 0.05,
+                        "passed": False,
+                        "cache_state": "cold_start",
+                    }
+                },
+            ),
+        ],
+    )
+
+    _emit_evaluate_failures(report)
+
+    captured = capsys.readouterr()
+    assert "metric=context_cache_hit_rate" in captured.err
+    assert "cache_state=cold_start" in captured.err
+
   @patch("bigquery_agent_analytics.cli._build_client")
   def test_evaluate_exit_code_on_pass(self, mock_build):
     client = MagicMock()
@@ -845,12 +879,34 @@ class TestAllEvaluators:
           "error_rate",
           "turn_count",
           "token_efficiency",
+          "context_cache_hit_rate",
           "ttft",
           "cost",
       ],
   )
   @patch("bigquery_agent_analytics.cli._build_client")
   def test_code_evaluator(self, mock_build, name):
+    client = MagicMock()
+    client.evaluate.return_value = _mock_report(10, 10)
+    mock_build.return_value = client
+    threshold = "0.5" if name == "context_cache_hit_rate" else "100"
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            f"--evaluator={name}",
+            f"--threshold={threshold}",
+        ],
+    )
+    assert result.exit_code == 0
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_context_cache_hit_rate_strict_missing_telemetry_flag(
+      self, mock_build
+  ):
     client = MagicMock()
     client.evaluate.return_value = _mock_report(10, 10)
     mock_build.return_value = client
@@ -861,11 +917,39 @@ class TestAllEvaluators:
             "evaluate",
             "--project-id=proj",
             "--dataset-id=ds",
-            f"--evaluator={name}",
-            "--threshold=100",
+            "--evaluator=context_cache_hit_rate",
+            "--fail-on-missing-cache-telemetry",
         ],
     )
     assert result.exit_code == 0
+
+    evaluator = client.evaluate.call_args[1]["evaluator"]
+    score = evaluator.evaluate_session(
+        {
+            "session_id": "s1",
+            "input_tokens": 1000,
+            "cached_tokens": 0,
+            "cache_telemetry_events": 0,
+        }
+    )
+    assert score.passed is False
+    detail = score.details["metric_context_cache_hit_rate"]
+    assert detail["fail_on_missing_telemetry"] is True
+
+  @patch("bigquery_agent_analytics.cli._build_client")
+  def test_cache_telemetry_flag_rejected_for_other_evaluators(self, mock_build):
+    result = runner.invoke(
+        app,
+        [
+            "evaluate",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--evaluator=latency",
+            "--fail-on-missing-cache-telemetry",
+        ],
+    )
+    assert result.exit_code == 2
+    mock_build.assert_not_called()
 
   @pytest.mark.parametrize(
       "criterion",
@@ -905,6 +989,7 @@ class TestDefaultThresholds:
           "error_rate",
           "turn_count",
           "token_efficiency",
+          "context_cache_hit_rate",
           "ttft",
           "cost",
       ],
