@@ -212,6 +212,42 @@ def compile_extractor(
         invalid_event_types="event_types must be non-empty",
     )
 
+  # Declared event types are themselves a public manifest contract
+  # (C2's loader keys on them). Validate each entry directly rather
+  # than discover problems indirectly via the sample-coverage check:
+  #   - every entry must be a non-empty string;
+  #   - no duplicates (a manifest claiming ("x", "x") is just noisy).
+  bad_types = [
+      (i, t)
+      for i, t in enumerate(event_types_tuple)
+      if not isinstance(t, str) or not t
+  ]
+  if bad_types:
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types=(
+            f"event_types[{bad_types[0][0]}]={bad_types[0][1]!r} "
+            f"must be a non-empty string; every declared event "
+            f"type is a public manifest field"
+        ),
+    )
+  if len(set(event_types_tuple)) != len(event_types_tuple):
+    seen: set[str] = set()
+    duplicates = [t for t in event_types_tuple if t in seen or seen.add(t)]
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types=(
+            f"event_types contains duplicates: {duplicates!r}. "
+            f"Each declared event type must be unique in the manifest."
+        ),
+    )
+
   # Sample events must each be a dict carrying a non-empty string
   # ``event_type``. A mix of int / None / "" event types makes the
   # coverage check unsortable for the error message and means the

@@ -765,6 +765,25 @@ class TestAstValidator:
     report = validate_source(src)
     assert any(f.code == "disallowed_shadowing" for f in report.failures)
 
+  def test_match_statement_rejected(self):
+    """``match`` carries pattern captures (``case {"x": len}``)
+    that bind names without going through ``Name(ctx=Store)`` —
+    the shadowing check would miss them and the call-target
+    allowlist could be bypassed. Reject ``match`` outright."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    match event:\n"
+        "        case {'x': len}:\n"
+        "            return len()\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(
+        f.code == "disallowed_match" for f in report.failures
+    ), f"got {[(f.code, f.detail) for f in report.failures]}"
+
   def test_lambda_call_rejected(self):
     """``(lambda: X)()`` previously slipped past the call-target
     allowlist because ``func`` was an ``ast.Lambda``, neither
@@ -1769,6 +1788,67 @@ def extract_bka_decision_event_compiled(event, spec):
     assert result.ok is False
     assert result.invalid_event_types is not None
     assert "non-empty" in result.invalid_event_types
+
+  @pytest.mark.parametrize(
+      "bad_event_types",
+      [
+          (1,),
+          ("",),
+          (None,),
+          ("ok", 2),
+          ("ok", ""),
+      ],
+  )
+  def test_non_string_event_types_rejected(
+      self, bad_event_types, tmp_path: pathlib.Path
+  ):
+    """Every declared event type is a public manifest field; non-
+    string or empty entries make the manifest contract incoherent.
+    Catch them directly rather than indirectly via 'no matching
+    sample'."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="bad_event_types",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=bad_event_types,
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "non-empty string" in result.invalid_event_types
+
+  def test_duplicate_event_types_rejected(self, tmp_path: pathlib.Path):
+    """A manifest claiming ``("x", "x")`` is just noisy. Reject
+    duplicates so the C2 loader sees a clean ``set``-equivalent
+    contract."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="dup_event_types",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision", "bka_decision"),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "duplicates" in result.invalid_event_types
 
   def test_malformed_sample_event_types_rejected(self, tmp_path: pathlib.Path):
     """The previous validator sorted sample event_type values

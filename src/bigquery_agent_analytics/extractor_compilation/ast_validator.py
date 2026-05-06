@@ -523,6 +523,26 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
         )
     )
     return
+  # ``ast.Match`` (Python 3.10+) is rejected outright. The accepted
+  # control-flow set is if / bounded for / comprehensions, and
+  # match-case carries pattern *captures* (``case {"x": len}``)
+  # that bind names without going through ``Name(ctx=Store)`` —
+  # so the shadowing check would miss them and the call-target
+  # allowlist could be bypassed.
+  if hasattr(ast, "Match") and isinstance(node, ast.Match):
+    failures.append(
+        AstFailure(
+            code="disallowed_match",
+            detail=(
+                "'match' statements are not allowed in compiled "
+                "extractors; pattern captures bind names outside the "
+                "shadowing check's reach. Use 'if' / 'elif' branches "
+                "instead."
+            ),
+            line=node.lineno,
+        )
+    )
+    return
   if isinstance(node, ast.For):
     _check_for_iter(node.iter, failures, lineno=node.lineno)
     return
