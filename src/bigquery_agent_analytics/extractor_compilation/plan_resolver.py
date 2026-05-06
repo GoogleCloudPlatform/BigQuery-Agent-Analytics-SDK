@@ -132,6 +132,20 @@ def build_resolution_prompt(
     * emit JSON conforming to
       :data:`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA`.
   """
+  if not isinstance(extraction_rule, Mapping):
+    raise TypeError(
+        f"extraction_rule must be a JSON-serializable mapping "
+        f"(plain dict at the root); got {type(extraction_rule).__name__}. "
+        f"Wrong-shape roots (lists, strings, primitives) would render "
+        f"a prompt where the no-hallucinated-paths rule has nothing "
+        f"sensible to anchor against."
+    )
+  if not isinstance(event_schema, Mapping):
+    raise TypeError(
+        f"event_schema must be a JSON-serializable mapping "
+        f"(plain dict at the root, mapping field paths to type names); "
+        f"got {type(event_schema).__name__}."
+    )
   rule_json = _dump_json_or_raise(extraction_rule, "extraction_rule")
   schema_json = _dump_json_or_raise(event_schema, "event_schema")
   output_contract = json.dumps(

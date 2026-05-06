@@ -224,6 +224,28 @@ class TestBuildResolutionPrompt:
     assert "extraction_rule" in str(exc_info.value)
     assert "JSON-serializable" in str(exc_info.value)
 
+  @pytest.mark.parametrize("bad_root", [["a", "b"], "string", 123, 3.14, True])
+  def test_extraction_rule_must_be_a_mapping_at_the_root(self, bad_root):
+    """Wrong root type — list, primitive — is JSON-serializable
+    but breaks the prompt's anchoring contract: the
+    no-hallucinated-paths rule needs a key→value structure to
+    reference. Reject at the boundary."""
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(bad_root, _bka_event_schema())
+    assert "extraction_rule" in str(exc_info.value)
+    assert "mapping" in str(exc_info.value)
+
+  @pytest.mark.parametrize("bad_root", [["a", "b"], "string", 123, 3.14, True])
+  def test_event_schema_must_be_a_mapping_at_the_root(self, bad_root):
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(_bka_extraction_rule(), bad_root)
+    assert "event_schema" in str(exc_info.value)
+    assert "mapping" in str(exc_info.value)
+
   def test_non_json_serializable_event_schema_raises_clear_typeerror(self):
     from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
 
