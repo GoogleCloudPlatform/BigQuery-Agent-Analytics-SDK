@@ -529,10 +529,8 @@ class TestCompileResultDiagnostic:
   def test_ok_returns_passthrough_message(self):
     import pathlib
 
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
     from bigquery_agent_analytics.extractor_compilation import Manifest
 
@@ -562,10 +560,8 @@ class TestCompileResultDiagnostic:
     explanation; the diagnostic prepends the stable
     ``CompileError [code=invalid_identifier]:`` prefix the retry
     prompt can grep on."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -587,10 +583,8 @@ class TestCompileResultDiagnostic:
     and AST pass, but the declared ``event_type`` has no matching
     smoke sample. Surfaces as ``invalid_event_types`` so the LLM
     knows to fix the rule's event_type, not the field mappings."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -612,10 +606,8 @@ class TestCompileResultDiagnostic:
     the candidate source. Subprocess mode surfaces this inside the
     smoke report instead, so the in-process path is the one that
     needs a CompileResult-level diagnostic."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -630,12 +622,10 @@ class TestCompileResultDiagnostic:
     )
 
   def test_ast_failure_falls_through_to_ast_diagnostic(self):
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_ast_diagnostic,
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstFailure
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_ast_diagnostic
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     ast_report = AstReport(
@@ -659,11 +649,9 @@ class TestCompileResultDiagnostic:
     )
 
   def test_smoke_failure_falls_through_to_smoke_diagnostic(self):
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-        build_smoke_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
+    from bigquery_agent_analytics.extractor_compilation import build_smoke_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     smoke = self._failing_smoke()
@@ -685,12 +673,10 @@ class TestCompileResultDiagnostic:
     diagnostic's "earliest stage" contract has to hold for the
     public CompileResult shape, not just for canonical pipeline
     output."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_ast_diagnostic,
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstFailure
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_ast_diagnostic
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     ast_report = AstReport(
@@ -719,10 +705,8 @@ class TestCompileResultDiagnostic:
     *and* leaves the (passing) smoke_report attached. The
     diagnostic should name the compile-level failure — that's the
     actionable bit; the smoke_report is incidental context."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -743,10 +727,8 @@ class TestCompileResultDiagnostic:
     is a logic-bug shape; rather than render an empty string, the
     diagnostic labels it so the retry loop's feedback isn't
     silently empty."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -770,11 +752,9 @@ class TestCompileResultDiagnostic:
 class TestBuildGateDiagnosticCompileKind:
 
   def test_dispatches_compile(self):
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_compile_result_diagnostic,
-        build_gate_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_compile_result_diagnostic
+    from bigquery_agent_analytics.extractor_compilation import build_gate_diagnostic
     from bigquery_agent_analytics.extractor_compilation import CompileResult
 
     result = CompileResult(
@@ -793,10 +773,8 @@ class TestBuildGateDiagnosticCompileKind:
     than a CompileResult) raises with the expected-type message,
     so callers can't accidentally route a per-gate report through
     the envelope path."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_gate_diagnostic,
-    )
     from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import build_gate_diagnostic
 
     with pytest.raises(TypeError, match="kind='compile' expects CompileResult"):
       build_gate_diagnostic("compile", AstReport())
@@ -805,9 +783,7 @@ class TestBuildGateDiagnosticCompileKind:
     """The error message should advertise the four allowed kinds —
     a caller wiring up the retry loop reads this when they
     misspell ``compile``."""
-    from bigquery_agent_analytics.extractor_compilation import (
-        build_gate_diagnostic,
-    )
+    from bigquery_agent_analytics.extractor_compilation import build_gate_diagnostic
 
     with pytest.raises(ValueError, match="'compile'"):
       build_gate_diagnostic("not-a-kind", None)
