@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deterministic source generator for compiled structured
+  extractors** in
+  `bigquery_agent_analytics.extractor_compilation.template_renderer`
+  and
+  [`docs/extractor_compilation_template_renderer.md`](docs/extractor_compilation_template_renderer.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.1 — turns a pre-resolved
+  ``ResolvedExtractorPlan`` into a Python source string that 4b.1's
+  ``compile_extractor`` runs through every gate (AST allowlist,
+  smoke runner, #76 validator). Public surface:
+  ``FieldMapping`` / ``SpanHandlingRule`` /
+  ``ResolvedExtractorPlan`` dataclasses + ``render_extractor_source(plan)
+  -> str``. The renderer is the deterministic boundary the LLM
+  step in PR 4b.2.2 will plug into; **no LLM call lives here**.
+  Generated source matches ``extract_bka_decision_event``'s
+  runtime behavior on the BKA fixture's sample events, exercised
+  end-to-end by 25 unit tests covering plan validation, the AST
+  gate, the subprocess smoke runner, and plan-shape variations
+  (no property fields, no span handling, single-step paths,
+  deep traversal paths).
 - **`bq-agent-sdk binding-validate` CLI** — pre-flight validator that
   checks whether a binding YAML's referenced BigQuery tables
   physically exist with the columns and types the binding requires,

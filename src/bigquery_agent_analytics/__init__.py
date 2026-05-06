@@ -592,9 +592,13 @@ try:
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import CompileResult
   from .extractor_compilation import compute_fingerprint
+  from .extractor_compilation import FieldMapping
   from .extractor_compilation import Manifest
+  from .extractor_compilation import render_extractor_source
+  from .extractor_compilation import ResolvedExtractorPlan
   from .extractor_compilation import run_smoke_test
   from .extractor_compilation import SmokeTestReport
+  from .extractor_compilation import SpanHandlingRule
   from .extractor_compilation import validate_source
 
   __all__.extend(
@@ -602,10 +606,14 @@ try:
           "AstFailure",
           "AstReport",
           "CompileResult",
+          "FieldMapping",
           "Manifest",
+          "ResolvedExtractorPlan",
           "SmokeTestReport",
+          "SpanHandlingRule",
           "compile_extractor",
           "compute_fingerprint",
+          "render_extractor_source",
           "run_smoke_test",
           "validate_source",
       ]

@@ -52,18 +52,26 @@ from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
 from .smoke_test import SmokeTestReport
+from .template_renderer import FieldMapping
+from .template_renderer import render_extractor_source
+from .template_renderer import ResolvedExtractorPlan
+from .template_renderer import SpanHandlingRule
 
 __all__ = [
     "AstFailure",
     "AstReport",
     "CompileResult",
+    "FieldMapping",
     "Manifest",
+    "ResolvedExtractorPlan",
     "SmokeTestReport",
+    "SpanHandlingRule",
     "compile_extractor",
     "compute_fingerprint",
     "default_bundle_dir",
     "load_callable_from_source",
     "now_iso_utc",
+    "render_extractor_source",
     "run_smoke_test",
     "run_smoke_test_in_subprocess",
     "validate_source",

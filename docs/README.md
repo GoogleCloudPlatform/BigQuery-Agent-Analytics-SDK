@@ -41,6 +41,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [ontology/validation.md](ontology/validation.md) | `validate_extracted_graph(spec, graph)` post-extraction validator with NODE/FIELD/EDGE-scope failure classification |
 | [extractor_compilation_runtime_target.md](extractor_compilation_runtime_target.md) | Phase 1 runtime-target decision for compiled structured extractors (issue #75 P0.2): client-side Python via the existing `run_structured_extractors()` hook |
 | [extractor_compilation_scaffolding.md](extractor_compilation_scaffolding.md) | Compile-time scaffolding for compiled structured extractors (issue #75 PR 4b.1): fingerprint, manifest, AST allowlist, smoke-test runner, end-to-end `compile_extractor`. LLM-driven template fill is PR 4b.2; runtime loading is C2. |
+| [extractor_compilation_template_renderer.md](extractor_compilation_template_renderer.md) | Deterministic source generator for compiled structured extractors (issue #75 PR 4b.2.1): `render_extractor_source(plan)` turns a `ResolvedExtractorPlan` into Python source compatible with 4b.1's `compile_extractor`. LLM step that *resolves* raw rules into a plan is PR 4b.2.2. |
 
 ## Deployment Surfaces
 
