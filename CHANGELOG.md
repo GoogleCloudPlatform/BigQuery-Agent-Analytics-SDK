@@ -64,12 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an `AstReport` with stable failure codes (`syntax_error`,
   `disallowed_import`, `disallowed_name`, `disallowed_attribute`,
   `disallowed_async`, `disallowed_generator`, `disallowed_class`,
-  `disallowed_scope`, `top_level_side_effect`),
+  `disallowed_scope`, `disallowed_decorator`, `disallowed_default`,
+  `disallowed_while`, `disallowed_raise`, `disallowed_try`,
+  `disallowed_with`, `top_level_side_effect`) — per-module symbol
+  allowlist, no `import x`, no wildcards, no dunder aliases, no
+  decorators, no non-constant defaults, no halt/escape constructs.
   `run_smoke_test(...)` returning a `SmokeTestReport` gated on the
-  #76 `validate_extracted_graph` validator, and the end-to-end
-  `compile_extractor(...) -> CompileResult` pipeline that writes a
-  fingerprint-named bundle on disk iff every gate passes. **No LLM
-  call lives here** — that's PR 4b.2. Runtime loader / orchestrator
+  #76 `validate_extracted_graph` validator plus return-shape
+  checks (catches `BaseException`, rejects wrong return types,
+  requires at least one non-empty result by default).
+  `compile_extractor(...) -> CompileResult` runs the end-to-end
+  pipeline through a sibling staging directory and atomically
+  replaces the target on success — failed re-compiles leave any
+  pre-existing valid bundle untouched, and a second compile on
+  identical inputs is a cache hit (`result.cache_hit is True`,
+  no rewrite). `module_name` / `function_name` are validated as
+  Python identifiers up front, so path-traversal-shaped names
+  fail before the harness touches the filesystem. **No LLM call
+  lives here** — that's PR 4b.2. Runtime loader / orchestrator
   integration is deferred to C2 per the runtime-target RFC.
 - **Runtime-target decision recorded for compiled structured
   extractors** in

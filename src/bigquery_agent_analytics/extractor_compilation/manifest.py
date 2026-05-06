@@ -49,12 +49,16 @@ class Manifest:
   created_at: str
 
   def to_json(self) -> str:
-    """Serialize to a stable JSON string.
+    """Serialize to a JSON string with sorted keys.
 
-    ``sort_keys=True`` keeps the on-disk form byte-stable across
-    runs given identical fields, so re-compiling with no input
-    changes is genuinely a no-op (same fingerprint → same dir →
-    byte-identical manifest).
+    ``sort_keys=True`` makes the serialization deterministic for a
+    given set of field values — two ``Manifest`` instances with
+    identical fields produce byte-identical JSON. The on-disk
+    bundle as a whole is byte-stable across consecutive
+    ``compile_extractor`` calls because the second call is a cache
+    hit and writes nothing — *not* because the manifest's own
+    ``created_at`` is preserved across writes (it isn't; each
+    write stamps a fresh timestamp).
     """
     payload = dataclasses.asdict(self)
     # asdict preserves the tuple, but json serializes it as a list.

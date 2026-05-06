@@ -100,7 +100,11 @@ PR 4b.1 commits to one layout:
     └── manifest.json
 ```
 
-The fingerprint is the directory name so two compile runs on identical inputs deterministically land in the same directory; the manifest is `sort_keys`-stable JSON, so a clean re-compile produces a byte-identical directory.
+The fingerprint is the directory name so two compile runs on identical inputs land in the same directory. `module_name` and `function_name` are validated up front as plain Python identifiers — path-traversal-shaped names like `../x` fail the gate before the harness ever touches the filesystem.
+
+The compile pipeline writes through a sibling staging directory and **atomically replaces** the target on success. A failed re-compile leaves any pre-existing valid bundle untouched.
+
+A second `compile_extractor` call with identical inputs is a **cache hit**: the existing manifest is read, fingerprint and `function_name` are matched, and the call returns without re-running any gates or re-writing anything. The on-disk bundle is therefore byte-identical between consecutive `compile_extractor` calls — only the first call writes. (The manifest's `created_at` timestamp is fresh on each *write*, but cache hits don't write, so the timestamp is preserved.)
 
 Runtime discovery — where C2's loader looks for bundles, and whether to mirror them into a BQ table — is deliberately deferred per the runtime-target RFC.
 
@@ -139,13 +143,19 @@ Compiled extractors must pass [`validate_source`][validator] before the harness 
 | `code` | Trigger |
 |---|---|
 | `syntax_error` | `ast.parse(source)` raised. |
-| `disallowed_import` | Plain `import x` (any module), or `from x import y` where `x` is outside the allowlist. |
-| `disallowed_name` | Reference to `eval`, `exec`, `compile`, `__import__`, `globals`, `locals`, `vars`, `setattr`, `getattr`, `delattr`, `open`, `input`. |
+| `disallowed_import` | Plain `import x` (any module); `from x import y` where `x` is outside the per-module symbol allowlist; `from <allowed_module> import <not_in_allowlist>`; `from x import *`; or `from x import y as _z` (private/dunder aliases). |
+| `disallowed_name` | Reference to `eval`, `exec`, `compile`, `__import__`, `__build_class__`, `globals`, `locals`, `vars`, `setattr`, `getattr`, `delattr`, `open`, `input`, `exit`, `quit`, `breakpoint`. |
 | `disallowed_attribute` | Any attribute access whose `attr` starts with `_` (blocks dunder access like `__class__` and private-attribute access). |
 | `disallowed_async` | `async def` / `async with` / `async for` / `await`. |
 | `disallowed_generator` | `yield` / `yield from`. |
 | `disallowed_class` | `class` definition. |
 | `disallowed_scope` | `global` / `nonlocal`. |
+| `disallowed_decorator` | Any decorator on a function (decorators run at definition time). |
+| `disallowed_default` | A function default argument that isn't a constant primitive (str / int / float / bool / None / bytes / unary-minus of int or float). Defaults run at module-import time, so non-constants are a smuggling vector. |
+| `disallowed_while` | `while` loop (could hang the smoke-test runner). |
+| `disallowed_raise` | `raise` statement. `raise SystemExit` would otherwise escape any non-`BaseException` catch; banning `raise` broadly is the simplest rule. |
+| `disallowed_try` | `try` / `try*` block. The smoke-test runner is the only layer that catches exceptions. |
+| `disallowed_with` | `with` block. Context-manager protocols invoke `__enter__` / `__exit__` (dunder methods). |
 | `top_level_side_effect` | Any module-scope statement other than the docstring, an allowlisted import, or a function definition. |
 
 `AstReport.ok` is True iff every check passes. Failures collect rather than fail-fast — callers (templates, LLM fixers in 4b.2) get the full list in one pass.
@@ -161,12 +171,12 @@ PR 4b.2 will replace this hand-written string with output from the LLM-driven te
 `tests/test_extractor_compilation.py` covers:
 
 - **TestFingerprint** (5 tests): determinism, allowlist-order independence, every named input is hashed (parametrized), template_version + compiler_package_version are hashed.
-- **TestManifest** (3 tests): JSON round-trip, byte-stability, sorted keys.
-- **TestAstValidator** (10 tests): safe source passes; one negative test per failure code.
-- **TestSmokeTest** (4 tests): rejects empty event list; captures per-event exceptions; surfaces validator failures; clean run returns `ok=True`.
-- **TestCompileExtractor** (5 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; identical inputs produce identical bundle directory.
+- **TestManifest** (3 tests): JSON round-trip, deterministic serialization for identical fields, sorted keys.
+- **TestAstValidator** (24 tests): safe source passes; one negative test per failure code, plus tests for the per-module symbol allowlist, wildcard imports, dunder aliases, decorators, non-constant defaults (and that constant defaults still pass), `while`, `raise`, `try`, `with`, and additional forbidden names (`exit`, `quit`, `__build_class__`, `breakpoint`).
+- **TestSmokeTest** (8 tests): rejects empty event list; captures per-event exceptions including `SystemExit`; surfaces validator failures; rejects wrong return types; fails when every event produces empty results; allows opt-out via `min_nonempty_results=0`; clean run returns `ok=True`.
+- **TestCompileExtractor** (8 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; second compile is a cache hit (no rewrite, `created_at` preserved); failed recompile leaves an existing valid bundle byte-identical; invalid `module_name` / `function_name` rejected (parametrized for path-traversal-shaped names).
 
-38 tests total, all pass against the full repo suite (2258 passed / 9 skipped).
+64 tests total, all pass against the full repo suite.
 
 ## Related
 

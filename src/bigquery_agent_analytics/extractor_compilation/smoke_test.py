@@ -24,12 +24,13 @@ Two responsibilities:
    natural debugging surface for compiled extractors.
 
 2. **Execute the callable on sample events and gate on the #76
-   validator.** The callable is invoked once per event, individual
-   exceptions are captured rather than aborting the run, and the
-   merged ``ExtractedGraph`` is fed through
-   :func:`bigquery_agent_analytics.graph_validation.validate_extracted_graph`.
-   Any validator failure or any per-event exception flips
-   ``SmokeTestReport.ok`` to False.
+   validator plus result-shape checks.** The callable is invoked
+   once per event under a ``BaseException`` catch so even
+   ``SystemExit`` is captured rather than escaping. Wrong return
+   types fail the gate. Empty-result-on-every-event fails the gate
+   too — by default at least one event must produce output, so an
+   extractor that vacuously returns ``StructuredExtractionResult()``
+   for every input doesn't quietly pass.
 
 PR 4b.1 keeps the runner ABI-only. C2 will plumb compiled callables
 into the orchestrator's ``run_structured_extractors()`` hook; until
@@ -57,19 +58,35 @@ from bigquery_agent_analytics.structured_extraction import StructuredExtractionR
 class SmokeTestReport:
   """Result of one smoke-test run.
 
-  ``ok`` is True iff every sample event produced a result without
-  an exception AND the merged graph validates clean against the
-  resolved spec. Either kind of failure flips it.
+  ``ok`` is True iff:
+    - every sample event produced a result without an exception
+      (BaseException, including ``SystemExit``);
+    - every result was a ``StructuredExtractionResult`` (no wrong
+      return types);
+    - at least ``min_nonempty_results`` events produced a non-empty
+      result;
+    - the merged graph validates clean against the resolved spec.
+
+  Any one of those flips ``ok`` to False.
   """
 
   events_processed: int
   events_with_exception: int
   exceptions: tuple[str, ...]
+  events_with_wrong_return_type: int
+  wrong_return_types: tuple[str, ...]
+  events_with_nonempty_result: int
+  min_nonempty_results: int
   validation_failures: tuple[ValidationFailure, ...]
 
   @property
   def ok(self) -> bool:
-    return not (self.exceptions or self.validation_failures)
+    return (
+        not self.exceptions
+        and not self.wrong_return_types
+        and self.events_with_nonempty_result >= self.min_nonempty_results
+        and not self.validation_failures
+    )
 
 
 def load_callable_from_source(
@@ -109,9 +126,10 @@ def run_smoke_test(
     events: list[dict],
     spec: Any,
     resolved_graph: Optional[Any] = None,
+    min_nonempty_results: int = 1,
 ) -> SmokeTestReport:
   """Run *extractor* on every event in *events* and gate on the
-  #76 validator.
+  #76 validator + result-shape checks.
 
   Args:
     extractor: A callable matching the ``StructuredExtractor``
@@ -126,9 +144,16 @@ def run_smoke_test(
     resolved_graph: ``ResolvedGraph`` to validate the merged result
       against. ``None`` skips the validator gate (useful for
       isolated tests of the runner itself).
+    min_nonempty_results: Minimum number of events that must
+      produce a non-empty ``StructuredExtractionResult``. Defaults
+      to 1 so an extractor that returns empty for every event
+      doesn't vacuously pass. Set to 0 only when the test is
+      deliberately exercising the empty-result path.
 
   Per-event exceptions are captured via ``traceback.format_exc()``
-  and reported in the result; one bad event does not abort the run.
+  under a ``BaseException`` catch — even ``SystemExit`` and
+  ``KeyboardInterrupt`` are surfaced in the report rather than
+  escaping the runner.
   """
   if not events:
     raise ValueError(
@@ -136,16 +161,32 @@ def run_smoke_test(
     )
 
   exceptions: list[str] = []
+  wrong_return_types: list[str] = []
   results: list[StructuredExtractionResult] = []
+  events_with_nonempty_result = 0
 
   for event in events:
     try:
       result = extractor(event, spec)
-    except Exception:  # noqa: BLE001 — by design, surface in the report
+    except BaseException:  # noqa: BLE001 — by design, surface in the report
       exceptions.append(traceback.format_exc())
       continue
-    if isinstance(result, StructuredExtractionResult):
-      results.append(result)
+
+    if not isinstance(result, StructuredExtractionResult):
+      wrong_return_types.append(
+          f"extractor returned {type(result).__name__!r}, expected "
+          f"StructuredExtractionResult"
+      )
+      continue
+
+    results.append(result)
+    if (
+        result.nodes
+        or result.edges
+        or result.fully_handled_span_ids
+        or result.partially_handled_span_ids
+    ):
+      events_with_nonempty_result += 1
 
   merged = (
       merge_extraction_results(results)
@@ -167,5 +208,9 @@ def run_smoke_test(
       events_processed=len(events),
       events_with_exception=len(exceptions),
       exceptions=tuple(exceptions),
+      events_with_wrong_return_type=len(wrong_return_types),
+      wrong_return_types=tuple(wrong_return_types),
+      events_with_nonempty_result=events_with_nonempty_result,
+      min_nonempty_results=min_nonempty_results,
       validation_failures=validation_failures,
   )

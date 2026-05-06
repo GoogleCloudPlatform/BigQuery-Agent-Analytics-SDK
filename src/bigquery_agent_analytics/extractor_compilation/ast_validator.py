@@ -22,30 +22,39 @@ trust boundary: AST failures short-circuit compile *before* any
 
 Allowed:
   - ``from __future__ import annotations``
-  - ``from bigquery_agent_analytics.extracted_models import ...``
-  - ``from bigquery_agent_analytics.structured_extraction import ...``
-  - Module-scope: only the docstring, allowlisted imports, and
+  - ``from bigquery_agent_analytics.extracted_models import
+    ExtractedNode, ExtractedEdge, ExtractedProperty``
+  - ``from bigquery_agent_analytics.structured_extraction import
+    StructuredExtractionResult, StructuredExtractor``
+  - Module scope: only the docstring, allowlisted imports, and
     function definitions
-  - Pure control flow: ``if`` / ``for`` / ``while`` / comprehensions
+  - Pure control flow: ``if`` / ``for`` / comprehensions
   - Literals, f-strings, allowlisted builtins, and method calls on
     parameter objects (e.g., ``event.get('content')``)
 
 Rejected:
-  - Imports outside the allowlist
+  - Imports outside the per-module symbol allowlist
+  - ``import x`` (always; bind via ``from x import y`` instead)
+  - Imported aliases starting with ``_`` (no hidden dunder smuggling)
   - Dynamic-execution names (``eval``, ``exec``, ``compile``,
-    ``__import__``)
+    ``__import__``, ``__build_class__``, ``breakpoint``)
   - Introspection (``getattr``, ``setattr``, ``delattr``,
     ``globals``, ``locals``, ``vars``)
-  - I/O builtins (``open``, ``input``)
+  - I/O / process-control builtins (``open``, ``input``,
+    ``exit``, ``quit``)
   - Any attribute starting with ``_`` (blocks dunder access like
     ``obj.__class__`` and private-attribute access)
   - Top-level side-effecting statements
-  - ``async`` / ``await`` / generators / ``yield`` / class
-    definitions / ``global`` / ``nonlocal``
+  - Decorators (run at definition time)
+  - Non-constant default arguments (run at definition time)
+  - Async / generators / class definitions / global / nonlocal
+  - ``while`` / ``raise`` / ``try`` / ``with`` (halting / flow
+    constructs that can hang the smoke runner or escape its
+    exception handler via ``SystemExit``)
 
 The allowlist is intentionally narrow for PR 4b.1; extending it as
-real templates need it (e.g., adding stdlib helpers) is a deliberate
-future PR, not a default expansion.
+real templates require it (e.g., adding stdlib helpers) is a
+deliberate future PR, not a default expansion.
 """
 
 from __future__ import annotations
@@ -54,30 +63,58 @@ import ast
 import dataclasses
 from typing import Optional
 
-_ALLOWED_IMPORTS_FROM = frozenset(
-    {
-        "__future__",
-        "bigquery_agent_analytics.extracted_models",
-        "bigquery_agent_analytics.structured_extraction",
-    }
-)
+# Per-module symbol allowlist. Keyed by module name; each value is
+# the set of *names* importable from that module via
+# ``from <module> import <name>``. Anything outside this map fails
+# ``disallowed_import``. Adding a new entry is a deliberate decision
+# — don't broaden without a concrete template need.
+_ALLOWED_IMPORTS_FROM: dict[str, frozenset[str]] = {
+    "__future__": frozenset({"annotations"}),
+    "bigquery_agent_analytics.extracted_models": frozenset(
+        {
+            "ExtractedNode",
+            "ExtractedEdge",
+            "ExtractedProperty",
+        }
+    ),
+    "bigquery_agent_analytics.structured_extraction": frozenset(
+        {
+            "StructuredExtractionResult",
+            "StructuredExtractor",
+        }
+    ),
+}
 
 _FORBIDDEN_NAMES = frozenset(
     {
+        # Dynamic execution
         "eval",
         "exec",
         "compile",
         "__import__",
+        "__build_class__",
+        # Introspection
         "globals",
         "locals",
         "vars",
         "setattr",
         "getattr",
         "delattr",
+        # I/O
         "open",
         "input",
+        # Process control / debugger
+        "exit",
+        "quit",
+        "breakpoint",
     }
 )
+
+# ``ast.TryStar`` exists on Python 3.11+. Build the rejection tuple
+# defensively so the validator works on older interpreters too.
+_TRY_TYPES: tuple[type, ...] = (ast.Try,)
+if hasattr(ast, "TryStar"):
+  _TRY_TYPES = _TRY_TYPES + (ast.TryStar,)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,9 +173,10 @@ def validate_source(source: str) -> AstReport:
 
 
 def _check_module_scope(tree: ast.Module, failures: list[AstFailure]) -> None:
-  """Reject anything at module scope other than docstring, imports,
-  and function defs. Top-level assignments and expressions are
-  side effects that compiled extractors should not have."""
+  """Reject anything at module scope other than the docstring,
+  allowlisted imports, and function defs. Top-level assignments
+  and expressions are side effects compiled extractors should not
+  have."""
   for stmt in tree.body:
     if _is_module_docstring(stmt):
       continue
@@ -169,12 +207,13 @@ def _is_module_docstring(stmt: ast.stmt) -> bool:
 
 
 def _check_import(stmt: ast.stmt, failures: list[AstFailure]) -> None:
-  """Reject imports outside the ``_ALLOWED_IMPORTS_FROM`` set.
+  """Reject imports outside the per-module symbol allowlist.
 
-  Plain ``import foo`` is rejected even for allowlisted modules
-  because it binds the top-level name (``foo``) into the extractor's
-  namespace, complicating the name-allowlist analysis. Use
-  ``from foo import x`` instead.
+  Plain ``import foo`` is rejected even for allowlisted modules:
+  the bound name (``foo``) puts the whole module surface in the
+  extractor's namespace, defeating the symbol allowlist. Use
+  ``from foo import x`` instead. Aliases starting with ``_`` are
+  rejected too — no hidden dunder smuggling.
   """
   if isinstance(stmt, ast.Import):
     for alias in stmt.names:
@@ -184,7 +223,7 @@ def _check_import(stmt: ast.stmt, failures: list[AstFailure]) -> None:
               detail=(
                   f"plain 'import {alias.name}' is not allowed in "
                   f"compiled extractors; use 'from <allowlisted-module> "
-                  f"import ...' instead"
+                  f"import <allowlisted-symbol>' instead"
               ),
               line=stmt.lineno,
           )
@@ -193,17 +232,60 @@ def _check_import(stmt: ast.stmt, failures: list[AstFailure]) -> None:
 
   assert isinstance(stmt, ast.ImportFrom)
   module = stmt.module or ""
-  if module not in _ALLOWED_IMPORTS_FROM:
+  allowed_symbols = _ALLOWED_IMPORTS_FROM.get(module)
+  if allowed_symbols is None:
     failures.append(
         AstFailure(
             code="disallowed_import",
             detail=(
                 f"import from {module!r} is not in the compiled-extractor "
-                f"allowlist; allowed: {sorted(_ALLOWED_IMPORTS_FROM)}"
+                f"allowlist; allowed modules: "
+                f"{sorted(_ALLOWED_IMPORTS_FROM)}"
             ),
             line=stmt.lineno,
         )
     )
+    return
+
+  for alias in stmt.names:
+    if alias.name == "*":
+      failures.append(
+          AstFailure(
+              code="disallowed_import",
+              detail=(
+                  f"wildcard 'from {module} import *' is not allowed in "
+                  f"compiled extractors; import each symbol explicitly"
+              ),
+              line=stmt.lineno,
+          )
+      )
+      continue
+    if alias.name not in allowed_symbols:
+      failures.append(
+          AstFailure(
+              code="disallowed_import",
+              detail=(
+                  f"symbol {alias.name!r} is not allowed from module "
+                  f"{module!r}; allowed: {sorted(allowed_symbols)}"
+              ),
+              line=stmt.lineno,
+          )
+      )
+      continue
+    bound_name = alias.asname or alias.name
+    if bound_name.startswith("_"):
+      failures.append(
+          AstFailure(
+              code="disallowed_import",
+              detail=(
+                  f"imported alias {bound_name!r} starts with '_'; private "
+                  f"and dunder aliases are not allowed (this also blocks "
+                  f"smuggling __builtins__-style names through valid "
+                  f"modules)"
+              ),
+              line=stmt.lineno,
+          )
+      )
 
 
 def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
@@ -233,6 +315,9 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
               line=node.lineno,
           )
       )
+    return
+  if isinstance(node, ast.FunctionDef):
+    _check_function_def(node, failures)
     return
   if isinstance(
       node,
@@ -287,3 +372,118 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
             line=getattr(node, "lineno", None),
         )
     )
+    return
+  if isinstance(node, ast.While):
+    failures.append(
+        AstFailure(
+            code="disallowed_while",
+            detail=(
+                "'while' loops are not allowed in compiled extractors "
+                "(can hang the smoke-test runner; use bounded 'for' loops)"
+            ),
+            line=node.lineno,
+        )
+    )
+    return
+  if isinstance(node, ast.Raise):
+    failures.append(
+        AstFailure(
+            code="disallowed_raise",
+            detail=(
+                "explicit 'raise' is not allowed in compiled extractors; "
+                "extractors should return an empty StructuredExtractionResult "
+                "for events they cannot handle, not raise (and certainly "
+                "not raise SystemExit, which would escape the smoke "
+                "runner's exception handler)"
+            ),
+            line=node.lineno,
+        )
+    )
+    return
+  if isinstance(node, _TRY_TYPES):
+    failures.append(
+        AstFailure(
+            code="disallowed_try",
+            detail=(
+                "'try' / 'try*' is not allowed in compiled extractors; "
+                "the smoke-test runner is the only layer that catches "
+                "exceptions"
+            ),
+            line=getattr(node, "lineno", None),
+        )
+    )
+    return
+  if isinstance(node, ast.With):
+    failures.append(
+        AstFailure(
+            code="disallowed_with",
+            detail=(
+                "'with' is not allowed in compiled extractors; "
+                "context-manager protocols invoke __enter__/__exit__ "
+                "which are dunder methods"
+            ),
+            line=node.lineno,
+        )
+    )
+    return
+
+
+def _check_function_def(
+    node: ast.FunctionDef, failures: list[AstFailure]
+) -> None:
+  """Reject decorators and non-constant default arguments.
+
+  Decorators run at definition (import) time and can do arbitrary
+  things. Default arguments are evaluated at definition time too —
+  ``def f(x=open('/etc/passwd').read())`` would happen at module
+  import even though ``open`` is forbidden inside the function
+  body. Constraining defaults to constant primitives blocks that
+  whole class of smuggling.
+  """
+  if node.decorator_list:
+    for dec in node.decorator_list:
+      failures.append(
+          AstFailure(
+              code="disallowed_decorator",
+              detail=(
+                  f"function {node.name!r} has a decorator; decorators "
+                  f"run at definition time and are not allowed in "
+                  f"compiled extractors"
+              ),
+              line=getattr(dec, "lineno", node.lineno),
+          )
+      )
+
+  defaults = list(node.args.defaults) + [
+      d for d in node.args.kw_defaults if d is not None
+  ]
+  for d in defaults:
+    if not _is_constant_primitive(d):
+      failures.append(
+          AstFailure(
+              code="disallowed_default",
+              detail=(
+                  f"function {node.name!r} has a non-constant default "
+                  f"argument; defaults are evaluated at module-import "
+                  f"time and must be primitive constants (str, int, "
+                  f"float, bool, None)"
+              ),
+              line=getattr(d, "lineno", node.lineno),
+          )
+      )
+
+
+def _is_constant_primitive(node: ast.AST) -> bool:
+  """Return True if *node* is a constant primitive (str, int, float,
+  bool, None, bytes, or unary-minus of a numeric constant).
+
+  Defaults restricted to this set cannot invoke any function, so
+  they cannot have import-time side effects.
+  """
+  if isinstance(node, ast.Constant):
+    return isinstance(node.value, (str, int, float, bool, type(None), bytes))
+  if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+    return isinstance(node.operand, ast.Constant) and isinstance(
+        node.operand.value, (int, float)
+    )
+  return False

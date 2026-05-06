@@ -401,6 +401,135 @@ class TestAstValidator:
     assert len(report.failures) == 1
     assert report.failures[0].code == "syntax_error"
 
+  def test_imported_symbol_must_be_in_per_module_allowlist(self):
+    """``from <allowed_module> import <not_allowed_symbol>`` is
+    rejected even though the module itself is fine — closes the
+    'smuggle ``__builtins__`` from a valid module' gap."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "from bigquery_agent_analytics.extracted_models import os_path\n"
+        "def f(event, spec):\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_import" for f in report.failures)
+
+  def test_wildcard_import_rejected(self):
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "from bigquery_agent_analytics.extracted_models import *\n"
+        "def f(event, spec):\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_import" for f in report.failures)
+
+  def test_imported_alias_starting_with_underscore_rejected(self):
+    """No hidden dunder smuggling: ``from x import y as _z`` fails
+    even though ``y`` is allowed."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "from bigquery_agent_analytics.extracted_models import "
+        "ExtractedNode as _hidden\n"
+        "def f(event, spec):\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_import" for f in report.failures)
+
+  def test_decorator_rejected(self):
+    """Decorators run at definition time and can do anything."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def deco(fn):\n"
+        "    return fn\n"
+        "@deco\n"
+        "def f(event, spec):\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_decorator" for f in report.failures)
+
+  def test_non_constant_default_rejected(self):
+    """``def f(x=open('p').read()): ...`` would run at module
+    import time. Defaults must be primitive constants."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec, _cache=[]):\n    return None\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_default" for f in report.failures)
+
+  def test_constant_defaults_accepted(self):
+    """Constant primitives are fine — no side effects at import."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec, x=42, y=None, z='ok', n=-1):\n    return None\n"
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_while_loop_rejected(self):
+    """``while True:`` could hang the smoke runner."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec):\n    while True:\n        pass\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_while" for f in report.failures)
+
+  def test_raise_rejected(self):
+    """``raise SystemExit`` would escape any non-BaseException
+    catch; banning 'raise' broadly is the simplest rule and frees
+    the smoke runner from worrying about SystemExit at all."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec):\n    raise SystemExit\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_raise" for f in report.failures)
+
+  def test_try_except_rejected(self):
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    try:\n"
+        "        return None\n"
+        "    except Exception:\n"
+        "        return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_try" for f in report.failures)
+
+  def test_with_statement_rejected(self):
+    """Context-manager protocols invoke __enter__/__exit__ — dunder
+    methods we want to keep out of compiled extractors."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n" "    with event as e:\n" "        return None\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_with" for f in report.failures)
+
+  def test_breakpoint_rejected(self):
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec):\n    breakpoint()\n    return None\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_name" for f in report.failures)
+
+  @pytest.mark.parametrize("name", ["exit", "quit", "__build_class__"])
+  def test_additional_forbidden_names(self, name):
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = f"def f(event, spec):\n    return {name}\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_name" for f in report.failures)
+
 
 # ------------------------------------------------------------------ #
 # Smoke-test runner                                                    #
@@ -507,6 +636,86 @@ class TestSmokeTest:
     assert report.ok is True
     assert report.events_with_exception == 0
     assert report.validation_failures == ()
+
+  def test_system_exit_captured_not_escaped(self):
+    """``raise SystemExit`` would escape an ``except Exception``
+    catch — the runner now catches ``BaseException`` so the harness
+    survives. (The AST validator also rejects ``raise`` outright in
+    bundle source; this test exercises the runtime guarantee in
+    case a future template path bypasses the AST gate.)"""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+
+    def extractor(event, spec):
+      raise SystemExit("compiled extractor tried to exit")
+
+    report = run_smoke_test(
+        extractor,
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+    )
+    assert report.ok is False
+    assert report.events_with_exception == 1
+    assert any("SystemExit" in e for e in report.exceptions)
+
+  def test_wrong_return_type_fails(self):
+    """An extractor that returns the wrong type (e.g., a dict
+    instead of a ``StructuredExtractionResult``) used to be
+    silently dropped from the merged result. It now fails the
+    smoke gate explicitly."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+
+    def extractor(event, spec):
+      return {"nodes": []}
+
+    report = run_smoke_test(
+        extractor,
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+    )
+    assert report.ok is False
+    assert report.events_with_wrong_return_type == 1
+    assert "dict" in report.wrong_return_types[0]
+
+  def test_all_empty_results_fail_default(self):
+    """An extractor that returns ``StructuredExtractionResult()``
+    for every event used to vacuously pass — #76 has no event-level
+    expectations. The smoke runner now requires
+    ``min_nonempty_results >= 1`` by default."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def extractor(event, spec):
+      return StructuredExtractionResult()
+
+    report = run_smoke_test(
+        extractor,
+        events=[{"event_type": "x"}, {"event_type": "y"}],
+        spec=None,
+        resolved_graph=None,
+    )
+    assert report.ok is False
+    assert report.events_with_nonempty_result == 0
+    assert report.min_nonempty_results == 1
+
+  def test_min_nonempty_results_zero_allows_empty(self):
+    """Callers can opt out of the non-empty floor for tests that
+    deliberately exercise the empty-result path."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def extractor(event, spec):
+      return StructuredExtractionResult()
+
+    report = run_smoke_test(
+        extractor,
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+        min_nonempty_results=0,
+    )
+    assert report.ok is True
 
 
 # ------------------------------------------------------------------ #
@@ -667,12 +876,14 @@ def f(event, spec):
     # Partial bundle dir was created and then removed.
     assert not list(tmp_path.iterdir())
 
-  def test_identical_inputs_produce_identical_bundle_directory(
-      self, tmp_path: pathlib.Path
-  ):
+  def test_second_compile_is_a_cache_hit(self, tmp_path: pathlib.Path):
     """Two compile runs on the same inputs land in the same
-    fingerprint-named directory and write byte-identical
-    artifacts (modulo ``created_at``)."""
+    fingerprint-named directory. The second run is a cache hit:
+    it reads the existing manifest, validates fingerprint +
+    function_name match, and returns without writing anything.
+    The on-disk bundle is therefore byte-identical between
+    consecutive ``compile_extractor`` calls — verified by
+    asserting the ``created_at`` timestamp doesn't change."""
     from bigquery_agent_analytics.extractor_compilation import compile_extractor
     from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
 
@@ -693,8 +904,154 @@ def f(event, spec):
     a = compile_extractor(**kwargs)
     b = compile_extractor(**kwargs)
     assert a.ok and b.ok
+    assert a.cache_hit is False
+    assert b.cache_hit is True
     assert a.bundle_dir == b.bundle_dir
     assert a.manifest.fingerprint == b.manifest.fingerprint
+    # Cache hit doesn't rewrite the manifest, so created_at is
+    # preserved — proves the second call wrote nothing.
+    assert a.manifest.created_at == b.manifest.created_at
+
+  def test_failed_recompile_leaves_existing_bundle_intact(
+      self, tmp_path: pathlib.Path
+  ):
+    """A successful first compile, followed by a second compile
+    with broken source under the *same* fingerprint inputs but a
+    different ``compiler_package_version`` (so it's not a cache
+    hit), must NOT corrupt the original bundle. Atomic-replace via
+    a staging dir is what guarantees this."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        module_name="bka_intact",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+    )
+    good = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        compiler_package_version="0.0.0",
+        **common,
+    )
+    assert good.ok is True
+    good_dir = good.bundle_dir
+    good_module = (good_dir / good.manifest.module_filename).read_text()
+    good_manifest = (good_dir / "manifest.json").read_text()
+
+    # Second compile with broken source: but keep the same
+    # fingerprint inputs and module/function names. Since AST
+    # would short-circuit before any bundle is touched, force the
+    # failure later by failing the smoke test instead — emit a
+    # type_mismatch.
+    bad_source = '''
+"""Bad compiled extractor that produces a type_mismatch."""
+
+from __future__ import annotations
+
+from bigquery_agent_analytics.extracted_models import ExtractedNode
+from bigquery_agent_analytics.extracted_models import ExtractedProperty
+from bigquery_agent_analytics.structured_extraction import (
+    StructuredExtractionResult,
+)
+
+
+def extract_bka_decision_event_compiled(event, spec):
+  return StructuredExtractionResult(
+      nodes=[
+          ExtractedNode(
+              node_id="sess1:mako_DecisionPoint:decision_id=99",
+              entity_name="mako_DecisionPoint",
+              labels=["mako_DecisionPoint"],
+              properties=[ExtractedProperty(name="decision_id", value=99)],
+          )
+      ]
+  )
+'''
+    # Bump the compiler version so the cache-hit short-circuit
+    # doesn't fire; we want to actually re-run the gates.
+    bad = compile_extractor(
+        source=bad_source,
+        compiler_package_version="0.0.1",
+        **common,
+    )
+    assert bad.ok is False
+    assert bad.smoke_report is not None
+    assert any(
+        f.code == "type_mismatch" for f in bad.smoke_report.validation_failures
+    )
+
+    # Original bundle must still be on disk and byte-identical.
+    assert good_dir.exists()
+    assert (good_dir / good.manifest.module_filename).read_text() == good_module
+    assert (good_dir / "manifest.json").read_text() == good_manifest
+
+  @pytest.mark.parametrize(
+      "module_name",
+      [
+          "../escape",
+          "foo.bar",
+          "foo-bar",
+          "1leading_digit",
+          "",
+          "with space",
+      ],
+  )
+  def test_invalid_module_name_rejected(
+      self, module_name: str, tmp_path: pathlib.Path
+  ):
+    """``module_filename = f'{module_name}.py'`` is used directly
+    as a path; path-traversal-shaped names must be rejected before
+    the harness ever touches the filesystem."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name=module_name,
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_identifier is not None
+    assert "module_name" in result.invalid_identifier
+    # No filesystem writes happened.
+    assert not list(tmp_path.iterdir())
+
+  def test_invalid_function_name_rejected(self, tmp_path: pathlib.Path):
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="ok_module",
+        function_name="../escape",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_identifier is not None
+    assert "function_name" in result.invalid_identifier
+    assert not list(tmp_path.iterdir())
 
 
 # ------------------------------------------------------------------ #
