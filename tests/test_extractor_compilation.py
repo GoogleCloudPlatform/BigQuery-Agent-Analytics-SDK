@@ -530,6 +530,88 @@ class TestAstValidator:
     report = validate_source(src)
     assert any(f.code == "disallowed_name" for f in report.failures)
 
+  def test_iter_name_rejected(self):
+    """``iter(callable, sentinel)`` is the documented unbounded-
+    iteration construct. Block by name."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec):\n" "    return iter(int, 1)\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_name" for f in report.failures)
+
+  @pytest.mark.parametrize(
+      "iterable",
+      [
+          "range(10)",
+          "range(10**100)",
+          "iter(int, 1)",
+          "some_helper()",
+      ],
+  )
+  def test_for_iter_name_call_rejected(self, iterable):
+    """``for _ in <Call to a Name>`` is rejected — covers
+    ``range(...)``, ``iter(...)``, and any user-defined helper."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = f"def f(event, spec):\n    for _ in {iterable}:\n        pass\n"
+    report = validate_source(src)
+    assert any(
+        f.code in ("disallowed_for_iter", "disallowed_name")
+        for f in report.failures
+    ), (
+        f"expected disallowed_for_iter or disallowed_name; got "
+        f"{[(f.code, f.detail) for f in report.failures]}"
+    )
+
+  def test_for_iter_tuple_literal_accepted(self):
+    """The BKA fixture iterates a Tuple literal — that must keep
+    working."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    for key in ('outcome', 'confidence'):\n"
+        "        pass\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_for_iter_method_call_accepted(self):
+    """Method calls are bounded by their receiver's runtime size,
+    which itself comes from event payload — accept ``dict.items()``
+    and friends."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    for k, v in event.items():\n"
+        "        pass\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_comprehension_with_name_call_iter_rejected(self):
+    """Same rule as for-loops applies to comprehensions:
+    ``[x for x in range(10**100)]`` could allocate forever."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    xs = [x for x in range(10)]\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert any(
+        f.code in ("disallowed_for_iter", "disallowed_name")
+        for f in report.failures
+    )
+
 
 # ------------------------------------------------------------------ #
 # Smoke-test runner                                                    #
@@ -911,6 +993,103 @@ def f(event, spec):
     # Cache hit doesn't rewrite the manifest, so created_at is
     # preserved — proves the second call wrote nothing.
     assert a.manifest.created_at == b.manifest.created_at
+
+  def test_cache_hit_misses_when_source_differs(self, tmp_path: pathlib.Path):
+    """The fingerprint covers the #75 input tuple but NOT the
+    candidate source. A second compile with different source must
+    not be a cache hit — it has to re-run AST + smoke + validator
+    on the *actual* new source."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        module_name="bka_src_diff",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+
+    a = compile_extractor(source=BKA_DECISION_SOURCE, **common)
+    assert a.ok and not a.cache_hit
+
+    # Same fingerprint inputs, same module/function/event_types,
+    # but different source. Must NOT be a cache hit.
+    altered_source = BKA_DECISION_SOURCE + "\n# trailing comment\n"
+    b = compile_extractor(source=altered_source, **common)
+    assert b.ok is True
+    assert (
+        b.cache_hit is False
+    ), "second compile with different source must not cache-hit"
+
+  def test_cache_hit_misses_when_module_name_differs(
+      self, tmp_path: pathlib.Path
+  ):
+    """A second compile with the same fingerprint but a different
+    module_name lands in the same bundle dir but with a different
+    on-disk filename. Must not be a cache hit."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        source=BKA_DECISION_SOURCE,
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+
+    a = compile_extractor(module_name="module_a", **common)
+    assert a.ok and not a.cache_hit
+    b = compile_extractor(module_name="module_b", **common)
+    assert b.ok is True
+    assert b.cache_hit is False
+    # The atomic-replace put module_b.py on disk; module_a.py is gone.
+    assert (b.bundle_dir / "module_b.py").exists()
+    assert not (b.bundle_dir / "module_a.py").exists()
+
+  def test_cache_hit_misses_when_event_types_differ(
+      self, tmp_path: pathlib.Path
+  ):
+    """A second compile with different per-bundle ``event_types``
+    coverage is a different request. Must not be a cache hit."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        source=BKA_DECISION_SOURCE,
+        module_name="bka_event_diff",
+        function_name="extract_bka_decision_event_compiled",
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+
+    a = compile_extractor(event_types=("bka_decision",), **common)
+    assert a.ok and not a.cache_hit
+    b = compile_extractor(
+        event_types=("bka_decision", "tool_completed"), **common
+    )
+    assert b.ok is True
+    assert b.cache_hit is False
+    assert b.manifest.event_types == ("bka_decision", "tool_completed")
 
   def test_failed_recompile_leaves_existing_bundle_intact(
       self, tmp_path: pathlib.Path

@@ -135,8 +135,10 @@ Compiled extractors must pass [`validate_source`][validator] before the harness 
 - `from bigquery_agent_analytics.extracted_models import ExtractedNode, ExtractedEdge, ExtractedProperty`
 - `from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult, StructuredExtractor`
 - Module scope: only the docstring, allowlisted imports, and function definitions.
-- Pure control flow: `if` / `for` / `while` / comprehensions.
+- Pure control flow: `if` / **bounded** `for` / comprehensions.
 - Literals, f-strings, allowlisted constructors and method calls.
+
+A `for` (or comprehension generator) is **bounded** when its iterable is one of: a literal tuple/list/set/dict, a constant, a parameter or attribute, a subscript, or a method call (e.g., `dict.items()`). A call to a bare `Name` (`range(...)`, `iter(...)`, a user-defined helper) is **rejected** as `disallowed_for_iter` — those forms can be arbitrarily long and would hang the in-process smoke runner. `iter` is also blocked as a top-level name. (`while` is rejected outright.)
 
 ### Rejected (with stable failure codes)
 
@@ -153,6 +155,7 @@ Compiled extractors must pass [`validate_source`][validator] before the harness 
 | `disallowed_decorator` | Any decorator on a function (decorators run at definition time). |
 | `disallowed_default` | A function default argument that isn't a constant primitive (str / int / float / bool / None / bytes / unary-minus of int or float). Defaults run at module-import time, so non-constants are a smuggling vector. |
 | `disallowed_while` | `while` loop (could hang the smoke-test runner). |
+| `disallowed_for_iter` | `for` or comprehension whose iterable is a call to a bare `Name` (e.g., `range(...)`, `iter(...)`, a user-defined helper). Those forms can be unbounded; iterate over a literal tuple/list, a parameter, or a method call (`dict.items()`) instead. |
 | `disallowed_raise` | `raise` statement. `raise SystemExit` would otherwise escape any non-`BaseException` catch; banning `raise` broadly is the simplest rule. |
 | `disallowed_try` | `try` / `try*` block. The smoke-test runner is the only layer that catches exceptions. |
 | `disallowed_with` | `with` block. Context-manager protocols invoke `__enter__` / `__exit__` (dunder methods). |
@@ -174,9 +177,9 @@ PR 4b.2 will replace this hand-written string with output from the LLM-driven te
 - **TestManifest** (3 tests): JSON round-trip, deterministic serialization for identical fields, sorted keys.
 - **TestAstValidator** (24 tests): safe source passes; one negative test per failure code, plus tests for the per-module symbol allowlist, wildcard imports, dunder aliases, decorators, non-constant defaults (and that constant defaults still pass), `while`, `raise`, `try`, `with`, and additional forbidden names (`exit`, `quit`, `__build_class__`, `breakpoint`).
 - **TestSmokeTest** (8 tests): rejects empty event list; captures per-event exceptions including `SystemExit`; surfaces validator failures; rejects wrong return types; fails when every event produces empty results; allows opt-out via `min_nonempty_results=0`; clean run returns `ok=True`.
-- **TestCompileExtractor** (8 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; second compile is a cache hit (no rewrite, `created_at` preserved); failed recompile leaves an existing valid bundle byte-identical; invalid `module_name` / `function_name` rejected (parametrized for path-traversal-shaped names).
+- **TestCompileExtractor** (11 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; second compile is a cache hit (no rewrite, `created_at` preserved); cache hit misses when the *source*, *module_name*, or *event_types* differ even with the same fingerprint; failed recompile leaves an existing valid bundle byte-identical; invalid `module_name` / `function_name` rejected (parametrized for path-traversal-shaped names).
 
-64 tests total, all pass against the full repo suite.
+75 tests total, all pass against the full repo suite.
 
 ## Related
 

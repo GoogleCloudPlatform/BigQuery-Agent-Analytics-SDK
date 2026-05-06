@@ -191,12 +191,22 @@ def compile_extractor(
   module_filename = f"{module_name}.py"
 
   # Stage 3: cache hit. A previous successful compile with the
-  # same fingerprint already wrote a valid bundle. Returning here
-  # guarantees the on-disk bundle is byte-identical between
-  # consecutive ``compile_extractor`` calls — only the first call
-  # writes anything.
+  # *exact same compile request* already wrote a valid bundle —
+  # source bytes, module_name, function_name, and event_types all
+  # have to match in addition to the fingerprint. The fingerprint
+  # alone is insufficient because per the #75 input tuple it
+  # covers ontology / binding / event_schema / extraction_rules
+  # (etc.) but NOT the candidate source, the chosen module_name,
+  # or the per-bundle event_types — so without these checks a
+  # follow-up call with a different (or broken) source could hit
+  # the cache and silently return ok=True.
   cached_manifest = _read_cached_manifest(
-      bundle_dir, fingerprint=fingerprint, function_name=function_name
+      bundle_dir,
+      fingerprint=fingerprint,
+      function_name=function_name,
+      module_filename=f"{module_name}.py",
+      event_types=tuple(event_types),
+      source=source,
   )
   if cached_manifest is not None:
     return CompileResult(
@@ -305,19 +315,31 @@ def _read_cached_manifest(
     *,
     fingerprint: str,
     function_name: str,
+    module_filename: str,
+    event_types: tuple[str, ...],
+    source: str,
 ) -> Optional[Manifest]:
-  """Return the existing manifest iff ``bundle_dir`` holds a valid
-  bundle whose fingerprint and function_name match the active
-  compile inputs.
+  """Return the existing manifest iff ``bundle_dir`` holds a bundle
+  that exactly matches the *current compile request*.
+
+  The fingerprint alone isn't enough — it covers the #75 input
+  tuple (ontology / binding / event_schema / extraction_rules /
+  versions) but NOT the candidate source, the chosen
+  ``module_name``, or the per-bundle ``event_types``. A second
+  call with the same fingerprint but a different module_name,
+  different event_types, or different (and possibly broken)
+  source must NOT be a cache hit — it has to re-run every gate
+  on the actual new request.
 
   Returns None on any of:
     - bundle_dir doesn't exist
-    - manifest.json missing or unreadable
-    - fingerprint mismatch (stale or unrelated bundle in this dir)
-    - function_name mismatch (different extractor under same
-      fingerprint, which shouldn't happen — fingerprint covers
-      template inputs — but treat defensively)
-    - module file missing
+    - manifest.json missing / unreadable
+    - fingerprint mismatch
+    - function_name mismatch
+    - module_filename mismatch (different module_name)
+    - event_types mismatch (different per-bundle coverage)
+    - module file missing on disk
+    - on-disk source bytes don't equal *source*
   """
   if not bundle_dir.is_dir():
     return None
@@ -332,7 +354,18 @@ def _read_cached_manifest(
     return None
   if manifest.function_name != function_name:
     return None
-  if not (bundle_dir / manifest.module_filename).is_file():
+  if manifest.module_filename != module_filename:
+    return None
+  if manifest.event_types != event_types:
+    return None
+  source_path = bundle_dir / manifest.module_filename
+  if not source_path.is_file():
+    return None
+  try:
+    on_disk_source = source_path.read_text(encoding="utf-8")
+  except OSError:
+    return None
+  if on_disk_source != source:
     return None
   return manifest
 

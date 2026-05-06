@@ -107,6 +107,11 @@ _FORBIDDEN_NAMES = frozenset(
         "exit",
         "quit",
         "breakpoint",
+        # Open-ended iteration: ``iter(callable, sentinel)`` is the
+        # documented two-argument form for unbounded iteration.
+        # Block by name; for-loop iter is also Call-to-Name-blocked
+        # below (catches ``range``, user-defined helpers, etc.).
+        "iter",
     }
 )
 
@@ -426,6 +431,15 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
         )
     )
     return
+  if isinstance(node, ast.For):
+    _check_for_iter(node.iter, failures, lineno=node.lineno)
+    return
+  if isinstance(
+      node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+  ):
+    for gen in node.generators:
+      _check_for_iter(gen.iter, failures, lineno=getattr(node, "lineno", None))
+    return
 
 
 def _check_function_def(
@@ -471,6 +485,45 @@ def _check_function_def(
               line=getattr(d, "lineno", node.lineno),
           )
       )
+
+
+def _check_for_iter(
+    iter_node: ast.AST, failures: list[AstFailure], *, lineno: Optional[int]
+) -> None:
+  """Reject open-ended iterables at ``for`` / comprehension positions.
+
+  ``while`` is already rejected outright. The remaining hazard is a
+  ``for`` loop or comprehension whose iterable is unbounded —
+  ``for _ in range(10**100):`` is the canonical example, and any
+  call to a name (``range``, ``iter``, a user-defined helper) is
+  the form that produces it. We allow:
+
+  - Literal containers: ``for k in ('a', 'b'):``
+  - Constants: ``for c in 'abc':``
+  - Names: ``for x in event_list:`` (size bounded by event payload)
+  - Attribute access: ``for x in event.items_list``
+  - Method calls: ``for k, v in content.items():`` — ``Call`` whose
+    ``func`` is an ``Attribute``. The receiver is parameter-bound
+    so the size is realistically bounded.
+  - Subscripts: ``for x in event['list']``
+
+  Anything else — particularly ``Call(func=Name(...))`` — fails.
+  """
+  if isinstance(iter_node, ast.Call) and isinstance(iter_node.func, ast.Name):
+    name = iter_node.func.id
+    failures.append(
+        AstFailure(
+            code="disallowed_for_iter",
+            detail=(
+                f"for/comprehension iterates over a call to {name!r}; "
+                f"name-call iterables (range, iter, user-defined "
+                f"helpers) can be unbounded and would hang the smoke "
+                f"runner. Iterate over a literal tuple/list, an event "
+                f"payload, or a method call (e.g., dict.items())"
+            ),
+            line=getattr(iter_node, "lineno", lineno),
+        )
+    )
 
 
 def _is_constant_primitive(node: ast.AST) -> bool:
