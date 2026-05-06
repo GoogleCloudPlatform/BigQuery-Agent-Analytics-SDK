@@ -68,6 +68,7 @@ from .manifest import Manifest
 from .manifest import now_iso_utc
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
+from .smoke_test import run_smoke_test_in_subprocess
 from .smoke_test import SmokeTestReport
 
 
@@ -130,6 +131,9 @@ def compile_extractor(
     template_version: str,
     compiler_package_version: str,
     min_nonempty_results: int = 1,
+    isolation: bool = True,
+    smoke_timeout_seconds: float = 30.0,
+    smoke_memory_limit_mb: Optional[int] = 512,
 ) -> CompileResult:
   """Run *source* through every gate and write a bundle on success.
 
@@ -226,8 +230,17 @@ def compile_extractor(
         spec=spec,
         resolved_graph=resolved_graph,
         min_nonempty_results=min_nonempty_results,
+        isolation=isolation,
+        smoke_timeout_seconds=smoke_timeout_seconds,
+        smoke_memory_limit_mb=smoke_memory_limit_mb,
     )
-    if cached_smoke is not None and cached_smoke.ok:
+    if cached_smoke is None:
+      # Cache hit candidate but the cached source couldn't be
+      # imported (corrupted bundle on disk, missing dependency,
+      # whatever). Fall through to a fresh compile; the staged
+      # replace will overwrite the broken bundle on success.
+      pass
+    elif cached_smoke.ok:
       return CompileResult(
           manifest=cached_manifest,
           ast_report=AstReport(),
@@ -235,16 +248,17 @@ def compile_extractor(
           bundle_dir=bundle_dir,
           cache_hit=True,
       )
-    # Cached bundle exists but fails the *current* smoke gate —
-    # report the failure to the caller. The on-disk bundle is
-    # left in place (rewriting wouldn't change anything: same
-    # source, same AST, only the test inputs are stricter).
-    return CompileResult(
-        manifest=None,
-        ast_report=AstReport(),
-        smoke_report=cached_smoke,
-        bundle_dir=None,
-    )
+    else:
+      # Cached bundle exists, source matches the request, but
+      # *current* smoke inputs reject it. The on-disk bundle is
+      # left in place (rewriting wouldn't change anything: same
+      # source, same AST, only the test inputs are stricter).
+      return CompileResult(
+          manifest=None,
+          ast_report=AstReport(),
+          smoke_report=cached_smoke,
+          bundle_dir=None,
+      )
 
   # Stage 4: AST gate. Failures short-circuit *before* any disk
   # write — the source is untrusted and we won't import it.
@@ -270,28 +284,46 @@ def compile_extractor(
     source_path = staging / module_filename
     source_path.write_text(source, encoding="utf-8")
 
-    try:
-      extractor = load_callable_from_source(
+    if isolation:
+      # Subprocess path: source is loaded inside the child, so a
+      # broken import surfaces as a subprocess failure rather than
+      # an in-process exception. Wallclock timeout + RLIMIT_AS are
+      # the runtime safety net for hangs / memory blowups the AST
+      # allowlist can't catch statically.
+      smoke_report = run_smoke_test_in_subprocess(
           source_path,
           module_name=module_name,
           function_name=function_name,
+          events=sample_events,
+          spec=spec,
+          resolved_graph=resolved_graph,
+          min_nonempty_results=min_nonempty_results,
+          timeout_seconds=smoke_timeout_seconds,
+          memory_limit_mb=smoke_memory_limit_mb,
       )
-    except BaseException as e:  # noqa: BLE001 — surface in the report
-      return CompileResult(
-          manifest=None,
-          ast_report=ast_report,
-          smoke_report=None,
-          bundle_dir=None,
-          load_error=f"{type(e).__name__}: {e}",
-      )
+    else:
+      try:
+        extractor = load_callable_from_source(
+            source_path,
+            module_name=module_name,
+            function_name=function_name,
+        )
+      except BaseException as e:  # noqa: BLE001 — surface in the report
+        return CompileResult(
+            manifest=None,
+            ast_report=ast_report,
+            smoke_report=None,
+            bundle_dir=None,
+            load_error=f"{type(e).__name__}: {e}",
+        )
 
-    smoke_report = run_smoke_test(
-        extractor,
-        events=sample_events,
-        spec=spec,
-        resolved_graph=resolved_graph,
-        min_nonempty_results=min_nonempty_results,
-    )
+      smoke_report = run_smoke_test(
+          extractor,
+          events=sample_events,
+          spec=spec,
+          resolved_graph=resolved_graph,
+          min_nonempty_results=min_nonempty_results,
+      )
     if not smoke_report.ok:
       return CompileResult(
           manifest=None,
@@ -385,7 +417,11 @@ def _read_cached_manifest(
     return None
   try:
     manifest = Manifest.from_json(manifest_path.read_text(encoding="utf-8"))
-  except (OSError, json.JSONDecodeError, KeyError):
+  except (OSError, json.JSONDecodeError, KeyError, TypeError):
+    # ``TypeError`` covers ``Manifest.from_json("42")`` and similar
+    # well-formed-but-wrong-shape inputs. Treat any malformed
+    # cached manifest as a cache miss rather than crashing the
+    # fresh compile path.
     return None
   if manifest.fingerprint != fingerprint:
     return None
@@ -415,6 +451,9 @@ def _smoke_test_cached_bundle(
     spec: Any,
     resolved_graph: Any,
     min_nonempty_results: int,
+    isolation: bool,
+    smoke_timeout_seconds: float,
+    smoke_memory_limit_mb: Optional[int],
 ) -> Optional[SmokeTestReport]:
   """Run the smoke gate against a cached bundle's callable.
 
@@ -426,11 +465,30 @@ def _smoke_test_cached_bundle(
   current inputs prevents a weak historical sample set from
   papering over a current-call regression.
 
-  Returns ``None`` if the cached source can't be imported (the
-  caller should treat that as a cache miss and fall through to
-  a fresh compile). Returns the ``SmokeTestReport`` otherwise.
+  Returns ``None`` if the cached source can't be imported in
+  ``isolation=False`` mode — the caller treats that as a cache
+  miss and falls through to a fresh compile. The subprocess path
+  surfaces import failures as a ``SubprocessFailure`` exception in
+  the returned report instead.
   """
   source_path = bundle_dir / manifest.module_filename
+  # Module name (without the ``.py``) — the subprocess child uses
+  # this to register in its own ``sys.modules``, so any string
+  # that's a valid module name will do.
+  module_stem = manifest.module_filename[:-3]
+  if isolation:
+    return run_smoke_test_in_subprocess(
+        source_path,
+        module_name=module_stem,
+        function_name=manifest.function_name,
+        events=sample_events,
+        spec=spec,
+        resolved_graph=resolved_graph,
+        min_nonempty_results=min_nonempty_results,
+        timeout_seconds=smoke_timeout_seconds,
+        memory_limit_mb=smoke_memory_limit_mb,
+    )
+
   # Per-call unique import name keeps ``sys.modules`` fresh across
   # repeated cache-hit runs in the same process.
   import_name = f"{manifest.fingerprint[:16]}__{manifest.module_filename[:-3]}"

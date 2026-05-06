@@ -50,6 +50,7 @@ from .manifest import Manifest
 from .manifest import now_iso_utc
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
+from .smoke_test import run_smoke_test_in_subprocess
 from .smoke_test import SmokeTestReport
 
 __all__ = [
@@ -64,5 +65,6 @@ __all__ = [
     "load_callable_from_source",
     "now_iso_utc",
     "run_smoke_test",
+    "run_smoke_test_in_subprocess",
     "validate_source",
 ]

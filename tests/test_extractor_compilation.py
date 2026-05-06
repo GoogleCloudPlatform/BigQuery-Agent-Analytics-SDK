@@ -648,8 +648,9 @@ class TestAstValidator:
     ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
 
   def test_method_calls_still_allowed(self):
-    """``Call(func=Attribute(...))`` is unaffected by the
-    call-target allowlist — receiver-bounded calls are fine."""
+    """Allowlisted methods (``get``, ``items``, ...) on bounded
+    receivers pass — those are the patterns the BKA fixture and
+    most real extractors use."""
     from bigquery_agent_analytics.extractor_compilation import validate_source
 
     src = (
@@ -658,6 +659,37 @@ class TestAstValidator:
         "    y = event.get('items', {}).items()\n"
         "    return None\n"
     )
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  @pytest.mark.parametrize(
+      "method", ["clear", "repeat_forever", "pop", "update", "fromkeys"]
+  )
+  def test_method_outside_allowlist_rejected(self, method):
+    """The reviewer's repro: ``event.repeat_forever()`` and
+    ``event.clear()`` previously passed. Method-name allowlist
+    now blocks them."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = f"def f(event, spec):\n    return event.{method}()\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_method" for f in report.failures), (
+        f"expected disallowed_method on event.{method}(); got "
+        f"{[(f.code, f.detail) for f in report.failures]}"
+    )
+
+  @pytest.mark.parametrize(
+      "method", ["get", "items", "keys", "values", "append"]
+  )
+  def test_allowlisted_methods_accepted(self, method):
+    """The BKA fixture uses ``get``, ``items``, ``append``;
+    ``keys`` and ``values`` round out the read-only dict access
+    set."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = f"def f(event, spec):\n    return event.{method}()\n"
     report = validate_source(src)
     assert (
         report.ok is True
@@ -865,6 +897,71 @@ class TestSmokeTest:
           resolved_graph=None,
           min_nonempty_results=-1,
       )
+
+  def test_subprocess_timeout_surfaces_as_exceptions(
+      self, tmp_path: pathlib.Path
+  ):
+    """Subprocess isolation is the runtime safety net for hangs
+    the AST allowlist can't catch. Source with ``while True``
+    bypasses the AST gate when fed straight to the runner — a
+    real-world hang would come from an LLM-emitted bundle that
+    cleared the AST gate but still allocated/looped without
+    bound. The wallclock cap must surface the hang as a
+    ``TimeoutError`` exception in the report."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    hanging_source = (
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        "def f(event, spec):\n"
+        "    while True:\n"
+        "        pass\n"
+        "    return StructuredExtractionResult()\n"
+    )
+    source_path = tmp_path / "hangs.py"
+    source_path.write_text(hanging_source, encoding="utf-8")
+
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="hangs",
+        function_name="f",
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+        timeout_seconds=1.0,
+        memory_limit_mb=None,  # keep the test platform-portable
+    )
+    assert report.ok is False
+    assert report.events_with_exception == 1
+    assert any("TimeoutError" in e for e in report.exceptions)
+
+  def test_subprocess_runs_clean_extractor_against_real_spec(
+      self, tmp_path: pathlib.Path
+  ):
+    """End-to-end happy path through the subprocess runner: the
+    BKA fixture compiles, the child loads the source, runs against
+    sample events, returns ``StructuredExtractionResult`` objects
+    via pickle, and the parent runs #76 validation in-process."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    source_path = tmp_path / "bka_subprocess.py"
+    source_path.write_text(BKA_DECISION_SOURCE, encoding="utf-8")
+
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="bka_subprocess",
+        function_name="extract_bka_decision_event_compiled",
+        events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        memory_limit_mb=None,
+    )
+    assert (
+        report.ok is True
+    ), f"failures: exc={report.exceptions} val={report.validation_failures}"
+    assert report.events_with_nonempty_result == 2
 
   def test_min_nonempty_results_zero_allows_empty(self):
     """Callers can opt out of the non-empty floor for tests that
@@ -1078,6 +1175,84 @@ def f(event, spec):
     # Cache hit doesn't rewrite the manifest, so created_at is
     # preserved — proves the second call wrote nothing.
     assert a.manifest.created_at == b.manifest.created_at
+
+  def test_corrupt_manifest_treated_as_cache_miss(self, tmp_path: pathlib.Path):
+    """A pre-existing ``manifest.json`` that's syntactically valid
+    JSON but the wrong shape (``42``, ``"oops"``, etc.) used to
+    crash ``Manifest.from_json`` with ``TypeError``. The cache-read
+    path now catches it and falls through to a fresh compile."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from bigquery_agent_analytics.extractor_compilation import compute_fingerprint
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    fingerprint_inputs = _fingerprint_inputs()
+    fp = compute_fingerprint(
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        **fingerprint_inputs,
+    )
+    bundle_dir = tmp_path / fp
+    bundle_dir.mkdir()
+    (bundle_dir / "manifest.json").write_text("42", encoding="utf-8")
+
+    spec = _bka_resolved_spec()
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="bka_corrupt_manifest",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=fingerprint_inputs,
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        isolation=False,  # keep this test fast; the bug is in the cache-read path
+    )
+    assert result.ok is True
+    assert result.cache_hit is False
+    assert (result.bundle_dir / "manifest.json").exists()
+    # Manifest is now well-formed, not the literal "42".
+    assert (result.bundle_dir / "manifest.json").read_text() != "42"
+
+  def test_cache_hit_import_failure_falls_through(self, tmp_path: pathlib.Path):
+    """If the cached bundle's source can't be imported (e.g., the
+    .py file disappeared while the manifest stuck around), the
+    cache-hit path falls through to a fresh compile rather than
+    returning a misleading failure."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        source=BKA_DECISION_SOURCE,
+        module_name="bka_resurrect",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        isolation=False,
+    )
+    a = compile_extractor(**common)
+    assert a.ok is True
+
+    # Corrupt the cached bundle: remove the .py while keeping
+    # manifest.json. Cache-match passes (manifest fields all good)
+    # but ``_smoke_test_cached_bundle`` returns None since import
+    # fails. The compiler must fall through to a fresh compile,
+    # not bubble up an ``ok=False``.
+    (a.bundle_dir / a.manifest.module_filename).unlink()
+
+    b = compile_extractor(**common)
+    assert b.ok is True
+    assert b.cache_hit is False
+    assert (b.bundle_dir / b.manifest.module_filename).exists()
 
   def test_cache_hit_re_runs_smoke_against_current_inputs(
       self, tmp_path: pathlib.Path

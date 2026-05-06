@@ -42,7 +42,10 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import os
 import pathlib
+import pickle
+import subprocess
 import sys
 import traceback
 from typing import Any, Callable, Optional
@@ -220,3 +223,258 @@ def run_smoke_test(
       min_nonempty_results=min_nonempty_results,
       validation_failures=validation_failures,
   )
+
+
+_SUBPROCESS_RUNNER_MODULE = (
+    "bigquery_agent_analytics.extractor_compilation.subprocess_runner"
+)
+
+
+def run_smoke_test_in_subprocess(
+    source_path: pathlib.Path,
+    *,
+    module_name: str,
+    function_name: str,
+    events: list[dict],
+    spec: Any,
+    resolved_graph: Optional[Any] = None,
+    min_nonempty_results: int = 1,
+    timeout_seconds: float = 30.0,
+    memory_limit_mb: Optional[int] = 512,
+) -> SmokeTestReport:
+  """Subprocess-isolated smoke runner — the runtime safety net for
+  hangs / memory blowups the AST allowlist can't catch statically.
+
+  The child process imports *source_path* and runs *extractor* on
+  each event in *events*. ``subprocess.run(..., timeout=...)`` caps
+  wallclock; ``resource.setrlimit(RLIMIT_AS, ...)`` caps virtual
+  memory in the child (POSIX-only; quietly best-effort elsewhere).
+  Per-event outcomes come back as a pickled list; the parent runs
+  the #76 validator on the merged graph so ``ResolvedGraph`` never
+  crosses the process boundary.
+
+  ``timeout_seconds=0`` or negative disables the wallclock cap (not
+  recommended; only useful for tests of this wrapper itself).
+  ``memory_limit_mb=None`` or 0 disables the memory cap.
+
+  Returns a ``SmokeTestReport`` even on timeout or harness failure
+  — the failure is reported per-event in ``exceptions`` so callers
+  see one consistent shape.
+  """
+  if not events:
+    raise ValueError(
+        "smoke test requires at least one sample event; got an empty list"
+    )
+  if min_nonempty_results < 0:
+    raise ValueError(
+        f"min_nonempty_results must be >= 0; got {min_nonempty_results!r}"
+    )
+
+  payload = pickle.dumps(
+      {
+          "source_path": str(source_path),
+          "module_name": module_name,
+          "function_name": function_name,
+          "events": events,
+          "spec": spec,
+          "memory_limit_mb": memory_limit_mb,
+      }
+  )
+
+  env = _subprocess_env_with_pythonpath()
+  timeout = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
+
+  try:
+    proc_result = subprocess.run(
+        [sys.executable, "-m", _SUBPROCESS_RUNNER_MODULE],
+        input=payload,
+        capture_output=True,
+        timeout=timeout,
+        env=env,
+        check=False,
+    )
+  except subprocess.TimeoutExpired:
+    return _harness_timeout_report(
+        events, timeout_seconds, min_nonempty_results
+    )
+
+  if proc_result.returncode != 0:
+    return _harness_failure_report(
+        events,
+        proc_result.stdout,
+        proc_result.stderr,
+        min_nonempty_results,
+    )
+
+  try:
+    parsed = pickle.loads(proc_result.stdout)
+  except (pickle.UnpicklingError, EOFError, AttributeError, TypeError):
+    return _harness_failure_report(
+        events, proc_result.stdout, proc_result.stderr, min_nonempty_results
+    )
+
+  if not (isinstance(parsed, tuple) and parsed[:1] == ("ok",)):
+    return _harness_failure_report(
+        events, proc_result.stdout, proc_result.stderr, min_nonempty_results
+    )
+
+  per_event = parsed[1]
+  return _aggregate_per_event(
+      per_event,
+      events_count=len(events),
+      resolved_graph=resolved_graph,
+      min_nonempty_results=min_nonempty_results,
+  )
+
+
+def _aggregate_per_event(
+    per_event: list,
+    *,
+    events_count: int,
+    resolved_graph: Optional[Any],
+    min_nonempty_results: int,
+) -> SmokeTestReport:
+  """Build a ``SmokeTestReport`` from the subprocess's per-event
+  outcomes. The child returns one tuple per event:
+  ``("exception", traceback)`` / ``("wrong_type", type_name)`` /
+  ``("result", StructuredExtractionResult)``.
+  """
+  exceptions: list[str] = []
+  wrong_return_types: list[str] = []
+  results: list[StructuredExtractionResult] = []
+  events_with_nonempty_result = 0
+
+  for entry in per_event:
+    if not isinstance(entry, tuple) or not entry:
+      exceptions.append(f"malformed per-event entry: {entry!r}")
+      continue
+    kind = entry[0]
+    if kind == "exception":
+      exceptions.append(entry[1] if len(entry) > 1 else "")
+    elif kind == "wrong_type":
+      type_name = entry[1] if len(entry) > 1 else "?"
+      wrong_return_types.append(
+          f"extractor returned {type_name!r}, expected "
+          f"StructuredExtractionResult"
+      )
+    elif kind == "result":
+      result = entry[1]
+      if not isinstance(result, StructuredExtractionResult):
+        wrong_return_types.append(
+            f"subprocess returned {type(result).__name__!r}, expected "
+            f"StructuredExtractionResult"
+        )
+        continue
+      results.append(result)
+      if (
+          result.nodes
+          or result.edges
+          or result.fully_handled_span_ids
+          or result.partially_handled_span_ids
+      ):
+        events_with_nonempty_result += 1
+    else:
+      exceptions.append(f"unknown per-event kind: {kind!r}")
+
+  merged = (
+      merge_extraction_results(results)
+      if results
+      else StructuredExtractionResult()
+  )
+  graph = ExtractedGraph(
+      name="smoke_test",
+      nodes=list(merged.nodes),
+      edges=list(merged.edges),
+  )
+  validation_failures: tuple[ValidationFailure, ...] = ()
+  if resolved_graph is not None:
+    report = validate_extracted_graph(resolved_graph, graph)
+    validation_failures = report.failures
+
+  return SmokeTestReport(
+      events_processed=events_count,
+      events_with_exception=len(exceptions),
+      exceptions=tuple(exceptions),
+      events_with_wrong_return_type=len(wrong_return_types),
+      wrong_return_types=tuple(wrong_return_types),
+      events_with_nonempty_result=events_with_nonempty_result,
+      min_nonempty_results=min_nonempty_results,
+      validation_failures=validation_failures,
+  )
+
+
+def _harness_timeout_report(
+    events: list[dict],
+    timeout_seconds: float,
+    min_nonempty_results: int,
+) -> SmokeTestReport:
+  """One synthesized exception per event so ``ok`` is False and
+  the failure is visible in callers' typical ``exceptions`` checks."""
+  msg = f"TimeoutError: subprocess smoke test exceeded {timeout_seconds}s"
+  return SmokeTestReport(
+      events_processed=len(events),
+      events_with_exception=len(events),
+      exceptions=tuple(msg for _ in events),
+      events_with_wrong_return_type=0,
+      wrong_return_types=(),
+      events_with_nonempty_result=0,
+      min_nonempty_results=min_nonempty_results,
+      validation_failures=(),
+  )
+
+
+def _harness_failure_report(
+    events: list[dict],
+    stdout: bytes,
+    stderr: bytes,
+    min_nonempty_results: int,
+) -> SmokeTestReport:
+  """Subprocess exited non-zero or returned an unparseable payload.
+  Surface what we can to callers; OOM kills produce an empty stdout
+  and a non-zero return code, so the stderr fallback is what shows
+  the underlying ``MemoryError``."""
+  detail = ""
+  try:
+    parsed = pickle.loads(stdout) if stdout else None
+    if isinstance(parsed, tuple) and parsed[:1] == ("harness_error",):
+      detail = (
+          ": ".join(str(p) for p in parsed[1:3]) if len(parsed) >= 3 else ""
+      )
+  except BaseException:  # noqa: BLE001 — best-effort
+    detail = ""
+  if not detail:
+    detail = stderr.decode(errors="replace").strip() or "subprocess failed"
+  msg = f"SubprocessFailure: {detail[:2000]}"
+  return SmokeTestReport(
+      events_processed=len(events),
+      events_with_exception=len(events),
+      exceptions=tuple(msg for _ in events),
+      events_with_wrong_return_type=0,
+      wrong_return_types=(),
+      events_with_nonempty_result=0,
+      min_nonempty_results=min_nonempty_results,
+      validation_failures=(),
+  )
+
+
+def _subprocess_env_with_pythonpath() -> dict:
+  """Inherit ``os.environ`` but ensure the SDK package is importable
+  in the child. Pytest's ``pythonpath = ["src"]`` only mutates the
+  in-process ``sys.path`` — subprocesses don't inherit it. We
+  derive the package's parent directory (which is the ``src/`` dir
+  in development mode, or the site-packages dir in installed mode)
+  and prepend it to ``PYTHONPATH``.
+  """
+  import bigquery_agent_analytics  # local import: stays out of cold path
+
+  package_parent = (
+      pathlib.Path(bigquery_agent_analytics.__file__).resolve().parent.parent
+  )
+  env = os.environ.copy()
+  existing = env.get("PYTHONPATH", "")
+  env["PYTHONPATH"] = (
+      f"{package_parent}{os.pathsep}{existing}"
+      if existing
+      else str(package_parent)
+  )
+  return env

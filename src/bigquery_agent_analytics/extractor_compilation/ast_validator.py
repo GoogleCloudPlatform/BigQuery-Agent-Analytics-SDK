@@ -154,6 +154,26 @@ _ALLOWED_CALL_TARGETS = frozenset(
     }
 )
 
+# Allowlist of *method* names — i.e. ``attr`` in
+# ``Call(func=Attribute(value=..., attr=<method>))``. Without this,
+# any method-style call passes (``event.repeat_forever()``,
+# ``event.clear()``, etc.). The list is intentionally small and
+# matches what the BKA fixture and likely 4b.2-emitted templates
+# need: read-only dict/list access plus list-building. Adding a
+# new entry should be a deliberate decision, not a default
+# expansion.
+_ALLOWED_METHOD_NAMES = frozenset(
+    {
+        # Read-only dict access
+        "get",
+        "items",
+        "keys",
+        "values",
+        # List building used by the BKA fixture
+        "append",
+    }
+)
+
 # ``ast.TryStar`` exists on Python 3.11+. Build the rejection tuple
 # defensively so the validator works on older interpreters too.
 _TRY_TYPES: tuple[type, ...] = (ast.Try,)
@@ -533,35 +553,51 @@ def _check_function_def(
 
 
 def _check_call(node: ast.Call, failures: list[AstFailure]) -> None:
-  """Reject ``Call(func=Name(...))`` whose target isn't in
-  ``_ALLOWED_CALL_TARGETS``.
+  """Reject Call targets outside the allowlist for both the
+  ``Call(func=Name(...))`` and ``Call(func=Attribute(...))`` forms.
 
-  Method-style calls (``Call(func=Attribute(...))``) are not
-  checked here — those are bounded by the receiver's runtime size
-  and the dunder-attribute rule already blocks ``__class__``-style
-  smuggling. The top-level call check exists so allocation /
-  iteration constructs like ``list(range(10**100))`` or
-  ``sum(big_iter)`` fail validation even though the names
-  themselves aren't in ``_FORBIDDEN_NAMES``.
+  Without the method-name check, ``event.repeat_forever()`` or
+  ``event.clear()`` would pass purely because the receiver is a
+  parameter. The dunder-attribute rule already blocks
+  ``__class__``-style smuggling, but it doesn't help with
+  arbitrary plain-name methods.
   """
-  if not isinstance(node.func, ast.Name):
+  if isinstance(node.func, ast.Name):
+    name = node.func.id
+    if name in _ALLOWED_CALL_TARGETS:
+      return
+    failures.append(
+        AstFailure(
+            code="disallowed_call",
+            detail=(
+                f"call target {name!r} is not in the compiled-extractor "
+                f"allowlist; allowed: {sorted(_ALLOWED_CALL_TARGETS)}. "
+                f"Use method-style calls on bounded receivers "
+                f"(e.g., dict.items(), event.get(...)) or pre-imported "
+                f"constructors instead."
+            ),
+            line=node.lineno,
+        )
+    )
     return
-  name = node.func.id
-  if name in _ALLOWED_CALL_TARGETS:
-    return
-  failures.append(
-      AstFailure(
-          code="disallowed_call",
-          detail=(
-              f"call target {name!r} is not in the compiled-extractor "
-              f"allowlist; allowed: {sorted(_ALLOWED_CALL_TARGETS)}. "
-              f"Use method-style calls on bounded receivers "
-              f"(e.g., dict.items(), event.get(...)) or pre-imported "
-              f"constructors instead."
-          ),
-          line=node.lineno,
-      )
-  )
+
+  if isinstance(node.func, ast.Attribute):
+    method_name = node.func.attr
+    if method_name in _ALLOWED_METHOD_NAMES:
+      return
+    failures.append(
+        AstFailure(
+            code="disallowed_method",
+            detail=(
+                f"method {method_name!r} is not in the compiled-extractor "
+                f"method allowlist; allowed: "
+                f"{sorted(_ALLOWED_METHOD_NAMES)}. Receivers are bounded "
+                f"by their runtime size, but unknown method calls can "
+                f"still mutate state, allocate, or never return."
+            ),
+            line=node.lineno,
+        )
+    )
 
 
 def _check_for_iter(
