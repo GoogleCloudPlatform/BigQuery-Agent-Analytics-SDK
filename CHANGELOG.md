@@ -17,17 +17,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the LLM can act on, ready for embedding in retry prompts.
   Public surface: ``build_plan_parse_diagnostic(error)`` /
   ``build_ast_diagnostic(report)`` / ``build_smoke_diagnostic(
-  report)`` plus a ``build_gate_diagnostic(kind, payload)``
-  dispatcher. Output is **actionable** (each per-failure entry
-  carries the stable failure ``code`` plus a dotted ``path`` or
-  source line so the LLM can grep its own response),
-  **bounded** (each section capped at the first ten entries with
-  a truncation summary; multi-line tracebacks reduced to their
-  last informative line), and **deterministic** (same input
-  report → byte-identical output). PR 4b.2.2.c.2 uses these to
-  build retry prompts; this PR ships the diagnostic format on
-  its own so the wording can be locked down before the retry
-  loop depends on it.
+  report)`` /
+  ``build_compile_result_diagnostic(result)`` plus a
+  ``build_gate_diagnostic(kind, payload)`` dispatcher
+  (``kind ∈ {"parse", "ast", "smoke", "compile"}``).
+  ``build_compile_result_diagnostic`` covers the top-level
+  ``CompileResult`` envelope, including the
+  ``invalid_identifier`` / ``invalid_event_types`` /
+  ``load_error`` failure modes that don't surface through any
+  single gate's report (e.g., the LLM emits a structurally-valid
+  plan with the wrong ``event_type`` — parser and AST pass, but
+  ``compile_extractor`` rejects it for missing sample coverage).
+  Output is **actionable** (each per-failure entry carries the
+  stable failure ``code`` plus a dotted ``path`` or source line
+  so the LLM can grep its own response), **bounded** (each
+  section capped at the first ten entries with a truncation
+  summary; multi-line tracebacks reduced to their last
+  informative line), and **deterministic** (same input report →
+  byte-identical output). PR 4b.2.2.c.2 uses these to build
+  retry prompts; this PR ships the diagnostic format on its own
+  so the wording can be locked down before the retry loop
+  depends on it.
 - **LLM-driven plan resolver for compiled structured extractors**
   in
   `bigquery_agent_analytics.extractor_compilation.plan_resolver`

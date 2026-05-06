@@ -19,15 +19,33 @@ orchestrator (PR 4b.2.2.c.2) feeds a *diagnostic* string back into
 the next prompt so the LLM can fix what failed. These functions
 own the diagnostic format.
 
+Coverage:
+
+* :func:`build_plan_parse_diagnostic` for ``PlanParseError`` from
+  4b.2.2.a.
+* :func:`build_ast_diagnostic` for ``AstReport`` from 4b.1.
+* :func:`build_smoke_diagnostic` for ``SmokeTestReport`` from 4b.1
+  (per-event exceptions, wrong return types, non-empty floor, #76
+  graph-validator failures).
+* :func:`build_compile_result_diagnostic` for the top-level
+  ``CompileResult`` envelope, which can additionally fail with
+  ``invalid_identifier`` / ``invalid_event_types`` / ``load_error``
+  *before* or *after* the AST and smoke gates. This is the entry
+  point the retry orchestrator should prefer — it has the full
+  ``CompileResult`` in hand, so handing it back the right
+  diagnostic is one call rather than a hand-rolled switch.
+* :func:`build_gate_diagnostic` is a thin dispatcher so the loop
+  doesn't have to switch on payload type itself.
+
 Three contracts the diagnostic text has to clear:
 
 * **Actionable.** The LLM has to be able to act on the message
   without re-deriving where in its previous response the problem
   was. Per-failure entries surface the stable ``code`` from the
   underlying gate (``PlanParseError.code``, ``AstFailure.code``,
-  ``ValidationFailure.code``) plus the dotted ``path`` or source
-  line, so the LLM can grep its own output for the offending
-  field / line.
+  ``ValidationFailure.code``, or the ``CompileResult`` field name)
+  plus the dotted ``path`` or source line, so the LLM can grep its
+  own output for the offending field / line.
 * **Bounded.** Diagnostics get embedded in retry prompts; long
   tracebacks or hundreds of validator failures would crowd out the
   rule + schema grounding in the prompt itself. Each section is
@@ -48,6 +66,7 @@ from __future__ import annotations
 from typing import Any, Union
 
 from .ast_validator import AstReport
+from .compiler import CompileResult
 from .plan_parser import PlanParseError
 from .smoke_test import SmokeTestReport
 
@@ -178,15 +197,76 @@ def build_smoke_diagnostic(report: SmokeTestReport) -> str:
   return "\n".join(sections)
 
 
+def build_compile_result_diagnostic(result: CompileResult) -> str:
+  """Return a diagnostic for any :class:`CompileResult` failure mode.
+
+  ``compile_extractor`` short-circuits on the first failed gate, so
+  most rejected ``CompileResult`` instances carry exactly one
+  populated failure source. This builder collapses the union back
+  into a single string the retry orchestrator (PR 4b.2.2.c.2) can
+  feed back to the LLM regardless of *which* gate rejected the
+  candidate. The check order mirrors the pipeline's own ordering so
+  the message names the *earliest* failed stage:
+
+  1. ``invalid_identifier`` — bad ``module_name`` / ``function_name``
+     (path-traversal-shaped, Python keyword, …). Rendered as
+     ``CompileError [code=invalid_identifier]: <message>``.
+  2. ``invalid_event_types`` — declared ``event_types`` empty,
+     malformed, duplicated, or with no matching sample / no
+     non-empty smoke output. Rendered as
+     ``CompileError [code=invalid_event_types]: <message>``.
+  3. ``load_error`` — in-process import (``isolation=False``) blew
+     up on the candidate source. Rendered as
+     ``CompileError [code=load_error]: <message>``.
+  4. AST failure — falls through to :func:`build_ast_diagnostic`.
+  5. Smoke failure — falls through to :func:`build_smoke_diagnostic`.
+
+  An ``ok`` result returns the passthrough message. The defensive
+  fallback at the end handles a hypothetical "ok=False but no field
+  populated" — a logic-bug shape we want labelled, not silently
+  empty, in retry feedback.
+  """
+  if result.ok:
+    return "Compile succeeded (no diagnostic to render)."
+
+  if result.invalid_identifier is not None:
+    return (
+        f"CompileError [code=invalid_identifier]: {result.invalid_identifier}"
+    )
+
+  if result.invalid_event_types is not None:
+    return (
+        f"CompileError [code=invalid_event_types]: {result.invalid_event_types}"
+    )
+
+  if result.load_error is not None:
+    return f"CompileError [code=load_error]: {result.load_error}"
+
+  if not result.ast_report.ok:
+    return build_ast_diagnostic(result.ast_report)
+
+  if result.smoke_report is not None and not result.smoke_report.ok:
+    return build_smoke_diagnostic(result.smoke_report)
+
+  return (
+      "CompileError [code=unknown]: compile failed but no diagnostic "
+      "field was populated on the CompileResult"
+  )
+
+
 def build_gate_diagnostic(
     kind: str,
-    payload: Union[PlanParseError, AstReport, SmokeTestReport],
+    payload: Union[PlanParseError, AstReport, SmokeTestReport, CompileResult],
 ) -> str:
   """Dispatch to the right per-gate diagnostic builder.
 
-  ``kind`` is ``"parse"`` / ``"ast"`` / ``"smoke"``. Used by the
-  retry orchestrator in PR 4b.2.2.c.2 so the loop doesn't have to
-  switch on type itself.
+  ``kind`` is ``"parse"`` / ``"ast"`` / ``"smoke"`` / ``"compile"``.
+  Used by the retry orchestrator in PR 4b.2.2.c.2 so the loop
+  doesn't have to switch on type itself. ``"compile"`` is the
+  general "the whole pipeline returned a CompileResult, render
+  whatever failed" entry point — preferred over the per-gate kinds
+  for the retry loop, which has the full ``CompileResult`` in hand
+  and shouldn't re-derive which gate fired.
   """
   if kind == "parse":
     if not isinstance(payload, PlanParseError):
@@ -208,8 +288,16 @@ def build_gate_diagnostic(
           f"{type(payload).__name__}"
       )
     return build_smoke_diagnostic(payload)
+  if kind == "compile":
+    if not isinstance(payload, CompileResult):
+      raise TypeError(
+          f"kind='compile' expects CompileResult, got "
+          f"{type(payload).__name__}"
+      )
+    return build_compile_result_diagnostic(payload)
   raise ValueError(
-      f"unknown gate kind {kind!r}; allowed: 'parse', 'ast', 'smoke'"
+      f"unknown gate kind {kind!r}; allowed: 'parse', 'ast', "
+      f"'smoke', 'compile'"
   )
 
 

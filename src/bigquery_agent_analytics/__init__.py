@@ -590,6 +590,7 @@ try:
   from .extractor_compilation import AstFailure
   from .extractor_compilation import AstReport
   from .extractor_compilation import build_ast_diagnostic
+  from .extractor_compilation import build_compile_result_diagnostic
   from .extractor_compilation import build_gate_diagnostic
   from .extractor_compilation import build_plan_parse_diagnostic
   from .extractor_compilation import build_resolution_prompt
@@ -626,6 +627,7 @@ try:
           "SmokeTestReport",
           "SpanHandlingRule",
           "build_ast_diagnostic",
+          "build_compile_result_diagnostic",
           "build_gate_diagnostic",
           "build_plan_parse_diagnostic",
           "build_resolution_prompt",

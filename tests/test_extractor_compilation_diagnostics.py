@@ -479,3 +479,298 @@ class TestBuildGateDiagnostic:
     )
     with pytest.raises(TypeError, match="kind='ast' expects AstReport"):
       build_gate_diagnostic("ast", report)
+
+
+# ------------------------------------------------------------------ #
+# build_compile_result_diagnostic                                     #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileResultDiagnostic:
+  """Cover every shape ``CompileResult`` can take when ``ok`` is
+  False — including the three CompileResult-only failure fields
+  (``invalid_identifier`` / ``invalid_event_types`` /
+  ``load_error``) that don't surface through any gate's report.
+
+  Most retry-loop failures will be ``invalid_event_types``: parser
+  and AST pass, but the LLM declared an ``event_type`` that has no
+  matching sample, so ``compile_extractor`` rejects the candidate
+  before the smoke gate ever runs.
+  """
+
+  def _ok_smoke(self):
+    from bigquery_agent_analytics.extractor_compilation import SmokeTestReport
+
+    return SmokeTestReport(
+        events_processed=1,
+        events_with_exception=0,
+        exceptions=(),
+        events_with_wrong_return_type=0,
+        wrong_return_types=(),
+        events_with_nonempty_result=1,
+        min_nonempty_results=1,
+        validation_failures=(),
+    )
+
+  def _failing_smoke(self):
+    from bigquery_agent_analytics.extractor_compilation import SmokeTestReport
+
+    return SmokeTestReport(
+        events_processed=1,
+        events_with_exception=1,
+        exceptions=("RuntimeError: boom",),
+        events_with_wrong_return_type=0,
+        wrong_return_types=(),
+        events_with_nonempty_result=0,
+        min_nonempty_results=1,
+        validation_failures=(),
+    )
+
+  def test_ok_returns_passthrough_message(self):
+    import pathlib
+
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+    from bigquery_agent_analytics.extractor_compilation import Manifest
+
+    manifest = Manifest(
+        fingerprint="f" * 64,
+        event_types=("bka_decision",),
+        module_filename="x.py",
+        function_name="extract",
+        compiler_package_version="0.0.1",
+        template_version="t-1",
+        transcript_builder_version="tb-1",
+        created_at="2026-05-06T00:00:00Z",
+    )
+    result = CompileResult(
+        manifest=manifest,
+        ast_report=AstReport(),
+        smoke_report=self._ok_smoke(),
+        bundle_dir=pathlib.Path("/tmp/bundle"),
+    )
+    assert result.ok
+    assert build_compile_result_diagnostic(result) == (
+        "Compile succeeded (no diagnostic to render)."
+    )
+
+  def test_invalid_identifier_renders_compile_error_code(self):
+    """The ``invalid_identifier`` field carries the harness's full
+    explanation; the diagnostic prepends the stable
+    ``CompileError [code=invalid_identifier]:`` prefix the retry
+    prompt can grep on."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_identifier=(
+            "module_name='../x' must be a plain Python identifier"
+        ),
+    )
+    assert build_compile_result_diagnostic(result) == (
+        "CompileError [code=invalid_identifier]: "
+        "module_name='../x' must be a plain Python identifier"
+    )
+
+  def test_invalid_event_types_renders_compile_error_code(self):
+    """The retry-loop's most common compile-level failure: parser
+    and AST pass, but the declared ``event_type`` has no matching
+    smoke sample. Surfaces as ``invalid_event_types`` so the LLM
+    knows to fix the rule's event_type, not the field mappings."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types=(
+            "declared event_types ['wrong_event'] have no matching sample events"
+        ),
+    )
+    assert build_compile_result_diagnostic(result) == (
+        "CompileError [code=invalid_event_types]: "
+        "declared event_types ['wrong_event'] have no matching sample events"
+    )
+
+  def test_load_error_renders_compile_error_code(self):
+    """In-process import path (``isolation=False``) failed to load
+    the candidate source. Subprocess mode surfaces this inside the
+    smoke report instead, so the in-process path is the one that
+    needs a CompileResult-level diagnostic."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        load_error="SyntaxError: invalid syntax",
+    )
+    assert build_compile_result_diagnostic(result) == (
+        "CompileError [code=load_error]: SyntaxError: invalid syntax"
+    )
+
+  def test_ast_failure_falls_through_to_ast_diagnostic(self):
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_ast_diagnostic,
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstFailure
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    ast_report = AstReport(
+        failures=(
+            AstFailure(
+                code="disallowed_import",
+                detail="import 'os' not allowlisted",
+                line=2,
+                col=0,
+            ),
+        )
+    )
+    result = CompileResult(
+        manifest=None,
+        ast_report=ast_report,
+        smoke_report=None,
+        bundle_dir=None,
+    )
+    assert build_compile_result_diagnostic(result) == build_ast_diagnostic(
+        ast_report
+    )
+
+  def test_smoke_failure_falls_through_to_smoke_diagnostic(self):
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+        build_smoke_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    smoke = self._failing_smoke()
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=smoke,
+        bundle_dir=None,
+    )
+    assert build_compile_result_diagnostic(result) == build_smoke_diagnostic(
+        smoke
+    )
+
+  def test_compile_level_field_wins_over_smoke_when_both_populated(self):
+    """The post-smoke coverage check sets ``invalid_event_types``
+    *and* leaves the (passing) smoke_report attached. The
+    diagnostic should name the compile-level failure — that's the
+    actionable bit; the smoke_report is incidental context."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=self._ok_smoke(),
+        bundle_dir=None,
+        invalid_event_types=(
+            "declared event_types ['x'] produced no non-empty smoke output"
+        ),
+    )
+    diag = build_compile_result_diagnostic(result)
+    assert diag.startswith("CompileError [code=invalid_event_types]:")
+    assert "Smoke test" not in diag
+
+  def test_no_field_populated_falls_back_to_unknown(self):
+    """Defensive: ``ok=False`` but no failure field is populated
+    is a logic-bug shape; rather than render an empty string, the
+    diagnostic labels it so the retry loop's feedback isn't
+    silently empty."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+    )
+    assert not result.ok
+    assert build_compile_result_diagnostic(result) == (
+        "CompileError [code=unknown]: compile failed but no "
+        "diagnostic field was populated on the CompileResult"
+    )
+
+
+# ------------------------------------------------------------------ #
+# build_gate_diagnostic — kind="compile" path                         #
+# ------------------------------------------------------------------ #
+
+
+class TestBuildGateDiagnosticCompileKind:
+
+  def test_dispatches_compile(self):
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_compile_result_diagnostic,
+        build_gate_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    result = CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types="event_types must be non-empty",
+    )
+    assert build_gate_diagnostic(
+        "compile", result
+    ) == build_compile_result_diagnostic(result)
+
+  def test_compile_kind_rejects_non_compile_payload(self):
+    """``kind='compile'`` with a bare AstReport (or anything other
+    than a CompileResult) raises with the expected-type message,
+    so callers can't accidentally route a per-gate report through
+    the envelope path."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_gate_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+
+    with pytest.raises(TypeError, match="kind='compile' expects CompileResult"):
+      build_gate_diagnostic("compile", AstReport())
+
+  def test_unknown_kind_message_lists_compile(self):
+    """The error message should advertise the four allowed kinds —
+    a caller wiring up the retry loop reads this when they
+    misspell ``compile``."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_gate_diagnostic,
+    )
+
+    with pytest.raises(ValueError, match="'compile'"):
+      build_gate_diagnostic("not-a-kind", None)
