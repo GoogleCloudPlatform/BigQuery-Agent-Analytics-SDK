@@ -27,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Schema dict with ``additionalProperties: false`` that PR
   4b.2.2.b will hand directly to the LLM client's structured-
   output mode (Gemini's ``response_schema``, etc.) so the LLM is
-  constrained to emit parser-acceptable JSON.
+  constrained to emit *structurally valid* JSON. (Schema-passing
+  payloads can still fail parser semantic checks — Python-
+  identifier shape, function-name keyword exclusion, duplicate
+  property names — which aren't expressible in plain JSON Schema
+  and stay parser-only.)
   **No LLM call lives here** — the parser is the deterministic
   boundary every LLM-emitted plan must cross. PR 4b.2.2.b owns
   the prompt and the LLM step that produces this JSON. Locked

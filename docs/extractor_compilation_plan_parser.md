@@ -30,7 +30,7 @@ plan = parse_resolved_extractor_plan_json(json_string_or_dict)
 
 ## JSON Schema for structured-output mode
 
-`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA` is a Draft-2020-12 JSON Schema dict that captures every *structural* rule the parser enforces (types, required fields, `additionalProperties: false`, `minLength: 1` for non-empty strings, `minItems: 1` for non-empty paths). PR 4b.2.2.b can hand it directly to the LLM client's structured-output mode (Gemini's `response_schema`, OpenAI's `json_schema` response format, etc.) so the LLM is constrained to emit JSON that the parser will accept.
+`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA` is a Draft-2020-12 JSON Schema dict that captures every *structural* rule the parser enforces (types, required fields, `additionalProperties: false`, `minLength: 1` for non-empty strings, `minItems: 1` for non-empty paths). PR 4b.2.2.b can hand it directly to the LLM client's structured-output mode (Gemini's `response_schema`, OpenAI's `json_schema` response format, etc.) so the LLM is constrained to emit **structurally valid JSON** — JSON that clears the parser's schema checks before reaching the semantic gate.
 
 Semantic rules (Python-identifier shape, function-name keyword/allowlist exclusion, duplicate property names) aren't expressible in plain JSON Schema and stay as parser-only checks. **A payload that passes the schema may still fail the parser's semantic gate; a payload that fails the schema is guaranteed to fail the parser.**
 
