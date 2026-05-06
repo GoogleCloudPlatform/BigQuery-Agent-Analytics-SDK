@@ -596,6 +596,73 @@ class TestAstValidator:
         report.ok is True
     ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
 
+  @pytest.mark.parametrize(
+      "expr",
+      [
+          "list(range(10))",
+          "sum([1, 2, 3])",
+          "max(1, 2, 3)",
+          "some_helper()",
+          "abs(-5)",
+      ],
+  )
+  def test_disallowed_call_target_rejected(self, expr):
+    """Names like ``list``, ``sum``, ``max``, user helpers, and
+    other builtins not in ``_ALLOWED_CALL_TARGETS`` fail with
+    ``disallowed_call`` — even though the names themselves aren't
+    in ``_FORBIDDEN_NAMES``. Closes the
+    ``list(range(10**100))`` / ``sum(big_iter)`` allocation hole."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = f"def f(event, spec):\n    return {expr}\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_call" for f in report.failures), (
+        f"expected disallowed_call; got "
+        f"{[(f.code, f.detail) for f in report.failures]}"
+    )
+
+  @pytest.mark.parametrize(
+      "expr",
+      [
+          "isinstance(event, dict)",
+          "bool(event)",
+          "len(event)",
+          "set()",
+          "list()",
+          "dict()",
+          "tuple()",
+          "ExtractedNode(node_id='x', entity_name='E', labels=['E'], properties=[])",
+      ],
+  )
+  def test_allowed_call_targets_accepted(self, expr):
+    """Allowlisted constructors and safe builtins still work."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "from bigquery_agent_analytics.extracted_models import ExtractedNode\n"
+        f"def f(event, spec):\n    return {expr}\n"
+    )
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_method_calls_still_allowed(self):
+    """``Call(func=Attribute(...))`` is unaffected by the
+    call-target allowlist — receiver-bounded calls are fine."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    x = event.get('x')\n"
+        "    y = event.get('items', {}).items()\n"
+        "    return None\n"
+    )
+    report = validate_source(src)
+    assert (
+        report.ok is True
+    ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
+
   def test_comprehension_with_name_call_iter_rejected(self):
     """Same rule as for-loops applies to comprehensions:
     ``[x for x in range(10**100)]`` could allocate forever."""
@@ -780,6 +847,24 @@ class TestSmokeTest:
     assert report.ok is False
     assert report.events_with_nonempty_result == 0
     assert report.min_nonempty_results == 1
+
+  def test_negative_min_nonempty_results_rejected(self):
+    """Negative values would make the floor trivially pass —
+    explicit ``ValueError`` so callers know 0 is the opt-out."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def extractor(event, spec):
+      return StructuredExtractionResult()
+
+    with pytest.raises(ValueError):
+      run_smoke_test(
+          extractor,
+          events=[{"event_type": "x"}],
+          spec=None,
+          resolved_graph=None,
+          min_nonempty_results=-1,
+      )
 
   def test_min_nonempty_results_zero_allows_empty(self):
     """Callers can opt out of the non-empty floor for tests that
@@ -993,6 +1078,48 @@ def f(event, spec):
     # Cache hit doesn't rewrite the manifest, so created_at is
     # preserved — proves the second call wrote nothing.
     assert a.manifest.created_at == b.manifest.created_at
+
+  def test_cache_hit_re_runs_smoke_against_current_inputs(
+      self, tmp_path: pathlib.Path
+  ):
+    """A cached bundle that passed against a weak sample set must
+    not silently pass against a stricter one. The cache hit path
+    re-runs ``run_smoke_test`` against the current inputs."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    spec = _bka_resolved_spec()
+    common = dict(
+        source=BKA_DECISION_SOURCE,
+        module_name="bka_smoke_re_run",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+
+    # First compile against the BKA samples — passes.
+    a = compile_extractor(sample_events=_sample_bka_events(), **common)
+    assert a.ok and not a.cache_hit
+
+    # Second compile with the same source/module/event_types but
+    # an event that hits the empty-result path. Cache match
+    # passes (source bytes equal), but the smoke gate now reports
+    # ``events_with_nonempty_result == 0`` and the cache hit
+    # fails. Bundle is left intact on disk.
+    empty_event = [{"event_type": "bka_decision", "content": {}}]
+    b = compile_extractor(sample_events=empty_event, **common)
+    assert b.ok is False
+    assert b.cache_hit is False
+    assert b.smoke_report is not None
+    assert b.smoke_report.events_with_nonempty_result == 0
+    # The cached bundle is still on disk (rewriting wouldn't
+    # change anything; same source).
+    assert (a.bundle_dir / "manifest.json").exists()
 
   def test_cache_hit_misses_when_source_differs(self, tmp_path: pathlib.Path):
     """The fingerprint covers the #75 input tuple but NOT the
@@ -1209,6 +1336,34 @@ def extract_bka_decision_event_compiled(event, spec):
     assert "module_name" in result.invalid_identifier
     # No filesystem writes happened.
     assert not list(tmp_path.iterdir())
+
+  @pytest.mark.parametrize("kw", ["class", "def", "for", "return"])
+  def test_python_keyword_rejected_as_module_name(
+      self, kw: str, tmp_path: pathlib.Path
+  ):
+    """``str.isidentifier`` returns True for keywords; the harness
+    rejects them too. ``module_name='class'`` would work as a
+    filename but is misleading; ``function_name='class'`` can't be
+    defined by valid source at all."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name=kw,
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_identifier is not None
+    assert "module_name" in result.invalid_identifier
 
   def test_invalid_function_name_rejected(self, tmp_path: pathlib.Path):
     from bigquery_agent_analytics.extractor_compilation import compile_extractor

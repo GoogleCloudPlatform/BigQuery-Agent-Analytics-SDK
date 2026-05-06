@@ -102,9 +102,14 @@ PR 4b.1 commits to one layout:
 
 The fingerprint is the directory name so two compile runs on identical inputs land in the same directory. `module_name` and `function_name` are validated up front as plain Python identifiers — path-traversal-shaped names like `../x` fail the gate before the harness ever touches the filesystem.
 
-The compile pipeline writes through a sibling staging directory and **atomically replaces** the target on success. A failed re-compile leaves any pre-existing valid bundle untouched.
+The compile pipeline writes through a sibling staging directory and **stages a replace** of the target on success — `rmtree` of any pre-existing bundle, then `rename` of the staged directory in. Not strictly atomic at the filesystem level (a process crash between the two ops would leave the target absent), but the bundle is reproducible from inputs so the next compile re-creates it. Failed gates leave any pre-existing valid bundle untouched.
 
-A second `compile_extractor` call with identical inputs is a **cache hit**: the existing manifest is read, fingerprint and `function_name` are matched, and the call returns without re-running any gates or re-writing anything. The on-disk bundle is therefore byte-identical between consecutive `compile_extractor` calls — only the first call writes. (The manifest's `created_at` timestamp is fresh on each *write*, but cache hits don't write, so the timestamp is preserved.)
+A second `compile_extractor` call with identical inputs (fingerprint + `function_name` + `module_name` + `event_types` + on-disk source bytes) is a **cache hit candidate**. The cache hit path:
+
+1. Imports the cached bundle's callable.
+2. Re-runs `run_smoke_test(...)` against the *current* `sample_events` / `resolved_graph` / `min_nonempty_results`. A weak historical sample set won't paper over a current-call regression — the gate runs against current inputs.
+3. If smoke passes, returns `cache_hit=True` with the cached manifest. Nothing is rewritten on disk; the bundle is byte-identical between consecutive calls and `created_at` is preserved.
+4. If smoke fails (e.g., the new call supplies stricter inputs), surfaces the failure. The on-disk bundle is left intact since the source hasn't changed; rewriting wouldn't help.
 
 Runtime discovery — where C2's loader looks for bundles, and whether to mirror them into a BQ table — is deliberately deferred per the runtime-target RFC.
 
@@ -156,6 +161,7 @@ A `for` (or comprehension generator) is **bounded** when its iterable is one of:
 | `disallowed_default` | A function default argument that isn't a constant primitive (str / int / float / bool / None / bytes / unary-minus of int or float). Defaults run at module-import time, so non-constants are a smuggling vector. |
 | `disallowed_while` | `while` loop (could hang the smoke-test runner). |
 | `disallowed_for_iter` | `for` or comprehension whose iterable is a call to a bare `Name` (e.g., `range(...)`, `iter(...)`, a user-defined helper). Those forms can be unbounded; iterate over a literal tuple/list, a parameter, or a method call (`dict.items()`) instead. |
+| `disallowed_call` | `Call(func=Name(...))` whose target isn't in the call-target allowlist (`ExtractedNode`, `ExtractedEdge`, `ExtractedProperty`, `StructuredExtractionResult`, `str`, `int`, `float`, `bool`, `bytes`, `set`, `frozenset`, `dict`, `list`, `tuple`, `isinstance`, `len`). Closes the `list(range(10**100))` / `sum(big_iter)` allocation hole. Method calls (`Call(func=Attribute(...))`) are unaffected — those are bounded by the receiver. |
 | `disallowed_raise` | `raise` statement. `raise SystemExit` would otherwise escape any non-`BaseException` catch; banning `raise` broadly is the simplest rule. |
 | `disallowed_try` | `try` / `try*` block. The smoke-test runner is the only layer that catches exceptions. |
 | `disallowed_with` | `with` block. Context-manager protocols invoke `__enter__` / `__exit__` (dunder methods). |
@@ -176,10 +182,10 @@ PR 4b.2 will replace this hand-written string with output from the LLM-driven te
 - **TestFingerprint** (5 tests): determinism, allowlist-order independence, every named input is hashed (parametrized), template_version + compiler_package_version are hashed.
 - **TestManifest** (3 tests): JSON round-trip, deterministic serialization for identical fields, sorted keys.
 - **TestAstValidator** (24 tests): safe source passes; one negative test per failure code, plus tests for the per-module symbol allowlist, wildcard imports, dunder aliases, decorators, non-constant defaults (and that constant defaults still pass), `while`, `raise`, `try`, `with`, and additional forbidden names (`exit`, `quit`, `__build_class__`, `breakpoint`).
-- **TestSmokeTest** (8 tests): rejects empty event list; captures per-event exceptions including `SystemExit`; surfaces validator failures; rejects wrong return types; fails when every event produces empty results; allows opt-out via `min_nonempty_results=0`; clean run returns `ok=True`.
-- **TestCompileExtractor** (11 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; second compile is a cache hit (no rewrite, `created_at` preserved); cache hit misses when the *source*, *module_name*, or *event_types* differ even with the same fingerprint; failed recompile leaves an existing valid bundle byte-identical; invalid `module_name` / `function_name` rejected (parametrized for path-traversal-shaped names).
+- **TestSmokeTest** (9 tests): rejects empty event list; rejects negative `min_nonempty_results`; captures per-event exceptions including `SystemExit`; surfaces validator failures; rejects wrong return types; fails when every event produces empty results; allows opt-out via `min_nonempty_results=0`; clean run returns `ok=True`.
+- **TestCompileExtractor** (16 tests): end-to-end compile of the BKA fixture; compiled output equivalence; AST failure leaves nothing on disk; smoke failure leaves nothing on disk; second compile is a cache hit (no rewrite, `created_at` preserved); cache hit re-runs smoke against current inputs (parametrized stricter-sample case fails the gate); cache hit misses when the *source*, *module_name*, or *event_types* differ; failed recompile leaves an existing valid bundle byte-identical; invalid `module_name` / `function_name` rejected (parametrized for path-traversal-shaped names + Python keywords).
 
-75 tests total, all pass against the full repo suite.
+95 tests total, all pass against the full repo suite.
 
 ## Related
 

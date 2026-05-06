@@ -115,6 +115,45 @@ _FORBIDDEN_NAMES = frozenset(
     }
 )
 
+# Allowlist of names that may appear as the *target* of a call,
+# i.e. ``func`` in ``Call(func=Name(...))``. The complement
+# (``Call(func=Attribute(...))``) is method-style and bounded by
+# the receiver's runtime size — those still pass. Anything outside
+# this set fails ``disallowed_call``, blocking shapes like
+# ``list(range(10**100))`` or ``sum(...)`` that would otherwise
+# allocate heavily even though the names themselves aren't in
+# ``_FORBIDDEN_NAMES``.
+_ALLOWED_CALL_TARGETS = frozenset(
+    {
+        # Allowlisted ontology / extraction model constructors.
+        # Must match ``_ALLOWED_IMPORTS_FROM`` above.
+        "ExtractedNode",
+        "ExtractedEdge",
+        "ExtractedProperty",
+        "StructuredExtractionResult",
+        # Primitive type constructors. ``int(x)``, ``str(x)``, etc.
+        # are bounded by their input.
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        # Bounded container constructors. Empty calls (``set()``,
+        # ``dict()``) and conversions of bounded inputs are safe;
+        # iteration shape is bounded separately by the for-iter
+        # rule, which still rejects ``for _ in list(...):`` because
+        # the for-iter rule is stricter than the call rule.
+        "set",
+        "frozenset",
+        "dict",
+        "list",
+        "tuple",
+        # Safe builtins.
+        "isinstance",
+        "len",
+    }
+)
+
 # ``ast.TryStar`` exists on Python 3.11+. Build the rejection tuple
 # defensively so the validator works on older interpreters too.
 _TRY_TYPES: tuple[type, ...] = (ast.Try,)
@@ -295,6 +334,12 @@ def _check_import(stmt: ast.stmt, failures: list[AstFailure]) -> None:
 
 def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
   """Per-node rules that apply at any nesting depth."""
+  if isinstance(node, ast.Call):
+    _check_call(node, failures)
+    # Don't return — the inner ``func`` Name will still be visited
+    # by ``ast.walk`` and the Name rule applies there too. That's
+    # intentional layered defense (forbidden Name + disallowed Call
+    # both fire on e.g. ``eval(...)``).
   if isinstance(node, ast.Name):
     if isinstance(node.ctx, ast.Load) and node.id in _FORBIDDEN_NAMES:
       failures.append(
@@ -485,6 +530,38 @@ def _check_function_def(
               line=getattr(d, "lineno", node.lineno),
           )
       )
+
+
+def _check_call(node: ast.Call, failures: list[AstFailure]) -> None:
+  """Reject ``Call(func=Name(...))`` whose target isn't in
+  ``_ALLOWED_CALL_TARGETS``.
+
+  Method-style calls (``Call(func=Attribute(...))``) are not
+  checked here — those are bounded by the receiver's runtime size
+  and the dunder-attribute rule already blocks ``__class__``-style
+  smuggling. The top-level call check exists so allocation /
+  iteration constructs like ``list(range(10**100))`` or
+  ``sum(big_iter)`` fail validation even though the names
+  themselves aren't in ``_FORBIDDEN_NAMES``.
+  """
+  if not isinstance(node.func, ast.Name):
+    return
+  name = node.func.id
+  if name in _ALLOWED_CALL_TARGETS:
+    return
+  failures.append(
+      AstFailure(
+          code="disallowed_call",
+          detail=(
+              f"call target {name!r} is not in the compiled-extractor "
+              f"allowlist; allowed: {sorted(_ALLOWED_CALL_TARGETS)}. "
+              f"Use method-style calls on bounded receivers "
+              f"(e.g., dict.items(), event.get(...)) or pre-imported "
+              f"constructors instead."
+          ),
+          line=node.lineno,
+      )
+  )
 
 
 def _check_for_iter(

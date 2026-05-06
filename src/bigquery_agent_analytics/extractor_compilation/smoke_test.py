@@ -159,6 +159,12 @@ def run_smoke_test(
     raise ValueError(
         "smoke test requires at least one sample event; got an empty list"
     )
+  if min_nonempty_results < 0:
+    raise ValueError(
+        f"min_nonempty_results must be >= 0; got "
+        f"{min_nonempty_results!r}. Use 0 to opt out of the non-empty "
+        f"floor; negative values would let the gate trivially pass."
+    )
 
   exceptions: list[str] = []
   wrong_return_types: list[str] = []

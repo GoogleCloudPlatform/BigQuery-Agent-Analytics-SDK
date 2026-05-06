@@ -18,21 +18,28 @@ Stages, executed in order, with any failure short-circuiting and
 leaving any pre-existing valid bundle untouched:
 
   1. Validate ``module_name`` / ``function_name`` are plain Python
-     identifiers (path-traversal safety).
+     identifiers (path-traversal safety) and not Python keywords.
   2. Compute the #75 fingerprint over compile inputs.
-  3. **Cache hit:** if ``<bundle_dir>/manifest.json`` already
-     exists with a matching fingerprint and function_name, return
-     the cached bundle without re-running any gates or re-writing
-     any files.
+  3. **Cache hit candidate:** if ``<bundle_dir>/manifest.json``
+     already exists and matches the current request (fingerprint +
+     function_name + module_filename + event_types + on-disk
+     source bytes), import the cached callable and re-run the
+     smoke-test runner against the *current* sample events and
+     resolved spec. If it passes, return the cached manifest
+     without rewriting anything. If smoke fails on the current
+     inputs, surface the failure — the on-disk bundle isn't
+     rewritten (same source, only the test inputs are stricter).
   4. AST-validate the candidate source.
   5. **Stage** in a sibling temp directory under ``parent_bundle_dir``:
      write source, import the module, look up the function, run the
      smoke-test runner with the #76 validator gate, write the
      manifest.
-  6. **Atomically replace** the (possibly pre-existing) bundle
-     directory with the staged one. A failed compile leaves the
-     pre-existing bundle untouched; the staging directory is
-     removed on every error path.
+  6. **Staged replace** the (possibly pre-existing) bundle
+     directory with the staged one (``rmtree`` then ``rename``).
+     Not strictly atomic — a process crash between the two
+     filesystem ops would leave the target absent — but the bundle
+     is reproducible from inputs, so the next compile re-creates
+     it. Failed gates leave the pre-existing bundle untouched.
 
 The bundle directory is named after the fingerprint. Two compile
 runs on identical inputs land in the same directory; the second
@@ -48,6 +55,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import keyword
 import pathlib
 import shutil
 import tempfile
@@ -190,16 +198,18 @@ def compile_extractor(
   bundle_dir = default_bundle_dir(parent_bundle_dir, fingerprint)
   module_filename = f"{module_name}.py"
 
-  # Stage 3: cache hit. A previous successful compile with the
-  # *exact same compile request* already wrote a valid bundle —
-  # source bytes, module_name, function_name, and event_types all
-  # have to match in addition to the fingerprint. The fingerprint
-  # alone is insufficient because per the #75 input tuple it
-  # covers ontology / binding / event_schema / extraction_rules
-  # (etc.) but NOT the candidate source, the chosen module_name,
-  # or the per-bundle event_types — so without these checks a
-  # follow-up call with a different (or broken) source could hit
-  # the cache and silently return ok=True.
+  # Stage 3: cache hit candidate. A previous successful compile
+  # with the *exact same compile request* already wrote a valid
+  # bundle — source bytes, module_name, function_name, and
+  # event_types all have to match in addition to the fingerprint.
+  # But matching the request isn't enough: the *current* call may
+  # supply a stronger ``sample_events`` / ``resolved_graph`` /
+  # ``min_nonempty_results`` than the call that originally wrote
+  # the bundle. We re-run the smoke gate against the current
+  # inputs so a weaker historical sample set can't paper over a
+  # current-call regression. The bundle is **not** rewritten on
+  # cache-hit success — same source bytes, same fingerprint,
+  # nothing on disk needs to change.
   cached_manifest = _read_cached_manifest(
       bundle_dir,
       fingerprint=fingerprint,
@@ -209,12 +219,31 @@ def compile_extractor(
       source=source,
   )
   if cached_manifest is not None:
-    return CompileResult(
-        manifest=cached_manifest,
-        ast_report=AstReport(),
-        smoke_report=None,
+    cached_smoke = _smoke_test_cached_bundle(
         bundle_dir=bundle_dir,
-        cache_hit=True,
+        manifest=cached_manifest,
+        sample_events=sample_events,
+        spec=spec,
+        resolved_graph=resolved_graph,
+        min_nonempty_results=min_nonempty_results,
+    )
+    if cached_smoke is not None and cached_smoke.ok:
+      return CompileResult(
+          manifest=cached_manifest,
+          ast_report=AstReport(),
+          smoke_report=cached_smoke,
+          bundle_dir=bundle_dir,
+          cache_hit=True,
+      )
+    # Cached bundle exists but fails the *current* smoke gate —
+    # report the failure to the caller. The on-disk bundle is
+    # left in place (rewriting wouldn't change anything: same
+    # source, same AST, only the test inputs are stricter).
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=cached_smoke,
+        bundle_dir=None,
     )
 
   # Stage 4: AST gate. Failures short-circuit *before* any disk
@@ -285,7 +314,7 @@ def compile_extractor(
     )
     (staging / "manifest.json").write_text(manifest.to_json(), encoding="utf-8")
 
-    _atomic_replace(staging, bundle_dir)
+    _staged_replace(staging, bundle_dir)
     # ``staging`` no longer exists after the replace; the finally
     # cleanup is a no-op for the success path.
     return CompileResult(
@@ -300,14 +329,22 @@ def compile_extractor(
 
 
 def _is_python_identifier(value: str) -> bool:
-  """``str.isidentifier`` is exactly the rule the harness wants:
-  letters, digits, underscores; not starting with a digit. Rejects
-  ``../x``, ``foo.bar``, ``foo-bar``, the empty string, and Python
-  keywords (handled by ``isidentifier`` returning True for keywords
-  but failing later — we treat keywords as valid here since the
-  user controls the file's stem; ``def`` as a stem would just
-  produce ``def.py`` which is fine on disk)."""
-  return isinstance(value, str) and value.isidentifier()
+  """Plain Python identifier: letters, digits, underscores; not
+  starting with a digit; not a reserved keyword.
+
+  ``str.isidentifier`` returns True for Python keywords (``class``,
+  ``def``, ``for``, ...). The harness rejects them too — even
+  though ``module_name='class'`` would work as a filename,
+  ``function_name='class'`` cannot be defined by valid Python
+  source and would only fail later as a load error. Rejecting
+  keywords up front keeps "plain Python identifier" honest in
+  both fields' validation messages.
+  """
+  return (
+      isinstance(value, str)
+      and value.isidentifier()
+      and not keyword.iskeyword(value)
+  )
 
 
 def _read_cached_manifest(
@@ -370,15 +407,64 @@ def _read_cached_manifest(
   return manifest
 
 
-def _atomic_replace(src: pathlib.Path, dst: pathlib.Path) -> None:
-  """Replace *dst* (a directory or absent) with *src* atomically
-  *enough* for compile bundles.
+def _smoke_test_cached_bundle(
+    *,
+    bundle_dir: pathlib.Path,
+    manifest: Manifest,
+    sample_events: list[dict],
+    spec: Any,
+    resolved_graph: Any,
+    min_nonempty_results: int,
+) -> Optional[SmokeTestReport]:
+  """Run the smoke gate against a cached bundle's callable.
 
-  POSIX ``rename`` won't replace a non-empty directory, so the
-  sequence is: rmtree-old → rename-new. The window between the
-  two is small; a process crash mid-replace leaves *dst* absent
-  (the next compile re-creates it). That's acceptable for
-  compile bundles, which are reproducible from inputs.
+  The cached bundle's *source* hasn't changed (we already verified
+  that against the current ``source`` argument), but the
+  *current call* may pass stricter ``sample_events`` /
+  ``resolved_graph`` / ``min_nonempty_results`` than the call
+  that originally wrote the bundle. Re-running smoke against the
+  current inputs prevents a weak historical sample set from
+  papering over a current-call regression.
+
+  Returns ``None`` if the cached source can't be imported (the
+  caller should treat that as a cache miss and fall through to
+  a fresh compile). Returns the ``SmokeTestReport`` otherwise.
+  """
+  source_path = bundle_dir / manifest.module_filename
+  # Per-call unique import name keeps ``sys.modules`` fresh across
+  # repeated cache-hit runs in the same process.
+  import_name = f"{manifest.fingerprint[:16]}__{manifest.module_filename[:-3]}"
+  try:
+    extractor = load_callable_from_source(
+        source_path,
+        module_name=import_name,
+        function_name=manifest.function_name,
+    )
+  except BaseException:  # noqa: BLE001 — treat as cache miss
+    return None
+  return run_smoke_test(
+      extractor,
+      events=sample_events,
+      spec=spec,
+      resolved_graph=resolved_graph,
+      min_nonempty_results=min_nonempty_results,
+  )
+
+
+def _staged_replace(src: pathlib.Path, dst: pathlib.Path) -> None:
+  """Replace *dst* (a directory or absent) with *src* via a
+  rmtree-then-rename sequence.
+
+  Not strictly atomic: a process crash between the ``rmtree`` and
+  the ``rename`` would leave *dst* absent. The bundle is
+  reproducible from compile inputs, so the next compile re-creates
+  it; we accept the small window in exchange for not implementing
+  a backup/restore dance. Failed compile gates leave any
+  pre-existing bundle untouched (the failure path returns before
+  this is called).
+
+  POSIX ``rename`` won't replace a non-empty directory; that's why
+  the rmtree comes first.
   """
   if dst.exists():
     shutil.rmtree(dst)
