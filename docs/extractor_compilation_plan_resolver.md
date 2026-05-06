@@ -79,10 +79,10 @@ Per the PR 4b.2.2.b sizing call:
 - **No provider adapters.** PR 4c (or a separate PR) adds concrete `google-genai` / OpenAI clients.
 - **No real LLM tests.** Tests use fake `LLMClient` implementations with pre-canned responses.
 
-## Tests (13 cases in `tests/test_extractor_compilation_plan_resolver.py`)
+## Tests (18 cases in `tests/test_extractor_compilation_plan_resolver.py`)
 
-- **`TestBuildResolutionPrompt`** (6) — deterministic for same inputs; dict insertion order doesn't matter; prompt grounds in rule + schema; prompt includes the output contract; prompt includes the no-hallucinated-paths rule; prompt includes identifier-safety rules with the call-target allowlist.
-- **`TestPlanResolver`** (7) — BKA fake response resolves to expected plan; schema passed through to client by identity; prompt passed matches builder output; parser structural failure propagates with `code`/`path`; parser semantic failure (`function_name` shadowing) propagates; LLM `RuntimeError` not swallowed; LLM `KeyboardInterrupt` not swallowed.
+- **`TestBuildResolutionPrompt`** (10) — deterministic for same inputs; dict insertion order doesn't matter; prompt grounds in rule + schema; prompt includes the output contract; prompt includes the no-hallucinated-paths rule; prompt includes identifier-safety rules with the call-target allowlist; **non-JSON-serializable `extraction_rule` raises a clear `TypeError` naming the offending field** (parametrized for rule with set / rule with custom class / rule itself a set); **non-JSON-serializable `event_schema` raises the same way**.
+- **`TestPlanResolver`** (8) — BKA fake response resolves to expected plan; **schema is passed through to client by value (deep copy), not identity** — equal to the exported global but a distinct object; **client mutation of its received schema doesn't leak into the module global**; prompt passed matches builder output; parser structural failure propagates with `code`/`path`; parser semantic failure (`function_name` shadowing) propagates; LLM `RuntimeError` not swallowed; LLM `KeyboardInterrupt` not swallowed.
 
 ## Related
 
