@@ -88,6 +88,96 @@ from .template_renderer import FieldMapping
 from .template_renderer import ResolvedExtractorPlan
 from .template_renderer import SpanHandlingRule
 
+# JSON Schema (Draft 2020-12) for the payload the LLM step in
+# PR 4b.2.2.b will eventually emit. Exported so the LLM client
+# can hand it directly to a structured-output mode (Gemini's
+# ``response_schema``, OpenAI's ``json_schema`` response format,
+# etc.) without re-deriving the contract.
+#
+# The schema captures *structural* rules: types, required fields,
+# unknown-field rejection (``additionalProperties: false``), empty-
+# string / empty-array rejection. Semantic rules — Python-
+# identifier shape, function-name keyword/allowlist exclusion,
+# duplicate property names — aren't expressible in plain JSON
+# Schema and stay as parser-only checks. A payload that passes
+# this schema may still fail the parser's semantic gate; a payload
+# that fails this schema is guaranteed to fail the parser.
+RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA: dict = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ResolvedExtractorPlan",
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "event_type",
+        "target_entity_name",
+        "function_name",
+        "key_field",
+    ],
+    "properties": {
+        "event_type": {"type": "string", "minLength": 1},
+        "target_entity_name": {"type": "string", "minLength": 1},
+        "function_name": {"type": "string", "minLength": 1},
+        "key_field": {"$ref": "#/$defs/FieldMapping"},
+        "property_fields": {
+            "type": "array",
+            "default": [],
+            "items": {"$ref": "#/$defs/FieldMapping"},
+        },
+        "session_id_path": {
+            "type": "array",
+            "default": ["session_id"],
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+        },
+        "span_handling": {
+            "default": None,
+            "oneOf": [
+                {"type": "null"},
+                {"$ref": "#/$defs/SpanHandlingRule"},
+            ],
+        },
+    },
+    "$defs": {
+        "FieldMapping": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["property_name", "source_path"],
+            "properties": {
+                "property_name": {"type": "string", "minLength": 1},
+                "source_path": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                },
+            },
+        },
+        "SpanHandlingRule": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "span_id_path": {
+                    "type": "array",
+                    "default": ["span_id"],
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                },
+                "partial_when_path": {
+                    "default": None,
+                    "oneOf": [
+                        {"type": "null"},
+                        {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1},
+                            "minItems": 1,
+                        },
+                    ],
+                },
+            },
+        },
+    },
+}
+
+
 _TOP_LEVEL_FIELDS = frozenset(
     {
         "event_type",
@@ -261,6 +351,21 @@ def parse_resolved_extractor_plan_json(
 def _check_unknown_fields(
     data: dict, allowed: frozenset, *, prefix: str
 ) -> None:
+  # JSON spec says object keys are strings — but the parser also
+  # accepts already-parsed dicts, where a caller could have non-
+  # string keys. Reject those up front so ``sorted(extra)`` below
+  # can't crash with a TypeError on mixed-type comparisons.
+  for key in data.keys():
+    if not isinstance(key, str):
+      location = prefix.rstrip(".") if prefix else ""
+      raise PlanParseError(
+          code="wrong_type",
+          path=location,
+          message=(
+              f"JSON object keys must be strings; got "
+              f"{type(key).__name__}={key!r}"
+          ),
+      )
   extra = set(data.keys()) - allowed
   if extra:
     first = sorted(extra)[0]

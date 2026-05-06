@@ -258,6 +258,113 @@ class TestBkaGolden:
 
 
 # ------------------------------------------------------------------ #
+# Exported JSON Schema                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestExportedJsonSchema:
+  """The exported ``RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA`` is what
+  PR 4b.2.2.b will hand to the LLM client's structured-output
+  mode (Gemini's ``response_schema``, OpenAI's ``json_schema``
+  response format, etc.). Lock down that the golden BKA fixture
+  conforms to it AND that obviously-bad payloads don't, so the
+  schema doesn't silently drift away from the parser."""
+
+  def test_schema_is_a_well_formed_dict(self):
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    assert isinstance(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA, dict)
+    assert RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA.get("type") == "object"
+    assert (
+        RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA.get("additionalProperties") is False
+    ), "schema must reject unknown fields, mirroring parser"
+
+  def test_bka_golden_fixture_conforms_to_schema(self):
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    # No exception → conforms.
+    jsonschema.validate(
+        instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+    )
+
+  def test_minimal_payload_conforms_to_schema(self):
+    """Smallest-valid payload (just required fields, all optionals
+    omitted) conforms — guards against accidentally tightening the
+    schema beyond what the parser accepts."""
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = {
+        "event_type": "x",
+        "target_entity_name": "E",
+        "function_name": "f",
+        "key_field": {"property_name": "k", "source_path": ["k"]},
+    }
+    jsonschema.validate(
+        instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+    )
+
+  def test_payload_with_unknown_field_rejected_by_schema(self):
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    payload["extra_field"] = "nope"
+    with pytest.raises(jsonschema.ValidationError):
+      jsonschema.validate(
+          instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+      )
+
+  def test_payload_missing_required_rejected_by_schema(self):
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    del payload["event_type"]
+    with pytest.raises(jsonschema.ValidationError):
+      jsonschema.validate(
+          instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+      )
+
+  def test_payload_with_empty_source_path_rejected_by_schema(self):
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    payload["key_field"]["source_path"] = []
+    with pytest.raises(jsonschema.ValidationError):
+      jsonschema.validate(
+          instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+      )
+
+  def test_payload_with_wrong_type_rejected_by_schema(self):
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    payload["event_type"] = 42  # wrong type
+    with pytest.raises(jsonschema.ValidationError):
+      jsonschema.validate(
+          instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+      )
+
+  def test_null_span_handling_conforms_to_schema(self):
+    """The schema's ``oneOf: [null, SpanHandlingRule]`` for
+    ``span_handling`` is a common LLM-output tripwire — make sure
+    it actually accepts ``null``."""
+    jsonschema = pytest.importorskip("jsonschema")
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    payload = _load_bka_payload()
+    payload["span_handling"] = None
+    jsonschema.validate(
+        instance=payload, schema=RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+    )
+
+
+# ------------------------------------------------------------------ #
 # Default values for optional fields                                  #
 # ------------------------------------------------------------------ #
 
@@ -576,6 +683,25 @@ class TestSemanticRejections:
       parse(payload)
     assert exc_info.value.code == "duplicate_property_name"
     assert exc_info.value.path == "property_fields[1].property_name"
+
+  def test_non_string_dict_keys_rejected_cleanly(self):
+    """The public API accepts already-parsed dicts. A caller can
+    hand a dict with non-string keys (``{1: "x", "z": "y"}``) —
+    the parser used to crash with ``TypeError`` while sorting
+    extra keys. It now raises a clean ``PlanParseError`` with a
+    structured ``code``/``path``/``message``."""
+    parse, PlanParseError = self._import()
+    payload = {
+        1: "bad_key",
+        "event_type": "x",
+        "target_entity_name": "E",
+        "function_name": "f",
+        "key_field": {"property_name": "k", "source_path": ["k"]},
+    }
+    with pytest.raises(PlanParseError) as exc_info:
+      parse(payload)
+    assert exc_info.value.code == "wrong_type"
+    assert "JSON object keys must be strings" in exc_info.value.message
 
   def test_duplicate_property_name_collides_with_key(self):
     """A property_field re-using the key_field's ``property_name``

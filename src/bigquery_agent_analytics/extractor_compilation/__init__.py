@@ -50,6 +50,7 @@ from .manifest import Manifest
 from .manifest import now_iso_utc
 from .plan_parser import parse_resolved_extractor_plan_json
 from .plan_parser import PlanParseError
+from .plan_parser import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -66,6 +67,7 @@ __all__ = [
     "FieldMapping",
     "Manifest",
     "PlanParseError",
+    "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
     "ResolvedExtractorPlan",
     "SmokeTestReport",
     "SpanHandlingRule",

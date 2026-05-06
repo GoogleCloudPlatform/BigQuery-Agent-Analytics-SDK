@@ -19,6 +19,7 @@ The deterministic JSON-to-`ResolvedExtractorPlan` parser. PR 4b.2.2.b will add t
 from bigquery_agent_analytics.extractor_compilation import (
     parse_resolved_extractor_plan_json,
     PlanParseError,
+    RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA,
 )
 
 plan = parse_resolved_extractor_plan_json(json_string_or_dict)
@@ -26,6 +27,14 @@ plan = parse_resolved_extractor_plan_json(json_string_or_dict)
 # the renderer's _validate_plan checks. Hand it directly to
 # render_extractor_source(plan) + compile_extractor(...).
 ```
+
+## JSON Schema for structured-output mode
+
+`RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA` is a Draft-2020-12 JSON Schema dict that captures every *structural* rule the parser enforces (types, required fields, `additionalProperties: false`, `minLength: 1` for non-empty strings, `minItems: 1` for non-empty paths). PR 4b.2.2.b can hand it directly to the LLM client's structured-output mode (Gemini's `response_schema`, OpenAI's `json_schema` response format, etc.) so the LLM is constrained to emit JSON that the parser will accept.
+
+Semantic rules (Python-identifier shape, function-name keyword/allowlist exclusion, duplicate property names) aren't expressible in plain JSON Schema and stay as parser-only checks. **A payload that passes the schema may still fail the parser's semantic gate; a payload that fails the schema is guaranteed to fail the parser.**
+
+The golden BKA fixture is asserted to conform to the exported schema in `tests/test_extractor_compilation_plan_parser.py::TestExportedJsonSchema`, alongside negative cases (unknown field, missing required, empty path, wrong type) — so the schema can't silently drift away from the parser.
 
 `parse_resolved_extractor_plan_json` accepts either a JSON string (parsed via `json.loads`) or an already-parsed dict. On any failure it raises `PlanParseError` with three structured fields:
 
@@ -97,11 +106,12 @@ Per the PR 4b.2.2.a sizing call:
 - **No retry orchestration.** PR 4b.2.2.c adds retry-on-AST/smoke/validator-failure with diagnostics fed back to the LLM.
 - **No prompt template.** The schema documented above is the contract; the prompt that produces JSON matching it is 4b.2.2.b's concern.
 
-## Tests (46 cases in `tests/test_extractor_compilation_plan_parser.py`)
+## Tests (55 cases in `tests/test_extractor_compilation_plan_parser.py`)
 
 - **`TestBkaGolden`** (3 cases) — JSON fixture parses to the same `ResolvedExtractorPlan` as the hand-authored plan; parser accepts dict input directly; parsed plan renders + compiles end-to-end through 4b.2.1's `render_extractor_source` and 4b.1's `compile_extractor`.
+- **`TestExportedJsonSchema`** (8 cases) — schema is a well-formed dict with `additionalProperties: false`; golden BKA fixture conforms; minimal payload conforms; payloads with unknown field / missing required / empty `source_path` / wrong type get rejected by the schema; explicit `null` `span_handling` conforms.
 - **`TestDefaults`** (6 cases) — omitted `property_fields` / `session_id_path` / `span_handling`; explicit `null` `span_handling`; `span_handling` with default `span_id_path`; explicit `null` `partial_when_path`.
-- **`TestSchemaRejections`** (24 cases) — invalid JSON; wrong root type (int, list); missing each required top-level field (parametrized); unknown field at top level / inside `key_field` / inside `span_handling`; wrong type for top-level string fields (parametrized); empty string `event_type`; `property_fields` not a list; `property_fields[i]` not an object; `source_path` not a list / empty / non-string segment / empty segment; missing `property_name` inside `property_fields[i]`.
+- **`TestSchemaRejections`** (25 cases) — invalid JSON; wrong root type (int, list); missing each required top-level field (parametrized); unknown field at top level / inside `key_field` / inside `span_handling`; wrong type for top-level string fields (parametrized); empty string `event_type`; `property_fields` not a list; `property_fields[i]` not an object; `source_path` not a list / empty / non-string segment / empty segment; missing `property_name` inside `property_fields[i]`; **non-string dict keys** rejected with a clean `PlanParseError` (no `TypeError` on `sorted`).
 - **`TestSemanticRejections`** (13 cases) — invalid `function_name` (parametrized for path-traversal-shaped, leading digit, whitespace, hyphens); reserved-keyword `function_name` (parametrized for `class`, `def`, `for`, `return`); `function_name` shadowing `len` / `isinstance` / `ExtractedNode`; non-identifier `target_entity_name`; non-identifier property name; duplicate property name within `property_fields`; property name colliding with key.
 
 ## Related

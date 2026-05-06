@@ -22,15 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stable failure codes: ``invalid_json``, ``wrong_root_type``,
   ``missing_required_field``, ``unknown_field``, ``wrong_type``,
   ``empty_string``, ``empty_path``, ``invalid_identifier``,
-  ``duplicate_property_name``, ``invalid_plan``.
+  ``duplicate_property_name``, ``invalid_plan``. Also exports
+  ``RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA`` — a Draft-2020-12 JSON
+  Schema dict with ``additionalProperties: false`` that PR
+  4b.2.2.b will hand directly to the LLM client's structured-
+  output mode (Gemini's ``response_schema``, etc.) so the LLM is
+  constrained to emit parser-acceptable JSON.
   **No LLM call lives here** — the parser is the deterministic
   boundary every LLM-emitted plan must cross. PR 4b.2.2.b owns
   the prompt and the LLM step that produces this JSON. Locked
   down by a golden BKA fixture
   (``tests/fixtures_extractor_compilation/plan_bka_decision.json``)
   whose parsed plan renders + compiles end-to-end through 4b.2.1
-  + 4b.1, plus 37 schema and semantic rejection cases (46 total
-  with happy paths and default-value coverage).
+  + 4b.1, plus 38 schema and semantic rejection cases and 8
+  schema-conformance cases (55 total).
 - **Deterministic source generator for compiled structured
   extractors** in
   `bigquery_agent_analytics.extractor_compilation.template_renderer`

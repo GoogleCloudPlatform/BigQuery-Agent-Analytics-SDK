@@ -597,6 +597,7 @@ try:
   from .extractor_compilation import parse_resolved_extractor_plan_json
   from .extractor_compilation import PlanParseError
   from .extractor_compilation import render_extractor_source
+  from .extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
   from .extractor_compilation import ResolvedExtractorPlan
   from .extractor_compilation import run_smoke_test
   from .extractor_compilation import SmokeTestReport
@@ -611,6 +612,7 @@ try:
           "FieldMapping",
           "Manifest",
           "PlanParseError",
+          "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
           "ResolvedExtractorPlan",
           "SmokeTestReport",
           "SpanHandlingRule",
