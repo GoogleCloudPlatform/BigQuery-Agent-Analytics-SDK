@@ -125,13 +125,14 @@ Per the PR 4b.2.2.c.1 sizing call:
 - **No orchestration.** PR 4b.2.2.c.2 adds `compile_with_llm(...)` that loops resolver → renderer → `compile_extractor` and feeds gate failures back to the LLM.
 - **No real LLM tests.** Every test feeds hand-built reports / errors.
 
-## Tests (`tests/test_extractor_compilation_diagnostics.py`)
+## Tests (34 cases in `tests/test_extractor_compilation_diagnostics.py`)
 
 - **`TestPlanParseDiagnostic`** (3) — root path renders as `<root>`, simple path, dotted path.
 - **`TestAstDiagnostic`** (6) — clean report passthrough; single failure with line + col; failure without col; failure without line; multiple failures preserved in walk order; truncation at ten with the `... and N more (truncated)` summary.
 - **`TestSmokeDiagnostic`** (8) — clean report passthrough; tracebacks reduced to last informative line; wrong-return-types section; non-empty-floor section; #76 validator-failures section; all four sections combined preserve order; truncation at ten validator failures; empty traceback renders `<empty traceback>` placeholder.
-- **`TestCompileResultDiagnostic`** — `ok` passthrough; `invalid_identifier` / `invalid_event_types` / `load_error` rendering; fall-through to AST and smoke builders when those gates fail; defensive `[code=unknown]` for the hypothetical no-field-populated shape.
-- **`TestBuildGateDiagnostic`** — dispatches correctly for each of the four kinds; unknown kind raises `ValueError`; payload-type mismatch (including `kind="compile"` with non-`CompileResult`) raises a clear `TypeError`.
+- **`TestBuildGateDiagnostic`** (5) — dispatch via `kind="parse"` / `"ast"` / `"smoke"`; unknown kind raises `ValueError`; payload-type mismatch raises a clear `TypeError`.
+- **`TestCompileResultDiagnostic`** (9) — `ok` passthrough; each of `invalid_identifier` / `invalid_event_types` / `load_error` renders with the right `CompileError [code=...]:` prefix; AST and smoke fall-through both pass equality against the per-gate builder; AST wins over `load_error` when both are populated (locks pipeline-stage ordering); `invalid_event_types` wins over a passing `smoke_report` (post-coverage shape); `[code=unknown]` defensive fallback for the `ok=False`/no-field shape.
+- **`TestBuildGateDiagnosticCompileKind`** (3) — dispatch via `kind="compile"`; non-`CompileResult` payload raises `TypeError` naming `CompileResult`; the unknown-kind error message advertises `'compile'` so misspellings are self-correcting.
 
 ## Related
 
