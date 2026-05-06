@@ -695,6 +695,49 @@ class TestAstValidator:
         report.ok is True
     ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
 
+  def test_lambda_call_rejected(self):
+    """``(lambda: X)()`` previously slipped past the call-target
+    allowlist because ``func`` was an ``ast.Lambda``, neither
+    Name nor Attribute. Both the lambda definition AND the call
+    fail now."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        "def f(event, spec):\n"
+        "    return (lambda: StructuredExtractionResult())()\n"
+    )
+    report = validate_source(src)
+    codes = {f.code for f in report.failures}
+    assert "disallowed_lambda" in codes
+    assert "disallowed_call" in codes
+
+  def test_chained_call_target_rejected(self):
+    """``(event.get('cb'))()`` — the callable is the result of a
+    method call, not a static name. Static allowlists can't cover
+    this; reject it."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec):\n" "    return (event.get('cb'))()\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_call" for f in report.failures)
+
+  def test_conditional_call_target_rejected(self):
+    """``(a if cond else b)()`` — IfExp callable. Same problem as
+    chained calls; static allowlists can't cover it."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    a = list\n"
+        "    b = dict\n"
+        "    return (a if event.get('x') else b)()\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_call" for f in report.failures)
+
   def test_comprehension_with_name_call_iter_rejected(self):
     """Same rule as for-loops applies to comprehensions:
     ``[x for x in range(10**100)]`` could allocate forever."""
@@ -935,6 +978,114 @@ class TestSmokeTest:
     assert report.ok is False
     assert report.events_with_exception == 1
     assert any("TimeoutError" in e for e in report.exceptions)
+
+  def test_unpicklable_inputs_surfaced_as_harness_failure(
+      self, tmp_path: pathlib.Path
+  ):
+    """The wrapper docstring promises a ``SmokeTestReport`` even
+    on harness failure. Pickling a lambda used to escape the
+    ``try`` and crash the caller; now it produces a
+    ``PickleError`` exception per event."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    source_path = tmp_path / "noop.py"
+    source_path.write_text(
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        "def f(event, spec):\n"
+        "    return StructuredExtractionResult()\n",
+        encoding="utf-8",
+    )
+    report = run_smoke_test_in_subprocess(
+        source_path,
+        module_name="noop",
+        function_name="f",
+        events=[{"event_type": "x"}],
+        spec=lambda x: x,  # not picklable
+        resolved_graph=None,
+        memory_limit_mb=None,
+    )
+    assert report.ok is False
+    assert report.events_with_exception == 1
+    assert any("PickleError" in e for e in report.exceptions)
+
+  def test_negative_memory_limit_rejected(self, tmp_path: pathlib.Path):
+    """``memory_limit_mb=-1`` used to silently no-op in the child;
+    parent now raises ``ValueError`` so the cap can't be disabled
+    by accident."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test_in_subprocess
+
+    source_path = tmp_path / "noop.py"
+    source_path.write_text(
+        "from bigquery_agent_analytics.structured_extraction import (\n"
+        "    StructuredExtractionResult,\n"
+        ")\n"
+        "def f(event, spec):\n"
+        "    return StructuredExtractionResult()\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+      run_smoke_test_in_subprocess(
+          source_path,
+          module_name="noop",
+          function_name="f",
+          events=[{"event_type": "x"}],
+          spec=None,
+          resolved_graph=None,
+          memory_limit_mb=-1,
+      )
+
+  def test_malformed_extraction_result_internals_caught(self):
+    """``isinstance(result, StructuredExtractionResult)`` doesn't
+    enforce field types. A generated extractor returning
+    ``StructuredExtractionResult(fully_handled_span_ids=("s",))``
+    used to crash inside ``merge_extraction_results``. The smoke
+    runner now reports it as a wrong-return-type failure."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def extractor_with_tuple_span_ids(event, spec):
+      return StructuredExtractionResult(
+          nodes=[],
+          edges=[],
+          fully_handled_span_ids=("s1",),  # tuple not set
+      )
+
+    report = run_smoke_test(
+        extractor_with_tuple_span_ids,
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+    )
+    assert report.ok is False
+    assert report.events_with_wrong_return_type == 1
+    assert any(
+        "fully_handled_span_ids must be set" in m
+        for m in report.wrong_return_types
+    )
+
+  def test_malformed_extraction_result_with_dict_node_caught(self):
+    """``nodes=[{}]`` (dict instead of ExtractedNode) used to
+    crash ``merge_extraction_results`` with an opaque
+    ``AttributeError``. Now caught at the smoke gate."""
+    from bigquery_agent_analytics.extractor_compilation import run_smoke_test
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def extractor_with_dict_node(event, spec):
+      return StructuredExtractionResult(nodes=[{}])
+
+    report = run_smoke_test(
+        extractor_with_dict_node,
+        events=[{"event_type": "x"}],
+        spec=None,
+        resolved_graph=None,
+    )
+    assert report.ok is False
+    assert report.events_with_wrong_return_type == 1
+    assert any(
+        "nodes[0] is not ExtractedNode" in m for m in report.wrong_return_types
+    )
 
   def test_subprocess_runs_clean_extractor_against_real_spec(
       self, tmp_path: pathlib.Path
@@ -1371,11 +1522,25 @@ def f(event, spec):
     from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
 
     spec = _bka_resolved_spec()
+    # Add a tool_completed sample so the second compile (which
+    # declares it in event_types) clears the
+    # event-types-vs-samples coverage check. The compiled
+    # extractor returns an empty result for non-bka_decision
+    # events, so we set ``min_nonempty_results=1`` and rely on the
+    # bka_decision sample to satisfy the floor.
+    extended_samples = _sample_bka_events() + [
+        {
+            "event_type": "tool_completed",
+            "session_id": "sess1",
+            "span_id": "span_tc",
+            "content": {},
+        }
+    ]
     common = dict(
         source=BKA_DECISION_SOURCE,
         module_name="bka_event_diff",
         function_name="extract_bka_decision_event_compiled",
-        sample_events=_sample_bka_events(),
+        sample_events=extended_samples,
         spec=None,
         resolved_graph=spec,
         parent_bundle_dir=tmp_path,
@@ -1510,6 +1675,58 @@ def extract_bka_decision_event_compiled(event, spec):
     assert result.invalid_identifier is not None
     assert "module_name" in result.invalid_identifier
     # No filesystem writes happened.
+    assert not list(tmp_path.iterdir())
+
+  def test_empty_event_types_rejected(self, tmp_path: pathlib.Path):
+    """A bundle has to claim coverage for *something*. Empty
+    ``event_types`` means the manifest's coverage claim is
+    vacuous."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="empty_event_types",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=(),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "non-empty" in result.invalid_event_types
+
+  def test_event_types_without_sample_coverage_rejected(
+      self, tmp_path: pathlib.Path
+  ):
+    """``event_types=("wrong_event",)`` while every sample is
+    ``"bka_decision"`` is an obvious metadata/sample mismatch.
+    The manifest's coverage claim would be untestable."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="event_type_lie",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("wrong_event",),
+        sample_events=_sample_bka_events(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "wrong_event" in result.invalid_event_types
+    # No bundle should have been written.
     assert not list(tmp_path.iterdir())
 
   @pytest.mark.parametrize("kw", ["class", "def", "for", "return"])

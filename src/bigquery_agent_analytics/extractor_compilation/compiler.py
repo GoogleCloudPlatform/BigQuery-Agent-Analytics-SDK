@@ -90,10 +90,13 @@ class CompileResult:
   load_error: Optional[str] = None
   cache_hit: bool = False
   invalid_identifier: Optional[str] = None
+  invalid_event_types: Optional[str] = None
 
   @property
   def ok(self) -> bool:
     if self.invalid_identifier is not None:
+      return False
+    if self.invalid_event_types is not None:
       return False
     if self.cache_hit:
       return self.manifest is not None and self.bundle_dir is not None
@@ -192,6 +195,40 @@ def compile_extractor(
               f"names up front"
           ),
       )
+
+  # Stage 1.5: declared ``event_types`` must be non-empty AND every
+  # declared type has at least one matching sample event. Catches
+  # an obvious metadata/sample mismatch up front — if the manifest
+  # claims a bundle covers ``("wrong_event",)`` but the smoke
+  # samples are all ``"bka_decision"``, the bundle's claim is
+  # untestable and shouldn't ship.
+  event_types_tuple = tuple(event_types)
+  if not event_types_tuple:
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types="event_types must be non-empty",
+    )
+  sample_types = {
+      e.get("event_type") for e in sample_events if isinstance(e, dict)
+  }
+  uncovered = [t for t in event_types_tuple if t not in sample_types]
+  if uncovered:
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types=(
+            f"declared event_types {uncovered!r} have no matching "
+            f"sample events; smoke samples cover {sorted(t for t in sample_types if t)!r}. "
+            f"Production target is >= 100 samples per event_type "
+            f"(per #75); the harness only enforces the floor of 1 "
+            f"so misconfiguration is caught."
+        ),
+    )
 
   # Stage 2: fingerprint over compile inputs.
   fingerprint = compute_fingerprint(

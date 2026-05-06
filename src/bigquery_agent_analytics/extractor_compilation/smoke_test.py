@@ -50,11 +50,58 @@ import sys
 import traceback
 from typing import Any, Callable, Optional
 
+from bigquery_agent_analytics.extracted_models import ExtractedEdge
 from bigquery_agent_analytics.extracted_models import ExtractedGraph
+from bigquery_agent_analytics.extracted_models import ExtractedNode
 from bigquery_agent_analytics.graph_validation import validate_extracted_graph
 from bigquery_agent_analytics.graph_validation import ValidationFailure
 from bigquery_agent_analytics.structured_extraction import merge_extraction_results
 from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+
+def _well_formed_result_error(
+    result: StructuredExtractionResult,
+) -> Optional[str]:
+  """Return ``None`` if *result*'s internals are well-formed, else
+  a short description of the first defect.
+
+  ``isinstance(result, StructuredExtractionResult)`` only checks
+  the outer dataclass — its fields are typed ``list`` / ``set`` in
+  the source but Python doesn't enforce that. A generated extractor
+  can pass the type check while shipping a tuple where a set is
+  expected, or a ``dict`` where an ``ExtractedNode`` is expected.
+  ``merge_extraction_results`` then crashes with an opaque
+  ``TypeError`` mid-aggregation. This helper catches the malformed
+  shape *before* aggregation so the smoke gate reports it as a
+  wrong-return-type failure instead.
+  """
+  if not isinstance(result.nodes, list):
+    return f"nodes must be list, got {type(result.nodes).__name__}"
+  for i, node in enumerate(result.nodes):
+    if not isinstance(node, ExtractedNode):
+      return f"nodes[{i}] is not ExtractedNode (got {type(node).__name__})"
+  if not isinstance(result.edges, list):
+    return f"edges must be list, got {type(result.edges).__name__}"
+  for i, edge in enumerate(result.edges):
+    if not isinstance(edge, ExtractedEdge):
+      return f"edges[{i}] is not ExtractedEdge (got {type(edge).__name__})"
+  if not isinstance(result.fully_handled_span_ids, (set, frozenset)):
+    return (
+        f"fully_handled_span_ids must be set, got "
+        f"{type(result.fully_handled_span_ids).__name__}"
+    )
+  if not isinstance(result.partially_handled_span_ids, (set, frozenset)):
+    return (
+        f"partially_handled_span_ids must be set, got "
+        f"{type(result.partially_handled_span_ids).__name__}"
+    )
+  for span_id in result.fully_handled_span_ids:
+    if not isinstance(span_id, str):
+      return f"fully_handled_span_ids contains non-string: {span_id!r}"
+  for span_id in result.partially_handled_span_ids:
+    if not isinstance(span_id, str):
+      return f"partially_handled_span_ids contains non-string: {span_id!r}"
+  return None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,6 +235,13 @@ def run_smoke_test(
       )
       continue
 
+    shape_err = _well_formed_result_error(result)
+    if shape_err is not None:
+      wrong_return_types.append(
+          f"malformed StructuredExtractionResult: {shape_err}"
+      )
+      continue
+
     results.append(result)
     if (
         result.nodes
@@ -270,16 +324,27 @@ def run_smoke_test_in_subprocess(
         f"min_nonempty_results must be >= 0; got {min_nonempty_results!r}"
     )
 
-  payload = pickle.dumps(
-      {
-          "source_path": str(source_path),
-          "module_name": module_name,
-          "function_name": function_name,
-          "events": events,
-          "spec": spec,
-          "memory_limit_mb": memory_limit_mb,
-      }
-  )
+  if memory_limit_mb is not None and memory_limit_mb < 0:
+    raise ValueError(
+        f"memory_limit_mb must be >= 0 or None; got {memory_limit_mb!r}"
+    )
+
+  try:
+    payload = pickle.dumps(
+        {
+            "source_path": str(source_path),
+            "module_name": module_name,
+            "function_name": function_name,
+            "events": events,
+            "spec": spec,
+            "memory_limit_mb": memory_limit_mb,
+        }
+    )
+  except BaseException as e:  # noqa: BLE001 — surface as harness failure
+    # ``events`` or ``spec`` not picklable — most commonly a closure
+    # or a lambda. The wrapper contract is "report-shaped on every
+    # path", so don't let pickle errors escape into the caller.
+    return _harness_pickle_failure_report(events, e, min_nonempty_results)
 
   env = _subprocess_env_with_pythonpath()
   timeout = timeout_seconds if timeout_seconds and timeout_seconds > 0 else None
@@ -365,6 +430,12 @@ def _aggregate_per_event(
             f"StructuredExtractionResult"
         )
         continue
+      shape_err = _well_formed_result_error(result)
+      if shape_err is not None:
+        wrong_return_types.append(
+            f"malformed StructuredExtractionResult: {shape_err}"
+        )
+        continue
       results.append(result)
       if (
           result.nodes
@@ -411,6 +482,30 @@ def _harness_timeout_report(
   """One synthesized exception per event so ``ok`` is False and
   the failure is visible in callers' typical ``exceptions`` checks."""
   msg = f"TimeoutError: subprocess smoke test exceeded {timeout_seconds}s"
+  return SmokeTestReport(
+      events_processed=len(events),
+      events_with_exception=len(events),
+      exceptions=tuple(msg for _ in events),
+      events_with_wrong_return_type=0,
+      wrong_return_types=(),
+      events_with_nonempty_result=0,
+      min_nonempty_results=min_nonempty_results,
+      validation_failures=(),
+  )
+
+
+def _harness_pickle_failure_report(
+    events: list[dict],
+    exc: BaseException,
+    min_nonempty_results: int,
+) -> SmokeTestReport:
+  """Subprocess inputs (events / spec) couldn't be pickled. Surface
+  one synthesized exception per event so callers see ``ok=False``
+  with a clear cause."""
+  msg = (
+      f"PickleError: subprocess inputs not picklable "
+      f"({type(exc).__name__}: {exc})"
+  )
   return SmokeTestReport(
       events_processed=len(events),
       events_with_exception=len(events),

@@ -431,6 +431,19 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
         )
     )
     return
+  if isinstance(node, ast.Lambda):
+    failures.append(
+        AstFailure(
+            code="disallowed_lambda",
+            detail=(
+                "lambda expressions are not allowed in compiled "
+                "extractors; the call-target allowlist relies on "
+                "static names, and lambdas defeat that"
+            ),
+            line=getattr(node, "lineno", None),
+        )
+    )
+    return
   if isinstance(node, (ast.Global, ast.Nonlocal)):
     failures.append(
         AstFailure(
@@ -598,6 +611,28 @@ def _check_call(node: ast.Call, failures: list[AstFailure]) -> None:
             line=node.lineno,
         )
     )
+    return
+
+  # Catch-all: ``func`` is neither a ``Name`` (allowlist of plain
+  # callable targets) nor an ``Attribute`` (allowlist of method
+  # names). The remaining shapes are
+  # ``Call(func=Lambda(...))`` (anonymous function), nested
+  # ``Call`` (chained calls), ``IfExp`` (conditional callable),
+  # ``Subscript``, ``BoolOp``, etc. None of these can be
+  # allowlisted by static name; reject the call itself.
+  failures.append(
+      AstFailure(
+          code="disallowed_call",
+          detail=(
+              f"call target is a {type(node.func).__name__} expression, "
+              f"not a name or method-style attribute access; the "
+              f"compiled-extractor allowlist only covers plain "
+              f"callable names and method calls (lambdas, chained "
+              f"calls, conditional callables and similar are rejected)"
+          ),
+          line=node.lineno,
+      )
+  )
 
 
 def _check_for_iter(
