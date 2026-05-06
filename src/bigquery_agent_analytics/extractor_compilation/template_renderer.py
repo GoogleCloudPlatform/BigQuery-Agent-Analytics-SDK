@@ -27,10 +27,13 @@ source generation happens.
 Design constraints:
 
 * Output passes 4b.1's :func:`validate_source` allowlist —
-  imports only the four extracted-models / structured-extraction
-  symbols, calls only allowlisted Names and method names, no
-  shadowing of allowlisted call targets, no halt/escape
-  constructs, no decorators, no non-constant defaults.
+  imports only the three symbols actually used (``ExtractedNode``,
+  ``ExtractedProperty``, ``StructuredExtractionResult``); calls
+  only allowlisted Names and method names; no shadowing of
+  allowlisted call targets, no halt/escape constructs, no
+  decorators, no non-constant defaults. ``ExtractedEdge`` isn't
+  imported since the renderer doesn't emit edges yet — adding
+  edge support is a future plan-shape extension.
 * Output, when run on sample events, emits well-formed
   :class:`StructuredExtractionResult` instances (lists for
   ``nodes`` / ``edges``, sets for the span-id fields) so the
@@ -204,7 +207,17 @@ def render_extractor_source(plan: ResolvedExtractorPlan) -> str:
 
 
 def _validate_plan(plan: ResolvedExtractorPlan) -> None:
-  """Reject malformed plans before any source is generated."""
+  """Reject malformed plans before any source is generated.
+
+  Type hints on the dataclasses don't enforce types at runtime —
+  ``ResolvedExtractorPlan(event_type=1)`` is accepted by Python
+  even though the renderer expects a string. The validator
+  catches every shape that would produce broken Python source or
+  an opaque downstream failure (Pydantic ``ExtractedNode``
+  construction, AST-gate rejection, etc.) and raises
+  ``ValueError`` at the renderer boundary so callers see one
+  consistent error shape.
+  """
   if not _is_python_identifier(plan.function_name):
     raise ValueError(
         f"function_name={plan.function_name!r} must be a plain Python "
@@ -216,24 +229,21 @@ def _validate_plan(plan: ResolvedExtractorPlan) -> None:
         f"function_name={plan.function_name!r} would shadow an "
         f"allowlisted call target; pick a different name"
     )
-  if not plan.event_type:
-    raise ValueError("event_type must be a non-empty string")
-  if not plan.target_entity_name:
-    raise ValueError("target_entity_name must be a non-empty string")
+  _require_nonempty_str(plan.event_type, "event_type")
+  _require_safe_identifier(plan.target_entity_name, "target_entity_name")
   if not plan.key_field.source_path:
     raise ValueError("key_field.source_path must be non-empty")
-  if not plan.key_field.property_name:
-    raise ValueError("key_field.property_name must be non-empty")
+  _require_safe_identifier(
+      plan.key_field.property_name, "key_field.property_name"
+  )
+  _require_string_path(plan.key_field.source_path, "key_field.source_path")
   seen_properties: set[str] = {plan.key_field.property_name}
-  for fm in plan.property_fields:
-    if not fm.property_name:
-      raise ValueError(
-          "property_fields entries must have non-empty property_name"
-      )
+  for index, fm in enumerate(plan.property_fields):
+    field_label = f"property_fields[{index}]"
+    _require_safe_identifier(fm.property_name, f"{field_label}.property_name")
     if not fm.source_path:
-      raise ValueError(
-          f"property_fields[{fm.property_name!r}].source_path must be non-empty"
-      )
+      raise ValueError(f"{field_label}.source_path must be non-empty")
+    _require_string_path(fm.source_path, f"{field_label}.source_path")
     if fm.property_name in seen_properties:
       raise ValueError(
           f"duplicate property_name {fm.property_name!r} in plan; the key "
@@ -242,9 +252,59 @@ def _validate_plan(plan: ResolvedExtractorPlan) -> None:
     seen_properties.add(fm.property_name)
   if not plan.session_id_path:
     raise ValueError("session_id_path must be non-empty")
+  _require_string_path(plan.session_id_path, "session_id_path")
   if plan.span_handling is not None:
     if not plan.span_handling.span_id_path:
       raise ValueError("span_handling.span_id_path must be non-empty")
+    _require_string_path(
+        plan.span_handling.span_id_path, "span_handling.span_id_path"
+    )
+    if plan.span_handling.partial_when_path is not None:
+      if not plan.span_handling.partial_when_path:
+        raise ValueError(
+            "span_handling.partial_when_path must be non-empty when set"
+        )
+      _require_string_path(
+          plan.span_handling.partial_when_path,
+          "span_handling.partial_when_path",
+      )
+
+
+def _require_nonempty_str(value, label: str) -> None:
+  if not isinstance(value, str):
+    raise ValueError(
+        f"{label} must be a string; got {type(value).__name__}={value!r}"
+    )
+  if not value:
+    raise ValueError(f"{label} must be a non-empty string")
+
+
+def _require_safe_identifier(value, label: str) -> None:
+  """Validate that *value* is a non-empty string AND a Python
+  identifier-shape (letters/digits/underscore, no leading digit).
+  Used for fields that get embedded directly into generated
+  Python source as raw characters (e.g., ``target_entity_name``
+  in the ``node_id`` f-string) — restricting them to identifier
+  shape means the source is well-formed regardless of input.
+  """
+  _require_nonempty_str(value, label)
+  if not value.isidentifier():
+    raise ValueError(
+        f"{label}={value!r} must be a Python-identifier-shaped string "
+        f"(letters/digits/underscore, no leading digit, no spaces or "
+        f"special characters); the renderer embeds it directly into "
+        f"generated Python source"
+    )
+
+
+def _require_string_path(value, label: str) -> None:
+  """Each path segment must be a non-empty string. Path segments
+  go through ``repr()`` when emitted into ``.get(...)`` calls, so
+  identifier shape isn't required — but mixed-type paths
+  (``("a", 1)``) or empty segments would render confusing source.
+  """
+  for i, segment in enumerate(value):
+    _require_nonempty_str(segment, f"{label}[{i}]")
 
 
 def _is_python_identifier(value: str) -> bool:
@@ -287,7 +347,10 @@ def _render_session_and_span_id(plan: ResolvedExtractorPlan) -> list[str]:
   lines: list[str] = []
   lines.extend(
       _render_optional_path_get(
-          plan.session_id_path, target_var="session_id", default_repr="''"
+          plan.session_id_path,
+          target_var="session_id",
+          var_prefix="_sid",
+          default_repr="''",
       )
   )
   if plan.span_handling is not None:
@@ -295,6 +358,7 @@ def _render_session_and_span_id(plan: ResolvedExtractorPlan) -> list[str]:
         _render_optional_path_get(
             plan.span_handling.span_id_path,
             target_var="span_id",
+            var_prefix="_spn",
             default_repr="''",
         )
     )
@@ -304,32 +368,46 @@ def _render_session_and_span_id(plan: ResolvedExtractorPlan) -> list[str]:
 
 
 def _render_optional_path_get(
-    path: tuple[str, ...], *, target_var: str, default_repr: str
+    path: tuple[str, ...],
+    *,
+    target_var: str,
+    var_prefix: str,
+    default_repr: str,
 ) -> list[str]:
   """Emit ``target_var = event[path]`` style traversal that falls
   back to ``default_repr`` when any intermediate isn't a dict or
-  the leaf is missing."""
-  lines: list[str] = []
+  the leaf is missing.
+
+  Each ``.get(...)`` is emitted *inside* the previous step's
+  ``isinstance(..., dict)`` guard — so a string / list / None
+  intermediate can never crash the next ``.get(...)`` call. The
+  previous flat pattern checked all isinstances *after* the
+  ``.get()`` chain had already run, which was the P1.1 bug.
+
+  Pattern (for path ``("a", "b", "c")``)::
+
+      target = default          # safe baseline
+      v0 = event.get('a')       # fails fast for missing keys
+      if isinstance(v0, dict):
+        v1 = v0.get('b')
+        if isinstance(v1, dict):
+          target = v1.get('c', default)
+  """
   if len(path) == 1:
-    lines.append(f"  {target_var} = event.get({path[0]!r}, {default_repr})")
-    return lines
-  # Multi-step: probe each intermediate, fall back if anything's
-  # not a dict.
+    return [f"  {target_var} = event.get({path[0]!r}, {default_repr})"]
+
+  lines: list[str] = [f"  {target_var} = {default_repr}"]
   last_dict = "event"
-  guard_var = f"_g_{target_var}"
-  for i, step in enumerate(path[:-1]):
-    var = f"{guard_var}_{i}"
-    lines.append(f"  {var} = {last_dict}.get({step!r})")
+  indent = "  "
+  for depth in range(len(path) - 1):
+    var = f"{var_prefix}_{depth}"
+    lines.append(f"{indent}{var} = {last_dict}.get({path[depth]!r})")
+    lines.append(f"{indent}if isinstance({var}, dict):")
     last_dict = var
-  guards = " and ".join(
-      f"isinstance({guard_var}_{i}, dict)" for i in range(len(path) - 1)
-  )
-  lines.append(f"  if {guards}:")
+    indent = indent + "  "
   lines.append(
-      f"    {target_var} = {last_dict}.get({path[-1]!r}, {default_repr})"
+      f"{indent}{target_var} = {last_dict}.get({path[-1]!r}, {default_repr})"
   )
-  lines.append("  else:")
-  lines.append(f"    {target_var} = {default_repr}")
   return lines
 
 
@@ -349,51 +427,53 @@ def _render_node_id_and_properties(
   lines.append(
       f"  properties = [ExtractedProperty(name={key_property!r}, value=key_value)]"
   )
-  for fm in plan.property_fields:
-    lines.extend(_render_optional_property(fm))
+  for index, fm in enumerate(plan.property_fields):
+    lines.extend(_render_optional_property(fm, index))
   return lines
 
 
-def _render_optional_property(fm: FieldMapping) -> list[str]:
+def _render_optional_property(fm: FieldMapping, index: int) -> list[str]:
   """Emit the conditional append for one optional property field.
 
-  Pattern (for path of length >= 1):
+  Each ``.get(...)`` lives inside the previous step's
+  ``isinstance(..., dict)`` guard so a non-dict intermediate
+  doesn't raise. *index* is the property's position in
+  ``plan.property_fields``; helper variable names derive from the
+  index (``_op0_0``, ``_op0_1``, ...) instead of from
+  ``fm.property_name`` so a property name that isn't a Python
+  identifier can't pollute the generated source.
 
-    _p0 = event.get('content')   # for path ('content', 'outcome')
-    if isinstance(_p0, dict) and 'outcome' in _p0:
-      properties.append(ExtractedProperty(name='outcome', value=_p0['outcome']))
+  Pattern (for path ``("content", "outcome")``)::
 
-  For length 1 the receiver is ``event`` directly.
+      _op0_0 = event.get('content')
+      if isinstance(_op0_0, dict):
+        if 'outcome' in _op0_0:
+          properties.append(ExtractedProperty(
+              name='outcome', value=_op0_0['outcome']))
   """
-  lines: list[str] = []
   path = fm.source_path
-  unique = fm.property_name
   if len(path) == 1:
-    receiver = "event"
     leaf_key = path[0]
-    lines.append(
-        f"  if isinstance({receiver}, dict) and {leaf_key!r} in {receiver}:"
-    )
-    lines.append(
+    return [
+        f"  if {leaf_key!r} in event:",
         f"    properties.append(ExtractedProperty("
-        f"name={fm.property_name!r}, value={receiver}[{leaf_key!r}]))"
-    )
-    return lines
+        f"name={fm.property_name!r}, value=event[{leaf_key!r}]))",
+    ]
 
-  # Multi-step: probe each intermediate, then check membership.
+  lines: list[str] = []
   last_dict = "event"
-  guard_var = f"_op_{unique}"
-  for i, step in enumerate(path[:-1]):
-    var = f"{guard_var}_{i}"
-    lines.append(f"  {var} = {last_dict}.get({step!r})")
+  indent = "  "
+  var_prefix = f"_op{index}"
+  for depth in range(len(path) - 1):
+    var = f"{var_prefix}_{depth}"
+    lines.append(f"{indent}{var} = {last_dict}.get({path[depth]!r})")
+    lines.append(f"{indent}if isinstance({var}, dict):")
     last_dict = var
-  guards = " and ".join(
-      f"isinstance({guard_var}_{i}, dict)" for i in range(len(path) - 1)
-  )
+    indent = indent + "  "
   leaf_key = path[-1]
-  lines.append(f"  if {guards} and {leaf_key!r} in {last_dict}:")
+  lines.append(f"{indent}if {leaf_key!r} in {last_dict}:")
   lines.append(
-      f"    properties.append(ExtractedProperty("
+      f"{indent}  properties.append(ExtractedProperty("
       f"name={fm.property_name!r}, value={last_dict}[{leaf_key!r}]))"
   )
   return lines
@@ -435,6 +515,7 @@ def _render_span_handling(plan: ResolvedExtractorPlan) -> list[str]:
       _render_optional_path_get(
           rule.partial_when_path,
           target_var="_partial_v",
+          var_prefix="_pw",
           default_repr="None",
       )
   )

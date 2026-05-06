@@ -320,6 +320,96 @@ class TestPlanValidation:
     with pytest.raises(ValueError, match="duplicate property_name"):
       render_extractor_source(plan)
 
+  def test_target_entity_name_with_quote_rejected(self):
+    """``target_entity_name`` is embedded directly in an f-string
+    in the generated source. A value containing a quote would
+    produce broken Python. The identifier-shape check rejects it
+    before any source is generated."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    plan = ResolvedExtractorPlan(
+        event_type="x",
+        target_entity_name="Foo's",
+        function_name="f",
+        key_field=FieldMapping("decision_id", ("decision_id",)),
+    )
+    with pytest.raises(ValueError, match="target_entity_name"):
+      render_extractor_source(plan)
+
+  @pytest.mark.parametrize(
+      "bad_name",
+      [
+          "bad-name",
+          "with space",
+          "1leading",
+          "weird;chars",
+      ],
+  )
+  def test_property_name_with_non_identifier_chars_rejected(self, bad_name):
+    """Property names with characters that aren't identifier-safe
+    used to render variable names like ``_op_bad-name_0`` (broken
+    Python). The renderer now derives variable names from the
+    property index, but the validator still rejects non-identifier
+    property names so the manifest contract stays predictable."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    plan = ResolvedExtractorPlan(
+        event_type="x",
+        target_entity_name="E",
+        function_name="f",
+        key_field=FieldMapping("decision_id", ("decision_id",)),
+        property_fields=(FieldMapping(bad_name, ("p",)),),
+    )
+    with pytest.raises(ValueError, match="property_name"):
+      render_extractor_source(plan)
+
+  @pytest.mark.parametrize(
+      "field, value",
+      [
+          ("event_type", 1),
+          ("event_type", None),
+          ("target_entity_name", 42),
+          ("function_name", b"bytes"),
+      ],
+  )
+  def test_non_string_top_level_fields_rejected(self, field, value):
+    """``ResolvedExtractorPlan`` doesn't enforce types at runtime
+    (no Pydantic). The renderer catches non-string values up front
+    so they don't render as broken Python that fails later in
+    ``compile_extractor`` or at runtime."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    base = dict(
+        event_type="x",
+        target_entity_name="E",
+        function_name="f",
+        key_field=FieldMapping("k", ("k",)),
+    )
+    base[field] = value
+    plan = ResolvedExtractorPlan(**base)
+    with pytest.raises(ValueError):
+      render_extractor_source(plan)
+
+  def test_non_string_path_segment_rejected(self):
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    plan = ResolvedExtractorPlan(
+        event_type="x",
+        target_entity_name="E",
+        function_name="f",
+        key_field=FieldMapping("k", ("ok", 1, "x")),
+    )
+    with pytest.raises(ValueError, match="key_field.source_path"):
+      render_extractor_source(plan)
+
   def test_property_name_collides_with_key_rejected(self):
     """The key property is also in the rendered properties list,
     so a property_field with the same name would emit two
@@ -534,6 +624,117 @@ class TestPlanShapeVariations:
     assert len(result.nodes) == 1
     properties = {p.name: p.value for p in result.nodes[0].properties}
     assert properties == {"decision_id": "d1", "outcome": "approved"}
+
+  def test_deep_optional_property_path_with_non_dict_intermediate(
+      self, tmp_path: pathlib.Path
+  ):
+    """The renderer's docs promise wrong-shape intermediates
+    resolve to "field absent" rather than crashing. Verify with
+    a length-3 *optional property* path where the first
+    intermediate is a string."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import load_callable_from_source
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    plan = ResolvedExtractorPlan(
+        event_type="deep",
+        target_entity_name="mako_DecisionPoint",
+        function_name="extract_deep_opt",
+        key_field=FieldMapping("decision_id", ("decision_id",)),
+        property_fields=(FieldMapping("outcome", ("a", "b", "outcome")),),
+    )
+    src = render_extractor_source(plan)
+    source_path = tmp_path / "deep_opt.py"
+    source_path.write_text(src, encoding="utf-8")
+    extractor = load_callable_from_source(
+        source_path,
+        module_name=_unique_module_name(prefix="deep_opt_"),
+        function_name=plan.function_name,
+    )
+
+    # event["a"] is a string, not a dict — must NOT raise.
+    result = extractor(
+        {"decision_id": "d1", "a": "notadict"},
+        None,
+    )
+    assert len(result.nodes) == 1
+    properties = {p.name for p in result.nodes[0].properties}
+    assert properties == {"decision_id"}, "outcome should be absent"
+
+  def test_deep_session_id_path_with_non_dict_intermediate(
+      self, tmp_path: pathlib.Path
+  ):
+    """Same protection on ``session_id_path``: a non-dict
+    intermediate falls back to the empty-string default rather
+    than crashing."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import load_callable_from_source
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+
+    plan = ResolvedExtractorPlan(
+        event_type="deep",
+        target_entity_name="mako_DecisionPoint",
+        function_name="extract_deep_session",
+        key_field=FieldMapping("decision_id", ("decision_id",)),
+        session_id_path=("a", "b", "c"),
+    )
+    src = render_extractor_source(plan)
+    source_path = tmp_path / "deep_session.py"
+    source_path.write_text(src, encoding="utf-8")
+    extractor = load_callable_from_source(
+        source_path,
+        module_name=_unique_module_name(prefix="deep_sess_"),
+        function_name=plan.function_name,
+    )
+
+    result = extractor(
+        {"decision_id": "d1", "a": "notadict"},
+        None,
+    )
+    assert len(result.nodes) == 1
+    # session_id falls back to '' so the node_id starts with the
+    # empty session prefix.
+    assert result.nodes[0].node_id == ":mako_DecisionPoint:decision_id=d1"
+
+  def test_deep_partial_when_path_with_non_dict_intermediate(
+      self, tmp_path: pathlib.Path
+  ):
+    """Same protection on ``partial_when_path``: a non-dict
+    intermediate resolves to None (i.e., span fully handled)
+    rather than crashing."""
+    from bigquery_agent_analytics.extractor_compilation import FieldMapping
+    from bigquery_agent_analytics.extractor_compilation import load_callable_from_source
+    from bigquery_agent_analytics.extractor_compilation import render_extractor_source
+    from bigquery_agent_analytics.extractor_compilation import ResolvedExtractorPlan
+    from bigquery_agent_analytics.extractor_compilation import SpanHandlingRule
+
+    plan = ResolvedExtractorPlan(
+        event_type="deep",
+        target_entity_name="mako_DecisionPoint",
+        function_name="extract_deep_partial",
+        key_field=FieldMapping("decision_id", ("decision_id",)),
+        span_handling=SpanHandlingRule(
+            span_id_path=("span_id",),
+            partial_when_path=("a", "b", "c"),
+        ),
+    )
+    src = render_extractor_source(plan)
+    source_path = tmp_path / "deep_partial.py"
+    source_path.write_text(src, encoding="utf-8")
+    extractor = load_callable_from_source(
+        source_path,
+        module_name=_unique_module_name(prefix="deep_partial_"),
+        function_name=plan.function_name,
+    )
+
+    result = extractor(
+        {"decision_id": "d1", "span_id": "s1", "a": "notadict"},
+        None,
+    )
+    assert result.fully_handled_span_ids == {"s1"}
+    assert result.partially_handled_span_ids == set()
 
   def test_plan_with_deep_traversal_path(self, tmp_path: pathlib.Path):
     """Length-3 paths emit nested ``isinstance(..., dict)`` guards

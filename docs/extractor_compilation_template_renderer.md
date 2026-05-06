@@ -73,7 +73,7 @@ source = render_extractor_source(plan)
 
 The output:
 
-- Imports only the four extracted-models / structured-extraction symbols from 4b.1's per-module symbol allowlist.
+- Imports only the three symbols it actually uses (`ExtractedNode`, `ExtractedProperty`, `StructuredExtractionResult`) from 4b.1's per-module symbol allowlist. `ExtractedEdge` isn't imported since the renderer doesn't emit edges yet.
 - Calls only allowlisted Names (`isinstance`, `len`, `set`, `ExtractedNode`, etc.) and allowlisted method names (`get`, `items`, `keys`, `values`, `append`).
 - Has no shadowing of allowlisted call targets, no decorators, no non-constant defaults, no halt/escape constructs (`while`, `raise`, `try`, `with`, `match`).
 - Returns well-formed `StructuredExtractionResult` instances — `nodes` is a `list[ExtractedNode]`, `edges` is `list[ExtractedEdge]`, span sets are `set[str]`. Passes the smoke runner's well-formed-result check.
