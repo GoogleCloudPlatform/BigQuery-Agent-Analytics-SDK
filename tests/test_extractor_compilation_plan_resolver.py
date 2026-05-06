@@ -246,6 +246,54 @@ class TestBuildResolutionPrompt:
     assert "event_schema" in str(exc_info.value)
     assert "mapping" in str(exc_info.value)
 
+  @pytest.mark.parametrize(
+      "label, payload",
+      [
+          ("non-string root key", {1: "intent"}),
+          (
+              "non-string nested key",
+              {"outer": {2: "value"}},
+          ),
+          ("non-string key inside list", {"xs": [{3: "v"}]}),
+      ],
+  )
+  def test_non_string_mapping_keys_rejected(self, label, payload):
+    """``json.dumps`` silently coerces non-string keys
+    (``{1: "x"}`` → ``{"1": "x"}``). For an API whose inputs are
+    JSON object contracts, that coercion would let the LLM see a
+    key the caller never wrote. Reject at the boundary,
+    recursively, so root and nested non-string keys both fail."""
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(payload, _bka_event_schema())
+    assert "mapping keys must be strings" in str(exc_info.value)
+
+  def test_non_string_keys_in_event_schema_rejected(self):
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt(
+          _bka_extraction_rule(),
+          {"bka_decision": {1: "string"}},
+      )
+    assert "mapping keys must be strings" in str(exc_info.value)
+
+  @pytest.mark.parametrize(
+      "bad_value", [float("nan"), float("inf"), float("-inf")]
+  )
+  def test_non_finite_floats_rejected(self, bad_value):
+    """``json.dumps(float('nan'))`` defaults to ``NaN`` which
+    isn't valid JSON per RFC 8259 — some structured-output
+    providers reject it outright. The boundary now passes
+    ``allow_nan=False`` and the wrapper translates the resulting
+    ``ValueError`` into a clear ``TypeError``."""
+    from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
+
+    with pytest.raises(TypeError) as exc_info:
+      build_resolution_prompt({"value": bad_value}, _bka_event_schema())
+    assert "JSON-serializable" in str(exc_info.value)
+
   def test_non_json_serializable_event_schema_raises_clear_typeerror(self):
     from bigquery_agent_analytics.extractor_compilation import build_resolution_prompt
 

@@ -49,23 +49,60 @@ from .template_renderer import ResolvedExtractorPlan
 
 
 def _dump_json_or_raise(value: Any, label: str) -> str:
-  """``json.dumps`` with ``sort_keys=True`` and a clear
-  ``TypeError`` on contract violation.
+  """``json.dumps`` with ``sort_keys=True`` and ``allow_nan=False``,
+  plus a clear error on contract violations.
 
-  Builds the boundary error message — a Pydantic model or a
-  ``set`` slipping in produces a precise complaint that names
-  the field instead of the bare default
+  Two extra rules beyond plain ``json.dumps``:
+
+  * **Strict JSON only** (``allow_nan=False``). ``json.dumps`` defaults
+    to emitting ``NaN`` / ``Infinity`` literals which aren't valid JSON
+    per RFC 8259; some structured-output providers reject them outright
+    or behave unpredictably. Better to fail at the boundary.
+  * **All mapping keys must be strings** (recursive). ``json.dumps``
+    silently coerces non-string keys (``{1: "x"}`` → ``{"1": "x"}``).
+    For an API whose inputs are JSON object contracts, that coercion
+    would let an LLM see a key the caller never wrote.
+
+  Errors are re-raised as ``TypeError`` with the offending field
+  named, instead of the bare default
   ``Object of type X is not JSON serializable``.
   """
+  _check_string_keys(value, label)
   try:
-    return json.dumps(value, sort_keys=True, indent=2)
-  except TypeError as e:
+    return json.dumps(value, sort_keys=True, indent=2, allow_nan=False)
+  except (TypeError, ValueError) as e:
     raise TypeError(
         f"{label} must be JSON-serializable (plain dicts of "
-        f"str/int/float/bool/None/list/dict); got {type(value).__name__} "
-        f"and json.dumps reported: {e}. Normalize Pydantic models / "
-        f"dataclasses / custom objects to plain dicts before calling."
+        f"str/int/float/bool/None/list/dict; no NaN/Infinity); got "
+        f"{type(value).__name__} and json.dumps reported: {e}. "
+        f"Normalize Pydantic models / dataclasses / custom objects "
+        f"to plain dicts before calling."
     ) from e
+
+
+def _check_string_keys(value: Any, path: str) -> None:
+  """Walk *value* recursively; reject any mapping with non-string
+  keys.
+
+  The path argument is the dotted location used in the error
+  message (top-level field name + nested keys + list indices).
+  """
+  if isinstance(value, Mapping):
+    for k, v in value.items():
+      if not isinstance(k, str):
+        raise TypeError(
+            f"{path}: mapping keys must be strings; got "
+            f"{type(k).__name__}={k!r}. JSON object keys are strings "
+            f"by spec, and json.dumps would silently coerce "
+            f"{k!r} to {str(k)!r} — letting the LLM see a key the "
+            f"caller never wrote."
+        )
+      child_path = f"{path}.{k}" if path else k
+      _check_string_keys(v, child_path)
+    return
+  if isinstance(value, list):
+    for i, item in enumerate(value):
+      _check_string_keys(item, f"{path}[{i}]")
 
 
 class LLMClient(Protocol):
