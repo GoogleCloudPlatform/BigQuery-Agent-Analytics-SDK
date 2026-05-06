@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **JSON-to-plan parser for compiled structured extractors** in
+  `bigquery_agent_analytics.extractor_compilation.plan_parser` and
+  [`docs/extractor_compilation_plan_parser.md`](docs/extractor_compilation_plan_parser.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.2.a — turns a JSON payload (string or already-parsed
+  dict) into a ``ResolvedExtractorPlan`` ready for 4b.2.1's
+  ``render_extractor_source``. Public surface:
+  ``parse_resolved_extractor_plan_json(payload)`` returning a
+  validated plan, plus ``PlanParseError`` carrying a stable
+  ``code``, dotted ``path``, and human-readable ``message``.
+  Stable failure codes: ``invalid_json``, ``wrong_root_type``,
+  ``missing_required_field``, ``unknown_field``, ``wrong_type``,
+  ``empty_string``, ``empty_path``, ``invalid_identifier``,
+  ``duplicate_property_name``, ``invalid_plan``.
+  **No LLM call lives here** — the parser is the deterministic
+  boundary every LLM-emitted plan must cross. PR 4b.2.2.b owns
+  the prompt and the LLM step that produces this JSON. Locked
+  down by a golden BKA fixture
+  (``tests/fixtures_extractor_compilation/plan_bka_decision.json``)
+  whose parsed plan renders + compiles end-to-end through 4b.2.1
+  + 4b.1, plus 37 schema and semantic rejection cases (46 total
+  with happy paths and default-value coverage).
 - **Deterministic source generator for compiled structured
   extractors** in
   `bigquery_agent_analytics.extractor_compilation.template_renderer`

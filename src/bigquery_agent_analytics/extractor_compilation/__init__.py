@@ -48,6 +48,8 @@ from .compiler import default_bundle_dir
 from .fingerprint import compute_fingerprint
 from .manifest import Manifest
 from .manifest import now_iso_utc
+from .plan_parser import parse_resolved_extractor_plan_json
+from .plan_parser import PlanParseError
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -63,6 +65,7 @@ __all__ = [
     "CompileResult",
     "FieldMapping",
     "Manifest",
+    "PlanParseError",
     "ResolvedExtractorPlan",
     "SmokeTestReport",
     "SpanHandlingRule",
@@ -71,6 +74,7 @@ __all__ = [
     "default_bundle_dir",
     "load_callable_from_source",
     "now_iso_utc",
+    "parse_resolved_extractor_plan_json",
     "render_extractor_source",
     "run_smoke_test",
     "run_smoke_test_in_subprocess",

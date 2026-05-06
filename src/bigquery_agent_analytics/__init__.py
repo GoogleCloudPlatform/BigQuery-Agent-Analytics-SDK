@@ -594,6 +594,8 @@ try:
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import Manifest
+  from .extractor_compilation import parse_resolved_extractor_plan_json
+  from .extractor_compilation import PlanParseError
   from .extractor_compilation import render_extractor_source
   from .extractor_compilation import ResolvedExtractorPlan
   from .extractor_compilation import run_smoke_test
@@ -608,11 +610,13 @@ try:
           "CompileResult",
           "FieldMapping",
           "Manifest",
+          "PlanParseError",
           "ResolvedExtractorPlan",
           "SmokeTestReport",
           "SpanHandlingRule",
           "compile_extractor",
           "compute_fingerprint",
+          "parse_resolved_extractor_plan_json",
           "render_extractor_source",
           "run_smoke_test",
           "validate_source",

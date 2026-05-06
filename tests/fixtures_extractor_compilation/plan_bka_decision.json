@@ -1,0 +1,28 @@
+{
+  "event_type": "bka_decision",
+  "target_entity_name": "mako_DecisionPoint",
+  "function_name": "extract_bka_decision_event_compiled",
+  "key_field": {
+    "property_name": "decision_id",
+    "source_path": ["content", "decision_id"]
+  },
+  "property_fields": [
+    {
+      "property_name": "outcome",
+      "source_path": ["content", "outcome"]
+    },
+    {
+      "property_name": "confidence",
+      "source_path": ["content", "confidence"]
+    },
+    {
+      "property_name": "alternatives_considered",
+      "source_path": ["content", "alternatives_considered"]
+    }
+  ],
+  "session_id_path": ["session_id"],
+  "span_handling": {
+    "span_id_path": ["span_id"],
+    "partial_when_path": ["content", "reasoning_text"]
+  }
+}
