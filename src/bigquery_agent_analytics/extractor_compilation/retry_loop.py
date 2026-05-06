@@ -66,6 +66,7 @@ Design notes:
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import pathlib
@@ -101,11 +102,15 @@ results."""
 class AttemptRecord:
   """One iteration of the retry loop.
 
-  Exactly one of ``plan_parse_error`` / ``render_error`` /
-  ``compile_result`` is populated for a failed attempt; for the
-  successful terminal attempt all three are ``None`` and
-  ``compile_result`` carries the successful ``CompileResult``
-  (``ok=True``).
+  For a *failed* attempt, exactly one of ``plan_parse_error`` /
+  ``render_error`` / ``compile_result`` is populated; the others
+  are ``None``. (When ``compile_result`` is the populated channel
+  on a failed attempt, ``compile_result.ok`` is ``False``.) For
+  the *successful* terminal attempt, ``plan_parse_error`` and
+  ``render_error`` are both ``None`` and ``compile_result`` is
+  populated with ``compile_result.ok == True``. Tests / telemetry
+  can route on the field name without re-deriving which channel
+  fired.
 
   Fields:
 
@@ -163,6 +168,35 @@ class RetryCompileResult:
   reason: str
 
 
+def _serialize_prior_response(value: Any) -> str:
+  """Serialize *value* for embedding in the retry prompt.
+
+  Tries the strict path first: ``json.dumps(..., sort_keys=True,
+  indent=2)`` for byte-stability across semantically-equal
+  inputs. Falls back to insertion-order JSON when ``sort_keys``
+  raises (mixed-type keys can't be sorted), and finally to
+  ``repr()`` for anything ``json.dumps`` can't handle at all
+  (custom objects with weird ``__getitem__``, …).
+
+  This matters because the parser explicitly handles structurally
+  malformed responses (mixed-type keys land as
+  ``unknown_field`` / ``missing_required_field`` / similar) and
+  the retry loop is supposed to feed those failures back to the
+  LLM. Without the fallback, the retry-prompt builder would
+  raise ``TypeError`` on exactly the inputs the loop was designed
+  to recover from — turning a recoverable failure into an
+  unrecoverable crash one frame above.
+  """
+  try:
+    return json.dumps(value, sort_keys=True, indent=2)
+  except TypeError:
+    pass
+  try:
+    return json.dumps(value, indent=2)
+  except TypeError:
+    return repr(value)
+
+
 def build_retry_prompt(
     *,
     original_prompt: str,
@@ -172,11 +206,17 @@ def build_retry_prompt(
   """Wrap *original_prompt* with the LLM's prior response and a
   diagnostic explaining why it was rejected.
 
-  Pure function. Same inputs → byte-identical output. The
-  embedded ``prior_response`` is serialized with
+  Pure function. Same well-formed inputs → byte-identical
+  output. The embedded ``prior_response`` is serialized with
   ``sort_keys=True`` and ``indent=2`` so two semantically-equal
   dicts produce the same retry prompt — matters for fingerprint /
-  cache stability if the loop ever logs prompts as inputs.
+  cache stability if the loop ever logs prompts as inputs. For
+  malformed responses where ``sort_keys`` can't serialize (e.g.,
+  a dict with mixed-type keys, which the parser rejects but the
+  retry loop still has to echo back), the helper falls back to
+  a deterministic-but-not-byte-stable serialization rather than
+  raising — losing byte-stability is acceptable on a degenerate
+  input that already produced a parser failure.
 
   Args:
     original_prompt: The output of
@@ -200,7 +240,7 @@ def build_retry_prompt(
     original prompt: the prior response, the diagnostic, and a
     "now emit a new JSON object that fixes this" instruction.
   """
-  prior_json = json.dumps(prior_response, sort_keys=True, indent=2)
+  prior_json = _serialize_prior_response(prior_response)
   return f"""\
 {original_prompt}
 # Previous attempt
@@ -294,9 +334,15 @@ def compile_with_llm(
     is_last_attempt = attempt_index == max_attempts
 
     # 1. LLM call. Anything raised propagates — no silent retry.
-    raw_response = llm_client.generate_json(
-        prompt, RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
-    )
+    # Deep-copy the schema before handing it to the client. Some
+    # provider adapters normalize schemas in place to work around
+    # vendor quirks (Gemini's ``response_schema`` doesn't support
+    # ``$schema`` / ``$defs``, etc.); without the copy, one
+    # mutating client could corrupt the exported module global
+    # for every later caller in the process. Mirrors the same
+    # hardening in ``PlanResolver.resolve``.
+    schema_copy = copy.deepcopy(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA)
+    raw_response = llm_client.generate_json(prompt, schema_copy)
 
     # 2. Parse. PlanParseError → retry with parser diagnostic.
     try:

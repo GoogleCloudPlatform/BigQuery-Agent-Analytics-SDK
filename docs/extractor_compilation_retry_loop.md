@@ -113,7 +113,7 @@ build_retry_prompt(
 ) -> str
 ```
 
-Determinism: `prior_response` is serialized with `sort_keys=True`, so two semantically-equal dicts produce byte-identical retry prompts.
+Determinism: `prior_response` is serialized with `sort_keys=True`, so two semantically-equal dicts produce byte-identical retry prompts. For *malformed* responses where `sort_keys` can't serialize (e.g., a dict with mixed-type keys, which the parser rejects but the retry loop still has to echo back), the builder falls back to insertion-order JSON, then to `repr()` — losing byte-stability is acceptable on a degenerate input that already produced a parser failure. Without the fallback, the retry-prompt builder would crash on exactly the inputs the loop was designed to recover from.
 
 Output shape:
 
@@ -154,9 +154,9 @@ Per-iteration state. Stored in `RetryCompileResult.attempts` in 1-indexed order.
 - `attempts: tuple[AttemptRecord, ...]` — in 1-indexed iteration order.
 - `reason: str` — `"succeeded"` or `"max_attempts_reached"`.
 
-## Tests (16 cases in `tests/test_extractor_compilation_retry_loop.py`)
+## Tests (20 cases in `tests/test_extractor_compilation_retry_loop.py`)
 
-- **`TestBuildRetryPrompt`** (5) — original prompt embedded verbatim; `prior_response` serialized with sorted keys (byte-stable for equal dicts); diagnostic embedded verbatim; non-dict `prior_response` (list) renders cleanly; byte-stable for repeated calls.
+- **`TestBuildRetryPrompt`** (6) — original prompt embedded verbatim; `prior_response` serialized with sorted keys (byte-stable for equal dicts); diagnostic embedded verbatim; non-dict `prior_response` (list) renders cleanly; byte-stable for repeated calls; mixed-type keys (the failure shape that crashes plain `json.dumps(sort_keys=True)`) handled via the fallback path.
 - **`TestCompileWithLlmArgs`** (2) — `max_attempts=0` and negative both raise `ValueError`.
 - **`TestCompileWithLlmHappyPath`** (1) — succeeds on first try; one LLM call, one compile call, single `AttemptRecord` with `compile_result.ok==True` and no diagnostic.
 - **`TestCompileWithLlmRecovery`** (3) — recovers after parser error, after compile failure (`invalid_event_types`), after renderer `ValueError` (monkeypatched). Each test asserts the right failure channel is populated and that the next attempt's prompt embeds the right diagnostic.
@@ -164,6 +164,8 @@ Per-iteration state. Stored in `RetryCompileResult.attempts` in 1-indexed order.
 - **`TestCompileWithLlmExceptionPropagation`** (1) — LLM client exceptions propagate unchanged; no silent retry.
 - **`TestCompileWithLlmRetryPromptContent`** (1) — second attempt's prompt embeds both the prior response and the diagnostic.
 - **`TestCompileWithLlmEndToEnd`** (1) — wires the *real* `compile_extractor` via a closure (not a stub) and proves the full stack lines up: prompt → LLM → parser → renderer → compile → bundle on disk.
+- **`TestCompileWithLlmSchemaMutation`** (2) — a mutating client can't corrupt the exported `RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA` module global; each attempt receives a fresh deep copy so a second attempt isn't fed a schema the first attempt's adapter normalized in place.
+- **`TestCompileWithLlmRecoveryNonStringKeys`** (1) — full-loop repro of the mixed-type-keys recovery path: parser rejects, retry-prompt builder doesn't crash, second attempt receives the original (echoed) response plus the parser diagnostic.
 
 ## Out of scope
 

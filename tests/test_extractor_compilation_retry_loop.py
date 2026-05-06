@@ -228,6 +228,25 @@ class TestBuildRetryPrompt:
     )
     assert a == b
 
+  def test_handles_mixed_type_keys_without_crashing(self):
+    """``json.dumps(..., sort_keys=True)`` raises ``TypeError`` on
+    a dict with mixed-type keys (Python can't compare ``str < int``).
+    The parser explicitly handles such responses as recoverable
+    failures (mixed-type keys land as ``unknown_field`` etc.), so
+    the retry-prompt builder must NOT crash on them — otherwise a
+    recoverable failure becomes an unrecoverable one frame above."""
+    from bigquery_agent_analytics.extractor_compilation import build_retry_prompt
+
+    # No exception. Output must include both keys so the LLM can
+    # see what it produced.
+    out = build_retry_prompt(
+        original_prompt="P",
+        prior_response={1: "bad", "event_type": "bka_decision"},
+        diagnostic="D",
+    )
+    assert "bka_decision" in out
+    assert "bad" in out
+
 
 # ------------------------------------------------------------------ #
 # compile_with_llm — argument validation                              #
@@ -628,3 +647,144 @@ class TestCompileWithLlmEndToEnd:
     assert result.bundle_dir is not None
     assert (result.bundle_dir / "manifest.json").is_file()
     assert (result.bundle_dir / "extract_decision_compiled.py").is_file()
+
+
+# ------------------------------------------------------------------ #
+# compile_with_llm — schema mutation hardening                        #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileWithLlmSchemaMutation:
+  """Mirrors the resolver's mutation-hardening test. A provider
+  adapter that normalizes the schema in place (Gemini's
+  ``response_schema`` doesn't support ``$schema`` / ``$defs``,
+  for example) must not be able to corrupt the exported module
+  global for later callers in the process."""
+
+  def test_module_global_schema_unchanged_after_mutating_client(self):
+    import copy as _copy
+
+    from bigquery_agent_analytics.extractor_compilation import compile_with_llm
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    baseline = _copy.deepcopy(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA)
+
+    captured: list[dict] = []
+
+    class MutatingClient:
+      """Stand-in for a provider adapter that strips fields off the
+      schema in place. If ``compile_with_llm`` hands over the
+      module global directly, this corrupts it for everyone."""
+
+      def __init__(self, response: dict) -> None:
+        self._response = response
+
+      def generate_json(self, prompt: str, schema: dict) -> dict:
+        captured.append(schema)
+        # Mutate the schema — both at the top level and one level
+        # deep — to detect shallow-copy regressions too.
+        schema["__mutated_top_level__"] = "yes"
+        if "properties" in schema and isinstance(schema["properties"], dict):
+          schema["properties"]["__mutated_nested__"] = "yes"
+        return self._response
+
+    compile_source = StubCompileSource([_make_ok_compile_result()])
+    compile_with_llm(
+        extraction_rule={"intent": "extract decision"},
+        event_schema={"content.decision_id": "string"},
+        llm_client=MutatingClient(_valid_plan_dict()),
+        compile_source=compile_source,
+    )
+
+    # Adapter received a mutated copy (proves the mutation actually
+    # happened — without this, the test could pass trivially even
+    # if the schema was never used).
+    assert captured and captured[0].get("__mutated_top_level__") == "yes"
+    # The module global is unchanged.
+    assert RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA == baseline
+
+  def test_each_attempt_gets_a_fresh_schema_copy(self):
+    """Across two attempts of the same loop, the second call must
+    receive a schema that hasn't been mutated by the first call.
+    Regression-locks the per-attempt deep-copy."""
+    import copy as _copy
+
+    from bigquery_agent_analytics.extractor_compilation import compile_with_llm
+    from bigquery_agent_analytics.extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
+
+    baseline = _copy.deepcopy(RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA)
+    captured: list[dict] = []
+
+    class MutatingClient:
+
+      def __init__(self, responses: list) -> None:
+        self._responses = list(responses)
+        self._i = 0
+
+      def generate_json(self, prompt: str, schema: dict) -> dict:
+        captured.append(_copy.deepcopy(schema))
+        # Mutate AFTER snapshot so the captured value reflects
+        # what the call site handed us, then make the schema
+        # unusable for the next call if it isn't a fresh copy.
+        schema.clear()
+        item = self._responses[self._i]
+        self._i += 1
+        return item
+
+    compile_with_llm(
+        extraction_rule={"intent": "extract decision"},
+        event_schema={"content.decision_id": "string"},
+        llm_client=MutatingClient(
+            [_missing_required_field_dict(), _valid_plan_dict()]
+        ),
+        compile_source=StubCompileSource([_make_ok_compile_result()]),
+        max_attempts=2,
+    )
+
+    assert len(captured) == 2
+    # Both attempts saw the full, unmodified schema.
+    assert captured[0] == baseline
+    assert captured[1] == baseline
+    # And the module global is still pristine.
+    assert RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA == baseline
+
+
+# ------------------------------------------------------------------ #
+# compile_with_llm — recovery from non-string-keys retry crash        #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileWithLlmRecoveryNonStringKeys:
+  """Reviewer's exact repro: first response has a non-string key
+  alongside ``event_type``. Without the ``_serialize_prior_response``
+  fallback, the loop builds the parser diagnostic correctly, then
+  ``build_retry_prompt`` raises ``TypeError`` on
+  ``json.dumps(sort_keys=True)`` — turning a recoverable failure
+  into an unrecoverable crash one frame above."""
+
+  def test_recovers_after_response_with_mixed_type_keys(self):
+    from bigquery_agent_analytics.extractor_compilation import compile_with_llm
+
+    bad = {1: "bad", "event_type": "bka_decision"}
+    good = _valid_plan_dict()
+    llm = FakeLLMClient([bad, good])
+    compile_source = StubCompileSource([_make_ok_compile_result()])
+
+    result = compile_with_llm(
+        extraction_rule={"intent": "extract decision"},
+        event_schema={"content.decision_id": "string"},
+        llm_client=llm,
+        compile_source=compile_source,
+        max_attempts=2,
+    )
+
+    assert result.ok is True
+    assert len(result.attempts) == 2
+    first = result.attempts[0]
+    assert first.plan_parse_error is not None
+    # The retry prompt that went out on attempt 2 must contain the
+    # bad response (echoed via the helper's fallback path), not a
+    # crash.
+    second_prompt, _schema = llm.call_log[1]
+    assert "bka_decision" in second_prompt
+    assert "bad" in second_prompt
