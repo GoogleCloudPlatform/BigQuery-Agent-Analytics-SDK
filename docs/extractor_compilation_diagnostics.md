@@ -45,7 +45,7 @@ diag = build_gate_diagnostic("compile", compile_result)  # preferred for the ret
 - **Bounded** — diagnostics get embedded in retry prompts; long tracebacks or hundreds of validator failures would crowd out the rule + schema grounding. Each section is capped at the first **ten** entries with an `... and N more (truncated)` line; tracebacks are reduced to their last informative line (the exception type + message).
 - **Deterministic** — same input report → byte-identical output. Sorting where applicable; otherwise input order is preserved (which itself is event-iteration order in the smoke report and `ast.walk` order in the AST report).
 
-The functions never raise — they always return a string.
+The per-gate builders never raise — they always return a string, even on degenerate input. The dispatcher `build_gate_diagnostic` is the only function in the module that does raise: `TypeError` for a payload type that doesn't match the `kind`, and `ValueError` for an unknown `kind`. Both are caller-misuse signals; the retry orchestrator in PR 4b.2.2.c.2 should never see them in practice.
 
 ## Output formats
 
@@ -89,21 +89,27 @@ Sections appear only when they have content. Tracebacks are reduced to their las
 
 ### `build_compile_result_diagnostic`
 
-Single entry point covering every failure mode of the top-level `CompileResult` envelope, so the retry orchestrator can ask "what failed?" with one call regardless of which gate fired. Check order mirrors the pipeline order, so the message names the *earliest* failed stage:
+Single entry point covering every failure mode of the top-level `CompileResult` envelope, so the retry orchestrator can ask "what failed?" with one call regardless of which gate fired.
 
-```
-CompileError [code=invalid_identifier]: <message>
-CompileError [code=invalid_event_types]: <message>
-CompileError [code=load_error]: <message>
-```
+Check order mirrors the canonical `compile_extractor` pipeline order so the message names the **earliest** failed stage:
 
-For AST or smoke failures, output falls through to the per-gate builder above (`AST validation failed (...)` / `Smoke test failed: ...`).
+| Stage | Field | Output |
+|------:|-------|--------|
+| 1     | `invalid_identifier`  | `CompileError [code=invalid_identifier]: <message>` |
+| 1.5   | `invalid_event_types` | `CompileError [code=invalid_event_types]: <message>` |
+| 4     | `ast_report.ok==False`| Falls through to `build_ast_diagnostic` (`AST validation failed (...)`) |
+| 5     | `load_error`          | `CompileError [code=load_error]: <message>` |
+| 5/6   | `smoke_report.ok==False` | Falls through to `build_smoke_diagnostic` (`Smoke test failed: ...`) |
 
-These three `CompileError` codes are exactly the `CompileResult` fields that don't surface through `AstReport` or `SmokeTestReport`:
+`compile_extractor` short-circuits on the first failed stage, so a canonical `CompileResult` carries exactly one populated failure source — but the order above also keeps the contract internally consistent for hand-built `CompileResult` values with multiple fields populated (e.g., AST + `load_error` would never both fire in practice; if they do, the diagnostic shows the AST failure, the earlier stage).
+
+Note that `invalid_event_types` can *also* fire after smoke as the pipeline-stage-7 post-coverage check, with `smoke_report` attached and `ok`. The `invalid_event_types` branch wins, which is the right call: the LLM has to fix the rule's declared event_type, not re-derive it from a passing smoke run.
+
+The three `CompileError` codes are exactly the `CompileResult` fields that don't surface through `AstReport` or `SmokeTestReport`:
 
 - **`invalid_identifier`** — `module_name` / `function_name` isn't a plain Python identifier (path-traversal-shaped, Python keyword, …).
 - **`invalid_event_types`** — declared `event_types` is empty / malformed / duplicated, or has no matching sample event, or never produced non-empty smoke output. The retry loop's most common compile-level failure mode for an LLM-emitted plan: parser passes, AST passes, but the plan declared the wrong `event_type`.
-- **`load_error`** — in-process import (`isolation=False`) blew up on the candidate source. Subprocess mode surfaces import failures inside the smoke report instead.
+- **`load_error`** — in-process import (`isolation=False`) blew up on the candidate source *after* AST passed. Subprocess mode surfaces import failures inside the smoke report instead.
 
 A successful `CompileResult` returns `"Compile succeeded (no diagnostic to render)."`. A defensive `[code=unknown]` fallback covers a hypothetical "ok=False but no field populated" — a logic-bug shape we want labelled in retry feedback rather than silently empty.
 

@@ -56,9 +56,18 @@ Three contracts the diagnostic text has to clear:
   Sorting where applicable; otherwise preserve input order, which
   itself is event-iteration order in the reports the gates produce.
 
-These functions never raise; they always return a string. PR
-4b.2.2.c.2 layers the retry-prompt builder + ``compile_with_llm``
-orchestrator on top.
+The per-gate builders never raise — they always return a string,
+even on degenerate input (empty traceback, missing line numbers,
+``ok=False`` with no field populated). The dispatcher
+:func:`build_gate_diagnostic` is the only function in this module
+that *does* raise: it validates caller input and raises
+``TypeError`` for a payload type that doesn't match ``kind``, and
+``ValueError`` for an unknown ``kind``. Both errors are caller-
+misuse signals, not gate-failure signals; the retry orchestrator
+in PR 4b.2.2.c.2 should never see them in practice.
+
+PR 4b.2.2.c.2 layers the retry-prompt builder +
+``compile_with_llm`` orchestrator on top.
 """
 
 from __future__ import annotations
@@ -201,30 +210,50 @@ def build_compile_result_diagnostic(result: CompileResult) -> str:
   """Return a diagnostic for any :class:`CompileResult` failure mode.
 
   ``compile_extractor`` short-circuits on the first failed gate, so
-  most rejected ``CompileResult`` instances carry exactly one
-  populated failure source. This builder collapses the union back
-  into a single string the retry orchestrator (PR 4b.2.2.c.2) can
-  feed back to the LLM regardless of *which* gate rejected the
-  candidate. The check order mirrors the pipeline's own ordering so
-  the message names the *earliest* failed stage:
+  a rejected ``CompileResult`` produced by the canonical pipeline
+  carries exactly one populated failure source. This builder
+  collapses the union back into a single string the retry
+  orchestrator (PR 4b.2.2.c.2) can feed back to the LLM regardless
+  of *which* gate rejected the candidate. The check order mirrors
+  the pipeline's own stage order, so for a canonical
+  ``CompileResult`` the message names the *earliest* failed stage:
 
   1. ``invalid_identifier`` — bad ``module_name`` / ``function_name``
-     (path-traversal-shaped, Python keyword, …). Rendered as
+     (path-traversal-shaped, Python keyword, …) rejected at
+     pipeline stage 1. Rendered as
      ``CompileError [code=invalid_identifier]: <message>``.
   2. ``invalid_event_types`` — declared ``event_types`` empty,
-     malformed, duplicated, or with no matching sample / no
-     non-empty smoke output. Rendered as
+     malformed, duplicated, or with no matching sample event,
+     rejected at pipeline stage 1.5. Rendered as
      ``CompileError [code=invalid_event_types]: <message>``.
-  3. ``load_error`` — in-process import (``isolation=False``) blew
-     up on the candidate source. Rendered as
-     ``CompileError [code=load_error]: <message>``.
-  4. AST failure — falls through to :func:`build_ast_diagnostic`.
-  5. Smoke failure — falls through to :func:`build_smoke_diagnostic`.
+  3. AST failure — pipeline stage 4. Falls through to
+     :func:`build_ast_diagnostic`.
+  4. ``load_error`` — in-process import (``isolation=False``) blew
+     up on the candidate source at pipeline stage 5, *after* AST
+     passed. Rendered as ``CompileError [code=load_error]:
+     <message>``.
+  5. Smoke failure — pipeline stage 5/6. Falls through to
+     :func:`build_smoke_diagnostic`.
+
+  Note that ``invalid_event_types`` can *also* fire after smoke as
+  the post-coverage check (pipeline stage 7), and in that case the
+  ``smoke_report`` will be attached and ``ok``. The
+  ``invalid_event_types`` branch above wins, which is the right
+  call: the LLM needs to fix the rule's declared event_type, not
+  re-derive it from a passing smoke run.
+
+  Earliest-stage ordering is a guarantee for ``CompileResult``
+  values produced by :func:`compile_extractor` (which never sets
+  more than one failure field at a time). For a hand-built
+  ``CompileResult`` with multiple failure fields populated — a
+  caller-error shape we don't expect in production — the order
+  above is what wins; it matches canonical pipeline order so the
+  diagnostic stays internally consistent.
 
   An ``ok`` result returns the passthrough message. The defensive
-  fallback at the end handles a hypothetical "ok=False but no field
-  populated" — a logic-bug shape we want labelled, not silently
-  empty, in retry feedback.
+  fallback at the end handles a hypothetical "ok=False but no
+  field populated" — a logic-bug shape we want labelled, not
+  silently empty, in retry feedback.
   """
   if result.ok:
     return "Compile succeeded (no diagnostic to render)."
@@ -239,11 +268,17 @@ def build_compile_result_diagnostic(result: CompileResult) -> str:
         f"CompileError [code=invalid_event_types]: {result.invalid_event_types}"
     )
 
-  if result.load_error is not None:
-    return f"CompileError [code=load_error]: {result.load_error}"
-
+  # AST is checked before load_error so the diagnostic order matches
+  # canonical pipeline order: AST gate (stage 4) runs before in-process
+  # load (stage 5). compile_extractor never sets both at once, but a
+  # hand-built CompileResult with both populated would otherwise get
+  # the load_error message and contradict the "earliest stage" claim
+  # above.
   if not result.ast_report.ok:
     return build_ast_diagnostic(result.ast_report)
+
+  if result.load_error is not None:
+    return f"CompileError [code=load_error]: {result.load_error}"
 
   if result.smoke_report is not None and not result.smoke_report.ok:
     return build_smoke_diagnostic(result.smoke_report)

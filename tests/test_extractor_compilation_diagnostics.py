@@ -677,6 +677,43 @@ class TestCompileResultDiagnostic:
         smoke
     )
 
+  def test_ast_wins_over_load_error_when_both_populated(self):
+    """``compile_extractor`` only sets ``load_error`` *after* AST
+    passes, so a real CompileResult never has both populated. But
+    a hand-built one with both populated should render the AST
+    failure — AST is the earlier pipeline stage, and the compile
+    diagnostic's "earliest stage" contract has to hold for the
+    public CompileResult shape, not just for canonical pipeline
+    output."""
+    from bigquery_agent_analytics.extractor_compilation import (
+        build_ast_diagnostic,
+        build_compile_result_diagnostic,
+    )
+    from bigquery_agent_analytics.extractor_compilation import AstFailure
+    from bigquery_agent_analytics.extractor_compilation import AstReport
+    from bigquery_agent_analytics.extractor_compilation import CompileResult
+
+    ast_report = AstReport(
+        failures=(
+            AstFailure(
+                code="disallowed_name",
+                detail="eval not allowlisted",
+                line=4,
+                col=0,
+            ),
+        )
+    )
+    result = CompileResult(
+        manifest=None,
+        ast_report=ast_report,
+        smoke_report=None,
+        bundle_dir=None,
+        load_error="ImportError: bogus",
+    )
+    diag = build_compile_result_diagnostic(result)
+    assert diag == build_ast_diagnostic(ast_report)
+    assert "load_error" not in diag
+
   def test_compile_level_field_wins_over_smoke_when_both_populated(self):
     """The post-smoke coverage check sets ``invalid_event_types``
     *and* leaves the (passing) smoke_report attached. The
