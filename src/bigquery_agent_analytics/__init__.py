@@ -589,7 +589,11 @@ except ImportError as e:
 try:
   from .extractor_compilation import AstFailure
   from .extractor_compilation import AstReport
+  from .extractor_compilation import build_ast_diagnostic
+  from .extractor_compilation import build_gate_diagnostic
+  from .extractor_compilation import build_plan_parse_diagnostic
   from .extractor_compilation import build_resolution_prompt
+  from .extractor_compilation import build_smoke_diagnostic
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import CompileResult
   from .extractor_compilation import compute_fingerprint
@@ -621,7 +625,11 @@ try:
           "ResolvedExtractorPlan",
           "SmokeTestReport",
           "SpanHandlingRule",
+          "build_ast_diagnostic",
+          "build_gate_diagnostic",
+          "build_plan_parse_diagnostic",
           "build_resolution_prompt",
+          "build_smoke_diagnostic",
           "compile_extractor",
           "compute_fingerprint",
           "parse_resolved_extractor_plan_json",

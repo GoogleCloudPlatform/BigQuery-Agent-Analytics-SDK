@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Diagnostic builders for compiled-extractor retry feedback** in
+  `bigquery_agent_analytics.extractor_compilation.diagnostics` and
+  [`docs/extractor_compilation_diagnostics.md`](docs/extractor_compilation_diagnostics.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.2.c.1 — turns each compile-gate failure into a string
+  the LLM can act on, ready for embedding in retry prompts.
+  Public surface: ``build_plan_parse_diagnostic(error)`` /
+  ``build_ast_diagnostic(report)`` / ``build_smoke_diagnostic(
+  report)`` plus a ``build_gate_diagnostic(kind, payload)``
+  dispatcher. Output is **actionable** (each per-failure entry
+  carries the stable failure ``code`` plus a dotted ``path`` or
+  source line so the LLM can grep its own response),
+  **bounded** (each section capped at the first ten entries with
+  a truncation summary; multi-line tracebacks reduced to their
+  last informative line), and **deterministic** (same input
+  report → byte-identical output). PR 4b.2.2.c.2 uses these to
+  build retry prompts; this PR ships the diagnostic format on
+  its own so the wording can be locked down before the retry
+  loop depends on it.
 - **LLM-driven plan resolver for compiled structured extractors**
   in
   `bigquery_agent_analytics.extractor_compilation.plan_resolver`

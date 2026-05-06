@@ -45,6 +45,10 @@ from .ast_validator import validate_source
 from .compiler import compile_extractor
 from .compiler import CompileResult
 from .compiler import default_bundle_dir
+from .diagnostics import build_ast_diagnostic
+from .diagnostics import build_gate_diagnostic
+from .diagnostics import build_plan_parse_diagnostic
+from .diagnostics import build_smoke_diagnostic
 from .fingerprint import compute_fingerprint
 from .manifest import Manifest
 from .manifest import now_iso_utc
@@ -76,7 +80,11 @@ __all__ = [
     "ResolvedExtractorPlan",
     "SmokeTestReport",
     "SpanHandlingRule",
+    "build_ast_diagnostic",
+    "build_gate_diagnostic",
+    "build_plan_parse_diagnostic",
     "build_resolution_prompt",
+    "build_smoke_diagnostic",
     "compile_extractor",
     "compute_fingerprint",
     "default_bundle_dir",
