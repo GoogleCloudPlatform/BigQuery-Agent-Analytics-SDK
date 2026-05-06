@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deterministic source generator for compiled structured
+  extractors** in
+  `bigquery_agent_analytics.extractor_compilation.template_renderer`
+  and
+  [`docs/extractor_compilation_template_renderer.md`](docs/extractor_compilation_template_renderer.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.2.1 — turns a pre-resolved
+  ``ResolvedExtractorPlan`` into a Python source string that 4b.1's
+  ``compile_extractor`` runs through every gate (AST allowlist,
+  smoke runner, #76 validator). Public surface:
+  ``FieldMapping`` / ``SpanHandlingRule`` /
+  ``ResolvedExtractorPlan`` dataclasses + ``render_extractor_source(plan)
+  -> str``. The renderer is the deterministic boundary the LLM
+  step in PR 4b.2.2 will plug into; **no LLM call lives here**.
+  Generated source carries a top-of-function ``event_type``
+  guard that returns an empty result when the incoming event
+  doesn't match the plan's declared type, layered with the
+  orchestrator's manifest-driven dispatch so a plan/manifest
+  mismatch can't silently attach an extractor to the wrong
+  event type. Output otherwise matches
+  ``extract_bka_decision_event``'s runtime behavior on the BKA
+  fixture's sample events. Exercised end-to-end by 39 unit
+  tests covering plan validation, the AST gate, the subprocess
+  smoke runner, plan-shape variations (no property fields, no
+  span handling, single-step paths, deep traversal paths,
+  non-dict intermediates at every depth-3 traversal site), and
+  wrong-event-type rejection.
 - **`bq-agent-sdk binding-validate` CLI** — pre-flight validator that
   checks whether a binding YAML's referenced BigQuery tables
   physically exist with the columns and types the binding requires,
@@ -53,6 +80,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph)`** — adapter for callers holding upstream
   `Ontology` + `Binding` instead of a `ResolvedGraph`. Resolves
   internally then delegates.
+- **Compile-time scaffolding for structured-extractor compilation**
+  in `bigquery_agent_analytics.extractor_compilation` and
+  [`docs/extractor_compilation_scaffolding.md`](docs/extractor_compilation_scaffolding.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4b.1 — the deterministic contract layer the LLM-driven
+  template fill (PR 4b.2) plugs into. Public surface:
+  `compute_fingerprint(...)` over the #75 input tuple,
+  `Manifest` with JSON round-trip, `validate_source(...)` returning
+  an `AstReport` with stable failure codes (`syntax_error`,
+  `disallowed_import`, `disallowed_name`, `disallowed_attribute`,
+  `disallowed_async`, `disallowed_generator`, `disallowed_class`,
+  `disallowed_scope`, `disallowed_decorator`, `disallowed_default`,
+  `disallowed_while`, `disallowed_for_iter`, `disallowed_raise`,
+  `disallowed_try`, `disallowed_with`, `disallowed_match`,
+  `disallowed_call`, `disallowed_method`, `disallowed_lambda`,
+  `disallowed_shadowing`, `top_level_side_effect`) — per-module symbol
+  allowlist, no `import x`, no wildcards, no dunder aliases, no
+  decorators, no non-constant defaults, no halt/escape constructs.
+  `run_smoke_test(...)` returning a `SmokeTestReport` gated on the
+  #76 `validate_extracted_graph` validator plus return-shape
+  checks (catches `BaseException`, rejects wrong return types,
+  requires at least one non-empty result by default).
+  `compile_extractor(...) -> CompileResult` runs the end-to-end
+  pipeline through a sibling staging directory and atomically
+  replaces the target on success — failed re-compiles leave any
+  pre-existing valid bundle untouched, and a second compile on
+  identical inputs is a cache hit (`result.cache_hit is True`,
+  no rewrite). `module_name` / `function_name` are validated as
+  Python identifiers up front, so path-traversal-shaped names
+  fail before the harness touches the filesystem. **No LLM call
+  lives here** — that's PR 4b.2. Runtime loader / orchestrator
+  integration is deferred to C2 per the runtime-target RFC.
+- **Runtime-target decision recorded for compiled structured
+  extractors** in
+  [`docs/extractor_compilation_runtime_target.md`](docs/extractor_compilation_runtime_target.md).
+  Settles issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  P0.2: Phase 1 emits plain Python and runs client-side via the
+  existing `run_structured_extractors()` hook in
+  `structured_extraction.py:198`. No SQL/UDF translation layer or
+  Remote Function deploy surface is taken on for Phase 1; Phase 2
+  re-opens the choice for the session-aggregated `AI.GENERATE`
+  tier with Option C (SQL / Python UDF) as the primary candidate.
+  Unblocks the compile-harness PR.
 
 ## [0.2.3] - 2026-04-27
 
