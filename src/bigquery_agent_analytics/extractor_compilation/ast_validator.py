@@ -350,6 +350,12 @@ def _check_import(stmt: ast.stmt, failures: list[AstFailure]) -> None:
               line=stmt.lineno,
           )
       )
+    # No import-alias shadowing check: the per-module symbol
+    # allowlist above already constrains *what* can be imported.
+    # Importing the allowlisted constructors (``ExtractedNode``,
+    # etc.) by their canonical names is the intended pattern, and
+    # an attacker can't import an unsafe symbol *as* an allowlist
+    # name because the symbol allowlist would reject the original.
 
 
 def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
@@ -371,6 +377,14 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
               ),
               line=node.lineno,
           )
+      )
+    if isinstance(node.ctx, ast.Store) and node.id in _ALLOWED_CALL_TARGETS:
+      failures.append(_shadowing_failure(node.id, node.lineno))
+    return
+  if isinstance(node, ast.arg):
+    if node.arg in _ALLOWED_CALL_TARGETS:
+      failures.append(
+          _shadowing_failure(node.arg, getattr(node, "lineno", None))
       )
     return
   if isinstance(node, ast.Attribute):
@@ -520,6 +534,24 @@ def _check_node(node: ast.AST, failures: list[AstFailure]) -> None:
     return
 
 
+def _shadowing_failure(name: str, line: Optional[int]) -> AstFailure:
+  """Build an ``AstFailure`` for a local binding that shadows a
+  name in ``_ALLOWED_CALL_TARGETS``. Without this rule the
+  call-target allowlist is bypassable: ``len = event.get('cb');
+  len()`` would slip past static analysis because ``len`` is in
+  the allowlist *as a name* even though the local rebinding has
+  made it point at something else."""
+  return AstFailure(
+      code="disallowed_shadowing",
+      detail=(
+          f"name {name!r} is in the call-target allowlist; binding "
+          f"it locally would let unsafe callables slip past the "
+          f"static check. Choose a different identifier."
+      ),
+      line=line,
+  )
+
+
 def _check_function_def(
     node: ast.FunctionDef, failures: list[AstFailure]
 ) -> None:
@@ -532,6 +564,9 @@ def _check_function_def(
   body. Constraining defaults to constant primitives blocks that
   whole class of smuggling.
   """
+  if node.name in _ALLOWED_CALL_TARGETS:
+    failures.append(_shadowing_failure(node.name, node.lineno))
+
   if node.decorator_list:
     for dec in node.decorator_list:
       failures.append(

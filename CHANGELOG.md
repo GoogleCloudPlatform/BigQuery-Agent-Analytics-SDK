@@ -67,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `disallowed_scope`, `disallowed_decorator`, `disallowed_default`,
   `disallowed_while`, `disallowed_for_iter`, `disallowed_raise`,
   `disallowed_try`, `disallowed_with`, `disallowed_call`,
-  `disallowed_method`, `disallowed_lambda`, `top_level_side_effect`) — per-module symbol
+  `disallowed_method`, `disallowed_lambda`,
+  `disallowed_shadowing`, `top_level_side_effect`) — per-module symbol
   allowlist, no `import x`, no wildcards, no dunder aliases, no
   decorators, no non-constant defaults, no halt/escape constructs.
   `run_smoke_test(...)` returning a `SmokeTestReport` gated on the

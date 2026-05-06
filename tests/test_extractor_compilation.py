@@ -695,6 +695,76 @@ class TestAstValidator:
         report.ok is True
     ), f"failures: {[(f.code, f.detail) for f in report.failures]}"
 
+  @pytest.mark.parametrize(
+      "code",
+      [
+          # Local assignment shadows the call-target allowlist.
+          "def f(event, spec):\n    len = event.get('cb')\n    return len()\n",
+          # AnnAssign.
+          "def f(event, spec):\n    len: int = 5\n    return None\n",
+          # AugAssign.
+          (
+              "def f(event, spec):\n"
+              "    isinstance = 0\n"
+              "    isinstance += 1\n"
+              "    return None\n"
+          ),
+          # For-loop target.
+          (
+              "def f(event, spec):\n"
+              "    for tuple in (1, 2):\n"
+              "        pass\n"
+              "    return None\n"
+          ),
+          # Comprehension target.
+          (
+              "def f(event, spec):\n"
+              "    xs = [list for list in (1, 2)]\n"
+              "    return None\n"
+          ),
+          # Walrus.
+          (
+              "def f(event, spec):\n"
+              "    if (set := event.get('cb')):\n"
+              "        return set()\n"
+              "    return None\n"
+          ),
+      ],
+  )
+  def test_shadowing_call_target_allowlist_rejected(self, code):
+    """Rebinding any name in ``_ALLOWED_CALL_TARGETS`` (via
+    assignment, for-target, comprehension target, walrus, etc.)
+    would let unsafe callables slip past the static check.
+    Reject all binding shapes."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    report = validate_source(code)
+    assert any(
+        f.code == "disallowed_shadowing" for f in report.failures
+    ), f"got {[(f.code, f.detail) for f in report.failures]}"
+
+  def test_shadowing_via_function_arg_rejected(self):
+    """``def f(event, spec, len=...): ...`` would shadow ``len``."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = "def f(event, spec, len=0):\n    return None\n"
+    report = validate_source(src)
+    assert any(f.code == "disallowed_shadowing" for f in report.failures)
+
+  def test_shadowing_via_nested_function_def_rejected(self):
+    """A nested ``def len(): ...`` would shadow the outer
+    ``len`` allowlist entry."""
+    from bigquery_agent_analytics.extractor_compilation import validate_source
+
+    src = (
+        "def f(event, spec):\n"
+        "    def len(x):\n"
+        "        return 0\n"
+        "    return len(event)\n"
+    )
+    report = validate_source(src)
+    assert any(f.code == "disallowed_shadowing" for f in report.failures)
+
   def test_lambda_call_rejected(self):
     """``(lambda: X)()`` previously slipped past the call-target
     allowlist because ``func`` was an ``ast.Lambda``, neither
@@ -1522,18 +1592,17 @@ def f(event, spec):
     from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
 
     spec = _bka_resolved_spec()
-    # Add a tool_completed sample so the second compile (which
-    # declares it in event_types) clears the
-    # event-types-vs-samples coverage check. The compiled
-    # extractor returns an empty result for non-bka_decision
-    # events, so we set ``min_nonempty_results=1`` and rely on the
-    # bka_decision sample to satisfy the floor.
+    # The BKA fixture's extractor emits a node for any event
+    # whose ``content`` carries a ``decision_id`` (it doesn't
+    # branch on event_type). Including a tool_completed sample
+    # with a decision_id lets compile B clear the new "declared
+    # event_types must demonstrate non-empty coverage" gate.
     extended_samples = _sample_bka_events() + [
         {
             "event_type": "tool_completed",
             "session_id": "sess1",
             "span_id": "span_tc",
-            "content": {},
+            "content": {"decision_id": "tc1"},
         }
     ]
     common = dict(
@@ -1700,6 +1769,95 @@ def extract_bka_decision_event_compiled(event, spec):
     assert result.ok is False
     assert result.invalid_event_types is not None
     assert "non-empty" in result.invalid_event_types
+
+  def test_malformed_sample_event_types_rejected(self, tmp_path: pathlib.Path):
+    """The previous validator sorted sample event_type values
+    directly — mixing ``int`` and ``str`` made
+    ``sorted(...)`` raise ``TypeError`` while formatting the
+    error message. Now malformed event_type values are caught
+    *before* the missing-coverage check with a clear message."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="malformed_sample_types",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("bka_decision",),
+        sample_events=[
+            {
+                "event_type": 1,
+                "session_id": "sess1",
+                "content": {},
+            },
+            {
+                "event_type": "a",
+                "session_id": "sess1",
+                "content": {"decision_id": "d1"},
+            },
+        ],
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "non-empty string 'event_type'" in result.invalid_event_types
+    # No partial bundle written.
+    assert not list(tmp_path.iterdir())
+
+  def test_event_types_must_have_nonempty_smoke_coverage(
+      self, tmp_path: pathlib.Path
+  ):
+    """A declared event_type with a sample but no non-empty
+    smoke output is still vacuous coverage. The reviewer's
+    repro: declare ``("x",)`` with one empty x sample plus a
+    nonempty y sample. The bundle's claim of x coverage is
+    untestable; the harness must reject it."""
+    from bigquery_agent_analytics.extractor_compilation import compile_extractor
+
+    # The BKA fixture emits when ``content.decision_id`` is set,
+    # regardless of event_type. So an x sample with empty content
+    # produces nothing; a y sample with a decision_id produces
+    # output. Declaring x as the bundle's event_types is then
+    # vacuous coverage.
+    samples = [
+        {
+            "event_type": "x",
+            "session_id": "sess1",
+            "span_id": "spx",
+            "content": {},  # no decision_id => empty result
+        },
+        {
+            "event_type": "y",
+            "session_id": "sess1",
+            "span_id": "spy",
+            "content": {"decision_id": "y1"},
+        },
+    ]
+
+    from tests.fixtures_extractor_compilation.bka_decision_template import BKA_DECISION_SOURCE
+
+    result = compile_extractor(
+        source=BKA_DECISION_SOURCE,
+        module_name="bka_no_x_coverage",
+        function_name="extract_bka_decision_event_compiled",
+        event_types=("x",),
+        sample_events=samples,
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        parent_bundle_dir=tmp_path,
+        fingerprint_inputs=_fingerprint_inputs(),
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+    )
+    assert result.ok is False
+    assert result.invalid_event_types is not None
+    assert "no non-empty smoke output" in result.invalid_event_types
+    assert "'x'" in result.invalid_event_types
 
   def test_event_types_without_sample_coverage_rejected(
       self, tmp_path: pathlib.Path

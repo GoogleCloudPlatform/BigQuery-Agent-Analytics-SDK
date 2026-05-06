@@ -211,9 +211,34 @@ def compile_extractor(
         bundle_dir=None,
         invalid_event_types="event_types must be non-empty",
     )
-  sample_types = {
-      e.get("event_type") for e in sample_events if isinstance(e, dict)
-  }
+
+  # Sample events must each be a dict carrying a non-empty string
+  # ``event_type``. A mix of int / None / "" event types makes the
+  # coverage check unsortable for the error message and means the
+  # samples can't actually be classified by type. Catch the
+  # malformed shape up front so later code can rely on string keys.
+  malformed_samples = [
+      i
+      for i, e in enumerate(sample_events)
+      if not isinstance(e, dict)
+      or not isinstance(e.get("event_type"), str)
+      or not e.get("event_type")
+  ]
+  if malformed_samples:
+    return CompileResult(
+        manifest=None,
+        ast_report=AstReport(),
+        smoke_report=None,
+        bundle_dir=None,
+        invalid_event_types=(
+            f"sample_events[{malformed_samples[0]}] (and {len(malformed_samples) - 1} "
+            f"others) is not a dict with a non-empty string 'event_type'. "
+            f"Every smoke sample must declare its event type so the "
+            f"harness can verify coverage."
+        ),
+    )
+
+  sample_types: set[str] = {e["event_type"] for e in sample_events}
   uncovered = [t for t in event_types_tuple if t not in sample_types]
   if uncovered:
     return CompileResult(
@@ -223,7 +248,7 @@ def compile_extractor(
         bundle_dir=None,
         invalid_event_types=(
             f"declared event_types {uncovered!r} have no matching "
-            f"sample events; smoke samples cover {sorted(t for t in sample_types if t)!r}. "
+            f"sample events; smoke samples cover {sorted(sample_types)!r}. "
             f"Production target is >= 100 samples per event_type "
             f"(per #75); the harness only enforces the floor of 1 "
             f"so misconfiguration is caught."
@@ -278,6 +303,21 @@ def compile_extractor(
       # replace will overwrite the broken bundle on success.
       pass
     elif cached_smoke.ok:
+      uncovered = _event_types_without_nonempty_coverage(
+          event_types_tuple, cached_smoke.nonempty_event_types
+      )
+      if uncovered:
+        return CompileResult(
+            manifest=None,
+            ast_report=AstReport(),
+            smoke_report=cached_smoke,
+            bundle_dir=None,
+            invalid_event_types=(
+                f"declared event_types {uncovered!r} produced no "
+                f"non-empty smoke output (cache-hit path). Saw: "
+                f"{list(cached_smoke.nonempty_event_types)!r}"
+            ),
+        )
       return CompileResult(
           manifest=cached_manifest,
           ast_report=AstReport(),
@@ -369,6 +409,29 @@ def compile_extractor(
           bundle_dir=None,
       )
 
+    # Declared event_types must each have actually demonstrated
+    # coverage in the smoke run — at least one sample event of
+    # that type must have produced a non-empty result. Without
+    # this, a manifest can claim ``("x",)`` while only ``"y"``
+    # samples did the work; the bundle's coverage claim is then
+    # untestable.
+    uncovered = _event_types_without_nonempty_coverage(
+        event_types_tuple, smoke_report.nonempty_event_types
+    )
+    if uncovered:
+      return CompileResult(
+          manifest=None,
+          ast_report=ast_report,
+          smoke_report=smoke_report,
+          bundle_dir=None,
+          invalid_event_types=(
+              f"declared event_types {uncovered!r} produced no non-empty "
+              f"smoke output; the manifest's coverage claim must match "
+              f"what the extractor actually demonstrates. Saw non-empty "
+              f"output for: {list(smoke_report.nonempty_event_types)!r}"
+          ),
+      )
+
     manifest = Manifest(
         fingerprint=fingerprint,
         event_types=tuple(event_types),
@@ -395,6 +458,16 @@ def compile_extractor(
   finally:
     if staging.exists():
       shutil.rmtree(staging, ignore_errors=True)
+
+
+def _event_types_without_nonempty_coverage(
+    declared: tuple[str, ...], nonempty_seen: tuple[str, ...]
+) -> list[str]:
+  """Return the declared event types that didn't produce non-empty
+  output in the smoke run. Order preserved so the failure message
+  reads naturally."""
+  seen = set(nonempty_seen)
+  return [t for t in declared if t not in seen]
 
 
 def _is_python_identifier(value: str) -> bool:

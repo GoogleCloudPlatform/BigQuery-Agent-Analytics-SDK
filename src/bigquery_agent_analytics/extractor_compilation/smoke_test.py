@@ -111,13 +111,21 @@ class SmokeTestReport:
   ``ok`` is True iff:
     - every sample event produced a result without an exception
       (BaseException, including ``SystemExit``);
-    - every result was a ``StructuredExtractionResult`` (no wrong
-      return types);
+    - every result was a well-formed ``StructuredExtractionResult``
+      (no wrong return types and no malformed internals);
     - at least ``min_nonempty_results`` events produced a non-empty
       result;
     - the merged graph validates clean against the resolved spec.
 
   Any one of those flips ``ok`` to False.
+
+  ``nonempty_event_types`` is the sorted tuple of distinct
+  ``event_type`` values whose corresponding event produced a
+  non-empty result. Compile-level callers use this to verify that
+  every event type a bundle's manifest claims coverage for
+  actually demonstrated coverage in the smoke samples — so a
+  manifest can't claim ``("x",)`` while only the ``"y"`` samples
+  did the work.
   """
 
   events_processed: int
@@ -128,6 +136,7 @@ class SmokeTestReport:
   events_with_nonempty_result: int
   min_nonempty_results: int
   validation_failures: tuple[ValidationFailure, ...]
+  nonempty_event_types: tuple[str, ...] = ()
 
   @property
   def ok(self) -> bool:
@@ -220,6 +229,7 @@ def run_smoke_test(
   wrong_return_types: list[str] = []
   results: list[StructuredExtractionResult] = []
   events_with_nonempty_result = 0
+  nonempty_event_types: set[str] = set()
 
   for event in events:
     try:
@@ -250,6 +260,9 @@ def run_smoke_test(
         or result.partially_handled_span_ids
     ):
       events_with_nonempty_result += 1
+      et = event.get("event_type") if isinstance(event, dict) else None
+      if isinstance(et, str) and et:
+        nonempty_event_types.add(et)
 
   merged = (
       merge_extraction_results(results)
@@ -276,6 +289,7 @@ def run_smoke_test(
       events_with_nonempty_result=events_with_nonempty_result,
       min_nonempty_results=min_nonempty_results,
       validation_failures=validation_failures,
+      nonempty_event_types=tuple(sorted(nonempty_event_types)),
   )
 
 
@@ -386,7 +400,7 @@ def run_smoke_test_in_subprocess(
   per_event = parsed[1]
   return _aggregate_per_event(
       per_event,
-      events_count=len(events),
+      events=events,
       resolved_graph=resolved_graph,
       min_nonempty_results=min_nonempty_results,
   )
@@ -395,21 +409,24 @@ def run_smoke_test_in_subprocess(
 def _aggregate_per_event(
     per_event: list,
     *,
-    events_count: int,
+    events: list[dict],
     resolved_graph: Optional[Any],
     min_nonempty_results: int,
 ) -> SmokeTestReport:
   """Build a ``SmokeTestReport`` from the subprocess's per-event
   outcomes. The child returns one tuple per event:
   ``("exception", traceback)`` / ``("wrong_type", type_name)`` /
-  ``("result", StructuredExtractionResult)``.
+  ``("result", StructuredExtractionResult)``. The original events
+  list is paired with the entries by index so we can attribute
+  non-empty results to their event_type.
   """
   exceptions: list[str] = []
   wrong_return_types: list[str] = []
   results: list[StructuredExtractionResult] = []
   events_with_nonempty_result = 0
+  nonempty_event_types: set[str] = set()
 
-  for entry in per_event:
+  for index, entry in enumerate(per_event):
     if not isinstance(entry, tuple) or not entry:
       exceptions.append(f"malformed per-event entry: {entry!r}")
       continue
@@ -444,6 +461,15 @@ def _aggregate_per_event(
           or result.partially_handled_span_ids
       ):
         events_with_nonempty_result += 1
+        if 0 <= index < len(events):
+          source_event = events[index]
+          et = (
+              source_event.get("event_type")
+              if isinstance(source_event, dict)
+              else None
+          )
+          if isinstance(et, str) and et:
+            nonempty_event_types.add(et)
     else:
       exceptions.append(f"unknown per-event kind: {kind!r}")
 
@@ -463,7 +489,7 @@ def _aggregate_per_event(
     validation_failures = report.failures
 
   return SmokeTestReport(
-      events_processed=events_count,
+      events_processed=len(events),
       events_with_exception=len(exceptions),
       exceptions=tuple(exceptions),
       events_with_wrong_return_type=len(wrong_return_types),
@@ -471,6 +497,7 @@ def _aggregate_per_event(
       events_with_nonempty_result=events_with_nonempty_result,
       min_nonempty_results=min_nonempty_results,
       validation_failures=validation_failures,
+      nonempty_event_types=tuple(sorted(nonempty_event_types)),
   )
 
 
