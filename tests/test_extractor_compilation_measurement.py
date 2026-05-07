@@ -1,0 +1,563 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Deterministic tests for the compile-and-measure utility (#75 PR 4c).
+
+Strategy:
+
+* ``DeterministicBkaPlanClient`` emits the canonical resolved
+  plan for the BKA-decision inputs without invoking any real LLM;
+* the BKA fixture fingerprint inputs / sample events / ontology
+  + binding mirror what 4b.1's compile tests already use;
+* one test wires the real ``compile_extractor`` through the loop
+  and asserts ``parity_ok=True`` against ``extract_bka_decision_event``;
+* additional tests cover the loop-failure path (``measure_compile``
+  returns a populated record on failure rather than raising) and
+  the report's JSON round-trip contract.
+
+The live-LLM + live-BigQuery proof is in
+``test_extractor_compilation_bka_compile_live.py`` and is gated
+on opt-in environment variables.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import tempfile
+from typing import Any, Optional
+import uuid
+
+import pytest
+
+# ------------------------------------------------------------------ #
+# Reused BKA YAML + fingerprint fixtures from PR 4b.1                 #
+# ------------------------------------------------------------------ #
+#
+# Pulled inline rather than imported so this test module doesn't
+# depend on test-private helpers in test_extractor_compilation.py.
+# Two YAML constants only — keeping them here keeps the BKA spec
+# round-trippable without a cross-test-file import.
+
+_BKA_ONTOLOGY_YAML = (
+    "ontology: BkaTest\n"
+    "entities:\n"
+    "  - name: mako_DecisionPoint\n"
+    "    keys:\n"
+    "      primary: [decision_id]\n"
+    "    properties:\n"
+    "      - name: decision_id\n"
+    "        type: string\n"
+    "      - name: outcome\n"
+    "        type: string\n"
+    "      - name: confidence\n"
+    "        type: double\n"
+    "      - name: alternatives_considered\n"
+    "        type: string\n"
+    "relationships: []\n"
+)
+_BKA_BINDING_YAML = (
+    "binding: bka_test\n"
+    "ontology: BkaTest\n"
+    "target:\n"
+    "  backend: bigquery\n"
+    "  project: p\n"
+    "  dataset: d\n"
+    "entities:\n"
+    "  - name: mako_DecisionPoint\n"
+    "    source: decision_points\n"
+    "    properties:\n"
+    "      - name: decision_id\n"
+    "        column: decision_id\n"
+    "      - name: outcome\n"
+    "        column: outcome\n"
+    "      - name: confidence\n"
+    "        column: confidence\n"
+    "      - name: alternatives_considered\n"
+    "        column: alternatives_considered\n"
+    "relationships: []\n"
+)
+
+
+def _bka_resolved_spec():
+  from bigquery_agent_analytics.resolved_spec import resolve
+  from bigquery_ontology import load_binding
+  from bigquery_ontology import load_ontology
+
+  tmp = pathlib.Path(tempfile.mkdtemp(prefix="bka_measure_test_"))
+  (tmp / "ont.yaml").write_text(_BKA_ONTOLOGY_YAML, encoding="utf-8")
+  (tmp / "bnd.yaml").write_text(_BKA_BINDING_YAML, encoding="utf-8")
+  ontology = load_ontology(str(tmp / "ont.yaml"))
+  binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+  return resolve(ontology, binding)
+
+
+def _fingerprint_inputs():
+  return {
+      "ontology_text": _BKA_ONTOLOGY_YAML,
+      "binding_text": _BKA_BINDING_YAML,
+      "event_schema": {
+          "bka_decision": {
+              "content": {
+                  "decision_id": "string",
+                  "outcome": "string",
+                  "confidence": "double",
+                  "reasoning_text": "string",
+              }
+          }
+      },
+      "event_allowlist": ("bka_decision",),
+      "transcript_builder_version": "v0.1",
+      "content_serialization_rules": {"strip_ansi": True},
+      "extraction_rules": {
+          "bka_decision": {
+              "entity": "mako_DecisionPoint",
+              "key_field": "decision_id",
+          }
+      },
+  }
+
+
+def _unique_module_name(prefix: str = "bka_measure_") -> str:
+  return f"{prefix}{uuid.uuid4().hex[:12]}"
+
+
+# ------------------------------------------------------------------ #
+# Deterministic LLM client                                            #
+# ------------------------------------------------------------------ #
+
+
+class DeterministicBkaPlanClient:
+  """Returns a canned plan dict on each call.
+
+  The default fixture (no constructor args) returns the canonical
+  ``BKA_RESOLVED_PLAN_DICT`` — what a correct LLM step *should*
+  emit for the BKA inputs. Tests that exercise failure paths can
+  pass alternate response sequences.
+  """
+
+  def __init__(self, responses: Optional[list[Any]] = None) -> None:
+    if responses is None:
+      from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_RESOLVED_PLAN_DICT
+
+      responses = [BKA_RESOLVED_PLAN_DICT]
+    self._responses = list(responses)
+    self._index = 0
+    self.call_log: list[tuple[str, dict]] = []
+
+  def generate_json(self, prompt: str, schema: dict) -> dict:
+    self.call_log.append((prompt, schema))
+    if self._index >= len(self._responses):
+      raise AssertionError(
+          "DeterministicBkaPlanClient exhausted its response queue"
+      )
+    item = self._responses[self._index]
+    self._index += 1
+    if isinstance(item, BaseException):
+      raise item
+    return item
+
+
+def _bka_compile_source(*, parent_bundle_dir: pathlib.Path):
+  """Return a ``compile_source`` closure wired to the BKA spec
+  + sample events. Each call uses a unique module_name so a
+  pytest session running multiple measurement tests doesn't
+  collide on ``sys.modules`` import cache."""
+  from bigquery_agent_analytics.extractor_compilation import compile_extractor
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
+
+  spec = _bka_resolved_spec()
+  fingerprint_inputs = _fingerprint_inputs()
+
+  def _compile(plan, source: str):
+    return compile_extractor(
+        source=source,
+        module_name=_unique_module_name(),
+        function_name=plan.function_name,
+        event_types=(plan.event_type,),
+        sample_events=BKA_SAMPLE_EVENTS,
+        spec=None,
+        resolved_graph=spec,
+        parent_bundle_dir=parent_bundle_dir,
+        fingerprint_inputs=fingerprint_inputs,
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        isolation=False,
+    )
+
+  return _compile
+
+
+# ------------------------------------------------------------------ #
+# Happy path: deterministic plan compiles, parity holds              #
+# ------------------------------------------------------------------ #
+
+
+class TestMeasureCompileBkaHappyPath:
+
+  def test_first_try_compile_with_parity(self, tmp_path: pathlib.Path):
+    from bigquery_agent_analytics.extractor_compilation import DETERMINISTIC_FAKE_MODEL
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=BKA_SAMPLE_EVENTS,
+        reference_extractor=extract_bka_decision_event,
+        spec=None,
+        llm_client=DeterministicBkaPlanClient(),
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+        captured_at="2026-05-06T00:00:00Z",
+    )
+
+    assert measurement.ok is True, (
+        f"compile/parity failed: divergences={measurement.parity_divergences}, "
+        f"attempt_failures={measurement.attempt_failures}, "
+        f"reason={measurement.reason}"
+    )
+    assert measurement.n_attempts == 1
+    assert measurement.reason == "succeeded"
+    assert measurement.attempt_failures == ()
+    assert measurement.bundle_fingerprint is not None
+    assert len(measurement.bundle_fingerprint) == 64  # sha256 hex
+    assert measurement.parity_ok is True
+    assert measurement.parity_divergences == ()
+    assert measurement.n_events == 2
+    assert measurement.n_events_with_node_match == 2
+    assert measurement.n_events_with_span_match == 2
+    assert measurement.model_name == DETERMINISTIC_FAKE_MODEL
+    assert measurement.source == "deterministic"
+    assert measurement.sample_session_ids == ("sess1",)
+    assert measurement.captured_at == "2026-05-06T00:00:00Z"
+
+
+# ------------------------------------------------------------------ #
+# Loop-failure path: malformed first response, exhaustion             #
+# ------------------------------------------------------------------ #
+
+
+class TestMeasureCompileLoopFailure:
+  """measure_compile must return a populated CompileMeasurement
+  even when the loop fails — callers route on ``ok`` /
+  ``attempt_failures`` rather than catching exceptions."""
+
+  def test_exhausted_loop_returns_failure_record(self, tmp_path: pathlib.Path):
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
+
+    # Both responses are missing required fields → parser rejects
+    # both → loop exhausts.
+    bad_response = {"event_type": "bka_decision"}
+    llm = DeterministicBkaPlanClient(responses=[bad_response, bad_response])
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=BKA_SAMPLE_EVENTS,
+        reference_extractor=extract_bka_decision_event,
+        spec=None,
+        llm_client=llm,
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+        max_attempts=2,
+    )
+
+    assert measurement.ok is False
+    assert measurement.reason == "max_attempts_reached"
+    assert measurement.n_attempts == 2
+    assert measurement.bundle_fingerprint is None
+    assert len(measurement.attempt_failures) == 2
+    # Stable codes — the parser's ``missing_required_field``
+    # propagates through the helper.
+    for code in measurement.attempt_failures:
+      assert code.startswith("plan_parse_error:")
+    assert measurement.parity_ok is False
+    assert measurement.parity_divergences == ()
+    assert measurement.n_events == 2
+    assert measurement.n_events_with_node_match == 0
+    assert measurement.n_events_with_span_match == 0
+
+
+# ------------------------------------------------------------------ #
+# Parity divergence: compiled output differs from reference          #
+# ------------------------------------------------------------------ #
+
+
+class TestMeasureCompileParityDivergence:
+  """The first plan compiles cleanly, but the compiled extractor's
+  output differs from the reference. measure_compile must report
+  ``parity_ok=False`` with a non-empty divergences tuple — *not*
+  raise — so callers can route on the parity field."""
+
+  def test_property_set_divergence_surfaces_in_record(
+      self, tmp_path: pathlib.Path
+  ):
+    """Plan omits ``alternatives_considered`` from
+    ``property_fields``; the reference handwritten extractor
+    *does* carry it over from ``content`` when present (it's
+    listed in the reference's carry-over loop), so on an event
+    that has the field, parity should diverge.
+
+    None of our default sample events carry
+    ``alternatives_considered``, so we add one event that does.
+    """
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+
+    plan_omitting_alternatives = {
+        "event_type": "bka_decision",
+        "target_entity_name": "mako_DecisionPoint",
+        "function_name": "extract_bka_decision_event_compiled_partial",
+        "key_field": {
+            "property_name": "decision_id",
+            "source_path": ["content", "decision_id"],
+        },
+        "property_fields": [
+            {"property_name": "outcome", "source_path": ["content", "outcome"]},
+            # alternatives_considered intentionally missing
+        ],
+        "session_id_path": ["session_id"],
+        "span_handling": {
+            "span_id_path": ["span_id"],
+            "partial_when_path": ["content", "reasoning_text"],
+        },
+    }
+
+    events_with_alternatives = [
+        {
+            "event_type": "bka_decision",
+            "session_id": "sess1",
+            "span_id": "span1",
+            "content": {
+                "decision_id": "d1",
+                "outcome": "approved",
+                "alternatives_considered": ["plan_A", "plan_B"],
+            },
+        }
+    ]
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=events_with_alternatives,
+        reference_extractor=extract_bka_decision_event,
+        spec=None,
+        llm_client=DeterministicBkaPlanClient(
+            responses=[plan_omitting_alternatives]
+        ),
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+    )
+
+    # The compile loop succeeded — only parity should fail.
+    assert measurement.reason == "succeeded"
+    assert measurement.attempt_failures == ()
+    assert measurement.bundle_fingerprint is not None
+
+    # But the compiled extractor's properties are a strict subset
+    # of the reference's, so parity reports a divergence.
+    assert measurement.parity_ok is False
+    assert measurement.ok is False  # rolls up to the top-level field
+    assert measurement.n_events_with_node_match == 0
+    assert any(
+        "property set mismatch" in d for d in measurement.parity_divergences
+    )
+
+
+# ------------------------------------------------------------------ #
+# CompileMeasurement JSON round-trip                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileMeasurementJson:
+
+  def _example(self):
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    return CompileMeasurement(
+        ok=True,
+        n_attempts=1,
+        reason="succeeded",
+        bundle_fingerprint="a" * 64,
+        attempt_failures=(),
+        parity_ok=True,
+        n_events=2,
+        n_events_with_node_match=2,
+        n_events_with_span_match=2,
+        parity_divergences=(),
+        captured_at="2026-05-06T00:00:00Z",
+        model_name="deterministic-fake",
+        source="deterministic",
+        sample_session_ids=("sess1",),
+    )
+
+  def test_round_trip_byte_stable(self):
+    measurement = self._example()
+    encoded = measurement.to_json()
+    decoded = type(measurement).from_json(encoded)
+    assert decoded == measurement
+    # Re-encoding the decoded value gives the same bytes.
+    assert decoded.to_json() == encoded
+
+  def test_to_json_keys_are_sorted(self):
+    encoded = self._example().to_json()
+    parsed = json.loads(encoded)
+    keys = list(parsed.keys())
+    assert keys == sorted(keys)
+
+  def test_round_trip_failure_record(self):
+    """A loop-failure measurement also round-trips cleanly."""
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    failure = CompileMeasurement(
+        ok=False,
+        n_attempts=2,
+        reason="max_attempts_reached",
+        bundle_fingerprint=None,
+        attempt_failures=(
+            "plan_parse_error:missing_required_field",
+            "plan_parse_error:missing_required_field",
+        ),
+        parity_ok=False,
+        n_events=2,
+        n_events_with_node_match=0,
+        n_events_with_span_match=0,
+        parity_divergences=(),
+        captured_at="2026-05-06T00:00:00Z",
+        model_name="gemini-2.5-flash",
+        source="live:proj.dataset.agent_events",
+        sample_session_ids=("real-sess-A", "real-sess-B"),
+    )
+    encoded = failure.to_json()
+    decoded = CompileMeasurement.from_json(encoded)
+    assert decoded == failure
+
+
+# ------------------------------------------------------------------ #
+# Audit fields                                                        #
+# ------------------------------------------------------------------ #
+
+
+class TestMeasurementAuditFields:
+
+  def test_session_ids_deduplicated_in_iteration_order(
+      self, tmp_path: pathlib.Path
+  ):
+    """Multiple events with overlapping session_ids should produce
+    a deduplicated tuple in iteration order — useful for live
+    runs where samples may include repeats."""
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+
+    events = [
+        {
+            "event_type": "bka_decision",
+            "session_id": "B",
+            "span_id": "spB",
+            "content": {"decision_id": "dB"},
+        },
+        {
+            "event_type": "bka_decision",
+            "session_id": "A",
+            "span_id": "spA1",
+            "content": {"decision_id": "dA1"},
+        },
+        {
+            "event_type": "bka_decision",
+            "session_id": "A",
+            "span_id": "spA2",
+            "content": {"decision_id": "dA2"},
+        },
+        {
+            "event_type": "bka_decision",
+            "session_id": "",  # empty — must be filtered
+            "span_id": "spX",
+            "content": {"decision_id": "dX"},
+        },
+    ]
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=events,
+        reference_extractor=extract_bka_decision_event,
+        spec=None,
+        llm_client=DeterministicBkaPlanClient(),
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+    )
+
+    # B comes first (iteration order), then A, then dedup, and the
+    # empty-string session_id is filtered.
+    assert measurement.sample_session_ids == ("B", "A")
+
+  def test_checked_in_artifact_round_trips_into_compile_measurement(self):
+    """The committed
+    ``tests/fixtures_extractor_compilation/bka_decision_measurement_report.json``
+    must parse cleanly via ``CompileMeasurement.from_json`` and
+    represent a successful measurement.
+
+    Reviewers can look at the JSON and see the measurement
+    contract without re-running the test suite; this assertion
+    keeps the artifact and the dataclass schema from drifting.
+    """
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    artifact = (
+        pathlib.Path(__file__).parent
+        / "fixtures_extractor_compilation"
+        / "bka_decision_measurement_report.json"
+    )
+    measurement = CompileMeasurement.from_json(artifact.read_text())
+    assert measurement.ok is True
+    assert measurement.parity_ok is True
+    assert measurement.parity_divergences == ()
+    assert measurement.attempt_failures == ()
+    # Bundle fingerprint is sha256 hex (locked at 64 chars; the
+    # exact value can drift across compiler version bumps and is
+    # regenerated by the live run).
+    assert measurement.bundle_fingerprint is not None
+    assert len(measurement.bundle_fingerprint) == 64
+
+  def test_model_name_and_source_are_passed_through(
+      self, tmp_path: pathlib.Path
+  ):
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=BKA_SAMPLE_EVENTS,
+        reference_extractor=extract_bka_decision_event,
+        spec=None,
+        llm_client=DeterministicBkaPlanClient(),
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+        model_name="test-model-name",
+        source="test:custom-source-string",
+    )
+
+    assert measurement.model_name == "test-model-name"
+    assert measurement.source == "test:custom-source-string"

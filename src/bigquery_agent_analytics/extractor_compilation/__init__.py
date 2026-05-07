@@ -53,6 +53,9 @@ from .diagnostics import build_smoke_diagnostic
 from .fingerprint import compute_fingerprint
 from .manifest import Manifest
 from .manifest import now_iso_utc
+from .measurement import CompileMeasurement
+from .measurement import DETERMINISTIC_FAKE_MODEL
+from .measurement import measure_compile
 from .plan_parser import parse_resolved_extractor_plan_json
 from .plan_parser import PlanParseError
 from .plan_parser import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
@@ -77,8 +80,10 @@ __all__ = [
     "AstFailure",
     "AstReport",
     "AttemptRecord",
+    "CompileMeasurement",
     "CompileResult",
     "CompileSource",
+    "DETERMINISTIC_FAKE_MODEL",
     "FieldMapping",
     "LLMClient",
     "Manifest",
@@ -99,6 +104,7 @@ __all__ = [
     "compile_extractor",
     "compile_with_llm",
     "compute_fingerprint",
+    "measure_compile",
     "default_bundle_dir",
     "load_callable_from_source",
     "now_iso_utc",

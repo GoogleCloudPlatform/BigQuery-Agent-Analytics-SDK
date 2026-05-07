@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Compile-and-measure utility + BKA-decision end-to-end proof**
+  in `bigquery_agent_analytics.extractor_compilation.measurement`
+  and
+  [`docs/extractor_compilation_bka_measurement.md`](docs/extractor_compilation_bka_measurement.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR 4c — wraps ``compile_with_llm`` with a parity check against
+  a known-good *reference* extractor. Public surface:
+  ``measure_compile(...)`` returning ``CompileMeasurement`` (a
+  JSON-serializable record covering loop outcome, bundle
+  fingerprint, per-attempt failure codes, per-axis parity counts,
+  and audit fields like model_name / source / sample_session_ids
+  / captured_at). Loop failure is captured in the record rather
+  than raised — callers route on ``ok`` / ``parity_ok``. The
+  first concrete consumer is ``extract_bka_decision_event``;
+  ``measure_compile`` itself is generic so future extractor
+  baselines can reuse the parity logic. CI path (deterministic
+  fake LLM client) is merge-blocking and runs without an API key;
+  gated live path
+  (``BQAA_RUN_LIVE_TESTS=1`` + ``BQAA_RUN_LIVE_LLM_COMPILE_TESTS=1``)
+  exercises the same pipeline against real ``agent_events`` rows
+  and a real Gemini model, regenerating the checked-in
+  measurement artifact at
+  ``tests/fixtures_extractor_compilation/bka_decision_measurement_report.json``.
 - **Retry-on-gate-failure orchestrator for compiled structured
   extractors** in
   `bigquery_agent_analytics.extractor_compilation.retry_loop` and

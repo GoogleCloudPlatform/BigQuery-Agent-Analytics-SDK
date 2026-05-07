@@ -599,12 +599,14 @@ try:
   from .extractor_compilation import build_smoke_diagnostic
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import compile_with_llm
+  from .extractor_compilation import CompileMeasurement
   from .extractor_compilation import CompileResult
   from .extractor_compilation import CompileSource
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import LLMClient
   from .extractor_compilation import Manifest
+  from .extractor_compilation import measure_compile
   from .extractor_compilation import parse_resolved_extractor_plan_json
   from .extractor_compilation import PlanParseError
   from .extractor_compilation import PlanResolver
@@ -622,6 +624,7 @@ try:
           "AstFailure",
           "AstReport",
           "AttemptRecord",
+          "CompileMeasurement",
           "CompileResult",
           "CompileSource",
           "FieldMapping",
@@ -644,6 +647,7 @@ try:
           "compile_extractor",
           "compile_with_llm",
           "compute_fingerprint",
+          "measure_compile",
           "parse_resolved_extractor_plan_json",
           "render_extractor_source",
           "run_smoke_test",

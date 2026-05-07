@@ -1,0 +1,18 @@
+{
+  "attempt_failures": [],
+  "bundle_fingerprint": "9e2b530041188fc31f7e2fe96e809d1e54f51a3ab528950ae88fa0dc6aa06ade",
+  "captured_at": "2026-05-06T00:00:00Z",
+  "model_name": "deterministic-fake",
+  "n_attempts": 1,
+  "n_events": 2,
+  "n_events_with_node_match": 2,
+  "n_events_with_span_match": 2,
+  "ok": true,
+  "parity_divergences": [],
+  "parity_ok": true,
+  "reason": "succeeded",
+  "sample_session_ids": [
+    "sess1"
+  ],
+  "source": "deterministic"
+}
