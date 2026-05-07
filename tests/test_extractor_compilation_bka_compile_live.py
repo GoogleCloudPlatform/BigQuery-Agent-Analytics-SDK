@@ -62,11 +62,23 @@ pytestmark = pytest.mark.skipif(
 
 _DEFAULT_MODEL = "gemini-2.5-flash"
 
-# Cap on rows pulled from agent_events. Keep small — the compile
-# loop's smoke gate just needs both span-handling branches
-# represented; pulling thousands of events doesn't change what's
-# proven and adds cost.
+# Pool size for the BigQuery fetch. We need a sample that covers
+# both span-handling branches (events with ``content.reasoning_text``
+# and events without it); a small fetch can fail to span both.
+# Pool large enough that partitioning has slack, then cap the
+# events we actually feed the LLM at ``_MAX_LIVE_EVENTS``.
+_LIVE_QUERY_POOL_SIZE = 50
+
+# Cap on events handed to the LLM compile loop. Keep small —
+# the smoke gate just needs both branches represented; pulling
+# thousands of events doesn't change what's proven and adds cost.
 _MAX_LIVE_EVENTS = 10
+
+# Floor for "minimum coverage of each branch we'll accept." If
+# either branch has zero events after filtering, we skip with a
+# message naming the missing branch — running the live LLM call
+# without proving both branches contradicts the test/doc claim.
+_MIN_EVENTS_PER_BRANCH = 1
 
 
 _LIVE_BKA_QUERY = """\
@@ -79,7 +91,7 @@ FROM `{project}.{dataset}.agent_events`
 WHERE event_type = 'bka_decision'
   AND content IS NOT NULL
 ORDER BY event_timestamp DESC
-LIMIT @max_events
+LIMIT @pool_size
 """
 
 
@@ -100,7 +112,29 @@ def live_config():
 
 @pytest.fixture(scope="module")
 def bq_events(live_config):
-  """Pull a small batch of bka_decision events from BigQuery."""
+  """Pull a balanced batch of bka_decision events from BigQuery.
+
+  The live test claims to prove both span-handling branches
+  (events with ``content.reasoning_text`` go to
+  ``partially_handled``; events without it go to
+  ``fully_handled``). Pulling the latest N rows blindly can land
+  with all rows in one branch — the LLM call would still
+  succeed, but the parity assertion would only exercise one
+  branch. To prevent that:
+
+  1. Fetch a larger pool (``_LIVE_QUERY_POOL_SIZE``).
+  2. Drop rows without ``content.decision_id`` — the reference
+     extractor returns an empty result on those, so they can't
+     demonstrate parity. Filtering them first avoids spending
+     LLM tokens on events that can't move the assertion.
+  3. Partition the remaining rows by ``content.reasoning_text``
+     presence.
+  4. ``pytest.skip`` if either partition is empty — running the
+     LLM compile without both branches represented would leave
+     the test/doc claim unproven.
+  5. Take a balanced sample (up to ``_MAX_LIVE_EVENTS // 2``
+     from each branch) and combine.
+  """
   pytest.importorskip("google.cloud.bigquery")
   from google.cloud import bigquery
 
@@ -110,7 +144,9 @@ def bq_events(live_config):
   )
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
-          bigquery.ScalarQueryParameter("max_events", "INT64", _MAX_LIVE_EVENTS)
+          bigquery.ScalarQueryParameter(
+              "pool_size", "INT64", _LIVE_QUERY_POOL_SIZE
+          )
       ]
   )
   rows = list(client.query(query, job_config=job_config).result())
@@ -120,18 +156,42 @@ def bq_events(live_config):
         f"{live_config['dataset']}.agent_events; cannot run live compile."
     )
 
-  events: list[dict] = []
+  with_reasoning: list[dict] = []
+  without_reasoning: list[dict] = []
   for row in rows:
     content = json.loads(row["content_json"]) if row["content_json"] else {}
-    events.append(
-        {
-            "event_type": row["event_type"],
-            "session_id": row["session_id"],
-            "span_id": row["span_id"],
-            "content": content,
-        }
+    # Skip rows that the reference extractor can't produce a node
+    # for — they'd be dead weight in the parity check.
+    if not isinstance(content, dict) or not content.get("decision_id"):
+      continue
+    event = {
+        "event_type": row["event_type"],
+        "session_id": row["session_id"],
+        "span_id": row["span_id"],
+        "content": content,
+    }
+    if content.get("reasoning_text"):
+      with_reasoning.append(event)
+    else:
+      without_reasoning.append(event)
+
+  if len(with_reasoning) < _MIN_EVENTS_PER_BRANCH:
+    pytest.skip(
+        f"Live BKA sample has 0 events with content.reasoning_text "
+        f"out of {_LIVE_QUERY_POOL_SIZE}-row pool; live test can't "
+        f"prove the partially-handled span branch. Run with a wider "
+        f"pool or against a project containing both branches."
     )
-  return events
+  if len(without_reasoning) < _MIN_EVENTS_PER_BRANCH:
+    pytest.skip(
+        f"Live BKA sample has 0 events WITHOUT content.reasoning_text "
+        f"out of {_LIVE_QUERY_POOL_SIZE}-row pool; live test can't "
+        f"prove the fully-handled span branch. Run with a wider pool "
+        f"or against a project containing both branches."
+    )
+
+  per_branch = max(_MIN_EVENTS_PER_BRANCH, _MAX_LIVE_EVENTS // 2)
+  return with_reasoning[:per_branch] + without_reasoning[:per_branch]
 
 
 class _GenaiLLMAdapter:
@@ -179,12 +239,28 @@ class _GenaiLLMAdapter:
 def test_live_bka_compile_with_parity(bq_events, live_config, tmp_path):
   """End-to-end live proof.
 
-  Pulls real ``bka_decision`` events from BigQuery, runs them
-  through the c.2 retry loop with a real Gemini model, and
-  asserts contract-level invariants. On success, regenerates the
-  checked-in measurement artifact under
+  Pulls real ``bka_decision`` events from BigQuery (the
+  ``bq_events`` fixture filters for ``content.decision_id`` and
+  enforces both span-handling branches via ``pytest.skip`` when
+  either is absent), runs them through the c.2 retry loop with
+  a real Gemini model, and asserts contract-level invariants.
+  On success, regenerates the checked-in measurement artifact
+  under
   ``tests/fixtures_extractor_compilation/bka_decision_measurement_report.json``.
   """
+  # Defense-in-depth: the fixture should already have skipped if
+  # either branch is absent, but we verify here so a future
+  # fixture refactor that loosens the partition guard fails the
+  # test rather than silently weakening the live proof.
+  with_reasoning = sum(
+      1 for e in bq_events if e["content"].get("reasoning_text")
+  )
+  without_reasoning = len(bq_events) - with_reasoning
+  assert with_reasoning >= 1 and without_reasoning >= 1, (
+      f"live sample must cover both span-handling branches; got "
+      f"{with_reasoning} with reasoning_text, {without_reasoning} "
+      f"without"
+  )
   from bigquery_agent_analytics.extractor_compilation import compile_extractor
   from bigquery_agent_analytics.extractor_compilation import measure_compile
   from bigquery_agent_analytics.resolved_spec import resolve

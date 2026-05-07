@@ -109,16 +109,19 @@ Plus runtime config:
 
 When all gates pass, the live test:
 
-1. Pulls a small set of `bka_decision` rows from the live `agent_events` table.
-2. Constructs a thin `LLMClient` adapter around `google.genai` (in-test; provider adapters are out of scope for the SDK core).
-3. Runs `measure_compile(...)` against `extract_bka_decision_event` as the reference.
-4. Writes the resulting `CompileMeasurement` JSON to `tests/fixtures_extractor_compilation/bka_decision_measurement_report.json`.
-5. Asserts **contract-level invariants only** — *not* exact LLM wording:
+1. Pulls a pool of `bka_decision` rows from the live `agent_events` table (default pool: 50).
+2. Filters out rows without `content.decision_id` (the reference can't produce a node for those — they'd be dead weight in parity).
+3. Partitions the remaining rows by `content.reasoning_text` presence and **`pytest.skip`s if either partition is empty**. Running the live LLM compile without both branches represented would leave the doc claim ("both span-handling branches proven") unverified; the test names the missing branch in the skip message.
+4. Takes a balanced sample (up to 5 from each branch) and runs `measure_compile(...)` against `extract_bka_decision_event` as the reference.
+5. Constructs a thin `LLMClient` adapter around `google.genai` (in-test; provider adapters are out of scope for the SDK core).
+6. Writes the resulting `CompileMeasurement` JSON to `tests/fixtures_extractor_compilation/bka_decision_measurement_report.json`.
+7. Asserts **contract-level invariants only** — *not* exact LLM wording:
    - `ok=True`
    - `n_attempts <= 3`
    - `parity_ok=True`
    - `parity_divergences=()`
    - `n_events >= 2`
+   - sample covers both span-handling branches (defense in depth: the fixture should already have skipped, but a future refactor that loosens the partition guard would fail the test rather than silently weaken the live proof)
    - bundle directory exists and the compiled module is importable
 
 The live test exists because there's a class of failure (prompt drift, model regression) that mocks can't catch — and it's the natural artifact-regeneration path. It is **not** part of the PR-merging contract.

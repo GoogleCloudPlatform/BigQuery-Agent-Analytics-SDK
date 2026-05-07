@@ -388,6 +388,18 @@ def _compare_extractors(
   """Run both extractors on every event; collect per-event
   divergences with stable, human-readable strings.
 
+  Both extractor calls are wrapped in ``try/except Exception`` —
+  if either raises on a given event, that event is recorded as a
+  divergence (``event[i]: reference extractor raised X: msg`` /
+  ``event[i]: compiled extractor raised X: msg``) and neither
+  axis counts as a match. The contract is that
+  :func:`measure_compile` always returns a populated
+  :class:`CompileMeasurement`; if a callable crash escaped, the
+  utility would raise and break that contract.
+
+  ``Exception`` (not ``BaseException``) is the catch boundary so
+  ``KeyboardInterrupt`` / ``SystemExit`` still propagate.
+
   Edges aren't compared because the renderer doesn't emit edges
   (per the renderer docstring); future renderer extensions will
   need to extend this comparator alongside the new emit-edges
@@ -398,8 +410,26 @@ def _compare_extractors(
   n_span_match = 0
 
   for index, event in enumerate(events):
-    ref_result = reference(event, spec)
-    cmp_result = compiled(event, spec)
+    try:
+      ref_result = reference(event, spec)
+    except Exception as exc:  # noqa: BLE001 — record + continue
+      divergences.append(
+          f"event[{index}]: reference extractor raised "
+          f"{type(exc).__name__}: {exc}"
+      )
+      # Reference output isn't available so neither axis can be
+      # checked for this event; leave the counters as-is and move
+      # to the next event.
+      continue
+
+    try:
+      cmp_result = compiled(event, spec)
+    except Exception as exc:  # noqa: BLE001 — record + continue
+      divergences.append(
+          f"event[{index}]: compiled extractor raised "
+          f"{type(exc).__name__}: {exc}"
+      )
+      continue
 
     node_divergence = _compare_nodes(ref_result.nodes, cmp_result.nodes)
     if node_divergence is None:

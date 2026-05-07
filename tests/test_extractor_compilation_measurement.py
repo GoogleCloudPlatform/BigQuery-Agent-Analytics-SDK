@@ -381,6 +381,88 @@ class TestMeasureCompileParityDivergence:
         "property set mismatch" in d for d in measurement.parity_divergences
     )
 
+  def test_extractor_exception_becomes_parity_divergence(
+      self, tmp_path: pathlib.Path
+  ):
+    """When either extractor crashes on an event, ``measure_compile``
+    must capture the exception as a structured divergence rather
+    than letting it propagate. Otherwise the utility's "always
+    returns a populated CompileMeasurement" contract breaks for
+    exactly the inputs callers most need a measurement on."""
+    from bigquery_agent_analytics.extractor_compilation import measure_compile
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
+
+    def crashing_reference(event, spec):
+      raise RuntimeError("reference exploded on this event")
+
+    measurement = measure_compile(
+        extraction_rule=BKA_EXTRACTION_RULE,
+        event_schema=BKA_EVENT_SCHEMA,
+        sample_events=BKA_SAMPLE_EVENTS,
+        reference_extractor=crashing_reference,
+        spec=None,
+        llm_client=DeterministicBkaPlanClient(),
+        compile_source=_bka_compile_source(parent_bundle_dir=tmp_path),
+    )
+
+    # Compile loop succeeded, parity didn't.
+    assert measurement.reason == "succeeded"
+    assert measurement.attempt_failures == ()
+    assert measurement.bundle_fingerprint is not None
+    assert measurement.parity_ok is False
+    assert measurement.ok is False
+    # Both events triggered the reference crash, so two divergences.
+    assert len(measurement.parity_divergences) == 2
+    for divergence in measurement.parity_divergences:
+      assert "reference extractor raised RuntimeError" in divergence
+      assert "reference exploded on this event" in divergence
+    # Counters stay at 0 — neither axis was checkable.
+    assert measurement.n_events_with_node_match == 0
+    assert measurement.n_events_with_span_match == 0
+
+  def test_compiled_extractor_exception_becomes_divergence_directly(self):
+    """Symmetric branch: when the *compiled* extractor crashes on
+    an event, the divergence string must say so. Tested at the
+    helper level (``_compare_extractors``) rather than through a
+    full ``measure_compile`` run — crafting a real BKA-shaped
+    event that crashes the rendered extractor without also
+    crashing the reference would require a synthetic plan that
+    adds plumbing without coverage. The helper's contract is
+    what matters; both try/except blocks are the same shape, and
+    the public-API reference-crashes test above plus this
+    direct-helper compiled-crashes test pin both branches."""
+    from bigquery_agent_analytics.extractor_compilation import measurement as _measurement_module
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def good_reference(event, spec):
+      return StructuredExtractionResult()
+
+    def crashing_compiled(event, spec):
+      raise ValueError(f"compiled extractor blew up on {event['span_id']}")
+
+    result = _measurement_module._compare_extractors(
+        reference=good_reference,
+        compiled=crashing_compiled,
+        events=[
+            {"event_type": "x", "span_id": "spA"},
+            {"event_type": "x", "span_id": "spB"},
+        ],
+        spec=None,
+    )
+
+    assert result.ok is False
+    assert result.n_events_with_node_match == 0
+    assert result.n_events_with_span_match == 0
+    assert len(result.divergences) == 2
+    for index, divergence in enumerate(result.divergences):
+      assert (
+          f"event[{index}]: compiled extractor raised ValueError" in divergence
+      )
+    assert "spA" in result.divergences[0]
+    assert "spB" in result.divergences[1]
+
 
 # ------------------------------------------------------------------ #
 # CompileMeasurement JSON round-trip                                  #
