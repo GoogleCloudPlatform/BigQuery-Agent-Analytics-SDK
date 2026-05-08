@@ -85,13 +85,17 @@ A divergence in *any* axis sets `parity_ok=False` and appends a human-readable s
 
 ## CI path (deterministic, merge-blocking)
 
-`tests/test_extractor_compilation_measurement.py` covers:
+`tests/test_extractor_compilation_measurement.py` (26 tests):
 
-- **`TestMeasureCompileBkaHappyPath`** — first-try success path: `DeterministicBkaPlanClient` emits the canonical plan; `compile_with_llm` produces a valid bundle in 1 attempt; the compiled extractor's output matches `extract_bka_decision_event` on both sample events.
-- **`TestMeasureCompileLoopFailure`** — measurement returns a populated record (not an exception) when the loop exhausts; `attempt_failures` contains one code per failed attempt.
-- **`TestMeasureCompileParityDivergence`** — when the compiled extractor's properties are a subset of the reference's, `parity_ok=False` with a `"property set mismatch"` divergence string.
-- **`TestCompileMeasurementJson`** — `to_json` / `from_json` round-trip is byte-stable; key ordering is sorted; failure records round-trip too.
-- **`TestMeasurementAuditFields`** — `sample_session_ids` is dedup'd in iteration order with empty strings filtered; `model_name` / `source` pass through verbatim; the checked-in measurement artifact parses via `CompileMeasurement.from_json`.
+- **`TestMeasureCompileBkaHappyPath`** — first-try success: `DeterministicBkaPlanClient` emits the canonical plan; `compile_with_llm` produces a valid bundle in 1 attempt; the compiled extractor's output matches `extract_bka_decision_event` on both sample events.
+- **`TestMeasureCompileLoopFailure`** — measurement returns a populated record (not an exception) when the loop exhausts; `attempt_failures` contains one stable code per failed attempt.
+- **`TestMeasureCompileParityDivergence`** — property-set divergence rendered correctly; reference-extractor exception captured as a structured divergence (`event[i]: reference extractor raised X: msg`); compiled-extractor exception captured at the helper level (symmetric branch).
+- **`TestCompileMeasurementJson`** — `to_json` / `from_json` round-trip is byte-stable; sorted keys; failure records round-trip cleanly.
+- **`TestCompileMeasurementFromJsonStrictTypes`** — the artifact's schema lock is **load-bearing**:
+  - **Exact keys.** JSON top-level keys must equal the dataclass field set; unknown fields raise `TypeError` (listing names), missing fields raise `TypeError` (listing names), both shapes of drift are reported together.
+  - **Strict types.** Each field is checked via `isinstance` (and `type(v) is bool` for the bool fields, so `int 0` doesn't sneak past as `False`). Constructor-style coercion (`bool("false")`, `tuple("abc")`, `int("3")`) is rejected with `TypeError` naming the offending field.
+- **`TestBkaFingerprintInputsCoverage`** — `BKA_FINGERPRINT_INPUTS` covers every field the extractor emits, so a real compile-input change moves the bundle hash. Three regression tests: changing `event_schema.bka_decision.content.alternatives_considered`, removing it from `extraction_rules.bka_decision.property_fields`, and re-pathing `span_handling.partial_when_path` each produce a different `compute_fingerprint` output. Pins C2's "fingerprint matches active inputs" contract.
+- **`TestMeasurementAuditFields`** — `sample_session_ids` dedup'd in iteration order with empty strings filtered; `model_name` / `source` pass through verbatim; the checked-in measurement artifact parses via the strict `CompileMeasurement.from_json` (locks both the artifact schema and the dataclass shape in one assertion).
 
 These run on every PR. No API key required.
 
