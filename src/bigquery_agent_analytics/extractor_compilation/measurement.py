@@ -134,27 +134,39 @@ class CompileMeasurement:
   @classmethod
   def from_json(cls, payload: str) -> "CompileMeasurement":
     """Inverse of :meth:`to_json`. Round-trip is byte-stable for
-    the same input."""
+    the same input.
+
+    Type-strict: every field is checked against its declared
+    Python type. ``bool``, ``int``, ``str``, ``list``, and
+    ``None`` are accepted only when the JSON literal matches —
+    no constructor-style coercion (``bool("false") == True`` /
+    ``tuple("abc") == ("a", "b", "c")``) is allowed. Each
+    failure raises :class:`TypeError` with the offending field
+    name; a malformed artifact fails loudly at parse time
+    rather than silently shifting under a future test
+    assertion.
+    """
     data = json.loads(payload)
+    if not isinstance(data, dict):
+      raise TypeError(
+          f"CompileMeasurement payload must be a JSON object; got "
+          f"{type(data).__name__}"
+      )
     return cls(
-        ok=bool(data["ok"]),
-        n_attempts=int(data["n_attempts"]),
-        reason=str(data["reason"]),
-        bundle_fingerprint=(
-            data["bundle_fingerprint"]
-            if data["bundle_fingerprint"] is None
-            else str(data["bundle_fingerprint"])
-        ),
-        attempt_failures=tuple(data["attempt_failures"]),
-        parity_ok=bool(data["parity_ok"]),
-        n_events=int(data["n_events"]),
-        n_events_with_node_match=int(data["n_events_with_node_match"]),
-        n_events_with_span_match=int(data["n_events_with_span_match"]),
-        parity_divergences=tuple(data["parity_divergences"]),
-        captured_at=str(data["captured_at"]),
-        model_name=str(data["model_name"]),
-        source=str(data["source"]),
-        sample_session_ids=tuple(data["sample_session_ids"]),
+        ok=_require_bool(data, "ok"),
+        n_attempts=_require_int(data, "n_attempts"),
+        reason=_require_str(data, "reason"),
+        bundle_fingerprint=_require_optional_str(data, "bundle_fingerprint"),
+        attempt_failures=_require_tuple_of_str(data, "attempt_failures"),
+        parity_ok=_require_bool(data, "parity_ok"),
+        n_events=_require_int(data, "n_events"),
+        n_events_with_node_match=_require_int(data, "n_events_with_node_match"),
+        n_events_with_span_match=_require_int(data, "n_events_with_span_match"),
+        parity_divergences=_require_tuple_of_str(data, "parity_divergences"),
+        captured_at=_require_str(data, "captured_at"),
+        model_name=_require_str(data, "model_name"),
+        source=_require_str(data, "source"),
+        sample_session_ids=_require_tuple_of_str(data, "sample_session_ids"),
     )
 
 
@@ -531,3 +543,84 @@ def _hashable(value: Any):
     return value
   except TypeError:
     return repr(value)
+
+
+# ------------------------------------------------------------------ #
+# Strict-type field readers for CompileMeasurement.from_json         #
+# ------------------------------------------------------------------ #
+#
+# Constructor-style coercion (``bool("false") == True``,
+# ``int("3") == 3``, ``tuple("abc") == ("a", "b", "c")``) silently
+# turns malformed JSON into well-typed-but-wrong Python values, so
+# the artifact's "schema lock" promise has to be enforced manually.
+# Each helper takes ``(data, field_name)`` and either returns the
+# correctly-typed value or raises a TypeError naming the field.
+
+
+def _require_bool(data: dict, field: str) -> bool:
+  value = data.get(field)
+  # ``bool`` is a subclass of ``int`` in Python; the strict check
+  # is ``type(value) is bool`` so ``isinstance(0, bool) is False``
+  # but ``isinstance(False, int) is True`` doesn't sneak past us.
+  if type(value) is not bool:
+    raise TypeError(
+        f"CompileMeasurement field {field!r} must be bool; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  return value
+
+
+def _require_int(data: dict, field: str) -> int:
+  value = data.get(field)
+  if type(value) is not int:
+    raise TypeError(
+        f"CompileMeasurement field {field!r} must be int; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  return value
+
+
+def _require_str(data: dict, field: str) -> str:
+  value = data.get(field)
+  if not isinstance(value, str):
+    raise TypeError(
+        f"CompileMeasurement field {field!r} must be str; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  return value
+
+
+def _require_optional_str(data: dict, field: str) -> Optional[str]:
+  value = data.get(field)
+  if value is None:
+    return None
+  if not isinstance(value, str):
+    raise TypeError(
+        f"CompileMeasurement field {field!r} must be str or null; "
+        f"got {type(value).__name__}={value!r}"
+    )
+  return value
+
+
+def _require_tuple_of_str(data: dict, field: str) -> tuple[str, ...]:
+  """Reads a JSON array of strings.
+
+  ``tuple(...)`` over a string would silently return a tuple of
+  characters; ``tuple(...)`` over a dict would silently return a
+  tuple of keys. Both are bugs the artifact-schema lock has to
+  reject — the explicit ``isinstance(value, list)`` check is what
+  makes the lock load-bearing.
+  """
+  value = data.get(field)
+  if not isinstance(value, list):
+    raise TypeError(
+        f"CompileMeasurement field {field!r} must be a JSON array; "
+        f"got {type(value).__name__}={value!r}"
+    )
+  for index, item in enumerate(value):
+    if not isinstance(item, str):
+      raise TypeError(
+          f"CompileMeasurement field {field!r}[{index}] must be str; "
+          f"got {type(item).__name__}={item!r}"
+      )
+  return tuple(value)

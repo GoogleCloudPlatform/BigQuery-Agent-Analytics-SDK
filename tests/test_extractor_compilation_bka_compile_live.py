@@ -267,36 +267,18 @@ def test_live_bka_compile_with_parity(bq_events, live_config, tmp_path):
   from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
   from bigquery_ontology import load_binding
   from bigquery_ontology import load_ontology
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_BINDING_YAML
   from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EVENT_SCHEMA
   from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_EXTRACTION_RULE
-  # Reuse the inline BKA YAML from the deterministic test module.
-  # Importing from a sibling test file is fine — both are in
-  # tests/, and the YAML is small enough that duplication would
-  # be its own kind of drift risk.
-  from tests.test_extractor_compilation_measurement import _BKA_BINDING_YAML
-  from tests.test_extractor_compilation_measurement import _BKA_ONTOLOGY_YAML
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_ONTOLOGY_YAML
 
   spec_dir = pathlib.Path(tempfile.mkdtemp(prefix="bka_live_compile_spec_"))
-  (spec_dir / "ont.yaml").write_text(_BKA_ONTOLOGY_YAML, encoding="utf-8")
-  (spec_dir / "bnd.yaml").write_text(_BKA_BINDING_YAML, encoding="utf-8")
+  (spec_dir / "ont.yaml").write_text(BKA_ONTOLOGY_YAML, encoding="utf-8")
+  (spec_dir / "bnd.yaml").write_text(BKA_BINDING_YAML, encoding="utf-8")
   ontology = load_ontology(str(spec_dir / "ont.yaml"))
   binding = load_binding(str(spec_dir / "bnd.yaml"), ontology=ontology)
   resolved_graph = resolve(ontology, binding)
-
-  fingerprint_inputs = {
-      "ontology_text": _BKA_ONTOLOGY_YAML,
-      "binding_text": _BKA_BINDING_YAML,
-      "event_schema": {"bka_decision": BKA_EVENT_SCHEMA["content"]},
-      "event_allowlist": ("bka_decision",),
-      "transcript_builder_version": "v0.1",
-      "content_serialization_rules": {"strip_ansi": True},
-      "extraction_rules": {
-          "bka_decision": {
-              "entity": "mako_DecisionPoint",
-              "key_field": "decision_id",
-          }
-      },
-  }
 
   def compile_source(plan, source: str):
     return compile_extractor(
@@ -308,7 +290,7 @@ def test_live_bka_compile_with_parity(bq_events, live_config, tmp_path):
         spec=None,
         resolved_graph=resolved_graph,
         parent_bundle_dir=tmp_path,
-        fingerprint_inputs=fingerprint_inputs,
+        fingerprint_inputs=BKA_FINGERPRINT_INPUTS,
         template_version="v0.1",
         compiler_package_version="0.0.0",
         isolation=False,

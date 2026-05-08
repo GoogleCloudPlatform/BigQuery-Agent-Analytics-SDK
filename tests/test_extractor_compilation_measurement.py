@@ -50,83 +50,22 @@ import pytest
 # Two YAML constants only — keeping them here keeps the BKA spec
 # round-trippable without a cross-test-file import.
 
-_BKA_ONTOLOGY_YAML = (
-    "ontology: BkaTest\n"
-    "entities:\n"
-    "  - name: mako_DecisionPoint\n"
-    "    keys:\n"
-    "      primary: [decision_id]\n"
-    "    properties:\n"
-    "      - name: decision_id\n"
-    "        type: string\n"
-    "      - name: outcome\n"
-    "        type: string\n"
-    "      - name: confidence\n"
-    "        type: double\n"
-    "      - name: alternatives_considered\n"
-    "        type: string\n"
-    "relationships: []\n"
-)
-_BKA_BINDING_YAML = (
-    "binding: bka_test\n"
-    "ontology: BkaTest\n"
-    "target:\n"
-    "  backend: bigquery\n"
-    "  project: p\n"
-    "  dataset: d\n"
-    "entities:\n"
-    "  - name: mako_DecisionPoint\n"
-    "    source: decision_points\n"
-    "    properties:\n"
-    "      - name: decision_id\n"
-    "        column: decision_id\n"
-    "      - name: outcome\n"
-    "        column: outcome\n"
-    "      - name: confidence\n"
-    "        column: confidence\n"
-    "      - name: alternatives_considered\n"
-    "        column: alternatives_considered\n"
-    "relationships: []\n"
-)
-
 
 def _bka_resolved_spec():
+  """Resolve the centralized BKA YAML fixtures into a
+  ``ResolvedGraph`` for the smoke gate."""
   from bigquery_agent_analytics.resolved_spec import resolve
   from bigquery_ontology import load_binding
   from bigquery_ontology import load_ontology
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_BINDING_YAML
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_ONTOLOGY_YAML
 
   tmp = pathlib.Path(tempfile.mkdtemp(prefix="bka_measure_test_"))
-  (tmp / "ont.yaml").write_text(_BKA_ONTOLOGY_YAML, encoding="utf-8")
-  (tmp / "bnd.yaml").write_text(_BKA_BINDING_YAML, encoding="utf-8")
+  (tmp / "ont.yaml").write_text(BKA_ONTOLOGY_YAML, encoding="utf-8")
+  (tmp / "bnd.yaml").write_text(BKA_BINDING_YAML, encoding="utf-8")
   ontology = load_ontology(str(tmp / "ont.yaml"))
   binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
   return resolve(ontology, binding)
-
-
-def _fingerprint_inputs():
-  return {
-      "ontology_text": _BKA_ONTOLOGY_YAML,
-      "binding_text": _BKA_BINDING_YAML,
-      "event_schema": {
-          "bka_decision": {
-              "content": {
-                  "decision_id": "string",
-                  "outcome": "string",
-                  "confidence": "double",
-                  "reasoning_text": "string",
-              }
-          }
-      },
-      "event_allowlist": ("bka_decision",),
-      "transcript_builder_version": "v0.1",
-      "content_serialization_rules": {"strip_ansi": True},
-      "extraction_rules": {
-          "bka_decision": {
-              "entity": "mako_DecisionPoint",
-              "key_field": "decision_id",
-          }
-      },
-  }
 
 
 def _unique_module_name(prefix: str = "bka_measure_") -> str:
@@ -175,10 +114,10 @@ def _bka_compile_source(*, parent_bundle_dir: pathlib.Path):
   pytest session running multiple measurement tests doesn't
   collide on ``sys.modules`` import cache."""
   from bigquery_agent_analytics.extractor_compilation import compile_extractor
+  from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
   from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_SAMPLE_EVENTS
 
   spec = _bka_resolved_spec()
-  fingerprint_inputs = _fingerprint_inputs()
 
   def _compile(plan, source: str):
     return compile_extractor(
@@ -190,7 +129,7 @@ def _bka_compile_source(*, parent_bundle_dir: pathlib.Path):
         spec=None,
         resolved_graph=spec,
         parent_bundle_dir=parent_bundle_dir,
-        fingerprint_inputs=fingerprint_inputs,
+        fingerprint_inputs=BKA_FINGERPRINT_INPUTS,
         template_version="v0.1",
         compiler_package_version="0.0.0",
         isolation=False,
@@ -531,6 +470,116 @@ class TestCompileMeasurementJson:
     encoded = failure.to_json()
     decoded = CompileMeasurement.from_json(encoded)
     assert decoded == failure
+
+
+# ------------------------------------------------------------------ #
+# CompileMeasurement.from_json — strict type checks                  #
+# ------------------------------------------------------------------ #
+
+
+class TestCompileMeasurementFromJsonStrictTypes:
+  """``from_json`` is the artifact-schema lock; constructor-style
+  coercion (``bool(\"false\") == True`` / ``tuple(\"abc\") ==
+  (\"a\", \"b\", \"c\")`` / ``int(\"3\") == 3``) would let
+  malformed JSON parse cleanly into well-typed-but-wrong Python
+  values, weakening the lock. Each test passes a deliberately
+  wrong-typed field and asserts ``TypeError`` with the field
+  name in the message."""
+
+  def _valid_payload_dict(self) -> dict:
+    return {
+        "ok": True,
+        "n_attempts": 1,
+        "reason": "succeeded",
+        "bundle_fingerprint": "a" * 64,
+        "attempt_failures": [],
+        "parity_ok": True,
+        "n_events": 2,
+        "n_events_with_node_match": 2,
+        "n_events_with_span_match": 2,
+        "parity_divergences": [],
+        "captured_at": "2026-05-07T00:00:00Z",
+        "model_name": "deterministic-fake",
+        "source": "deterministic",
+        "sample_session_ids": ["sess1"],
+    }
+
+  def _from_json(self, payload: dict):
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    return CompileMeasurement.from_json(json.dumps(payload))
+
+  def test_root_must_be_object(self):
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    with pytest.raises(TypeError, match="must be a JSON object"):
+      CompileMeasurement.from_json(json.dumps([1, 2, 3]))
+
+  def test_string_for_bool_field_rejected(self):
+    """``bool('false')`` would silently be ``True`` under
+    constructor coercion. The strict reader rejects it."""
+    payload = self._valid_payload_dict()
+    payload["ok"] = "false"
+    with pytest.raises(TypeError, match="'ok' must be bool"):
+      self._from_json(payload)
+
+  def test_int_zero_for_bool_field_rejected(self):
+    """``bool(0)`` is ``False`` — but ``0`` isn't valid JSON for
+    a bool field. The reader rejects it so a malformed artifact
+    can't paper over the schema."""
+    payload = self._valid_payload_dict()
+    payload["parity_ok"] = 0
+    with pytest.raises(TypeError, match="'parity_ok' must be bool"):
+      self._from_json(payload)
+
+  def test_string_digit_for_int_field_rejected(self):
+    payload = self._valid_payload_dict()
+    payload["n_attempts"] = "1"
+    with pytest.raises(TypeError, match="'n_attempts' must be int"):
+      self._from_json(payload)
+
+  def test_string_for_list_field_rejected(self):
+    """``tuple('abc')`` would silently be ``('a', 'b', 'c')``."""
+    payload = self._valid_payload_dict()
+    payload["attempt_failures"] = "abc"
+    with pytest.raises(
+        TypeError, match="'attempt_failures' must be a JSON array"
+    ):
+      self._from_json(payload)
+
+  def test_non_string_item_in_list_field_rejected(self):
+    payload = self._valid_payload_dict()
+    payload["sample_session_ids"] = ["sess1", 42, "sess3"]
+    with pytest.raises(
+        TypeError, match=r"'sample_session_ids'\[1\] must be str"
+    ):
+      self._from_json(payload)
+
+  def test_int_for_str_field_rejected(self):
+    payload = self._valid_payload_dict()
+    payload["reason"] = 42
+    with pytest.raises(TypeError, match="'reason' must be str"):
+      self._from_json(payload)
+
+  def test_int_for_optional_str_field_rejected(self):
+    """``bundle_fingerprint`` is ``Optional[str]``: ``None`` is
+    valid, but a non-string non-None must be rejected."""
+    payload = self._valid_payload_dict()
+    payload["bundle_fingerprint"] = 12345
+    with pytest.raises(
+        TypeError, match="'bundle_fingerprint' must be str or null"
+    ):
+      self._from_json(payload)
+
+  def test_optional_str_field_accepts_null(self):
+    """Sanity check: ``None`` is valid for ``Optional[str]``."""
+    from bigquery_agent_analytics.extractor_compilation import CompileMeasurement
+
+    payload = self._valid_payload_dict()
+    payload["bundle_fingerprint"] = None
+    payload["ok"] = False  # null fingerprint pairs with failed compile
+    decoded = CompileMeasurement.from_json(json.dumps(payload))
+    assert decoded.bundle_fingerprint is None
 
 
 # ------------------------------------------------------------------ #

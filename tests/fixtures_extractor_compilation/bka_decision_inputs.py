@@ -154,3 +154,94 @@ BKA_RESOLVED_PLAN_DICT: dict = {
 """Pre-resolved plan in the shape the parser accepts. Used by the
 deterministic test client and as a fallback in any test that
 needs a known-good plan without invoking the resolver step."""
+
+
+# ------------------------------------------------------------------ #
+# Compile-side fixture (ontology / binding / fingerprint inputs)      #
+# ------------------------------------------------------------------ #
+#
+# These mirror the inputs PR 4b.1's ``compile_extractor`` test
+# fixtures use for the BKA-decision compile path. Centralizing
+# them here means the deterministic test, the gated live test,
+# and any future demo / artifact-capture script all hash the same
+# bytes through the bundle fingerprint — so a live-regenerated
+# measurement artifact's ``bundle_fingerprint`` matches the
+# deterministic capture for metadata reasons that aren't about
+# the extractor's behavior.
+
+
+BKA_ONTOLOGY_YAML: str = (
+    "ontology: BkaTest\n"
+    "entities:\n"
+    "  - name: mako_DecisionPoint\n"
+    "    keys:\n"
+    "      primary: [decision_id]\n"
+    "    properties:\n"
+    "      - name: decision_id\n"
+    "        type: string\n"
+    "      - name: outcome\n"
+    "        type: string\n"
+    "      - name: confidence\n"
+    "        type: double\n"
+    "      - name: alternatives_considered\n"
+    "        type: string\n"
+    "relationships: []\n"
+)
+"""Minimal BKA ontology YAML for compile fixtures."""
+
+
+BKA_BINDING_YAML: str = (
+    "binding: bka_test\n"
+    "ontology: BkaTest\n"
+    "target:\n"
+    "  backend: bigquery\n"
+    "  project: p\n"
+    "  dataset: d\n"
+    "entities:\n"
+    "  - name: mako_DecisionPoint\n"
+    "    source: decision_points\n"
+    "    properties:\n"
+    "      - name: decision_id\n"
+    "        column: decision_id\n"
+    "      - name: outcome\n"
+    "        column: outcome\n"
+    "      - name: confidence\n"
+    "        column: confidence\n"
+    "      - name: alternatives_considered\n"
+    "        column: alternatives_considered\n"
+    "relationships: []\n"
+)
+"""Binding YAML matching the ontology above."""
+
+
+BKA_FINGERPRINT_INPUTS: dict = {
+    "ontology_text": BKA_ONTOLOGY_YAML,
+    "binding_text": BKA_BINDING_YAML,
+    "event_schema": {
+        "bka_decision": {
+            "content": {
+                "decision_id": "string",
+                "outcome": "string",
+                "confidence": "double",
+                "reasoning_text": "string",
+            }
+        }
+    },
+    "event_allowlist": ("bka_decision",),
+    "transcript_builder_version": "v0.1",
+    "content_serialization_rules": {"strip_ansi": True},
+    "extraction_rules": {
+        "bka_decision": {
+            "entity": "mako_DecisionPoint",
+            "key_field": "decision_id",
+        }
+    },
+}
+"""Inputs hashed into the compile bundle fingerprint. Distinct
+from :data:`BKA_EVENT_SCHEMA` (which is the typed payload
+structure the resolver prompt sees): this dict is the stable
+*bundle* identifier, and its shape mirrors what PR 4b.1's
+compile tests use. Both the deterministic and live paths feed
+this constant into ``compile_extractor.fingerprint_inputs`` so
+the resulting ``bundle_fingerprint`` is byte-identical across
+paths."""
