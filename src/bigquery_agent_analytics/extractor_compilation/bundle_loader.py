@@ -68,6 +68,8 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import inspect
+import json
+import keyword
 import pathlib
 import sys
 from typing import Any, Callable, Optional, Union
@@ -183,19 +185,12 @@ def load_bundle(
         detail=f"manifest.json not found at {manifest_path}",
     )
 
-  try:
-    manifest_text = manifest_path.read_text(encoding="utf-8")
-    manifest = Manifest.from_json(manifest_text)
-  # ``Manifest.from_json`` can raise on JSON parse errors,
-  # missing/extra fields, wrong types, etc. We don't care which
-  # — the artifact is unreadable as a Manifest. ``OSError`` covers
-  # filesystem errors that slipped past ``is_file()`` (race, etc.).
-  except (OSError, Exception) as e:  # noqa: BLE001 — surface in record
-    return LoadFailure(
-        bundle_dir=bundle_dir,
-        code="manifest_unreadable",
-        detail=f"{type(e).__name__}: {e}",
-    )
+  manifest_or_failure = _parse_manifest_strict(
+      manifest_path=manifest_path, bundle_dir=bundle_dir
+  )
+  if isinstance(manifest_or_failure, LoadFailure):
+    return manifest_or_failure
+  manifest = manifest_or_failure
 
   if manifest.fingerprint != expected_fingerprint:
     return LoadFailure(
@@ -222,7 +217,34 @@ def load_bundle(
           ),
       )
 
-  module_path = bundle_dir / manifest.module_filename
+  # ``module_filename`` is already shape-validated by
+  # ``_parse_manifest_strict``; resolve the path inside
+  # ``bundle_dir`` and verify it stays directly inside the bundle
+  # — defense in depth against any future shape-check bypass.
+  bundle_resolved = bundle_dir.resolve()
+  module_path = (bundle_dir / manifest.module_filename).resolve()
+  try:
+    module_path.relative_to(bundle_resolved)
+  except ValueError:
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=(
+            f"module_filename {manifest.module_filename!r} resolved to "
+            f"{module_path!s} which is outside bundle_dir "
+            f"{bundle_resolved!s}; refusing to import"
+        ),
+    )
+  if module_path.parent != bundle_resolved:
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=(
+            f"module_filename {manifest.module_filename!r} must point "
+            f"directly into bundle_dir {bundle_resolved!s}; got "
+            f"{module_path!s}"
+        ),
+    )
   if not module_path.is_file():
     return LoadFailure(
         bundle_dir=bundle_dir,
@@ -345,7 +367,29 @@ def discover_bundles(
         ),
     )
 
-  for child in sorted(parent_dir.iterdir()):
+  # ``iterdir`` can raise ``PermissionError`` / ``OSError`` on
+  # filesystem races or restricted access. The loader's contract
+  # is "never raises through to the caller"; surface those as a
+  # structured discovery failure instead.
+  try:
+    children = sorted(parent_dir.iterdir())
+  except OSError as e:
+    return DiscoveryResult(
+        registry={},
+        loaded=(),
+        failures=(
+            LoadFailure(
+                bundle_dir=parent_dir,
+                code="manifest_missing",
+                detail=(
+                    f"could not iterate {parent_dir}: "
+                    f"{type(e).__name__}: {e}"
+                ),
+            ),
+        ),
+    )
+
+  for child in children:
     if not child.is_dir():
       continue
     result = load_bundle(
@@ -400,6 +444,220 @@ def discover_bundles(
 # ------------------------------------------------------------------ #
 
 
+def _parse_manifest_strict(
+    *,
+    manifest_path: pathlib.Path,
+    bundle_dir: pathlib.Path,
+) -> Union[Manifest, LoadFailure]:
+  """Strict manifest parser for the loader's trust boundary.
+
+  Bypasses :meth:`Manifest.from_json`, which is permissive on
+  field types (``tuple("xy")`` would silently accept ``"xy"`` as
+  ``event_types``, ``module_filename: 42`` would land in the
+  dataclass, etc.). This parser enforces the artifact contract
+  the runtime is about to act on:
+
+  * JSON object root, no extra/missing keys;
+  * ``fingerprint`` and version-string fields are non-empty
+    strings;
+  * ``event_types`` is a JSON array of distinct non-empty strings
+    (one or more);
+  * ``module_filename`` is a safe Python module filename
+    (``<identifier>.py``, no path components, not a Python
+    keyword) — refuses ``../escape.py``, ``/etc/x.py``,
+    ``foo.bar.py``, ``class.py``, etc.;
+  * ``function_name`` is a Python identifier (not a keyword) —
+    the runtime imports under this name and would crash on
+    arbitrary strings.
+
+  Returns the parsed :class:`Manifest` on success, or a
+  ``LoadFailure(code="manifest_unreadable")`` naming the offending
+  field. Never raises.
+  """
+  try:
+    text = manifest_path.read_text(encoding="utf-8")
+  except OSError as e:
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=f"could not read {manifest_path}: {type(e).__name__}: {e}",
+    )
+
+  try:
+    raw = json.loads(text)
+  except json.JSONDecodeError as e:
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=f"JSON parse error: {e}",
+    )
+
+  if not isinstance(raw, dict):
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=(
+            f"manifest payload must be a JSON object; got "
+            f"{type(raw).__name__}"
+        ),
+    )
+
+  allowed = {f.name for f in dataclasses.fields(Manifest)}
+  keys = set(raw)
+  if keys != allowed:
+    missing = sorted(allowed - keys)
+    extra = sorted(keys - allowed)
+    bits: list[str] = []
+    if missing:
+      bits.append(f"missing fields: {missing}")
+    if extra:
+      bits.append(f"unknown fields: {extra}")
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail="manifest schema mismatch — " + "; ".join(bits),
+    )
+
+  # String fields — non-empty.
+  string_fields = (
+      "fingerprint",
+      "compiler_package_version",
+      "template_version",
+      "transcript_builder_version",
+      "created_at",
+  )
+  for field in string_fields:
+    err = _check_nonempty_str(raw, field)
+    if err is not None:
+      return LoadFailure(
+          bundle_dir=bundle_dir, code="manifest_unreadable", detail=err
+      )
+
+  # event_types — JSON array of distinct non-empty strings.
+  err_or_tuple = _check_event_types(raw["event_types"])
+  if isinstance(err_or_tuple, str):
+    return LoadFailure(
+        bundle_dir=bundle_dir,
+        code="manifest_unreadable",
+        detail=err_or_tuple,
+    )
+  event_types = err_or_tuple
+
+  # module_filename — safe Python module filename.
+  err = _check_safe_module_filename(raw["module_filename"])
+  if err is not None:
+    return LoadFailure(
+        bundle_dir=bundle_dir, code="manifest_unreadable", detail=err
+    )
+
+  # function_name — Python identifier (not a keyword).
+  err = _check_python_identifier(raw["function_name"], "function_name")
+  if err is not None:
+    return LoadFailure(
+        bundle_dir=bundle_dir, code="manifest_unreadable", detail=err
+    )
+
+  return Manifest(
+      fingerprint=raw["fingerprint"],
+      event_types=event_types,
+      module_filename=raw["module_filename"],
+      function_name=raw["function_name"],
+      compiler_package_version=raw["compiler_package_version"],
+      template_version=raw["template_version"],
+      transcript_builder_version=raw["transcript_builder_version"],
+      created_at=raw["created_at"],
+  )
+
+
+def _check_nonempty_str(data: dict, field: str) -> Optional[str]:
+  value = data.get(field)
+  if not isinstance(value, str):
+    return (
+        f"manifest field {field!r} must be a string; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  if not value:
+    return f"manifest field {field!r} must be a non-empty string"
+  return None
+
+
+def _check_event_types(value: Any) -> Union[tuple[str, ...], str]:
+  """Return ``tuple[str, ...]`` on success, or a detail string on
+  failure. Catches the silent ``tuple('xy') == ('x', 'y')``
+  coercion the lenient parser would otherwise accept."""
+  if not isinstance(value, list):
+    return (
+        f"manifest field 'event_types' must be a JSON array of "
+        f"strings; got {type(value).__name__}={value!r}"
+    )
+  if not value:
+    return "manifest field 'event_types' must contain at least one entry"
+  seen: set[str] = set()
+  for index, item in enumerate(value):
+    if not isinstance(item, str):
+      return (
+          f"manifest field 'event_types'[{index}] must be a string; "
+          f"got {type(item).__name__}={item!r}"
+      )
+    if not item:
+      return f"manifest field 'event_types'[{index}] is the empty string"
+    if item in seen:
+      return (
+          f"manifest field 'event_types' contains duplicate entry " f"{item!r}"
+      )
+    seen.add(item)
+  return tuple(value)
+
+
+def _check_safe_module_filename(value: Any) -> Optional[str]:
+  """Reject module_filename values the runtime can't safely
+  import. Required shape: ``<identifier>.py``, no path
+  components, not a Python keyword. Catches ``../escape.py``,
+  ``/etc/passwd.py``, ``foo.bar.py``, ``class.py``,
+  ``module_filename: 42``, etc."""
+  if not isinstance(value, str):
+    return (
+        f"manifest field 'module_filename' must be a string; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  if not value:
+    return "manifest field 'module_filename' must be a non-empty string"
+  # No path separators in either flavor — the loader joins this
+  # to bundle_dir and refuses anything that escapes.
+  if "/" in value or "\\" in value:
+    return (
+        f"manifest field 'module_filename' must not contain path "
+        f"separators; got {value!r}"
+    )
+  if not value.endswith(".py"):
+    return (
+        f"manifest field 'module_filename' must end with '.py'; "
+        f"got {value!r}"
+    )
+  stem = value[:-3]
+  if not stem.isidentifier() or keyword.iskeyword(stem):
+    return (
+        f"manifest field 'module_filename' must be "
+        f"<identifier>.py (letters/digits/underscore stem, not a "
+        f"Python keyword); got {value!r}"
+    )
+  return None
+
+
+def _check_python_identifier(value: Any, field: str) -> Optional[str]:
+  if not isinstance(value, str):
+    return (
+        f"manifest field {field!r} must be a string; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  if not value.isidentifier() or keyword.iskeyword(value):
+    return (
+        f"manifest field {field!r} must be a Python identifier "
+        f"(not a keyword); got {value!r}"
+    )
+  return None
+
+
 def _import_module_from_path(
     module_path: pathlib.Path,
     *,
@@ -411,6 +669,14 @@ def _import_module_from_path(
   Each call uses a ``module_stem + uuid`` name so reloading the
   same bundle (e.g., across two ``load_bundle`` calls in the
   same process) doesn't recycle a stale ``sys.modules`` entry.
+
+  Pops the entry from ``sys.modules`` whether the import succeeds
+  or fails. Successful loads return a module object; the
+  callable the loader extracts via ``getattr`` retains a
+  reference to the module's globals, so the runtime keeps
+  working without leaving the entry behind for ``sys.modules`` to
+  grow without bound. Failed loads pop a partial-state module so
+  it can't be picked up by a later import.
   """
   unique_name = f"{module_stem}__loaded_{uuid.uuid4().hex[:12]}"
   spec = importlib.util.spec_from_file_location(unique_name, module_path)
@@ -420,13 +686,9 @@ def _import_module_from_path(
   sys.modules[unique_name] = module
   try:
     spec.loader.exec_module(module)
-  except BaseException:
-    # If exec_module raised, the partial module object in
-    # sys.modules is unsafe for any future import. Remove it so
-    # the failure is fully contained.
+    return module
+  finally:
     sys.modules.pop(unique_name, None)
-    raise
-  return module
 
 
 def _signature_compatible(extractor: Callable[..., Any]) -> Optional[str]:

@@ -57,11 +57,11 @@ Callers can switch on `failure.code`:
 
 | Code | When |
 |---|---|
-| `manifest_missing` | `bundle_dir/manifest.json` doesn't exist (or, for `discover_bundles` on a non-existent parent, the parent is missing) |
-| `manifest_unreadable` | JSON parse error or `Manifest.from_json` rejected the payload |
+| `manifest_missing` | `bundle_dir/manifest.json` doesn't exist (or, for `discover_bundles` on a non-existent / unreadable parent, the parent itself is unavailable — a `PermissionError` from `iterdir()` lands here too rather than propagating) |
+| `manifest_unreadable` | JSON parse error, schema mismatch (unknown / missing fields), or any field whose type / shape doesn't satisfy the manifest contract. The strict parse rejects: `event_types: "xy"` (would silently become `("x", "y")` under lenient parsing); `event_types` empty / containing duplicates / non-string items; `module_filename` that's not `<identifier>.py` (rejects `../escape.py`, `/etc/passwd.py`, `foo.bar.py`, `class.py`, non-string values); `function_name` that isn't a Python identifier or is a keyword. The loader's strict parser is what makes the trust boundary load-bearing — a permissive parse would let nonsense register at runtime. |
 | `fingerprint_mismatch` | manifest fingerprint != caller's `expected_fingerprint` |
 | `event_types_mismatch` | `expected_event_types` (when set) isn't a subset of the manifest's `event_types` |
-| `module_not_found` | the module file referenced by the manifest is absent on disk |
+| `module_not_found` | the module file referenced by the manifest is absent on disk (only reachable for shape-valid manifests; the strict parse already rejects path-traversal-shaped names) |
 | `import_failed` | importing the module raised — covers `Exception` *and* `BaseException` (e.g., `SystemExit`), so a malicious or buggy bundle can't tear down the loading process |
 | `function_not_found` | manifest's `function_name` isn't defined as a callable in the imported module |
 | `function_signature_mismatch` | the imported callable can't be called as `f(event, spec)` (best-effort introspection via `inspect.signature` + `sig.bind(None, None)`) |
@@ -72,15 +72,18 @@ Callers can switch on `failure.code`:
 Each gate short-circuits — the first failure wins:
 
 1. `manifest.json` exists.
-2. `manifest.json` parses + has the right shape.
+2. `manifest.json` parses with **strict shape validation** (no unknown / missing fields, every field is the declared type, `event_types` is a non-empty list of distinct non-empty strings, `module_filename` is `<identifier>.py` with no path components, `function_name` is a Python identifier).
 3. Manifest fingerprint equals `expected_fingerprint`.
 4. `expected_event_types` (when set) is a subset of `manifest.event_types`.
-5. The module file referenced by the manifest exists on disk.
-6. Importing the module succeeds (no exception).
-7. The manifest's `function_name` is defined as a callable in the imported module.
-8. The imported callable accepts `(event, spec)`.
+5. Resolved module path is directly inside `bundle_dir` (defense in depth — the shape check at step 2 already catches path traversal; this catches anything the shape check misses, including symlink shenanigans).
+6. The module file exists on disk.
+7. Importing the module succeeds (no exception). `import_failed` catches both `Exception` and `BaseException` so a bundle that calls `sys.exit` at import time can't tear down the loading process.
+8. The manifest's `function_name` is defined as a callable in the imported module.
+9. The imported callable accepts `(event, spec)`.
 
-The fingerprint check runs **before** module import, so an attacker can't side-effect via a broken module if their fingerprint doesn't match. A regression test (`test_fingerprint_check_runs_before_module_load`) pins this ordering.
+After a successful load, the imported module is **popped from `sys.modules`** — the captured callable retains a reference to the module's globals, so the runtime keeps working without leaking a `<stem>__loaded_<uuid>` entry per call. Repeated `load_bundle` calls don't grow `sys.modules`.
+
+The fingerprint check runs **before** module import, so an attacker can't side-effect via a broken module if their fingerprint doesn't match. A regression test (`test_fingerprint_check_runs_before_module_load`) pins this ordering. Path-traversal attempts are rejected at step 2 (manifest shape) or step 5 (resolved-path containment) — *before* any import attempt — so `module_filename: "../escape.py"` cannot import a sibling file outside the bundle.
 
 ## Multi-event bundle semantics
 

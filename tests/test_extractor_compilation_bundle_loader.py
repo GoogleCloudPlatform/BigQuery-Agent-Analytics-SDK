@@ -809,3 +809,253 @@ class TestBundleLoaderEndToEnd:
     assert "bka_decision" in discovered.registry
     assert len(discovered.loaded) == 1
     assert discovered.failures == ()
+
+
+# ------------------------------------------------------------------ #
+# Strict manifest validation (review P1 #1)                           #
+# ------------------------------------------------------------------ #
+#
+# The lenient ``Manifest.from_json`` would silently accept
+# malformed shapes (``tuple("xy") == ("x", "y")``,
+# ``module_filename: 42`` lands in the dataclass without raising,
+# etc.). The loader's trust boundary now does its own strict
+# parse — every test below feeds a deliberately-broken manifest
+# JSON straight to disk and asserts the loader rejects with
+# ``manifest_unreadable`` instead of raising or loading nonsense.
+
+
+def _write_raw_manifest(bundle_dir: pathlib.Path, payload: dict) -> None:
+  """Like ``_write_manifest`` but takes the full dict verbatim
+  (no defaults, no field overrides). Used to write deliberately-
+  malformed manifests."""
+  bundle_dir.mkdir(parents=True, exist_ok=True)
+  (bundle_dir / "manifest.json").write_text(
+      json.dumps(payload), encoding="utf-8"
+  )
+
+
+def _baseline_manifest_dict() -> dict:
+  return {
+      "fingerprint": _VALID_FINGERPRINT,
+      "event_types": ["bka_decision"],
+      "module_filename": "extractor.py",
+      "function_name": "extract_bka",
+      "compiler_package_version": "0.0.0",
+      "template_version": "v0.1",
+      "transcript_builder_version": "tb-1",
+      "created_at": "2026-05-08T00:00:00Z",
+  }
+
+
+@pytest.mark.parametrize(
+    "label,mutate",
+    [
+        (
+            "event_types as string coerces to chars",
+            lambda d: d.update({"event_types": "xy"}),
+        ),
+        ("event_types empty list", lambda d: d.update({"event_types": []})),
+        (
+            "event_types with empty string item",
+            lambda d: d.update({"event_types": ["a", ""]}),
+        ),
+        (
+            "event_types with non-string item",
+            lambda d: d.update({"event_types": [1, 2]}),
+        ),
+        (
+            "event_types with duplicate items",
+            lambda d: d.update({"event_types": ["a", "a"]}),
+        ),
+        ("module_filename as int", lambda d: d.update({"module_filename": 42})),
+        (
+            "module_filename without .py",
+            lambda d: d.update({"module_filename": "extractor"}),
+        ),
+        (
+            "module_filename with double dot",
+            lambda d: d.update({"module_filename": "foo.bar.py"}),
+        ),
+        (
+            "module_filename Python keyword",
+            lambda d: d.update({"module_filename": "class.py"}),
+        ),
+        ("module_filename empty", lambda d: d.update({"module_filename": ""})),
+        ("function_name as int", lambda d: d.update({"function_name": 42})),
+        (
+            "function_name with dash",
+            lambda d: d.update({"function_name": "not-an-identifier"}),
+        ),
+        (
+            "function_name Python keyword",
+            lambda d: d.update({"function_name": "class"}),
+        ),
+        ("function_name empty", lambda d: d.update({"function_name": ""})),
+        ("fingerprint as int", lambda d: d.update({"fingerprint": 12345})),
+        ("fingerprint empty string", lambda d: d.update({"fingerprint": ""})),
+        (
+            "unknown extra field",
+            lambda d: d.update({"surprising_extra_field": "value"}),
+        ),
+        ("missing required field", lambda d: d.pop("created_at")),
+    ],
+)
+def test_malformed_manifest_rejected_with_manifest_unreadable(
+    tmp_path: pathlib.Path, label: str, mutate
+):
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadFailure
+
+  payload = _baseline_manifest_dict()
+  mutate(payload)
+  _write_raw_manifest(tmp_path, payload)
+  _write_module(tmp_path, source=_MINIMAL_VALID_SOURCE)
+
+  result = load_bundle(
+      tmp_path,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  assert isinstance(
+      result, LoadFailure
+  ), f"[{label}] expected LoadFailure, got {result!r}"
+  assert (
+      result.code == "manifest_unreadable"
+  ), f"[{label}] expected manifest_unreadable, got {result.code}"
+
+
+def test_malformed_manifest_root_array_rejected(tmp_path: pathlib.Path):
+  """A JSON document whose root is an array (not an object) must
+  surface as ``manifest_unreadable`` — not raise."""
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadFailure
+
+  tmp_path.mkdir(exist_ok=True)
+  (tmp_path / "manifest.json").write_text(
+      json.dumps([1, 2, 3]), encoding="utf-8"
+  )
+
+  result = load_bundle(
+      tmp_path,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  assert isinstance(result, LoadFailure)
+  assert result.code == "manifest_unreadable"
+
+
+# ------------------------------------------------------------------ #
+# Path-traversal defense (review P1 #2)                               #
+# ------------------------------------------------------------------ #
+
+
+def test_module_filename_path_traversal_rejected(tmp_path: pathlib.Path):
+  """A manifest claiming ``module_filename = '../escape.py'`` must
+  not succeed in importing a sibling file outside the bundle.
+  This is the security boundary the trust boundary is for."""
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadFailure
+
+  bundle_dir = tmp_path / "bundle"
+  bundle_dir.mkdir()
+  outside = tmp_path / "escape.py"
+  outside.write_text(
+      "raise RuntimeError('outside-bundle module should not import')\n",
+      encoding="utf-8",
+  )
+  _write_raw_manifest(
+      bundle_dir,
+      {**_baseline_manifest_dict(), "module_filename": "../escape.py"},
+  )
+
+  result = load_bundle(
+      bundle_dir,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  # Must reject at the manifest-parse step, *before* any import
+  # attempt. The outside module's RuntimeError must NOT have run.
+  assert isinstance(result, LoadFailure)
+  assert result.code == "manifest_unreadable"
+
+
+def test_module_filename_absolute_path_rejected(tmp_path: pathlib.Path):
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadFailure
+
+  _write_raw_manifest(
+      tmp_path,
+      {**_baseline_manifest_dict(), "module_filename": "/etc/passwd.py"},
+  )
+
+  result = load_bundle(
+      tmp_path,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  assert isinstance(result, LoadFailure)
+  assert result.code == "manifest_unreadable"
+
+
+# ------------------------------------------------------------------ #
+# sys.modules leak (review P2)                                        #
+# ------------------------------------------------------------------ #
+
+
+def test_repeated_load_does_not_leak_sys_modules(tmp_path: pathlib.Path):
+  """Each successful load used to leave a ``<stem>__loaded_<uuid>``
+  entry in ``sys.modules``. Runtime discovery can run repeatedly,
+  so that's process-global growth. The loader now pops the entry
+  once the callable has been captured."""
+  import sys
+
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadedBundle
+
+  _write_manifest(tmp_path)
+  _write_module(tmp_path, source=_MINIMAL_VALID_SOURCE)
+
+  before = sum(1 for name in sys.modules if "__loaded_" in name)
+  for _ in range(5):
+    result = load_bundle(
+        tmp_path,
+        expected_fingerprint=_VALID_FINGERPRINT,
+    )
+    assert isinstance(result, LoadedBundle)
+    # The captured callable must remain valid even after
+    # sys.modules cleanup — invoking it has to work.
+    assert result.extractor({"event_type": "bka_decision"}, None) is None
+  after = sum(1 for name in sys.modules if "__loaded_" in name)
+
+  assert after == before, (
+      f"sys.modules grew by {after - before} __loaded_ entries "
+      f"across 5 load_bundle calls"
+  )
+
+
+# ------------------------------------------------------------------ #
+# discover_bundles iterdir failure (review P3)                        #
+# ------------------------------------------------------------------ #
+
+
+def test_discover_bundles_handles_iterdir_oserror(
+    monkeypatch, tmp_path: pathlib.Path
+):
+  """``parent_dir.iterdir()`` can raise ``PermissionError`` /
+  ``OSError`` on filesystem races or restricted access. The
+  module's contract is "never raises through to the caller";
+  monkeypatch ``Path.iterdir`` to surface that path."""
+  from bigquery_agent_analytics.extractor_compilation import discover_bundles
+
+  def boom(self):
+    raise PermissionError("EACCES (simulated)")
+
+  monkeypatch.setattr(pathlib.Path, "iterdir", boom)
+
+  result = discover_bundles(
+      tmp_path,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  assert result.registry == {}
+  assert result.loaded == ()
+  assert len(result.failures) == 1
+  failure = result.failures[0]
+  assert failure.code == "manifest_missing"
+  assert "PermissionError" in failure.detail
+  assert "EACCES" in failure.detail
