@@ -603,8 +603,13 @@ try:
   from .extractor_compilation import CompileResult
   from .extractor_compilation import CompileSource
   from .extractor_compilation import compute_fingerprint
+  from .extractor_compilation import discover_bundles
+  from .extractor_compilation import DiscoveryResult
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import LLMClient
+  from .extractor_compilation import load_bundle
+  from .extractor_compilation import LoadedBundle
+  from .extractor_compilation import LoadFailure
   from .extractor_compilation import Manifest
   from .extractor_compilation import measure_compile
   from .extractor_compilation import parse_resolved_extractor_plan_json
@@ -627,7 +632,10 @@ try:
           "CompileMeasurement",
           "CompileResult",
           "CompileSource",
+          "DiscoveryResult",
           "FieldMapping",
+          "LoadFailure",
+          "LoadedBundle",
           "LLMClient",
           "Manifest",
           "PlanParseError",
@@ -647,6 +655,8 @@ try:
           "compile_extractor",
           "compile_with_llm",
           "compute_fingerprint",
+          "discover_bundles",
+          "load_bundle",
           "measure_compile",
           "parse_resolved_extractor_plan_json",
           "render_extractor_source",

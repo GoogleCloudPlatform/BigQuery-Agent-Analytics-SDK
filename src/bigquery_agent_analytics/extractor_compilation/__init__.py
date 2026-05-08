@@ -42,6 +42,11 @@ from __future__ import annotations
 from .ast_validator import AstFailure
 from .ast_validator import AstReport
 from .ast_validator import validate_source
+from .bundle_loader import discover_bundles
+from .bundle_loader import DiscoveryResult
+from .bundle_loader import load_bundle
+from .bundle_loader import LoadedBundle
+from .bundle_loader import LoadFailure
 from .compiler import compile_extractor
 from .compiler import CompileResult
 from .compiler import default_bundle_dir
@@ -84,6 +89,9 @@ __all__ = [
     "CompileResult",
     "CompileSource",
     "DETERMINISTIC_FAKE_MODEL",
+    "DiscoveryResult",
+    "LoadFailure",
+    "LoadedBundle",
     "FieldMapping",
     "LLMClient",
     "Manifest",
@@ -104,8 +112,10 @@ __all__ = [
     "compile_extractor",
     "compile_with_llm",
     "compute_fingerprint",
-    "measure_compile",
     "default_bundle_dir",
+    "discover_bundles",
+    "load_bundle",
+    "measure_compile",
     "load_callable_from_source",
     "now_iso_utc",
     "parse_resolved_extractor_plan_json",
