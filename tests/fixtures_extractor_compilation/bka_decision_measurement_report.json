@@ -1,7 +1,7 @@
 {
   "attempt_failures": [],
-  "bundle_fingerprint": "9e2b530041188fc31f7e2fe96e809d1e54f51a3ab528950ae88fa0dc6aa06ade",
-  "captured_at": "2026-05-06T00:00:00Z",
+  "bundle_fingerprint": "c2e26a8eaf37398b1b9fcc4b6be657f7166f943137341c25525e92224c811c46",
+  "captured_at": "2026-05-07T00:00:00Z",
   "model_name": "deterministic-fake",
   "n_attempts": 1,
   "n_events": 2,

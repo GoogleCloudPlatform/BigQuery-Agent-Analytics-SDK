@@ -581,6 +581,132 @@ class TestCompileMeasurementFromJsonStrictTypes:
     decoded = CompileMeasurement.from_json(json.dumps(payload))
     assert decoded.bundle_fingerprint is None
 
+  def test_unknown_field_rejected(self):
+    """A stale or accidental extra field has to fail loudly —
+    otherwise the artifact accumulates dead keys that don't
+    surface in code review and the schema lock isn't a lock."""
+    payload = self._valid_payload_dict()
+    payload["accidental_field"] = "drift"
+    with pytest.raises(
+        TypeError, match=r"unknown fields: \['accidental_field'\]"
+    ):
+      self._from_json(payload)
+
+  def test_missing_field_rejected(self):
+    """A renamed-or-dropped field has to fail loudly. Without
+    this check, ``data.get(field)`` would silently treat a
+    missing ``bundle_fingerprint`` as ``None`` (a valid
+    ``Optional[str]`` value) — the schema would drift without
+    review noticing."""
+    payload = self._valid_payload_dict()
+    del payload["bundle_fingerprint"]
+    with pytest.raises(
+        TypeError, match=r"missing fields: \['bundle_fingerprint'\]"
+    ):
+      self._from_json(payload)
+
+  def test_both_missing_and_unknown_reported_together(self):
+    """When the artifact has both shapes of drift, the error
+    message should name both so a single fix-it round suffices."""
+    payload = self._valid_payload_dict()
+    payload["accidental_field"] = "drift"
+    del payload["captured_at"]
+    with pytest.raises(TypeError) as excinfo:
+      self._from_json(payload)
+    msg = str(excinfo.value)
+    assert "missing fields: ['captured_at']" in msg
+    assert "unknown fields: ['accidental_field']" in msg
+
+
+# ------------------------------------------------------------------ #
+# Fingerprint coverage of extractor's emitted fields                  #
+# ------------------------------------------------------------------ #
+
+
+class TestBkaFingerprintInputsCoverage:
+  """``BKA_FINGERPRINT_INPUTS`` is the basis for the bundle
+  fingerprint that C2 will use as "this bundle matches these
+  active inputs." If a real compile-input change for a field the
+  extractor emits (e.g., the ``alternatives_considered`` carry-
+  over property) doesn't move the fingerprint, the contract
+  fails silently. These tests pin the coverage."""
+
+  def _baseline_fingerprint(self) -> str:
+    import copy
+
+    from bigquery_agent_analytics.extractor_compilation import compute_fingerprint
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
+
+    return compute_fingerprint(
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        **copy.deepcopy(BKA_FINGERPRINT_INPUTS),
+    )
+
+  def test_changing_event_schema_changes_fingerprint(self):
+    """Removing ``alternatives_considered`` from the event_schema
+    must produce a different fingerprint. Otherwise a real
+    compile-input change for an extractor-relevant field doesn't
+    move the bundle's hash."""
+    import copy
+
+    from bigquery_agent_analytics.extractor_compilation import compute_fingerprint
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
+
+    altered = copy.deepcopy(BKA_FINGERPRINT_INPUTS)
+    del altered["event_schema"]["bka_decision"]["content"][
+        "alternatives_considered"
+    ]
+    altered_fp = compute_fingerprint(
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        **altered,
+    )
+    assert altered_fp != self._baseline_fingerprint()
+
+  def test_changing_extraction_rules_changes_fingerprint(self):
+    """Removing ``alternatives_considered`` from
+    ``extraction_rules.bka_decision.property_fields`` must also
+    move the fingerprint — the rule itself is what tells the
+    compile pipeline which fields to emit."""
+    import copy
+
+    from bigquery_agent_analytics.extractor_compilation import compute_fingerprint
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
+
+    altered = copy.deepcopy(BKA_FINGERPRINT_INPUTS)
+    altered["extraction_rules"]["bka_decision"]["property_fields"] = [
+        f
+        for f in altered["extraction_rules"]["bka_decision"]["property_fields"]
+        if f["name"] != "alternatives_considered"
+    ]
+    altered_fp = compute_fingerprint(
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        **altered,
+    )
+    assert altered_fp != self._baseline_fingerprint()
+
+  def test_changing_span_handling_changes_fingerprint(self):
+    """``span_handling.partial_when_path`` is the rule that picks
+    the partial-vs-full branch in the rendered extractor; moving
+    that path must move the fingerprint."""
+    import copy
+
+    from bigquery_agent_analytics.extractor_compilation import compute_fingerprint
+    from tests.fixtures_extractor_compilation.bka_decision_inputs import BKA_FINGERPRINT_INPUTS
+
+    altered = copy.deepcopy(BKA_FINGERPRINT_INPUTS)
+    altered["extraction_rules"]["bka_decision"]["span_handling"][
+        "partial_when_path"
+    ] = ["content", "different_field"]
+    altered_fp = compute_fingerprint(
+        template_version="v0.1",
+        compiler_package_version="0.0.0",
+        **altered,
+    )
+    assert altered_fp != self._baseline_fingerprint()
+
 
 # ------------------------------------------------------------------ #
 # Audit fields                                                        #

@@ -223,6 +223,7 @@ BKA_FINGERPRINT_INPUTS: dict = {
                 "decision_id": "string",
                 "outcome": "string",
                 "confidence": "double",
+                "alternatives_considered": "array<string>",
                 "reasoning_text": "string",
             }
         }
@@ -234,14 +235,47 @@ BKA_FINGERPRINT_INPUTS: dict = {
         "bka_decision": {
             "entity": "mako_DecisionPoint",
             "key_field": "decision_id",
+            "key_field_path": ["content", "decision_id"],
+            "property_fields": [
+                {"name": "outcome", "source_path": ["content", "outcome"]},
+                {
+                    "name": "confidence",
+                    "source_path": ["content", "confidence"],
+                },
+                {
+                    "name": "alternatives_considered",
+                    "source_path": ["content", "alternatives_considered"],
+                },
+            ],
+            "span_handling": {
+                "span_id_path": ["span_id"],
+                "partial_when_path": ["content", "reasoning_text"],
+            },
+            "session_id_path": ["session_id"],
         }
     },
 }
 """Inputs hashed into the compile bundle fingerprint. Distinct
 from :data:`BKA_EVENT_SCHEMA` (which is the typed payload
 structure the resolver prompt sees): this dict is the stable
-*bundle* identifier, and its shape mirrors what PR 4b.1's
-compile tests use. Both the deterministic and live paths feed
-this constant into ``compile_extractor.fingerprint_inputs`` so
-the resulting ``bundle_fingerprint`` is byte-identical across
-paths."""
+*bundle* identifier, and both deterministic and live paths feed
+it into ``compile_extractor.fingerprint_inputs`` so the resulting
+``bundle_fingerprint`` is byte-identical across paths.
+
+The shape covers **every field the extractor emits**:
+
+* ``event_schema.bka_decision.content`` lists every payload key
+  the resolver might map (including
+  ``alternatives_considered``, which is in the carry-over
+  property loop).
+* ``extraction_rules.bka_decision`` mirrors the resolved plan's
+  full structure: key field path, property-field source paths,
+  span-handling rules, session_id path.
+
+This is what makes ``bundle_fingerprint`` C2's "fingerprint
+matches active inputs" contract — adding, removing, or
+re-pathing any extractor-relevant field changes the hash. PR
+4b.1's local ``_fingerprint_inputs`` helper used a narrower
+shape (``entity`` + ``key_field`` only); this fixture is
+deliberately fuller so 4c's measurement artifact's fingerprint
+moves whenever a real compile input changes."""

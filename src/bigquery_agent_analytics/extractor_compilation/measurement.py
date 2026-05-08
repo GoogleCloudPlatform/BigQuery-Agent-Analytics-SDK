@@ -136,7 +136,15 @@ class CompileMeasurement:
     """Inverse of :meth:`to_json`. Round-trip is byte-stable for
     the same input.
 
-    Type-strict: every field is checked against its declared
+    The artifact contract is **exact-keys**: the JSON object's
+    top-level keys must equal the dataclass's field set.
+    Unknown fields (a stale or accidental extra key) fail with a
+    :class:`TypeError` listing the unknown names; missing fields
+    fail with a :class:`TypeError` listing the missing names.
+    A schema-lock that silently ignored unknown keys would let
+    the artifact accumulate dead fields review couldn't see.
+
+    Type-strict: every field is also checked against its declared
     Python type. ``bool``, ``int``, ``str``, ``list``, and
     ``None`` are accepted only when the JSON literal matches —
     no constructor-style coercion (``bool("false") == True`` /
@@ -151,6 +159,19 @@ class CompileMeasurement:
       raise TypeError(
           f"CompileMeasurement payload must be a JSON object; got "
           f"{type(data).__name__}"
+      )
+    allowed = {f.name for f in dataclasses.fields(cls)}
+    keys = set(data)
+    if keys != allowed:
+      missing = sorted(allowed - keys)
+      extra = sorted(keys - allowed)
+      parts: list[str] = []
+      if missing:
+        parts.append(f"missing fields: {missing}")
+      if extra:
+        parts.append(f"unknown fields: {extra}")
+      raise TypeError(
+          "CompileMeasurement payload schema mismatch — " + "; ".join(parts)
       )
     return cls(
         ok=_require_bool(data, "ok"),
