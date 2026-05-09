@@ -61,7 +61,11 @@ bundles_without_fallback    : tuple[str, ...]                  # compiled-only e
 fallbacks_without_bundle    : tuple[str, ...]                  # fallback-only event_types (registered unchanged)
 ```
 
-`bundles_without_fallback` and `fallbacks_without_bundle` are sorted tuples for deterministic audit output. The two together let rollout telemetry compute coverage percentages: `len(fallbacks_without_bundle)` is "no compiled coverage yet"; `len(bundles_without_fallback)` is "compiled coverage skipped due to missing fallback" (a configuration-error signal, not a coverage signal).
+`bundles_without_fallback` and `fallbacks_without_bundle` are sorted tuples for deterministic audit output.
+
+`bundles_without_fallback` is the strict signal: a compiled bundle was successfully discovered but had no matching fallback, so it was skipped. Always a configuration-error signal, never a coverage signal.
+
+`fallbacks_without_bundle` is the wider signal: there's no *usable* compiled registry entry for the event_type. That includes "no bundle was ever built" *and* "a bundle exists but discovery rejected it" — fingerprint mismatch, `manifest_unreadable`, event-type collision, etc. — with the underlying reason in `discovery.failures`. Rollout telemetry that wants to distinguish "bundle never built" from "bundle rejected" should cross-reference `discovery.failures` for the failure code rather than treat `fallbacks_without_bundle` as a pure "no coverage yet" count.
 
 ## Allowlist semantics
 

@@ -120,10 +120,17 @@ class WrappedRegistry:
     surfaces configuration gaps so they don't fail silently.
   * ``fallbacks_without_bundle`` — event_types for which a
     fallback was registered (and matched the allowlist) but no
-    compiled bundle was discovered. The fallback IS registered
-    unchanged. This is the "no compiled coverage yet" shape —
-    distinct from "compiled coverage exists but skipped" above
-    so rollout telemetry can compute coverage percentages.
+    *usable* compiled registry entry was produced by discovery.
+    The fallback IS registered unchanged. The "no usable
+    entry" set is wider than "no bundle on disk": a bundle
+    can exist but be excluded by fingerprint mismatch,
+    ``manifest_unreadable``, or event-type collision — those
+    cases all surface here too, with the underlying reason in
+    ``discovery.failures``. Rollout telemetry that wants to
+    distinguish "bundle never built" from "bundle exists but
+    rejected" should cross-reference ``discovery.failures``
+    rather than treat ``fallbacks_without_bundle`` as a pure
+    "no coverage yet" signal.
 
   Sorted tuples for deterministic audit output.
   """
