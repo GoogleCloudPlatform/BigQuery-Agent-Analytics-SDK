@@ -54,6 +54,7 @@ from caller_agent.agent import DATASET_LOCATION
 from caller_agent.agent import PROJECT_ID
 from campaigns import CAMPAIGN_BRIEFS
 from google.adk.runners import InMemoryRunner
+from google.api_core import exceptions as gax_exceptions
 from google.cloud import bigquery
 from google.genai.types import Content
 from google.genai.types import Part
@@ -252,7 +253,10 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   print("Running acceptance gates...")
 
   # G1: caller has ≥1 A2A_INTERACTION per campaign session. Caller
-  # plugin already flushed before this point so a single read is fine.
+  # plugin already flushed before this point so a single read is
+  # fine. Catch NotFound — if the caller table is missing the plugin
+  # never wrote anything and we want a clean diagnostic, not a raw
+  # BigQuery exception.
   q_g1 = f"""
     SELECT
       session_id,
@@ -261,7 +265,17 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
     WHERE session_id IN UNNEST(@sessions)
     GROUP BY session_id
   """
-  rows = list(client.query(q_g1, job_config=job_config).result())
+  try:
+    rows = list(client.query(q_g1, job_config=job_config).result())
+  except gax_exceptions.NotFound:
+    print(
+        f"  G1 FAIL: caller agent_events table `{caller_table}` not "
+        "found after caller flush. Verify the caller BQ AA Plugin "
+        "wrote successfully (check run_caller_agent.py logs for "
+        "flush() / shutdown() warnings).",
+        file=sys.stderr,
+    )
+    return 1
   missing = [r["session_id"] for r in rows if int(r["a2a_calls"]) == 0]
   no_row = set(caller_sessions) - {r["session_id"] for r in rows}
   if missing or no_row:
@@ -275,10 +289,16 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
 
   # G2: receiver dataset has ≥1 row. Receiver plugin runs in the
   # other process and flushes asynchronously w.r.t. the caller's HTTP
-  # round-trips, so we poll.
+  # round-trips, so we poll. Treat NotFound as 0 — on a fresh dataset
+  # the receiver table doesn't exist until the plugin's first write
+  # creates it, and we want the poll loop to time out cleanly with
+  # the intended diagnostic instead of stack-tracing.
   def _g2_check():
     q = f"SELECT COUNT(*) AS n FROM `{receiver_table}`"
-    return int(list(client.query(q).result())[0]["n"])
+    try:
+      return int(list(client.query(q).result())[0]["n"])
+    except gax_exceptions.NotFound:
+      return 0
 
   receiver_rows = _poll_until(
       "G2 receiver row poll",
@@ -319,7 +339,10 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   """
 
   def _g3_check():
-    rows = list(client.query(q_g3, job_config=job_config).result())
+    try:
+      rows = list(client.query(q_g3, job_config=job_config).result())
+    except gax_exceptions.NotFound:
+      return 0
     return int(rows[0]["matched"]) if rows else 0
 
   matched = _poll_until(

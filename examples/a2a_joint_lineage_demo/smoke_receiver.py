@@ -14,23 +14,29 @@
 
 """Smoke-test the receiver A2A server end-to-end.
 
-Sends one minimal audience-risk-review request to ``RECEIVER_A2A_URL``
-via the A2A client, waits for the response, then polls
-``<RECEIVER_DATASET_ID>.<RECEIVER_TABLE_ID>`` until at least one row
-is visible.
+Captures the receiver row count before the request, sends one
+minimal audience-risk-review request to ``RECEIVER_A2A_URL`` via the
+A2A client, waits for the response, then polls
+``<RECEIVER_DATASET_ID>.<RECEIVER_TABLE_ID>`` until the count
+strictly exceeds the before-count.
 
-The poll matters: ``BigQueryAgentAnalyticsPlugin._log_event`` queues
-spans into an async writer. ``batch_size=1`` triggers a flush per
-event but the BigQuery write is still asynchronous w.r.t. the HTTP
-response, so a naive single-shot count after the response races and
-sometimes returns zero. We retry with backoff so the gate has a real
-chance to observe the row.
+The strict-greater check matters: a previous demo run may have left
+rows in the receiver table, and a plain "count > 0" check would
+silently pass even if the *current* receiver server is running
+without the plugin. The smoke gate's purpose is to confirm the
+*current* request landed, not that the table was ever written to.
 
-If the gate still returns zero after the polling window, the most
-likely cause is that ``run_receiver_server.py`` is using
-``to_a2a()``'s default plugin-free runner instead of the
-explicit-runner path; the receiver agent processes the request but
-the plugin is silent.
+The poll itself matters because
+``BigQueryAgentAnalyticsPlugin._log_event`` queues spans into an
+async writer; ``batch_size=1`` triggers a flush per event but the
+BigQuery write is still asynchronous w.r.t. the HTTP response. We
+retry with backoff so the gate has a real chance to observe the
+new row.
+
+If the gate fails after the polling window, the most likely cause
+is that ``run_receiver_server.py`` is using ``to_a2a()``'s default
+plugin-free runner instead of the explicit-runner path; the
+receiver agent processes the request but the plugin is silent.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ import time
 import uuid
 
 from dotenv import load_dotenv
+from google.api_core import exceptions as gax_exceptions
 import google.auth
 from google.cloud import bigquery
 import httpx
@@ -110,42 +117,72 @@ async def _send_request() -> tuple[int, dict | None]:
 
 
 def _count_receiver_rows(bq_client: bigquery.Client) -> int:
+  """Return current receiver row count.
+
+  Treats a NotFound (table doesn't exist yet) as zero rows so the
+  poll loop can still time out cleanly with the intended diagnostic
+  instead of stack-tracing on a clean dataset.
+  """
   query = (
       f"SELECT COUNT(*) AS receiver_rows FROM "
       f"`{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`"
   )
-  rows = list(bq_client.query(query).result())
+  try:
+    rows = list(bq_client.query(query).result())
+  except gax_exceptions.NotFound:
+    return 0
   return int(rows[0]["receiver_rows"]) if rows else 0
 
 
-def _poll_for_receiver_rows(
+def _poll_for_new_receiver_rows(
     bq_client: bigquery.Client,
+    before_count: int,
     timeout_s: float,
     interval_s: float,
 ) -> int:
-  """Poll receiver row count until nonzero or timeout. Returns final count."""
+  """Poll until receiver row count strictly exceeds ``before_count``.
+
+  Returns the final observed count. The strict-greater check protects
+  against a stale-rows pass: a previous demo run may have left rows
+  in the receiver table, and a plain ``count > 0`` check would
+  silently pass even if the *current* receiver server is running
+  without the BQ AA Plugin attached. The smoke gate's purpose is to
+  confirm the *current* request landed, not that the table was ever
+  written to.
+  """
   deadline = time.monotonic() + timeout_s
-  count = 0
+  count = before_count
   attempt = 0
   while time.monotonic() < deadline:
     attempt += 1
     count = _count_receiver_rows(bq_client)
-    if count > 0:
+    if count > before_count:
       print(
           f"  Receiver agent_events rows: {count} "
-          f"(observed after {attempt} poll(s))"
+          f"(was {before_count} before the smoke request; observed "
+          f"after {attempt} poll(s))"
       )
       return count
     time.sleep(interval_s)
   print(
-      f"  Receiver agent_events rows: {count} (after {timeout_s:.0f}s "
-      f"poll, {attempt} attempt(s))"
+      f"  Receiver agent_events rows: {count} (was {before_count} "
+      f"before; no new rows after {timeout_s:.0f}s poll, "
+      f"{attempt} attempt(s))"
   )
   return count
 
 
 def main() -> int:
   print(f"Smoking receiver at {RECEIVER_A2A_URL} ...")
+  bq_client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
+
+  # Capture the row count before the smoke request so we can require
+  # a strict increase. Without this, a re-run on a dataset that
+  # already has rows from a prior demo would pass even if the
+  # current receiver server is running without the plugin.
+  before_count = _count_receiver_rows(bq_client)
+  print(f"  Receiver agent_events rows before request: {before_count}")
+
   status, body = asyncio.run(_send_request())
   if status >= 400:
     print(
@@ -165,19 +202,21 @@ def main() -> int:
     )
     return 1
 
-  bq_client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
-  receiver_rows = _poll_for_receiver_rows(
+  receiver_rows = _poll_for_new_receiver_rows(
       bq_client,
+      before_count=before_count,
       timeout_s=SMOKE_POLL_TIMEOUT_S,
       interval_s=SMOKE_POLL_INTERVAL_S,
   )
   print(f"  Table: `{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`")
-  if receiver_rows == 0:
+  if receiver_rows <= before_count:
     print(
-        "ERROR: receiver agent_events table is still empty after "
-        f"{SMOKE_POLL_TIMEOUT_S}s of polling. The receiver server is "
-        "most likely running with `to_a2a()`'s default plugin-free "
-        "runner. Verify `run_receiver_server.py` constructs "
+        "ERROR: receiver agent_events row count did not increase "
+        f"after the smoke request ({before_count} before -> "
+        f"{receiver_rows} after, polled {SMOKE_POLL_TIMEOUT_S}s). "
+        "The receiver server is most likely running with `to_a2a()`'s "
+        "default plugin-free runner, or the plugin is failing to "
+        "write. Verify `run_receiver_server.py` constructs "
         "`Runner(..., plugins=[receiver_plugin])` and passes it via "
         "`runner=`.",
         file=sys.stderr,

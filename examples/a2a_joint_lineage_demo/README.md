@@ -39,6 +39,8 @@ Then in two terminals:
 ./.venv/bin/python3 build_org_graphs.py
 ```
 
+**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller and receiver datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass and the receiver-extraction acceptance gate (≥3 decisions, ≥9 candidates) reflect only the current campaigns. Skip the reset if you're iterating and intentionally want stale rows visible.
+
 After all three commands return zero, you have:
 
 - `<PROJECT>.a2a_caller_demo.agent_events` — caller-side spans, including `A2A_INTERACTION` rows
