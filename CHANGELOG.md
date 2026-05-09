@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runtime fallback wiring for compiled structured extractors**
+  in
+  `bigquery_agent_analytics.extractor_compilation.runtime_fallback`
+  and
+  [`docs/extractor_compilation_runtime_fallback.md`](docs/extractor_compilation_runtime_fallback.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.b — the runtime safety net for compiled extractors.
+  Public surface: ``run_with_fallback(*, event, spec,
+  resolved_graph, compiled_extractor, fallback_extractor)``
+  returning ``FallbackOutcome`` with ``decision`` ∈
+  ``{\"compiled_unchanged\", \"compiled_filtered\",
+  \"fallback_for_event\"}``. Validates the compiled extractor's
+  output via #76's ``validate_extracted_graph`` and routes by
+  failure scope: per-element failures (NODE / EDGE / FIELD with
+  pinpointable ``node_id`` / ``edge_id``) drop the offending
+  elements with orphan cleanup AND downgrade the event's
+  ``span_id`` from ``fully_handled_span_ids`` to
+  ``partially_handled_span_ids`` so the AI transcript still sees
+  the source span and can recover the dropped facts. EVENT-
+  scope failures, compiled-extractor exceptions, wrong return
+  types, and unpinpointable failures all trigger
+  ``fallback_for_event``. The wrapper does not validate the
+  fallback output and does not catch fallback exceptions —
+  fallback is the trusted runtime baseline (handwritten
+  extractor or ``AI.GENERATE``). Out of scope (deferred to
+  C2.c/d): orchestrator call-site swap, BQ-table mirror,
+  revalidation harness.
 - **Bundle loader + minimal runtime discovery for compiled
   structured extractors** in
   `bigquery_agent_analytics.extractor_compilation.bundle_loader`

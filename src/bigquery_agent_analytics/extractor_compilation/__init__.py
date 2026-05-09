@@ -72,6 +72,8 @@ from .retry_loop import build_retry_prompt
 from .retry_loop import compile_with_llm
 from .retry_loop import CompileSource
 from .retry_loop import RetryCompileResult
+from .runtime_fallback import FallbackOutcome
+from .runtime_fallback import run_with_fallback
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -90,6 +92,7 @@ __all__ = [
     "CompileSource",
     "DETERMINISTIC_FAKE_MODEL",
     "DiscoveryResult",
+    "FallbackOutcome",
     "LoadFailure",
     "LoadedBundle",
     "FieldMapping",
@@ -122,5 +125,6 @@ __all__ = [
     "render_extractor_source",
     "run_smoke_test",
     "run_smoke_test_in_subprocess",
+    "run_with_fallback",
     "validate_source",
 ]

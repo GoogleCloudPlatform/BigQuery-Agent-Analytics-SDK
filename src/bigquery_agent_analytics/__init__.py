@@ -605,6 +605,7 @@ try:
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import discover_bundles
   from .extractor_compilation import DiscoveryResult
+  from .extractor_compilation import FallbackOutcome
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import LLMClient
   from .extractor_compilation import load_bundle
@@ -620,6 +621,7 @@ try:
   from .extractor_compilation import ResolvedExtractorPlan
   from .extractor_compilation import RetryCompileResult
   from .extractor_compilation import run_smoke_test
+  from .extractor_compilation import run_with_fallback
   from .extractor_compilation import SmokeTestReport
   from .extractor_compilation import SpanHandlingRule
   from .extractor_compilation import validate_source
@@ -633,6 +635,7 @@ try:
           "CompileResult",
           "CompileSource",
           "DiscoveryResult",
+          "FallbackOutcome",
           "FieldMapping",
           "LoadFailure",
           "LoadedBundle",
@@ -661,6 +664,7 @@ try:
           "parse_resolved_extractor_plan_json",
           "render_extractor_source",
           "run_smoke_test",
+          "run_with_fallback",
           "validate_source",
       ]
   )
