@@ -476,7 +476,14 @@ def _parse_manifest_strict(
   """
   try:
     text = manifest_path.read_text(encoding="utf-8")
-  except OSError as e:
+  # ``OSError`` covers filesystem-level failures (race after the
+  # ``is_file()`` check, EACCES, etc.). ``UnicodeError`` covers
+  # the case where a manifest file exists but isn't valid UTF-8 —
+  # ``read_text`` raises ``UnicodeDecodeError`` (a subclass of
+  # ``UnicodeError``), which the ``OSError`` clause alone wouldn't
+  # catch and which would otherwise escape the loader's "never
+  # raises" contract.
+  except (OSError, UnicodeError) as e:
     return LoadFailure(
         bundle_dir=bundle_dir,
         code="manifest_unreadable",

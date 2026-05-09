@@ -109,7 +109,7 @@ Two bundles claiming the same event_type fail closed:
 
 The alternative — silently picking one bundle — would make runtime behavior depend on filesystem ordering, which is a debugging nightmare and a security smell.
 
-## Tests (30 cases in `tests/test_extractor_compilation_bundle_loader.py`)
+## Tests (54 cases in `tests/test_extractor_compilation_bundle_loader.py`)
 
 - **`TestLoadBundleHappyPath`** (3) — valid bundle loads; subset check accepts broader manifest; check is skipped when `expected_event_types=None`.
 - **`TestLoadBundleFailureCodes`** (13) — every stable code, including: manifest missing, invalid JSON, missing required field, fingerprint mismatch, event-types mismatch, module not found, import-time `SyntaxError`, import-time `RuntimeError`, import-time `SystemExit`, function not found, function not callable (same code), signature with too few args, signature kwargs-only rejected, signature with `*args` accepted.
@@ -118,6 +118,13 @@ The alternative — silently picking one bundle — would make runtime behavior 
 - **`TestDiscoverBundlesCollisions`** (2) — two bundles same event_type fail closed; partial collision preserves unique event_types from each bundle.
 - **`TestDiscoverBundlesNonBundleEntries`** (2) — loose files (README, INDEX) at the parent are silently skipped; non-bundle subdirectories fail with `manifest_missing` (every walked directory is accounted for, no silent skips of children).
 - **`TestBundleLoaderEndToEnd`** (2) — runs the **real** `compile_extractor` to produce a bundle, then loads it via `load_bundle` AND `discover_bundles`, invokes the loaded callable, and asserts behavioral parity with the handwritten reference. Proves the loader's contract holds for bundles produced by the rest of Phase C, not just hand-built fixtures.
+
+Strict-trust-boundary regression groups (added in review):
+
+- **Strict manifest validation** (20) — an 18-case parametrized test (`test_malformed_manifest_rejected_with_manifest_unreadable`) covers every shape the lenient `Manifest.from_json` would accept silently: `event_types: "xy"` (silent char-tuple coercion), empty / duplicate / non-string / empty-string `event_types` items, non-string `module_filename` / `function_name`, `module_filename` without `.py`, double-dot stems, Python-keyword stems, empty strings, dashed function names, integer / empty `fingerprint`, unknown extra fields, missing required fields. Plus root-array rejection (`test_malformed_manifest_root_array_rejected`) and invalid-UTF-8 rejection (`test_invalid_utf8_manifest_rejected`).
+- **Path-traversal defense** (2) — `module_filename: "../escape.py"` doesn't import a sibling file outside the bundle (test plants an `escape.py` that raises if imported and confirms it's never touched); `module_filename: "/etc/passwd.py"` rejected.
+- **`sys.modules` cleanup** (1) — five repeated `load_bundle` calls leave the `__loaded_<uuid>` count in `sys.modules` unchanged; the captured callable still works after cleanup.
+- **`discover_bundles` `iterdir` failure** (1) — `pathlib.Path.iterdir` monkeypatched to raise `PermissionError`; discovery returns a structured `manifest_missing` failure naming the underlying error rather than propagating.
 
 ## Out of scope (deferred to later C2 PRs)
 

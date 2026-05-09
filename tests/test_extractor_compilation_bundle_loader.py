@@ -942,6 +942,28 @@ def test_malformed_manifest_root_array_rejected(tmp_path: pathlib.Path):
   assert result.code == "manifest_unreadable"
 
 
+def test_invalid_utf8_manifest_rejected(tmp_path: pathlib.Path):
+  """A ``manifest.json`` containing bytes that aren't valid UTF-8
+  must surface as ``manifest_unreadable``. ``Path.read_text`` raises
+  ``UnicodeDecodeError`` (a subclass of ``UnicodeError``), which
+  isn't caught by an ``OSError``-only clause; this test pins the
+  loader's wider ``(OSError, UnicodeError)`` catch."""
+  from bigquery_agent_analytics.extractor_compilation import load_bundle
+  from bigquery_agent_analytics.extractor_compilation import LoadFailure
+
+  tmp_path.mkdir(exist_ok=True)
+  # Lone surrogates / BOM-like bytes that aren't valid UTF-8.
+  (tmp_path / "manifest.json").write_bytes(b"\xff\xfe\xff\xfe")
+
+  result = load_bundle(
+      tmp_path,
+      expected_fingerprint=_VALID_FINGERPRINT,
+  )
+  assert isinstance(result, LoadFailure)
+  assert result.code == "manifest_unreadable"
+  assert "UnicodeDecodeError" in result.detail
+
+
 # ------------------------------------------------------------------ #
 # Path-traversal defense (review P1 #2)                               #
 # ------------------------------------------------------------------ #
