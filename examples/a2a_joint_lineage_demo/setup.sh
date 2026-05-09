@@ -118,8 +118,21 @@ RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
 RECEIVER_TABLE_ID="${RECEIVER_TABLE_ID:-agent_events}"
 AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
 DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-us-central1}"
-DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-2.5-pro}"
-DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
+# Model defaults updated to Gemini 3.x:
+#   - gemini-3.1-pro-preview is the supported 3.x preview ID for the
+#     ADK agent on Vertex AI (gemini-3-pro-preview was discontinued in
+#     March 2026; use gemini-3.1-pro-preview going forward).
+#   - gemini-3-flash is the BigQuery AI.GENERATE endpoint name. During
+#     the Gemini 3.0 preview window, BigQuery may also accept the full
+#     endpoint string `projects/<NUM>/locations/global/publishers/google/models/gemini-3-flash`
+#     if the simple name resolution hasn't landed in your project.
+#     Override DEMO_AI_ENDPOINT to that full path if you see endpoint-
+#     resolution errors during preview.
+# Both are preview models — confirm Vertex AI preview access on the
+# project before running the demo, or override these env vars to fall
+# back to gemini-2.5-pro / gemini-2.5-flash.
+DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-3.1-pro-preview}"
+DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-3-flash}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
 for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
@@ -176,6 +189,9 @@ echo ""
 echo "============================================"
 echo "  Setup complete! Next: run the demo."
 echo "============================================"
+echo ""
+echo "Presentation run (starts/stops the receiver server for you):"
+echo "  cd $SCRIPT_DIR && ./run_e2e_demo.sh"
 echo ""
 echo "Two terminals:"
 echo ""

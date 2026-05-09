@@ -54,7 +54,11 @@ PROJECT_ID = os.getenv("PROJECT_ID") or _auth_project
 DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 CALLER_DATASET_ID = os.getenv("CALLER_DATASET_ID", "a2a_caller_demo")
 CALLER_TABLE_ID = os.getenv("CALLER_TABLE_ID", "agent_events")
-MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-2.5-pro")
+# Default to Gemini 3.1 Pro preview. gemini-3-pro-preview was
+# discontinued in March 2026; gemini-3.1-pro-preview is the current
+# supported 3.x ID on Vertex AI. Override DEMO_AGENT_MODEL to fall
+# back to gemini-2.5-pro on projects without preview access.
+MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-3.1-pro-preview")
 AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "us-central1")
 RECEIVER_A2A_URL = os.getenv("RECEIVER_A2A_URL", "http://127.0.0.1:8000")
 # Standard A2A protocol exposes the agent card at this well-known

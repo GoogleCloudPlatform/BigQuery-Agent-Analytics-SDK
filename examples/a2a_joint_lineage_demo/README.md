@@ -2,10 +2,11 @@
 
 Two BQ AA Plugin instances. Two `agent_events` tables. One A2A delegation in the middle. The caller's media-planning supervisor delegates audience-risk review to the receiver's governance agent over A2A; both sides write traces to BigQuery; the SDK materializes a context graph for each side independently; an auditor projection stitches them into a single joint property graph that an external reviewer queries through BigQuery Studio.
 
-This bundle implements the plan in [issue #129](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/129) and ships in two PRs:
+This bundle implements the plan in [issue #129](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/129) and ships in three slices:
 
 - **PR 1** (merged) — caller / receiver agents, receiver server with custom-runner plugin attach, smoke gate, caller driver, dual `ContextGraphManager` materialization.
-- **PR 2** (this slice) — auditor projections (`build_joint_graph.py`), Phase 1 joint property graph (`joint_property_graph.gql.tpl`), 5 paste-and-run BigQuery Studio blocks (`bq_studio_queries.gql.tpl`), `render_queries.sh`, and the narrative docs.
+- **PR 2** (merged) — auditor projections (`build_joint_graph.py`), Phase 1 joint property graph (`joint_property_graph.gql.tpl`), 5 paste-and-run BigQuery Studio blocks (`bq_studio_queries.gql.tpl`), `render_queries.sh`, and the narrative docs.
+- **PR 3** (merged) — SDK `A2A_INTERACTION` typed view (`adk_a2a_interactions`) for downstream consumers that want the A2A metadata without writing JSON extraction by hand.
 
 ## Running it
 
@@ -13,7 +14,19 @@ This bundle implements the plan in [issue #129](https://github.com/GoogleCloudPl
 ./setup.sh
 ```
 
-Then in two terminals:
+For the user-facing E2E demo, run:
+
+```bash
+./run_e2e_demo.sh
+```
+
+That script starts the receiver A2A server in the background, verifies
+that receiver plugin rows land in BigQuery, runs the caller campaigns,
+builds the caller and receiver SDK context graphs, builds the auditor
+joint graph, renders `bq_studio_queries.gql`, and stops the receiver
+server on exit.
+
+For debugging, the same flow can be run manually in two terminals:
 
 ```bash
 # Terminal A — long-lived receiver server
@@ -46,6 +59,12 @@ After all five commands return zero, you have:
 
 Open BigQuery Studio in the project, navigate to `a2a_auditor_demo`, and paste blocks from `bq_studio_queries.gql` (rendered by `render_queries.sh`). See [`A2A_JOINT_LINEAGE.md`](A2A_JOINT_LINEAGE.md) for the per-block walkthrough.
 
+For a presentation-ready path, use:
+
+- [`BQ_STUDIO_WALKTHROUGH.md`](BQ_STUDIO_WALKTHROUGH.md) — click-by-click BigQuery Studio guide
+- [`DEMO_NARRATION.md`](DEMO_NARRATION.md) — 5-minute talk track for users
+- [`DATA_LINEAGE.md`](DATA_LINEAGE.md) — table-by-table source map
+
 ## Stitch contract
 
 The auditor stitches caller and receiver at **context/session level**:
@@ -62,6 +81,7 @@ Per-span `a2a_task_id` propagation onto receiver spans is **deferred to a follow
 
 ## Known limitations
 
+- **Gemini 3.x preview models:** the agent defaults to `gemini-3.1-pro-preview` (Vertex AI) and the BQ AI.GENERATE endpoint defaults to `gemini-3-flash`. Both are preview models. Vertex AI preview access on the demo project is required. If endpoint resolution fails for `AI.GENERATE`, override `DEMO_AI_ENDPOINT` with the full path: `projects/<PROJECT_NUMBER>/locations/global/publishers/google/models/gemini-3-flash`. To fall back to stable models, override `DEMO_AGENT_MODEL=gemini-2.5-pro` and `DEMO_AI_ENDPOINT=gemini-2.5-flash`.
 - **Receiver task-level spans:** context-level stitch works now; per-span `a2a_task_id` is a separate follow-up that needs ADK runtime plumbing plus a plugin change.
 - **`adk_session_id` response echo:** the response-metadata path may or may not populate for `A2AMessage`-shaped responses; the stitch above does not depend on it. Treat the `receiver_session_id_from_response` column as diagnostic only.
 - **Cross-org security:** this is a one-project demo. Caller, receiver, and auditor datasets sit in the same project and the auditor redaction is enforced by curated projection tables, not IAM. Production cross-org redaction is a separate working group.
@@ -76,7 +96,10 @@ examples/a2a_joint_lineage_demo/
 ├── README.md                       ← this file
 ├── A2A_JOINT_LINEAGE.md            ← stitch contract + walkthrough
 ├── DATA_LINEAGE.md                 ← table-by-table source map
+├── BQ_STUDIO_WALKTHROUGH.md        ← click-by-click BigQuery Studio guide
+├── DEMO_NARRATION.md               ← 5-minute presenter talk track
 ├── setup.sh                        ← bootstrap (datasets, .env, deps)
+├── run_e2e_demo.sh                 ← one-command live demo runner
 ├── reset.sh                        ← drop caller + receiver + auditor datasets
 ├── render_queries.sh               ← render *.gql.tpl with .env values
 ├── .gitignore

@@ -55,7 +55,12 @@ CALLER_DATASET_ID = os.getenv("CALLER_DATASET_ID", "a2a_caller_demo")
 CALLER_TABLE_ID = os.getenv("CALLER_TABLE_ID", "agent_events")
 RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
-DEMO_AI_ENDPOINT = os.getenv("DEMO_AI_ENDPOINT", "gemini-2.5-flash")
+# Default to gemini-3-flash for AI.GENERATE. During the Gemini 3.0
+# preview window, BigQuery may require the full Vertex AI endpoint
+# string instead of the simple name; override DEMO_AI_ENDPOINT with
+#   projects/<NUM>/locations/global/publishers/google/models/gemini-3-flash
+# (or fall back to gemini-2.5-flash) if endpoint resolution fails.
+DEMO_AI_ENDPOINT = os.getenv("DEMO_AI_ENDPOINT", "gemini-3-flash")
 
 # Receiver-extraction acceptance gate. The receiver prompt forces
 # three options per call; for the default 3-campaign demo the
