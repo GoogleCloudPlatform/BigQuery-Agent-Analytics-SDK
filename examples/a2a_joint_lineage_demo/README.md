@@ -81,7 +81,17 @@ Per-span `a2a_task_id` propagation onto receiver spans is **deferred to a follow
 
 ## Known limitations
 
-- **Gemini 3.x preview models:** the agent defaults to `gemini-3.1-pro-preview` (Vertex AI) and the BQ AI.GENERATE endpoint defaults to `gemini-3-flash`. Both are preview models. Vertex AI preview access on the demo project is required. If endpoint resolution fails for `AI.GENERATE`, override `DEMO_AI_ENDPOINT` with the full path: `projects/<PROJECT_NUMBER>/locations/global/publishers/google/models/gemini-3-flash`. To fall back to stable models, override `DEMO_AGENT_MODEL=gemini-2.5-pro` and `DEMO_AI_ENDPOINT=gemini-2.5-flash`.
+- **Gemini 3.x preview models — `global`-only, full-URL only.** Verified live against Vertex AI + BigQuery `AI.GENERATE` in May 2026:
+  - The agent defaults to `gemini-3.1-pro-preview` at **`global`** (`DEMO_AGENT_LOCATION=global`). The model is **not** published at `us-central1` or any other regional location — a regional lookup returns 404.
+  - The BQ AI.GENERATE endpoint defaults to the full HTTPS URL `https://aiplatform.googleapis.com/v1/projects/<PROJECT_ID>/locations/global/publishers/google/models/gemini-3-flash-preview`. The model ID is `gemini-3-flash-preview` (not `gemini-3-flash`); the BQML simple-name resolver does **not** recognize either short form during the Gemini 3 preview, so the full URL is required. `setup.sh` resolves `<PROJECT_ID>` at .env-write time.
+  - Both are preview models — confirm Vertex AI preview access on the demo project before running.
+  - **To fall back to stable models** on a project without preview access, override all three:
+    ```bash
+    DEMO_AGENT_LOCATION=us-central1
+    DEMO_AGENT_MODEL=gemini-2.5-pro
+    DEMO_AI_ENDPOINT=gemini-2.5-flash
+    ```
+    The `gemini-2.5-*` simple names work directly with BQML's resolver.
 - **Receiver task-level spans:** context-level stitch works now; per-span `a2a_task_id` is a separate follow-up that needs ADK runtime plumbing plus a plugin change.
 - **`adk_session_id` response echo:** the response-metadata path may or may not populate for `A2AMessage`-shaped responses; the stitch above does not depend on it. Treat the `receiver_session_id_from_response` column as diagnostic only.
 - **Cross-org security:** this is a one-project demo. Caller, receiver, and auditor datasets sit in the same project and the auditor redaction is enforced by curated projection tables, not IAM. Production cross-org redaction is a separate working group.
