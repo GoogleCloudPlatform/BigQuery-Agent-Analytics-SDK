@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bundle loader + minimal runtime discovery for compiled
+  structured extractors** in
+  `bigquery_agent_analytics.extractor_compilation.bundle_loader`
+  and
+  [`docs/extractor_compilation_bundle_loader.md`](docs/extractor_compilation_bundle_loader.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.a — the trust boundary between on-disk compiled bundles
+  and the runtime that's about to import + execute them. Public
+  surface: ``load_bundle(bundle_dir, *, expected_fingerprint,
+  expected_event_types)`` and ``discover_bundles(parent_dir, *,
+  expected_fingerprint, event_type_allowlist)`` returning
+  ``LoadedBundle`` / ``LoadFailure`` / ``DiscoveryResult``.
+  Stable ``LoadFailure`` codes — ``manifest_missing`` /
+  ``manifest_unreadable`` / ``fingerprint_mismatch`` /
+  ``event_types_mismatch`` / ``module_not_found`` /
+  ``import_failed`` (catches both ``Exception`` and
+  ``BaseException`` so a malicious or buggy bundle can't tear
+  down the loading process) / ``function_not_found`` /
+  ``function_signature_mismatch`` / ``event_type_collision``.
+  The loader never raises; every failure surfaces as a
+  structured record. The fingerprint check runs *before* module
+  import, so a bundle with a wrong fingerprint can't side-effect
+  via a broken module. Multi-event bundles register the same
+  callable under each declared event_type. Discovery fails
+  closed on event-type collisions: dropped from the registry,
+  one ``LoadFailure`` per claimant, other event_types from the
+  same bundles still register if unique. Out of scope (deferred
+  to C2.b/c/d): per-field/node/edge fallback through #76's
+  validator, BQ-table mirror, ontology-graph call-site swap,
+  revalidation harness.
 - **Compile-and-measure utility + BKA-decision end-to-end proof**
   in `bigquery_agent_analytics.extractor_compilation.measurement`
   and
