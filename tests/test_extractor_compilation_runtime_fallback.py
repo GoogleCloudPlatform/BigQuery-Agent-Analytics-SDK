@@ -806,3 +806,233 @@ class TestRunWithFallbackEndToEnd:
       assert outcome.dropped_node_ids == ()
       assert outcome.dropped_edge_ids == ()
       assert outcome.compiled_exception is None
+
+
+# ------------------------------------------------------------------ #
+# Malformed result internals (review P1 #1)                           #
+# ------------------------------------------------------------------ #
+
+
+class TestRunWithFallbackMalformedInternals:
+  """``StructuredExtractionResult`` is a ``@dataclass`` with no
+  runtime type validation, so ``StructuredExtractionResult(nodes=[{}])``
+  succeeds. The wrapper only realizes the internals are wrong
+  when it tries to build an ``ExtractedGraph`` from them — which
+  Pydantic rejects with ``ValidationError``. The wrapper must
+  catch that and fall back, otherwise the "never raises on
+  compiled / validator failure" contract leaks."""
+
+  def test_compiled_returns_result_with_dict_nodes_falls_back(self):
+    """The reviewer's exact repro: a compiled extractor that
+    returns ``StructuredExtractionResult(nodes=[{}])``. Building
+    ``ExtractedGraph`` with that nodes list raises a Pydantic
+    ``ValidationError``; the wrapper must catch it and return
+    ``fallback_for_event``, not propagate."""
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    fallback_result = _empty_result()
+
+    def compiled(event, spec):
+      return StructuredExtractionResult(nodes=[{}])
+
+    outcome = run_with_fallback(
+        event=_valid_bka_event(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        compiled_extractor=compiled,
+        fallback_extractor=lambda e, s: fallback_result,
+    )
+
+    assert outcome.decision == "fallback_for_event"
+    assert outcome.result is fallback_result
+    # The audit record names the failure shape so logs can route
+    # malformed-internals separately from extractor exceptions.
+    assert outcome.compiled_exception is not None
+    assert outcome.compiled_exception.startswith("MalformedResultInternals:")
+    # No ValidationReport produced — validation never returned.
+    assert outcome.validation_failures == ()
+
+
+# ------------------------------------------------------------------ #
+# EDGE failures with both node_id and edge_id (review P1 #2)         #
+# ------------------------------------------------------------------ #
+
+
+class TestRunWithFallbackEdgeFailureWithBothIds:
+  """#76's ``missing_endpoint_key`` populates both ``node_id``
+  (the referenced endpoint id) and ``edge_id`` (the offending
+  edge). Earlier, the wrapper checked ``node_id`` first via
+  ``elif`` and dropped the wrong element. The fix switches on
+  ``failure.scope``: EDGE always drops by ``edge_id``."""
+
+  def test_edge_failure_with_both_ids_drops_edge_not_node(self):
+    from bigquery_agent_analytics.extracted_models import ExtractedEdge
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+    from bigquery_agent_analytics.graph_validation import FallbackScope
+    from bigquery_agent_analytics.graph_validation import ValidationFailure
+    from bigquery_agent_analytics.graph_validation import ValidationReport
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    node_a = ExtractedNode(
+        node_id="node_a",
+        entity_name="mako_DecisionPoint",
+        labels=["mako_DecisionPoint"],
+        properties=[ExtractedProperty(name="decision_id", value="da")],
+    )
+    bad_edge = ExtractedEdge(
+        edge_id="bad_edge",
+        relationship_name="rel",
+        from_node_id="node_a",
+        to_node_id="node_b",
+        properties=[],
+    )
+    compiled_result = StructuredExtractionResult(
+        nodes=[node_a],
+        edges=[bad_edge],
+        fully_handled_span_ids={"span1"},
+        partially_handled_span_ids=set(),
+    )
+
+    # Mirror #76's missing_endpoint_key shape: EDGE scope, both
+    # node_id (the referenced endpoint id) AND edge_id populated.
+    failure = ValidationFailure(
+        scope=FallbackScope.EDGE,
+        code="missing_endpoint_key",
+        path="edges[0].from_node_id.<key:decision_id>",
+        node_id="node_a",  # the endpoint reference
+        edge_id="bad_edge",  # the offending edge
+    )
+
+    import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
+
+    real = rf.validate_extracted_graph
+    rf.validate_extracted_graph = lambda spec, graph: ValidationReport(
+        failures=(failure,)
+    )
+    try:
+      outcome = run_with_fallback(
+          event=_valid_bka_event(),
+          spec=None,
+          resolved_graph=_bka_resolved_spec(),
+          compiled_extractor=lambda e, s: compiled_result,
+          fallback_extractor=lambda e, s: _empty_result(),
+      )
+    finally:
+      rf.validate_extracted_graph = real
+
+    assert outcome.decision == "compiled_filtered"
+    # The fix: dropped the EDGE, not the node referenced in
+    # node_id. Pre-fix, the elif dropped node_a here.
+    assert outcome.dropped_edge_ids == ("bad_edge",)
+    assert outcome.dropped_node_ids == ()
+    surviving_node_ids = {n.node_id for n in outcome.result.nodes}
+    assert surviving_node_ids == {"node_a"}
+
+  def test_node_failure_without_node_id_is_unpinpointable(self):
+    """Symmetric pinpointability check: a NODE-scope failure
+    that's missing ``node_id`` is unpinpointable even if
+    ``edge_id`` is set (an edge id can't pinpoint a node-scope
+    failure). Falls back for the event."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+    from bigquery_agent_analytics.graph_validation import FallbackScope
+    from bigquery_agent_analytics.graph_validation import ValidationFailure
+    from bigquery_agent_analytics.graph_validation import ValidationReport
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    compiled_result = StructuredExtractionResult(
+        nodes=[
+            ExtractedNode(
+                node_id="some_node",
+                entity_name="mako_DecisionPoint",
+                labels=["mako_DecisionPoint"],
+                properties=[ExtractedProperty(name="decision_id", value="d1")],
+            )
+        ],
+        edges=[],
+        fully_handled_span_ids=set(),
+        partially_handled_span_ids=set(),
+    )
+
+    failure = ValidationFailure(
+        scope=FallbackScope.NODE,
+        code="hand_crafted",
+        path="nodes[0]",
+        node_id=None,  # NODE scope without node_id is unpinpointable
+        edge_id="some_edge",  # edge_id doesn't help here
+    )
+
+    import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
+
+    real = rf.validate_extracted_graph
+    rf.validate_extracted_graph = lambda spec, graph: ValidationReport(
+        failures=(failure,)
+    )
+    try:
+      outcome = run_with_fallback(
+          event=_valid_bka_event(),
+          spec=None,
+          resolved_graph=_bka_resolved_spec(),
+          compiled_extractor=lambda e, s: compiled_result,
+          fallback_extractor=lambda e, s: _empty_result(),
+      )
+    finally:
+      rf.validate_extracted_graph = real
+
+    assert outcome.decision == "fallback_for_event"
+
+
+# ------------------------------------------------------------------ #
+# SystemExit / KeyboardInterrupt (review P2)                          #
+# ------------------------------------------------------------------ #
+
+
+class TestRunWithFallbackSystemExit:
+  """``SystemExit`` is a ``BaseException`` subclass. A bundle's
+  compiled extractor calling ``sys.exit()`` at runtime would
+  otherwise tear down the runtime; the wrapper catches it and
+  treats it as a fallback signal — same shape C2.a's loader
+  uses at import time. ``KeyboardInterrupt`` is *not* caught
+  so operator cancellation still works."""
+
+  def test_compiled_calls_sys_exit_falls_back(self):
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+
+    fallback_result = _empty_result()
+
+    def compiled(event, spec):
+      raise SystemExit("compiled bundle decided to exit")
+
+    outcome = run_with_fallback(
+        event=_valid_bka_event(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        compiled_extractor=compiled,
+        fallback_extractor=lambda e, s: fallback_result,
+    )
+
+    assert outcome.decision == "fallback_for_event"
+    assert outcome.result is fallback_result
+    assert outcome.compiled_exception is not None
+    assert outcome.compiled_exception.startswith("SystemExit:")
+
+  def test_compiled_keyboard_interrupt_propagates(self):
+    """KeyboardInterrupt must NOT be caught — operator
+    cancellation has to remain functional."""
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+
+    def compiled(event, spec):
+      raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+      run_with_fallback(
+          event=_valid_bka_event(),
+          spec=None,
+          resolved_graph=_bka_resolved_spec(),
+          compiled_extractor=compiled,
+          fallback_extractor=lambda e, s: _empty_result(),
+      )

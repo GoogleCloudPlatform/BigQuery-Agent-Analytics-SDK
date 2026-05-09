@@ -166,7 +166,14 @@ def run_with_fallback(
   compiled_result: Optional[StructuredExtractionResult] = None
   try:
     raw = compiled_extractor(event, spec)
-  except Exception as exc:  # noqa: BLE001 — record + fall back
+  # ``Exception`` covers ordinary errors. ``SystemExit`` is a
+  # ``BaseException`` subclass but it's exactly the kind of
+  # thing a malicious or buggy bundle might raise to tear down
+  # the runtime — capture it as a fallback signal instead, the
+  # same way C2.a's loader catches ``BaseException`` at import
+  # time. ``KeyboardInterrupt`` is intentionally *not* caught
+  # so operator cancellation still works.
+  except (Exception, SystemExit) as exc:  # noqa: BLE001 — record + fall back
     compiled_exception = f"{type(exc).__name__}: {exc}"
   else:
     if not isinstance(raw, StructuredExtractionResult):
@@ -184,13 +191,30 @@ def run_with_fallback(
         compiled_exception=compiled_exception,
     )
 
-  # Stage 2: validate compiled output via #76.
-  graph = ExtractedGraph(
-      name="runtime_fallback",
-      nodes=list(compiled_result.nodes),
-      edges=list(compiled_result.edges),
-  )
-  report: ValidationReport = validate_extracted_graph(resolved_graph, graph)
+  # Stage 2: validate compiled output via #76. Building
+  # ``ExtractedGraph`` runs Pydantic validation on every node /
+  # edge entry — if the compiled extractor returned a
+  # ``StructuredExtractionResult`` whose internals contain dicts
+  # or other non-``ExtractedNode`` items, that construction (or
+  # the validator itself) raises before producing a report.
+  # Catch that and treat it as a fallback signal — otherwise the
+  # wrapper's "never raises on compiled / validator failure"
+  # contract leaks.
+  try:
+    graph = ExtractedGraph(
+        name="runtime_fallback",
+        nodes=list(compiled_result.nodes),
+        edges=list(compiled_result.edges),
+    )
+    report: ValidationReport = validate_extracted_graph(resolved_graph, graph)
+  except Exception as exc:  # noqa: BLE001 — record + fall back
+    return FallbackOutcome(
+        result=fallback_extractor(event, spec),
+        decision=_DECISION_FALLBACK_FOR_EVENT,
+        compiled_exception=(
+            f"MalformedResultInternals: {type(exc).__name__}: {exc}"
+        ),
+    )
   failures = report.failures
 
   if not failures:
@@ -200,10 +224,14 @@ def run_with_fallback(
     )
 
   # Stage 3: any EVENT-scope failure or unpinpointable failure
-  # → fall back for the whole event.
+  # → fall back for the whole event. Pinpointability is
+  # *scope-specific*: NODE pinpointable iff ``node_id`` is set;
+  # EDGE iff ``edge_id`` is set; FIELD iff either is set
+  # (the validator attaches FIELD failures to whichever
+  # container holds the offending property).
   has_event_scope = any(f.scope is FallbackScope.EVENT for f in failures)
   has_unpinpointable = any(
-      f.scope is not FallbackScope.EVENT and not f.node_id and not f.edge_id
+      f.scope is not FallbackScope.EVENT and not _is_failure_pinpointable(f)
       for f in failures
   )
   if has_event_scope or has_unpinpointable:
@@ -227,6 +255,30 @@ def run_with_fallback(
 # ------------------------------------------------------------------ #
 
 
+def _is_failure_pinpointable(failure: ValidationFailure) -> bool:
+  """Whether *failure* identifies a specific element the wrapper
+  can drop. Per scope:
+
+  * ``NODE`` — pinpointable iff ``node_id`` is set.
+  * ``EDGE`` — pinpointable iff ``edge_id`` is set. (#76's
+    ``missing_endpoint_key`` populates *both* ``node_id`` (the
+    referenced endpoint) and ``edge_id`` (the offending edge);
+    the right thing to drop is the edge, not the endpoint.)
+  * ``FIELD`` — pinpointable iff *either* is set (the validator
+    attaches FIELD failures to whichever container — node or
+    edge — holds the offending property).
+  * ``EVENT`` — handled at the higher gate before this is
+    called, so always returns ``False`` here.
+  """
+  if failure.scope is FallbackScope.NODE:
+    return bool(failure.node_id)
+  if failure.scope is FallbackScope.EDGE:
+    return bool(failure.edge_id)
+  if failure.scope is FallbackScope.FIELD:
+    return bool(failure.node_id) or bool(failure.edge_id)
+  return False
+
+
 def _build_filtered_outcome(
     *,
     event: dict,
@@ -235,21 +287,30 @@ def _build_filtered_outcome(
 ) -> FallbackOutcome:
   """Drop offending nodes/edges, orphan-clean dependent edges,
   downgrade span-handling. Caller guarantees every failure is
-  pinpointable (has a usable ``node_id`` or ``edge_id``)."""
-  # Collect IDs to drop. NODE / FIELD failures whose ``node_id``
-  # is set drop the node; EDGE / FIELD failures whose ``edge_id``
-  # is set drop the edge. A FIELD failure can carry only a
-  # node_id OR an edge_id depending on which container the bad
-  # property lives on; the validator sets exactly one.
+  pinpointable (has a usable ``node_id`` or ``edge_id`` for its
+  scope per :func:`_is_failure_pinpointable`)."""
+  # Switch on scope (not on which ID happens to be set).
+  # ``NODE`` always drops by ``node_id``; ``EDGE`` always drops by
+  # ``edge_id`` — even when ``node_id`` is also populated, as in
+  # #76's ``missing_endpoint_key`` failure where ``node_id``
+  # holds the *referenced* endpoint id and the actual fix is the
+  # edge. ``FIELD`` drops the containing element, preferring the
+  # edge when both IDs are set (the property literally lives on
+  # the edge in that case).
   drop_node_ids: set[str] = set()
   drop_edge_ids: set[str] = set()
   for failure in failures:
-    if failure.node_id:
+    if failure.scope is FallbackScope.NODE and failure.node_id:
       drop_node_ids.add(failure.node_id)
-    elif failure.edge_id:
+    elif failure.scope is FallbackScope.EDGE and failure.edge_id:
       drop_edge_ids.add(failure.edge_id)
-    # The "neither set" branch was filtered out by the
-    # has_unpinpointable check at the call site.
+    elif failure.scope is FallbackScope.FIELD:
+      if failure.edge_id:
+        drop_edge_ids.add(failure.edge_id)
+      elif failure.node_id:
+        drop_node_ids.add(failure.node_id)
+    # Other shapes were filtered out by the has_unpinpointable
+    # gate at the caller.
 
   surviving_nodes: list[ExtractedNode] = [
       n for n in compiled_result.nodes if n.node_id not in drop_node_ids

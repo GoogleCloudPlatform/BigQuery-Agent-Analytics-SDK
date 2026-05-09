@@ -41,21 +41,23 @@ The wrapper applies the decision tree top-down; first match wins.
 
 | Step | Condition | Decision |
 |------|-----------|----------|
-| 1 | Compiled extractor raises *or* returns a non-`StructuredExtractionResult` value | `fallback_for_event` (compiled_exception captured in audit record) |
+| 1 | Compiled extractor raises (`Exception` or `SystemExit`) *or* returns a non-`StructuredExtractionResult` value | `fallback_for_event` (compiled_exception captured) |
+| 1b | Compiled return value is a `StructuredExtractionResult` whose internals (e.g., `nodes=[{}]`) raise when the wrapper builds an `ExtractedGraph` for validation | `fallback_for_event` (compiled_exception = `"MalformedResultInternals: <ExceptionType>: <message>"`) |
 | 2 | Validate compiled output via `validate_extracted_graph`. No failures | `compiled_unchanged` |
-| 3 | Any `EVENT`-scope failure, *or* any failure with neither a `node_id` nor an `edge_id` we can pinpoint | `fallback_for_event` |
-| 4 | Otherwise (every failure has a usable `node_id`/`edge_id`) | `compiled_filtered` |
+| 3 | Any `EVENT`-scope failure, *or* any failure that isn't pinpointable for its scope | `fallback_for_event` |
+| 4 | Otherwise (every failure is scope-pinpointable) | `compiled_filtered` |
 
-`FallbackScope.EVENT` is reserved for this runtime layer — the wrapper handles it defensively, but #76 itself doesn't currently emit it.
+`FallbackScope.EVENT` is reserved for this runtime layer — the wrapper handles it defensively, but #76 itself doesn't currently emit it. **Pinpointability is scope-specific**: NODE iff `node_id` is set, EDGE iff `edge_id` is set, FIELD iff *either* is set. (Critical for #76's `missing_endpoint_key` failures, which are `EDGE`-scope but populate both `node_id` (the referenced endpoint) and `edge_id` (the offending edge) — the wrapper drops the edge, not the endpoint.)
+
+`KeyboardInterrupt` is **not** caught — operator cancellation propagates through.
 
 ## Drop policy in `compiled_filtered`
 
-Per-element drops are conservative — drop the whole containing element rather than salvage individual properties:
+Drops are decided by `failure.scope`, not by which IDs happen to be set on the failure record. Per-element drops are conservative — drop the whole containing element rather than salvage individual properties:
 
-- `NODE` failure with `node_id` → drop that node by ID.
-- `EDGE` failure with `edge_id` → drop that edge by ID.
-- `FIELD` failure with `node_id` → drop the whole containing **node** (not just the bad property).
-- `FIELD` failure with `edge_id` → drop the whole containing **edge**.
+- `NODE` scope → drop by `node_id`.
+- `EDGE` scope → drop by `edge_id`. Even when `node_id` is also populated (as in `missing_endpoint_key`), the right thing to drop is the edge, not the referenced endpoint.
+- `FIELD` scope → drop the whole containing element. The wrapper prefers `edge_id` if both are set (the property literally lives on the edge in that case), falling back to `node_id` otherwise.
 - After per-element drops, **orphan-clean** any edge whose `from_node_id` or `to_node_id` was dropped. The audit's `dropped_edge_ids` lists both direct and orphan-cleaned edges.
 
 ## Span-handling downgrade — load-bearing
@@ -90,13 +92,19 @@ validation_failures     : tuple[ValidationFailure, ...]  # the report driving th
 
 `frozen=True`. The audit fields are designed so telemetry can group on `decision`, count `compiled_exception` types, and surface `dropped_*` cardinalities.
 
-## Tests (16 cases in `tests/test_extractor_compilation_runtime_fallback.py`)
+## Tests (21 cases in `tests/test_extractor_compilation_runtime_fallback.py`)
 
 - **`TestRunWithFallbackCompiledUnchanged`** (2) — valid compiled output passes through; empty compiled output is vacuously valid (no fallback call).
-- **`TestRunWithFallbackForEventTriggers`** (7) — compiled raises; compiled returns wrong type; compiled returns `None`; `EVENT`-scope validator failure; unpinpointable failure (no `node_id` / `edge_id`); mixed `EVENT` + per-element failures (EVENT wins); fallback-extractor exceptions propagate without being swallowed.
+- **`TestRunWithFallbackForEventTriggers`** (7) — compiled raises; compiled returns wrong type; compiled returns `None`; `EVENT`-scope validator failure; unpinpointable failure; mixed `EVENT` + per-element failures (EVENT wins); fallback-extractor exceptions propagate without being swallowed.
 - **`TestRunWithFallbackCompiledFiltered`** (4) — `NODE`-scope failure drops node (real validator run on a ghost-entity node); orphan cleanup drops edges referencing a dropped node; `EDGE`-scope failure drops edge while keeping nodes; `FIELD`-scope with `node_id` drops whole containing node.
 - **`TestRunWithFallbackSpanDowngrade`** (2) — load-bearing: a node failure on a fully-handled span moves the span to `partially_handled_span_ids`; events without `span_id` skip the downgrade gracefully.
-- **`TestRunWithFallbackEndToEnd`** (1) — real BKA bundle (compiled via the full pipeline + loaded via `load_bundle`) as `compiled_extractor`, real `extract_bka_decision_event` as `fallback_extractor`. Both produce identical output for every BKA sample event → `decision="compiled_unchanged"`. Proves the wrapper plays nicely with the rest of Phase C.
+- **`TestRunWithFallbackEndToEnd`** (1) — real BKA bundle as `compiled_extractor`, real `extract_bka_decision_event` as `fallback_extractor`; identical output → `compiled_unchanged`.
+
+Review-driven regression groups:
+
+- **`TestRunWithFallbackMalformedInternals`** (1) — reviewer's exact repro: `StructuredExtractionResult(nodes=[{}])` (a dict instead of an `ExtractedNode`) makes `ExtractedGraph` construction raise pydantic `ValidationError`. The wrapper catches it and falls back; `compiled_exception` starts with `"MalformedResultInternals:"` so logs can route this separately from extractor exceptions.
+- **`TestRunWithFallbackEdgeFailureWithBothIds`** (2) — `EDGE`-scope failure with both `node_id` and `edge_id` populated (mirroring #76's `missing_endpoint_key`) drops the edge, not the referenced endpoint; symmetric pinpointability check ensures NODE-scope failure missing `node_id` is treated as unpinpointable even when `edge_id` is set.
+- **`TestRunWithFallbackSystemExit`** (2) — `SystemExit` from the compiled extractor is captured as `fallback_for_event`; `KeyboardInterrupt` propagates through so operator cancellation works.
 
 ## Out of scope (deferred to other C2 sub-PRs)
 
