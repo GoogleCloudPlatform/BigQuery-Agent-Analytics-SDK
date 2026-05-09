@@ -15,21 +15,31 @@
 """Smoke-test the receiver A2A server end-to-end.
 
 Sends one minimal audience-risk-review request to ``RECEIVER_A2A_URL``
-via the A2A client, waits for the response, then queries
-``<RECEIVER_DATASET_ID>.<RECEIVER_TABLE_ID>`` and asserts at least
-one row exists.
+via the A2A client, waits for the response, then polls
+``<RECEIVER_DATASET_ID>.<RECEIVER_TABLE_ID>`` until at least one row
+is visible.
 
-If this fails before caller campaigns run, the most likely cause is
-that ``run_receiver_server.py`` is using ``to_a2a()``'s default
-plugin-free runner instead of the explicit-runner path; the
-receiver agent processes the request but the plugin is silent.
+The poll matters: ``BigQueryAgentAnalyticsPlugin._log_event`` queues
+spans into an async writer. ``batch_size=1`` triggers a flush per
+event but the BigQuery write is still asynchronous w.r.t. the HTTP
+response, so a naive single-shot count after the response races and
+sometimes returns zero. We retry with backoff so the gate has a real
+chance to observe the row.
+
+If the gate still returns zero after the polling window, the most
+likely cause is that ``run_receiver_server.py`` is using
+``to_a2a()``'s default plugin-free runner instead of the
+explicit-runner path; the receiver agent processes the request but
+the plugin is silent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import time
 import uuid
 
 from dotenv import load_dotenv
@@ -48,6 +58,8 @@ DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
 RECEIVER_A2A_URL = os.getenv("RECEIVER_A2A_URL", "http://127.0.0.1:8000")
+SMOKE_POLL_TIMEOUT_S = int(os.getenv("DEMO_SMOKE_POLL_TIMEOUT_S", "60"))
+SMOKE_POLL_INTERVAL_S = float(os.getenv("DEMO_SMOKE_POLL_INTERVAL_S", "2.0"))
 
 
 _SMOKE_PROMPT = (
@@ -60,8 +72,12 @@ _SMOKE_PROMPT = (
 )
 
 
-async def _send_request() -> int:
-  """Posts one A2A message/send request and returns the HTTP status."""
+async def _send_request() -> tuple[int, dict | None]:
+  """Posts one A2A message/send request.
+
+  Returns ``(http_status, parsed_body)``. ``parsed_body`` is ``None``
+  if the response wasn't JSON.
+  """
   url = RECEIVER_A2A_URL.rstrip("/")
   payload = {
       "jsonrpc": "2.0",
@@ -80,22 +96,57 @@ async def _send_request() -> int:
     print(f"  Receiver responded: HTTP {resp.status_code}")
     if resp.status_code >= 400:
       print(f"  Body: {resp.text[:600]}", file=sys.stderr)
-    return resp.status_code
+      return resp.status_code, None
+    try:
+      body = resp.json()
+    except json.JSONDecodeError:
+      print(
+          f"  WARNING: response was HTTP 200 but not JSON: "
+          f"{resp.text[:300]}",
+          file=sys.stderr,
+      )
+      return resp.status_code, None
+    return resp.status_code, body
 
 
-def _count_receiver_rows() -> int:
-  client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
+def _count_receiver_rows(bq_client: bigquery.Client) -> int:
   query = (
       f"SELECT COUNT(*) AS receiver_rows FROM "
       f"`{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`"
   )
-  rows = list(client.query(query).result())
+  rows = list(bq_client.query(query).result())
   return int(rows[0]["receiver_rows"]) if rows else 0
+
+
+def _poll_for_receiver_rows(
+    bq_client: bigquery.Client,
+    timeout_s: float,
+    interval_s: float,
+) -> int:
+  """Poll receiver row count until nonzero or timeout. Returns final count."""
+  deadline = time.monotonic() + timeout_s
+  count = 0
+  attempt = 0
+  while time.monotonic() < deadline:
+    attempt += 1
+    count = _count_receiver_rows(bq_client)
+    if count > 0:
+      print(
+          f"  Receiver agent_events rows: {count} "
+          f"(observed after {attempt} poll(s))"
+      )
+      return count
+    time.sleep(interval_s)
+  print(
+      f"  Receiver agent_events rows: {count} (after {timeout_s:.0f}s "
+      f"poll, {attempt} attempt(s))"
+  )
+  return count
 
 
 def main() -> int:
   print(f"Smoking receiver at {RECEIVER_A2A_URL} ...")
-  status = asyncio.run(_send_request())
+  status, body = asyncio.run(_send_request())
   if status >= 400:
     print(
         f"ERROR: receiver returned HTTP {status}. The server is not "
@@ -104,19 +155,31 @@ def main() -> int:
         file=sys.stderr,
     )
     return 1
+  if body is not None and isinstance(body, dict) and body.get("error"):
+    err = body["error"]
+    print(
+        "ERROR: receiver returned a JSON-RPC error in a 200 "
+        f"response: code={err.get('code')!r}, "
+        f"message={err.get('message')!r}",
+        file=sys.stderr,
+    )
+    return 1
 
-  receiver_rows = _count_receiver_rows()
-  print(
-      f"  Receiver agent_events rows: {receiver_rows} "
-      f"(table=`{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`)"
+  bq_client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
+  receiver_rows = _poll_for_receiver_rows(
+      bq_client,
+      timeout_s=SMOKE_POLL_TIMEOUT_S,
+      interval_s=SMOKE_POLL_INTERVAL_S,
   )
+  print(f"  Table: `{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`")
   if receiver_rows == 0:
     print(
-        "ERROR: receiver agent_events table is empty after the smoke "
-        "request. The receiver server is most likely running with "
-        "`to_a2a()`'s default plugin-free runner. Verify "
-        "`run_receiver_server.py` constructs `Runner(..., "
-        "plugins=[receiver_plugin])` and passes it via `runner=`.",
+        "ERROR: receiver agent_events table is still empty after "
+        f"{SMOKE_POLL_TIMEOUT_S}s of polling. The receiver server is "
+        "most likely running with `to_a2a()`'s default plugin-free "
+        "runner. Verify `run_receiver_server.py` constructs "
+        "`Runner(..., plugins=[receiver_plugin])` and passes it via "
+        "`runner=`.",
         file=sys.stderr,
     )
     return 1

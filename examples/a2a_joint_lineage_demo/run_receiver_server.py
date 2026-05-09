@@ -42,7 +42,6 @@ from google.adk.auth.credential_service.in_memory_credential_service import InMe
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
 from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
-
 from receiver_agent import APP_NAME
 from receiver_agent import build_receiver_plugin
 from receiver_agent import root_agent

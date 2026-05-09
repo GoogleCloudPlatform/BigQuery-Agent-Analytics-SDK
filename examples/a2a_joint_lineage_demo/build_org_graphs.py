@@ -39,6 +39,7 @@ from dotenv import load_dotenv
 import google.auth
 from google.cloud import bigquery
 
+from bigquery_agent_analytics import ContextGraphConfig
 from bigquery_agent_analytics import ContextGraphManager
 from bigquery_agent_analytics import make_bq_client
 
@@ -93,24 +94,50 @@ def _build_one(
       f"{dataset_id}.{table_id}"
   )
 
+  # endpoint is configured on ContextGraphConfig; build_context_graph
+  # itself does not accept an ai_endpoint kwarg.
   manager = ContextGraphManager(
       project_id=PROJECT_ID,
       dataset_id=dataset_id,
       table_id=table_id,
       client=bq_client,
       location=DATASET_LOCATION,
+      config=ContextGraphConfig(endpoint=DEMO_AI_ENDPOINT),
   )
   print(
       f"[{label}] running ContextGraphManager.build_context_graph "
       "(use_ai_generate=True, include_decisions=True)..."
   )
-  manager.build_context_graph(
+  results = manager.build_context_graph(
       session_ids=session_ids,
       use_ai_generate=True,
       include_decisions=True,
-      ai_endpoint=DEMO_AI_ENDPOINT,
   )
-  print(f"[{label}] graph built.")
+
+  # build_context_graph swallows per-step exceptions and reports
+  # success as bool flags in the results dict; treat a False on any
+  # of the gating steps as a hard failure so we don't print "graph
+  # built" and then have an empty / broken graph downstream.
+  required_flags = [
+      "cross_links_created",
+      "decision_points_stored",
+      "decision_edges_created",
+      "property_graph_created",
+  ]
+  failed = [
+      flag for flag in required_flags if flag in results and not results[flag]
+  ]
+  if failed:
+    print(
+        f"ERROR: [{label}] graph build reported failures on: "
+        f"{failed}. Full results: {results}",
+        file=sys.stderr,
+    )
+    return 1
+  print(
+      f"[{label}] graph built. biz_nodes={results.get('biz_nodes_count')} "
+      f"decision_points={results.get('decision_points_count')}"
+  )
   return 0
 
 
@@ -153,9 +180,7 @@ def main() -> int:
   if rc != 0:
     return rc
 
-  rc = _build_one(
-      "receiver", RECEIVER_DATASET_ID, RECEIVER_TABLE_ID, bq_client
-  )
+  rc = _build_one("receiver", RECEIVER_DATASET_ID, RECEIVER_TABLE_ID, bq_client)
   if rc != 0:
     return rc
 

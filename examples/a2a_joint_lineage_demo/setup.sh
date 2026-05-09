@@ -94,12 +94,16 @@ VENV_PY="$VENV_DIR/bin/python3"
 "$VENV_PY" -m pip install \
   "google-cloud-bigquery>=3.13.0" \
   "google-cloud-aiplatform>=1.148.0" \
-  "google-adk>=1.21.0" \
+  "google-adk[a2a]>=1.21.0" \
   "google-genai>=1.0.0" \
   "python-dotenv>=1.0.0" \
   "uvicorn>=0.30.0" \
   "httpx>=0.27.0" \
   --quiet
+# google-adk's [a2a] extra pulls a2a-sdk, which the receiver server
+# (to_a2a()) and the caller's RemoteA2aAgent both import as `a2a`.
+# Without the extra, both fail with ModuleNotFoundError before the
+# demo starts.
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 "$VENV_PY" -m pip install -e "$REPO_ROOT" --quiet
 echo "  Dependencies installed in $VENV_DIR"

@@ -28,11 +28,14 @@ For each campaign:
 After all sessions finish, runs three acceptance gates:
 
   G1. caller has ≥1 ``A2A_INTERACTION`` row per campaign session;
-  G2. receiver dataset has ≥1 row (run smoke first if zero);
+  G2. receiver dataset has ≥1 row;
   G3. ≥1 caller ``a2a_context_id`` matches a receiver ``session_id``.
 
-Hard-fails fast if any gate fails — partial demos are worse than no
-demo.
+G2 and G3 poll with backoff because the receiver-side
+``BigQueryAgentAnalyticsPlugin`` writes asynchronously. The caller
+flush completes before this script returns, but receiver-side rows
+can lag. Hard-fails fast if any gate fails — partial demos are
+worse than no demo.
 """
 
 from __future__ import annotations
@@ -62,6 +65,8 @@ USER_ID = os.getenv("DEMO_USER_ID", "u-a2a-demo-mediabuyer")
 PER_SESSION_TIMEOUT_S = int(os.getenv("DEMO_SESSION_TIMEOUT_S", "420"))
 RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
+GATE_POLL_TIMEOUT_S = int(os.getenv("DEMO_GATE_POLL_TIMEOUT_S", "120"))
+GATE_POLL_INTERVAL_S = float(os.getenv("DEMO_GATE_POLL_INTERVAL_S", "3.0"))
 
 _CREATE_CAMPAIGN_RUNS_TABLE = """\
 CREATE OR REPLACE TABLE `{project}.{dataset}.campaign_runs` (
@@ -76,7 +81,11 @@ CREATE OR REPLACE TABLE `{project}.{dataset}.campaign_runs` (
 
 
 async def _run_one(
-    runner: InMemoryRunner, campaign: str, brief: str, idx: int, total: int
+    runner: InMemoryRunner,
+    campaign: str,
+    brief: str,
+    idx: int,
+    total: int,
 ) -> tuple[str, int, str | None]:
   """Run one campaign brief through the caller end-to-end."""
   session = await runner.session_service.create_session(
@@ -106,9 +115,7 @@ async def _run_one(
 
   elapsed = time.monotonic() - start
   if exception_msg is not None:
-    error_reason: str | None = (
-        f"caller raised an exception ({exception_msg})"
-    )
+    error_reason: str | None = f"caller raised an exception ({exception_msg})"
     status = "errored"
   elif event_count == 0:
     error_reason = "caller streamed zero events"
@@ -203,6 +210,30 @@ def _write_campaign_runs(runs: list[dict[str, object]]) -> None:
   print(f"  Wrote {len(runs)} campaign_runs rows to {table_ref}")
 
 
+def _poll_until(
+    label: str,
+    fn,
+    timeout_s: float,
+    interval_s: float,
+):
+  """Poll ``fn()`` until it returns truthy or timeout. Returns final value."""
+  deadline = time.monotonic() + timeout_s
+  attempt = 0
+  result = None
+  while time.monotonic() < deadline:
+    attempt += 1
+    result = fn()
+    if result:
+      print(f"  {label}: observed after {attempt} poll(s).")
+      return result
+    time.sleep(interval_s)
+  print(
+      f"  {label}: still empty after {timeout_s:.0f}s "
+      f"({attempt} attempt(s))."
+  )
+  return result
+
+
 def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   """Run the three caller-side acceptance gates. Returns 0 if all pass."""
   if not succeeded:
@@ -210,11 +241,18 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   client = bigquery.Client(project=PROJECT_ID, location=DATASET_LOCATION)
   caller_table = f"{PROJECT_ID}.{CALLER_DATASET_ID}.{CALLER_TABLE_ID}"
   receiver_table = f"{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}"
+  caller_sessions = [str(r["session_id"]) for r in succeeded]
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ArrayQueryParameter("sessions", "STRING", caller_sessions),
+      ],
+  )
 
   print()
   print("Running acceptance gates...")
 
-  # G1: caller has ≥1 A2A_INTERACTION per campaign session.
+  # G1: caller has ≥1 A2A_INTERACTION per campaign session. Caller
+  # plugin already flushed before this point so a single read is fine.
   q_g1 = f"""
     SELECT
       session_id,
@@ -223,33 +261,35 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
     WHERE session_id IN UNNEST(@sessions)
     GROUP BY session_id
   """
-  caller_sessions = [str(r["session_id"]) for r in succeeded]
-  job_config = bigquery.QueryJobConfig(
-      query_parameters=[
-          bigquery.ArrayQueryParameter(
-              "sessions", "STRING", caller_sessions
-          ),
-      ],
-  )
   rows = list(client.query(q_g1, job_config=job_config).result())
   missing = [r["session_id"] for r in rows if int(r["a2a_calls"]) == 0]
   no_row = set(caller_sessions) - {r["session_id"] for r in rows}
   if missing or no_row:
     print(
-        f"  G1 FAIL: A2A_INTERACTION missing for "
+        "  G1 FAIL: A2A_INTERACTION missing for "
         f"{sorted(set(missing) | no_row)}",
         file=sys.stderr,
     )
     return 1
-  print(f"  G1 OK — every caller session has ≥1 A2A_INTERACTION row.")
+  print("  G1 OK — every caller session has ≥1 A2A_INTERACTION row.")
 
-  # G2: receiver dataset has ≥1 row.
-  q_g2 = f"SELECT COUNT(*) AS n FROM `{receiver_table}`"
-  receiver_rows = int(list(client.query(q_g2).result())[0]["n"])
-  if receiver_rows == 0:
+  # G2: receiver dataset has ≥1 row. Receiver plugin runs in the
+  # other process and flushes asynchronously w.r.t. the caller's HTTP
+  # round-trips, so we poll.
+  def _g2_check():
+    q = f"SELECT COUNT(*) AS n FROM `{receiver_table}`"
+    return int(list(client.query(q).result())[0]["n"])
+
+  receiver_rows = _poll_until(
+      "G2 receiver row poll",
+      _g2_check,
+      timeout_s=GATE_POLL_TIMEOUT_S,
+      interval_s=GATE_POLL_INTERVAL_S,
+  )
+  if not receiver_rows:
     print(
-        "  G2 FAIL: receiver agent_events is empty. Confirm "
-        "run_receiver_server.py is running with the explicit "
+        "  G2 FAIL: receiver agent_events is empty after polling. "
+        "Confirm run_receiver_server.py is running with the explicit "
         "Runner(plugins=[...]) path; ./.venv/bin/python3 "
         "smoke_receiver.py reproduces the gap.",
         file=sys.stderr,
@@ -257,7 +297,8 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
     return 1
   print(f"  G2 OK — receiver agent_events has {receiver_rows} rows.")
 
-  # G3: ≥1 caller a2a_context_id matches a receiver session_id.
+  # G3: ≥1 caller a2a_context_id matches a receiver session_id. Same
+  # async-write race as G2 — poll.
   q_g3 = f"""
     WITH caller_a2a AS (
       SELECT DISTINCT
@@ -276,14 +317,23 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
     JOIN receiver_sessions
       ON caller_a2a.a2a_context_id = receiver_sessions.session_id
   """
-  matched_rows = list(client.query(q_g3, job_config=job_config).result())
-  matched = int(matched_rows[0]["matched"]) if matched_rows else 0
-  if matched == 0:
+
+  def _g3_check():
+    rows = list(client.query(q_g3, job_config=job_config).result())
+    return int(rows[0]["matched"]) if rows else 0
+
+  matched = _poll_until(
+      "G3 caller↔receiver match poll",
+      _g3_check,
+      timeout_s=GATE_POLL_TIMEOUT_S,
+      interval_s=GATE_POLL_INTERVAL_S,
+  )
+  if not matched:
     print(
         "  G3 FAIL: zero caller a2a_context_id values matched a "
-        "receiver session_id. Check that the receiver server is using "
-        "InMemorySessionService (or another service that honors "
-        "explicit session ids).",
+        "receiver session_id after polling. Check that the receiver "
+        "server is using InMemorySessionService (or another service "
+        "that honors explicit session ids).",
         file=sys.stderr,
     )
     return 1
