@@ -179,7 +179,23 @@ def run_with_fallback(
     if not isinstance(raw, StructuredExtractionResult):
       compiled_exception = f"WrongReturnType: {type(raw).__name__}"
     else:
-      compiled_result = raw
+      # Validate span-handling internals before treating the
+      # result as well-formed. ``StructuredExtractionResult`` is
+      # a ``@dataclass`` with no runtime type validation, so
+      # ``fully_handled_span_ids=None`` / =``"span1"`` /
+      # =``[1, 2]`` all pass through field assignment. Without
+      # this check, those values either leak downstream (the
+      # ``compiled_unchanged`` path) or break the filtered path's
+      # ``set(...)`` coercion at span-handling-downgrade time.
+      span_problem = _check_span_set_shape(
+          raw.fully_handled_span_ids, "fully_handled_span_ids"
+      ) or _check_span_set_shape(
+          raw.partially_handled_span_ids, "partially_handled_span_ids"
+      )
+      if span_problem is not None:
+        compiled_exception = f"MalformedResultInternals: {span_problem}"
+      else:
+        compiled_result = raw
 
   if compiled_result is None:
     # Compiled crashed or returned wrong shape — fall back for
@@ -362,3 +378,41 @@ def _build_filtered_outcome(
       dropped_edge_ids=tuple(sorted(all_dropped_edge_ids)),
       validation_failures=failures,
   )
+
+
+def _check_span_set_shape(value: Any, field_name: str) -> Optional[str]:
+  """Reject malformed span-handling containers.
+
+  ``StructuredExtractionResult.fully_handled_span_ids`` and
+  ``partially_handled_span_ids`` are declared as ``set[str]``,
+  but the dataclass doesn't enforce the type at runtime — a
+  compiled extractor can return ``None``, a raw string, a list,
+  or a set with non-string entries, and the dataclass happily
+  stores it.
+
+  Required shape: a ``set`` or ``frozenset`` whose elements are
+  all non-empty strings. Strings themselves are rejected even
+  though they're iterable — ``set("span1") == {"s", "p", "a",
+  "n", "1"}`` is the corrupt-coercion shape this check exists
+  to prevent. Lists / tuples are rejected for the same reason
+  the field declaration says ``set``: callers downstream merge
+  these via union, and accidentally storing a list would
+  silently change merge semantics.
+
+  Returns ``None`` if the shape is valid, or a short detail
+  string naming the offending field and observed type.
+  """
+  if not isinstance(value, (set, frozenset)):
+    return (
+        f"{field_name} must be a set/frozenset of strings; got "
+        f"{type(value).__name__}={value!r}"
+    )
+  for item in value:
+    if not isinstance(item, str):
+      return (
+          f"{field_name} contains a non-string entry "
+          f"{type(item).__name__}={item!r}"
+      )
+    if not item:
+      return f"{field_name} contains an empty-string entry"
+  return None

@@ -1036,3 +1036,143 @@ class TestRunWithFallbackSystemExit:
           compiled_extractor=compiled,
           fallback_extractor=lambda e, s: _empty_result(),
       )
+
+
+# ------------------------------------------------------------------ #
+# Span-set shape validation (review P1)                               #
+# ------------------------------------------------------------------ #
+
+
+class TestRunWithFallbackSpanSetShape:
+  """``StructuredExtractionResult`` is a ``@dataclass``; its
+  ``fully_handled_span_ids`` / ``partially_handled_span_ids``
+  fields are declared ``set[str]`` but the dataclass enforces
+  nothing at runtime. Bad shapes either silently leak downstream
+  via ``compiled_unchanged`` (where existing runtime code
+  expects iterables of strings) or break the
+  ``compiled_filtered`` path's ``set(...)`` coercion at
+  span-handling-downgrade time.
+
+  The wrapper now validates the shape up front and routes
+  malformed span containers to ``fallback_for_event`` with
+  ``compiled_exception`` starting ``"MalformedResultInternals:"``.
+  """
+
+  def _bad_span_compiled(self, **field_overrides):
+    """Construct a compiled extractor returning a result with
+    one or both span-handling fields swapped to a malformed
+    value. Other fields default to a clean valid shape."""
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    fields: dict = {
+        "nodes": [],
+        "edges": [],
+        "fully_handled_span_ids": set(),
+        "partially_handled_span_ids": set(),
+    }
+    fields.update(field_overrides)
+    bad = StructuredExtractionResult(**fields)
+
+    def compiled(event, spec):
+      return bad
+
+    return compiled
+
+  def _run_with_bad_span(self, **field_overrides):
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+
+    return run_with_fallback(
+        event=_valid_bka_event(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        compiled_extractor=self._bad_span_compiled(**field_overrides),
+        fallback_extractor=lambda e, s: _empty_result(),
+    )
+
+  def test_fully_handled_none_falls_back(self):
+    """Reviewer's repro #1: ``fully_handled_span_ids=None``.
+    Pre-fix this returned ``compiled_unchanged`` with ``None``
+    leaking downstream."""
+    outcome = self._run_with_bad_span(fully_handled_span_ids=None)
+    assert outcome.decision == "fallback_for_event"
+    assert outcome.compiled_exception is not None
+    assert outcome.compiled_exception.startswith("MalformedResultInternals:")
+    assert "fully_handled_span_ids" in outcome.compiled_exception
+
+  def test_partially_handled_string_falls_back(self):
+    """Reviewer's repro #2: ``partially_handled_span_ids="span1"``.
+    Strings are iterable, so without an explicit type check the
+    set-coercion path would corrupt this into
+    ``{"s", "p", "a", "n", "1"}``."""
+    outcome = self._run_with_bad_span(partially_handled_span_ids="span1")
+    assert outcome.decision == "fallback_for_event"
+    assert outcome.compiled_exception is not None
+    assert outcome.compiled_exception.startswith("MalformedResultInternals:")
+    assert "partially_handled_span_ids" in outcome.compiled_exception
+
+  def test_list_instead_of_set_falls_back(self):
+    """List has the right element types but the wrong container
+    type — the dataclass field declares ``set``."""
+    outcome = self._run_with_bad_span(fully_handled_span_ids=["sp1", "sp2"])
+    assert outcome.decision == "fallback_for_event"
+    assert "MalformedResultInternals" in outcome.compiled_exception
+
+  def test_set_with_non_string_item_falls_back(self):
+    outcome = self._run_with_bad_span(fully_handled_span_ids={"sp1", 42})
+    assert outcome.decision == "fallback_for_event"
+    assert "non-string entry" in outcome.compiled_exception
+
+  def test_set_with_empty_string_item_falls_back(self):
+    outcome = self._run_with_bad_span(fully_handled_span_ids={"sp1", ""})
+    assert outcome.decision == "fallback_for_event"
+    assert "empty-string entry" in outcome.compiled_exception
+
+  def test_frozenset_accepted(self):
+    """``frozenset`` is a valid container — the type annotation
+    is ``set[str]`` but immutable variants are equivalent for
+    membership / iteration / union."""
+    outcome = self._run_with_bad_span(
+        fully_handled_span_ids=frozenset({"span1"})
+    )
+    assert outcome.decision == "compiled_unchanged"
+
+  def test_filtered_path_safe_when_validation_drops_node_with_clean_spans(self):
+    """Reviewer's repro #3 covered: if validation fails AND a
+    span container is malformed, the filtered path's
+    ``set(compiled_result.fully_handled_span_ids)`` would raise.
+    With span-set validation up front, the loader falls back
+    *before* that path runs. This test pins the no-crash
+    behavior by setting up a NODE-failure scenario AND
+    ``fully_handled_span_ids=None`` simultaneously."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extractor_compilation import run_with_fallback
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    bad_node = ExtractedNode(
+        node_id="ghost",
+        entity_name="GhostEntity",
+        labels=["GhostEntity"],
+        properties=[],
+    )
+    # Build by-passing ``__init__`` semantics: the dataclass
+    # accepts ``None`` for the span field.
+    compiled_result = StructuredExtractionResult(
+        nodes=[bad_node],
+        edges=[],
+        fully_handled_span_ids=None,
+        partially_handled_span_ids=set(),
+    )
+
+    outcome = run_with_fallback(
+        event=_valid_bka_event(),
+        spec=None,
+        resolved_graph=_bka_resolved_spec(),
+        compiled_extractor=lambda e, s: compiled_result,
+        fallback_extractor=lambda e, s: _empty_result(),
+    )
+
+    # Span-set validation runs before the validator, so the
+    # outcome is fallback_for_event with MalformedResultInternals
+    # — *not* a TypeError raised from the filtered path.
+    assert outcome.decision == "fallback_for_event"
+    assert outcome.compiled_exception.startswith("MalformedResultInternals:")

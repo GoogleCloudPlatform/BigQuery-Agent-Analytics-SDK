@@ -42,7 +42,8 @@ The wrapper applies the decision tree top-down; first match wins.
 | Step | Condition | Decision |
 |------|-----------|----------|
 | 1 | Compiled extractor raises (`Exception` or `SystemExit`) *or* returns a non-`StructuredExtractionResult` value | `fallback_for_event` (compiled_exception captured) |
-| 1b | Compiled return value is a `StructuredExtractionResult` whose internals (e.g., `nodes=[{}]`) raise when the wrapper builds an `ExtractedGraph` for validation | `fallback_for_event` (compiled_exception = `"MalformedResultInternals: <ExceptionType>: <message>"`) |
+| 1b | Compiled return value's `fully_handled_span_ids` / `partially_handled_span_ids` aren't a `set`/`frozenset` of non-empty strings | `fallback_for_event` (compiled_exception starts `"MalformedResultInternals:"`, names the offending field). The dataclass enforces no runtime types; this catch-up validation rejects `None`, raw strings, lists, and sets containing non-string or empty-string entries before the value can leak downstream. |
+| 1c | Compiled return value's `nodes` / `edges` (e.g., `nodes=[{}]`) raise when the wrapper builds an `ExtractedGraph` for validation | `fallback_for_event` (compiled_exception starts `"MalformedResultInternals:"`) |
 | 2 | Validate compiled output via `validate_extracted_graph`. No failures | `compiled_unchanged` |
 | 3 | Any `EVENT`-scope failure, *or* any failure that isn't pinpointable for its scope | `fallback_for_event` |
 | 4 | Otherwise (every failure is scope-pinpointable) | `compiled_filtered` |
@@ -105,6 +106,7 @@ Review-driven regression groups:
 - **`TestRunWithFallbackMalformedInternals`** (1) — reviewer's exact repro: `StructuredExtractionResult(nodes=[{}])` (a dict instead of an `ExtractedNode`) makes `ExtractedGraph` construction raise pydantic `ValidationError`. The wrapper catches it and falls back; `compiled_exception` starts with `"MalformedResultInternals:"` so logs can route this separately from extractor exceptions.
 - **`TestRunWithFallbackEdgeFailureWithBothIds`** (2) — `EDGE`-scope failure with both `node_id` and `edge_id` populated (mirroring #76's `missing_endpoint_key`) drops the edge, not the referenced endpoint; symmetric pinpointability check ensures NODE-scope failure missing `node_id` is treated as unpinpointable even when `edge_id` is set.
 - **`TestRunWithFallbackSystemExit`** (2) — `SystemExit` from the compiled extractor is captured as `fallback_for_event`; `KeyboardInterrupt` propagates through so operator cancellation works.
+- **`TestRunWithFallbackSpanSetShape`** (7) — `fully_handled_span_ids=None` falls back; `partially_handled_span_ids="span1"` falls back (would otherwise corrupt to `{"s","p","a","n","1"}` via `set(...)` coercion); list rejected (wrong container type); non-string entry rejected; empty-string entry rejected; `frozenset` accepted; combined NODE-failure + `fully_handled_span_ids=None` falls back via span-set validation rather than crashing in the filtered-path's `set(...)` coercion.
 
 ## Out of scope (deferred to other C2 sub-PRs)
 
