@@ -43,8 +43,8 @@ Auditor projections (Phase 1):
     ``remote_agent_invocations.a2a_context_id`` to
     ``receiver_runs.receiver_session_id``.
 
-Redaction is a *convention* enforced by these views, not an
-IAM-enforced control. In a single-project demo, anyone with
+Redaction is a *convention* enforced by these projection tables,
+not an IAM-enforced control. In a single-project demo, anyone with
 project-level access can SELECT * from the underlying caller and
 receiver datasets directly. Production cross-org redaction
 enforcement is a separate working group.
@@ -244,8 +244,67 @@ def _create_property_graph(client: bigquery.Client) -> int:
 
 
 def _verify_graph(client: bigquery.Client) -> int:
-  """Smoke-check: end-to-end traversal returns at least one row."""
-  q = f"""
+  """Verify stitch coverage and traversal end-to-end.
+
+  Two checks:
+
+  1. Stitch coverage — every row in ``remote_agent_invocations``
+     must have a matching row in ``joint_a2a_edges``. A "≥1 row
+     traversal" check would silently pass on a partially broken
+     auditor graph (3 remote calls, 1 stitched edge, downstream
+     traversal returns the one stitched campaign and looks fine).
+     This gate fails if any remote call is unstitched, with a
+     pointer at Block 1 in ``bq_studio_queries.gql`` for diagnosis.
+  2. Traversal smoke — issue the headline query and print up to 5
+     rows so the operator can eyeball that the join is producing
+     real data, not just a non-empty result set.
+  """
+  coverage_q = f"""
+    SELECT
+      (SELECT COUNT(*) FROM
+        `{PROJECT_ID}.{AUDITOR_DATASET_ID}.remote_agent_invocations`)
+        AS a2a_calls,
+      (SELECT COUNT(*) FROM
+        `{PROJECT_ID}.{AUDITOR_DATASET_ID}.joint_a2a_edges`)
+        AS stitched_edges
+  """
+  try:
+    coverage_row = list(client.query(coverage_q).result())[0]
+  except gax_exceptions.GoogleAPIError as exc:
+    print(
+        f"ERROR: stitch-coverage query failed: {exc}",
+        file=sys.stderr,
+    )
+    return 1
+  a2a_calls = int(coverage_row["a2a_calls"])
+  stitched_edges = int(coverage_row["stitched_edges"])
+  print(
+      f"  stitch coverage: a2a_calls={a2a_calls}, "
+      f"stitched_edges={stitched_edges}"
+  )
+  if a2a_calls == 0:
+    print(
+        "ERROR: zero remote_agent_invocations rows. The caller has "
+        "no A2A_INTERACTION events; verify run_caller_agent.py "
+        "produced them and that build_org_graphs.py ran.",
+        file=sys.stderr,
+    )
+    return 1
+  if stitched_edges != a2a_calls:
+    unstitched = a2a_calls - stitched_edges
+    print(
+        f"ERROR: stitch coverage incomplete — {unstitched} of "
+        f"{a2a_calls} remote calls have no matching receiver "
+        "session. Run Block 1 in bq_studio_queries.gql to inspect; "
+        "the most likely cause is the receiver session service "
+        "rewriting session ids so caller.a2a_context_id no longer "
+        "equals receiver.session_id.",
+        file=sys.stderr,
+    )
+    return 1
+  print("  stitch coverage OK — every remote call has a matching edge.")
+
+  traversal_q = f"""
     GRAPH `{PROJECT_ID}.{AUDITOR_DATASET_ID}.a2a_joint_context_graph`
     MATCH (campaign:CallerCampaignRun)
           -[:DelegatedVia]->(remote:RemoteAgentInvocation)
@@ -257,7 +316,7 @@ def _verify_graph(client: bigquery.Client) -> int:
     LIMIT 5
   """
   try:
-    rows = list(client.query(q).result())
+    rows = list(client.query(traversal_q).result())
   except gax_exceptions.GoogleAPIError as exc:
     print(
         f"ERROR: traversal smoke query failed: {exc}",
@@ -266,9 +325,9 @@ def _verify_graph(client: bigquery.Client) -> int:
     return 1
   if not rows:
     print(
-        "ERROR: traversal smoke returned zero rows. Check that "
-        "joint_a2a_edges has matching pairs (see Block 1 in "
-        "bq_studio_queries.gql).",
+        "ERROR: traversal returned zero rows even though stitch "
+        "coverage passed. This shouldn't happen unless the property "
+        "graph DDL itself is broken; re-render and re-create.",
         file=sys.stderr,
     )
     return 1

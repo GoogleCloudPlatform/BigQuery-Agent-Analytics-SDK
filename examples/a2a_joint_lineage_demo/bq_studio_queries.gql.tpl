@@ -15,16 +15,33 @@
 --   Block 5 — Redaction proof.
 
 -- ============================================================
--- Block 1 — Stitch health.
--- Confirms each A2A_INTERACTION row carries a context_id and
--- counts how many also carry the (diagnostic) receiver_session_id
--- echoed back in the A2A response metadata.
+-- Block 1 — Stitch health and coverage.
+-- Confirms each A2A_INTERACTION row carries a context_id, counts
+-- how many also carry the (diagnostic) receiver_session_id echoed
+-- back in the A2A response metadata, and reports stitch coverage:
+-- if `stitched_edges` is less than `a2a_calls`, some remote calls
+-- have no matching receiver session (the join in joint_a2a_edges
+-- found no row), and downstream traversals will silently miss
+-- those calls.
 -- ============================================================
+WITH ri AS (
+  SELECT
+    COUNT(*)                                                  AS a2a_calls,
+    COUNTIF(a2a_context_id IS NOT NULL)                       AS calls_with_context_id,
+    COUNTIF(receiver_session_id_from_response IS NOT NULL)    AS calls_with_receiver_echo
+  FROM `__PROJECT_ID__.__AUDITOR_DATASET_ID__.remote_agent_invocations`
+),
+edges AS (
+  SELECT COUNT(*) AS stitched_edges
+  FROM `__PROJECT_ID__.__AUDITOR_DATASET_ID__.joint_a2a_edges`
+)
 SELECT
-  COUNT(*)                                                  AS a2a_calls,
-  COUNTIF(a2a_context_id IS NOT NULL)                       AS calls_with_context_id,
-  COUNTIF(receiver_session_id_from_response IS NOT NULL)    AS calls_with_receiver_echo
-FROM `__PROJECT_ID__.__AUDITOR_DATASET_ID__.remote_agent_invocations`;
+  ri.a2a_calls,
+  ri.calls_with_context_id,
+  ri.calls_with_receiver_echo,
+  edges.stitched_edges,
+  ri.a2a_calls - edges.stitched_edges AS unstitched_calls
+FROM ri, edges;
 
 
 -- ============================================================
@@ -38,6 +55,7 @@ MATCH (campaign:CallerCampaignRun)
       -[:DelegatedVia]->(remote:RemoteAgentInvocation)
       -[:HandledBy]->(receiver:ReceiverAgentRun)
 RETURN
+  campaign.caller_session_id,
   campaign.campaign,
   remote.a2a_context_id,
   remote.a2a_task_id,

@@ -24,8 +24,9 @@ Then in two terminals:
 ./.venv/bin/python3 run_caller_agent.py
 ./.venv/bin/python3 build_org_graphs.py
 ./.venv/bin/python3 build_joint_graph.py
-./render_queries.sh   # renders bq_studio_queries.gql for BQ Studio
 ```
+
+`build_joint_graph.py` already runs `./render_queries.sh` itself, so `bq_studio_queries.gql` is on disk after the last command. Re-run `./render_queries.sh` only if you edit `.env` (e.g. swap `DEMO_CALLER_SESSION_ID` to inspect a different campaign) or change the `*.gql.tpl` templates.
 
 **For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, and auditor datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass and the receiver-extraction acceptance gate (≥3 decisions, ≥9 candidates) reflect only the current campaigns. Skip the reset if you're iterating and intentionally want stale rows visible.
 
@@ -61,7 +62,7 @@ Per-span `a2a_task_id` propagation onto receiver spans is **deferred to a follow
 
 - **Receiver task-level spans:** context-level stitch works now; per-span `a2a_task_id` is a separate follow-up that needs ADK runtime plumbing plus a plugin change.
 - **`adk_session_id` response echo:** the response-metadata path may or may not populate for `A2AMessage`-shaped responses; the stitch above does not depend on it. Treat the `receiver_session_id_from_response` column as diagnostic only.
-- **Cross-org security:** this is a one-project demo. Caller, receiver, and auditor datasets sit in the same project and the auditor redaction is enforced by curated views, not IAM. Production cross-org redaction is a separate working group.
+- **Cross-org security:** this is a one-project demo. Caller, receiver, and auditor datasets sit in the same project and the auditor redaction is enforced by curated projection tables, not IAM. Production cross-org redaction is a separate working group.
 - **Streaming / long-running A2A:** out of scope. The demo uses synchronous request/response A2A.
 - **A2A error paths:** failed remote calls may not produce `A2A_INTERACTION` rows. Auditor coverage of the error path is a follow-up.
 - **Receiver extraction quality:** the receiver's response shape is enforced only by the system prompt. Loose prompts produce empty `decision_points`. The acceptance gate in `build_org_graphs.py` catches this.

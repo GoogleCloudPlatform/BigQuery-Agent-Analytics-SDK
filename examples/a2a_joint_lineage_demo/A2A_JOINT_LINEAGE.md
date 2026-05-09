@@ -101,7 +101,7 @@ The Article 22 / Article 86 query: for one specific caller campaign, return ever
 
 Lists every column named `a2a_request` / `a2a_response` / `content` across the auditor projections. **Expected: zero rows.** The auditor surface intentionally drops raw payloads; this query is the single statement that demonstrates the convention is in force.
 
-If this returns rows, an upstream change has leaked payload columns into the auditor view set — fix the projection SQL in `build_joint_graph.py` before merging.
+If this returns rows, an upstream change has leaked payload columns into the auditor projection tables — fix the projection SQL in `build_joint_graph.py` before merging.
 
 ## Failure modes and what each gate catches
 
