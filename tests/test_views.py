@@ -58,6 +58,7 @@ class TestViewManager:
     assert "HITL_CREDENTIAL_REQUEST_COMPLETED" in types
     assert "HITL_CONFIRMATION_REQUEST_COMPLETED" in types
     assert "HITL_INPUT_REQUEST_COMPLETED" in types
+    assert "A2A_INTERACTION" in types
     assert len(types) == len(_EVENT_VIEW_DEFS)
 
   def test_get_view_name(self, vm):
@@ -195,3 +196,116 @@ class TestViewManager:
       sql = vm.get_view_sql(event_type)
       assert "CREATE OR REPLACE VIEW" in sql
       assert f"event_type = '{event_type}'" in sql
+
+
+class TestA2AInteractionView:
+  """Tests for the A2A_INTERACTION view shape.
+
+  The A2A_INTERACTION view exposes lineage IDs (task / context),
+  the request / response payloads, and a typed
+  ``receiver_session_id`` column derived via COALESCE so both A2A
+  response shapes (task-shaped and ``A2AMessage``-shaped) are
+  covered.
+  """
+
+  def test_view_name(self, vm):
+    assert vm.get_view_name("A2A_INTERACTION") == "adk_a2a_interactions"
+
+  def test_view_sql_columns_present(self, vm):
+    """All five typed columns appear in the rendered SQL."""
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    assert "AS a2a_task_id" in sql
+    assert "AS a2a_context_id" in sql
+    assert "AS a2a_request" in sql
+    assert "AS a2a_response" in sql
+    assert "AS receiver_session_id" in sql
+
+  def test_view_sql_event_filter(self, vm):
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    assert "WHERE event_type = 'A2A_INTERACTION'" in sql
+
+  def test_view_sql_extracts_a2a_metadata_from_attributes(self, vm):
+    """task_id / context_id / request / response come from
+    ``attributes.a2a_metadata.*`` — the JSON column the BQ AA
+    Plugin writes them to.
+    """
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    assert (
+        """JSON_VALUE(
+    attributes, '$.a2a_metadata."a2a:task_id"'
+  )"""
+        in sql
+    )
+    assert (
+        """JSON_VALUE(
+    attributes, '$.a2a_metadata."a2a:context_id"'
+  )"""
+        in sql
+    )
+    assert (
+        """JSON_QUERY(
+    attributes, '$.a2a_metadata."a2a:request"'
+  )"""
+        in sql
+    )
+    assert (
+        """JSON_QUERY(
+    attributes, '$.a2a_metadata."a2a:response"'
+  )"""
+        in sql
+    )
+
+  def test_view_sql_receiver_session_id_covers_task_response_shape(self, vm):
+    """Task-shaped responses carry ``adk_session_id`` at
+    ``content.metadata.adk_session_id`` (the BQ AA Plugin uses the
+    response's task object as the row content). The first COALESCE
+    branch addresses this path.
+    """
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    assert "JSON_VALUE(content, '$.metadata.adk_session_id')" in sql
+
+  def test_view_sql_receiver_session_id_covers_message_response_shape(self, vm):
+    """``A2AMessage``-shaped responses (no task wrapper) keep the
+    response object under
+    ``attributes.a2a_metadata."a2a:response"`` rather than as the
+    row content. The second COALESCE branch addresses this path.
+    """
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    assert (
+        """JSON_VALUE(
+      attributes,
+      '$.a2a_metadata."a2a:response".metadata.adk_session_id'
+    )"""
+        in sql
+    )
+
+  def test_view_sql_receiver_session_id_uses_coalesce(self, vm):
+    """The two response-shape paths must be combined under one
+    ``COALESCE`` so a single typed column always carries the
+    receiver session id when it's present in either location.
+    """
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    receiver_block_start = sql.find("COALESCE")
+    receiver_block_end = sql.find(") AS receiver_session_id")
+    assert (
+        receiver_block_start != -1
+    ), "COALESCE must wrap the receiver_session_id paths"
+    assert (
+        receiver_block_end != -1
+    ), "receiver_session_id alias must close a COALESCE"
+    assert receiver_block_start < receiver_block_end
+
+  def test_view_sql_keeps_standard_headers(self, vm):
+    """A2A_INTERACTION view still surfaces the demo-wide identity
+    headers — ``session_id`` is what downstream auditor projections
+    use as the caller-side join key.
+    """
+    sql = vm.get_view_sql("A2A_INTERACTION")
+    for header in [
+        "timestamp",
+        "event_type",
+        "session_id",
+        "invocation_id",
+        "span_id",
+    ]:
+      assert header in sql
