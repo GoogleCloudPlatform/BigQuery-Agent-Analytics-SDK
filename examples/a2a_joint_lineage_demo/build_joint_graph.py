@@ -412,13 +412,20 @@ def _verify_graph(client: bigquery.Client) -> int:
   print("  receiver-scope OK (aggregate).")
 
   # Per-receiver-session coverage: every stitched receiver session
-  # must have ≥1 decision and ≥3 candidates (matching the receiver
-  # prompt contract — one Audience-risk-review decision per A2A
-  # call with three options weighed). Without this, the aggregate
-  # gate above would pass with 3 A2A calls where two receiver
-  # sessions produce 3+9 rows and the third produces zero — the
-  # extended traversal returns rows from the good sessions, but
-  # Block 4 for the missing campaign returns empty.
+  # must have ≥1 retained decision and ≥3 candidates *traversable
+  # through those retained decisions* (matching the receiver prompt
+  # contract — one Audience-risk-review decision per A2A call with
+  # three options weighed).
+  #
+  # The candidate join chains through rpd.decision_id rather than
+  # joining options directly to the session — that's what the
+  # property graph actually traverses
+  # (ReceiverAgentRun -> ReceiverPlanningDecision ->
+  # ReceiverDecisionOption). A direct session join would count
+  # candidate rows whose decision_id is NOT retained in
+  # receiver_planning_decisions; those rows would never appear in
+  # Block 4's traversal, so counting them would let the gate pass
+  # with an empty Block 4 result.
   per_session_q = f"""
     SELECT
       jae.receiver_session_id,
@@ -432,7 +439,7 @@ def _verify_graph(client: bigquery.Client) -> int:
     LEFT JOIN
       `{PROJECT_ID}.{AUDITOR_DATASET_ID}.receiver_decision_options`
         AS rdo
-      ON jae.receiver_session_id = rdo.session_id
+      ON rpd.decision_id = rdo.decision_id
     GROUP BY jae.receiver_session_id
     HAVING decision_count < 1 OR candidate_count < 3
   """
