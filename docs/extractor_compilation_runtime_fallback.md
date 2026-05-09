@@ -93,7 +93,7 @@ validation_failures     : tuple[ValidationFailure, ...]  # the report driving th
 
 `frozen=True`. The audit fields are designed so telemetry can group on `decision`, count `compiled_exception` types, and surface `dropped_*` cardinalities.
 
-## Tests (21 cases in `tests/test_extractor_compilation_runtime_fallback.py`)
+## Tests (28 cases in `tests/test_extractor_compilation_runtime_fallback.py`)
 
 - **`TestRunWithFallbackCompiledUnchanged`** (2) — valid compiled output passes through; empty compiled output is vacuously valid (no fallback call).
 - **`TestRunWithFallbackForEventTriggers`** (7) — compiled raises; compiled returns wrong type; compiled returns `None`; `EVENT`-scope validator failure; unpinpointable failure; mixed `EVENT` + per-element failures (EVENT wins); fallback-extractor exceptions propagate without being swallowed.
