@@ -253,7 +253,10 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   print("Running acceptance gates...")
 
   # G1: caller has ≥1 A2A_INTERACTION per campaign session. Caller
-  # plugin already flushed before this point so a single read is fine.
+  # plugin already flushed before this point so a single read is
+  # fine. Catch NotFound — if the caller table is missing the plugin
+  # never wrote anything and we want a clean diagnostic, not a raw
+  # BigQuery exception.
   q_g1 = f"""
     SELECT
       session_id,
@@ -262,7 +265,17 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
     WHERE session_id IN UNNEST(@sessions)
     GROUP BY session_id
   """
-  rows = list(client.query(q_g1, job_config=job_config).result())
+  try:
+    rows = list(client.query(q_g1, job_config=job_config).result())
+  except gax_exceptions.NotFound:
+    print(
+        f"  G1 FAIL: caller agent_events table `{caller_table}` not "
+        "found after caller flush. Verify the caller BQ AA Plugin "
+        "wrote successfully (check run_caller_agent.py logs for "
+        "flush() / shutdown() warnings).",
+        file=sys.stderr,
+    )
+    return 1
   missing = [r["session_id"] for r in rows if int(r["a2a_calls"]) == 0]
   no_row = set(caller_sessions) - {r["session_id"] for r in rows}
   if missing or no_row:
