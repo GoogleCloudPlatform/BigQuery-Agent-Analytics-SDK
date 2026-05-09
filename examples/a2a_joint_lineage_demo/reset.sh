@@ -36,9 +36,10 @@ fi
 
 CALLER_DATASET_ID="${CALLER_DATASET_ID:-a2a_caller_demo}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
+AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
 
 echo "Tearing down A2A Joint Lineage demo state in project $PROJECT_ID..."
-for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID"; do
+for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
   if bq show "${PROJECT_ID}:${ds}" &>/dev/null 2>&1; then
     echo "  Removing dataset ${ds}..."
     bq rm -r -f --dataset "${PROJECT_ID}:${ds}" 2>/dev/null || true

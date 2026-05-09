@@ -116,12 +116,13 @@ CALLER_DATASET_ID="${CALLER_DATASET_ID:-a2a_caller_demo}"
 CALLER_TABLE_ID="${CALLER_TABLE_ID:-agent_events}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
 RECEIVER_TABLE_ID="${RECEIVER_TABLE_ID:-agent_events}"
+AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
 DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-us-central1}"
 DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-2.5-pro}"
 DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
-for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID"; do
+for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
   if ! bq show "${PROJECT_ID}:${ds}" &>/dev/null 2>&1; then
     echo "  Creating BigQuery dataset: ${ds} in ${DATASET_LOCATION}..."
     bq mk --dataset --location="$DATASET_LOCATION" \
@@ -130,7 +131,7 @@ for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID"; do
 done
 
 cat > "$ENV_FILE" <<EOF
-# A2A Joint Lineage Demo Configuration (PR 1 scope)
+# A2A Joint Lineage Demo Configuration
 PROJECT_ID=$PROJECT_ID
 DATASET_LOCATION=$DATASET_LOCATION
 
@@ -139,6 +140,8 @@ CALLER_TABLE_ID=$CALLER_TABLE_ID
 
 RECEIVER_DATASET_ID=$RECEIVER_DATASET_ID
 RECEIVER_TABLE_ID=$RECEIVER_TABLE_ID
+
+AUDITOR_DATASET_ID=$AUDITOR_DATASET_ID
 
 DEMO_AGENT_LOCATION=$DEMO_AGENT_LOCATION
 DEMO_AGENT_MODEL=$DEMO_AGENT_MODEL
@@ -161,11 +164,13 @@ echo ""
 echo "  Terminal A (receiver server, leave running):"
 echo "    cd $SCRIPT_DIR && ./.venv/bin/python3 run_receiver_server.py"
 echo ""
-echo "  Terminal B (smoke + caller campaigns + dual graph):"
+echo "  Terminal B (smoke + caller campaigns + dual graph + auditor graph):"
 echo "    cd $SCRIPT_DIR"
 echo "    ./.venv/bin/python3 smoke_receiver.py"
 echo "    ./.venv/bin/python3 run_caller_agent.py"
 echo "    ./.venv/bin/python3 build_org_graphs.py"
+echo "    ./.venv/bin/python3 build_joint_graph.py"
+echo "    ./render_queries.sh   # renders bq_studio_queries.gql for BQ Studio"
 echo ""
 echo "Acceptance gates:"
 echo "  - run_caller_agent.py asserts each campaign has ≥1 A2A_INTERACTION row"
