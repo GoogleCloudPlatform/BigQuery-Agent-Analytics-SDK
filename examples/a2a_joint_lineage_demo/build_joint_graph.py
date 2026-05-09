@@ -75,6 +75,13 @@ RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
 AUDITOR_DATASET_ID = os.getenv("AUDITOR_DATASET_ID", "a2a_auditor_demo")
 
+# Scoped receiver-extraction acceptance thresholds. Match the
+# defaults in build_org_graphs.py so the auditor surface for a
+# default 3-campaign demo (3 decisions × 3 candidates) is
+# consistent with the per-org gate. Override either via env.
+MIN_SCOPED_DECISIONS = int(os.getenv("DEMO_MIN_RECEIVER_DECISIONS", "3"))
+MIN_SCOPED_CANDIDATES = int(os.getenv("DEMO_MIN_RECEIVER_CANDIDATES", "9"))
+
 _RENDERED_GRAPH_DDL_PATH = os.path.join(_HERE, "joint_property_graph.gql")
 _RENDER_SCRIPT_PATH = os.path.join(_HERE, "render_queries.sh")
 
@@ -373,20 +380,28 @@ def _verify_graph(client: bigquery.Client) -> int:
   scoped_decisions = int(scope_row["scoped_decisions"])
   scoped_candidates = int(scope_row["scoped_candidates"])
   print(
-      f"  receiver scope: scoped_decisions={scoped_decisions}, "
-      f"scoped_candidates={scoped_candidates}"
+      f"  receiver scope: scoped_decisions={scoped_decisions} "
+      f"(min {MIN_SCOPED_DECISIONS}), "
+      f"scoped_candidates={scoped_candidates} "
+      f"(min {MIN_SCOPED_CANDIDATES})"
   )
-  if scoped_decisions == 0 or scoped_candidates == 0:
+  if (
+      scoped_decisions < MIN_SCOPED_DECISIONS
+      or scoped_candidates < MIN_SCOPED_CANDIDATES
+  ):
     print(
-        "ERROR: scoped receiver_planning_decisions or "
-        "receiver_decision_options is empty. build_org_graphs.py "
-        "validates the full receiver dataset, but the auditor "
-        "scope chain dropped every row — no receiver session in "
-        "the receiver dataset's decision_points / candidates "
-        "matches a current caller a2a_context_id. Re-run after "
-        "./reset.sh && ./setup.sh, or check that "
-        "InMemorySessionService is honoring caller context_ids on "
-        "the receiver side.",
+        f"ERROR: scoped receiver-extraction coverage below threshold "
+        f"({scoped_decisions} < {MIN_SCOPED_DECISIONS} decisions or "
+        f"{scoped_candidates} < {MIN_SCOPED_CANDIDATES} candidates). "
+        "build_org_graphs.py validates the full receiver dataset, "
+        "but the auditor scope chain may have dropped most rows — "
+        "no-reset reruns where receiver session ids changed will "
+        "satisfy the global gate while leaving the scoped surface "
+        "thin. Re-run after `./reset.sh && ./setup.sh`, or check "
+        "that the receiver session service is honoring caller "
+        "context_ids. Override the threshold via "
+        "DEMO_MIN_RECEIVER_DECISIONS / DEMO_MIN_RECEIVER_CANDIDATES "
+        "if intentionally running fewer campaigns.",
         file=sys.stderr,
     )
     return 1
