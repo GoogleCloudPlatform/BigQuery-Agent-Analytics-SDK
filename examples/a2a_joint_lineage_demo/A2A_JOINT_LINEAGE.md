@@ -41,11 +41,13 @@ The `joint_a2a_edges` projection in `build_joint_graph.py` materializes this joi
 | Auditor table | Source | Purpose |
 |---|---|---|
 | `caller_campaign_runs` | `<CALLER_DATASET>.campaign_runs` | Renames `session_id` → `caller_session_id` to match the graph DDL's `KEY (caller_session_id)` |
-| `remote_agent_invocations` | caller `agent_events` `WHERE event_type = 'A2A_INTERACTION'` | One row per remote A2A call. Carries lineage IDs (task/context); drops raw `a2a_request` / `a2a_response` / `content` |
-| `receiver_runs` | receiver `agent_events` `GROUP BY session_id` | Receiver-side session roots — there is no campaign brief on the receiver, so this is the only sensible root |
-| `receiver_planning_decisions` | `<RECEIVER_DATASET>.decision_points` | Receiver-side decisions extracted from `LLM_RESPONSE` text |
-| `receiver_decision_options` | `<RECEIVER_DATASET>.candidates` | Receiver-side options weighed (`rejection_rationale` lives here as a property) |
-| `joint_a2a_edges` | inner join of the two above on `a2a_context_id == receiver_session_id` | The cross-org stitch as a first-class edge table |
+| `remote_agent_invocations` | caller `agent_events` `WHERE event_type = 'A2A_INTERACTION'`, **scoped by `INNER JOIN caller_campaign_runs`** | One row per remote A2A call **for the current campaign run only**. Carries lineage IDs (task/context); drops raw `a2a_request` / `a2a_response` / `content`. The scope keeps no-reset reruns from carrying orphaned remote invocations whose `CallerCampaignRun` source vanished. |
+| `receiver_runs` | receiver `agent_events` `GROUP BY session_id`, **filtered to `session_id IN (SELECT a2a_context_id FROM remote_agent_invocations)`** | Receiver-side session roots **for sessions matched to current caller campaigns**. Smoke session + sessions left from prior runs are excluded. |
+| `receiver_planning_decisions` | `<RECEIVER_DATASET>.decision_points`, **filtered to `session_id IN (SELECT receiver_session_id FROM receiver_runs)`** | Receiver-side decisions extracted from `LLM_RESPONSE` text, scoped to the receiver sessions retained in `receiver_runs` |
+| `receiver_decision_options` | `<RECEIVER_DATASET>.candidates`, **filtered to `session_id IN (SELECT receiver_session_id FROM receiver_runs)`** | Receiver-side options weighed (`rejection_rationale` lives here as a property), same scoping as `receiver_planning_decisions` |
+| `joint_a2a_edges` | inner join of `remote_agent_invocations` and `receiver_runs` on `a2a_context_id == receiver_session_id` | The cross-org stitch as a first-class edge table |
+
+The scope chain (`caller_campaign_runs` → `remote_agent_invocations` → `receiver_runs` → receiver decisions/options) means the auditor surface always reflects the current campaign run only. `build_joint_graph.py`'s `_verify_graph` runs three coverage gates: stitch coverage (every remote call has a matching edge), receiver-extraction coverage (scoped `receiver_planning_decisions` ≥ 1, `receiver_decision_options` ≥ 1), and an end-to-end traversal that walks all the way to `ReceiverDecisionOption` so a broken scope chain produces zero rows even when the upstream gates pass.
 
 All projections use `CREATE OR REPLACE TABLE … AS SELECT …` so re-runs are idempotent. Redaction of raw payloads (`a2a_request`, `a2a_response`, `content`) is a *convention* enforced by the projection SELECT lists, not an IAM-enforced control. A single-project demo cannot enforce IAM-level redaction — that's the production cross-org story (out of scope here; see the working-group plan in #129).
 

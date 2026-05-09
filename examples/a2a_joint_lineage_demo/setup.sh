@@ -27,10 +27,11 @@
 #   Terminal A  (long-lived receiver server)
 #     ./.venv/bin/python3 run_receiver_server.py
 #
-#   Terminal B  (smoke + caller campaigns + dual graph build)
+#   Terminal B  (smoke + caller campaigns + dual graph + auditor graph)
 #     ./.venv/bin/python3 smoke_receiver.py
 #     ./.venv/bin/python3 run_caller_agent.py
 #     ./.venv/bin/python3 build_org_graphs.py
+#     ./.venv/bin/python3 build_joint_graph.py
 #
 # Required IAM roles for the authenticated principal:
 #   - roles/bigquery.dataEditor

@@ -281,7 +281,7 @@ def _create_property_graph(client: bigquery.Client) -> int:
 def _verify_graph(client: bigquery.Client) -> int:
   """Verify stitch coverage and traversal end-to-end.
 
-  Two checks:
+  Three checks:
 
   1. Stitch coverage — every row in ``remote_agent_invocations``
      must have a matching row in ``joint_a2a_edges``. A "≥1 row
@@ -290,9 +290,18 @@ def _verify_graph(client: bigquery.Client) -> int:
      traversal returns the one stitched campaign and looks fine).
      This gate fails if any remote call is unstitched, with a
      pointer at Block 1 in ``bq_studio_queries.gql`` for diagnosis.
-  2. Traversal smoke — issue the headline query and print up to 5
-     rows so the operator can eyeball that the join is producing
-     real data, not just a non-empty result set.
+  2. Receiver-extraction coverage — after the receiver-side scope
+     chain (PR-2 follow-up), the auditor's
+     ``receiver_planning_decisions`` and ``receiver_decision_options``
+     are filtered to only sessions matched to current caller
+     campaigns. ``build_org_graphs.py`` validates the full
+     receiver dataset, but a no-reset rerun could leave the scoped
+     auditor tables nearly empty (e.g. receiver session ids
+     changed between runs but the receiver dataset still has
+     stale extraction). Catch that here.
+  3. Traversal smoke — issue the headline query through
+     ``ReceiverDecisionOption`` so the smoke breaks if the scoped
+     receiver tables are empty even when stitch coverage passes.
   """
   coverage_q = f"""
     SELECT
@@ -339,15 +348,67 @@ def _verify_graph(client: bigquery.Client) -> int:
     return 1
   print("  stitch coverage OK — every remote call has a matching edge.")
 
+  # Receiver-extraction coverage gate. Mirrors the thresholds in
+  # build_org_graphs.py (≥3 decisions, ≥9 candidates for the
+  # default 3-campaign demo) but runs against the *scoped* auditor
+  # tables, so empty scoped projections are caught here even when
+  # the unscoped receiver dataset satisfied build_org_graphs.py.
+  scope_q = f"""
+    SELECT
+      (SELECT COUNT(*) FROM
+        `{PROJECT_ID}.{AUDITOR_DATASET_ID}.receiver_planning_decisions`)
+        AS scoped_decisions,
+      (SELECT COUNT(*) FROM
+        `{PROJECT_ID}.{AUDITOR_DATASET_ID}.receiver_decision_options`)
+        AS scoped_candidates
+  """
+  try:
+    scope_row = list(client.query(scope_q).result())[0]
+  except gax_exceptions.GoogleAPIError as exc:
+    print(
+        f"ERROR: receiver-scope query failed: {exc}",
+        file=sys.stderr,
+    )
+    return 1
+  scoped_decisions = int(scope_row["scoped_decisions"])
+  scoped_candidates = int(scope_row["scoped_candidates"])
+  print(
+      f"  receiver scope: scoped_decisions={scoped_decisions}, "
+      f"scoped_candidates={scoped_candidates}"
+  )
+  if scoped_decisions == 0 or scoped_candidates == 0:
+    print(
+        "ERROR: scoped receiver_planning_decisions or "
+        "receiver_decision_options is empty. build_org_graphs.py "
+        "validates the full receiver dataset, but the auditor "
+        "scope chain dropped every row — no receiver session in "
+        "the receiver dataset's decision_points / candidates "
+        "matches a current caller a2a_context_id. Re-run after "
+        "./reset.sh && ./setup.sh, or check that "
+        "InMemorySessionService is honoring caller context_ids on "
+        "the receiver side.",
+        file=sys.stderr,
+    )
+    return 1
+  print("  receiver-scope OK.")
+
+  # Headline traversal goes all the way to ReceiverDecisionOption
+  # so a broken scope chain (empty receiver_planning_decisions or
+  # receiver_decision_options) produces zero rows here even when
+  # stitch coverage passed.
   traversal_q = f"""
     GRAPH `{PROJECT_ID}.{AUDITOR_DATASET_ID}.a2a_joint_context_graph`
     MATCH (campaign:CallerCampaignRun)
           -[:DelegatedVia]->(remote:RemoteAgentInvocation)
           -[:HandledBy]->(receiver:ReceiverAgentRun)
+          -[:ReceiverMadeDecision]->(decision:ReceiverPlanningDecision)
+          -[:ReceiverWeighedOption]->(option:ReceiverDecisionOption)
     RETURN
       campaign.campaign,
       remote.a2a_context_id,
-      receiver.receiver_session_id
+      receiver.receiver_session_id,
+      decision.decision_type,
+      option.status
     LIMIT 5
   """
   try:
@@ -360,9 +421,10 @@ def _verify_graph(client: bigquery.Client) -> int:
     return 1
   if not rows:
     print(
-        "ERROR: traversal returned zero rows even though stitch "
-        "coverage passed. This shouldn't happen unless the property "
-        "graph DDL itself is broken; re-render and re-create.",
+        "ERROR: end-to-end traversal returned zero rows even though "
+        "stitch and receiver-scope coverage passed. This shouldn't "
+        "happen unless the property graph DDL itself is broken; "
+        "re-render and re-create.",
         file=sys.stderr,
     )
     return 1
@@ -371,7 +433,9 @@ def _verify_graph(client: bigquery.Client) -> int:
     print(
         f"    campaign={row['campaign']!r} "
         f"context={row['a2a_context_id']!r} "
-        f"receiver_session={row['receiver_session_id']!r}"
+        f"receiver_session={row['receiver_session_id']!r} "
+        f"decision={row['decision_type']!r} "
+        f"option_status={row['status']!r}"
     )
   return 0
 
