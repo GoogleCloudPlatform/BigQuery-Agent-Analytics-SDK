@@ -8,7 +8,7 @@
 -- Five paste-and-run blocks for the BigQuery Studio walkthrough.
 -- Render concrete project/dataset values via ./render_queries.sh.
 --
---   Block 1 — Stitch health.
+--   Block 1 — Stitch health and coverage.
 --   Block 2 — End-to-end A2A path (one row per remote call).
 --   Block 3 — Remote governance rejections.
 --   Block 4 — Right-to-explanation for one specific campaign.

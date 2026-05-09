@@ -55,13 +55,27 @@ The Phase 1 joint property graph has 5 node labels and 4 edge labels. `receiver_
 
 `render_queries.sh` writes `bq_studio_queries.gql` with concrete `<PROJECT>` / `<AUDITOR_DATASET>` / `<DEMO_CALLER_SESSION_ID>` values inlined. Open BigQuery Studio in the demo project and paste each block.
 
-### Block 1 — Stitch health
+### Block 1 — Stitch health and coverage
 
 ```sql
-SELECT COUNT(*)                                                  AS a2a_calls,
-       COUNTIF(a2a_context_id IS NOT NULL)                       AS calls_with_context_id,
-       COUNTIF(receiver_session_id_from_response IS NOT NULL)    AS calls_with_receiver_echo
-FROM `<P>.<AUDITOR>.remote_agent_invocations`;
+WITH ri AS (
+  SELECT
+    COUNT(*)                                                  AS a2a_calls,
+    COUNTIF(a2a_context_id IS NOT NULL)                       AS calls_with_context_id,
+    COUNTIF(receiver_session_id_from_response IS NOT NULL)    AS calls_with_receiver_echo
+  FROM `<P>.<AUDITOR>.remote_agent_invocations`
+),
+edges AS (
+  SELECT COUNT(*) AS stitched_edges
+  FROM `<P>.<AUDITOR>.joint_a2a_edges`
+)
+SELECT
+  ri.a2a_calls,
+  ri.calls_with_context_id,
+  ri.calls_with_receiver_echo,
+  edges.stitched_edges,
+  ri.a2a_calls - edges.stitched_edges AS unstitched_calls
+FROM ri, edges;
 ```
 
 What it tells you:
@@ -69,6 +83,8 @@ What it tells you:
 - `a2a_calls` should equal the number of campaigns × delegations-per-campaign (3 in the default config).
 - `calls_with_context_id = a2a_calls` always; `a2a:context_id` is set unconditionally by `RemoteA2aAgent`.
 - `calls_with_receiver_echo` may be less than `a2a_calls` for `A2AMessage`-shaped responses; treat as diagnostic only. The actual stitch uses `a2a_context_id` against `receiver.session_id`, not the echo.
+- `stitched_edges` is the number of remote calls that joined cleanly to a receiver session via `joint_a2a_edges`.
+- **`unstitched_calls > 0` is the failure signal.** It means some remote A2A calls have no matching receiver session — typically the receiver session service rewrote `session_id` so the equality `a2a_context_id == receiver.session_id` no longer holds. `build_joint_graph.py` already fails its strict-coverage gate on this; Block 1 is the operator-side reproduction.
 
 ### Block 2 — End-to-end A2A path
 
@@ -77,7 +93,8 @@ GRAPH `<P>.<AUDITOR>.a2a_joint_context_graph`
 MATCH (campaign:CallerCampaignRun)
       -[:DelegatedVia]->(remote:RemoteAgentInvocation)
       -[:HandledBy]->(receiver:ReceiverAgentRun)
-RETURN campaign.campaign,
+RETURN campaign.caller_session_id,
+       campaign.campaign,
        remote.a2a_context_id,
        remote.a2a_task_id,
        receiver.receiver_session_id,
@@ -85,7 +102,7 @@ RETURN campaign.campaign,
 LIMIT 20;
 ```
 
-One row per remote A2A call. Pick any `caller_session_id` from this output and use it as the `@caller_session` parameter in Block 4.
+One row per remote A2A call. Pick any `caller_session_id` from the first column and use it as the `@caller_session` parameter in Block 4.
 
 ### Block 3 — Remote governance rejections
 
