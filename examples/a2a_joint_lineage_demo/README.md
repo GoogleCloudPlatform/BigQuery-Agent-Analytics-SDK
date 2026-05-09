@@ -39,6 +39,8 @@ Then in two terminals:
 ./.venv/bin/python3 build_org_graphs.py
 ```
 
+**For a clean verification run, start with `./reset.sh`** to drop the caller and receiver datasets first. `build_org_graphs.py` discovers all sessions in each table, including the smoke session and any sessions left from prior runs. Resetting up front guarantees the receiver-extraction acceptance gate (≥3 decisions, ≥9 candidates) reflects only the current campaigns. Skip the reset if you're iterating and intentionally want stale rows visible.
+
 After all three commands return zero, you have:
 
 - `<PROJECT>.a2a_caller_demo.agent_events` — caller-side spans, including `A2A_INTERACTION` rows

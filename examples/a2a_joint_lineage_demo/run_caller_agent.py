@@ -54,6 +54,7 @@ from caller_agent.agent import DATASET_LOCATION
 from caller_agent.agent import PROJECT_ID
 from campaigns import CAMPAIGN_BRIEFS
 from google.adk.runners import InMemoryRunner
+from google.api_core import exceptions as gax_exceptions
 from google.cloud import bigquery
 from google.genai.types import Content
 from google.genai.types import Part
@@ -275,10 +276,16 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
 
   # G2: receiver dataset has ≥1 row. Receiver plugin runs in the
   # other process and flushes asynchronously w.r.t. the caller's HTTP
-  # round-trips, so we poll.
+  # round-trips, so we poll. Treat NotFound as 0 — on a fresh dataset
+  # the receiver table doesn't exist until the plugin's first write
+  # creates it, and we want the poll loop to time out cleanly with
+  # the intended diagnostic instead of stack-tracing.
   def _g2_check():
     q = f"SELECT COUNT(*) AS n FROM `{receiver_table}`"
-    return int(list(client.query(q).result())[0]["n"])
+    try:
+      return int(list(client.query(q).result())[0]["n"])
+    except gax_exceptions.NotFound:
+      return 0
 
   receiver_rows = _poll_until(
       "G2 receiver row poll",
@@ -319,7 +326,10 @@ def _check_acceptance_gates(succeeded: list[dict[str, object]]) -> int:
   """
 
   def _g3_check():
-    rows = list(client.query(q_g3, job_config=job_config).result())
+    try:
+      rows = list(client.query(q_g3, job_config=job_config).result())
+    except gax_exceptions.NotFound:
+      return 0
     return int(rows[0]["matched"]) if rows else 0
 
   matched = _poll_until(
