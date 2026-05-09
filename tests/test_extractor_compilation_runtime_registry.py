@@ -609,3 +609,70 @@ class TestRegistryEndToEnd:
         ("bka_decision", "compiled_unchanged"),
         ("bka_decision", "compiled_unchanged"),
     ]
+
+
+# ------------------------------------------------------------------ #
+# Fallback callable validation (review P2)                            #
+# ------------------------------------------------------------------ #
+
+
+class TestRegistryFallbackCallableValidation:
+  """``run_structured_extractors`` silently skips ``None`` entries
+  (treats them as "no extractor") and raises ``TypeError`` when it
+  tries to invoke a non-callable value — both far from the
+  misconfiguration site. The adapter validates the whole
+  ``fallback_extractors`` dict at build time so the error
+  surfaces with the offending event_type named."""
+
+  def test_none_fallback_rejected(self, tmp_path: pathlib.Path):
+    """Reviewer's repro #1: ``fallback_extractors={\"a\": None}``
+    used to land in the registry as-is; the runtime would silently
+    skip it. Build-time validation rejects with a clear error."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    with pytest.raises(
+        TypeError, match=r"fallback_extractors\['a'\] must be callable"
+    ):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"a": None},
+          resolved_graph=None,
+      )
+
+  def test_non_callable_fallback_rejected(self, tmp_path: pathlib.Path):
+    """Reviewer's repro #2: ``fallback_extractors={\"a\": 123}``."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    with pytest.raises(
+        TypeError, match=r"fallback_extractors\['a'\] must be callable"
+    ):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"a": 123},
+          resolved_graph=None,
+      )
+
+  def test_invalid_fallback_outside_allowlist_still_rejected(
+      self, tmp_path: pathlib.Path
+  ):
+    """The full ``fallback_extractors`` dict is validated, not
+    just the scoped subset. A misconfig in an out-of-allowlist
+    entry is still a misconfig — surfacing it now beats hiding
+    it until the allowlist widens."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    fallback_a = lambda e, s: _empty_result()
+
+    with pytest.raises(
+        TypeError, match=r"fallback_extractors\['b'\] must be callable"
+    ):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"a": fallback_a, "b": None},
+          resolved_graph=None,
+          # 'b' is OUT of allowlist but still has to be callable.
+          event_type_allowlist=("a",),
+      )

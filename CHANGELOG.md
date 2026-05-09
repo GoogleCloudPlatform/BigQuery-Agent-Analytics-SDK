@@ -30,9 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registered unchanged; **compiled-only → skipped and recorded
   in ``bundles_without_fallback``** (C2's safety contract
   requires a fallback; fail-closed default). The inverse
-  ``fallbacks_without_bundle`` audit surface lets rollout
-  telemetry distinguish "no compiled coverage yet" from
-  "compiled coverage exists but skipped because no fallback."
+  ``fallbacks_without_bundle`` audit surface records every
+  event_type whose fallback has *no usable compiled registry
+  entry* — that includes "bundle never built" and "bundle
+  exists but discovery rejected it" (fingerprint mismatch,
+  collision, ``manifest_unreadable``); rollout telemetry that
+  wants to distinguish those cases should cross-reference
+  ``discovery.failures``. ``fallback_extractors`` values are
+  validated to be callable at build time (rejects ``None`` /
+  non-callable with a ``TypeError`` naming the offending
+  event_type) so misconfiguration surfaces immediately rather
+  than silently in ``run_structured_extractors``.
   ``event_type_allowlist`` filters both candidate pools. The
   ``on_outcome`` callback fires on every wrapped invocation
   including ``compiled_unchanged`` (denominator metric for

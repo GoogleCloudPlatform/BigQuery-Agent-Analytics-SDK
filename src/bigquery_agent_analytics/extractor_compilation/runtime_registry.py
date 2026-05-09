@@ -43,10 +43,15 @@ Per-event-type wiring rules:
 
 The :class:`WrappedRegistry` return value carries both the
 ready-to-use ``extractors`` dict and audit fields callers can
-use to build coverage telemetry — particularly the *inverse*
-``fallbacks_without_bundle``, which lets a rollout dashboard
-distinguish "no compiled coverage exists yet" from "compiled
-bundle existed but was skipped because no fallback."
+use to build coverage telemetry. ``bundles_without_fallback``
+is the strict configuration-error signal (compiled bundle
+discovered, no matching fallback). ``fallbacks_without_bundle``
+is the wider "no usable compiled registry entry" signal — it
+includes "bundle never built" *and* "bundle exists but
+discovery rejected it" (fingerprint mismatch,
+``manifest_unreadable``, event-type collision, etc.). Rollout
+telemetry that wants to distinguish those cases should cross-
+reference ``discovery.failures`` for the underlying reason.
 
 The ``on_outcome`` callback fires on **every** wrapped
 invocation including ``compiled_unchanged`` outcomes — that's
@@ -184,7 +189,25 @@ def build_runtime_extractor_registry(
     A :class:`WrappedRegistry`. The ``extractors`` dict is
     ready to be passed straight into
     :func:`run_structured_extractors`.
+
+  Raises:
+    TypeError: if any ``fallback_extractors`` value isn't
+      callable. The dict is validated *before* allowlist
+      scoping, so misconfigured entries surface even when
+      they'd be filtered out — the caller's input contract has
+      to hold for the whole dict, not just the scoped subset.
+      ``run_structured_extractors`` would otherwise silently
+      skip ``None`` entries (treating them as "no extractor")
+      or raise ``TypeError`` later when it tried to invoke a
+      non-callable value, far from the misconfiguration site.
   """
+  for event_type, fallback in fallback_extractors.items():
+    if not callable(fallback):
+      raise TypeError(
+          f"fallback_extractors[{event_type!r}] must be callable; "
+          f"got {type(fallback).__name__}={fallback!r}"
+      )
+
   discovery = discover_bundles(
       bundles_root,
       expected_fingerprint=expected_fingerprint,
