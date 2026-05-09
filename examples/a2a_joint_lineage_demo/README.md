@@ -28,7 +28,9 @@ Then in two terminals:
 
 `build_joint_graph.py` already runs `./render_queries.sh` itself, so `bq_studio_queries.gql` is on disk after the last command. Re-run `./render_queries.sh` only if you edit `.env` (e.g. swap `DEMO_CALLER_SESSION_ID` to inspect a different campaign) or change the `*.gql.tpl` templates.
 
-**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, and auditor datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass and the receiver-extraction acceptance gate (≥3 decisions, ≥9 candidates) reflect only the current campaigns. Skip the reset if you're iterating and intentionally want stale rows visible.
+**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, and auditor datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass reflects only the current campaigns.
+
+The auditor-side projections built by `build_joint_graph.py` are scoped to the current campaign run regardless (the chain `caller_campaign_runs → remote_agent_invocations → receiver_runs → receiver decisions/options` filters out anything not matched to a current caller session). Stale rows from prior runs still accumulate in the **source** layers — `<CALLER_DATASET>.agent_events`, `<RECEIVER_DATASET>.agent_events`, and the per-org `decision_points` / `candidates` tables `build_org_graphs.py` writes — and remain visible in the BQ Studio Explorer for those datasets. Skip the reset if you're iterating and want that source-side history kept; reset if you want a guaranteed-clean per-org and acceptance-gate baseline.
 
 After all five commands return zero, you have:
 

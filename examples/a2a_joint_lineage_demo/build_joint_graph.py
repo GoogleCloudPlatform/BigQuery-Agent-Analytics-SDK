@@ -288,7 +288,7 @@ def _create_property_graph(client: bigquery.Client) -> int:
 def _verify_graph(client: bigquery.Client) -> int:
   """Verify stitch coverage and traversal end-to-end.
 
-  Three checks:
+  Four checks:
 
   1. Stitch coverage — every row in ``remote_agent_invocations``
      must have a matching row in ``joint_a2a_edges``. A "≥1 row
@@ -297,18 +297,22 @@ def _verify_graph(client: bigquery.Client) -> int:
      traversal returns the one stitched campaign and looks fine).
      This gate fails if any remote call is unstitched, with a
      pointer at Block 1 in ``bq_studio_queries.gql`` for diagnosis.
-  2. Receiver-extraction coverage — after the receiver-side scope
-     chain (PR-2 follow-up), the auditor's
+  2. Aggregate receiver-extraction coverage — scoped
      ``receiver_planning_decisions`` and ``receiver_decision_options``
-     are filtered to only sessions matched to current caller
-     campaigns. ``build_org_graphs.py`` validates the full
-     receiver dataset, but a no-reset rerun could leave the scoped
-     auditor tables nearly empty (e.g. receiver session ids
-     changed between runs but the receiver dataset still has
-     stale extraction). Catch that here.
-  3. Traversal smoke — issue the headline query through
-     ``ReceiverDecisionOption`` so the smoke breaks if the scoped
-     receiver tables are empty even when stitch coverage passes.
+     must meet the same thresholds ``build_org_graphs.py`` uses
+     (defaults 3 / 9). Catches no-reset reruns where the unscoped
+     receiver dataset satisfies the per-org gate but the scope
+     chain dropped most rows.
+  3. Per-receiver-session coverage — every stitched receiver
+     session must have ≥1 decision and ≥3 candidates (the per-call
+     receiver-prompt contract). Catches the case where (2) passes
+     because some sessions over-produce while others have zero,
+     leaving Block 4 empty for one specific campaign even though
+     the aggregate count is fine.
+  4. End-to-end traversal — walks all the way to
+     ``ReceiverDecisionOption`` so a broken scope chain or a
+     KEY/REFERENCES drift in the property graph DDL produces zero
+     rows even when (1)-(3) pass.
   """
   coverage_q = f"""
     SELECT
@@ -405,7 +409,60 @@ def _verify_graph(client: bigquery.Client) -> int:
         file=sys.stderr,
     )
     return 1
-  print("  receiver-scope OK.")
+  print("  receiver-scope OK (aggregate).")
+
+  # Per-receiver-session coverage: every stitched receiver session
+  # must have ≥1 decision and ≥3 candidates (matching the receiver
+  # prompt contract — one Audience-risk-review decision per A2A
+  # call with three options weighed). Without this, the aggregate
+  # gate above would pass with 3 A2A calls where two receiver
+  # sessions produce 3+9 rows and the third produces zero — the
+  # extended traversal returns rows from the good sessions, but
+  # Block 4 for the missing campaign returns empty.
+  per_session_q = f"""
+    SELECT
+      jae.receiver_session_id,
+      COUNT(DISTINCT rpd.decision_id)  AS decision_count,
+      COUNT(DISTINCT rdo.candidate_id) AS candidate_count
+    FROM `{PROJECT_ID}.{AUDITOR_DATASET_ID}.joint_a2a_edges` AS jae
+    LEFT JOIN
+      `{PROJECT_ID}.{AUDITOR_DATASET_ID}.receiver_planning_decisions`
+        AS rpd
+      ON jae.receiver_session_id = rpd.session_id
+    LEFT JOIN
+      `{PROJECT_ID}.{AUDITOR_DATASET_ID}.receiver_decision_options`
+        AS rdo
+      ON jae.receiver_session_id = rdo.session_id
+    GROUP BY jae.receiver_session_id
+    HAVING decision_count < 1 OR candidate_count < 3
+  """
+  try:
+    bad_sessions = list(client.query(per_session_q).result())
+  except gax_exceptions.GoogleAPIError as exc:
+    print(
+        f"ERROR: per-receiver-session coverage query failed: {exc}",
+        file=sys.stderr,
+    )
+    return 1
+  if bad_sessions:
+    summary = ", ".join(
+        f"{r['receiver_session_id']}(d={r['decision_count']},"
+        f"c={r['candidate_count']})"
+        for r in bad_sessions[:5]
+    )
+    print(
+        f"ERROR: {len(bad_sessions)} stitched receiver session(s) "
+        "lack the per-session contract (≥1 decision, ≥3 candidates "
+        f"per call). Failing sessions (first 5): {summary}. The "
+        "receiver prompt likely produced an unparseable response "
+        "for these calls; inspect the receiver agent_events for "
+        "those sessions and tighten receiver_agent/prompts.py if "
+        "the LLM_RESPONSE text doesn't match the SELECTED|DROPPED "
+        "shape.",
+        file=sys.stderr,
+    )
+    return 1
+  print("  receiver-scope OK (per-session).")
 
   # Headline traversal goes all the way to ReceiverDecisionOption
   # so a broken scope chain (empty receiver_planning_decisions or
