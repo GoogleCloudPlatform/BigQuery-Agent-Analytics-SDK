@@ -38,16 +38,16 @@ Phase 1 deliberately uses only the receiver's `decision_points` + `candidates` f
 
 ## Layer 4 — Auditor projections
 
-`build_joint_graph.py` writes six `CREATE OR REPLACE TABLE` projections into `<AUDITOR_DATASET>`. All use the SDK-extracted Layer 3 tables as input:
+`build_joint_graph.py` writes six `CREATE OR REPLACE TABLE` projections into `<AUDITOR_DATASET>`. Inputs span Layers 1, 2, and 3 — raw caller/receiver `agent_events` (Layer 1), demo metadata (Layer 2), and SDK-extracted graph backing tables (Layer 3) — as listed in the **Source projection** column:
 
-| Auditor table | KEY | Source projection | Why renamed |
-|---|---|---|---|
-| `caller_campaign_runs` | `caller_session_id` | `SELECT session_id AS caller_session_id, campaign, brand, brief, run_order, event_count FROM <CALLER>.campaign_runs` | Graph DDL needs `caller_session_id` as the KEY; source has bare `session_id` |
-| `remote_agent_invocations` | `remote_invocation_id` | `SELECT TO_HEX(SHA256(CONCAT(session_id, ':', span_id))) AS remote_invocation_id, session_id AS caller_session_id, span_id AS caller_span_id, JSON_VALUE(attributes, '$.a2a_metadata."a2a:task_id"') AS a2a_task_id, JSON_VALUE(attributes, '$.a2a_metadata."a2a:context_id"') AS a2a_context_id, COALESCE(...) AS receiver_session_id_from_response, timestamp FROM <CALLER>.agent_events WHERE event_type = 'A2A_INTERACTION'` | One row per remote A2A call; deterministic synthetic ID; lineage IDs only (drops raw `a2a_request` / `a2a_response`) |
-| `receiver_runs` | `receiver_session_id` | `SELECT session_id AS receiver_session_id, MIN(timestamp), MAX(timestamp), COUNT(*), COUNTIF(event_type='AGENT_COMPLETED') FROM <RECEIVER>.agent_events GROUP BY session_id` | Receiver has no campaign briefs; this is the only sensible session-root projection |
-| `receiver_planning_decisions` | `decision_id` | `SELECT decision_id, session_id, span_id, decision_type, description FROM <RECEIVER>.decision_points` | Direct projection — same key |
-| `receiver_decision_options` | `candidate_id` | `SELECT candidate_id, decision_id, session_id, name, score, status, rejection_rationale FROM <RECEIVER>.candidates` | Direct projection — same key |
-| `joint_a2a_edges` | `edge_id` | `SELECT TO_HEX(SHA256(CONCAT(r.remote_invocation_id, ':', rr.receiver_session_id))) AS edge_id, r.remote_invocation_id, rr.receiver_session_id, r.a2a_context_id, r.a2a_task_id FROM remote_agent_invocations r JOIN receiver_runs rr ON r.a2a_context_id = rr.receiver_session_id` | The cross-org stitch as a first-class edge table |
+| Auditor table | Layer | KEY | Source projection | Why renamed |
+|---|---|---|---|---|
+| `caller_campaign_runs` | 2 | `caller_session_id` | `SELECT session_id AS caller_session_id, campaign, brand, brief, run_order, event_count FROM <CALLER>.campaign_runs` | Graph DDL needs `caller_session_id` as the KEY; source has bare `session_id` |
+| `remote_agent_invocations` | 1 + 4 | `remote_invocation_id` | `SELECT TO_HEX(SHA256(CONCAT(ev.session_id, ':', ev.span_id))) AS remote_invocation_id, ev.session_id AS caller_session_id, ev.span_id AS caller_span_id, JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:task_id"') AS a2a_task_id, JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:context_id"') AS a2a_context_id, COALESCE(...) AS receiver_session_id_from_response, ev.timestamp FROM <CALLER>.agent_events ev JOIN <AUDITOR>.caller_campaign_runs ccr ON ev.session_id = ccr.caller_session_id WHERE ev.event_type = 'A2A_INTERACTION'` | One row per remote A2A call; deterministic synthetic ID; lineage IDs only (drops raw `a2a_request` / `a2a_response`). Joined against `caller_campaign_runs` so reruns without `./reset.sh` don't carry orphaned remote invocations whose `CallerCampaignRun` source vanished. |
+| `receiver_runs` | 1 | `receiver_session_id` | `SELECT session_id AS receiver_session_id, MIN(timestamp), MAX(timestamp), COUNT(*), COUNTIF(event_type='AGENT_COMPLETED') FROM <RECEIVER>.agent_events GROUP BY session_id` | Receiver has no campaign briefs; this is the only sensible session-root projection |
+| `receiver_planning_decisions` | 3 | `decision_id` | `SELECT decision_id, session_id, span_id, decision_type, description FROM <RECEIVER>.decision_points` | Direct projection — same key |
+| `receiver_decision_options` | 3 | `candidate_id` | `SELECT candidate_id, decision_id, session_id, name, score, status, rejection_rationale FROM <RECEIVER>.candidates` | Direct projection — same key |
+| `joint_a2a_edges` | 4 (self) | `edge_id` | `SELECT TO_HEX(SHA256(CONCAT(r.remote_invocation_id, ':', rr.receiver_session_id))) AS edge_id, r.remote_invocation_id, rr.receiver_session_id, r.a2a_context_id, r.a2a_task_id FROM remote_agent_invocations r JOIN receiver_runs rr ON r.a2a_context_id = rr.receiver_session_id` | The cross-org stitch as a first-class edge table |
 
 All Layer 4 tables are idempotent via `CREATE OR REPLACE TABLE`. Re-running `build_joint_graph.py` rebuilds them in place — no duplicates accumulate.
 

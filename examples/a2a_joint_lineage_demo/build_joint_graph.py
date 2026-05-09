@@ -96,21 +96,32 @@ FROM `{project}.{caller}.campaign_runs`
     ),
     (
         "remote_agent_invocations",
+        # Filter to A2A_INTERACTION rows whose caller session is in
+        # the current caller_campaign_runs. Without this join, a
+        # rerun without ./reset.sh (the README's "skip reset if
+        # iterating" path) leaves stale A2A_INTERACTION rows in the
+        # caller agent_events table while run_caller_agent.py
+        # WRITE_TRUNCATEs campaign_runs to only the current run.
+        # The auditor projection would then carry orphaned remote
+        # invocations whose CallerCampaignRun source vanished, and
+        # Block 2's traversal would silently drop them.
         """\
 CREATE OR REPLACE TABLE `{project}.{auditor}.remote_agent_invocations` AS
 SELECT
-  TO_HEX(SHA256(CONCAT(session_id, ':', span_id))) AS remote_invocation_id,
-  session_id AS caller_session_id,
-  span_id AS caller_span_id,
-  JSON_VALUE(attributes, '$.a2a_metadata."a2a:task_id"')    AS a2a_task_id,
-  JSON_VALUE(attributes, '$.a2a_metadata."a2a:context_id"') AS a2a_context_id,
+  TO_HEX(SHA256(CONCAT(ev.session_id, ':', ev.span_id))) AS remote_invocation_id,
+  ev.session_id AS caller_session_id,
+  ev.span_id AS caller_span_id,
+  JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:task_id"')    AS a2a_task_id,
+  JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:context_id"') AS a2a_context_id,
   COALESCE(
-    JSON_VALUE(content, '$.metadata.adk_session_id'),
-    JSON_VALUE(attributes, '$.a2a_metadata."a2a:response".metadata.adk_session_id')
+    JSON_VALUE(ev.content, '$.metadata.adk_session_id'),
+    JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:response".metadata.adk_session_id')
   ) AS receiver_session_id_from_response,
-  timestamp
-FROM `{project}.{caller}.{caller_table}`
-WHERE event_type = 'A2A_INTERACTION'
+  ev.timestamp
+FROM `{project}.{caller}.{caller_table}` AS ev
+JOIN `{project}.{auditor}.caller_campaign_runs` AS ccr
+  ON ev.session_id = ccr.caller_session_id
+WHERE ev.event_type = 'A2A_INTERACTION'
 """,
     ),
     (

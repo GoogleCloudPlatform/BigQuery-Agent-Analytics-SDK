@@ -123,10 +123,28 @@ DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
 for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
-  if ! bq show "${PROJECT_ID}:${ds}" &>/dev/null 2>&1; then
-    echo "  Creating BigQuery dataset: ${ds} in ${DATASET_LOCATION}..."
-    bq mk --dataset --location="$DATASET_LOCATION" \
-      "${PROJECT_ID}:${ds}" 2>/dev/null || true
+  if bq show "${PROJECT_ID}:${ds}" &>/dev/null; then
+    echo "  Dataset ${ds} already exists."
+    continue
+  fi
+  echo "  Creating BigQuery dataset: ${ds} in ${DATASET_LOCATION}..."
+  # No `|| true` — let `bq mk` surface its own error and stop the
+  # script. Otherwise the .env file gets written and the user
+  # discovers the missing dataset at build_joint_graph.py time
+  # with a much less actionable error.
+  if ! bq mk --dataset --location="$DATASET_LOCATION" \
+       "${PROJECT_ID}:${ds}"; then
+    echo "ERROR: failed to create dataset ${ds}. Check that the" \
+         "authenticated principal has roles/bigquery.dataEditor on" \
+         "project ${PROJECT_ID} and that ${DATASET_LOCATION} is a" \
+         "valid BigQuery location." >&2
+    exit 1
+  fi
+  # Defensive: confirm the dataset is actually visible after mk.
+  if ! bq show "${PROJECT_ID}:${ds}" &>/dev/null; then
+    echo "ERROR: bq mk reported success but ${ds} is not visible." \
+         "Re-run after addressing." >&2
+    exit 1
   fi
 done
 
