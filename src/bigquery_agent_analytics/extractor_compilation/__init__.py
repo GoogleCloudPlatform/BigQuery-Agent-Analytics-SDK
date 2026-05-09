@@ -74,6 +74,9 @@ from .retry_loop import CompileSource
 from .retry_loop import RetryCompileResult
 from .runtime_fallback import FallbackOutcome
 from .runtime_fallback import run_with_fallback
+from .runtime_registry import build_runtime_extractor_registry
+from .runtime_registry import OutcomeCallback
+from .runtime_registry import WrappedRegistry
 from .smoke_test import load_callable_from_source
 from .smoke_test import run_smoke_test
 from .smoke_test import run_smoke_test_in_subprocess
@@ -98,6 +101,7 @@ __all__ = [
     "FieldMapping",
     "LLMClient",
     "Manifest",
+    "OutcomeCallback",
     "PlanParseError",
     "PlanResolver",
     "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
@@ -105,12 +109,14 @@ __all__ = [
     "RetryCompileResult",
     "SmokeTestReport",
     "SpanHandlingRule",
+    "WrappedRegistry",
     "build_ast_diagnostic",
     "build_compile_result_diagnostic",
     "build_gate_diagnostic",
     "build_plan_parse_diagnostic",
     "build_resolution_prompt",
     "build_retry_prompt",
+    "build_runtime_extractor_registry",
     "build_smoke_diagnostic",
     "compile_extractor",
     "compile_with_llm",

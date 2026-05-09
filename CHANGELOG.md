@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runtime extractor-registry adapter for compiled structured
+  extractors** in
+  `bigquery_agent_analytics.extractor_compilation.runtime_registry`
+  and
+  [`docs/extractor_compilation_runtime_registry.md`](docs/extractor_compilation_runtime_registry.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.c.1 — the adapter that glues C2.a's
+  ``discover_bundles`` and C2.b's ``run_with_fallback`` into one
+  call. Public surface:
+  ``build_runtime_extractor_registry(*, bundles_root,
+  expected_fingerprint, fallback_extractors, resolved_graph,
+  event_type_allowlist, on_outcome)`` returning
+  ``WrappedRegistry(extractors, discovery,
+  bundles_without_fallback, fallbacks_without_bundle)``. The
+  ``extractors`` dict is ready to pass straight into the
+  existing ``run_structured_extractors`` hook. Wiring matrix:
+  compiled+fallback → wrapped closure that calls
+  ``run_with_fallback``; fallback-only → original callable
+  registered unchanged; **compiled-only → skipped and recorded
+  in ``bundles_without_fallback``** (C2's safety contract
+  requires a fallback; fail-closed default). The inverse
+  ``fallbacks_without_bundle`` audit surface lets rollout
+  telemetry distinguish "no compiled coverage yet" from
+  "compiled coverage exists but skipped because no fallback."
+  ``event_type_allowlist`` filters both candidate pools. The
+  ``on_outcome`` callback fires on every wrapped invocation
+  including ``compiled_unchanged`` (denominator metric for
+  compiled-vs-fallback rate analysis); callback exceptions
+  propagate. **This PR ships the adapter, not the orchestrator
+  call-site swap** — that's C2.c.2. Out of scope (deferred):
+  BQ mirror (C2.c.3), revalidation harness (C2.d),
+  ``AI.GENERATE`` fallback adapter.
 - **Runtime fallback wiring for compiled structured extractors**
   in
   `bigquery_agent_analytics.extractor_compilation.runtime_fallback`

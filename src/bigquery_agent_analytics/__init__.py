@@ -596,6 +596,7 @@ try:
   from .extractor_compilation import build_plan_parse_diagnostic
   from .extractor_compilation import build_resolution_prompt
   from .extractor_compilation import build_retry_prompt
+  from .extractor_compilation import build_runtime_extractor_registry
   from .extractor_compilation import build_smoke_diagnostic
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import compile_with_llm
@@ -613,6 +614,7 @@ try:
   from .extractor_compilation import LoadFailure
   from .extractor_compilation import Manifest
   from .extractor_compilation import measure_compile
+  from .extractor_compilation import OutcomeCallback
   from .extractor_compilation import parse_resolved_extractor_plan_json
   from .extractor_compilation import PlanParseError
   from .extractor_compilation import PlanResolver
@@ -625,6 +627,7 @@ try:
   from .extractor_compilation import SmokeTestReport
   from .extractor_compilation import SpanHandlingRule
   from .extractor_compilation import validate_source
+  from .extractor_compilation import WrappedRegistry
 
   __all__.extend(
       [
@@ -639,6 +642,8 @@ try:
           "FieldMapping",
           "LoadFailure",
           "LoadedBundle",
+          "OutcomeCallback",
+          "WrappedRegistry",
           "LLMClient",
           "Manifest",
           "PlanParseError",
@@ -662,6 +667,7 @@ try:
           "load_bundle",
           "measure_compile",
           "parse_resolved_extractor_plan_json",
+          "build_runtime_extractor_registry",
           "render_extractor_source",
           "run_smoke_test",
           "run_with_fallback",
