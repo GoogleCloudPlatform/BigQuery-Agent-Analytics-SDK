@@ -126,45 +126,69 @@ WHERE ev.event_type = 'A2A_INTERACTION'
     ),
     (
         "receiver_runs",
+        # Scope receiver_runs to sessions referenced by the current
+        # remote_agent_invocations. Without this, no-reset reruns
+        # (and the smoke_receiver session) leave stale receiver
+        # session rows visible in the BQ Studio Explorer and in
+        # any GQL traversal that starts from ReceiverAgentRun. The
+        # curated Blocks 2-4 start from RemoteAgentInvocation and
+        # are mostly protected, but the auditor table itself
+        # should reflect only sessions matched to current caller
+        # campaigns.
         """\
 CREATE OR REPLACE TABLE `{project}.{auditor}.receiver_runs` AS
 SELECT
-  session_id AS receiver_session_id,
-  MIN(timestamp) AS started_at,
-  MAX(timestamp) AS ended_at,
+  ev.session_id AS receiver_session_id,
+  MIN(ev.timestamp) AS started_at,
+  MAX(ev.timestamp) AS ended_at,
   COUNT(*) AS event_count,
-  COUNTIF(event_type = 'AGENT_COMPLETED') AS completed
-FROM `{project}.{receiver}.{receiver_table}`
-WHERE session_id IS NOT NULL
+  COUNTIF(ev.event_type = 'AGENT_COMPLETED') AS completed
+FROM `{project}.{receiver}.{receiver_table}` AS ev
+WHERE ev.session_id IS NOT NULL
+  AND ev.session_id IN (
+    SELECT DISTINCT a2a_context_id
+    FROM `{project}.{auditor}.remote_agent_invocations`
+    WHERE a2a_context_id IS NOT NULL
+  )
 GROUP BY receiver_session_id
 """,
     ),
     (
         "receiver_planning_decisions",
+        # Scope to the receiver sessions retained in receiver_runs
+        # so stale extractions (including those from smoke_receiver)
+        # don't surface in the auditor projection.
         """\
 CREATE OR REPLACE TABLE `{project}.{auditor}.receiver_planning_decisions` AS
 SELECT
-  decision_id,
-  session_id,
-  span_id,
-  decision_type,
-  description
-FROM `{project}.{receiver}.decision_points`
+  dp.decision_id,
+  dp.session_id,
+  dp.span_id,
+  dp.decision_type,
+  dp.description
+FROM `{project}.{receiver}.decision_points` AS dp
+WHERE dp.session_id IN (
+  SELECT receiver_session_id FROM `{project}.{auditor}.receiver_runs`
+)
 """,
     ),
     (
         "receiver_decision_options",
+        # Same scoping rationale as receiver_planning_decisions.
         """\
 CREATE OR REPLACE TABLE `{project}.{auditor}.receiver_decision_options` AS
 SELECT
-  candidate_id,
-  decision_id,
-  session_id,
-  name,
-  score,
-  status,
-  rejection_rationale
-FROM `{project}.{receiver}.candidates`
+  c.candidate_id,
+  c.decision_id,
+  c.session_id,
+  c.name,
+  c.score,
+  c.status,
+  c.rejection_rationale
+FROM `{project}.{receiver}.candidates` AS c
+WHERE c.session_id IN (
+  SELECT receiver_session_id FROM `{project}.{auditor}.receiver_runs`
+)
 """,
     ),
     (

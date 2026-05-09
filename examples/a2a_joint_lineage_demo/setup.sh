@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Bootstrap for the A2A Joint Lineage demo (PR 1 scope).
+# Bootstrap for the A2A Joint Lineage demo.
 #
 # Steps:
 #   1. Verify python3 + gcloud + .venv tooling.
 #   2. Enable BigQuery + Vertex AI APIs.
 #   3. Install dependencies into ./.venv.
-#   4. Create caller/receiver datasets if missing. Auditor dataset
-#      lands in PR 2.
+#   4. Create caller, receiver, and auditor datasets if missing.
 #   5. Write a .env file the agents and runners read.
 #
 # After setup, the demo runs in two terminals:
@@ -45,7 +44,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 
 echo ""
 echo "============================================"
-echo "  A2A Joint Lineage Demo (PR 1) — Setup"
+echo "  A2A Joint Lineage Demo — Setup"
 echo "============================================"
 echo ""
 
