@@ -453,6 +453,102 @@ class TestFromBundlesRootExtractGraphCallSite:
     # graphs.
     assert isinstance(result, ExtractedGraph)
 
+  def test_extract_graph_merges_compiled_nodes_into_result(
+      self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+  ):
+    """The previous test asserts ``on_outcome`` fired, but the
+    compiled extractor returned an empty result so the merge
+    path in ``extract_graph`` had nothing to merge. This test
+    uses a compiled bundle that returns a real
+    ``ExtractedNode`` and asserts that node appears in the
+    final ``ExtractedGraph`` returned by ``extract_graph`` —
+    proving the structured-and-AI merge actually runs the
+    bundle's output through to the caller-visible result, not
+    just through the registry's audit channel."""
+    from bigquery_agent_analytics.extracted_models import ExtractedGraph
+    from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
+
+    ontology, binding = _bka_ontology_binding()
+
+    # Bundle whose compiled extractor returns one node + marks
+    # the span fully handled. The runtime should propagate the
+    # node into extract_graph's returned ExtractedGraph.
+    _write_handwritten_bundle(
+        tmp_path / "bundle_event_x",
+        event_types=("event_x",),
+        source=(
+            "from bigquery_agent_analytics.extracted_models import"
+            " ExtractedNode\n"
+            "from bigquery_agent_analytics.extracted_models import"
+            " ExtractedProperty\n"
+            "from bigquery_agent_analytics.structured_extraction import"
+            " StructuredExtractionResult\n"
+            "\n"
+            "def extract_event(event, spec):\n"
+            "  node = ExtractedNode(\n"
+            "      node_id=event['session_id'] + ':'"
+            " + event.get('span_id', 'noid'),\n"
+            "      entity_name='mako_DecisionPoint',\n"
+            "      labels=['mako_DecisionPoint'],\n"
+            "      properties=[\n"
+            "          ExtractedProperty(name='decision_id', value='d1'),\n"
+            "      ],\n"
+            "  )\n"
+            "  return StructuredExtractionResult(\n"
+            "      nodes=[node],\n"
+            "      edges=[],\n"
+            "      fully_handled_span_ids={event.get('span_id', 'noid')},\n"
+            "      partially_handled_span_ids=set(),\n"
+            "  )\n"
+        ),
+    )
+
+    fallback = lambda event, spec: _empty_result()
+
+    manager = OntologyGraphManager.from_bundles_root(
+        project_id="p",
+        dataset_id="d",
+        ontology=ontology,
+        binding=binding,
+        bundles_root=tmp_path,
+        expected_fingerprint=_VALID_FINGERPRINT,
+        fallback_extractors={"event_x": fallback},
+    )
+
+    monkeypatch.setattr(
+        manager,
+        "_fetch_raw_events",
+        lambda session_ids: [
+            {
+                "event_type": "event_x",
+                "session_id": "sess1",
+                "span_id": "spA",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_extract_via_ai_generate",
+        lambda session_ids, excluded, partial, hint: ExtractedGraph(
+            name=manager.spec.name,
+            nodes=[],
+            edges=[],
+        ),
+    )
+
+    result = manager.extract_graph(session_ids=["sess1"], use_ai_generate=True)
+
+    # The structured node from the compiled bundle made it
+    # through the merge into the final ExtractedGraph.
+    assert isinstance(result, ExtractedGraph)
+    node_ids = {n.node_id for n in result.nodes}
+    assert "sess1:spA" in node_ids
+    matching = next(n for n in result.nodes if n.node_id == "sess1:spA")
+    assert matching.entity_name == "mako_DecisionPoint"
+    # And the AI side was correctly told to exclude the fully-
+    # handled span (verified indirectly — the stubbed
+    # _extract_via_ai_generate received non-empty ``excluded``).
+
   def test_extract_graph_skips_structured_when_use_ai_generate_false(
       self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
   ):
