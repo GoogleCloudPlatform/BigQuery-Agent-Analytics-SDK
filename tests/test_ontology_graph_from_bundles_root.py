@@ -362,3 +362,152 @@ class TestFromBundlesRootEndToEnd:
         ("bka_decision", "compiled_unchanged"),
         ("bka_decision", "compiled_unchanged"),
     ]
+
+
+# ------------------------------------------------------------------ #
+# Production call site: manager.extract_graph(...) actually uses     #
+# the wrapped registry                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestFromBundlesRootExtractGraphCallSite:
+  """The previous end-to-end test exercises
+  ``run_structured_extractors`` directly with
+  ``manager.extractors``. That proves the registry works, but
+  it doesn't prove ``manager.extract_graph(...)`` — the actual
+  production call site — invokes the wrapped registry.
+
+  These tests monkeypatch the BigQuery-touching dependencies
+  (``_fetch_raw_events``, ``_extract_via_ai_generate``,
+  ``_extract_payloads``) so we can drive ``extract_graph`` with
+  canned events and assert the wrapped callback fired at the
+  real call site."""
+
+  def test_extract_graph_invokes_wrapped_registry_on_compiled_path(
+      self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+  ):
+    from bigquery_agent_analytics.extracted_models import ExtractedGraph
+    from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
+
+    ontology, binding = _bka_ontology_binding()
+    _write_handwritten_bundle(
+        tmp_path / "bundle_event_x", event_types=("event_x",)
+    )
+
+    fallback_called = {"count": 0}
+
+    def fallback(event, spec):
+      fallback_called["count"] += 1
+      return _empty_result()
+
+    callback_log: list[tuple[str, str]] = []
+
+    def on_outcome(event_type, outcome):
+      callback_log.append((event_type, outcome.decision))
+
+    manager = OntologyGraphManager.from_bundles_root(
+        project_id="p",
+        dataset_id="d",
+        ontology=ontology,
+        binding=binding,
+        bundles_root=tmp_path,
+        expected_fingerprint=_VALID_FINGERPRINT,
+        fallback_extractors={"event_x": fallback},
+        on_outcome=on_outcome,
+    )
+
+    # Monkeypatch the BigQuery-touching methods so we can drive
+    # extract_graph end-to-end without a real BQ client. The
+    # raw events flow through the wrapped registry; the
+    # AI.GENERATE call is stubbed to a no-op.
+    monkeypatch.setattr(
+        manager,
+        "_fetch_raw_events",
+        lambda session_ids: [
+            {"event_type": "event_x", "span_id": "sp1"},
+            {"event_type": "event_x", "span_id": "sp2"},
+        ],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_extract_via_ai_generate",
+        lambda session_ids, excluded, partial, hint: ExtractedGraph(
+            name=manager.spec.name,
+            nodes=[],
+            edges=[],
+        ),
+    )
+
+    result = manager.extract_graph(session_ids=["sess1"], use_ai_generate=True)
+
+    # The wrapped registry ran inside extract_graph. The bundle's
+    # compiled extractor returned a valid empty result, so each
+    # event was a ``compiled_unchanged`` outcome — fallback was
+    # NOT called.
+    assert fallback_called["count"] == 0
+    assert callback_log == [
+        ("event_x", "compiled_unchanged"),
+        ("event_x", "compiled_unchanged"),
+    ]
+    # Result merges the structured (empty) and AI (empty)
+    # graphs.
+    assert isinstance(result, ExtractedGraph)
+
+  def test_extract_graph_skips_structured_when_use_ai_generate_false(
+      self, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+  ):
+    """``extract_graph`` only runs structured extractors under
+    ``if self.extractors and use_ai_generate``. This pre-dates
+    C2.c.2 — the bundle-wired path inherits the same gate. Pin
+    the behavior so future changes that decouple the two
+    surface as a deliberate decision."""
+    from bigquery_agent_analytics.extracted_models import ExtractedGraph
+    from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
+
+    ontology, binding = _bka_ontology_binding()
+    _write_handwritten_bundle(
+        tmp_path / "bundle_event_x", event_types=("event_x",)
+    )
+
+    fallback = lambda event, spec: _empty_result()
+    callback_log: list[tuple[str, str]] = []
+
+    def on_outcome(event_type, outcome):
+      callback_log.append((event_type, outcome.decision))
+
+    manager = OntologyGraphManager.from_bundles_root(
+        project_id="p",
+        dataset_id="d",
+        ontology=ontology,
+        binding=binding,
+        bundles_root=tmp_path,
+        expected_fingerprint=_VALID_FINGERPRINT,
+        fallback_extractors={"event_x": fallback},
+        on_outcome=on_outcome,
+    )
+
+    # Stub _extract_payloads (the use_ai_generate=False path)
+    # and _fetch_raw_events; the structured path should NOT
+    # call _fetch_raw_events when use_ai_generate is False.
+    fetch_called = {"count": 0}
+
+    def fake_fetch(session_ids):
+      fetch_called["count"] += 1
+      return []
+
+    monkeypatch.setattr(manager, "_fetch_raw_events", fake_fetch)
+    monkeypatch.setattr(
+        manager,
+        "_extract_payloads",
+        lambda session_ids: ExtractedGraph(
+            name=manager.spec.name, nodes=[], edges=[]
+        ),
+    )
+
+    manager.extract_graph(session_ids=["sess1"], use_ai_generate=False)
+
+    # Pre-existing behavior: structured extractors don't run
+    # when use_ai_generate=False. The bundle wiring is correctly
+    # registered, but the gate in extract_graph short-circuits.
+    assert fetch_called["count"] == 0
+    assert callback_log == []

@@ -65,13 +65,28 @@ manager.runtime_registry.bundles_without_fallback == ("event_x",)
 
 This matches C2.c.1's fail-closed policy — C2.b's safety contract requires a fallback, so registering a compiled-only event_type would invert the C2 guarantees. The audit field surfaces the configuration gap so operators can fix it; the runtime stays safe.
 
-## Tests (5 cases in `tests/test_ontology_graph_from_bundles_root.py`)
+## Inherited `use_ai_generate` gate
+
+`extract_graph` runs structured extractors only under:
+
+```python
+if self.extractors and use_ai_generate:
+    raw_events = self._fetch_raw_events(session_ids)
+    structured_result = run_structured_extractors(raw_events, self.extractors, self.spec)
+```
+
+This gate pre-dates C2.c.2 — the bundle-wired path inherits it as-is. **When `use_ai_generate=False`, the compiled extractors do not run**, even if `manager.extractors` is fully populated from `from_bundles_root`. The non-AI path falls back to `_extract_payloads(session_ids)` and returns the stub graph that has always been there.
+
+Whether to decouple structured extraction from the AI flag is a separate scope decision. C2.c.2 deliberately does *not* change this gate so that the call-site swap is a pure substitution: the same conditions that triggered the legacy `extractors=` path trigger the new `from_bundles_root` path, no more and no less. A regression test (`test_extract_graph_skips_structured_when_use_ai_generate_false`) pins this inherited behavior so any future decoupling shows up as a deliberate change.
+
+## Tests (7 cases in `tests/test_ontology_graph_from_bundles_root.py`)
 
 - **`TestOntologyGraphManagerDirectInit`** (1) — direct `__init__` leaves `runtime_registry = None`; `extractors` identity is preserved.
 - **`TestFromBundlesRootNoBundles`** (1) — `bundles_root` exists but contains no bundles → `manager.extractors` identity-preserves the fallback; `runtime_registry.fallbacks_without_bundle` lists the uncovered event_types.
 - **`TestFromBundlesRootCompiledAndFallback`** (1) — hand-written bundle + matching fallback → wrapped closure registered (different identity from the original fallback); calling it drives `run_with_fallback` and the `on_outcome` callback fires with `decision="compiled_unchanged"`.
 - **`TestFromBundlesRootCompiledOnlyNoFallback`** (1) — **negative case** — bundle for `event_x` with empty `fallback_extractors`. `event_x` is NOT registered; surfaced in `bundles_without_fallback`. Behavioral check: running `run_structured_extractors` over an `event_x` event yields an empty result (the runtime's "no extractor → skip" path).
-- **`TestFromBundlesRootEndToEnd`** (1) — real BKA compiled bundle (driven through the full Phase C compile pipeline) + real `extract_bka_decision_event` as fallback, wired into the manager, fed through `run_structured_extractors` via `manager.extractors`. Both BKA sample events produce `compiled_unchanged` outcomes; both `mako_DecisionPoint` nodes appear in the merged result; callback log shows expected per-event traces. Proves the call-site swap puts compiled extractors on the runtime path.
+- **`TestFromBundlesRootEndToEnd`** (1) — real BKA compiled bundle (driven through the full Phase C compile pipeline) + real `extract_bka_decision_event` as fallback, wired into the manager, fed through `run_structured_extractors` via `manager.extractors`. Both BKA sample events produce `compiled_unchanged` outcomes; both `mako_DecisionPoint` nodes appear in the merged result; callback log shows expected per-event traces.
+- **`TestFromBundlesRootExtractGraphCallSite`** (2) — **the production call site itself**. Monkeypatches `_fetch_raw_events` and `_extract_via_ai_generate` (the BigQuery-touching dependencies), then calls `manager.extract_graph(session_ids=..., use_ai_generate=True)` and asserts `on_outcome` fired with the compiled path — proves `extract_graph` actually invokes the wrapped registry, not just `run_structured_extractors` in isolation. The second test pins the inherited `use_ai_generate=False` gate: structured extractors don't run, the fetch hook isn't called, `on_outcome` doesn't fire.
 
 ## Out of scope (deferred)
 
