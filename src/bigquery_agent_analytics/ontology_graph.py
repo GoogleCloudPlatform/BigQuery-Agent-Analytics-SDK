@@ -43,6 +43,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import pathlib
 from typing import Optional
 
 from google.cloud import bigquery
@@ -390,6 +391,14 @@ class OntologyGraphManager:
     self._bq_client = bq_client
     self._warned_unlabeled_client = False
     self.extractors = extractors or {}
+    # Audit handle for the C2.c compiled-bundle path. Stays
+    # ``None`` for manager instances built via the legacy
+    # ``extractors=`` constructor parameter; set to the
+    # :class:`WrappedRegistry` produced by
+    # :meth:`from_bundles_root`. ``self.extractors`` is always
+    # the dict the runtime invokes — the registry is the audit
+    # object next to it.
+    self.runtime_registry: Optional["WrappedRegistry"] = None
 
   @classmethod
   def from_ontology_binding(
@@ -445,6 +454,113 @@ class OntologyGraphManager:
         bq_client=bq_client,
         extractors=extractors,
     )
+
+  @classmethod
+  def from_bundles_root(
+      cls,
+      project_id: str,
+      dataset_id: str,
+      ontology: "Ontology",
+      binding: "Binding",
+      bundles_root: pathlib.Path,
+      expected_fingerprint: str,
+      fallback_extractors: dict[str, StructuredExtractor],
+      lineage_config: Optional[dict] = None,
+      table_id: str = "agent_events",
+      endpoint: str = "gemini-2.5-flash",
+      location: Optional[str] = None,
+      bq_client: Optional[bigquery.Client] = None,
+      event_type_allowlist: Optional[tuple[str, ...]] = None,
+      on_outcome: Optional["OutcomeCallback"] = None,
+  ) -> "OntologyGraphManager":
+    """Construct from ontology + binding *and* a compiled-bundle root.
+
+    The C2.c.2 entry point that actually puts compiled
+    extractors on the runtime path. Wires C2.a's
+    :func:`discover_bundles` and C2.b's
+    :func:`run_with_fallback` together via C2.c.1's
+    :func:`build_runtime_extractor_registry`, then constructs an
+    :class:`OntologyGraphManager` whose ``extractors`` dict is
+    the wrapped registry — so existing call sites that read
+    ``self.extractors`` and pass them through to
+    :func:`run_structured_extractors` pick up the
+    compiled-with-fallback behavior with no other changes.
+
+    The resulting manager exposes:
+
+    * ``manager.extractors`` — the dict the runtime invokes
+      (wrapped closures for event_types with both a compiled
+      bundle and a fallback; original fallback callables
+      otherwise).
+    * ``manager.runtime_registry`` — the full
+      :class:`WrappedRegistry` from C2.c.1, including
+      ``discovery``, ``bundles_without_fallback``, and
+      ``fallbacks_without_bundle`` for rollout-coverage
+      telemetry.
+
+    Args:
+      project_id: GCP project where telemetry is stored.
+      dataset_id: BigQuery dataset where telemetry is stored.
+      ontology: Upstream :class:`Ontology` object.
+      binding: Upstream :class:`Binding` object.
+      bundles_root: Directory containing compiled bundles.
+        Forwarded to :func:`discover_bundles`.
+      expected_fingerprint: Fingerprint the runtime computed
+        from its active inputs. Bundles whose manifest
+        fingerprint doesn't match are skipped at discovery.
+      fallback_extractors: ``event_type -> handwritten
+        callable``. Required: C2.b's safety contract uses the
+        fallback as the authoritative baseline against which
+        the compiled output is compared. Validated at build
+        time (non-str keys, empty-string keys, non-callable
+        values, and callables that can't accept ``(event,
+        spec)`` are rejected with ``TypeError``).
+      lineage_config: Optional lineage session column config
+        forwarded to :func:`resolve`.
+      table_id: Source telemetry table name.
+      endpoint: ``AI.GENERATE`` model endpoint for the
+        non-compiled extraction path.
+      location: BigQuery location.
+      bq_client: Optional pre-configured BigQuery client.
+      event_type_allowlist: Optional. Filters both compiled
+        bundles and fallback extractors to the named event
+        types; ``None`` considers everything.
+      on_outcome: Optional ``(event_type, outcome) -> None``
+        invoked from inside each wrapped extractor on every
+        event including ``compiled_unchanged`` outcomes —
+        denominator metric for compiled-vs-fallback rates.
+        Callback exceptions propagate.
+
+    Returns:
+      A configured :class:`OntologyGraphManager` with
+      ``runtime_registry`` set.
+    """
+    from .extractor_compilation import build_runtime_extractor_registry
+    from .resolved_spec import resolve
+
+    spec = resolve(ontology, binding, lineage_config=lineage_config)
+
+    registry = build_runtime_extractor_registry(
+        bundles_root=bundles_root,
+        expected_fingerprint=expected_fingerprint,
+        fallback_extractors=fallback_extractors,
+        resolved_graph=spec,
+        event_type_allowlist=event_type_allowlist,
+        on_outcome=on_outcome,
+    )
+
+    manager = cls(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        spec=spec,
+        table_id=table_id,
+        endpoint=endpoint,
+        location=location,
+        bq_client=bq_client,
+        extractors=registry.extractors,
+    )
+    manager.runtime_registry = registry
+    return manager
 
   @property
   def bq_client(self) -> bigquery.Client:

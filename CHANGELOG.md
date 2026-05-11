@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Orchestrator call-site swap for compiled structured
+  extractors** in
+  `bigquery_agent_analytics.ontology_graph.OntologyGraphManager`
+  and
+  [`docs/extractor_compilation_orchestrator_swap.md`](docs/extractor_compilation_orchestrator_swap.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.c.2 — the actual call-site swap that puts compiled
+  extractors on the runtime path. New classmethod
+  ``OntologyGraphManager.from_bundles_root(*, project_id,
+  dataset_id, ontology, binding, bundles_root,
+  expected_fingerprint, fallback_extractors, ...)`` builds the
+  C2.c.1 registry adapter internally and constructs a manager
+  whose ``extractors`` dict is the wrapped registry — so the
+  existing ``run_structured_extractors`` call inside
+  ``extract_graph`` picks up compiled-with-fallback behavior
+  automatically. Manager exposes ``manager.runtime_registry:
+  WrappedRegistry | None`` as the audit handle (non-``None``
+  when bundle-wired; cross-reference
+  ``runtime_registry.bundles_without_fallback`` /
+  ``fallbacks_without_bundle`` /  ``discovery.failures`` for
+  rollout-coverage telemetry). The existing ``__init__`` and
+  ``from_ontology_binding`` paths are unchanged — direct-
+  constructor callers leave ``runtime_registry = None`` and
+  back-compat holds by construction. Compiled-only event_types
+  without a matching fallback are NOT registered (fail-closed
+  per C2.b's safety contract). Out of scope (deferred): BQ-
+  table mirror (C2.c.3), revalidation harness (C2.d),
+  ``AI.GENERATE`` fallback adapter.
 - **Runtime extractor-registry adapter for compiled structured
   extractors** in
   `bigquery_agent_analytics.extractor_compilation.runtime_registry`
