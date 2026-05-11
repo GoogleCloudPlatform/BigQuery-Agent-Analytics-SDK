@@ -88,13 +88,14 @@ The callback is **not** invoked for fallback-only registry entries (no compiled 
 
 **Callback exceptions propagate.** Telemetry callbacks should be correct; silently swallowing here would hide instrumentation bugs and defeat the audit channel. A caller that wants non-blocking telemetry can layer their own try/except inside the callback.
 
-## Tests (15 cases in `tests/test_extractor_compilation_runtime_registry.py`)
+## Tests (22 cases in `tests/test_extractor_compilation_runtime_registry.py`)
 
 - **`TestRegistryWiringMatrix`** (4) — compiled+fallback wraps via `run_with_fallback`; fallback-only passes through unchanged (identity preserved); compiled-only is skipped and listed in `bundles_without_fallback`; neither-present is empty registry.
 - **`TestRegistryAuditSurfaces`** (3) — `fallbacks_without_bundle` records the "no usable compiled registry entry" cases; audit lists are sorted; mixed three-event scenario lands each event in the right bucket.
 - **`TestRegistryAllowlist`** (3) — allowlist filters both pools (out-of-scope event_types appear in NEITHER audit field); empty allowlist registers nothing; `None` considers everything.
 - **`TestRegistryOnOutcomeCallback`** (4) — fires on `compiled_unchanged` (with a real validator + empty result); fires on `fallback_for_event`; one call per invocation (denominator metric); callback exceptions propagate (no silent swallow).
 - **`TestRegistryEndToEnd`** (1) — real BKA bundle (compiled via the full Phase C pipeline) + real `extract_bka_decision_event` as fallback, fed through `run_structured_extractors` via the registry. Both sample events produce `compiled_unchanged` outcomes; both nodes appear in the merged result; callback log shows the expected per-event traces.
+- **`TestRegistryFallbackCallableValidation`** (7) — build-time validation of every entry in `fallback_extractors`: `None` value rejected; non-callable (int) rejected; out-of-allowlist invalid still rejected (full dict validated, not just the scoped subset); non-string key rejected (would silently never match in `run_structured_extractors` and crash audit-tuple sorting); empty-string key rejected; mixed-key-types rejected before the sort crash (clearer error message); one-arg callable rejected via `_signature_compatible` (the same `(event, spec)` contract check the bundle loader uses for compiled callables).
 
 ## Out of scope (deferred)
 

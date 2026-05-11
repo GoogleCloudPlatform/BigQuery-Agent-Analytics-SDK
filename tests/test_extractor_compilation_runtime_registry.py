@@ -676,3 +676,78 @@ class TestRegistryFallbackCallableValidation:
           # 'b' is OUT of allowlist but still has to be callable.
           event_type_allowlist=("a",),
       )
+
+  def test_non_string_key_rejected(self, tmp_path: pathlib.Path):
+    """``run_structured_extractors`` keys event_type lookups by
+    string. A non-string key would silently never match — and
+    mixing string + non-string keys would crash later when the
+    audit tuples are sorted."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    fallback = lambda e, s: _empty_result()
+
+    with pytest.raises(
+        TypeError, match=r"fallback_extractors keys must be strings"
+    ):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={1: fallback},
+          resolved_graph=None,
+      )
+
+  def test_empty_string_key_rejected(self, tmp_path: pathlib.Path):
+    """Event type ``\"\"`` is meaningless — silently registering
+    an empty-string event_type would create a registry entry no
+    real event could match."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    fallback = lambda e, s: _empty_result()
+
+    with pytest.raises(TypeError, match=r"empty-string key"):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"": fallback},
+          resolved_graph=None,
+      )
+
+  def test_mixed_key_types_rejected_before_sort_crash(
+      self, tmp_path: pathlib.Path
+  ):
+    """``{\"a\": fn, 1: fn}`` would otherwise crash at audit-
+    tuple ``sorted(...)`` time with a confusing
+    ``\"'<' not supported between str and int\"`` error. The
+    pre-sort key-type check fails the whole call earlier with a
+    clear message."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    fallback = lambda e, s: _empty_result()
+
+    with pytest.raises(
+        TypeError, match=r"fallback_extractors keys must be strings"
+    ):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"a": fallback, 1: fallback},
+          resolved_graph=None,
+      )
+
+  def test_one_arg_callable_rejected(self, tmp_path: pathlib.Path):
+    """``StructuredExtractor`` is a ``(event, spec) -> ...``
+    contract. A one-arg lambda would pass build-time
+    ``callable()`` check but crash when invoked. Reuse the
+    bundle loader's ``_signature_compatible`` check at the
+    runtime trust boundary."""
+    from bigquery_agent_analytics.extractor_compilation import build_runtime_extractor_registry
+
+    one_arg = lambda event: _empty_result()
+
+    with pytest.raises(TypeError, match=r"fallback_extractors\['a'\]"):
+      build_runtime_extractor_registry(
+          bundles_root=tmp_path,
+          expected_fingerprint=_VALID_FINGERPRINT,
+          fallback_extractors={"a": one_arg},
+          resolved_graph=None,
+      )

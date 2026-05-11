@@ -85,6 +85,7 @@ import pathlib
 from typing import Any, Callable, Optional
 
 from ..structured_extraction import StructuredExtractionResult
+from .bundle_loader import _signature_compatible
 from .bundle_loader import discover_bundles
 from .bundle_loader import DiscoveryResult
 from .runtime_fallback import FallbackOutcome
@@ -201,12 +202,28 @@ def build_runtime_extractor_registry(
       or raise ``TypeError`` later when it tried to invoke a
       non-callable value, far from the misconfiguration site.
   """
+  # Validate the full input dict before any other work. Bad
+  # entries surface here, with the offending key named, rather
+  # than silently producing a registry the runtime will skip
+  # (None-valued), crash on (non-callable invoked), can't sort
+  # for audit (mixed-type keys), or call with the wrong number
+  # of args (one-arg lambda).
   for event_type, fallback in fallback_extractors.items():
+    if not isinstance(event_type, str):
+      raise TypeError(
+          f"fallback_extractors keys must be strings (event_type "
+          f"names); got {type(event_type).__name__}={event_type!r}"
+      )
+    if not event_type:
+      raise TypeError("fallback_extractors contains an empty-string key")
     if not callable(fallback):
       raise TypeError(
           f"fallback_extractors[{event_type!r}] must be callable; "
           f"got {type(fallback).__name__}={fallback!r}"
       )
+    sig_problem = _signature_compatible(fallback)
+    if sig_problem is not None:
+      raise TypeError(f"fallback_extractors[{event_type!r}] {sig_problem}")
 
   discovery = discover_bundles(
       bundles_root,
