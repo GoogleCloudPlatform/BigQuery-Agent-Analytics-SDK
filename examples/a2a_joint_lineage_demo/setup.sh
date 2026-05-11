@@ -19,7 +19,7 @@
 #   1. Verify python3 + gcloud + .venv tooling.
 #   2. Enable BigQuery + Vertex AI APIs.
 #   3. Install dependencies into ./.venv.
-#   4. Create caller, receiver, and auditor datasets if missing.
+#   4. Create caller, receiver, auditor, and analyst datasets if missing.
 #   5. Write a .env file the agents and runners read.
 #
 # After setup, the demo runs in two terminals:
@@ -27,11 +27,12 @@
 #   Terminal A  (long-lived receiver server)
 #     ./.venv/bin/python3 run_receiver_server.py
 #
-#   Terminal B  (smoke + caller campaigns + dual graph + auditor graph)
+#   Terminal B  (smoke + caller campaigns + dual graph + auditor graph + analyst)
 #     ./.venv/bin/python3 smoke_receiver.py
 #     ./.venv/bin/python3 run_caller_agent.py
 #     ./.venv/bin/python3 build_org_graphs.py
 #     ./.venv/bin/python3 build_joint_graph.py
+#     ./.venv/bin/python3 run_analyst_agent.py
 #
 # Required IAM roles for the authenticated principal:
 #   - roles/bigquery.dataEditor
@@ -117,6 +118,8 @@ CALLER_TABLE_ID="${CALLER_TABLE_ID:-agent_events}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
 RECEIVER_TABLE_ID="${RECEIVER_TABLE_ID:-agent_events}"
 AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
+ANALYST_DATASET_ID="${ANALYST_DATASET_ID:-a2a_analyst_demo}"
+ANALYST_TABLE_ID="${ANALYST_TABLE_ID:-agent_events}"
 # Gemini 3.x model defaults — verified against live Vertex AI +
 # BigQuery AI.GENERATE in May 2026:
 #
@@ -150,7 +153,7 @@ DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-3.1-pro-preview}"
 DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-https://aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/global/publishers/google/models/gemini-3-flash-preview}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
-for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
+for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID" "$ANALYST_DATASET_ID"; do
   if bq show "${PROJECT_ID}:${ds}" &>/dev/null; then
     echo "  Dataset ${ds} already exists."
     continue
@@ -189,6 +192,9 @@ RECEIVER_TABLE_ID=$RECEIVER_TABLE_ID
 
 AUDITOR_DATASET_ID=$AUDITOR_DATASET_ID
 
+ANALYST_DATASET_ID=$ANALYST_DATASET_ID
+ANALYST_TABLE_ID=$ANALYST_TABLE_ID
+
 DEMO_AGENT_LOCATION=$DEMO_AGENT_LOCATION
 DEMO_AGENT_MODEL=$DEMO_AGENT_MODEL
 DEMO_AI_ENDPOINT=$DEMO_AI_ENDPOINT
@@ -219,6 +225,7 @@ echo "    ./.venv/bin/python3 smoke_receiver.py"
 echo "    ./.venv/bin/python3 run_caller_agent.py"
 echo "    ./.venv/bin/python3 build_org_graphs.py"
 echo "    ./.venv/bin/python3 build_joint_graph.py   # runs ./render_queries.sh itself"
+echo "    ./.venv/bin/python3 run_analyst_agent.py   # closes the loop"
 echo ""
 echo "  (Re-run ./render_queries.sh only after editing .env or *.gql.tpl.)"
 echo ""

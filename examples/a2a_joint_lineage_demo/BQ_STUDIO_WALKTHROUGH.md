@@ -24,8 +24,9 @@ For a presentation run, use the one-command runner:
 
 The runner starts the receiver A2A server, smoke-tests that receiver
 plugin writes land in BigQuery, runs the caller campaigns, builds both
-per-org SDK context graphs, builds the auditor joint graph, and renders
-`bq_studio_queries.gql`.
+per-org SDK context graphs, builds the auditor joint graph, renders
+`bq_studio_queries.gql`, and runs the analyst agent against the canned
+audit question set (closing the loop).
 
 ## Step 0 — Open BigQuery Studio
 

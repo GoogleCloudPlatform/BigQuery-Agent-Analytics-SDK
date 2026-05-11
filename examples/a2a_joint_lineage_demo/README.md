@@ -1,12 +1,13 @@
 # A2A Joint Lineage Demo
 
-Two BQ AA Plugin instances. Two `agent_events` tables. One A2A delegation in the middle. The caller's media-planning supervisor delegates audience-risk review to the receiver's governance agent over A2A; both sides write traces to BigQuery; the SDK materializes a context graph for each side independently; an auditor projection stitches them into a single joint property graph that an external reviewer queries through BigQuery Studio.
+Two BQ AA Plugin instances. Two `agent_events` tables. One A2A delegation in the middle. The caller's media-planning supervisor delegates audience-risk review to the receiver's governance agent over A2A; both sides write traces to BigQuery; the SDK materializes a context graph for each side independently; an auditor projection stitches them into a single joint property graph; **a third agent — the audit-analyst — closes the loop by reading that joint graph back through bounded BigQuery tools and answering natural-language audit questions**. The analyst's own reasoning trace also lands in BigQuery via the BQ AA Plugin, giving you audit-of-the-audit lineage in the same data model.
 
 This bundle implements the plan in [issue #129](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/129) and ships in three slices:
 
 - **PR 1** (merged) — caller / receiver agents, receiver server with custom-runner plugin attach, smoke gate, caller driver, dual `ContextGraphManager` materialization.
 - **PR 2** (merged) — auditor projections (`build_joint_graph.py`), Phase 1 joint property graph (`joint_property_graph.gql.tpl`), 5 paste-and-run BigQuery Studio blocks (`bq_studio_queries.gql.tpl`), `render_queries.sh`, and the narrative docs.
 - **PR 3** (merged) — SDK `A2A_INTERACTION` typed view (`adk_a2a_interactions`) for downstream consumers that want the A2A metadata without writing JSON extraction by hand.
+- **Analyst loop** — `analyst_agent/` package + `run_analyst_agent.py`. Closes the demo loop: an ADK agent with four bounded BigQuery tools (`stitch_health`, `list_campaigns`, `audit_campaign`, `find_governance_rejections`) answers natural-language audit questions against the joint graph. The analyst's own traces land in `<ANALYST_DATASET>.agent_events`.
 
 ## Running it
 
@@ -23,8 +24,9 @@ For the user-facing E2E demo, run:
 That script starts the receiver A2A server in the background, verifies
 that receiver plugin rows land in BigQuery, runs the caller campaigns,
 builds the caller and receiver SDK context graphs, builds the auditor
-joint graph, renders `bq_studio_queries.gql`, and stops the receiver
-server on exit.
+joint graph, renders `bq_studio_queries.gql`, **runs the analyst agent
+against the canned audit question set (closes the loop)**, and stops
+the receiver server on exit.
 
 For debugging, the same flow can be run manually in two terminals:
 
@@ -37,11 +39,16 @@ For debugging, the same flow can be run manually in two terminals:
 ./.venv/bin/python3 run_caller_agent.py
 ./.venv/bin/python3 build_org_graphs.py
 ./.venv/bin/python3 build_joint_graph.py
+./.venv/bin/python3 run_analyst_agent.py     # canned questions
+# or:
+./.venv/bin/python3 run_analyst_agent.py "Why was X rejected for campaign Y?"
 ```
 
-`build_joint_graph.py` already runs `./render_queries.sh` itself, so `bq_studio_queries.gql` is on disk after the last command. Re-run `./render_queries.sh` only if you edit `.env` (e.g. swap `DEMO_CALLER_SESSION_ID` to inspect a different campaign) or change the `*.gql.tpl` templates.
+`build_joint_graph.py` already runs `./render_queries.sh` itself, so `bq_studio_queries.gql` is on disk after that command. Re-run `./render_queries.sh` only if you edit `.env` (e.g. swap `DEMO_CALLER_SESSION_ID` to inspect a different campaign) or change the `*.gql.tpl` templates.
 
-**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, and auditor datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass reflects only the current campaigns.
+`run_analyst_agent.py` runs four canned questions by default (one per analyst tool); pass any free-text question(s) as positional args to ask ad-hoc.
+
+**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, auditor, and analyst datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass reflects only the current campaigns.
 
 The auditor-side projections built by `build_joint_graph.py` are scoped to the current campaign run regardless (the chain `caller_campaign_runs → remote_agent_invocations → receiver_runs → receiver decisions/options` filters out anything not matched to a current caller session). Stale rows from prior runs still accumulate in the **source** layers — `<CALLER_DATASET>.agent_events`, `<RECEIVER_DATASET>.agent_events`, and the per-org `decision_points` / `candidates` tables `build_org_graphs.py` writes — and remain visible in the BQ Studio Explorer for those datasets. Skip the reset if you're iterating and want that source-side history kept; reset if you want a guaranteed-clean per-org and acceptance-gate baseline.
 
@@ -56,6 +63,7 @@ After `run_e2e_demo.sh` succeeds (or after the manual two-terminal flow returns 
 - `<PROJECT>.a2a_receiver_demo.agent_context_graph` — receiver property graph
 - `<PROJECT>.a2a_auditor_demo.{caller_campaign_runs,remote_agent_invocations,receiver_runs,receiver_planning_decisions,receiver_decision_options,joint_a2a_edges}` — auditor projections (redacted)
 - `<PROJECT>.a2a_auditor_demo.a2a_joint_context_graph` — joint property graph spanning both orgs
+- `<PROJECT>.a2a_analyst_demo.agent_events` — analyst-agent traces (one ADK session per question, including the tool-call lineage that produced each answer)
 
 Open BigQuery Studio in the project, navigate to `a2a_auditor_demo`, and paste blocks from `bq_studio_queries.gql` (rendered by `render_queries.sh`). See [`A2A_JOINT_LINEAGE.md`](A2A_JOINT_LINEAGE.md) for the per-block walkthrough.
 
@@ -110,7 +118,7 @@ examples/a2a_joint_lineage_demo/
 ├── DEMO_NARRATION.md               ← 5-minute presenter talk track
 ├── setup.sh                        ← bootstrap (datasets, .env, deps)
 ├── run_e2e_demo.sh                 ← one-command live demo runner
-├── reset.sh                        ← drop caller + receiver + auditor datasets
+├── reset.sh                        ← drop caller + receiver + auditor + analyst datasets
 ├── render_queries.sh               ← render *.gql.tpl with .env values
 ├── .gitignore
 ├── campaigns.py                    ← three campaign briefs
@@ -123,11 +131,17 @@ examples/a2a_joint_lineage_demo/
 │   ├── __init__.py
 │   ├── agent.py
 │   └── prompts.py
+├── analyst_agent/                  ← audit-analyst that closes the loop
+│   ├── __init__.py
+│   ├── agent.py
+│   ├── prompts.py
+│   └── tools.py                    ← 4 bounded BQ tools over the joint graph
 ├── run_receiver_server.py          ← custom Runner(..., plugins=[...]) + to_a2a()
 ├── smoke_receiver.py               ← receiver-row gate
 ├── run_caller_agent.py             ← caller campaigns + 3 acceptance gates
 ├── build_org_graphs.py             ← dual ContextGraphManager.build_context_graph
 ├── build_joint_graph.py            ← auditor projections + joint property graph
+├── run_analyst_agent.py            ← natural-language audit Q&A loop
 ├── joint_property_graph.gql.tpl    ← Phase 1 5-node / 4-edge graph DDL
 └── bq_studio_queries.gql.tpl       ← 5 paste-and-run BQ Studio blocks
 ```

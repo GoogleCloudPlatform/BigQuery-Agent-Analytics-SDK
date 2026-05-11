@@ -20,7 +20,8 @@
 #
 # This script starts the receiver A2A server in the background, runs the
 # receiver smoke gate, runs the caller campaigns, builds both per-org SDK
-# context graphs, builds the auditor joint graph, then stops the receiver.
+# context graphs, builds the auditor joint graph, runs the analyst agent
+# against that graph (closing the loop), then stops the receiver.
 
 set -euo pipefail
 
@@ -63,7 +64,7 @@ echo "Receiver URL: $RECEIVER_A2A_URL"
 echo "Server log:   $SERVER_LOG"
 echo ""
 
-echo "[1/5] Starting receiver A2A server..."
+echo "[1/6] Starting receiver A2A server..."
 : > "$SERVER_LOG"
 "$VENV_PY" "$SCRIPT_DIR/run_receiver_server.py" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
@@ -90,20 +91,24 @@ done
 echo "  Receiver ready: $RECEIVER_AGENT_CARD"
 
 echo ""
-echo "[2/5] Smoke-testing receiver plugin writes..."
+echo "[2/6] Smoke-testing receiver plugin writes..."
 "$VENV_PY" "$SCRIPT_DIR/smoke_receiver.py"
 
 echo ""
-echo "[3/5] Running caller campaigns through the remote A2A receiver..."
+echo "[3/6] Running caller campaigns through the remote A2A receiver..."
 "$VENV_PY" "$SCRIPT_DIR/run_caller_agent.py"
 
 echo ""
-echo "[4/5] Building caller and receiver SDK context graphs..."
+echo "[4/6] Building caller and receiver SDK context graphs..."
 "$VENV_PY" "$SCRIPT_DIR/build_org_graphs.py"
 
 echo ""
-echo "[5/5] Building auditor projections and joint property graph..."
+echo "[5/6] Building auditor projections and joint property graph..."
 "$VENV_PY" "$SCRIPT_DIR/build_joint_graph.py"
+
+echo ""
+echo "[6/6] Asking the analyst agent canned audit questions..."
+"$VENV_PY" "$SCRIPT_DIR/run_analyst_agent.py"
 
 echo ""
 echo "============================================"
@@ -117,4 +122,7 @@ echo "Use:"
 echo "  $SCRIPT_DIR/BQ_STUDIO_WALKTHROUGH.md"
 echo "  $SCRIPT_DIR/bq_studio_queries.gql"
 echo "  $SCRIPT_DIR/DEMO_NARRATION.md"
+echo ""
+echo "Ask the analyst agent ad-hoc questions:"
+echo "  $SCRIPT_DIR/.venv/bin/python3 run_analyst_agent.py \"<your question>\""
 echo ""
