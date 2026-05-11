@@ -72,6 +72,12 @@ from .retry_loop import build_retry_prompt
 from .retry_loop import compile_with_llm
 from .retry_loop import CompileSource
 from .retry_loop import RetryCompileResult
+from .revalidation import check_thresholds
+from .revalidation import EventTypeCounts
+from .revalidation import revalidate_compiled_extractors
+from .revalidation import RevalidationReport
+from .revalidation import RevalidationThresholds
+from .revalidation import ThresholdCheckResult
 from .runtime_fallback import FallbackOutcome
 from .runtime_fallback import run_with_fallback
 from .runtime_registry import build_runtime_extractor_registry
@@ -95,6 +101,7 @@ __all__ = [
     "CompileSource",
     "DETERMINISTIC_FAKE_MODEL",
     "DiscoveryResult",
+    "EventTypeCounts",
     "FallbackOutcome",
     "LoadFailure",
     "LoadedBundle",
@@ -107,8 +114,11 @@ __all__ = [
     "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
     "ResolvedExtractorPlan",
     "RetryCompileResult",
+    "RevalidationReport",
+    "RevalidationThresholds",
     "SmokeTestReport",
     "SpanHandlingRule",
+    "ThresholdCheckResult",
     "WrappedRegistry",
     "build_ast_diagnostic",
     "build_compile_result_diagnostic",
@@ -118,6 +128,7 @@ __all__ = [
     "build_retry_prompt",
     "build_runtime_extractor_registry",
     "build_smoke_diagnostic",
+    "check_thresholds",
     "compile_extractor",
     "compile_with_llm",
     "compute_fingerprint",
@@ -129,6 +140,7 @@ __all__ = [
     "now_iso_utc",
     "parse_resolved_extractor_plan_json",
     "render_extractor_source",
+    "revalidate_compiled_extractors",
     "run_smoke_test",
     "run_smoke_test_in_subprocess",
     "run_with_fallback",

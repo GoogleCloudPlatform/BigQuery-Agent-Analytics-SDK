@@ -598,6 +598,7 @@ try:
   from .extractor_compilation import build_retry_prompt
   from .extractor_compilation import build_runtime_extractor_registry
   from .extractor_compilation import build_smoke_diagnostic
+  from .extractor_compilation import check_thresholds
   from .extractor_compilation import compile_extractor
   from .extractor_compilation import compile_with_llm
   from .extractor_compilation import CompileMeasurement
@@ -606,6 +607,7 @@ try:
   from .extractor_compilation import compute_fingerprint
   from .extractor_compilation import discover_bundles
   from .extractor_compilation import DiscoveryResult
+  from .extractor_compilation import EventTypeCounts
   from .extractor_compilation import FallbackOutcome
   from .extractor_compilation import FieldMapping
   from .extractor_compilation import LLMClient
@@ -622,10 +624,14 @@ try:
   from .extractor_compilation import RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA
   from .extractor_compilation import ResolvedExtractorPlan
   from .extractor_compilation import RetryCompileResult
+  from .extractor_compilation import revalidate_compiled_extractors
+  from .extractor_compilation import RevalidationReport
+  from .extractor_compilation import RevalidationThresholds
   from .extractor_compilation import run_smoke_test
   from .extractor_compilation import run_with_fallback
   from .extractor_compilation import SmokeTestReport
   from .extractor_compilation import SpanHandlingRule
+  from .extractor_compilation import ThresholdCheckResult
   from .extractor_compilation import validate_source
   from .extractor_compilation import WrappedRegistry
 
@@ -638,6 +644,7 @@ try:
           "CompileResult",
           "CompileSource",
           "DiscoveryResult",
+          "EventTypeCounts",
           "FallbackOutcome",
           "FieldMapping",
           "LoadFailure",
@@ -651,8 +658,11 @@ try:
           "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
           "ResolvedExtractorPlan",
           "RetryCompileResult",
+          "RevalidationReport",
+          "RevalidationThresholds",
           "SmokeTestReport",
           "SpanHandlingRule",
+          "ThresholdCheckResult",
           "build_ast_diagnostic",
           "build_compile_result_diagnostic",
           "build_gate_diagnostic",
@@ -660,6 +670,7 @@ try:
           "build_resolution_prompt",
           "build_retry_prompt",
           "build_smoke_diagnostic",
+          "check_thresholds",
           "compile_extractor",
           "compile_with_llm",
           "compute_fingerprint",
@@ -669,6 +680,7 @@ try:
           "parse_resolved_extractor_plan_json",
           "build_runtime_extractor_registry",
           "render_extractor_source",
+          "revalidate_compiled_extractors",
           "run_smoke_test",
           "run_with_fallback",
           "validate_source",

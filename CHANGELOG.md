@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Revalidation harness for compiled structured extractors**
+  in
+  `bigquery_agent_analytics.extractor_compilation.revalidation`
+  and
+  [`docs/extractor_compilation_revalidation.md`](docs/extractor_compilation_revalidation.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.d — turns the compiled path from "works in tests" into
+  "keeps proving itself after rollout." Public surface:
+  ``revalidate_compiled_extractors(events,
+  compiled_extractors, reference_extractors, resolved_graph,
+  ...)`` drives ``run_with_fallback`` over a batch of events
+  and aggregates the per-event outcomes into a
+  ``RevalidationReport`` (per-event-type ``EventTypeCounts``
+  plus totals for ``compiled_unchanged`` /
+  ``compiled_filtered`` / ``fallback_for_event``, with
+  ``compiled_exceptions`` split out so bundle bugs are
+  distinguishable from ontology drift). Headline KPI is
+  ``compiled_unchanged_rate``. Sample divergences are capped
+  at 10 by default with the cap callable. Skipped events
+  (event_types without a compiled or reference extractor,
+  malformed events) are counted separately from the rate
+  denominators. ``check_thresholds(report,
+  RevalidationThresholds(...))`` evaluates the same report
+  against policy gates without baking thresholds into the
+  report shape; multiple thresholds all evaluated (no short-
+  circuit), violations as human-readable strings naming the
+  failed rate and bound. ``RevalidationReport.to_json()`` is
+  deterministic for persistence + cross-run diffing. Out of
+  scope (deferred): scheduled / cron orchestration, BigQuery
+  / disk persistence, CLI binary, sampling strategy, auto-fix
+  workflows.
 - **Orchestrator call-site swap for compiled structured
   extractors** in
   `bigquery_agent_analytics.ontology_graph.OntologyGraphManager`
