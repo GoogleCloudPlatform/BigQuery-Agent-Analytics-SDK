@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Bootstrap for the A2A Joint Lineage demo (PR 1 scope).
+# Bootstrap for the A2A Joint Lineage demo.
 #
 # Steps:
 #   1. Verify python3 + gcloud + .venv tooling.
 #   2. Enable BigQuery + Vertex AI APIs.
 #   3. Install dependencies into ./.venv.
-#   4. Create caller/receiver datasets if missing. Auditor dataset
-#      lands in PR 2.
+#   4. Create caller, receiver, and auditor datasets if missing.
 #   5. Write a .env file the agents and runners read.
 #
 # After setup, the demo runs in two terminals:
@@ -28,10 +27,11 @@
 #   Terminal A  (long-lived receiver server)
 #     ./.venv/bin/python3 run_receiver_server.py
 #
-#   Terminal B  (smoke + caller campaigns + dual graph build)
+#   Terminal B  (smoke + caller campaigns + dual graph + auditor graph)
 #     ./.venv/bin/python3 smoke_receiver.py
 #     ./.venv/bin/python3 run_caller_agent.py
 #     ./.venv/bin/python3 build_org_graphs.py
+#     ./.venv/bin/python3 build_joint_graph.py
 #
 # Required IAM roles for the authenticated principal:
 #   - roles/bigquery.dataEditor
@@ -45,7 +45,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 
 echo ""
 echo "============================================"
-echo "  A2A Joint Lineage Demo (PR 1) — Setup"
+echo "  A2A Joint Lineage Demo — Setup"
 echo "============================================"
 echo ""
 
@@ -116,21 +116,40 @@ CALLER_DATASET_ID="${CALLER_DATASET_ID:-a2a_caller_demo}"
 CALLER_TABLE_ID="${CALLER_TABLE_ID:-agent_events}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
 RECEIVER_TABLE_ID="${RECEIVER_TABLE_ID:-agent_events}"
+AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
 DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-us-central1}"
 DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-2.5-pro}"
 DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
-for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID"; do
-  if ! bq show "${PROJECT_ID}:${ds}" &>/dev/null 2>&1; then
-    echo "  Creating BigQuery dataset: ${ds} in ${DATASET_LOCATION}..."
-    bq mk --dataset --location="$DATASET_LOCATION" \
-      "${PROJECT_ID}:${ds}" 2>/dev/null || true
+for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
+  if bq show "${PROJECT_ID}:${ds}" &>/dev/null; then
+    echo "  Dataset ${ds} already exists."
+    continue
+  fi
+  echo "  Creating BigQuery dataset: ${ds} in ${DATASET_LOCATION}..."
+  # No `|| true` — let `bq mk` surface its own error and stop the
+  # script. Otherwise the .env file gets written and the user
+  # discovers the missing dataset at build_joint_graph.py time
+  # with a much less actionable error.
+  if ! bq mk --dataset --location="$DATASET_LOCATION" \
+       "${PROJECT_ID}:${ds}"; then
+    echo "ERROR: failed to create dataset ${ds}. Check that the" \
+         "authenticated principal has roles/bigquery.dataEditor on" \
+         "project ${PROJECT_ID} and that ${DATASET_LOCATION} is a" \
+         "valid BigQuery location." >&2
+    exit 1
+  fi
+  # Defensive: confirm the dataset is actually visible after mk.
+  if ! bq show "${PROJECT_ID}:${ds}" &>/dev/null; then
+    echo "ERROR: bq mk reported success but ${ds} is not visible." \
+         "Re-run after addressing." >&2
+    exit 1
   fi
 done
 
 cat > "$ENV_FILE" <<EOF
-# A2A Joint Lineage Demo Configuration (PR 1 scope)
+# A2A Joint Lineage Demo Configuration
 PROJECT_ID=$PROJECT_ID
 DATASET_LOCATION=$DATASET_LOCATION
 
@@ -139,6 +158,8 @@ CALLER_TABLE_ID=$CALLER_TABLE_ID
 
 RECEIVER_DATASET_ID=$RECEIVER_DATASET_ID
 RECEIVER_TABLE_ID=$RECEIVER_TABLE_ID
+
+AUDITOR_DATASET_ID=$AUDITOR_DATASET_ID
 
 DEMO_AGENT_LOCATION=$DEMO_AGENT_LOCATION
 DEMO_AGENT_MODEL=$DEMO_AGENT_MODEL
@@ -161,11 +182,14 @@ echo ""
 echo "  Terminal A (receiver server, leave running):"
 echo "    cd $SCRIPT_DIR && ./.venv/bin/python3 run_receiver_server.py"
 echo ""
-echo "  Terminal B (smoke + caller campaigns + dual graph):"
+echo "  Terminal B (smoke + caller campaigns + dual graph + auditor graph):"
 echo "    cd $SCRIPT_DIR"
 echo "    ./.venv/bin/python3 smoke_receiver.py"
 echo "    ./.venv/bin/python3 run_caller_agent.py"
 echo "    ./.venv/bin/python3 build_org_graphs.py"
+echo "    ./.venv/bin/python3 build_joint_graph.py   # runs ./render_queries.sh itself"
+echo ""
+echo "  (Re-run ./render_queries.sh only after editing .env or *.gql.tpl.)"
 echo ""
 echo "Acceptance gates:"
 echo "  - run_caller_agent.py asserts each campaign has ≥1 A2A_INTERACTION row"

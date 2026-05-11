@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Tear down PR 1 demo state.
+# Tear down A2A Joint Lineage demo state.
 #
-# Drops the caller and receiver datasets created by setup.sh. Leaves
-# the .venv intact (delete it manually if you want a fresh install).
+# Drops the caller, receiver, and auditor datasets created by
+# setup.sh. Leaves the .venv intact (delete it manually if you
+# want a fresh install).
 
 set -euo pipefail
 
@@ -36,9 +37,10 @@ fi
 
 CALLER_DATASET_ID="${CALLER_DATASET_ID:-a2a_caller_demo}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
+AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
 
 echo "Tearing down A2A Joint Lineage demo state in project $PROJECT_ID..."
-for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID"; do
+for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
   if bq show "${PROJECT_ID}:${ds}" &>/dev/null 2>&1; then
     echo "  Removing dataset ${ds}..."
     bq rm -r -f --dataset "${PROJECT_ID}:${ds}" 2>/dev/null || true

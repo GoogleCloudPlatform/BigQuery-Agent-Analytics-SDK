@@ -211,6 +211,30 @@ def _write_campaign_runs(runs: list[dict[str, object]]) -> None:
   print(f"  Wrote {len(runs)} campaign_runs rows to {table_ref}")
 
 
+def _record_first_caller_session_id(runs: list[dict[str, object]]) -> None:
+  """Persist the first successful caller session_id to .env.
+
+  ``render_queries.sh`` reads ``DEMO_CALLER_SESSION_ID`` to bind
+  Block 4's @caller_session parameter. Without this, the rendered
+  query carries an empty literal and returns zero rows.
+  """
+  if not runs:
+    return
+  first = str(runs[0]["session_id"])
+  lines: list[str] = []
+  if os.path.exists(_ENV_PATH):
+    with open(_ENV_PATH, encoding="utf-8") as f:
+      lines = [
+          ln
+          for ln in f.read().splitlines()
+          if not ln.startswith("DEMO_CALLER_SESSION_ID=")
+      ]
+  lines.append(f"DEMO_CALLER_SESSION_ID={first}")
+  with open(_ENV_PATH, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+  print(f"  Wrote DEMO_CALLER_SESSION_ID={first} to {_ENV_PATH}")
+
+
 def _poll_until(
     label: str,
     fn,
@@ -383,6 +407,7 @@ def main() -> int:
     print("ERROR: zero caller sessions produced traces.", file=sys.stderr)
     return 1
   _write_campaign_runs(succeeded)
+  _record_first_caller_session_id(succeeded)
   return _check_acceptance_gates(succeeded)
 
 

@@ -188,6 +188,53 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result""",
     ),
+    # A2A_INTERACTION is emitted by the BQ AA Plugin whenever a
+    # supervisor agent invokes a `RemoteA2aAgent` sub-agent. The
+    # ADK plugin populates these fields under
+    # `attributes.a2a_metadata` when `event.custom_metadata`
+    # carries `a2a:request` / `a2a:response`. The SDK side surfaces
+    # the lineage IDs (task_id / context_id) plus the full
+    # request / response payloads as typed top-level columns so
+    # downstream consumers can join without re-extracting JSON.
+    #
+    # `receiver_session_id` is the receiver-side ADK session id
+    # echoed back to the caller via response metadata. The COALESCE
+    # handles both A2A response shapes:
+    #   - Task-shaped responses: the executor populates
+    #     `task.metadata.adk_session_id` and the BQ AA Plugin
+    #     stores the full task object as `a2a:response`. The plugin
+    #     also uses that task object as the row's `content` column,
+    #     so the same value is reachable via either path.
+    #   - `A2AMessage`-shaped responses: when populated, the value
+    #     is at the same nested path; when not populated, the
+    #     COALESCE returns NULL and downstream consumers should
+    #     treat the receiver_session_id as diagnostic only and
+    #     fall back to the context-level join
+    #     (caller.a2a_context_id == receiver.session_id) for the
+    #     primary stitch.
+    "A2A_INTERACTION": (
+        "a2a_interactions",
+        """\
+  JSON_VALUE(
+    attributes, '$.a2a_metadata."a2a:task_id"'
+  ) AS a2a_task_id,
+  JSON_VALUE(
+    attributes, '$.a2a_metadata."a2a:context_id"'
+  ) AS a2a_context_id,
+  JSON_QUERY(
+    attributes, '$.a2a_metadata."a2a:request"'
+  ) AS a2a_request,
+  JSON_QUERY(
+    attributes, '$.a2a_metadata."a2a:response"'
+  ) AS a2a_response,
+  COALESCE(
+    JSON_VALUE(content, '$.metadata.adk_session_id'),
+    JSON_VALUE(
+      attributes,
+      '$.a2a_metadata."a2a:response".metadata.adk_session_id'
+    )
+  ) AS receiver_session_id""",
+    ),
 }
 
 # ------------------------------------------------------------------ #
