@@ -125,13 +125,46 @@ User takeaway:
 
 > The demo separates trace collection from the auditor-facing surface.
 
+## Beat 8 — Closing The Loop With An Analyst Agent
+
+Run `./.venv/bin/python3 run_analyst_agent.py` (the one-command runner does this as step 6).
+
+> So far the human has been reading the graph. This last step closes
+> the loop: a third agent — the audit analyst — reads the joint graph
+> back through four bounded BigQuery tools and answers natural-language
+> audit questions. Its own reasoning trace lands in the analyst
+> `agent_events` table, so the audit-of-the-audit lineage is itself a
+> first-class BQ AA dataset.
+
+Show the four canned answers the agent produces:
+
+- "Is the joint audit graph healthy?" → tool: `stitch_health()`
+- "What campaigns are in scope?" → tool: `list_campaigns()`
+- "Walk me through the first campaign's audit path." → tool: `audit_campaign(...)`
+- "What are the lowest-scored dropped options?" → tool: `find_governance_rejections(...)`
+
+Then drop into ad-hoc mode:
+
+```bash
+./.venv/bin/python3 run_analyst_agent.py \
+  "Why was anything dropped for the Adidas track campaign?"
+```
+
+User takeaway:
+
+> The same data model used to record the trace is used to ask
+> questions about the trace. An agent → BQAA → context graph → agent
+> loop, not just agent → BQAA → human SQL.
+
 ## Close
 
 > This is the end-to-end pattern: real agents, BQ AA Plugin telemetry,
-> per-agent context graphs, and one redacted joint graph for audit. The
-> key is that the graph is built from runtime evidence, so the demo is
-> not just a dashboard. It is a lineage surface over what the agents
-> actually did.
+> per-agent context graphs, one redacted joint graph for audit, and an
+> analyst agent that reads that graph back in natural language. The
+> key is that every step — including the analyst's reasoning — is
+> built from runtime evidence in the same data model. It is a lineage
+> surface over what the agents actually did, queryable both by humans
+> (BigQuery Studio) and by other agents (the analyst's BQ tools).
 
 ## Questions To Invite
 

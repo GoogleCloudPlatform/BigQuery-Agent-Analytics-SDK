@@ -127,6 +127,28 @@ Lists every column named `a2a_request` / `a2a_response` / `content` across the a
 
 If this returns rows, an upstream change has leaked payload columns into the auditor projection tables — fix the projection SQL in `build_joint_graph.py` before merging.
 
+## Closing the loop — the analyst agent
+
+`run_analyst_agent.py` is the demo's last hop. It instantiates an ADK agent (`analyst_agent/agent.py`) whose system prompt frames it as an audit analyst with four bounded BigQuery tools — one per headline audit question:
+
+| Tool | Maps to | When the agent picks it |
+|---|---|---|
+| `stitch_health()` | Block 1 | "Is the audit graph healthy? Are all calls accounted for?" |
+| `list_campaigns()` | (discovery) | "What campaigns are in scope?" or session-id lookup when the user names a campaign |
+| `audit_campaign(caller_session_id)` | Block 4 | "Walk me through the audit path for campaign X" |
+| `find_governance_rejections(decision_type=None, max_score=None)` | Block 3 (filtered) | Portfolio-level scans for dropped options |
+
+Each tool runs a parameterized BigQuery query against the auditor projections and the `a2a_joint_context_graph`. Results are dict-shaped and bounded (default 25 campaigns, 30 rejection rows) so the LLM doesn't blow its context window. Raw `a2a_request` / `a2a_response` payloads are never returned — the redaction contract from the projection layer carries through to the agent surface.
+
+The analyst's own ADK session — its tool-call sequence, its LLM responses, its final summary — lands in `<ANALYST_DATASET>.agent_events` via a third BQ AA Plugin instance. Operators can run `ContextGraphManager.build_context_graph` against that dataset for audit-of-the-audit lineage if they need it; that's left as a follow-on.
+
+The default `run_analyst_agent.py` invocation fires four canned questions (one per tool) so a fresh demo exercises the whole tool surface. Positional arguments override the canned set for ad-hoc questions:
+
+```bash
+./.venv/bin/python3 run_analyst_agent.py \
+  "Across all campaigns, which dropped options scored below 0.3?"
+```
+
 ## Failure modes and what each gate catches
 
 | Symptom | Likely cause | Where it surfaces |
