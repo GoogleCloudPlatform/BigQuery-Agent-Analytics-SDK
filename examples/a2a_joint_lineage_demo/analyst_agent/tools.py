@@ -58,6 +58,11 @@ AUDITOR_DATASET_ID = os.getenv("AUDITOR_DATASET_ID", "a2a_auditor_demo")
 # scan; the defaults stay tight to keep the demo readable.
 _LIST_LIMIT = int(os.getenv("ANALYST_LIST_LIMIT", "25"))
 _REJECTIONS_LIMIT = int(os.getenv("ANALYST_REJECTIONS_LIMIT", "30"))
+# audit_campaign() walks N options × M decisions for one campaign;
+# at the receiver-prompt contract (3 candidates × 1 decision per
+# call) this is ~3 rows per A2A call. A misconfigured receiver
+# can produce many more, hence the cap.
+_AUDIT_LIMIT = int(os.getenv("ANALYST_AUDIT_LIMIT", "50"))
 
 _GRAPH = f"`{PROJECT_ID}.{AUDITOR_DATASET_ID}.a2a_joint_context_graph`"
 
@@ -211,6 +216,7 @@ def audit_campaign(caller_session_id: str) -> dict[str, Any]:
       option.status AS status,
       option.rejection_rationale AS rationale
     ORDER BY option.status DESC, option.score DESC
+    LIMIT {_AUDIT_LIMIT}
   """
   job_config = bigquery.QueryJobConfig(
       query_parameters=[
@@ -284,8 +290,11 @@ def find_governance_rejections(
           ANALYST_REJECTIONS_LIMIT, default 30).
         - filters (dict): echo of the applied filter values.
         - rejections (list[dict]): each entry has
-          a2a_context_id, decision_type, option_name, score, and
-          rationale.
+          caller_session_id, campaign, brand, a2a_context_id,
+          decision_type, option_name, score, and rationale. Campaign
+          identity is included so the analyst can attribute each
+          rejection back to a specific caller campaign in
+          portfolio-level questions.
   """
   filters = {"decision_type": decision_type, "max_score": max_score}
   where = ["option.status = 'DROPPED'"]
@@ -304,13 +313,23 @@ def find_governance_rejections(
     )
 
   where_clause = " AND ".join(where)
+  # Walk back to CallerCampaignRun so the analyst can attribute each
+  # rejection to a specific campaign (caller_session_id + campaign
+  # + brand). The earlier shape started from RemoteAgentInvocation,
+  # which made portfolio-level answers ambiguous about which
+  # campaign each rejection belonged to.
   q = f"""
     GRAPH {_GRAPH}
-    MATCH (remote:RemoteAgentInvocation)-[:HandledBy]->(receiver:ReceiverAgentRun)
+    MATCH (campaign:CallerCampaignRun)
+          -[:DelegatedVia]->(remote:RemoteAgentInvocation)
+          -[:HandledBy]->(receiver:ReceiverAgentRun)
           -[:ReceiverMadeDecision]->(decision:ReceiverPlanningDecision)
           -[:ReceiverWeighedOption]->(option:ReceiverDecisionOption)
     WHERE {where_clause}
     RETURN
+      campaign.caller_session_id AS caller_session_id,
+      campaign.campaign AS campaign,
+      campaign.brand AS brand,
       remote.a2a_context_id AS a2a_context_id,
       decision.decision_type AS decision_type,
       option.name AS option_name,
@@ -334,6 +353,9 @@ def find_governance_rejections(
     }
   rejections = [
       {
+          "caller_session_id": str(r["caller_session_id"]),
+          "campaign": str(r["campaign"]),
+          "brand": str(r["brand"]) if r["brand"] is not None else None,
           "a2a_context_id": (
               str(r["a2a_context_id"]) if r["a2a_context_id"] else None
           ),

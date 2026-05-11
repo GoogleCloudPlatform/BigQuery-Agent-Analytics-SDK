@@ -24,8 +24,9 @@ For the user-facing E2E demo, run:
 That script starts the receiver A2A server in the background, verifies
 that receiver plugin rows land in BigQuery, runs the caller campaigns,
 builds the caller and receiver SDK context graphs, builds the auditor
-joint graph, renders `bq_studio_queries.gql`, and stops the receiver
-server on exit.
+joint graph, renders `bq_studio_queries.gql`, **runs the analyst agent
+against the canned audit question set (closes the loop)**, and stops
+the receiver server on exit.
 
 For debugging, the same flow can be run manually in two terminals:
 
@@ -47,7 +48,7 @@ For debugging, the same flow can be run manually in two terminals:
 
 `run_analyst_agent.py` runs four canned questions by default (one per analyst tool); pass any free-text question(s) as positional args to ask ad-hoc.
 
-**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, and auditor datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass reflects only the current campaigns.
+**For a clean verification run: `./reset.sh && ./setup.sh`, then run the two-terminal flow above.** `reset.sh` drops the caller, receiver, auditor, and analyst datasets entirely; `setup.sh` recreates them. The plugin creates tables, not datasets, so a bare `./reset.sh` would leave the demo unable to write. Resetting up front guarantees `build_org_graphs.py`'s discover-all-sessions pass reflects only the current campaigns.
 
 The auditor-side projections built by `build_joint_graph.py` are scoped to the current campaign run regardless (the chain `caller_campaign_runs → remote_agent_invocations → receiver_runs → receiver decisions/options` filters out anything not matched to a current caller session). Stale rows from prior runs still accumulate in the **source** layers — `<CALLER_DATASET>.agent_events`, `<RECEIVER_DATASET>.agent_events`, and the per-org `decision_points` / `candidates` tables `build_org_graphs.py` writes — and remain visible in the BQ Studio Explorer for those datasets. Skip the reset if you're iterating and want that source-side history kept; reset if you want a guaranteed-clean per-org and acceptance-gate baseline.
 
@@ -117,7 +118,7 @@ examples/a2a_joint_lineage_demo/
 ├── DEMO_NARRATION.md               ← 5-minute presenter talk track
 ├── setup.sh                        ← bootstrap (datasets, .env, deps)
 ├── run_e2e_demo.sh                 ← one-command live demo runner
-├── reset.sh                        ← drop caller + receiver + auditor datasets
+├── reset.sh                        ← drop caller + receiver + auditor + analyst datasets
 ├── render_queries.sh               ← render *.gql.tpl with .env values
 ├── .gitignore
 ├── campaigns.py                    ← three campaign briefs

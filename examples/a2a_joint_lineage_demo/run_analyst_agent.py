@@ -49,6 +49,7 @@ import asyncio
 import os
 import sys
 import time
+from typing import Optional
 
 from analyst_agent import APP_NAME
 from analyst_agent import bq_logging_plugin
@@ -90,8 +91,16 @@ _DEFAULT_QUESTIONS = [
 ]
 
 
-def _final_text(events: list) -> str:
-  """Pull the analyst agent's last user-visible text response."""
+def _final_text(events: list) -> Optional[str]:
+  """Pull the analyst agent's last user-visible text response.
+
+  Returns ``None`` when the agent produced no terminal text response
+  (e.g. all events were tool calls/results with no follow-up
+  summary). Callers should treat that case as a failure rather than
+  silently exiting success: ``run_e2e_demo.sh`` exits 0 if the
+  driver returns 0, and we don't want a question that produced
+  zero answer text to slip past the e2e gate.
+  """
   for event in reversed(events):
     content = getattr(event, "content", None)
     if not content:
@@ -107,7 +116,7 @@ def _final_text(events: list) -> str:
     ]
     if text_parts:
       return "\n".join(text_parts).strip()
-  return "(analyst produced no final text response)"
+  return None
 
 
 async def _ask_one(
@@ -145,6 +154,14 @@ async def _ask_one(
     return session_id, len(events), exception_msg
 
   answer = _final_text(events)
+  if answer is None:
+    msg = "analyst produced no final text response"
+    print(
+        f"          ! {msg} ({elapsed:.1f}s, {len(events)} events)",
+        file=sys.stderr,
+    )
+    return session_id, len(events), msg
+
   print(f"          A ({elapsed:.1f}s, {len(events)} events):")
   for line in answer.splitlines():
     print(f"            {line}")
