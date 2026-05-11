@@ -192,15 +192,28 @@ def build_runtime_extractor_registry(
     :func:`run_structured_extractors`.
 
   Raises:
-    TypeError: if any ``fallback_extractors`` value isn't
-      callable. The dict is validated *before* allowlist
-      scoping, so misconfigured entries surface even when
-      they'd be filtered out — the caller's input contract has
-      to hold for the whole dict, not just the scoped subset.
-      ``run_structured_extractors`` would otherwise silently
-      skip ``None`` entries (treating them as "no extractor")
-      or raise ``TypeError`` later when it tried to invoke a
-      non-callable value, far from the misconfiguration site.
+    TypeError: if any ``fallback_extractors`` entry is
+      structurally invalid. Each of the following is rejected
+      with a message naming the offending key:
+
+      * key isn't a ``str`` (the runtime keys event_type
+        lookups by string; non-str keys silently never match,
+        and mixed key types crash audit-tuple sorting);
+      * key is the empty string ``""`` (registers an entry no
+        real event can match);
+      * value isn't callable (``None`` would be silently
+        skipped by ``run_structured_extractors``; other
+        non-callables would raise far from the misconfig site);
+      * callable signature can't accept ``(event, spec)``
+        (verified via the same ``_signature_compatible`` check
+        the bundle loader applies to compiled extractors, so
+        the ``StructuredExtractor`` contract has one source of
+        truth at every trust boundary).
+
+      The dict is validated *before* allowlist scoping, so
+      misconfigured entries surface even when they'd be
+      filtered out — the caller's input contract has to hold
+      for the whole dict, not just the scoped subset.
   """
   # Validate the full input dict before any other work. Bad
   # entries surface here, with the offending key named, rather
