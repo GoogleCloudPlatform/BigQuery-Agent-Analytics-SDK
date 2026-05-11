@@ -55,7 +55,21 @@ CALLER_DATASET_ID = os.getenv("CALLER_DATASET_ID", "a2a_caller_demo")
 CALLER_TABLE_ID = os.getenv("CALLER_TABLE_ID", "agent_events")
 RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
-DEMO_AI_ENDPOINT = os.getenv("DEMO_AI_ENDPOINT", "gemini-2.5-flash")
+# BigQuery AI.GENERATE endpoint default — verified live in May 2026:
+# the Gemini 3 preview is reachable ONLY via the full HTTPS endpoint
+# URL at locations/global. The simple-name resolver in BQML does not
+# recognize "gemini-3-flash" or "gemini-3-flash-preview" today; both
+# return 404. The model ID is gemini-3-flash-preview (NOT
+# gemini-3-flash). The endpoint URL is per-project, so the default is
+# computed from PROJECT_ID at module load. setup.sh writes the same
+# resolved URL into .env so the explicit env var also works in the
+# normal demo flow. To fall back to a stable model that does work as
+# a simple name, override DEMO_AI_ENDPOINT=gemini-2.5-flash.
+DEMO_AI_ENDPOINT = os.getenv(
+    "DEMO_AI_ENDPOINT",
+    f"https://aiplatform.googleapis.com/v1/projects/{PROJECT_ID}"
+    f"/locations/global/publishers/google/models/gemini-3-flash-preview",
+)
 
 # Receiver-extraction acceptance gate. The receiver prompt forces
 # three options per call; for the default 3-campaign demo the

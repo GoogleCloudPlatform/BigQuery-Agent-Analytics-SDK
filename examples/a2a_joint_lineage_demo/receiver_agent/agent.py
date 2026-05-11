@@ -54,8 +54,15 @@ PROJECT_ID = os.getenv("PROJECT_ID") or _auth_project
 DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 RECEIVER_DATASET_ID = os.getenv("RECEIVER_DATASET_ID", "a2a_receiver_demo")
 RECEIVER_TABLE_ID = os.getenv("RECEIVER_TABLE_ID", "agent_events")
-MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-2.5-pro")
-AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "us-central1")
+# Default to Gemini 3.1 Pro preview. gemini-3-pro-preview was
+# discontinued in March 2026; gemini-3.1-pro-preview is the current
+# supported 3.x ID on Vertex AI. Verified live: this model is only
+# published at locations/global — a regional lookup returns 404. The
+# `global` default for AGENT_LOCATION below is required when this
+# default is in use. To fall back to gemini-2.5-pro on projects
+# without preview access, also override DEMO_AGENT_LOCATION=us-central1.
+MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-3.1-pro-preview")
+AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "global")
 
 os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID or ""
 os.environ["GOOGLE_CLOUD_LOCATION"] = AGENT_LOCATION

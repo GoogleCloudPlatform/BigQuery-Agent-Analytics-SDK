@@ -54,8 +54,15 @@ PROJECT_ID = os.getenv("PROJECT_ID") or _auth_project
 DATASET_LOCATION = os.getenv("DATASET_LOCATION", "us-central1")
 CALLER_DATASET_ID = os.getenv("CALLER_DATASET_ID", "a2a_caller_demo")
 CALLER_TABLE_ID = os.getenv("CALLER_TABLE_ID", "agent_events")
-MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-2.5-pro")
-AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "us-central1")
+# Default to Gemini 3.1 Pro preview. gemini-3-pro-preview was
+# discontinued in March 2026; gemini-3.1-pro-preview is the current
+# supported 3.x ID on Vertex AI. Verified live: this model is only
+# published at locations/global — a regional lookup returns 404. The
+# `global` default for AGENT_LOCATION below is required when this
+# default is in use. To fall back to gemini-2.5-pro on projects
+# without preview access, also override DEMO_AGENT_LOCATION=us-central1.
+MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-3.1-pro-preview")
+AGENT_LOCATION = os.getenv("DEMO_AGENT_LOCATION", "global")
 RECEIVER_A2A_URL = os.getenv("RECEIVER_A2A_URL", "http://127.0.0.1:8000")
 # Standard A2A protocol exposes the agent card at this well-known
 # path; ``adk-python``'s ``to_a2a()`` helper serves it from

@@ -2,6 +2,7 @@
 .env
 __pycache__/
 *.pyc
+receiver_server.log
 # Rendered GQL — keep .tpl source, ignore the generated output that
 # render_queries.sh produces with project-specific values inlined.
 joint_property_graph.gql

@@ -117,9 +117,37 @@ CALLER_TABLE_ID="${CALLER_TABLE_ID:-agent_events}"
 RECEIVER_DATASET_ID="${RECEIVER_DATASET_ID:-a2a_receiver_demo}"
 RECEIVER_TABLE_ID="${RECEIVER_TABLE_ID:-agent_events}"
 AUDITOR_DATASET_ID="${AUDITOR_DATASET_ID:-a2a_auditor_demo}"
-DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-us-central1}"
-DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-2.5-pro}"
-DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-gemini-2.5-flash}"
+# Gemini 3.x model defaults — verified against live Vertex AI +
+# BigQuery AI.GENERATE in May 2026:
+#
+#   - DEMO_AGENT_LOCATION must be `global` for Gemini 3.x preview
+#     models. They are not published at us-central1 (or any other
+#     regional location); a regional lookup returns 404. To fall
+#     back to gemini-2.5-pro, also override
+#     DEMO_AGENT_LOCATION=us-central1.
+#
+#   - DEMO_AGENT_MODEL: gemini-3.1-pro-preview is the supported 3.x
+#     preview ID. gemini-3-pro-preview was discontinued in March
+#     2026; gemini-3.1-pro-preview is the current ID.
+#
+#   - DEMO_AI_ENDPOINT for BigQuery AI.GENERATE must be the full
+#     HTTPS endpoint URL. During the Gemini 3 preview the BQML
+#     simple-name resolver does NOT recognize "gemini-3-flash" or
+#     "gemini-3-flash-preview"; only the full URL works, and only
+#     the locations/global publisher path is registered. The model
+#     ID is gemini-3-flash-preview (NOT gemini-3-flash). The full
+#     URL must be substituted with the demo's PROJECT_ID at .env-
+#     write time below; a literal default would not be reachable
+#     across projects.
+#
+#   - To fall back to stable models on a project without Gemini 3
+#     preview access, override:
+#       DEMO_AGENT_LOCATION=us-central1
+#       DEMO_AGENT_MODEL=gemini-2.5-pro
+#       DEMO_AI_ENDPOINT=gemini-2.5-flash
+DEMO_AGENT_LOCATION="${DEMO_AGENT_LOCATION:-global}"
+DEMO_AGENT_MODEL="${DEMO_AGENT_MODEL:-gemini-3.1-pro-preview}"
+DEMO_AI_ENDPOINT="${DEMO_AI_ENDPOINT:-https://aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/global/publishers/google/models/gemini-3-flash-preview}"
 RECEIVER_A2A_URL="${RECEIVER_A2A_URL:-http://127.0.0.1:8000}"
 
 for ds in "$CALLER_DATASET_ID" "$RECEIVER_DATASET_ID" "$AUDITOR_DATASET_ID"; do
@@ -176,6 +204,9 @@ echo ""
 echo "============================================"
 echo "  Setup complete! Next: run the demo."
 echo "============================================"
+echo ""
+echo "Presentation run (starts/stops the receiver server for you):"
+echo "  cd $SCRIPT_DIR && ./run_e2e_demo.sh"
 echo ""
 echo "Two terminals:"
 echo ""
