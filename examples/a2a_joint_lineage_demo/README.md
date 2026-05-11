@@ -45,7 +45,7 @@ For debugging, the same flow can be run manually in two terminals:
 
 The auditor-side projections built by `build_joint_graph.py` are scoped to the current campaign run regardless (the chain `caller_campaign_runs → remote_agent_invocations → receiver_runs → receiver decisions/options` filters out anything not matched to a current caller session). Stale rows from prior runs still accumulate in the **source** layers — `<CALLER_DATASET>.agent_events`, `<RECEIVER_DATASET>.agent_events`, and the per-org `decision_points` / `candidates` tables `build_org_graphs.py` writes — and remain visible in the BQ Studio Explorer for those datasets. Skip the reset if you're iterating and want that source-side history kept; reset if you want a guaranteed-clean per-org and acceptance-gate baseline.
 
-After all five commands return zero, you have:
+After `run_e2e_demo.sh` succeeds (or after the manual two-terminal flow returns zero on every step), you have:
 
 - `<PROJECT>.a2a_caller_demo.agent_events` — caller-side spans, including `A2A_INTERACTION` rows
 - `<PROJECT>.a2a_caller_demo.campaign_runs` — campaign ↔ caller-session map
