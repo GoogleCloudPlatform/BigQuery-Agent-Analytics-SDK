@@ -74,6 +74,7 @@ from typing import Any, Callable, Optional
 from ..structured_extraction import StructuredExtractionResult
 from .measurement import _compare_nodes
 from .measurement import _compare_span_handling
+from .measurement import _hashable
 from .runtime_fallback import FallbackOutcome
 from .runtime_fallback import run_with_fallback
 
@@ -618,33 +619,134 @@ def _check_parity(
   output on *event*. Returns ``None`` on agreement, or a short
   divergence string naming what differed.
 
-  The reference call is wrapped in ``try/except Exception`` —
-  a reference crash is recorded as a divergence
-  (``reference extractor raised X: msg``) rather than aborting
-  the batch. ``KeyboardInterrupt`` / ``SystemExit`` propagate
-  so operator cancellation still works."""
+  Every failure mode on the reference side is funneled into a
+  parity-divergence string so one bad reference event can't
+  kill the batch:
+
+  * Reference raises → ``reference extractor raised X: msg``.
+  * Reference returns a non-``StructuredExtractionResult``
+    (including ``None``) → ``reference extractor returned
+    <TypeName>, not StructuredExtractionResult``. Without this
+    check the comparators below would hit
+    ``AttributeError`` on ``.nodes`` and crash the batch.
+  * Comparator itself raises (e.g. a malformed span-set on
+    either side blows up the comparator's ``set(...)``
+    coercion) → ``parity comparator raised X: msg``.
+
+  ``KeyboardInterrupt`` / ``SystemExit`` propagate so operator
+  cancellation still works.
+  """
   try:
     ref_result = reference_extractor(event, spec)
   except Exception as exc:  # noqa: BLE001 — record + continue
     return f"reference extractor raised {type(exc).__name__}: {exc}"
 
-  # Node-set agreement: same ``node_id`` set with matching
-  # entity_name / labels / property-set per node. Defers to
-  # measurement.py's comparator so revalidation and
-  # measure_compile stay byte-aligned on parity semantics.
-  node_divergence = _compare_nodes(ref_result.nodes, wrapper_result.nodes)
-  if node_divergence is not None:
-    return node_divergence
+  if not isinstance(ref_result, StructuredExtractionResult):
+    return (
+        f"reference extractor returned {type(ref_result).__name__}, "
+        f"not StructuredExtractionResult"
+    )
 
-  # Span-handling agreement: ``fully_handled_span_ids`` and
-  # ``partially_handled_span_ids`` sets must match. Important
-  # because C2.b's compiled_filtered path downgrades span
-  # handling from fully → partially; a wrong span-handling set
-  # silently changes what the AI extractor sees downstream.
-  span_divergence = _compare_span_handling(ref_result, wrapper_result)
-  if span_divergence is not None:
-    return span_divergence
+  # Comparator calls wrapped in try/except: a malformed
+  # internal (e.g. ``ref_result.fully_handled_span_ids`` that
+  # was stored as a list / None / str — the dataclass doesn't
+  # enforce ``set[str]`` at runtime) makes the comparator
+  # raise rather than return a divergence string. Catching
+  # here keeps the batch alive; the parity-divergence message
+  # names the comparator so an operator can triage which side
+  # has the bad shape.
+  try:
+    # Node-set agreement: same ``node_id`` set with matching
+    # entity_name / labels / property-set per node. Defers to
+    # measurement.py's comparator so revalidation and
+    # measure_compile stay byte-aligned on parity semantics.
+    node_divergence = _compare_nodes(ref_result.nodes, wrapper_result.nodes)
+    if node_divergence is not None:
+      return node_divergence
 
+    # Edge-set agreement: same ``edge_id`` set with matching
+    # relationship_name / endpoints / property-set per edge.
+    # Edge-emitting compiled extractors that drift on edge
+    # endpoints or relationship would otherwise look like a
+    # parity match — the wrapper accepts them and the
+    # node comparator never sees them.
+    edge_divergence = _compare_edges(ref_result.edges, wrapper_result.edges)
+    if edge_divergence is not None:
+      return edge_divergence
+
+    # Span-handling agreement: ``fully_handled_span_ids`` and
+    # ``partially_handled_span_ids`` sets must match. Important
+    # because C2.b's compiled_filtered path downgrades span
+    # handling from fully → partially; a wrong span-handling
+    # set silently changes what the AI extractor sees
+    # downstream.
+    span_divergence = _compare_span_handling(ref_result, wrapper_result)
+    if span_divergence is not None:
+      return span_divergence
+  except Exception as exc:  # noqa: BLE001 — record + continue
+    return f"parity comparator raised {type(exc).__name__}: {exc}"
+
+  return None
+
+
+def _compare_edges(ref_edges, cmp_edges) -> Optional[str]:
+  """Return a divergence string or ``None`` if the edge sets
+  match.
+
+  Match criterion: same set of ``edge_id`` values, and for
+  each shared ``edge_id`` the ``relationship_name``,
+  ``from_node_id``, ``to_node_id``, and property
+  ``(name, value)`` set are equal.
+
+  Lives in revalidation rather than measurement because the
+  renderer doesn't emit edges (per the renderer docstring) so
+  ``measure_compile`` doesn't need edge parity. Revalidation
+  is sampling-agnostic — it runs against any compiled / handwritten
+  pair, including ones that emit edges.
+  """
+  ref_by_id = {e.edge_id: e for e in ref_edges}
+  cmp_by_id = {e.edge_id: e for e in cmp_edges}
+  if set(ref_by_id) != set(cmp_by_id):
+    only_ref = sorted(set(ref_by_id) - set(cmp_by_id))
+    only_cmp = sorted(set(cmp_by_id) - set(ref_by_id))
+    parts = []
+    if only_ref:
+      parts.append(f"only in reference: {only_ref}")
+    if only_cmp:
+      parts.append(f"only in compiled: {only_cmp}")
+    return "edge_id mismatch — " + "; ".join(parts)
+  for edge_id in sorted(ref_by_id):
+    ref_edge = ref_by_id[edge_id]
+    cmp_edge = cmp_by_id[edge_id]
+    if ref_edge.relationship_name != cmp_edge.relationship_name:
+      return (
+          f"edge {edge_id!r} relationship_name "
+          f"{ref_edge.relationship_name!r} (ref) != "
+          f"{cmp_edge.relationship_name!r} (compiled)"
+      )
+    if ref_edge.from_node_id != cmp_edge.from_node_id:
+      return (
+          f"edge {edge_id!r} from_node_id "
+          f"{ref_edge.from_node_id!r} (ref) != "
+          f"{cmp_edge.from_node_id!r} (compiled)"
+      )
+    if ref_edge.to_node_id != cmp_edge.to_node_id:
+      return (
+          f"edge {edge_id!r} to_node_id "
+          f"{ref_edge.to_node_id!r} (ref) != "
+          f"{cmp_edge.to_node_id!r} (compiled)"
+      )
+    ref_props = {(p.name, _hashable(p.value)) for p in ref_edge.properties}
+    cmp_props = {(p.name, _hashable(p.value)) for p in cmp_edge.properties}
+    if ref_props != cmp_props:
+      only_ref = sorted(ref_props - cmp_props)
+      only_cmp = sorted(cmp_props - ref_props)
+      bits = []
+      if only_ref:
+        bits.append(f"only in reference: {only_ref}")
+      if only_cmp:
+        bits.append(f"only in compiled: {only_cmp}")
+      return f"edge {edge_id!r} property set mismatch — " + "; ".join(bits)
   return None
 
 

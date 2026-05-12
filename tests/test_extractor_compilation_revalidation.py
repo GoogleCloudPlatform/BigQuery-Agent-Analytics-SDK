@@ -279,6 +279,132 @@ class TestRevalidationParity:
     assert "ValueError" in report.sample_parity_divergences[0]
     assert "reference blew up" in report.sample_parity_divergences[0]
 
+  def test_edge_drift_caught_by_parity(self):
+    """Edge-emitting extractor whose endpoints disagree with
+    the reference. Without edge parity the divergence would be
+    invisible — the node sets match, so ``_compare_nodes`` and
+    ``_compare_span_handling`` both return ``None``. With edge
+    parity (this round's P1 fix) the wrong endpoint surfaces
+    as a divergence."""
+    from bigquery_agent_analytics.extracted_models import ExtractedEdge
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def _two_nodes_with_edge(*, span_id: str, to_node_id: str):
+      a = ExtractedNode(
+          node_id="N1", entity_name="X", labels=["X"], properties=[]
+      )
+      b = ExtractedNode(
+          node_id="N2", entity_name="X", labels=["X"], properties=[]
+      )
+      edge = ExtractedEdge(
+          edge_id="E1",
+          relationship_name="rel",
+          from_node_id="N1",
+          to_node_id=to_node_id,
+          properties=[],
+      )
+      return StructuredExtractionResult(
+          nodes=[a, b],
+          edges=[edge],
+          fully_handled_span_ids={span_id},
+          partially_handled_span_ids=set(),
+      )
+
+    def compiled(event, spec):
+      # Edge points to N2 in reference, but to N1 in compiled.
+      return _two_nodes_with_edge(span_id=event["span_id"], to_node_id="N1")
+
+    def reference(event, spec):
+      return _two_nodes_with_edge(span_id=event["span_id"], to_node_id="N2")
+
+    # Stub the validator: this synthetic graph isn't in the
+    # BKA spec, but we want to focus on parity. Acceptance of
+    # any compiled output keeps ``compiled_unchanged`` so the
+    # parity check actually runs.
+    import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
+    from bigquery_agent_analytics.graph_validation import ValidationReport
+
+    real_validator = rf.validate_extracted_graph
+    rf.validate_extracted_graph = lambda spec, graph: ValidationReport(
+        failures=()
+    )
+    try:
+      report = revalidate_compiled_extractors(
+          events=[_bka_event(span_id="sp1")],
+          compiled_extractors={"bka_decision": compiled},
+          reference_extractors={"bka_decision": reference},
+          resolved_graph=_bka_resolved_spec(),
+      )
+    finally:
+      rf.validate_extracted_graph = real_validator
+
+    assert report.total_compiled_unchanged == 1
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 1
+    # Sample-divergence names the offending edge field so an
+    # operator can drill in.
+    assert "to_node_id" in report.sample_parity_divergences[0]
+
+  def test_reference_returns_none_recorded_as_parity_divergence(self):
+    """A reference that returns ``None`` (rather than raising)
+    must NOT abort the batch with ``AttributeError`` on
+    ``.nodes``. Recorded as a parity divergence naming the
+    wrong return type."""
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+
+    def none_returning_reference(event, spec):
+      return None
+
+    report = revalidate_compiled_extractors(
+        events=[_bka_event(span_id="sp1"), _bka_event(span_id="sp2")],
+        compiled_extractors={"bka_decision": extract_bka_decision_event},
+        reference_extractors={"bka_decision": none_returning_reference},
+        resolved_graph=_bka_resolved_spec(),
+    )
+
+    # Both events processed; both flagged as parity
+    # divergences naming the wrong return type.
+    assert report.total_events == 2
+    assert report.total_parity_divergences == 2
+    assert report.total_parity_matches == 0
+    for divergence in report.sample_parity_divergences:
+      assert "NoneType" in divergence
+      assert "StructuredExtractionResult" in divergence
+
+  def test_comparator_exception_recorded_as_parity_divergence(self):
+    """If the comparator itself raises (e.g. a malformed
+    internal field bypasses the isinstance check and trips
+    the comparator's iteration), the crash must NOT abort
+    the batch. Recorded as a parity divergence naming the
+    comparator that exploded."""
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    import bigquery_agent_analytics.extractor_compilation.revalidation as reval
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+
+    real_compare_nodes = reval._compare_nodes
+
+    def exploding_compare_nodes(ref_nodes, cmp_nodes):
+      raise RuntimeError("comparator boom")
+
+    reval._compare_nodes = exploding_compare_nodes
+    try:
+      report = revalidate_compiled_extractors(
+          events=[_bka_event(span_id="sp1")],
+          compiled_extractors={"bka_decision": extract_bka_decision_event},
+          reference_extractors={"bka_decision": extract_bka_decision_event},
+          resolved_graph=_bka_resolved_spec(),
+      )
+    finally:
+      reval._compare_nodes = real_compare_nodes
+
+    assert report.total_events == 1
+    assert report.total_parity_divergences == 1
+    assert "parity comparator raised" in report.sample_parity_divergences[0]
+    assert "RuntimeError" in report.sample_parity_divergences[0]
+
 
 # ------------------------------------------------------------------ #
 # Drift: compiled output diverges from the validator                  #

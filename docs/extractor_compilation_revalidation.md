@@ -65,10 +65,21 @@ if not result.ok:
 For each event the harness:
 
 1. Drives the event through `run_with_fallback` with a **no-op fallback** so the call yields a clean runtime-decision signal. The wrapper's `compiled_unchanged` / `compiled_filtered` / `fallback_for_event` decision lands directly in the report's decision counts.
-2. For events whose decision is `compiled_unchanged` or `compiled_filtered`, calls the reference extractor separately and compares its output against the wrapper's output via the parity comparator from `measurement.py` (node-set equality with matching `entity_name` / `labels` / property-set per node; span-handling-set equality). Result lands as `parity_match` or `parity_divergence`.
+2. For events whose decision is `compiled_unchanged` or `compiled_filtered`, calls the reference extractor separately and compares its output against the wrapper's output via three comparators:
+   - **`_compare_nodes`** (from `measurement.py`): same `node_id` set; matching `entity_name`, `labels`, and `(name, value)` property-set per shared node.
+   - **`_compare_edges`** (defined in `revalidation.py`): same `edge_id` set; matching `relationship_name`, `from_node_id`, `to_node_id`, and property-set per shared edge. Lives here rather than `measurement.py` because the renderer doesn't emit edges (so `measure_compile` doesn't need this) but revalidation runs against any compiled / handwritten pair, including ones that emit edges.
+   - **`_compare_span_handling`** (from `measurement.py`): `fully_handled_span_ids` and `partially_handled_span_ids` sets must match.
+
+   Result lands as `parity_match` or `parity_divergence`.
 3. For `fallback_for_event` events the compiled output never reaches downstream, so parity is recorded as `parity_not_checked` and excluded from the `parity_match_rate` denominator.
 
-The reference call is wrapped in `try/except Exception` — a reference exception on a single event is recorded as a parity divergence (`reference extractor raised X: msg`) and the batch keeps going. The wrapper itself never crashes the batch on compiled-extractor failures (per `run_with_fallback`'s contract).
+**Every failure mode on the reference side becomes a parity divergence**, never a batch abort:
+
+- Reference raises → `reference extractor raised X: msg`.
+- Reference returns a non-`StructuredExtractionResult` (including `None`) → `reference extractor returned <TypeName>, not StructuredExtractionResult`. Without this guard the comparators would hit `AttributeError` on `.nodes` and crash the batch.
+- Comparator itself raises (e.g. corrupt internals that bypass the isinstance check) → `parity comparator raised X: msg`.
+
+`KeyboardInterrupt` / `SystemExit` still propagate so operator cancellation works.
 
 ## `RevalidationReport` shape
 
@@ -155,15 +166,18 @@ Revalidation only makes sense when there's a compiled path to validate; the skip
 
 `RevalidationReport.to_json()` is deterministic (sorted keys, fixed formatting) so reports persisted to disk / BigQuery / a telemetry pipeline can be diffed across revalidation runs to spot trends. The harness doesn't decide where reports go — `to_json` lets the caller plug into whatever persistence path they already have.
 
-## Tests (16 cases in `tests/test_extractor_compilation_revalidation.py`)
+## Tests (19 cases in `tests/test_extractor_compilation_revalidation.py`)
 
 Coverage spans both dimensions:
 
 - **`TestRevalidationHappyPath`** (1) — deterministic BKA fixture: handwritten extractor on both sides, 3 events → all `compiled_unchanged` AND all `parity_match`.
-- **`TestRevalidationParity`** (3) — the load-bearing P1 fix:
-  - Schema-valid wrong output: compiled extractor emits a `mako_DecisionPoint` node with the wrong `decision_id`. Decision is `compiled_unchanged` (validator accepts it); **parity catches the drift**. Without this dimension the run would look perfect.
+- **`TestRevalidationParity`** (6) — the load-bearing parity coverage:
+  - Schema-valid wrong output: compiled extractor emits a `mako_DecisionPoint` node with the wrong `decision_id`. Decision is `compiled_unchanged` (validator accepts it); **parity catches the drift**.
   - `parity_not_checked` for `fallback_for_event` events: a crashing compiled extractor has its compiled output discarded; parity is excluded from the match-rate denominator instead of inflating the divergence count.
-  - Reference-extractor exception safety: a reference that crashes on one event is recorded as a parity divergence and the batch continues; sibling events still get revalidated.
+  - Reference-extractor exception safety: a reference that crashes on one event is recorded as a parity divergence and the batch continues.
+  - **Edge drift**: compiled emits an edge whose `to_node_id` disagrees with the reference. Node sets and span sets match, so without edge parity this would silently aggregate as a match; with edge parity the wrong endpoint surfaces.
+  - **Reference returns `None`**: must NOT abort the batch with `AttributeError`. Recorded as a parity divergence naming the wrong return type.
+  - **Comparator-raises**: a monkey-patched `_compare_nodes` that raises is caught at the parity-check boundary; the divergence string names the comparator that exploded.
 - **`TestRevalidationDrift`** (1) — schema-failing drift surfaces in BOTH dimensions: `compiled_filtered` (validator drops the bad node) AND `parity_divergence` (filtered output disagrees with reference's real output).
 - **`TestRevalidationCompiledException`** (2) — compiled extractor that raises lands as `fallback_for_event` with the underlying outcome's `compiled_exception` field set; the report counts those as `compiled_path_faults` separately from validator-driven fallbacks.
 - **`TestRevalidationThresholds`** (5) — flagship gate (unchanged rate < 0.95); empty thresholds always pass; multiple thresholds (including `min_parity_match_rate`) all evaluated; **rate-bounds validation** rejects out-of-range / NaN / bool at construction; boundary values (0.0 and 1.0) are accepted.
@@ -181,4 +195,4 @@ Coverage spans both dimensions:
 
 - [`extractor_compilation_runtime_fallback.md`](extractor_compilation_runtime_fallback.md) — `run_with_fallback` decision tree. Revalidation is a batch driver around it (with the fallback wired to a no-op so reference exceptions can't crash the batch).
 - [`extractor_compilation_runtime_registry.md`](extractor_compilation_runtime_registry.md) — `on_outcome` callback in the production registry. The same per-event audit channel; revalidation aggregates it in batch.
-- [`extractor_compilation_bka_measurement.md`](extractor_compilation_bka_measurement.md) — `measure_compile` is the one-shot compile-and-measure utility; revalidation is the ongoing-check utility. They share the parity comparator (`_compare_nodes` / `_compare_span_handling`) so the same agreement semantics apply at compile time and at revalidation time.
+- [`extractor_compilation_bka_measurement.md`](extractor_compilation_bka_measurement.md) — `measure_compile` is the one-shot compile-and-measure utility; revalidation is the ongoing-check utility. They share `_compare_nodes` / `_compare_span_handling` so the same agreement semantics apply at compile time and at revalidation time. Revalidation adds `_compare_edges` on top (kept here because the renderer doesn't emit edges, but handwritten / future extractors can).
