@@ -1,0 +1,419 @@
+# =============================================================================
+# MAKO — Monetization Agents Knowledge Ontology
+# Module: mako-core
+# Version: 1.0.0
+# Date:    2026-04-30
+# Owner:   Mikul Bhatt — Yahoo Monetization Platform
+#
+# Purpose: Domain-agnostic decision semantics, agent coordination, outcome
+#          tracking, and human-in-the-loop governance. Extends PKO and PROV-O.
+#
+# Source:  Generated from MAKO_Design_Document_v1.docx (March 9, 2026)
+#          See: 03-mako-context-graph/MAKO_Design_Document_v1.docx
+# =============================================================================
+
+@prefix mako:    <https://ontology.yahoo.com/mako/> .
+@prefix prov:    <http://www.w3.org/ns/prov#> .
+@prefix pko:     <https://w3id.org/pko/> .
+@prefix pplan:   <http://purl.org/net/p-plan#> .
+@prefix time:    <http://www.w3.org/2006/time#> .
+@prefix dcat:    <http://www.w3.org/ns/dcat#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix skos:    <http://www.w3.org/2004/02/skos/core#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+
+# ----- Ontology metadata --------------------------------------------------- #
+<https://ontology.yahoo.com/mako/>
+    a owl:Ontology ;
+    owl:versionInfo "1.0.0" ;
+    dcterms:title "MAKO Core — Monetization Agents Knowledge Ontology (Core Module)" ;
+    dcterms:description "Domain-agnostic decision semantics, agent coordination, outcome tracking, and human-in-the-loop governance. Extends PKO and PROV-O." ;
+    dcterms:creator "Mikul Bhatt — Yahoo Monetization Platform" ;
+    dcterms:created "2026-03-09"^^xsd:date ;
+    dcterms:modified "2026-04-30"^^xsd:date ;
+    dcterms:license <https://creativecommons.org/licenses/by/4.0/> ;
+    owl:imports <http://www.w3.org/ns/prov#> ,
+                <https://w3id.org/pko/> ,
+                <http://purl.org/net/p-plan#> ,
+                <http://www.w3.org/2006/time#> ,
+                <http://www.w3.org/ns/dcat#> .
+
+# =============================================================================
+# 0. ROLE TRAIT MARKER (REQ-ONT-022 — Trait/Mixin discipline)
+# Classes that play orthogonal roles (e.g., something that becomes a Candidate
+# at decision time but is also a first-class business entity at rest) are
+# typed as mako:RoleTrait so SHACL/codegen can distinguish trait parents from
+# primary parents and only one primary parent is permitted.
+# =============================================================================
+
+mako:RoleTrait a owl:Class ;
+    rdfs:label "Role Trait" ;
+    rdfs:comment "Marker class. Subclasses of mako:RoleTrait are orthogonal capability/role markers, not primary type parents. Used to enforce single-primary-parent inheritance discipline (REQ-ONT-022)." .
+
+mako:Candidate rdfs:subClassOf mako:RoleTrait .
+# Note: Candidate is BOTH a prov:Entity (primary parent) AND a RoleTrait
+# (mixin), so any class can declare 'rdfs:subClassOf prov:Entity, mako:Candidate'
+# legitimately — the second parent is a role trait, not a primary type.
+
+# =============================================================================
+# 1. CORE DECISION CLASSES
+# =============================================================================
+
+mako:DecisionPoint a owl:Class ;
+    rdfs:label "Decision Point" ;
+    rdfs:comment "A step that evaluates candidates and selects one or more. The atomic unit of decisioning in MAKO." ;
+    rdfs:subClassOf pko:Step .
+
+mako:Candidate a owl:Class ;
+    rdfs:label "Candidate" ;
+    rdfs:comment "An option evaluated at a DecisionPoint (e.g., an audience segment, a bid value, a creative)." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:Score a owl:Class ;
+    rdfs:label "Score" ;
+    rdfs:comment "A numeric assessment attached to a Candidate at a DecisionPoint. Carries model version provenance." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:SelectionOutcome a owl:Class ;
+    rdfs:label "Selection Outcome" ;
+    rdfs:comment "The result of a DecisionPoint: which Candidate(s) were selected and why." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:RejectionReason a owl:Class ;
+    rdfs:label "Rejection Reason" ;
+    rdfs:comment "Structured reason why a Candidate was not selected (rule-based, model-based, constraint-filtered, or timeout)." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:DecisionExecution a owl:Class ;
+    rdfs:label "Decision Execution" ;
+    rdfs:comment "A specific instance of executing a DecisionPoint, with timestamps and agent binding. Inherits prov:Activity transitively via pko:StepExecution." ;
+    rdfs:subClassOf pko:StepExecution .
+
+mako:ContextSnapshot a owl:Class ;
+    rdfs:label "Context Snapshot" ;
+    rdfs:comment "Point-in-time capture of all entity states relevant to a decision. Immutable once created." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:AgentSession a owl:Class ;
+    rdfs:label "Agent Session" ;
+    rdfs:comment "A complete agent workflow session, grouping multiple DecisionExecutions. Inherits prov:Activity transitively via pko:ProcedureExecution." ;
+    rdfs:subClassOf pko:ProcedureExecution .
+
+mako:AgentDelegation a owl:Class ;
+    rdfs:label "Agent Delegation" ;
+    rdfs:comment "Record of one agent delegating a sub-task to another agent via A2A protocol." ;
+    rdfs:subClassOf prov:Activity .
+
+mako:InterAgentMessage a owl:Class ;
+    rdfs:label "Inter-Agent Message" ;
+    rdfs:comment "Data payload passed between agents during delegation. Part of decision context." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:OutcomeSignal a owl:Class ;
+    rdfs:label "Outcome Signal" ;
+    rdfs:comment "An observed real-world result (click, conversion, viewability) linked to a decision." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:RewardComputation a owl:Class ;
+    rdfs:label "Reward Computation" ;
+    rdfs:comment "Derivation of RL reward from OutcomeSignals, linked to model version." ;
+    rdfs:subClassOf prov:Activity .
+
+mako:ModelVersion a owl:Class ;
+    rdfs:label "Model Version" ;
+    rdfs:comment "Identifies which ML model version produced scores. Supports rollback analysis." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:BusinessConstraint a owl:Class ;
+    rdfs:label "Business Constraint" ;
+    rdfs:comment "A rule or policy that governs decisions (budget cap, frequency limit, brand safety)." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:ConstraintApplication a owl:Class ;
+    rdfs:label "Constraint Application" ;
+    rdfs:comment "Record that a BusinessConstraint was evaluated at a DecisionPoint, with pass/fail result." ;
+    rdfs:subClassOf prov:Activity .
+
+mako:HumanReviewGate a owl:Class ;
+    rdfs:label "Human Review Gate" ;
+    rdfs:comment "A human-in-the-loop approval or rejection point in the workflow." ;
+    rdfs:subClassOf pko:Step .
+
+# =============================================================================
+# 2. OBJECT PROPERTIES (relationships)
+# =============================================================================
+
+mako:evaluatesCandidate a owl:ObjectProperty ;
+    rdfs:label "evaluates candidate" ;
+    rdfs:comment "Links a DecisionPoint to the Candidates it evaluates." ;
+    rdfs:domain mako:DecisionPoint ;
+    rdfs:range mako:Candidate .
+
+mako:hasScore a owl:ObjectProperty ;
+    rdfs:label "has score" ;
+    rdfs:comment "The score assigned to a Candidate at this DecisionPoint." ;
+    rdfs:domain mako:Candidate ;
+    rdfs:range mako:Score .
+
+mako:scoredByModel a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "scored by model" ;
+    rdfs:comment "Which ModelVersion produced this Score. Functional — exactly one ModelVersion per Score. Required for ALL scores." ;
+    rdfs:domain mako:Score ;
+    rdfs:range mako:ModelVersion .
+
+mako:selectedCandidate a owl:ObjectProperty ;
+    rdfs:label "selected candidate" ;
+    rdfs:comment "The Candidate(s) that were selected at this SelectionOutcome." ;
+    rdfs:domain mako:SelectionOutcome ;
+    rdfs:range mako:Candidate .
+
+mako:rejectedCandidate a owl:ObjectProperty ;
+    rdfs:label "rejected candidate" ;
+    rdfs:comment "The Candidate(s) that were rejected at this SelectionOutcome." ;
+    rdfs:domain mako:SelectionOutcome ;
+    rdfs:range mako:Candidate .
+
+mako:hasRejectionReason a owl:ObjectProperty ;
+    rdfs:label "has rejection reason" ;
+    rdfs:comment "Why a Candidate was not selected. Required for every rejected Candidate." ;
+    rdfs:domain mako:Candidate ;
+    rdfs:range mako:RejectionReason .
+
+mako:hasSelectionOutcome a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "has selection outcome" ;
+    rdfs:comment "Links a DecisionExecution to its SelectionOutcome. Functional — exactly one outcome per execution." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:SelectionOutcome .
+
+mako:atContextSnapshot a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "at context snapshot" ;
+    rdfs:comment "The ContextSnapshot of world state at decision time. Functional — exactly one snapshot per execution." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:ContextSnapshot .
+
+mako:delegatedTo a owl:ObjectProperty ;
+    rdfs:label "delegated to" ;
+    rdfs:comment "The agent receiving the delegated task." ;
+    rdfs:domain mako:AgentDelegation ;
+    rdfs:range prov:Agent .
+
+mako:delegatedBy a owl:ObjectProperty ;
+    rdfs:label "delegated by" ;
+    rdfs:comment "The agent that delegated the task." ;
+    rdfs:domain mako:AgentDelegation ;
+    rdfs:range prov:Agent .
+
+mako:carriesMessage a owl:ObjectProperty ;
+    rdfs:label "carries message" ;
+    rdfs:comment "Data passed during a delegation." ;
+    rdfs:domain mako:AgentDelegation ;
+    rdfs:range mako:InterAgentMessage .
+
+mako:producedOutcome a owl:ObjectProperty ;
+    rdfs:label "produced outcome" ;
+    rdfs:comment "Observed result linked to a decision." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:OutcomeSignal .
+
+mako:derivedReward a owl:ObjectProperty ;
+    rdfs:label "derived reward" ;
+    rdfs:comment "The OutcomeSignals used to compute reward." ;
+    rdfs:domain mako:RewardComputation ;
+    rdfs:range mako:OutcomeSignal .
+
+mako:appliedConstraint a owl:ObjectProperty ;
+    rdfs:label "applied constraint" ;
+    rdfs:comment "Which BusinessConstraint was evaluated." ;
+    rdfs:domain mako:ConstraintApplication ;
+    rdfs:range mako:BusinessConstraint .
+
+mako:filteredByConstraint a owl:ObjectProperty ;
+    rdfs:label "filtered by constraint" ;
+    rdfs:comment "Links a Candidate's removal to the ConstraintApplication that caused it." ;
+    rdfs:domain mako:Candidate ;
+    rdfs:range mako:ConstraintApplication .
+
+mako:atDecisionPoint a owl:ObjectProperty ;
+    rdfs:label "at decision point" ;
+    rdfs:comment "Links a Score to the DecisionPoint where it was assigned." ;
+    rdfs:domain mako:Score ;
+    rdfs:range mako:DecisionPoint .
+
+mako:executedAtDecisionPoint a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "executed at decision point" ;
+    rdfs:comment "Links a DecisionExecution to the DecisionPoint it instantiates. Functional. Sub-property of pko:enactsStep so generic PKO queries see MAKO data." ;
+    rdfs:subPropertyOf pko:enactsStep ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:DecisionPoint .
+
+mako:partOfSession a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "part of session" ;
+    rdfs:comment "Links a DecisionExecution to its parent AgentSession. Functional. Sub-property of pko:isExecutionOf for PKO compatibility." ;
+    rdfs:subPropertyOf pko:isExecutionOf ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:AgentSession .
+
+mako:gateApprovedBy a owl:ObjectProperty ;
+    rdfs:label "gate approved by" ;
+    rdfs:comment "The human (or human role) who resolved this gate." ;
+    rdfs:domain mako:HumanReviewGate ;
+    rdfs:range prov:Agent .
+
+# =============================================================================
+# 3. DATATYPE PROPERTIES
+# =============================================================================
+
+mako:scoreValue a owl:DatatypeProperty ;
+    rdfs:label "score value" ;
+    rdfs:comment "Numeric score value, normalized 0.0–1.0." ;
+    rdfs:domain mako:Score ;
+    rdfs:range xsd:double .
+
+mako:confidenceInterval a owl:DatatypeProperty ;
+    rdfs:label "confidence interval" ;
+    rdfs:comment "Confidence bounds as a string [low, high] (e.g., \"[0.82, 0.91]\")." ;
+    rdfs:domain mako:Score ;
+    rdfs:range xsd:string .
+
+mako:traceId a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label "trace ID (OTEL)" ;
+    rdfs:comment "OpenTelemetry trace ID for cross-system correlation. Functional — exactly one trace_id per execution. Required on every DecisionExecution." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range xsd:string .
+
+mako:spanId a owl:DatatypeProperty , owl:FunctionalProperty ;
+    rdfs:label "span ID (OTEL)" ;
+    rdfs:comment "OpenTelemetry span ID. Functional — exactly one span_id per execution. Required on every DecisionExecution." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range xsd:string .
+
+mako:latencyMs a owl:DatatypeProperty ;
+    rdfs:label "latency (ms)" ;
+    rdfs:comment "Wall-clock latency of the decision in milliseconds." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range xsd:integer .
+
+mako:rewardValue a owl:DatatypeProperty ;
+    rdfs:label "reward value" ;
+    rdfs:comment "Computed RL reward signal." ;
+    rdfs:domain mako:RewardComputation ;
+    rdfs:range xsd:double .
+
+mako:modelName a owl:DatatypeProperty ;
+    rdfs:label "model name" ;
+    rdfs:comment "Model identifier (e.g., \"bid-optimizer-v3.2\")." ;
+    rdfs:domain mako:ModelVersion ;
+    rdfs:range xsd:string .
+
+mako:modelTrainDate a owl:DatatypeProperty ;
+    rdfs:label "model train date" ;
+    rdfs:comment "When the model was trained." ;
+    rdfs:domain mako:ModelVersion ;
+    rdfs:range xsd:dateTime .
+
+mako:modelRegistryUri a owl:DatatypeProperty ;
+    rdfs:label "model registry URI" ;
+    rdfs:comment "Cross-reference into Vertex AI Model Registry (REQ-ONT-062)." ;
+    rdfs:domain mako:ModelVersion ;
+    rdfs:range xsd:anyURI .
+
+mako:constraintType a owl:DatatypeProperty ;
+    rdfs:label "constraint type" ;
+    rdfs:comment "Category: BUDGET, FREQUENCY, BRAND_SAFETY, REGULATORY, AUTONOMY, REVERSIBILITY." ;
+    rdfs:domain mako:BusinessConstraint ;
+    rdfs:range xsd:string .
+
+mako:constraintResult a owl:DatatypeProperty ;
+    rdfs:label "constraint result" ;
+    rdfs:comment "Pass/fail result of constraint evaluation. Values: PASS | FAIL | WARN." ;
+    rdfs:domain mako:ConstraintApplication ;
+    rdfs:range xsd:string .
+
+mako:rejectionCategory a owl:DatatypeProperty ;
+    rdfs:label "rejection category" ;
+    rdfs:comment "Category of the rejection. Values: RULE_BASED | MODEL_BASED | CONSTRAINT_FILTERED | TIMEOUT." ;
+    rdfs:domain mako:RejectionReason ;
+    rdfs:range xsd:string .
+
+mako:rejectionText a owl:DatatypeProperty ;
+    rdfs:label "rejection text" ;
+    rdfs:comment "Human-readable explanation of the rejection." ;
+    rdfs:domain mako:RejectionReason ;
+    rdfs:range xsd:string .
+
+mako:reversibility a owl:DatatypeProperty ;
+    rdfs:label "reversibility" ;
+    rdfs:comment "Reversibility classification. Values: REVERSIBLE | DELAYED_REVERSIBLE | IRREVERSIBLE. Drives escalation policy." ;
+    rdfs:domain mako:DecisionPoint ;
+    rdfs:range xsd:string .
+
+mako:sessionId a owl:DatatypeProperty ;
+    rdfs:label "session ID" ;
+    rdfs:comment "Session identifier for isolation. Used as part of node KEY in Spanner Graph." ;
+    rdfs:domain mako:AgentSession ;
+    rdfs:range xsd:string .
+
+mako:businessEntityId a owl:DatatypeProperty ;
+    rdfs:label "business entity ID" ;
+    rdfs:comment "Persistent identifier for cross-session lineage (REQ-ONT-051). Same logical decision can span multiple sessions." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range xsd:string .
+
+mako:snapshotTimestamp a owl:DatatypeProperty ;
+    rdfs:label "snapshot timestamp" ;
+    rdfs:comment "When the ContextSnapshot was taken." ;
+    rdfs:domain mako:ContextSnapshot ;
+    rdfs:range xsd:dateTime .
+
+mako:snapshotPayload a owl:DatatypeProperty ;
+    rdfs:label "snapshot payload (JSON, legacy)" ;
+    rdfs:comment "DEPRECATED in v2 in favor of mako:snapshotEntities. Serialized JSON capture of relevant entity states at decision time. Preserved for v1 backward compatibility; new instance data should use mako:snapshotEntities." ;
+    owl:deprecated true ;
+    rdfs:domain mako:ContextSnapshot ;
+    rdfs:range xsd:string .
+
+mako:snapshotEntities a owl:ObjectProperty ;
+    rdfs:label "snapshot entities" ;
+    rdfs:comment "PROV-O qualified version of snapshot payload. References the actual prov:Entity nodes whose states are captured at decision time. Replaces opaque JSON with a typed graph reference set. Each referenced entity is a mako:ContextEntityRef carrying state + version." ;
+    rdfs:domain mako:ContextSnapshot ;
+    rdfs:range mako:ContextEntityRef .
+
+mako:ContextEntityRef a owl:Class ;
+    rdfs:label "Context Entity Reference" ;
+    rdfs:comment "Typed reference to an entity captured in a ContextSnapshot, including the entity URI and the version/revision observed at snapshot time." ;
+    rdfs:subClassOf prov:Entity .
+
+mako:refersToEntity a owl:ObjectProperty , owl:FunctionalProperty ;
+    rdfs:label "refers to entity" ;
+    rdfs:domain mako:ContextEntityRef ;
+    rdfs:range prov:Entity .
+
+mako:entityRevision a owl:DatatypeProperty ;
+    rdfs:label "entity revision" ;
+    rdfs:comment "Version / revision identifier of the referenced entity at snapshot time." ;
+    rdfs:domain mako:ContextEntityRef ;
+    rdfs:range xsd:string .
+
+# =============================================================================
+# 4. CROSS-SESSION LINEAGE (REQ-ONT-051)
+# =============================================================================
+
+mako:evolvedFrom a owl:ObjectProperty , owl:TransitiveProperty ;
+    rdfs:label "evolved from" ;
+    rdfs:comment "Temporal lineage edge: links a DecisionExecution to a prior version of the same logical decision (e.g., across triage passes). Transitive — A evolvedFrom B evolvedFrom C ⊨ A evolvedFrom C." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:DecisionExecution .
+
+mako:supersededBy a owl:ObjectProperty , owl:TransitiveProperty ;
+    rdfs:label "superseded by" ;
+    rdfs:comment "Inverse of evolvedFrom. Transitive." ;
+    rdfs:domain mako:DecisionExecution ;
+    rdfs:range mako:DecisionExecution ;
+    owl:inverseOf mako:evolvedFrom .
+
+# =============================================================================
+# END mako-core.ttl
+# =============================================================================

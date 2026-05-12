@@ -1,0 +1,7 @@
+{
+  "min_compiled_unchanged_rate": 0.95,
+  "max_compiled_filtered_rate": 0.05,
+  "max_fallback_for_event_rate": 0.05,
+  "max_compiled_path_fault_rate": 0.01,
+  "min_parity_match_rate": 0.99
+}
