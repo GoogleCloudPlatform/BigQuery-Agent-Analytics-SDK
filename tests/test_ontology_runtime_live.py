@@ -88,11 +88,18 @@ _ONTOLOGY_YAML = textwrap.dedent(
             type: string
         synonyms: ["California", "CA"]
         annotations:
-          # Two notations: PR #92 emits one label_kind='notation'
-          # row per value, but the per-row notation column
-          # carries only the lex-min ("CA"). The live test
-          # asserts lookup_by_notation finds BOTH.
-          skos:notation: ["CA", "ZZ-LATE"]
+          # Two notations declared in NON-sorted order:
+          # PR #92 emits one label_kind='notation' row per
+          # value, but the per-row notation column carries
+          # the lex-min ("CA", not "ZZ-LATE" — even though
+          # "ZZ-LATE" is the first-authored value). The live
+          # test asserts both:
+          #   * lookup_by_notation finds BOTH values
+          #     (round-2 fix), and
+          #   * notation_for() returns the lex-min display
+          #     token "CA", not the first-authored
+          #     "ZZ-LATE" (round-3 fix).
+          skos:notation: ["ZZ-LATE", "CA"]
     """
 )
 
@@ -201,6 +208,16 @@ def test_live_runtime_round_trip(tmp_path: pathlib.Path):
     # NOT the queried value — proving the predicate isn't
     # accidentally matching that column.
     assert rows_zz[0].notation == "CA"
+
+    # Round-3 lex-min display-token lock: runtime.notation_for()
+    # must match what the concept-index rows expose, not the
+    # first-authored value. The fixture declares
+    # skos:notation: ["ZZ-LATE", "CA"] so first-authored is
+    # "ZZ-LATE" but lex-min (the rule PR #92's emitter uses) is
+    # "CA". Before the fix runtime would have returned
+    # "ZZ-LATE" and disagreed with the concept-index column.
+    assert runtime.notation_for("CaliforniaRegion") == "CA"
+    assert set(runtime.notations_for("CaliforniaRegion")) == {"CA", "ZZ-LATE"}
   finally:
     client.delete_table(table_id, not_found_ok=True)
     client.delete_table(meta_table_id, not_found_ok=True)

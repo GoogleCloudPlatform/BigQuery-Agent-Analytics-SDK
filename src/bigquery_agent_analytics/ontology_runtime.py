@@ -1046,12 +1046,26 @@ class OntologyRuntime:
     return ()
 
   def notation_for(self, entity_name: str) -> Optional[str]:
-    """Return the entity's ``skos:notation`` value, or
-    ``None``. When multiple notations are declared, returns
-    the first (matching the emission's first-notation rule)."""
-    return _first_string_value(
-        self._annotation_raw(entity_name, "skos:notation")
-    )
+    """Return the entity's per-row notation **display token**,
+    or ``None``.
+
+    Matches PR #92's emission rule: when multiple notations
+    are declared the per-row ``notation`` column carries the
+    **lexicographically smallest** value
+    (``bigquery_ontology.concept_index._entity_notation``).
+    The previous "first authored value" semantics caused
+    :class:`ExactEntityResolver` and
+    :class:`LabelSynonymResolver` to disagree on the same
+    entity when notations were declared in non-sorted order
+    (e.g. ``skos:notation: ["B", "A"]`` would report ``"B"``
+    via the runtime but ``"A"`` via the emitted rows). Now
+    both paths return the same display token.
+
+    Use :meth:`notations_for` if you need every authored
+    value (e.g. to feed
+    :meth:`ConceptIndexLookup.lookup_by_notation` for each)."""
+    values = self.notations_for(entity_name)
+    return min(values) if values else None
 
   def notations_for(self, entity_name: str) -> tuple[str, ...]:
     """Return every ``skos:notation`` value declared on the
@@ -1060,7 +1074,9 @@ class OntologyRuntime:
 
     Companion to :meth:`notation_for` for callers that need
     every notation (the concept-index emission writes one
-    ``label_kind='notation'`` row per declared value)."""
+    ``label_kind='notation'`` row per declared value;
+    :meth:`notation_for` returns only the lex-min display
+    token)."""
     return _all_string_values(
         self._annotation_raw(entity_name, "skos:notation")
     )

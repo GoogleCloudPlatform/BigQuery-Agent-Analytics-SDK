@@ -89,7 +89,7 @@ candidates = resolver.resolve("California")
 | `synonyms_for(entity_name)` | `tuple[str, ...]` | The `synonyms:` YAML field. |
 | `schemes_for(entity_name)` | `tuple[str, ...]` | `skos:inScheme` annotation values (scalar OR list). |
 | `in_scheme(scheme)` | `tuple[str, ...]` | Forward map: entity names that are members of this scheme. |
-| `notation_for(entity_name)` | `str \| None` | First `skos:notation` value if any. |
+| `notation_for(entity_name)` | `str \| None` | **Lex-min display token** when multiple `skos:notation` values are declared (matches PR #92's `_entity_notation()` rule so the runtime and concept-index rows agree). Use `notations_for(...)` for every authored value. |
 | `notations_for(entity_name)` | `tuple[str, ...]` | Every `skos:notation` value (scalar or list normalized). |
 | `broader(entity_name)` | `tuple[str, ...]` | Direct parents from `skos:broader` (not transitive). |
 | `narrower(entity_name)` | `tuple[str, ...]` | Direct children — inverse of `broader`. |
@@ -149,7 +149,7 @@ Every method returns `list[ConceptIndexRowView]` carrying the full emission sche
 
 ## Tests
 
-CI suite — `tests/test_ontology_runtime.py` (52 cases) using in-memory fake BigQuery clients:
+CI suite — `tests/test_ontology_runtime.py` (54 cases) using in-memory fake BigQuery clients:
 
 - **`TestOntologyRuntimeConstruction`** (5) — in-memory + from-files factories; `concept_index_table` requires `bq_client`; eager fingerprint verification at construction; matching-fingerprint happy path.
 - **`TestOntologyRuntimeAccessors`** (10) — entity / relationships lookup, declared-order, case-sensitivity, synonyms / annotations / schemes / notation / labels traversal (covers SKOS `inScheme` list + scalar normalization, language-suffixed annotations), provenance properties (compile_fingerprint / compile_id).
@@ -165,6 +165,7 @@ CI suite — `tests/test_ontology_runtime.py` (52 cases) using in-memory fake Bi
   - `verify()` always re-queries — locked with a swappable fake client that returns matching → mismatched fingerprints across calls; verifies the construction call + two subsequent re-checks all hit BigQuery (3 calls total).
   - Multiple `__meta` rows → `MetaTableMultipleRowsError`; `verify()` SQL uses `LIMIT 2` so the multi-row case is detected without scanning the whole table.
   - `labels_for()` emits notation as `label_kind='notation'` (matching PR #92's six-kind vocabulary).
+  - `notation_for()` returns the **lex-min display token** to match PR #92's `_entity_notation()` rule. Round-3 regression: an entity declaring `skos:notation: ["B", "A", "C"]` returns `"A"` from `notation_for()`, not the first-authored `"B"`; `ExactEntityResolver` candidates carry the same lex-min so both resolver paths agree on the same entity.
 
 Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery.** Compiles a tiny ontology with **two notations** (`["CA", "ZZ-LATE"]`) to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, runs `LabelSynonymResolver` and `lookup_by_notation` queries for both the primary (lex-min) AND secondary notation values, asserts every candidate carries the runtime's `compile_fingerprint` and that the per-row `notation` column carries the lex-min display token while `label` is the queried notation, drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323` in ~30s.
 

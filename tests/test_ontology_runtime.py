@@ -1348,3 +1348,116 @@ class TestRoundOneFindings:
     assert runtime.notations_for("Region") == ("REG",)
     assert runtime.notations_for("CaliforniaRegion") == ("CA",)
     assert runtime.notations_for("Nope") == ()
+
+  def test_notation_for_returns_lex_min_display_token(self):
+    """Reviewer's reproducer: when notations are declared in
+    non-sorted order (``["B", "A"]``), ``notation_for()``
+    must return the **lexicographically smallest** value —
+    same rule as PR #92's emitter (``_entity_notation``).
+
+    Before the fix, ``notation_for`` returned the first
+    authored value ("B") while
+    ``ConceptIndexLookup``-backed lookups exposed "A" as
+    the per-row notation column. The two views must agree
+    or :class:`ExactEntityResolver` and
+    :class:`LabelSynonymResolver` would report different
+    notations for the same entity."""
+    from bigquery_agent_analytics import OntologyRuntime
+    from bigquery_ontology.binding_models import BigQueryTarget
+    from bigquery_ontology.binding_models import Binding
+    from bigquery_ontology.binding_models import EntityBinding
+    from bigquery_ontology.binding_models import PropertyBinding
+    from bigquery_ontology.ontology_models import Entity
+    from bigquery_ontology.ontology_models import Keys
+    from bigquery_ontology.ontology_models import Ontology
+    from bigquery_ontology.ontology_models import Property
+
+    # Build directly via pydantic so the list-order is
+    # preserved exactly as authored (YAML round-trips don't
+    # reorder, but constructing the models removes one
+    # layer of doubt).
+    ontology = Ontology(
+        ontology="lex_min_test",
+        entities=[
+            Entity(
+                name="Entity",
+                keys=Keys(primary=["id"]),
+                properties=[Property(name="id", type="string")],
+                annotations={"skos:notation": ["B", "A", "C"]},
+            )
+        ],
+    )
+    binding = Binding(
+        binding="lex_min_bq",
+        ontology="lex_min_test",
+        target=BigQueryTarget(
+            backend="bigquery", project="test-proj", dataset="test_ds"
+        ),
+        entities=[
+            EntityBinding(
+                name="Entity",
+                source="entity_table",
+                properties=[PropertyBinding(name="id", column="id")],
+            )
+        ],
+    )
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+    # Lex-min of ("B", "A", "C") is "A".
+    assert runtime.notation_for("Entity") == "A"
+    # But notations_for keeps every authored value in
+    # declaration order so a caller can iterate them all.
+    assert runtime.notations_for("Entity") == ("B", "A", "C")
+
+  def test_exact_resolver_uses_lex_min_notation(self):
+    """End-to-end lock for the round-2/3 fix: an
+    :class:`ExactEntityResolver` candidate's ``notation``
+    field must equal the lex-min display token, matching
+    what the concept-index rows expose, so the two resolver
+    paths agree on the same entity."""
+    from bigquery_agent_analytics import ExactEntityResolver
+    from bigquery_agent_analytics import OntologyRuntime
+    from bigquery_ontology.binding_models import BigQueryTarget
+    from bigquery_ontology.binding_models import Binding
+    from bigquery_ontology.binding_models import EntityBinding
+    from bigquery_ontology.binding_models import PropertyBinding
+    from bigquery_ontology.ontology_models import Entity
+    from bigquery_ontology.ontology_models import Keys
+    from bigquery_ontology.ontology_models import Ontology
+    from bigquery_ontology.ontology_models import Property
+
+    ontology = Ontology(
+        ontology="exact_lex_min",
+        entities=[
+            Entity(
+                name="E",
+                keys=Keys(primary=["id"]),
+                properties=[Property(name="id", type="string")],
+                annotations={"skos:notation": ["Z", "A"]},
+            )
+        ],
+    )
+    binding = Binding(
+        binding="exact_lex_min_bq",
+        ontology="exact_lex_min",
+        target=BigQueryTarget(
+            backend="bigquery", project="test-proj", dataset="test_ds"
+        ),
+        entities=[
+            EntityBinding(
+                name="E",
+                source="e_table",
+                properties=[PropertyBinding(name="id", column="id")],
+            )
+        ],
+    )
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+    candidates = ExactEntityResolver(runtime).resolve("E")
+    assert candidates[0].notation == "A"  # lex-min, not first-authored
