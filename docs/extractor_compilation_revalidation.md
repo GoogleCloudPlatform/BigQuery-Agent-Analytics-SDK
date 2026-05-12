@@ -66,8 +66,8 @@ For each event the harness:
 
 1. Drives the event through `run_with_fallback` with a **no-op fallback** so the call yields a clean runtime-decision signal. The wrapper's `compiled_unchanged` / `compiled_filtered` / `fallback_for_event` decision lands directly in the report's decision counts.
 2. For events whose decision is `compiled_unchanged` or `compiled_filtered`, calls the reference extractor separately and compares its output against the wrapper's output via three comparators:
-   - **`_compare_nodes`** (from `measurement.py`): same `node_id` set; matching `entity_name`, `labels`, and `(name, value)` property-set per shared node.
-   - **`_compare_edges`** (defined in `revalidation.py`): same `edge_id` set; matching `relationship_name`, `from_node_id`, `to_node_id`, and property-set per shared edge. Lives here rather than `measurement.py` because the renderer doesn't emit edges (so `measure_compile` doesn't need this) but revalidation runs against any compiled / handwritten pair, including ones that emit edges.
+   - **`_compare_nodes`** (from `measurement.py`): same `node_id` set; matching `entity_name`, `labels`, and `(name, value)` property-set per shared node. Preceded by a local **duplicate-node-id guard** because `_compare_nodes` keys nodes by `node_id` via dict construction and would silently collapse duplicates; #76 catches duplicate node_ids on the compiled side, but reference output isn't validated, so the symmetric guard has to live here.
+   - **`_compare_edges`** (defined in `revalidation.py`): same `edge_id` set; matching `relationship_name`, `from_node_id`, `to_node_id`, and property-set per shared edge. Has its own inline duplicate-edge-id guard since #76 doesn't enforce edge-id uniqueness at all. Lives here rather than `measurement.py` because the renderer doesn't emit edges (so `measure_compile` doesn't need this) but revalidation runs against any compiled / handwritten pair, including ones that emit edges.
    - **`_compare_span_handling`** (from `measurement.py`): `fully_handled_span_ids` and `partially_handled_span_ids` sets must match.
 
    Result lands as `parity_match` or `parity_divergence`.
@@ -166,17 +166,18 @@ Revalidation only makes sense when there's a compiled path to validate; the skip
 
 `RevalidationReport.to_json()` is deterministic (sorted keys, fixed formatting) so reports persisted to disk / BigQuery / a telemetry pipeline can be diffed across revalidation runs to spot trends. The harness doesn't decide where reports go — `to_json` lets the caller plug into whatever persistence path they already have.
 
-## Tests (20 cases in `tests/test_extractor_compilation_revalidation.py`)
+## Tests (21 cases in `tests/test_extractor_compilation_revalidation.py`)
 
 Coverage spans both dimensions:
 
 - **`TestRevalidationHappyPath`** (1) — deterministic BKA fixture: handwritten extractor on both sides, 3 events → all `compiled_unchanged` AND all `parity_match`.
-- **`TestRevalidationParity`** (7) — the load-bearing parity coverage:
+- **`TestRevalidationParity`** (8) — the load-bearing parity coverage:
   - Schema-valid wrong output: compiled extractor emits a `mako_DecisionPoint` node with the wrong `decision_id`. Decision is `compiled_unchanged` (validator accepts it); **parity catches the drift**.
   - `parity_not_checked` for `fallback_for_event` events: a crashing compiled extractor has its compiled output discarded; parity is excluded from the match-rate denominator instead of inflating the divergence count.
   - Reference-extractor exception safety: a reference that crashes on one event is recorded as a parity divergence and the batch continues.
   - **Edge drift**: compiled emits an edge whose `to_node_id` disagrees with the reference. Node sets and span sets match, so without edge parity this would silently aggregate as a match; with edge parity the wrong endpoint surfaces.
   - **Duplicate edge_id**: compiled emits two edges sharing the same `edge_id` and the reference emits one matching the last duplicate. Without explicit duplicate detection, dict keying would silently collapse the duplicates and the run would look like a match. The check surfaces it as a parity divergence naming the offending IDs.
+  - **Reference duplicate node_id**: reference emits two nodes sharing the same `node_id` where the last duplicate matches compiled's single node. #76 catches duplicate_node_id on the compiled side, but reference output isn't validated, so the local guard in `_check_parity` covers it before delegating to `_compare_nodes`.
   - **Reference returns `None`**: must NOT abort the batch with `AttributeError`. Recorded as a parity divergence naming the wrong return type.
   - **Comparator-raises**: a monkey-patched `_compare_nodes` that raises is caught at the parity-check boundary; the divergence string names the comparator that exploded.
 - **`TestRevalidationDrift`** (1) — schema-failing drift surfaces in BOTH dimensions: `compiled_filtered` (validator drops the bad node) AND `parity_divergence` (filtered output disagrees with reference's real output).

@@ -662,6 +662,25 @@ def _check_parity(
   # names the comparator so an operator can triage which side
   # has the bad shape.
   try:
+    # Duplicate node_id guard, *before* ``_compare_nodes``.
+    # ``_compare_nodes`` in measurement.py keys nodes by
+    # ``node_id`` via ``{n.node_id: n for n in ...}`` and would
+    # silently collapse duplicates — a malformed reference with
+    # duplicate node_ids could overwrite down to a single node
+    # that happens to match compiled, and the run would report
+    # ``parity_match``. #76's validator catches
+    # ``duplicate_node_id`` on the *compiled* side before the
+    # wrapper output reaches us, but reference output isn't
+    # validated. The local guard is symmetric (checks both
+    # sides) so the parity contract — "every reference-side
+    # failure mode becomes a parity divergence" — actually
+    # holds.
+    node_dupe_divergence = _check_duplicate_node_ids(
+        ref_result.nodes, wrapper_result.nodes
+    )
+    if node_dupe_divergence is not None:
+      return node_dupe_divergence
+
     # Node-set agreement: same ``node_id`` set with matching
     # entity_name / labels / property-set per node. Defers to
     # measurement.py's comparator so revalidation and
@@ -693,6 +712,34 @@ def _check_parity(
     return f"parity comparator raised {type(exc).__name__}: {exc}"
 
   return None
+
+
+def _check_duplicate_node_ids(ref_nodes, cmp_nodes) -> Optional[str]:
+  """Return a divergence string if either side has duplicate
+  ``node_id``s, or ``None`` otherwise.
+
+  Lives in revalidation rather than ``measurement.py`` because
+  measure_compile compares against a freshly-compiled extractor
+  whose duplicates would already be caught by the smoke-test
+  validator; revalidation runs against arbitrary reference
+  extractors whose output isn't validated by #76, so the guard
+  has to live here. Checks both sides symmetrically — compiled
+  duplicates are usually caught by #76 before the wrapper
+  output reaches us, but the symmetric check is cheap and
+  makes the contract self-contained.
+  """
+  ref_counts = collections.Counter(n.node_id for n in ref_nodes)
+  cmp_counts = collections.Counter(n.node_id for n in cmp_nodes)
+  ref_dupes = sorted(nid for nid, n in ref_counts.items() if n > 1)
+  cmp_dupes = sorted(nid for nid, n in cmp_counts.items() if n > 1)
+  if not (ref_dupes or cmp_dupes):
+    return None
+  parts = []
+  if ref_dupes:
+    parts.append(f"reference duplicates: {ref_dupes}")
+  if cmp_dupes:
+    parts.append(f"compiled duplicates: {cmp_dupes}")
+  return "duplicate node_id — " + "; ".join(parts)
 
 
 def _compare_edges(ref_edges, cmp_edges) -> Optional[str]:

@@ -439,6 +439,82 @@ class TestRevalidationParity:
     assert "compiled duplicates" in divergence
     assert "E1" in divergence
 
+  def test_reference_duplicate_node_id_caught_by_parity(self):
+    """Reference extractor emits two ExtractedNode values
+    sharing the same ``node_id``. ``_compare_nodes`` keys
+    nodes by ``node_id`` via ``{n.node_id: n for n in ...}``
+    and would silently collapse the duplicates — a malformed
+    reference whose last duplicate happens to match the
+    compiled output would otherwise report ``parity_match``.
+    #76's validator catches duplicate_node_id on the compiled
+    side, but reference output isn't validated, so the local
+    guard in ``_check_parity`` has to cover it."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def compiled(event, spec):
+      node = ExtractedNode(
+          node_id="N1",
+          entity_name="X",
+          labels=["X"],
+          properties=[],
+      )
+      return StructuredExtractionResult(
+          nodes=[node],
+          edges=[],
+          fully_handled_span_ids={event["span_id"]},
+          partially_handled_span_ids=set(),
+      )
+
+    def reference(event, spec):
+      # Two nodes sharing node_id "N1" — the dict-keyed
+      # comparator would silently take only the last one,
+      # which matches compiled's single node.
+      a = ExtractedNode(
+          node_id="N1",
+          entity_name="WrongEntity",
+          labels=["WrongEntity"],
+          properties=[],
+      )
+      b = ExtractedNode(
+          node_id="N1",
+          entity_name="X",
+          labels=["X"],
+          properties=[],
+      )
+      return StructuredExtractionResult(
+          nodes=[a, b],
+          edges=[],
+          fully_handled_span_ids={event["span_id"]},
+          partially_handled_span_ids=set(),
+      )
+
+    import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
+    from bigquery_agent_analytics.graph_validation import ValidationReport
+
+    real_validator = rf.validate_extracted_graph
+    rf.validate_extracted_graph = lambda spec, graph: ValidationReport(
+        failures=()
+    )
+    try:
+      report = revalidate_compiled_extractors(
+          events=[_bka_event(span_id="sp1")],
+          compiled_extractors={"bka_decision": compiled},
+          reference_extractors={"bka_decision": reference},
+          resolved_graph=_bka_resolved_spec(),
+      )
+    finally:
+      rf.validate_extracted_graph = real_validator
+
+    assert report.total_compiled_unchanged == 1
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 1
+    divergence = report.sample_parity_divergences[0]
+    assert "duplicate node_id" in divergence
+    assert "reference duplicates" in divergence
+    assert "N1" in divergence
+
   def test_reference_returns_none_recorded_as_parity_divergence(self):
     """A reference that returns ``None`` (rather than raising)
     must NOT abort the batch with ``AttributeError`` on
