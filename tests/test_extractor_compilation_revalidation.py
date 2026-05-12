@@ -347,6 +347,98 @@ class TestRevalidationParity:
     # operator can drill in.
     assert "to_node_id" in report.sample_parity_divergences[0]
 
+  def test_duplicate_edge_id_caught_by_parity(self):
+    """Compiled extractor emits two ExtractedEdge values
+    sharing the same ``edge_id``. Without an explicit
+    duplicate check, the dict-keyed comparator would collapse
+    them and a coincidental shape-match against the
+    reference's single edge would look like
+    ``parity_match``. #76's validator catches
+    ``duplicate_node_id`` but not ``duplicate_edge_id``, so
+    the protection has to live in ``_compare_edges``."""
+    from bigquery_agent_analytics.extracted_models import ExtractedEdge
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    nodes = [
+        ExtractedNode(
+            node_id="N1", entity_name="X", labels=["X"], properties=[]
+        ),
+        ExtractedNode(
+            node_id="N2", entity_name="X", labels=["X"], properties=[]
+        ),
+    ]
+
+    def compiled(event, spec):
+      # Two edges sharing edge_id "E1" — the dict-keyed
+      # comparator would silently take only the last one.
+      e_a = ExtractedEdge(
+          edge_id="E1",
+          relationship_name="rel",
+          from_node_id="N1",
+          to_node_id="N2",
+          properties=[],
+      )
+      e_b = ExtractedEdge(
+          edge_id="E1",
+          relationship_name="rel",
+          from_node_id="N2",
+          to_node_id="N1",
+          properties=[],
+      )
+      return StructuredExtractionResult(
+          nodes=nodes,
+          edges=[e_a, e_b],
+          fully_handled_span_ids={event["span_id"]},
+          partially_handled_span_ids=set(),
+      )
+
+    def reference(event, spec):
+      # Single edge matching e_b's endpoints — without the
+      # duplicate check the comparison would succeed (e_b
+      # overwrites e_a in the dict).
+      edge = ExtractedEdge(
+          edge_id="E1",
+          relationship_name="rel",
+          from_node_id="N2",
+          to_node_id="N1",
+          properties=[],
+      )
+      return StructuredExtractionResult(
+          nodes=nodes,
+          edges=[edge],
+          fully_handled_span_ids={event["span_id"]},
+          partially_handled_span_ids=set(),
+      )
+
+    import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
+    from bigquery_agent_analytics.graph_validation import ValidationReport
+
+    real_validator = rf.validate_extracted_graph
+    rf.validate_extracted_graph = lambda spec, graph: ValidationReport(
+        failures=()
+    )
+    try:
+      report = revalidate_compiled_extractors(
+          events=[_bka_event(span_id="sp1")],
+          compiled_extractors={"bka_decision": compiled},
+          reference_extractors={"bka_decision": reference},
+          resolved_graph=_bka_resolved_spec(),
+      )
+    finally:
+      rf.validate_extracted_graph = real_validator
+
+    assert report.total_compiled_unchanged == 1
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 1
+    # Divergence string names the duplicate edge_id and which
+    # side has the duplicate.
+    divergence = report.sample_parity_divergences[0]
+    assert "duplicate edge_id" in divergence
+    assert "compiled duplicates" in divergence
+    assert "E1" in divergence
+
   def test_reference_returns_none_recorded_as_parity_divergence(self):
     """A reference that returns ``None`` (rather than raising)
     must NOT abort the batch with ``AttributeError`` on

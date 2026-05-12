@@ -66,6 +66,7 @@ and orchestration follow once the report shape is stable):
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime
 import json
@@ -703,7 +704,29 @@ def _compare_edges(ref_edges, cmp_edges) -> Optional[str]:
   ``measure_compile`` doesn't need edge parity. Revalidation
   is sampling-agnostic — it runs against any compiled / handwritten
   pair, including ones that emit edges.
+
+  Duplicate ``edge_id``s on either side are reported as a
+  divergence before the dict-keyed comparison begins.
+  Without this check, duplicates would silently collapse
+  during ``{e.edge_id: e for e in ...}`` construction — the
+  last entry would win, and a coincidental match against the
+  reference's single-entry view would look like agreement.
+  #76's validator catches ``duplicate_node_id`` but doesn't
+  enforce edge-id uniqueness, so the protection has to live
+  here.
   """
+  ref_counts = collections.Counter(e.edge_id for e in ref_edges)
+  cmp_counts = collections.Counter(e.edge_id for e in cmp_edges)
+  ref_dupes = sorted(eid for eid, n in ref_counts.items() if n > 1)
+  cmp_dupes = sorted(eid for eid, n in cmp_counts.items() if n > 1)
+  if ref_dupes or cmp_dupes:
+    parts = []
+    if ref_dupes:
+      parts.append(f"reference duplicates: {ref_dupes}")
+    if cmp_dupes:
+      parts.append(f"compiled duplicates: {cmp_dupes}")
+    return "duplicate edge_id — " + "; ".join(parts)
+
   ref_by_id = {e.edge_id: e for e in ref_edges}
   cmp_by_id = {e.edge_id: e for e in cmp_edges}
   if set(ref_by_id) != set(cmp_by_id):

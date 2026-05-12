@@ -31,14 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exceptions, wrong return type, and malformed result
   internals) are distinguishable from ontology drift; (2)
   agreement against reference — ``parity_matches`` /
-  ``parity_divergences`` / ``parity_not_checked`` using the
-  parity comparator from ``measurement.py`` (node-set
-  equality with matching entity_name / labels / property-set
-  per node, span-handling-set equality). The parity
-  dimension catches **schema-valid but semantically wrong**
-  outputs the validator would silently accept. Reference-
-  extractor exceptions are caught per-event so a flaky
-  reference doesn't abort the batch. Headline KPIs:
+  ``parity_divergences`` / ``parity_not_checked`` using a
+  three-comparator parity check: ``_compare_nodes`` and
+  ``_compare_span_handling`` from ``measurement.py`` plus
+  ``_compare_edges`` in ``revalidation.py`` (same edge_id
+  set with matching relationship_name / endpoints / property-
+  set per shared edge; duplicate edge_ids on either side
+  reported as a divergence rather than silently collapsed by
+  dict keying, since #76 doesn't enforce edge-id
+  uniqueness). The parity dimension catches **schema-valid
+  but semantically wrong** outputs the validator would
+  silently accept. **Every failure mode on the reference
+  side becomes a parity divergence, never a batch abort**:
+  exceptions, non-``StructuredExtractionResult`` returns
+  (including ``None``), and comparator crashes all funnel
+  into the divergence channel with a descriptive string. Headline KPIs:
   ``compiled_unchanged_rate`` (schema safety) and
   ``parity_match_rate`` (semantic agreement; denominator
   excludes ``parity_not_checked`` so wrapper-filtered events

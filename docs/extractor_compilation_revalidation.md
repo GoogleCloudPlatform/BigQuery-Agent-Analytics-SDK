@@ -166,16 +166,17 @@ Revalidation only makes sense when there's a compiled path to validate; the skip
 
 `RevalidationReport.to_json()` is deterministic (sorted keys, fixed formatting) so reports persisted to disk / BigQuery / a telemetry pipeline can be diffed across revalidation runs to spot trends. The harness doesn't decide where reports go — `to_json` lets the caller plug into whatever persistence path they already have.
 
-## Tests (19 cases in `tests/test_extractor_compilation_revalidation.py`)
+## Tests (20 cases in `tests/test_extractor_compilation_revalidation.py`)
 
 Coverage spans both dimensions:
 
 - **`TestRevalidationHappyPath`** (1) — deterministic BKA fixture: handwritten extractor on both sides, 3 events → all `compiled_unchanged` AND all `parity_match`.
-- **`TestRevalidationParity`** (6) — the load-bearing parity coverage:
+- **`TestRevalidationParity`** (7) — the load-bearing parity coverage:
   - Schema-valid wrong output: compiled extractor emits a `mako_DecisionPoint` node with the wrong `decision_id`. Decision is `compiled_unchanged` (validator accepts it); **parity catches the drift**.
   - `parity_not_checked` for `fallback_for_event` events: a crashing compiled extractor has its compiled output discarded; parity is excluded from the match-rate denominator instead of inflating the divergence count.
   - Reference-extractor exception safety: a reference that crashes on one event is recorded as a parity divergence and the batch continues.
   - **Edge drift**: compiled emits an edge whose `to_node_id` disagrees with the reference. Node sets and span sets match, so without edge parity this would silently aggregate as a match; with edge parity the wrong endpoint surfaces.
+  - **Duplicate edge_id**: compiled emits two edges sharing the same `edge_id` and the reference emits one matching the last duplicate. Without explicit duplicate detection, dict keying would silently collapse the duplicates and the run would look like a match. The check surfaces it as a parity divergence naming the offending IDs.
   - **Reference returns `None`**: must NOT abort the batch with `AttributeError`. Recorded as a parity divergence naming the wrong return type.
   - **Comparator-raises**: a monkey-patched `_compare_nodes` that raises is caught at the parity-check boundary; the divergence string names the comparator that exploded.
 - **`TestRevalidationDrift`** (1) — schema-failing drift surfaces in BOTH dimensions: `compiled_filtered` (validator drops the bad node) AND `parity_divergence` (filtered output disagrees with reference's real output).
