@@ -709,3 +709,32 @@ except ImportError as e:
       "Could not import extractor compilation scaffolding: %s.",
       e,
   )
+
+# Ontology runtime reader (issue #58 reader follow-on to PR #92)
+from .ontology_runtime import ConceptIndexError
+from .ontology_runtime import ConceptIndexLookup
+from .ontology_runtime import ConceptIndexRowView
+from .ontology_runtime import EntityResolver
+from .ontology_runtime import ExactEntityResolver
+from .ontology_runtime import FingerprintMismatchError
+from .ontology_runtime import LabelSynonymResolver
+from .ontology_runtime import MetaTableEmptyError
+from .ontology_runtime import MetaTableMissingError
+from .ontology_runtime import OntologyRuntime
+from .ontology_runtime import ResolverCandidate
+
+__all__.extend(
+    [
+        "ConceptIndexError",
+        "ConceptIndexLookup",
+        "ConceptIndexRowView",
+        "EntityResolver",
+        "ExactEntityResolver",
+        "FingerprintMismatchError",
+        "LabelSynonymResolver",
+        "MetaTableEmptyError",
+        "MetaTableMissingError",
+        "OntologyRuntime",
+        "ResolverCandidate",
+    ]
+)

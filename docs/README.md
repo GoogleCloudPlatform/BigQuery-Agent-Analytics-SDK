@@ -26,6 +26,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | [ontology_graph_v5_design.md](ontology_graph_v5_design.md) | V5: TTL import, mixed extraction, temporal lineage |
 | [learning_ontology_and_context_graph.md](learning_ontology_and_context_graph.md) | Learning guide for ontology and context graph |
 | [implementation_plan_concept_index_runtime.md](implementation_plan_concept_index_runtime.md) | Phased implementation plan for concept index + runtime entity resolution (issue #58) |
+| [ontology_runtime_reader.md](ontology_runtime_reader.md) | Ontology runtime reader (issue #58 reader follow-on to PR #92). `OntologyRuntime` loads ontology + binding + optional concept-index lookup. `EntityResolver` Protocol + two reference impls: `ExactEntityResolver` (in-memory) + `LabelSynonymResolver` (BQ-backed). `ConceptIndexLookup` is fingerprint-strict: eager `verify()` at construction + every `lookup_*` query includes `WHERE compile_fingerprint = @expected_fp` as defense in depth. Stable failure codes: `FingerprintMismatchError`, `MetaTableMissingError`, `MetaTableEmptyError`. NO embedding / LLM / fuzzy in this slice — those are explicit non-goals; future PRs can implement the Protocol without changing the runtime surface. |
 
 ## Ontology Reference
 

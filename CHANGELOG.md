@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ontology runtime reader** in
+  ``bigquery_agent_analytics.ontology_runtime`` and
+  [`docs/ontology_runtime_reader.md`](docs/ontology_runtime_reader.md).
+  Issue [#58](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/58)
+  reader follow-on to PR #92's concept-index emission.
+  Public surface:
+  * ``OntologyRuntime`` — façade that loads
+    ``Ontology + Binding`` (from YAML files or in-memory
+    models) plus an optional :class:`ConceptIndexLookup`
+    wired to the emitted BigQuery table. Read-only
+    accessors over entities / relationships / synonyms /
+    annotations / SKOS schemes / notations / labels;
+    provenance properties (``compile_fingerprint`` /
+    ``compile_id``) computed locally.
+  * ``EntityResolver`` Protocol + two reference
+    implementations: ``ExactEntityResolver`` (in-memory
+    match on ``entity_name``, no BQ roundtrip) and
+    ``LabelSynonymResolver`` (BQ-backed match against the
+    concept-index ``label`` / ``synonym`` / ``notation``
+    rows, re-ranked by label-kind priority
+    ``name > pref > alt > hidden > synonym > notation``).
+    **No embedding / LLM / fuzzy in this slice** — explicit
+    non-goals; future PRs can implement the Protocol
+    without touching the runtime surface.
+  * ``ConceptIndexLookup`` — BigQuery-backed accessor that
+    is **fingerprint-strict**. Three trust points: eager
+    ``verify()`` at construction (compares the table's
+    ``__meta`` row against the locally-computed
+    ``compile_fingerprint(ontology_fp, binding_fp,
+    compiler_version)``); explicit ``verify()`` method for
+    re-checks before long batches; per-query
+    ``WHERE compile_fingerprint = @expected_fp`` as defense
+    in depth so stale rows can't surface even mid-flight.
+    Three lookup methods: ``lookup_by_label`` (with
+    label-kind / language / case-insensitive filters),
+    ``lookup_by_entity_name``, ``lookup_by_notation``.
+    Stable failure codes: ``FingerprintMismatchError``,
+    ``MetaTableMissingError``, ``MetaTableEmptyError`` —
+    all subclass ``ConceptIndexError``.
+  CI suite (39 cases) uses in-memory fake BQ clients;
+  live test (gated behind ``BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1``)
+  emits a real concept-index via PR #92's path, attaches
+  the runtime, runs resolver queries against the live
+  table, asserts provenance, drops the tables on the way
+  out. Closes the last feature dependency for #107's
+  four-guarantee notebook (the resolve beat).
 - **Compiled-extractor rollout guide** at
   [`docs/extractor_compilation_rollout_guide.md`](docs/extractor_compilation_rollout_guide.md).
   Operational playbook for the Phase C pipeline (issue
