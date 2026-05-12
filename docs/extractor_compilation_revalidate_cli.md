@@ -55,7 +55,7 @@ Intentionally narrow so cron / GitHub Actions can branch on them:
 |------|---------|
 | `0` | Revalidation completed; if thresholds were supplied, every threshold passed. |
 | `1` | Revalidation completed but at least one threshold was violated. The report JSON is still written; the caller inspects `threshold_check.violations`. |
-| `2` | Usage / load / input error: bad flags, missing files, malformed JSONL, missing reference module surface, mixed-fingerprint bundle root, threshold validation failure, etc. The report is **not** written. |
+| `2` | Usage / load / input error: bad flags (missing required, unrecognized), missing files, malformed JSONL, missing reference module surface, mixed-fingerprint bundle root, threshold validation failure, etc. The report is **not** written. `main(argv)` *returns* this code rather than raising `SystemExit` (argparse's own `error()` is routed through the same `_CliError` boundary). `--help` and `--version` still terminate via `SystemExit(0)` — that's the expected behavior for those flags. |
 
 ## Report JSON shape
 
@@ -110,10 +110,10 @@ Unknown fields, out-of-range rates (`5.0` intended as 5%), NaN, and bool all fai
 
 ## Tests
 
-`tests/test_extractor_compilation_cli_revalidate.py` (18 cases):
+`tests/test_extractor_compilation_cli_revalidate.py` (20 cases):
 
 - **`TestCliEndToEnd`** (3) — happy path (exit 0, report written, `threshold_check: null`); threshold pass (exit 0, `ok: true`); threshold violation (exit 1, report still written with violations listed).
-- **`TestCliUsageErrors`** (14) — missing events file; malformed JSONL line; missing bundles root; mixed-fingerprint bundle root; empty bundle root; reference module not importable; reference module missing `EXTRACTORS`; reference module missing `RESOLVED_GRAPH`; bad `EXTRACTORS` shape; thresholds JSON with unknown field; thresholds JSON with out-of-range rate; **missing `--report-out` parent directory** (preflight catches it before any work runs); **invalid UTF-8 in `--events-jsonl`** (wrapped as clean exit 2); **invalid UTF-8 in `--thresholds-json`** (same).
+- **`TestCliUsageErrors`** (16) — missing events file; malformed JSONL line; missing bundles root; mixed-fingerprint bundle root; empty bundle root; reference module not importable; reference module missing `EXTRACTORS`; reference module missing `RESOLVED_GRAPH`; bad `EXTRACTORS` shape; thresholds JSON with unknown field; thresholds JSON with out-of-range rate; missing `--report-out` parent directory (preflight catches it before any work runs); invalid UTF-8 in `--events-jsonl`; invalid UTF-8 in `--thresholds-json`; **missing required flag returns 2 (not `SystemExit`)**; **unrecognized flag returns 2 (not `SystemExit`)** — argparse's default `error()` is overridden to route through `_CliError` so `main(argv)` reliably *returns* an exit code rather than raising `SystemExit` mid-call.
 - **`test_console_script_entry_point_registered`** (1) — locks the `pyproject.toml` `[project.scripts]` entry so a typo in the entry-point string fails CI rather than breaking the binary at user-install time.
 
 ## Out of scope (deferred)

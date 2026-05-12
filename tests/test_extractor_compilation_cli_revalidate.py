@@ -838,6 +838,63 @@ class TestCliUsageErrors:
     assert "--thresholds-json" in err
     assert "UTF-8" in err
 
+  def test_missing_required_flag_returns_two_not_systemexit(
+      self,
+      capsys: pytest.CaptureFixture,
+  ):
+    """``argparse.ArgumentParser.parse_args`` defaults to
+    calling ``sys.exit(2)`` on missing required arguments,
+    which would bypass ``main()``'s documented return-code
+    contract — tests calling ``main([])`` would see a raised
+    ``SystemExit`` rather than a return value. The custom
+    ``_NonExitingArgumentParser.error()`` funnels argparse
+    errors through ``_CliError`` so ``main(argv)`` reliably
+    *returns* ``EXIT_USAGE_ERROR``."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    # No SystemExit must escape. Empty argv -> first
+    # required-arg error.
+    code = main([])
+    assert code == 2
+    err = capsys.readouterr().err
+    # argparse's standard wording is preserved so users see
+    # the same message they'd get from any argparse-driven
+    # CLI.
+    assert "the following arguments are required" in err
+    # The usage line is still printed first (matches argparse's
+    # default UX) so the user can see what flags exist.
+    assert "usage:" in err
+
+  def test_unrecognized_flag_returns_two_not_systemexit(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+  ):
+    """Same contract for unrecognized flags — argparse would
+    call ``sys.exit(2)``; the custom parser routes through
+    ``_CliError`` so ``main()`` returns instead."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    # All required flags supplied so the unrecognized-arg
+    # error is the one that fires (argparse reports
+    # missing-required before unrecognized).
+    code = main(
+        [
+            "--bundles-root",
+            str(tmp_path),
+            "--events-jsonl",
+            str(tmp_path / "events.jsonl"),
+            "--reference-extractors-module",
+            "irrelevant",
+            "--report-out",
+            str(tmp_path / "report.json"),
+            "--no-such-flag",
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments" in err
+
   def test_console_script_entry_point_registered(self):
     """The ``console_scripts`` entry in ``pyproject.toml``
     points at :func:`main`. Lock with importlib metadata so

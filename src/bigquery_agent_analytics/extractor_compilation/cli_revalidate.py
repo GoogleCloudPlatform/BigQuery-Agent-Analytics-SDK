@@ -140,9 +140,26 @@ class _CliConfig:
 def main(argv: Optional[list[str]] = None) -> int:
   """CLI entry point. Returns an exit code; ``console_scripts``
   in ``pyproject.toml`` invokes this and propagates the
-  return value to the shell."""
+  return value to the shell.
+
+  All usage / load / input errors funnel through the same
+  ``_CliError`` -> ``EXIT_USAGE_ERROR`` boundary, including
+  argparse's own "missing required argument" /
+  "unrecognized argument" errors. The custom parser raises
+  ``_CliError`` from ``error()`` instead of calling
+  ``sys.exit(2)``, so ``main(argv)`` reliably **returns**
+  an exit code per its documented contract rather than
+  raising ``SystemExit`` mid-call. ``--help`` and
+  ``--version`` still go through argparse's own
+  ``SystemExit(0)`` path; that's the expected terminal
+  behavior for those flags."""
   parser = _build_parser()
-  args = parser.parse_args(argv)
+  try:
+    args = parser.parse_args(argv)
+  except _CliError as exc:
+    print(f"bqaa-revalidate-extractors: {exc}", file=sys.stderr)
+    return EXIT_USAGE_ERROR
+
   try:
     config = _load_config(args)
   except _CliError as exc:
@@ -161,8 +178,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     return EXIT_USAGE_ERROR
 
 
+class _NonExitingArgumentParser(argparse.ArgumentParser):
+  """``argparse.ArgumentParser`` whose ``error()`` raises
+  :class:`_CliError` instead of calling ``sys.exit(2)``.
+
+  argparse's default ``error()`` writes a usage line + error
+  message to stderr and then exits. That bypasses
+  :func:`main`'s documented return-code contract — tests that
+  call ``main([])`` would catch a ``SystemExit`` instead of
+  receiving ``EXIT_USAGE_ERROR``. The override preserves the
+  user-facing UX (usage line still goes to stderr) but funnels
+  the error through the same ``_CliError`` boundary every
+  other usage failure uses.
+
+  ``exit()`` is **not** overridden, so ``--help`` and
+  ``--version`` still terminate via ``SystemExit(0)`` — that's
+  the expected terminal behavior for those flags."""
+
+  def error(self, message: str) -> None:  # type: ignore[override]
+    self.print_usage(sys.stderr)
+    raise _CliError(f"argument error: {message}")
+
+
 def _build_parser() -> argparse.ArgumentParser:
-  parser = argparse.ArgumentParser(
+  parser = _NonExitingArgumentParser(
       prog="bqaa-revalidate-extractors",
       description=(
           "Run compiled-extractor revalidation against a local "
