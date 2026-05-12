@@ -20,19 +20,32 @@ compare pass. C2.c.2's orchestrator wires the compiled path
 into the runtime. **This module turns "works in tests" into
 "keeps proving itself after rollout"** — a batch-mode runner
 that takes a corpus of events, drives each through
-:func:`run_with_fallback` with the matching compiled and
-reference extractor, and aggregates the per-event
-:class:`FallbackOutcome` decisions into a structured report.
+:func:`run_with_fallback` plus a direct reference-extractor
+call, and aggregates the per-event outcomes (decision +
+agreement) into a structured report.
 
-The report's job is to surface drift. C2.b's decision tree
-(``compiled_unchanged`` / ``compiled_filtered`` /
-``fallback_for_event``) is already the right vocabulary for
-"how often did the compiled extractor hold up versus need
-adjustment." Revalidation runs that decision tree against a
-sample of real events and aggregates the counts — per
-event_type and overall — so operators can see whether the
-compiled bundle's behavior matches the handwritten reference
-that gated its compile.
+The report has **two orthogonal dimensions**, both load-bearing:
+
+1. **Runtime decision** — what
+   :func:`run_with_fallback` did on this event:
+   ``compiled_unchanged`` / ``compiled_filtered`` /
+   ``fallback_for_event``. This is C2.b's safety vocabulary
+   ("did the schema validator accept the compiled output").
+2. **Agreement against reference** — did the compiled
+   extractor's output match the handwritten reference's
+   output on this event? ``parity_match`` /
+   ``parity_divergence`` / ``parity_not_checked`` (the last
+   for ``fallback_for_event`` events, where the compiled
+   output was discarded). This catches **schema-valid but
+   semantically wrong** outputs — the case where the
+   compiled extractor emits a node that survives the
+   validator but disagrees with the reference (e.g. wrong
+   property value). The schema-only check would silently
+   call this ``compiled_unchanged``.
+
+Both dimensions land in :class:`RevalidationReport`. The
+report is JSON-serializable for persistence and gates via
+:class:`RevalidationThresholds` + :func:`check_thresholds`.
 
 Out of scope (this PR keeps the core in-memory; persistence
 and orchestration follow once the report shape is stable):
@@ -59,30 +72,51 @@ import json
 from typing import Any, Callable, Optional
 
 from ..structured_extraction import StructuredExtractionResult
+from .measurement import _compare_nodes
+from .measurement import _compare_span_handling
 from .runtime_fallback import FallbackOutcome
 from .runtime_fallback import run_with_fallback
 
-# Cap on per-event_type sample-divergence entries in the report.
+# Cap on per-report sample-divergence entries. Two independent
+# caps — one per dimension — so a run that's noisy on the
+# decision side doesn't crowd out parity samples and vice versa.
 # Hard-coded for C2.d; if real reports grow noisier than this,
-# C2.d.1 can expose it.
+# C2.d.1 can expose them.
 _DEFAULT_SAMPLE_DIVERGENCE_CAP = 10
 
 
 @dataclasses.dataclass(frozen=True)
 class EventTypeCounts:
-  """Per-event-type aggregation of revalidation outcomes."""
+  """Per-event-type aggregation of revalidation outcomes.
+
+  Covers both dimensions (runtime decision + agreement against
+  reference) so a single ``EventTypeCounts`` row tells you
+  both *what the runtime did* and *whether the output was
+  right*.
+  """
 
   event_type: str
   total: int
+  # Runtime-decision counts (from run_with_fallback).
   compiled_unchanged: int
   compiled_filtered: int
   fallback_for_event: int
   # Subset of ``fallback_for_event`` where the compiled
-  # extractor crashed (``compiled_exception`` is set on the
-  # outcome). Surfaced separately so an operator can see the
+  # extractor failed in a way that fingered the compiled
+  # *path*, not the data: exceptions, wrong return type,
+  # or malformed result internals. ``run_with_fallback``
+  # captures all three via its ``compiled_exception`` audit
+  # field; we surface the rollup so an operator can see the
   # *kind* of fallback — bundle bug vs. ontology drift vs.
   # validator rejection — without parsing per-event outcomes.
-  compiled_exceptions: int
+  compiled_path_faults: int
+  # Agreement-against-reference counts. The new dimension
+  # added in C2.d's P1 fix: schema-only validation can pass
+  # while compiled output silently disagrees with the
+  # reference; parity counts catch that.
+  parity_matches: int
+  parity_divergences: int
+  parity_not_checked: int
 
   @property
   def compiled_unchanged_rate(self) -> float:
@@ -97,8 +131,18 @@ class EventTypeCounts:
     return self.fallback_for_event / self.total if self.total else 0.0
 
   @property
-  def exception_rate(self) -> float:
-    return self.compiled_exceptions / self.total if self.total else 0.0
+  def compiled_path_fault_rate(self) -> float:
+    return self.compiled_path_faults / self.total if self.total else 0.0
+
+  @property
+  def parity_match_rate(self) -> float:
+    """Matches over *checked* events. Events whose parity was
+    ``not_checked`` (the compiled output wasn't used) are
+    excluded from the denominator — including them would
+    conflate "compiled output never reached production" with
+    "compiled output reached production and was wrong"."""
+    checked = self.parity_matches + self.parity_divergences
+    return self.parity_matches / checked if checked else 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,15 +163,21 @@ class RevalidationReport:
     when there's something compiled to validate; these are
     reported for visibility but excluded from the rate
     denominators.
-  * Aggregate counts (``total_compiled_unchanged`` etc.) — sum
-    of per-event-type counts. ``compiled_unchanged_rate`` is
-    the headline KPI: fraction of revalidated events where the
-    compiled extractor's output validated clean.
-  * ``sample_divergences`` — capped at
-    ``_DEFAULT_SAMPLE_DIVERGENCE_CAP`` total. Each entry is a
-    short, stable string identifying a non-``compiled_unchanged``
-    outcome so an operator can drill in. Format:
-    ``\"<event_type>: <decision> [exception=...|dropped_node_ids=...]\"``.
+  * Runtime-decision aggregate counts
+    (``total_compiled_unchanged`` etc.) — sum of per-event-
+    type counts.
+  * Agreement aggregate counts (``total_parity_matches`` etc.)
+    — sum of per-event-type counts.
+  * ``sample_decision_divergences`` — capped non-
+    ``compiled_unchanged`` decision samples. Format:
+    ``"<event_type>: <decision> [exception=...|dropped_node_ids=...]"``.
+  * ``sample_parity_divergences`` — capped parity-divergence
+    samples. Format:
+    ``"<event_type>: <comparator detail>"``. Surfaced
+    separately so a run with lots of ``compiled_filtered``
+    events (which are decision divergences) doesn't crowd
+    out the parity samples an operator actually needs to
+    triage semantic drift.
   * Audit fields (``started_at`` / ``finished_at``).
   """
 
@@ -137,8 +187,12 @@ class RevalidationReport:
   total_compiled_unchanged: int
   total_compiled_filtered: int
   total_fallback_for_event: int
-  total_compiled_exceptions: int
-  sample_divergences: tuple[str, ...]
+  total_compiled_path_faults: int
+  total_parity_matches: int
+  total_parity_divergences: int
+  total_parity_not_checked: int
+  sample_decision_divergences: tuple[str, ...]
+  sample_parity_divergences: tuple[str, ...]
   started_at: str
   finished_at: str
 
@@ -167,12 +221,20 @@ class RevalidationReport:
     )
 
   @property
-  def exception_rate(self) -> float:
+  def compiled_path_fault_rate(self) -> float:
     return (
-        self.total_compiled_exceptions / self.total_events
+        self.total_compiled_path_faults / self.total_events
         if self.total_events
         else 0.0
     )
+
+  @property
+  def parity_match_rate(self) -> float:
+    """Matches over *checked* events. See
+    :meth:`EventTypeCounts.parity_match_rate` for why
+    ``parity_not_checked`` is excluded from the denominator."""
+    checked = self.total_parity_matches + self.total_parity_divergences
+    return self.total_parity_matches / checked if checked else 0.0
 
   def to_json(self) -> str:
     """Serialize the report to a stable JSON string. Useful for
@@ -188,8 +250,12 @@ class RevalidationReport:
         "total_compiled_unchanged": self.total_compiled_unchanged,
         "total_compiled_filtered": self.total_compiled_filtered,
         "total_fallback_for_event": self.total_fallback_for_event,
-        "total_compiled_exceptions": self.total_compiled_exceptions,
-        "sample_divergences": list(self.sample_divergences),
+        "total_compiled_path_faults": self.total_compiled_path_faults,
+        "total_parity_matches": self.total_parity_matches,
+        "total_parity_divergences": self.total_parity_divergences,
+        "total_parity_not_checked": self.total_parity_not_checked,
+        "sample_decision_divergences": list(self.sample_decision_divergences),
+        "sample_parity_divergences": list(self.sample_parity_divergences),
         "started_at": self.started_at,
         "finished_at": self.finished_at,
     }
@@ -202,13 +268,43 @@ class RevalidationThresholds:
 
   Every field is ``None`` by default — meaning "no threshold on
   this dimension." Set the ones the caller cares about; leave
-  the rest. Rates are fractions in ``[0, 1]``.
+  the rest. Rates are fractions in ``[0, 1]``; values outside
+  that range are rejected at construction time so a typo like
+  ``max_fallback_for_event_rate=5`` (intended as 5%) fails loud
+  instead of silently disabling the gate.
   """
 
   min_compiled_unchanged_rate: Optional[float] = None
   max_compiled_filtered_rate: Optional[float] = None
   max_fallback_for_event_rate: Optional[float] = None
-  max_exception_rate: Optional[float] = None
+  max_compiled_path_fault_rate: Optional[float] = None
+  min_parity_match_rate: Optional[float] = None
+
+  def __post_init__(self) -> None:
+    # Each threshold names a fraction in [0, 1]. A value above
+    # 1 silently disables the gate (no observed rate can ever
+    # exceed it), a negative value disables the matching
+    # min-gate, and ``NaN`` makes every comparison False — all
+    # three patterns hide misconfiguration. Reject at
+    # construction so the failure surfaces at the call site
+    # that built the thresholds, not three runs later when an
+    # operator wonders why nothing tripped.
+    for field in dataclasses.fields(self):
+      value = getattr(self, field.name)
+      if value is None:
+        continue
+      if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(
+            f"RevalidationThresholds field {field.name!r} must be a "
+            f"number in [0, 1] or None; got "
+            f"{type(value).__name__}={value!r}"
+        )
+      # ``value != value`` catches NaN without importing math.
+      if value != value or value < 0.0 or value > 1.0:
+        raise ValueError(
+            f"RevalidationThresholds field {field.name!r} must be in "
+            f"[0, 1]; got {value!r}"
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,8 +324,35 @@ def revalidate_compiled_extractors(
     spec: Any = None,
     sample_divergence_cap: int = _DEFAULT_SAMPLE_DIVERGENCE_CAP,
 ) -> RevalidationReport:
-  """Run every event through ``run_with_fallback(compiled,
-  reference)`` and aggregate the outcomes into a report.
+  """Run every event through both extractors and aggregate the
+  outcomes into a report covering both the runtime decision
+  (from :func:`run_with_fallback`) and agreement against the
+  reference.
+
+  Per-event flow:
+
+  1. Drive the event through :func:`run_with_fallback` with a
+     **no-op fallback** so the call yields a clean runtime-
+     decision signal without consuming a reference invocation.
+     The wrapper's ``compiled_unchanged`` / ``compiled_filtered``
+     / ``fallback_for_event`` decision lands directly in the
+     report's decision counts.
+  2. For events whose decision is ``compiled_unchanged`` or
+     ``compiled_filtered``, call the reference extractor
+     separately and compare its output against the wrapper's
+     output via the parity comparator from
+     ``measurement.py``. Result is recorded as
+     ``parity_match`` / ``parity_divergence``.
+  3. For ``fallback_for_event`` events the compiled output
+     never reaches downstream, so parity is recorded as
+     ``parity_not_checked``.
+
+  The reference call is wrapped in ``try/except Exception`` —
+  a reference exception on a single event is recorded as a
+  parity divergence ("``reference extractor raised ...``") and
+  the batch keeps going. The wrapper itself never crashes the
+  batch on compiled-extractor failures (per
+  :func:`run_with_fallback`'s contract).
 
   Args:
     events: Sample events to revalidate against. Typically a
@@ -245,21 +368,24 @@ def revalidate_compiled_extractors(
       callable``. Must cover every event_type in
       ``compiled_extractors``; events whose event_type has a
       compiled entry but no reference entry are also skipped
-      (the wrapper requires both).
+      (revalidation needs both extractors to be meaningful).
     resolved_graph: Forwarded to :func:`run_with_fallback`.
     spec: Forwarded to each extractor's ``(event, spec)`` call.
-    sample_divergence_cap: Maximum number of sample-divergence
-      strings to include in the report. Defaults to 10.
+    sample_divergence_cap: Per-dimension cap on the number of
+      sample-divergence strings included in the report. Applies
+      independently to ``sample_decision_divergences`` and
+      ``sample_parity_divergences``. Defaults to 10.
 
   Returns:
     A :class:`RevalidationReport` aggregating per-event-type
-    counts and rates.
+    counts and rates across both dimensions.
   """
   started_at = _now_iso_utc()
 
   per_type_running: dict[str, _RunningCounts] = {}
   skipped_events = 0
-  sample_divergences: list[str] = []
+  sample_decision_divergences: list[str] = []
+  sample_parity_divergences: list[str] = []
 
   for event in events:
     if not isinstance(event, dict):
@@ -280,27 +406,62 @@ def revalidate_compiled_extractors(
         spec=spec,
         resolved_graph=resolved_graph,
         compiled_extractor=compiled,
-        fallback_extractor=reference,
+        # No-op fallback: the wrapper's "fallback" output isn't
+        # exercised here; we want the runtime decision, and the
+        # parity check below calls reference directly under
+        # exception protection. Keeping the fallback no-op
+        # avoids double-invoking reference on fallback events
+        # *and* keeps reference-extractor exceptions from
+        # propagating out through ``run_with_fallback`` (which
+        # by design forwards fallback exceptions unchanged).
+        fallback_extractor=_noop_fallback,
     )
 
     running = per_type_running.setdefault(event_type, _RunningCounts())
     running.total += 1
+
+    # Dimension 1: runtime decision.
     if outcome.decision == "compiled_unchanged":
       running.compiled_unchanged += 1
     elif outcome.decision == "compiled_filtered":
       running.compiled_filtered += 1
-      if len(sample_divergences) < sample_divergence_cap:
-        sample_divergences.append(
+      if len(sample_decision_divergences) < sample_divergence_cap:
+        sample_decision_divergences.append(
             _summarize_outcome(event_type=event_type, outcome=outcome)
         )
     elif outcome.decision == "fallback_for_event":
       running.fallback_for_event += 1
       if outcome.compiled_exception is not None:
-        running.compiled_exceptions += 1
-      if len(sample_divergences) < sample_divergence_cap:
-        sample_divergences.append(
+        running.compiled_path_faults += 1
+      if len(sample_decision_divergences) < sample_divergence_cap:
+        sample_decision_divergences.append(
             _summarize_outcome(event_type=event_type, outcome=outcome)
         )
+
+    # Dimension 2: agreement against reference. Only meaningful
+    # when the compiled output actually reached downstream
+    # (decisions other than ``fallback_for_event``). For
+    # ``fallback_for_event`` events the compiled output was
+    # discarded by the wrapper, so a parity comparison would
+    # measure something the runtime never used — recorded as
+    # ``parity_not_checked`` and excluded from the parity-match
+    # denominator.
+    if outcome.decision == "fallback_for_event":
+      running.parity_not_checked += 1
+      continue
+
+    parity_divergence = _check_parity(
+        wrapper_result=outcome.result,
+        reference_extractor=reference,
+        event=event,
+        spec=spec,
+    )
+    if parity_divergence is None:
+      running.parity_matches += 1
+    else:
+      running.parity_divergences += 1
+      if len(sample_parity_divergences) < sample_divergence_cap:
+        sample_parity_divergences.append(f"{event_type}: {parity_divergence}")
 
   counts_by_event_type = {
       et: EventTypeCounts(
@@ -309,7 +470,10 @@ def revalidate_compiled_extractors(
           compiled_unchanged=r.compiled_unchanged,
           compiled_filtered=r.compiled_filtered,
           fallback_for_event=r.fallback_for_event,
-          compiled_exceptions=r.compiled_exceptions,
+          compiled_path_faults=r.compiled_path_faults,
+          parity_matches=r.parity_matches,
+          parity_divergences=r.parity_divergences,
+          parity_not_checked=r.parity_not_checked,
       )
       for et, r in per_type_running.items()
   }
@@ -324,8 +488,17 @@ def revalidate_compiled_extractors(
   total_fallback_for_event = sum(
       c.fallback_for_event for c in counts_by_event_type.values()
   )
-  total_compiled_exceptions = sum(
-      c.compiled_exceptions for c in counts_by_event_type.values()
+  total_compiled_path_faults = sum(
+      c.compiled_path_faults for c in counts_by_event_type.values()
+  )
+  total_parity_matches = sum(
+      c.parity_matches for c in counts_by_event_type.values()
+  )
+  total_parity_divergences = sum(
+      c.parity_divergences for c in counts_by_event_type.values()
+  )
+  total_parity_not_checked = sum(
+      c.parity_not_checked for c in counts_by_event_type.values()
   )
 
   return RevalidationReport(
@@ -335,8 +508,12 @@ def revalidate_compiled_extractors(
       total_compiled_unchanged=total_compiled_unchanged,
       total_compiled_filtered=total_compiled_filtered,
       total_fallback_for_event=total_fallback_for_event,
-      total_compiled_exceptions=total_compiled_exceptions,
-      sample_divergences=tuple(sample_divergences),
+      total_compiled_path_faults=total_compiled_path_faults,
+      total_parity_matches=total_parity_matches,
+      total_parity_divergences=total_parity_divergences,
+      total_parity_not_checked=total_parity_not_checked,
+      sample_decision_divergences=tuple(sample_decision_divergences),
+      sample_parity_divergences=tuple(sample_parity_divergences),
       started_at=started_at,
       finished_at=_now_iso_utc(),
   )
@@ -380,11 +557,20 @@ def check_thresholds(
           f"fallback_for_event_rate {report.fallback_for_event_rate:.4f} "
           f"> max {thresholds.max_fallback_for_event_rate:.4f}"
       )
-  if thresholds.max_exception_rate is not None:
-    if report.exception_rate > thresholds.max_exception_rate:
+  if thresholds.max_compiled_path_fault_rate is not None:
+    if (
+        report.compiled_path_fault_rate
+        > thresholds.max_compiled_path_fault_rate
+    ):
       violations.append(
-          f"exception_rate {report.exception_rate:.4f} "
-          f"> max {thresholds.max_exception_rate:.4f}"
+          f"compiled_path_fault_rate {report.compiled_path_fault_rate:.4f} "
+          f"> max {thresholds.max_compiled_path_fault_rate:.4f}"
+      )
+  if thresholds.min_parity_match_rate is not None:
+    if report.parity_match_rate < thresholds.min_parity_match_rate:
+      violations.append(
+          f"parity_match_rate {report.parity_match_rate:.4f} "
+          f"< min {thresholds.min_parity_match_rate:.4f}"
       )
   return ThresholdCheckResult(
       ok=not violations,
@@ -407,7 +593,59 @@ class _RunningCounts:
   compiled_unchanged: int = 0
   compiled_filtered: int = 0
   fallback_for_event: int = 0
-  compiled_exceptions: int = 0
+  compiled_path_faults: int = 0
+  parity_matches: int = 0
+  parity_divergences: int = 0
+  parity_not_checked: int = 0
+
+
+def _noop_fallback(event: dict, spec: Any) -> StructuredExtractionResult:
+  """Empty :class:`StructuredExtractionResult`. Used as the
+  fallback in revalidation's ``run_with_fallback`` call so the
+  wrapper never invokes the reference indirectly; the parity
+  check calls reference directly under exception protection."""
+  return StructuredExtractionResult()
+
+
+def _check_parity(
+    *,
+    wrapper_result: StructuredExtractionResult,
+    reference_extractor: Callable[..., StructuredExtractionResult],
+    event: dict,
+    spec: Any,
+) -> Optional[str]:
+  """Compare *wrapper_result* against the reference extractor's
+  output on *event*. Returns ``None`` on agreement, or a short
+  divergence string naming what differed.
+
+  The reference call is wrapped in ``try/except Exception`` —
+  a reference crash is recorded as a divergence
+  (``reference extractor raised X: msg``) rather than aborting
+  the batch. ``KeyboardInterrupt`` / ``SystemExit`` propagate
+  so operator cancellation still works."""
+  try:
+    ref_result = reference_extractor(event, spec)
+  except Exception as exc:  # noqa: BLE001 — record + continue
+    return f"reference extractor raised {type(exc).__name__}: {exc}"
+
+  # Node-set agreement: same ``node_id`` set with matching
+  # entity_name / labels / property-set per node. Defers to
+  # measurement.py's comparator so revalidation and
+  # measure_compile stay byte-aligned on parity semantics.
+  node_divergence = _compare_nodes(ref_result.nodes, wrapper_result.nodes)
+  if node_divergence is not None:
+    return node_divergence
+
+  # Span-handling agreement: ``fully_handled_span_ids`` and
+  # ``partially_handled_span_ids`` sets must match. Important
+  # because C2.b's compiled_filtered path downgrades span
+  # handling from fully → partially; a wrong span-handling set
+  # silently changes what the AI extractor sees downstream.
+  span_divergence = _compare_span_handling(ref_result, wrapper_result)
+  if span_divergence is not None:
+    return span_divergence
+
+  return None
 
 
 def _summarize_outcome(*, event_type: str, outcome: FallbackOutcome) -> str:

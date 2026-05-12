@@ -9,9 +9,14 @@
 
 ## What this is
 
-PR 4c's `measure_compile` proves a single compile-and-compare pass. C2.c.2's orchestrator wires the compiled path into the runtime. **This module turns "works in tests" into "keeps proving itself after rollout"** — a batch-mode runner that takes a corpus of events, drives each through `run_with_fallback` with the matching compiled and reference extractor, and aggregates the per-event `FallbackOutcome` decisions into a structured report.
+PR 4c's `measure_compile` proves a single compile-and-compare pass. C2.c.2's orchestrator wires the compiled path into the runtime. **This module turns "works in tests" into "keeps proving itself after rollout"** — a batch-mode runner that takes a corpus of events, drives each through `run_with_fallback` *and* a direct reference-extractor call, and aggregates the per-event outcomes into a structured report.
 
-The report's job is to surface drift. C2.b's decision tree (`compiled_unchanged` / `compiled_filtered` / `fallback_for_event`) is already the right vocabulary for "how often did the compiled extractor hold up versus need adjustment." Revalidation runs that decision tree against a sample of real events and aggregates the counts — per event_type and overall — so operators can see whether the compiled bundle's behavior still matches the handwritten reference that gated its compile.
+The report has **two orthogonal dimensions**, both load-bearing:
+
+1. **Runtime decision** — what `run_with_fallback` did on this event: `compiled_unchanged` / `compiled_filtered` / `fallback_for_event`. This is C2.b's safety vocabulary ("did the schema validator accept the compiled output").
+2. **Agreement against reference** — did the compiled extractor's output match the handwritten reference's output on this event? `parity_match` / `parity_divergence` / `parity_not_checked` (the last for `fallback_for_event` events, where the compiled output was discarded).
+
+The agreement dimension catches **schema-valid but semantically wrong** outputs — the case where the compiled extractor emits a node that survives the validator but disagrees with the reference (e.g. wrong property value). The schema-only check would silently call this `compiled_unchanged`; parity makes the drift visible.
 
 ## Public API
 
@@ -34,83 +39,135 @@ report: RevalidationReport = revalidate_compiled_extractors(
     sample_divergence_cap=10,                               # default 10
 )
 
-# Headline KPI
+# Schema-safety KPI
 print(report.compiled_unchanged_rate)
+
+# Agreement KPI
+print(report.parity_match_rate)
 
 # Per-event-type breakdown
 for et, counts in report.counts_by_event_type.items():
-    print(et, counts.total, counts.compiled_unchanged_rate)
+    print(et, counts.total, counts.compiled_unchanged_rate, counts.parity_match_rate)
 
-# Threshold check
+# Threshold check (gates both dimensions)
 result = check_thresholds(report, RevalidationThresholds(
     min_compiled_unchanged_rate=0.95,
     max_fallback_for_event_rate=0.05,
+    min_parity_match_rate=0.99,
 ))
 if not result.ok:
     for violation in result.violations:
         print("FAIL:", violation)
 ```
 
+## Per-event flow
+
+For each event the harness:
+
+1. Drives the event through `run_with_fallback` with a **no-op fallback** so the call yields a clean runtime-decision signal. The wrapper's `compiled_unchanged` / `compiled_filtered` / `fallback_for_event` decision lands directly in the report's decision counts.
+2. For events whose decision is `compiled_unchanged` or `compiled_filtered`, calls the reference extractor separately and compares its output against the wrapper's output via the parity comparator from `measurement.py` (node-set equality with matching `entity_name` / `labels` / property-set per node; span-handling-set equality). Result lands as `parity_match` or `parity_divergence`.
+3. For `fallback_for_event` events the compiled output never reaches downstream, so parity is recorded as `parity_not_checked` and excluded from the `parity_match_rate` denominator.
+
+The reference call is wrapped in `try/except Exception` — a reference exception on a single event is recorded as a parity divergence (`reference extractor raised X: msg`) and the batch keeps going. The wrapper itself never crashes the batch on compiled-extractor failures (per `run_with_fallback`'s contract).
+
 ## `RevalidationReport` shape
 
 ```
-counts_by_event_type        : dict[str, EventTypeCounts]
-total_events                : int                      # all revalidated events
-skipped_events              : int                      # no compiled path → not revalidated
-total_compiled_unchanged    : int
-total_compiled_filtered     : int
-total_fallback_for_event    : int
-total_compiled_exceptions   : int                      # subset of fallback_for_event
-sample_divergences          : tuple[str, ...]          # capped at sample_divergence_cap
-started_at                  : str                      # UTC ISO timestamp
-finished_at                 : str
+counts_by_event_type           : dict[str, EventTypeCounts]
+total_events                   : int                      # all revalidated events
+skipped_events                 : int                      # no compiled path → not revalidated
 
-# Computed:
-compiled_unchanged_rate     : float
-compiled_filtered_rate      : float
-fallback_for_event_rate     : float
-exception_rate              : float
+# Runtime-decision dimension
+total_compiled_unchanged       : int
+total_compiled_filtered        : int
+total_fallback_for_event       : int
+total_compiled_path_faults     : int                      # subset of fallback_for_event
+
+# Agreement-against-reference dimension
+total_parity_matches           : int
+total_parity_divergences       : int
+total_parity_not_checked       : int                      # = total_fallback_for_event
+
+# Sample listings (per-dimension caps)
+sample_decision_divergences    : tuple[str, ...]
+sample_parity_divergences      : tuple[str, ...]
+
+# Audit
+started_at                     : str                      # UTC ISO timestamp
+finished_at                    : str
+
+# Computed properties
+compiled_unchanged_rate        : float
+compiled_filtered_rate         : float
+fallback_for_event_rate        : float
+compiled_path_fault_rate       : float
+parity_match_rate              : float                    # matches / (matches + divergences)
 ```
 
 Per-event-type:
 ```
 EventTypeCounts:
-  event_type, total, compiled_unchanged, compiled_filtered,
-  fallback_for_event, compiled_exceptions
-  + rate properties
+  event_type, total,
+  compiled_unchanged, compiled_filtered, fallback_for_event, compiled_path_faults,
+  parity_matches, parity_divergences, parity_not_checked
+  + rate properties (including parity_match_rate)
 ```
 
-`compiled_exceptions` is split out from `fallback_for_event` so operators can distinguish **bundle bugs** (compiled extractor crashed) from **ontology drift** (validator rejected the output). Both end up as fallback_for_event in the production runtime; the rates tell different stories.
+### Why `parity_not_checked` is excluded from `parity_match_rate`
+
+A `fallback_for_event` event is one where the wrapper already filtered the compiled output out for safety. Counting it as a parity divergence would conflate "compiled output never reached production" with "compiled output reached production and was wrong." Only the events the wrapper actually emitted are included in the parity denominator.
+
+### Why `compiled_path_faults` and not `compiled_exceptions`
+
+`run_with_fallback`'s `compiled_exception` audit field fires for three distinct paths: an actual exception, a wrong return type, or malformed `StructuredExtractionResult` internals. All three are bugs in the compiled bundle (not ontology drift) but only the first is literally an exception. `compiled_path_faults` covers the full set without mis-naming the malformed-internals cases.
+
+## `RevalidationThresholds` and `check_thresholds`
+
+The report is pure data. Threshold checks are a policy concern — a separate function so the same report can be evaluated against different threshold sets (production gate vs. canary gate vs. nightly-trend gate).
+
+Threshold fields:
+
+```
+min_compiled_unchanged_rate        : Optional[float]
+max_compiled_filtered_rate         : Optional[float]
+max_fallback_for_event_rate        : Optional[float]
+max_compiled_path_fault_rate       : Optional[float]
+min_parity_match_rate              : Optional[float]
+```
+
+All default to `None` (no threshold on that dimension). Set the ones the caller cares about; leave the rest.
+
+**Rate bounds are enforced at construction.** Every non-None rate must be in `[0, 1]`; a typo like `max_fallback_for_event_rate=5` (intended as 5%) raises `ValueError` instead of silently disabling the gate (no observed rate can ever exceed 5). NaN and bool are also rejected — NaN makes every comparison false; bool `True` would silently mean 100%.
+
+The `ThresholdCheckResult` lists every violation (not just the first), each as a human-readable string naming the failed rate and the threshold it failed.
 
 ## What gets skipped
 
 Events that can't be revalidated end up in `report.skipped_events` rather than the rate denominators:
 
 - Events whose `event_type` has no compiled extractor (`compiled_extractors[event_type]` is missing).
-- Events whose `event_type` has no reference extractor (the wrapper requires both).
+- Events whose `event_type` has no reference extractor (revalidation needs both).
 - Malformed events (not a dict, missing `event_type`, empty-string `event_type`).
 
 Revalidation only makes sense when there's a compiled path to validate; the skipped count is reported for visibility but doesn't pollute the headline rates.
-
-## `RevalidationThresholds` and `check_thresholds`
-
-The report is pure data. Threshold checks are a policy concern — a separate function so the same report can be evaluated against different threshold sets (production gate vs. canary gate vs. nightly-trend gate).
-
-All four threshold fields default to `None` (no threshold on that dimension). Set the ones the caller cares about; leave the rest. The `ThresholdCheckResult` lists every violation (not just the first), each as a human-readable string naming the failed rate and the threshold it failed.
 
 ## Determinism + persistence
 
 `RevalidationReport.to_json()` is deterministic (sorted keys, fixed formatting) so reports persisted to disk / BigQuery / a telemetry pipeline can be diffed across revalidation runs to spot trends. The harness doesn't decide where reports go — `to_json` lets the caller plug into whatever persistence path they already have.
 
-## Tests (11 cases in `tests/test_extractor_compilation_revalidation.py`)
+## Tests (16 cases in `tests/test_extractor_compilation_revalidation.py`)
 
-The four scenarios from the working plan plus audit-shape coverage:
+Coverage spans both dimensions:
 
-- **`TestRevalidationHappyPath`** (1) — deterministic BKA fixture: handwritten extractor on both sides, 3 events → all `compiled_unchanged`, rates aggregate correctly.
-- **`TestRevalidationDrift`** (1) — compiled extractor emits an `unknown_entity` node, validator drops it, decision is `compiled_filtered`. Counts and sample-divergence entry surface in the report.
-- **`TestRevalidationCompiledException`** (2) — compiled extractor that raises lands as `fallback_for_event` with `compiled_exception` field set, and the report counts those *separately* from validator-driven fallbacks. The split is what lets operators see bundle-bug vs. ontology-drift at a glance.
-- **`TestRevalidationThresholds`** (3) — threshold-fails case (unchanged rate < 0.95 trips the gate); empty thresholds always pass; multiple thresholds all evaluated (no short-circuit on first violation).
-- **`TestRevalidationAuditShape`** (4) — skipped-events accounting for events whose `event_type` has no compiled extractor; malformed events skipped; `to_json` deterministic + sorted; `sample_divergence_cap` respected even with 20 drifted events.
+- **`TestRevalidationHappyPath`** (1) — deterministic BKA fixture: handwritten extractor on both sides, 3 events → all `compiled_unchanged` AND all `parity_match`.
+- **`TestRevalidationParity`** (3) — the load-bearing P1 fix:
+  - Schema-valid wrong output: compiled extractor emits a `mako_DecisionPoint` node with the wrong `decision_id`. Decision is `compiled_unchanged` (validator accepts it); **parity catches the drift**. Without this dimension the run would look perfect.
+  - `parity_not_checked` for `fallback_for_event` events: a crashing compiled extractor has its compiled output discarded; parity is excluded from the match-rate denominator instead of inflating the divergence count.
+  - Reference-extractor exception safety: a reference that crashes on one event is recorded as a parity divergence and the batch continues; sibling events still get revalidated.
+- **`TestRevalidationDrift`** (1) — schema-failing drift surfaces in BOTH dimensions: `compiled_filtered` (validator drops the bad node) AND `parity_divergence` (filtered output disagrees with reference's real output).
+- **`TestRevalidationCompiledException`** (2) — compiled extractor that raises lands as `fallback_for_event` with the underlying outcome's `compiled_exception` field set; the report counts those as `compiled_path_faults` separately from validator-driven fallbacks.
+- **`TestRevalidationThresholds`** (5) — flagship gate (unchanged rate < 0.95); empty thresholds always pass; multiple thresholds (including `min_parity_match_rate`) all evaluated; **rate-bounds validation** rejects out-of-range / NaN / bool at construction; boundary values (0.0 and 1.0) are accepted.
+- **`TestRevalidationAuditShape`** (4) — skipped-events accounting; malformed events skipped; `to_json` deterministic + sorted; both sample-divergence caps respected independently.
 
 ## Out of scope (deferred)
 
@@ -122,6 +179,6 @@ The four scenarios from the working plan plus audit-shape coverage:
 
 ## Related
 
-- [`extractor_compilation_runtime_fallback.md`](extractor_compilation_runtime_fallback.md) — `run_with_fallback` decision tree. Revalidation is a batch driver around it.
+- [`extractor_compilation_runtime_fallback.md`](extractor_compilation_runtime_fallback.md) — `run_with_fallback` decision tree. Revalidation is a batch driver around it (with the fallback wired to a no-op so reference exceptions can't crash the batch).
 - [`extractor_compilation_runtime_registry.md`](extractor_compilation_runtime_registry.md) — `on_outcome` callback in the production registry. The same per-event audit channel; revalidation aggregates it in batch.
-- [`extractor_compilation_bka_measurement.md`](extractor_compilation_bka_measurement.md) — `measure_compile` is the one-shot compile-and-measure utility; revalidation is the ongoing-check utility. Different timing, same parity vocabulary.
+- [`extractor_compilation_bka_measurement.md`](extractor_compilation_bka_measurement.md) — `measure_compile` is the one-shot compile-and-measure utility; revalidation is the ongoing-check utility. They share the parity comparator (`_compare_nodes` / `_compare_span_handling`) so the same agreement semantics apply at compile time and at revalidation time.

@@ -14,22 +14,22 @@
 
 """Tests for the revalidation harness (#75 PR C2.d).
 
-Covers four scenarios per the working plan:
+Covers both dimensions C2.d aggregates:
 
-* Deterministic BKA happy path — every event lands as
-  ``compiled_unchanged`` and rates aggregate correctly.
-* Drift case — the compiled extractor's output diverges from
-  the reference's; the validator catches it and the report
-  shows ``compiled_filtered`` counts and a sample-divergence
-  entry.
-* Compiled exception case — the compiled extractor raises on
-  some events; the report shows ``fallback_for_event`` plus a
-  separate ``compiled_exceptions`` count.
-* Threshold-fails case — a threshold-check on a report with
-  drift trips the ``min_compiled_unchanged_rate`` gate.
+* **Runtime decision** (from ``run_with_fallback``):
+  ``compiled_unchanged`` / ``compiled_filtered`` /
+  ``fallback_for_event``, plus the ``compiled_path_faults``
+  subset that distinguishes bundle bugs from ontology drift.
+* **Agreement against reference**: ``parity_match`` /
+  ``parity_divergence`` / ``parity_not_checked``. The
+  schema-valid-but-semantically-wrong case is the load-
+  bearing one — without parity it would silently aggregate
+  as ``compiled_unchanged``.
 
-Plus a few audit-shape tests (skipped-events accounting, JSON
-round-trip, sample-divergence cap).
+Plus threshold checks (including rate-bounds validation),
+reference-exception safety, and audit-shape coverage
+(skipped events, malformed events, JSON determinism,
+sample-divergence caps).
 """
 
 from __future__ import annotations
@@ -60,12 +60,6 @@ def _bka_resolved_spec():
   return resolve(ontology, binding)
 
 
-def _empty_result():
-  from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
-
-  return StructuredExtractionResult()
-
-
 def _bka_event(*, span_id: str, decision_id: str = "d1") -> dict:
   return {
       "event_type": "bka_decision",
@@ -86,17 +80,14 @@ def _bka_event(*, span_id: str, decision_id: str = "d1") -> dict:
 
 class TestRevalidationHappyPath:
 
-  def test_all_compiled_unchanged(self):
-    """Real BKA fixtures: handwritten extractor and a synthetic
-    'compiled' extractor that returns the same shape. Every
-    event lands as ``compiled_unchanged`` and the report's
-    aggregate counts add up."""
+  def test_all_compiled_unchanged_and_parity_matches(self):
+    """Real BKA fixtures: handwritten extractor used as both
+    'compiled' and 'reference'. Every event lands as
+    ``compiled_unchanged`` (schema validates) AND
+    ``parity_match`` (output equals reference)."""
     from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
     from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
 
-    # The compiled extractor returns the same output as the
-    # handwritten reference. Validation passes, decision is
-    # always compiled_unchanged.
     compiled = extract_bka_decision_event
     reference = extract_bka_decision_event
 
@@ -118,16 +109,175 @@ class TestRevalidationHappyPath:
     assert report.total_compiled_unchanged == 3
     assert report.total_compiled_filtered == 0
     assert report.total_fallback_for_event == 0
-    assert report.total_compiled_exceptions == 0
-    assert report.sample_divergences == ()
+    assert report.total_compiled_path_faults == 0
+    assert report.sample_decision_divergences == ()
     assert report.compiled_unchanged_rate == 1.0
 
-    # Per-event-type breakdown is also populated.
+    # Parity dimension agrees: matches on all 3 events.
+    assert report.total_parity_matches == 3
+    assert report.total_parity_divergences == 0
+    assert report.total_parity_not_checked == 0
+    assert report.parity_match_rate == 1.0
+    assert report.sample_parity_divergences == ()
+
     bka_counts = report.counts_by_event_type["bka_decision"]
     assert bka_counts.event_type == "bka_decision"
     assert bka_counts.total == 3
     assert bka_counts.compiled_unchanged == 3
     assert bka_counts.compiled_unchanged_rate == 1.0
+    assert bka_counts.parity_matches == 3
+    assert bka_counts.parity_match_rate == 1.0
+
+
+# ------------------------------------------------------------------ #
+# Parity: schema-valid but semantically wrong                          #
+# ------------------------------------------------------------------ #
+
+
+class TestRevalidationParity:
+
+  def test_schema_valid_wrong_output_caught_by_parity(self):
+    """The P1 blocker reproducer: a compiled extractor that
+    emits a BKA decision node with the **wrong decision_id**.
+    The output is schema-valid (entity_name / labels match the
+    ontology, property names match), so the validator returns
+    no failures and the runtime decision is
+    ``compiled_unchanged``. Without parity, the run would look
+    perfect. WITH parity (the C2.d agreement check), the
+    divergence surfaces as ``parity_divergence`` and the
+    ``parity_match_rate`` drops."""
+    from bigquery_agent_analytics.extracted_models import ExtractedNode
+    from bigquery_agent_analytics.extracted_models import ExtractedProperty
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+    from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
+
+    def wrong_decision_id_compiled(event, spec):
+      # Same shape as the handwritten reference would produce
+      # (entity_name + labels are exactly what
+      # ``extract_bka_decision_event`` emits, so the schema
+      # validator accepts it), but with a *wrong* decision_id.
+      # Reference emits "d1" (from event["content"]); this
+      # emits "WRONG_VALUE".
+      sess = event["session_id"]
+      node = ExtractedNode(
+          node_id=f"{sess}:mako_DecisionPoint:decision_id=WRONG_VALUE",
+          entity_name="mako_DecisionPoint",
+          labels=["mako_DecisionPoint"],
+          properties=[
+              ExtractedProperty(name="decision_id", value="WRONG_VALUE"),
+              ExtractedProperty(name="outcome", value="approved"),
+              ExtractedProperty(name="confidence", value=0.9),
+          ],
+      )
+      return StructuredExtractionResult(
+          nodes=[node],
+          edges=[],
+          fully_handled_span_ids={event["span_id"]},
+          partially_handled_span_ids=set(),
+      )
+
+    events = [
+        _bka_event(span_id="sp1"),
+        _bka_event(span_id="sp2"),
+    ]
+
+    report = revalidate_compiled_extractors(
+        events=events,
+        compiled_extractors={"bka_decision": wrong_decision_id_compiled},
+        reference_extractors={"bka_decision": extract_bka_decision_event},
+        resolved_graph=_bka_resolved_spec(),
+    )
+
+    # Schema dimension says everything's fine.
+    assert report.total_events == 2
+    assert report.total_compiled_unchanged == 2
+    assert report.total_compiled_filtered == 0
+    assert report.total_fallback_for_event == 0
+    assert report.compiled_unchanged_rate == 1.0
+
+    # Parity dimension catches the drift.
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 2
+    assert report.total_parity_not_checked == 0
+    assert report.parity_match_rate == 0.0
+    # Sample-divergence list names the parity failures
+    # so an operator can drill in.
+    assert len(report.sample_parity_divergences) == 2
+    for divergence in report.sample_parity_divergences:
+      assert divergence.startswith("bka_decision:")
+
+  def test_parity_not_checked_for_fallback_for_event(self):
+    """When the wrapper falls back for the whole event (e.g.
+    compiled extractor crashed), the compiled output never
+    reaches downstream — parity is recorded as
+    ``parity_not_checked`` and excluded from the parity-match
+    denominator. Otherwise a noisy bundle would tank the
+    parity_match_rate via events the wrapper already filtered
+    out for safety."""
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+
+    def crashing_compiled(event, spec):
+      raise RuntimeError("compiled bundle exploded")
+
+    report = revalidate_compiled_extractors(
+        events=[_bka_event(span_id="sp1"), _bka_event(span_id="sp2")],
+        compiled_extractors={"bka_decision": crashing_compiled},
+        reference_extractors={"bka_decision": extract_bka_decision_event},
+        resolved_graph=_bka_resolved_spec(),
+    )
+
+    assert report.total_fallback_for_event == 2
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 0
+    assert report.total_parity_not_checked == 2
+    # Rate is 0 over empty denominator, not NaN or division
+    # error.
+    assert report.parity_match_rate == 0.0
+
+  def test_reference_exception_recorded_as_parity_divergence(self):
+    """A reference extractor that crashes on one event must
+    NOT abort the batch (P2 #2). The crash is recorded as a
+    parity divergence with the exception type + message; the
+    remaining events keep getting revalidated."""
+    from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
+    from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
+
+    call_counter = {"n": 0}
+
+    def flaky_reference(event, spec):
+      call_counter["n"] += 1
+      if call_counter["n"] == 1:
+        raise ValueError("reference blew up on sp1")
+      return extract_bka_decision_event(event, spec)
+
+    events = [
+        _bka_event(span_id="sp1"),
+        _bka_event(span_id="sp2"),
+    ]
+
+    report = revalidate_compiled_extractors(
+        events=events,
+        compiled_extractors={"bka_decision": extract_bka_decision_event},
+        reference_extractors={"bka_decision": flaky_reference},
+        resolved_graph=_bka_resolved_spec(),
+    )
+
+    # Both events were processed — the batch didn't abort.
+    assert report.total_events == 2
+    assert report.total_compiled_unchanged == 2
+
+    # First event: reference crashed → parity divergence.
+    # Second event: reference returned, output matched →
+    # parity match.
+    assert report.total_parity_divergences == 1
+    assert report.total_parity_matches == 1
+
+    # Sample-divergence captured the exception type + message.
+    assert len(report.sample_parity_divergences) == 1
+    assert "ValueError" in report.sample_parity_divergences[0]
+    assert "reference blew up" in report.sample_parity_divergences[0]
 
 
 # ------------------------------------------------------------------ #
@@ -137,22 +287,19 @@ class TestRevalidationHappyPath:
 
 class TestRevalidationDrift:
 
-  def test_compiled_filtered_drift_surfaces_in_report(self):
+  def test_compiled_filtered_drift_surfaces_in_both_dimensions(self):
     """The compiled extractor emits a node with an
     ``entity_name`` the BKA spec doesn't know about — the
-    validator drops the node, the wrapper's decision is
-    ``compiled_filtered``, and the report shows the count plus
-    a sample-divergence entry."""
+    validator drops the node (decision: ``compiled_filtered``)
+    AND the filtered output disagrees with the reference's
+    real BKA decision node (parity: ``parity_divergence``).
+    Both signals are populated."""
     from bigquery_agent_analytics.extracted_models import ExtractedNode
     from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
     from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
     from bigquery_agent_analytics.structured_extraction import StructuredExtractionResult
 
     def drifted_compiled(event, spec):
-      # Emit a node whose entity_name isn't in the BKA spec.
-      # The validator catches this as NODE-scope
-      # ``unknown_entity`` and the wrapper drops the node →
-      # compiled_filtered.
       bad_node = ExtractedNode(
           node_id=f"{event['session_id']}:Ghost:id=g1",
           entity_name="GhostEntity",  # not in spec
@@ -178,15 +325,20 @@ class TestRevalidationDrift:
         resolved_graph=_bka_resolved_spec(),
     )
 
+    # Decision dimension.
     assert report.total_events == 2
     assert report.total_compiled_unchanged == 0
     assert report.total_compiled_filtered == 2
     assert report.total_fallback_for_event == 0
-    assert report.total_compiled_exceptions == 0
-    # Sample divergences captured the drift.
-    assert len(report.sample_divergences) == 2
-    for divergence in report.sample_divergences:
+    assert report.total_compiled_path_faults == 0
+    assert len(report.sample_decision_divergences) == 2
+    for divergence in report.sample_decision_divergences:
       assert divergence.startswith("bka_decision: compiled_filtered")
+
+    # Parity dimension.
+    assert report.total_parity_matches == 0
+    assert report.total_parity_divergences == 2
+    assert report.total_parity_not_checked == 0
 
 
 # ------------------------------------------------------------------ #
@@ -196,11 +348,12 @@ class TestRevalidationDrift:
 
 class TestRevalidationCompiledException:
 
-  def test_compiled_exception_falls_back_and_counts(self):
+  def test_compiled_exception_falls_back_and_counts_path_faults(self):
     """A compiled extractor that raises on every event lands
     as ``fallback_for_event`` with the ``compiled_exception``
-    field set. The report counts those separately from
-    validator-driven fallbacks."""
+    field set on the underlying outcome. The report counts
+    those as ``compiled_path_faults`` separately so operators
+    can distinguish bundle bugs from ontology drift."""
     from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
     from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
 
@@ -221,21 +374,20 @@ class TestRevalidationCompiledException:
 
     assert report.total_events == 2
     assert report.total_fallback_for_event == 2
-    # All fallbacks were exception-driven.
-    assert report.total_compiled_exceptions == 2
+    # All fallbacks were path-fault-driven.
+    assert report.total_compiled_path_faults == 2
     assert report.total_compiled_unchanged == 0
     assert report.total_compiled_filtered == 0
-    # Sample divergences name the exception type + message.
-    assert len(report.sample_divergences) == 2
-    for divergence in report.sample_divergences:
+    assert len(report.sample_decision_divergences) == 2
+    for divergence in report.sample_decision_divergences:
       assert "RuntimeError" in divergence
       assert "compiled bundle exploded" in divergence
 
-  def test_validator_driven_fallback_does_not_count_as_exception(self):
+  def test_validator_driven_fallback_does_not_count_as_path_fault(self):
     """A ``fallback_for_event`` triggered by an EVENT-scope
     validator failure (not an exception) lands in
     ``total_fallback_for_event`` but NOT in
-    ``total_compiled_exceptions``. The two counters are
+    ``total_compiled_path_faults``. The two counters are
     separate so operators can distinguish bundle-bug from
     ontology-drift."""
     from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
@@ -248,8 +400,6 @@ class TestRevalidationCompiledException:
     def benign_compiled(event, spec):
       return StructuredExtractionResult()
 
-    # Stub the validator to return one EVENT-scope failure per
-    # call → wrapper falls back for the whole event.
     import bigquery_agent_analytics.extractor_compilation.runtime_fallback as rf
 
     real_validator = rf.validate_extracted_graph
@@ -277,7 +427,7 @@ class TestRevalidationCompiledException:
       rf.validate_extracted_graph = real_validator
 
     assert report.total_fallback_for_event == 1
-    assert report.total_compiled_exceptions == 0
+    assert report.total_compiled_path_faults == 0
 
 
 # ------------------------------------------------------------------ #
@@ -300,9 +450,7 @@ class TestRevalidationThresholds:
     def maybe_drifted(event, spec):
       call_counter["n"] += 1
       if call_counter["n"] == 1:
-        # First call: clean output (matches reference).
         return extract_bka_decision_event(event, spec)
-      # Remaining calls: drift.
       bad_node = ExtractedNode(
           node_id="ghost", entity_name="GhostEntity", labels=[], properties=[]
       )
@@ -367,15 +515,63 @@ class TestRevalidationThresholds:
         RevalidationThresholds(
             min_compiled_unchanged_rate=0.95,
             max_compiled_filtered_rate=0.10,
-            # fallback_for_event_rate is 0, so this one passes.
             max_fallback_for_event_rate=0.50,
+            # parity_match_rate is 0/3=0.0 here (3 filtered
+            # events all diverged from reference; the 1
+            # compiled_unchanged matched). With 3 divergences
+            # and 1 match, rate is 1/4 = 0.25 < 0.95.
+            min_parity_match_rate=0.95,
         ),
     )
 
     assert result.ok is False
-    assert len(result.violations) == 2
+    # 3 violations: unchanged, filtered, parity. fallback
+    # threshold passes (rate is 0).
+    assert len(result.violations) == 3
     assert any("compiled_unchanged_rate" in v for v in result.violations)
     assert any("compiled_filtered_rate" in v for v in result.violations)
+    assert any("parity_match_rate" in v for v in result.violations)
+
+  def test_threshold_rate_out_of_range_rejected(self):
+    """``RevalidationThresholds`` enforces ``[0, 1]`` at
+    construction. A typo like ``max_fallback_for_event_rate=5``
+    (intended as 5%) must fail loudly instead of silently
+    disabling the gate (no observed rate can ever exceed 5)."""
+    from bigquery_agent_analytics.extractor_compilation import RevalidationThresholds
+
+    with pytest.raises(ValueError, match=r"max_fallback_for_event_rate"):
+      RevalidationThresholds(max_fallback_for_event_rate=5.0)
+    with pytest.raises(ValueError, match=r"min_compiled_unchanged_rate"):
+      RevalidationThresholds(min_compiled_unchanged_rate=-0.1)
+    with pytest.raises(ValueError, match=r"max_compiled_filtered_rate"):
+      RevalidationThresholds(max_compiled_filtered_rate=1.5)
+    # NaN must also be rejected — every comparison with NaN
+    # returns False, so a NaN threshold silently passes
+    # every report.
+    with pytest.raises(ValueError, match=r"min_parity_match_rate"):
+      RevalidationThresholds(min_parity_match_rate=float("nan"))
+    # Bool must be rejected even though it's a numeric
+    # subclass in Python: ``True == 1.0`` makes
+    # ``min_compiled_unchanged_rate=True`` look like 100%
+    # which is almost certainly not the caller's intent.
+    with pytest.raises(ValueError, match=r"min_compiled_unchanged_rate"):
+      RevalidationThresholds(min_compiled_unchanged_rate=True)
+
+  def test_threshold_rate_boundary_values_accepted(self):
+    """0.0 and 1.0 are the boundary values for valid rates;
+    both must be accepted. (Otherwise a gate at exactly
+    ``min_compiled_unchanged_rate=1.0`` couldn't be
+    expressed.)"""
+    from bigquery_agent_analytics.extractor_compilation import RevalidationThresholds
+
+    # Should not raise.
+    RevalidationThresholds(
+        min_compiled_unchanged_rate=0.0,
+        max_compiled_filtered_rate=1.0,
+        max_fallback_for_event_rate=0.0,
+        max_compiled_path_fault_rate=1.0,
+        min_parity_match_rate=1.0,
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -404,7 +600,6 @@ class TestRevalidationAuditShape:
         resolved_graph=_bka_resolved_spec(),
     )
 
-    # Two BKA events were revalidated; one was skipped.
     assert report.total_events == 2
     assert report.skipped_events == 1
 
@@ -449,14 +644,17 @@ class TestRevalidationAuditShape:
     parsed = json.loads(encoded)
     # Top-level keys are sorted.
     assert list(parsed.keys()) == sorted(parsed.keys())
-    # All declared fields land in the JSON.
+    # Both dimensions land in the JSON.
     assert parsed["total_events"] == 1
     assert parsed["total_compiled_unchanged"] == 1
+    assert parsed["total_parity_matches"] == 1
+    assert parsed["total_parity_divergences"] == 0
     assert parsed["counts_by_event_type"]["bka_decision"]["total"] == 1
+    assert parsed["counts_by_event_type"]["bka_decision"]["parity_matches"] == 1
 
-  def test_sample_divergence_cap_respected(self):
-    """The divergence list never exceeds the cap, even if many
-    events drift."""
+  def test_sample_decision_divergence_cap_respected(self):
+    """The decision-divergence list never exceeds the cap,
+    even if many events drift."""
     from bigquery_agent_analytics.extracted_models import ExtractedNode
     from bigquery_agent_analytics.extractor_compilation import revalidate_compiled_extractors
     from bigquery_agent_analytics.structured_extraction import extract_bka_decision_event
@@ -488,4 +686,9 @@ class TestRevalidationAuditShape:
 
     assert report.total_events == 20
     assert report.total_compiled_filtered == 20
-    assert len(report.sample_divergences) == 5
+    assert len(report.sample_decision_divergences) == 5
+    # Parity-divergence cap applies independently — the
+    # filtered output (empty after node drop) disagrees with
+    # the reference's real output on every event, so the
+    # parity-divergence list is also at cap.
+    assert len(report.sample_parity_divergences) == 5
