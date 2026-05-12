@@ -130,14 +130,16 @@ Sync-side:
 - `unexpected_file` — row whose `bundle_path` isn't `manifest.json` nor the manifest's `module_filename`. Bundles are exactly two files; anything extra is rejected.
 - `module_row_missing` — manifest is fine but no row for the module file.
 - `duplicate_row` — two rows share the same `(fingerprint, bundle_path)`.
-- `malformed_row` — row fields have wrong types (e.g. `file_content` not bytes).
+- `malformed_row` — row fields have wrong types (e.g. `file_content` not bytes) **or** the `bundle_fingerprint` isn't a strict 64-char lowercase sha256 hex string. The fingerprint check is load-bearing: sync uses the fingerprint as a directory name (`dest_dir/<fingerprint>/`), so a tampered value like `"../escape"` would otherwise write outside `dest_dir`.
 - `bundle_load_failed` — sync wrote files to a *staging* directory but `load_bundle` rejected the reconstruction. The staging directory is removed and any pre-existing `dest_dir/<fingerprint>/` is left intact — a bad mirror row never destroys good local state.
 
 Neither `publish_bundles_to_bq` nor `sync_bundles_from_bq` raises on per-bundle problems; failures accumulate. **Store exceptions** (BQ-side: network, auth, table missing) DO propagate — that's the right boundary for "fix the connection and retry."
 
-## Atomicity-during-sync
+## Staged replace during sync
 
-Sync writes each fingerprint's two files to a side-by-side **staging directory** (`dest_dir/.staging-<fingerprint>-<uuid>/`), runs `load_bundle` on the staging copy, and only then atomically replaces `dest_dir/<fingerprint>/`. A corrupt mirror row therefore cannot destroy a previously-good local bundle — the existing target dir is touched only after `load_bundle` accepts the staged reconstruction. Locked by `test_sync_failure_preserves_existing_good_bundle`.
+Sync writes each fingerprint's two files to a side-by-side **staging directory** (`dest_dir/.staging-<fingerprint>-<uuid>/`) and runs `load_bundle` on the staged copy **before touching the target**. Only after `load_bundle` accepts the staged reconstruction does sync `rmtree(dest_dir/<fingerprint>)` and `shutil.move(staging, target)`. A corrupt mirror row therefore cannot destroy a previously-good local bundle — the load-bundle gate is the safety boundary.
+
+The replace itself is **staged, not strictly atomic.** Between `rmtree(target)` and `move(staging, target)` there is a brief window where the target is absent; a process crash inside that window leaves the bundle missing on disk (a re-sync recovers it). The load-bundle-failure case — the one the staged flow is designed to protect — is correctly atomic in the failure direction: load-bundle failure leaves the target untouched. Locked by `test_sync_failure_preserves_existing_good_bundle`.
 
 ## Idempotency + non-atomic publish
 
@@ -149,7 +151,7 @@ Cross-subdir duplicate fingerprints (two bundles claiming the same fingerprint) 
 
 ## Tests
 
-CI suite — `tests/test_extractor_compilation_bq_bundle_mirror.py`, 21 cases using an in-memory `BundleStore` substitute:
+CI suite — `tests/test_extractor_compilation_bq_bundle_mirror.py`, 24 cases using an in-memory `BundleStore` substitute:
 
 - **`TestRoundTrip`** (2) — publish a local bundle, sync it back, verify `load_bundle` accepts the reconstruction. Plus a multi-bundle variant.
 - **`TestAllowlist`** (3) — publish-side allowlist skips unlisted; sync-side allowlist skips unlisted; sync-side allowlist names a fingerprint with no rows → `fingerprint_not_in_table` failure.
@@ -157,7 +159,7 @@ CI suite — `tests/test_extractor_compilation_bq_bundle_mirror.py`, 21 cases us
 - **`TestMissingAndMalformedRows`** (5) — missing manifest row, malformed manifest content, unexpected extra file, wrong field type, duplicate rows.
 - **`TestIdempotentRepublish`** (1) — two consecutive publishes of the same bundle leave exactly two rows in the store, not four.
 - **`TestPublishFailures`** (4) — subdir without manifest; bundle that would fail `load_bundle` pre-publish; missing `bundle_root`; two subdirs declaring the same fingerprint → `duplicate_fingerprint`, neither published.
-- **`TestRoundTwoFindings`** (3) — manifest row with `module_filename` containing a path separator → `manifest_row_unreadable` (no `FileNotFoundError`); existing good local bundle preserved across a corrupt re-sync (staging-then-validate); `BigQueryBundleStore.publish_rows` raises `ValueError` on duplicate input pairs without running DELETE or INSERT.
+- **`TestRoundTwoFindings`** (6) — manifest row with `module_filename` containing a path separator → `manifest_row_unreadable` (no `FileNotFoundError`); existing good local bundle preserved across a corrupt re-sync (staging-then-validate); `BigQueryBundleStore.publish_rows` raises `ValueError` on duplicate input pairs without running DELETE or INSERT; tampered `bundle_fingerprint="../escape"` rejected as `malformed_row` before any path is computed (no write outside `dest_dir`); tampered manifest `fingerprint="../escape"` rejected at publish-side; `BigQueryBundleStore.__init__` raises `ValueError` on malformed `table_id` (backtick, semicolon, whitespace, wrong dot count, empty segment, `--` comment marker, trailing newline) so injection can't reach the SQL.
 
 Live BQ suite — `tests/test_extractor_compilation_bq_bundle_mirror_live.py`, 1 case behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_BQ_MIRROR_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. Creates a temporary table, runs the publish+sync round-trip, asserts `load_bundle` accepts the reconstruction, deletes the table on the way out.
 

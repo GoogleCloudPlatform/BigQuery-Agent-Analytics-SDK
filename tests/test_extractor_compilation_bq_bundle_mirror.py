@@ -939,3 +939,126 @@ class TestRoundTwoFindings:
     store = BigQueryBundleStore(bq_client=_FakeBQClient(), table_id="p.d.t")
     with pytest.raises(ValueError, match=r"duplicate.*manifest\.json"):
       store.publish_rows([row, row])
+
+  def test_sync_rejects_tampered_bundle_fingerprint_path_escape(
+      self, tmp_path: pathlib.Path
+  ):
+    """A row whose ``bundle_fingerprint="../escape"`` used to
+    sync successfully and write OUTSIDE ``dest_dir`` because
+    the fingerprint flows straight into ``dest_dir /
+    fingerprint``. The shape check now requires strict 64-char
+    lowercase hex (sha256) and rejects anything else as
+    ``malformed_row`` BEFORE any path is computed."""
+    from bigquery_agent_analytics.extractor_compilation import BundleRow
+    from bigquery_agent_analytics.extractor_compilation import sync_bundles_from_bq
+
+    tampered_row = BundleRow(
+        bundle_fingerprint="../escape",
+        bundle_path="manifest.json",
+        file_content=b"{}",
+        event_types=("bka_decision",),
+        module_filename="extractor.py",
+        function_name="extract_bka",
+        published_at="2026-05-08T00:00:00Z",
+    )
+    store = _InMemoryStore()
+    store.publish_rows([tampered_row])
+
+    sync_dir = tmp_path / "synced"
+    sync = sync_bundles_from_bq(store=store, dest_dir=sync_dir)
+
+    assert sync.synced_fingerprints == ()
+    codes = {f.code for f in sync.failures}
+    assert "malformed_row" in codes
+    # Crucially: nothing was written outside dest_dir.
+    assert not (sync_dir.parent / "escape").exists()
+    # And no ``../escape`` subdir of dest_dir either.
+    assert not any(p.name == "escape" for p in sync_dir.parent.iterdir())
+
+  def test_publish_rejects_tampered_manifest_fingerprint(
+      self, tmp_path: pathlib.Path
+  ):
+    """Defense in depth: the publish-side shape check now
+    catches a manifest whose ``fingerprint`` isn't a clean
+    sha256 hex string, so a tampered local manifest can never
+    introduce a path-escape value into the table."""
+    from bigquery_agent_analytics.extractor_compilation import publish_bundles_to_bq
+
+    bundle_root = tmp_path / "bundles"
+    bundle_root.mkdir()
+    _write_manifest(
+        bundle_root / "tampered",
+        fingerprint="../escape",
+    )
+    (bundle_root / "tampered" / "extractor.py").write_text(
+        _MINIMAL_VALID_SOURCE, encoding="utf-8"
+    )
+
+    store = _InMemoryStore()
+    publish = publish_bundles_to_bq(bundle_root=bundle_root, store=store)
+
+    assert publish.published_fingerprints == ()
+    assert publish.rows_written == 0
+    codes = {f.code for f in publish.failures}
+    assert "manifest_unreadable" in codes
+    # Detail names the offending fingerprint shape so an
+    # operator can spot the tampered file.
+    detail = next(
+        f.detail for f in publish.failures if f.code == "manifest_unreadable"
+    )
+    assert "fingerprint" in detail
+    assert store.all_rows() == []
+
+  def test_bigquery_store_rejects_malformed_table_id(self):
+    """``BigQueryBundleStore.__init__`` validates ``table_id``
+    at construction so a malformed value (backtick, semicolon,
+    wrong dot count, injection attempt) raises ``ValueError``
+    before any SQL interpolation. The constructor is the only
+    place where ``table_id`` enters a backticked SQL string;
+    catching here prevents downstream injection."""
+    from bigquery_agent_analytics.extractor_compilation import BigQueryBundleStore
+
+    class _FakeBQClient:
+      pass
+
+    fake = _FakeBQClient()
+
+    # Wrong dot count.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="onlyone")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="two.parts")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="four.parts.here.tbl")
+
+    # Backtick — would break out of the quoted identifier.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(
+          bq_client=fake, table_id="proj.ds.tbl`; DROP TABLE x; --"
+      )
+
+    # Semicolon / SQL injection markers.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="proj.ds.tbl;DROP")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="proj.ds.tbl --comment")
+
+    # Whitespace.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="proj. ds.tbl")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="proj.ds.tbl\n")
+
+    # Empty segment.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      BigQueryBundleStore(bq_client=fake, table_id="proj..tbl")
+
+    # Non-string.
+    with pytest.raises(ValueError, match=r"must be a string"):
+      BigQueryBundleStore(bq_client=fake, table_id=None)  # type: ignore[arg-type]
+
+    # Valid forms — should NOT raise.
+    BigQueryBundleStore(
+        bq_client=fake, table_id="my-project.my_dataset.compiled_bundles"
+    )
+    BigQueryBundleStore(bq_client=fake, table_id="p.d.t")

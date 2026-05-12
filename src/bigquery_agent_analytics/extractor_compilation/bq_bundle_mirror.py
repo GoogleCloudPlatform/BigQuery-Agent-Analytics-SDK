@@ -124,6 +124,7 @@ import collections
 import dataclasses
 import datetime
 import pathlib
+import re
 import shutil
 from typing import Any, Iterable, Iterator, Optional, Protocol
 import uuid
@@ -172,6 +173,32 @@ BUNDLE_MIRROR_TABLE_SCHEMA: tuple[tuple[str, str, str], ...] = (
 # filename is read from the manifest itself, so the only
 # *constant* allowed path is the manifest.
 _MANIFEST_FILENAME = "manifest.json"
+
+# Bundle fingerprints are sha256 hex digests — strict 64-char
+# lowercase hex. Used as directory names by sync
+# (``dest_dir/<fingerprint>/``) and as path components in the
+# staging dir, so any value that isn't a pure hex digest could
+# trivially escape the destination (e.g. ``"../escape"``).
+# Enforced on every row at sync-side ``_check_row_shape`` and
+# on every manifest at both publish and sync, so a tampered
+# value never reaches the directory-name computation.
+_FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+# BigQuery table identifiers go into backtick-quoted SQL. The
+# constructor accepts ``project.dataset.table``; this pattern
+# rejects anything that could break out of the quoted identifier
+# or smuggle SQL through. Conservative ASCII-only set; BQ does
+# allow broader characters but a mirror table is operator-named
+# and there's no reason to permit anything exotic.
+#
+# * Each segment: letters / digits / ``_`` / ``-``. Project IDs
+#   can contain ``-``; dataset and table names cannot per BQ
+#   docs, but allowing ``-`` here keeps the check simple and
+#   BigQuery itself will reject an invalid dataset name later.
+# * Exactly two dots; three non-empty segments.
+_TABLE_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+)
 
 
 # ------------------------------------------------------------------ #
@@ -323,7 +350,26 @@ class BigQueryBundleStore:
     """``bq_client`` is a ``google.cloud.bigquery.Client`` or
     test-compatible substitute (anything exposing ``query``,
     ``insert_rows_json``, ``get_table``, ``create_table``).
-    ``table_id`` is ``project.dataset.table``."""
+    ``table_id`` is ``project.dataset.table`` and is validated
+    at construction — only ASCII letters / digits / ``_`` /
+    ``-`` per segment, exactly three segments. Any value that
+    could break out of the backtick-quoted SQL identifier
+    (backtick, semicolon, whitespace, ``--``, ``/*``)
+    raises :class:`ValueError`."""
+    if not isinstance(table_id, str):
+      raise ValueError(
+          f"table_id must be a string; got {type(table_id).__name__}"
+      )
+    # ``fullmatch`` (not ``match``) because Python regex's ``$``
+    # accepts a trailing newline by default — ``"proj.ds.tbl\n"``
+    # would otherwise sneak past and reach the SQL.
+    if not _TABLE_ID_PATTERN.fullmatch(table_id):
+      raise ValueError(
+          f"table_id {table_id!r} is not a well-formed "
+          f"'project.dataset.table' identifier "
+          f"(allowed per segment: ASCII letters, digits, '_', "
+          f"'-'; exactly three segments)"
+      )
     self._bq_client = bq_client
     self._table_id = table_id
 
@@ -576,6 +622,23 @@ def publish_bundles_to_bq(
           MirrorFailure(
               code="manifest_unreadable",
               detail=f"{type(exc).__name__}: {exc}",
+              bundle_path=str(manifest_path.relative_to(bundle_root)),
+          )
+      )
+      continue
+
+    # Shape-check the manifest before trusting its fingerprint /
+    # module_filename anywhere downstream. Specifically: a
+    # tampered ``fingerprint`` like ``"../escape"`` would
+    # otherwise become a ``bundle_fingerprint`` value in the
+    # table, and sync would use it as a directory name. Catch
+    # at the source.
+    shape_problem = _validate_manifest_shape(manifest)
+    if shape_problem is not None:
+      failures.append(
+          MirrorFailure(
+              code="manifest_unreadable",
+              detail=shape_problem,
               bundle_path=str(manifest_path.relative_to(bundle_root)),
           )
       )
@@ -885,7 +948,12 @@ def sync_bundles_from_bq(
     # touching any existing ``dest_dir/<fingerprint>/``. A bad
     # mirror row must not destroy a previously-good local
     # bundle: write somewhere safe, run the loader gate, then
-    # atomically replace the target only on success.
+    # staged-replace the target only on success. The
+    # replacement itself (rmtree + move) is NOT strictly
+    # atomic — a crash between the two leaves the bundle
+    # absent on disk — but the load-bundle-failure case (the
+    # one the staged flow is designed to protect) is correctly
+    # atomic in the failure direction.
     bundle_dir = dest_dir / fp
     staging_dir = dest_dir / f".staging-{fp}-{uuid.uuid4().hex[:8]}"
     if staging_dir.exists():
@@ -931,13 +999,14 @@ def sync_bundles_from_bq(
       skipped.append(fp)
       continue
 
-    # Atomic-ish replace: remove old ``bundle_dir`` (if any),
-    # then move staging into place. The window between the
-    # rmtree and the move is small and on the same filesystem,
-    # so we accept the tiny risk in exchange for simplicity.
+    # Staged replace: remove old ``bundle_dir`` (if any), then
+    # move staging into place. The rmtree + move pair is NOT
+    # strictly atomic — a crash between the two leaves the
+    # bundle absent on disk, recoverable by re-running sync.
     # The crucial property — "don't destroy good local state
     # because of bad mirror rows" — is preserved by the
-    # staging-then-validate flow above.
+    # staging-then-validate flow above (load_bundle failure
+    # never reaches this point).
     if bundle_dir.exists():
       shutil.rmtree(bundle_dir)
     shutil.move(str(staging_dir), str(bundle_dir))
@@ -1011,6 +1080,15 @@ def _validate_manifest_shape(manifest: Manifest) -> Optional[str]:
         f"manifest fingerprint must be a non-empty string; got "
         f"{type(manifest.fingerprint).__name__}={manifest.fingerprint!r}"
     )
+  # Manifest fingerprints become row's ``bundle_fingerprint``
+  # and then directory names; same strict sha256-hex enforcement
+  # as ``_check_row_shape``. Catching here lets publish reject
+  # tampered manifests before they hit the table.
+  if not _FINGERPRINT_PATTERN.fullmatch(manifest.fingerprint):
+    return (
+        f"manifest fingerprint must be 64 lowercase hex characters "
+        f"(sha256); got {manifest.fingerprint!r}"
+    )
   if not isinstance(manifest.function_name, str) or not manifest.function_name:
     return (
         f"manifest function_name must be a non-empty string; got "
@@ -1062,6 +1140,15 @@ def _check_row_shape(row: Any) -> Optional[str]:
     return f"row is not a BundleRow; got {type(row).__name__}"
   if not isinstance(row.bundle_fingerprint, str) or not row.bundle_fingerprint:
     return f"bundle_fingerprint must be a non-empty string"
+  # Fingerprints become directory names at sync
+  # (``dest_dir/<fingerprint>/`` + the staging-dir name). A
+  # tampered value like ``"../escape"`` would otherwise sync
+  # successfully and write OUTSIDE dest_dir; reject early.
+  if not _FINGERPRINT_PATTERN.fullmatch(row.bundle_fingerprint):
+    return (
+        f"bundle_fingerprint must be 64 lowercase hex characters "
+        f"(sha256); got {row.bundle_fingerprint!r}"
+    )
   if not isinstance(row.bundle_path, str) or not row.bundle_path:
     return f"bundle_path must be a non-empty string"
   if not isinstance(row.file_content, (bytes, bytearray)):
