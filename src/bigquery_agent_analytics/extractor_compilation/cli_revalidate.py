@@ -570,13 +570,25 @@ def _load_events_from_bq(
   if not sql.strip():
     raise _CliError(f"--events-bq-query-file {str(query_file)!r} is empty")
 
-  client = _make_bq_client(project=project, location=location)
+  # Client construction sits inside its own try/except so
+  # auth / ADC / invalid-credentials / network failures
+  # surface as a clean exit-2 ``_CliError`` instead of
+  # escaping as a raw traceback. Our own ``_CliError``
+  # (from project-inference failure inside the factory)
+  # passes through unchanged.
+  try:
+    client = _make_bq_client(project=project, location=location)
+  except _CliError:
+    raise
+  except Exception as exc:  # noqa: BLE001 — record + abort
+    raise _CliError(
+        f"--events-bq-query-file: BigQuery client construction failed: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
 
   try:
     job = client.query(sql)
     rows = list(job.result())
-  except _CliError:
-    raise
   # Catch ``Exception`` (not ``BaseException``) so
   # ``KeyboardInterrupt`` / ``SystemExit`` still propagate.
   # The BigQuery client raises a mix of
@@ -588,6 +600,23 @@ def _load_events_from_bq(
         f"--events-bq-query-file: BigQuery query failed: "
         f"{type(exc).__name__}: {exc}"
     ) from exc
+
+  # Enforce the "exactly one column named ``event_json``"
+  # contract before iterating. The docs + CLI help promise
+  # this; without the check, a query returning
+  # ``event_json, extra_col`` would silently accept the extra
+  # column because the row loop only reads
+  # ``row["event_json"]``. Check via the first row's keys
+  # (works for both ``bigquery.Row`` and dict fakes); empty
+  # result sets are a no-op (nothing to validate, harness
+  # produces a zero-event report).
+  if rows:
+    first_keys = sorted(rows[0].keys())
+    if first_keys != ["event_json"]:
+      raise _CliError(
+          f"--events-bq-query-file: query must produce exactly one "
+          f"column named 'event_json'; got {first_keys}"
+      )
 
   events: list[dict] = []
   for row_index, row in enumerate(rows):

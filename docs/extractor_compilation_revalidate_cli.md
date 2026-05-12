@@ -36,9 +36,10 @@ bqaa-revalidate-extractors \
     --report-out report.json
 ```
 
-Where `events_query.sql` returns exactly one column named `event_json` (STRING) containing a JSON-encoded event dict per row, e.g.:
+Where `events_query.sql` returns exactly one column named `event_json` (STRING) containing a JSON-encoded event dict per row. The SQL file must be **fully self-contained** — the CLI does not accept query parameters, so substitute concrete literals before invoking:
 
 ```sql
+-- events_query.sql — bake in literal time bounds before running.
 SELECT TO_JSON_STRING(STRUCT(
   event_type,
   span_id,
@@ -46,7 +47,7 @@ SELECT TO_JSON_STRING(STRUCT(
   content
 )) AS event_json
 FROM `my-project.my_dataset.agent_events`
-WHERE event_timestamp BETWEEN @start_time AND @end_time
+WHERE event_timestamp BETWEEN TIMESTAMP('2026-05-01') AND TIMESTAMP('2026-05-12')
 LIMIT 10000
 ```
 
@@ -126,7 +127,9 @@ The SQL must produce **exactly one column** named `event_json` (STRING) per row.
 
 | Failure | Behavior |
 |---------|----------|
-| BigQuery raises (auth, syntax, table-not-found, permission) | exit 2 with `BigQuery query failed: <Type>: <message>` |
+| BigQuery client construction fails (auth, ADC, invalid credentials, network) | exit 2 with `BigQuery client construction failed: <Type>: <message>` |
+| BigQuery query raises (syntax, table-not-found, permission) | exit 2 with `BigQuery query failed: <Type>: <message>` |
+| Query returns extra columns beyond `event_json` | exit 2 with `query must produce exactly one column named 'event_json'; got [...]` |
 | Row missing the `event_json` column | exit 2 with `row N: missing required column 'event_json'` |
 | `event_json` value isn't a STRING (e.g. STRUCT projected without `TO_JSON_STRING`) | exit 2 with `row N: 'event_json' must be STRING; got <type>` |
 | `event_json` STRING isn't valid JSON | exit 2 with `row N: invalid JSON in 'event_json': <msg>` |
@@ -162,15 +165,17 @@ Unknown fields, out-of-range rates (`5.0` intended as 5%), NaN, and bool all fai
 
 ## Tests
 
-CI suite — `tests/test_extractor_compilation_cli_revalidate.py` (31 cases, 1 skipped under dev-install):
+CI suite — `tests/test_extractor_compilation_cli_revalidate.py` (33 cases, 1 skipped under dev-install):
 
 - **`TestCliEndToEnd`** (3) — happy path (exit 0, report written, `threshold_check: null`); threshold pass (exit 0, `ok: true`); threshold violation (exit 1, report still written with violations listed).
 - **`TestCliUsageErrors`** (18) — missing events file; malformed JSONL line; missing bundles root; mixed-fingerprint bundle root; empty bundle root; reference module not importable; reference module missing `EXTRACTORS`; reference module missing `RESOLVED_GRAPH`; bad `EXTRACTORS` shape; thresholds JSON with unknown field; thresholds JSON with out-of-range rate; missing `--report-out` parent directory (preflight catches it before any work runs); invalid UTF-8 in `--events-jsonl`; invalid UTF-8 in `--thresholds-json`; missing required flag returns 2 (not `SystemExit`); unrecognized flag returns 2 (not `SystemExit`); **both `--events-jsonl` and `--events-bq-query-file` returns 2** (argparse mutex `not allowed with`); **neither event source returns 2** (argparse mutex `one of the arguments ... is required`).
-- **`TestCliEventsBQ`** (9) — BigQuery event-source paths, monkeypatching `_make_bq_client` to inject an in-memory fake:
+- **`TestCliEventsBQ`** (11) — BigQuery event-source paths, monkeypatching `_make_bq_client` to inject an in-memory fake:
   - Happy path: 2 `event_json` rows, valid JSON, BKA shape → exit 0, report includes both events.
   - Project inferred from ADC: `_FakeBQClient(project="adc-project")` is accepted without `--bq-project`.
   - No project anywhere: `bigquery.Client()` returns a project-less client AND `--bq-project` absent → exit 2 with `Set --bq-project explicitly`.
+  - **Client construction failure** (`_make_bq_client` raises `RuntimeError("could not authenticate")`) → exit 2 with `BigQuery client construction failed: ...`. Distinguishes auth/ADC failures from query-time failures.
   - Query exception (`RuntimeError("table not found")`) → exit 2 with `BigQuery query failed: RuntimeError: table not found`.
+  - **Extra column rejected**: row with `event_json` + `extra_col` keys → exit 2 with `exactly one column ... got ['event_json', 'extra_col']`. Enforces the documented contract; report not written.
   - Row missing `event_json` column → exit 2 with `row 1` (the second row).
   - `event_json` non-string (dict) → exit 2 with `row 0: 'event_json' must be STRING`.
   - `event_json` invalid JSON → exit 2 with `row 0: invalid JSON`.

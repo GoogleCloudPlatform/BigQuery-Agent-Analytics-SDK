@@ -1432,3 +1432,102 @@ class TestCliEventsBQ:
     assert code == 2
     err = capsys.readouterr().err
     assert "is empty" in err
+
+  def test_bq_client_construction_failure_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """``_make_bq_client`` can raise BEFORE ``client.query``
+    (auth, ADC, invalid credentials). That used to escape as
+    a raw traceback; the wrap around client construction now
+    surfaces it as a clean exit 2 with the type + message
+    and a ``BigQuery client construction failed`` prefix to
+    distinguish from query-time failures."""
+    from bigquery_agent_analytics.extractor_compilation import cli_revalidate
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_construct_fail")
+
+    def _raises(*, project, location):
+      # Simulates ``google.auth.exceptions.DefaultCredentialsError``
+      # or any other library-side construction failure.
+      raise RuntimeError("could not authenticate")
+
+    monkeypatch.setattr(cli_revalidate, "_make_bq_client", _raises)
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "BigQuery client construction failed" in err
+    assert "could not authenticate" in err
+
+  def test_bq_extra_column_rejected(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """The "exactly one column named ``event_json``" contract
+    is enforced. A query returning ``event_json, extra_col``
+    used to succeed because the row loop only reads
+    ``row["event_json"]`` — the extra column silently slipped
+    through. Now fails at exit 2 with the offending column
+    names listed."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text(
+        "SELECT event_json, extra_col FROM t", encoding="utf-8"
+    )
+    ref_module = cleanup_reference_modules("bq_extra_col")
+
+    rows = [
+        {
+            "event_json": _event_json("sp1"),
+            "extra_col": "should not have been projected",
+        }
+    ]
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "exactly one column" in err
+    assert "event_json" in err
+    assert "extra_col" in err
+    # Report is not written for usage errors.
+    assert not (tmp_path / "report.json").exists()
