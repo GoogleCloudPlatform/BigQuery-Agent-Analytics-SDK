@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     ``MetaTableMissingError``, ``MetaTableEmptyError``,
     ``MetaTableMultipleRowsError`` — all subclass
     ``ConceptIndexError``.
-  CI suite (54 cases) uses in-memory fake BQ clients;
+  CI suite (55 cases) uses in-memory fake BQ clients;
   live test (gated behind ``BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1``)
   emits a real concept-index via PR #92's path, attaches
   the runtime, runs resolver queries against the live

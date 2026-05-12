@@ -149,13 +149,13 @@ Every method returns `list[ConceptIndexRowView]` carrying the full emission sche
 
 ## Tests
 
-CI suite — `tests/test_ontology_runtime.py` (54 cases) using in-memory fake BigQuery clients:
+CI suite — `tests/test_ontology_runtime.py` (55 cases) using in-memory fake BigQuery clients:
 
 - **`TestOntologyRuntimeConstruction`** (5) — in-memory + from-files factories; `concept_index_table` requires `bq_client`; eager fingerprint verification at construction; matching-fingerprint happy path.
 - **`TestOntologyRuntimeAccessors`** (10) — entity / relationships lookup, declared-order, case-sensitivity, synonyms / annotations / schemes / notation / labels traversal (covers SKOS `inScheme` list + scalar normalization, language-suffixed annotations), provenance properties (compile_fingerprint / compile_id).
 - **`TestConceptIndexLookupVerify`** (4) — happy path, mismatch, missing meta table, empty meta table.
 - **`TestConceptIndexLookupQueries`** (10) — label / entity_name / notation lookups (notation queries `label_kind='notation' AND label=@notation` so secondary notations on multi-notation entities are caught — the per-row `notation` column carries only the lex-min display token); SQL-shape lock prevents regression to the old `WHERE notation = @notation` path; `WHERE compile_fingerprint = @expected_fp` defense-in-depth lock; label-kind / language / case-insensitive filters; empty result not an error.
-- **`TestExactEntityResolver`** (5) — known entity, missing entity, case-sensitivity (default + opt-in), empty query.
+- **`TestExactEntityResolver`** (6) — known entity, missing entity, case-sensitivity (default + opt-in), empty query, `limit=0` / negative limit returns empty (matches `LabelSynonymResolver`'s `limit=0` behavior so callers can disable a resolver branch by passing `limit=0` regardless of which Protocol implementation they hold).
 - **`TestLabelSynonymResolver`** (5) — requires concept index; happy path; label-kind priority re-ranking (`name > pref > alt > hidden > synonym > notation`); limit cap; empty query.
 - **`TestEntityResolverProtocol`** (2) — both reference resolvers satisfy `isinstance(resolver, EntityResolver)`.
 - **`TestRoundOneFindings`** (11) — round-1 reviewer-finding reproducers:
@@ -167,7 +167,14 @@ CI suite — `tests/test_ontology_runtime.py` (54 cases) using in-memory fake Bi
   - `labels_for()` emits notation as `label_kind='notation'` (matching PR #92's six-kind vocabulary).
   - `notation_for()` returns the **lex-min display token** to match PR #92's `_entity_notation()` rule. Round-3 regression: an entity declaring `skos:notation: ["B", "A", "C"]` returns `"A"` from `notation_for()`, not the first-authored `"B"`; `ExactEntityResolver` candidates carry the same lex-min so both resolver paths agree on the same entity.
 
-Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery.** Compiles a tiny ontology with **two notations** (`["CA", "ZZ-LATE"]`) to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, runs `LabelSynonymResolver` and `lookup_by_notation` queries for both the primary (lex-min) AND secondary notation values, asserts every candidate carries the runtime's `compile_fingerprint` and that the per-row `notation` column carries the lex-min display token while `label` is the queried notation, drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323` in ~30s.
+Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery.** Compiles a tiny ontology with **two notations declared in NON-sorted order** (`skos:notation: ["ZZ-LATE", "CA"]` — first-authored is `"ZZ-LATE"` but lex-min is `"CA"`) to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, and asserts:
+  - `lookup_by_notation("CA")` finds the entity (primary, lex-min notation).
+  - `lookup_by_notation("ZZ-LATE")` ALSO finds the entity (round-2 secondary-notation fix — locks against regressing to the per-row-`notation`-column predicate that would miss it).
+  - `runtime.notation_for("CaliforniaRegion") == "CA"` (round-3 lex-min display-token rule — first-authored value would be `"ZZ-LATE"` but the runtime must match PR #92's emission rule).
+  - Per-row `notation` column carries the lex-min display token while `label` is the queried notation value.
+  - Every candidate carries the runtime's `compile_fingerprint`.
+
+Drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323` in ~16s.
 
 ## Out of scope (deferred)
 

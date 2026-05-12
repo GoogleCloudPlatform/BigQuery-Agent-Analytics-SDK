@@ -662,9 +662,13 @@ class ExactEntityResolver:
   def resolve(self, query: str, *, limit: int = 10) -> list[ResolverCandidate]:
     """Return at most one candidate whose ``entity_name``
     matches *query*. ``limit`` is accepted for Protocol
-    symmetry but never returns more than one row (exact match
-    on a unique name)."""
-    if not query:
+    symmetry; ``limit <= 0`` returns no candidates to match
+    :class:`LabelSynonymResolver`'s ``limit=0`` behavior so
+    callers can disable a resolver branch by passing
+    ``limit=0`` regardless of which implementation they hold.
+    Otherwise the resolver returns at most one row (exact
+    match on a unique name)."""
+    if limit <= 0 or not query:
       return []
     entity = self._runtime.entity(
         query, case_insensitive=self._case_insensitive

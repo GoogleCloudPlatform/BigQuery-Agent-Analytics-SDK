@@ -776,6 +776,26 @@ class TestExactEntityResolver:
     runtime = self._runtime(loaded_models)
     assert ExactEntityResolver(runtime).resolve("") == []
 
+  def test_limit_zero_returns_empty(self, loaded_models):
+    """Match :class:`LabelSynonymResolver`'s behavior:
+    ``limit <= 0`` returns no candidates so callers can
+    disable a resolver branch by passing ``limit=0``
+    regardless of which Protocol implementation they hold.
+    Previously the singular-result path ignored ``limit``
+    and always returned one candidate."""
+    from bigquery_agent_analytics import ExactEntityResolver
+
+    runtime = self._runtime(loaded_models)
+    resolver = ExactEntityResolver(runtime)
+    # Limit 0 → empty even for a known-good entity.
+    assert resolver.resolve("CaliforniaRegion", limit=0) == []
+    # Negative limit also empty (Protocol doesn't define
+    # negative behavior; failing-empty is consistent with
+    # the BQ-backed resolver's slice).
+    assert resolver.resolve("CaliforniaRegion", limit=-1) == []
+    # Sanity: limit=1 still returns the candidate.
+    assert len(resolver.resolve("CaliforniaRegion", limit=1)) == 1
+
 
 # ------------------------------------------------------------------ #
 # LabelSynonymResolver                                                #
