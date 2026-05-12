@@ -601,15 +601,94 @@ class TestConceptIndexLookupQueries:
     assert {r.label for r in rows} == {"California", "Cali"}
 
   def test_lookup_by_notation(self, loaded_models):
+    """Notation lookup queries label_kind='notation' AND
+    label=@notation — PR #92's emission writes one label-row
+    per declared notation where label is the notation value
+    itself."""
     fake = _FakeBQClient()
     runtime, expected = _runtime_with_lookup(loaded_models, fake)
+    # The notation-label row's ``label`` carries the notation
+    # value and ``label_kind='notation'``; the per-row
+    # ``notation`` column is the entity's display token.
     fake.add_handler(
-        "notation = @notation",
-        [_data_row(compile_fingerprint=expected)],
+        "label_kind = 'notation'",
+        [
+            _data_row(
+                label="CA",
+                label_kind="notation",
+                notation="CA",
+                compile_fingerprint=expected,
+            )
+        ],
     )
 
     rows = runtime.concept_index.lookup_by_notation("CA")
-    assert rows[0].notation == "CA"
+    assert rows[0].label == "CA"
+    assert rows[0].label_kind == "notation"
+
+  def test_lookup_by_notation_finds_secondary_notations(self, loaded_models):
+    """Reviewer's reproducer: for a multi-notation entity
+    where ``skos:notation: ["A", "B"]``, the per-row
+    ``notation`` column carries only ``"A"`` (the
+    lexicographically smallest) per PR #92's
+    ``_entity_notation()`` semantics. The old query
+    ``WHERE notation = @notation`` would miss ``"B"`` entirely.
+    The fixed query ``WHERE label_kind = 'notation' AND
+    label = @notation`` catches it because PR #92 writes a
+    dedicated ``label_kind='notation'`` row per declared
+    value."""
+    fake = _FakeBQClient()
+    runtime, expected = _runtime_with_lookup(loaded_models, fake)
+    fake.add_handler(
+        "label_kind = 'notation'",
+        [
+            # The dedicated notation row for "B" — its ``label``
+            # is "B" but the entity's display ``notation`` is
+            # the lex-min "A".
+            _data_row(
+                entity_name="MultiNotationEntity",
+                label="B",
+                label_kind="notation",
+                notation="A",
+                compile_fingerprint=expected,
+            )
+        ],
+    )
+
+    rows = runtime.concept_index.lookup_by_notation("B")
+    assert len(rows) == 1
+    assert rows[0].label == "B"
+    assert rows[0].notation == "A"  # display token, NOT the queried value
+    assert rows[0].entity_name == "MultiNotationEntity"
+
+  def test_lookup_by_notation_sql_pins_label_predicate(self, loaded_models):
+    """SQL-shape lock: capture the query and assert it
+    queries the label-kind row path, not the per-row
+    notation column. Prevents regressing to the old
+    ``WHERE notation = @notation`` behavior that misses
+    secondary notations."""
+    from bigquery_agent_analytics.extractor_compilation import cli_revalidate  # noqa: F401 — irrelevant; just for symmetry
+
+    captured = []
+
+    class _CaptureClient(_FakeBQClient):
+
+      def query(self, sql, job_config=None):
+        captured.append(sql)
+        return super().query(sql, job_config=job_config)
+
+    fake = _CaptureClient()
+    runtime, expected = _runtime_with_lookup(loaded_models, fake)
+    fake.add_handler("label_kind = 'notation'", [])
+
+    runtime.concept_index.lookup_by_notation("anything")
+    data_queries = [s for s in captured if "label_kind = 'notation'" in s]
+    assert len(data_queries) == 1
+    sql = data_queries[0]
+    assert "label = @notation" in sql
+    # The old WHERE predicate must NOT survive — locks the
+    # regression.
+    assert "WHERE notation = @notation" not in sql
 
   def test_lookup_case_insensitive_by_default(self, loaded_models):
     """Default is case-insensitive so operator queries

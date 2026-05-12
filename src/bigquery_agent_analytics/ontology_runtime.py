@@ -535,8 +535,19 @@ class ConceptIndexLookup:
       *,
       limit: int = 100,
   ) -> list[ConceptIndexRowView]:
-    """Return rows whose ``notation`` column equals
-    *notation*.
+    """Return rows for entities that declare *notation* as a
+    ``skos:notation`` value.
+
+    **Looks at the ``label_kind='notation'`` rows**, not the
+    per-row ``notation`` column. PR #92's emission writes one
+    ``label_kind='notation'`` row per declared notation
+    value (where ``label`` is the notation), and uses the
+    per-row ``notation`` column purely as the per-entity
+    *display token* — for multi-notation entities the column
+    holds the lexicographically smallest value only. Querying
+    ``WHERE notation = @notation`` would miss the entity's
+    secondary notations entirely. The label-row path
+    catches all of them.
 
     Notation matches are exact (no case folding) — notations
     are display tokens like ``"ACME-7"`` and codes like
@@ -545,7 +556,8 @@ class ConceptIndexLookup:
     self.verify()
     where_clauses = [
         "compile_fingerprint = @expected_fp",
-        "notation = @notation",
+        "label_kind = 'notation'",
+        "label = @notation",
     ]
     params: dict[str, Any] = {
         "notation": notation,

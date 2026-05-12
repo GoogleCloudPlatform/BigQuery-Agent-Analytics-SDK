@@ -46,9 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     label-kind / language / case-insensitive filters),
     ``lookup_by_entity_name``, ``lookup_by_notation``.
     Stable failure codes: ``FingerprintMismatchError``,
-    ``MetaTableMissingError``, ``MetaTableEmptyError`` —
-    all subclass ``ConceptIndexError``.
-  CI suite (39 cases) uses in-memory fake BQ clients;
+    ``MetaTableMissingError``, ``MetaTableEmptyError``,
+    ``MetaTableMultipleRowsError`` — all subclass
+    ``ConceptIndexError``.
+  CI suite (52 cases) uses in-memory fake BQ clients;
   live test (gated behind ``BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1``)
   emits a real concept-index via PR #92's path, attaches
   the runtime, runs resolver queries against the live

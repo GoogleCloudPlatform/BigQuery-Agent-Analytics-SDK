@@ -149,12 +149,12 @@ Every method returns `list[ConceptIndexRowView]` carrying the full emission sche
 
 ## Tests
 
-CI suite — `tests/test_ontology_runtime.py` (50 cases) using in-memory fake BigQuery clients:
+CI suite — `tests/test_ontology_runtime.py` (52 cases) using in-memory fake BigQuery clients:
 
 - **`TestOntologyRuntimeConstruction`** (5) — in-memory + from-files factories; `concept_index_table` requires `bq_client`; eager fingerprint verification at construction; matching-fingerprint happy path.
 - **`TestOntologyRuntimeAccessors`** (10) — entity / relationships lookup, declared-order, case-sensitivity, synonyms / annotations / schemes / notation / labels traversal (covers SKOS `inScheme` list + scalar normalization, language-suffixed annotations), provenance properties (compile_fingerprint / compile_id).
 - **`TestConceptIndexLookupVerify`** (4) — happy path, mismatch, missing meta table, empty meta table.
-- **`TestConceptIndexLookupQueries`** (8) — label / entity_name / notation lookups; `WHERE compile_fingerprint = @expected_fp` defense-in-depth lock; label-kind / language / case-insensitive filters; empty result not an error.
+- **`TestConceptIndexLookupQueries`** (10) — label / entity_name / notation lookups (notation queries `label_kind='notation' AND label=@notation` so secondary notations on multi-notation entities are caught — the per-row `notation` column carries only the lex-min display token); SQL-shape lock prevents regression to the old `WHERE notation = @notation` path; `WHERE compile_fingerprint = @expected_fp` defense-in-depth lock; label-kind / language / case-insensitive filters; empty result not an error.
 - **`TestExactEntityResolver`** (5) — known entity, missing entity, case-sensitivity (default + opt-in), empty query.
 - **`TestLabelSynonymResolver`** (5) — requires concept index; happy path; label-kind priority re-ranking (`name > pref > alt > hidden > synonym > notation`); limit cap; empty query.
 - **`TestEntityResolverProtocol`** (2) — both reference resolvers satisfy `isinstance(resolver, EntityResolver)`.
@@ -166,7 +166,7 @@ CI suite — `tests/test_ontology_runtime.py` (50 cases) using in-memory fake Bi
   - Multiple `__meta` rows → `MetaTableMultipleRowsError`; `verify()` SQL uses `LIMIT 2` so the multi-row case is detected without scanning the whole table.
   - `labels_for()` emits notation as `label_kind='notation'` (matching PR #92's six-kind vocabulary).
 
-Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery** during round-1: compiles a tiny ontology to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, runs `LabelSynonymResolver` + notation lookups, asserts every candidate carries the runtime's `compile_fingerprint`, drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323`.
+Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery.** Compiles a tiny ontology with **two notations** (`["CA", "ZZ-LATE"]`) to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, runs `LabelSynonymResolver` and `lookup_by_notation` queries for both the primary (lex-min) AND secondary notation values, asserts every candidate carries the runtime's `compile_fingerprint` and that the per-row `notation` column carries the lex-min display token while `label` is the queried notation, drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323` in ~30s.
 
 ## Out of scope (deferred)
 

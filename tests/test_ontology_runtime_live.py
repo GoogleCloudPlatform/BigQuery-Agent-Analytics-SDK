@@ -88,7 +88,11 @@ _ONTOLOGY_YAML = textwrap.dedent(
             type: string
         synonyms: ["California", "CA"]
         annotations:
-          skos:notation: "CA"
+          # Two notations: PR #92 emits one label_kind='notation'
+          # row per value, but the per-row notation column
+          # carries only the lex-min ("CA"). The live test
+          # asserts lookup_by_notation finds BOTH.
+          skos:notation: ["CA", "ZZ-LATE"]
     """
 )
 
@@ -173,9 +177,30 @@ def test_live_runtime_round_trip(tmp_path: pathlib.Path):
       assert c.compile_fingerprint == runtime.compile_fingerprint
 
     # Notation lookup roundtrips through the same gate.
+    # Primary (lex-min) notation: per-row notation column == "CA".
     rows = runtime.concept_index.lookup_by_notation("CA")
-    assert rows
+    assert rows, "expected at least one row for primary notation 'CA'"
     assert rows[0].entity_name == "CaliforniaRegion"
+    assert rows[0].label == "CA"
+    assert rows[0].label_kind == "notation"
+
+    # Secondary notation: lookup_by_notation must STILL find
+    # the entity even though the per-row notation column
+    # carries "CA" (lex-min). Locks the round-1 P2 fix
+    # against real BigQuery, not just the in-memory fake.
+    rows_zz = runtime.concept_index.lookup_by_notation("ZZ-LATE")
+    assert rows_zz, (
+        "expected lookup_by_notation('ZZ-LATE') to find the entity even "
+        "though the per-row notation column is 'CA' — querying by "
+        "label_kind='notation' AND label is the only correct path"
+    )
+    assert rows_zz[0].entity_name == "CaliforniaRegion"
+    assert rows_zz[0].label == "ZZ-LATE"
+    assert rows_zz[0].label_kind == "notation"
+    # And the per-row notation column is the display token,
+    # NOT the queried value — proving the predicate isn't
+    # accidentally matching that column.
+    assert rows_zz[0].notation == "CA"
   finally:
     client.delete_table(table_id, not_found_ok=True)
     client.delete_table(meta_table_id, not_found_ok=True)
