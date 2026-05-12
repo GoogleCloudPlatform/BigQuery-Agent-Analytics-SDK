@@ -118,24 +118,31 @@ CREATE OR REPLACE TABLE `{project}.{dataset}.campaign_runs` (
 #     keeps stale rows from prior runs out without needing a
 #     supervisor-session FK on the A2A row.
 #
-# Pairing by ``ROW_NUMBER() OVER (ORDER BY timestamp)`` is correct
-# because campaign briefs run sequentially (each ``_run_one`` awaits
-# completion before the next starts), so the chronological order is
-# strict: TS₁ < A2A₁ < TS₂ < A2A₂ < TS₃ < A2A₃.
+# Pair each supervisor ``TOOL_STARTING`` to the first A2A sub-session
+# event in the interval ``[supervisor_ts, next_supervisor_ts)``. This is
+# stricter than global row-number pairing: an extra stale A2A row can no
+# longer shift every later campaign's mapping.
 _CREATE_SUPERVISOR_A2A_INVOCATIONS = """\
 CREATE OR REPLACE TABLE `{project}.{dataset}.supervisor_a2a_invocations` AS
-WITH tool_starts AS (
+WITH tool_start_base AS (
   SELECT
     session_id AS caller_session_id,
     span_id AS supervisor_span_id,
     timestamp AS supervisor_ts,
-    user_id,
-    ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
+    user_id
   FROM `{project}.{dataset}.{table}`
   WHERE event_type = 'TOOL_STARTING'
     AND JSON_VALUE(content, '$.tool') = 'audience_risk_reviewer'
     AND JSON_VALUE(content, '$.tool_origin') = 'A2A'
     AND session_id IN UNNEST(@sessions)
+),
+tool_starts AS (
+  SELECT
+    *,
+    LEAD(supervisor_ts) OVER (
+      PARTITION BY user_id ORDER BY supervisor_ts
+    ) AS next_supervisor_ts
+  FROM tool_start_base
 ),
 window_bounds AS (
   SELECT MIN(supervisor_ts) AS min_ts FROM tool_starts
@@ -155,25 +162,48 @@ a2a_events AS (
         '$.a2a_metadata."a2a:response".metadata.adk_session_id'
       )
     ) AS receiver_session_id_from_response,
-    ROW_NUMBER() OVER (ORDER BY timestamp) AS rn
+    timestamp
   FROM `{project}.{dataset}.{table}`
   WHERE event_type = 'A2A_INTERACTION'
     AND agent = 'audience_risk_reviewer'
     AND timestamp >= (SELECT min_ts FROM window_bounds)
+),
+paired AS (
+  SELECT
+    ts.caller_session_id,
+    ts.supervisor_span_id,
+    ts.supervisor_ts,
+    ae.a2a_invocation_session_id,
+    ae.a2a_invocation_span_id,
+    ae.a2a_invocation_timestamp,
+    ae.a2a_task_id,
+    ae.a2a_context_id,
+    ae.receiver_session_id_from_response,
+    ROW_NUMBER() OVER (
+      PARTITION BY ts.caller_session_id, ts.supervisor_span_id
+      ORDER BY ae.a2a_invocation_timestamp
+    ) AS match_rank
+  FROM tool_starts AS ts
+  LEFT JOIN a2a_events AS ae
+    ON ts.user_id = ae.user_id
+    AND ae.a2a_invocation_timestamp >= ts.supervisor_ts
+    AND (
+      ts.next_supervisor_ts IS NULL
+      OR ae.a2a_invocation_timestamp < ts.next_supervisor_ts
+    )
 )
 SELECT
-  ts.caller_session_id,
-  ts.supervisor_span_id,
-  ts.supervisor_ts,
-  ae.a2a_invocation_session_id,
-  ae.a2a_invocation_span_id,
-  ae.a2a_invocation_timestamp,
-  ae.a2a_task_id,
-  ae.a2a_context_id,
-  ae.receiver_session_id_from_response
-FROM tool_starts AS ts
-JOIN a2a_events AS ae
-  ON ts.rn = ae.rn AND ts.user_id = ae.user_id
+  caller_session_id,
+  supervisor_span_id,
+  supervisor_ts,
+  a2a_invocation_session_id,
+  a2a_invocation_span_id,
+  a2a_invocation_timestamp,
+  a2a_task_id,
+  a2a_context_id,
+  receiver_session_id_from_response
+FROM paired
+WHERE match_rank = 1
 """
 
 

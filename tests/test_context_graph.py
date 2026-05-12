@@ -1304,18 +1304,24 @@ class TestDecisionSemantics:
     assert len(trail[0]["candidates"]) == 1
     assert trail[0]["candidates"][0]["status"] == "SELECTED"
 
-  def test_decision_extraction_prompt_specifies_required_fields(self):
-    """Decision extraction enumerates its field contract in the prompt.
+  def test_decision_extraction_uses_typed_ai_generate_output(self):
+    """Decision extraction uses SQL-style AI.GENERATE output_schema.
 
-    The SDK no longer passes ``output_schema`` to ``AI.GENERATE``
-    (the current BigQuery parser rejects the JSON-Schema string the
-    SDK used to send). Instead the prompt itself names every field
-    AI.GENERATE must return, and the Python side parses the result
-    JSON.
+    BigQuery rejects the old JSON-Schema string shape, but current
+    AI.GENERATE accepts SQL-style output_schema declarations. The
+    decision extractor uses that typed output for the high-variance
+    nested decision/candidate shape, then converts ``.decisions`` to
+    JSON so the Python parser keeps the same row contract.
     """
     from bigquery_agent_analytics.context_graph import _EXTRACT_DECISION_POINTS_AI_QUERY
 
-    assert "output_schema =>" not in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert "output_schema =>" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert "decisions ARRAY<STRUCT<" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert "candidates ARRAY<STRUCT<" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert "TO_JSON_STRING(" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert ").decisions" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert "model_params => JSON" in _EXTRACT_DECISION_POINTS_AI_QUERY
+    assert '"temperature": 0.0' in _EXTRACT_DECISION_POINTS_AI_QUERY
     for field in (
         "decision_type",
         "description",

@@ -33,14 +33,17 @@ before debugging the graph DDL.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
 import google.auth
 from google.cloud import bigquery
 
+from bigquery_agent_analytics import Candidate
 from bigquery_agent_analytics import ContextGraphConfig
 from bigquery_agent_analytics import ContextGraphManager
+from bigquery_agent_analytics import DecisionPoint
 from bigquery_agent_analytics import make_bq_client
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +79,14 @@ DEMO_AI_ENDPOINT = os.getenv(
 # receiver should produce at least 3 decisions and 9 candidates.
 MIN_RECEIVER_DECISIONS = int(os.getenv("DEMO_MIN_RECEIVER_DECISIONS", "3"))
 MIN_RECEIVER_CANDIDATES = int(os.getenv("DEMO_MIN_RECEIVER_CANDIDATES", "9"))
+
+_OPTION_RE = re.compile(
+    r"^\s*[-*]\s*(?P<name>.*?)\s+[-—–]\s+"
+    r"(?P<status>SELECTED|DROPPED)\s+[-—–]\s+"
+    r"score\s+(?P<score>0(?:\.\d+)?|1(?:\.0+)?)\s+[-—–]\s+"
+    r"rationale:\s*(?P<rationale>.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _discover_session_ids(
@@ -155,8 +166,7 @@ def _build_one(
   return 0
 
 
-def _check_receiver_extraction(bq_client: bigquery.Client) -> int:
-  """Receiver-side decision/candidate extraction acceptance gate."""
+def _receiver_extraction_counts(bq_client: bigquery.Client) -> tuple[int, int]:
   q = f"""
     SELECT
       (SELECT COUNT(*) FROM
@@ -167,19 +177,174 @@ def _check_receiver_extraction(bq_client: bigquery.Client) -> int:
         AS receiver_candidates
   """
   row = list(bq_client.query(q).result())[0]
-  decisions = int(row["receiver_decisions"])
-  candidates = int(row["receiver_candidates"])
+  return int(row["receiver_decisions"]), int(row["receiver_candidates"])
+
+
+def _clean_receiver_response(raw: str) -> str:
+  """Normalizes the receiver's prompt-shaped response text."""
+  text = raw.strip()
+  if text.startswith("text: "):
+    text = text[len("text: ") :].strip()
+  if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+    text = text[1:-1]
+  return text
+
+
+def _parse_receiver_decision_response(
+    session_id: str,
+    span_id: str,
+    response_text: str,
+) -> tuple[DecisionPoint, list[Candidate]] | None:
+  """Parse the receiver demo's strict three-option response contract.
+
+  This is a demo-specific safety net for live presentations. The SDK's
+  general path still uses AI.GENERATE; this parser only understands the
+  receiver_agent/prompts.py shape:
+
+    Decision type: ...
+    Options considered:
+    - name — SELECTED|DROPPED — score N.NN — rationale: ...
+
+  Returning ``None`` means the response did not match the receiver
+  contract and should remain an extraction failure.
+  """
+  text = _clean_receiver_response(response_text)
+  decision_match = re.search(r"^Decision type:\s*(.+)$", text, re.MULTILINE)
+  if not decision_match:
+    return None
+
+  candidates: list[Candidate] = []
+  decision_id = f"{session_id}:demo_receiver_dp:{span_id}:0"
+  for idx, line in enumerate(text.splitlines()):
+    option_match = _OPTION_RE.match(line)
+    if not option_match:
+      continue
+    status = option_match.group("status").upper()
+    rationale = option_match.group("rationale").strip()
+    candidates.append(
+        Candidate(
+            candidate_id=f"{decision_id}:c:{idx}",
+            decision_id=decision_id,
+            session_id=session_id,
+            name=option_match.group("name").strip(),
+            score=float(option_match.group("score")),
+            status=status,
+            rejection_rationale=None if status == "SELECTED" else rationale,
+        )
+    )
+
+  if len(candidates) < 3:
+    return None
+
+  dp = DecisionPoint(
+      decision_id=decision_id,
+      session_id=session_id,
+      span_id=span_id,
+      decision_type=decision_match.group(1).strip(),
+      description="Receiver audience-risk review extracted from prompt-shaped response.",
+  )
+  return dp, candidates
+
+
+def _repair_receiver_extraction_from_prompt_contract(
+    bq_client: bigquery.Client,
+) -> int:
+  """Fallback parse for the receiver demo's strict LLM_RESPONSE shape."""
+  q = f"""
+    SELECT
+      session_id,
+      span_id,
+      JSON_EXTRACT_SCALAR(content, '$.response') AS response_text
+    FROM `{PROJECT_ID}.{RECEIVER_DATASET_ID}.{RECEIVER_TABLE_ID}`
+    WHERE event_type = 'LLM_RESPONSE'
+      AND agent = 'audience_risk_reviewer'
+      AND content IS NOT NULL
+    ORDER BY timestamp ASC
+  """
+  rows = list(bq_client.query(q).result())
+  decision_points: list[DecisionPoint] = []
+  candidates: list[Candidate] = []
+  for row in rows:
+    response_text = row["response_text"]
+    if not response_text:
+      continue
+    parsed = _parse_receiver_decision_response(
+        session_id=str(row["session_id"]),
+        span_id=str(row["span_id"]),
+        response_text=str(response_text),
+    )
+    if parsed is None:
+      continue
+    dp, cands = parsed
+    decision_points.append(dp)
+    candidates.extend(cands)
+
+  if not decision_points or not candidates:
+    print(
+        "ERROR: receiver fallback parser found zero prompt-shaped "
+        "decisions. Tighten receiver_agent/prompts.py.",
+        file=sys.stderr,
+    )
+    return 1
+
+  manager = ContextGraphManager(
+      project_id=PROJECT_ID,
+      dataset_id=RECEIVER_DATASET_ID,
+      table_id=RECEIVER_TABLE_ID,
+      client=bq_client,
+      location=DATASET_LOCATION,
+      config=ContextGraphConfig(endpoint=DEMO_AI_ENDPOINT),
+  )
+  session_ids = sorted({dp.session_id for dp in decision_points})
+  print(
+      "Receiver AI.GENERATE extraction was below threshold; applying "
+      "demo fallback parser for receiver_agent/prompts.py contract..."
+  )
+  if not manager.store_decision_points(decision_points, candidates):
+    print("ERROR: fallback decision storage failed.", file=sys.stderr)
+    return 1
+  if not manager.create_decision_edges(session_ids):
+    print("ERROR: fallback decision edge creation failed.", file=sys.stderr)
+    return 1
+  print(
+      f"Fallback stored {len(decision_points)} receiver decision(s) and "
+      f"{len(candidates)} candidate(s)."
+  )
+  return 0
+
+
+def _check_receiver_extraction(bq_client: bigquery.Client) -> int:
+  """Receiver-side decision/candidate extraction acceptance gate."""
+  decisions, candidates = _receiver_extraction_counts(bq_client)
   print(
       f"Receiver extraction: decision_points={decisions} "
+      f"(min {MIN_RECEIVER_DECISIONS}), candidates={candidates} "
+      f"(min {MIN_RECEIVER_CANDIDATES})"
+  )
+  if (
+      decisions >= MIN_RECEIVER_DECISIONS
+      and candidates >= MIN_RECEIVER_CANDIDATES
+  ):
+    print("Receiver extraction gate OK.")
+    return 0
+
+  repair_rc = _repair_receiver_extraction_from_prompt_contract(bq_client)
+  if repair_rc != 0:
+    return repair_rc
+
+  decisions, candidates = _receiver_extraction_counts(bq_client)
+  print(
+      f"Receiver extraction after fallback: decision_points={decisions} "
       f"(min {MIN_RECEIVER_DECISIONS}), candidates={candidates} "
       f"(min {MIN_RECEIVER_CANDIDATES})"
   )
   if decisions < MIN_RECEIVER_DECISIONS or candidates < MIN_RECEIVER_CANDIDATES:
     print(
         "ERROR: receiver extraction below threshold. The receiver "
-        "system prompt likely isn't enforcing the three-option "
-        "format. Tighten receiver_agent/prompts.py before debugging "
-        "the graph DDL.",
+        "system prompt likely isn't enforcing the three-option format "
+        "and the fallback parser could not recover enough rows. "
+        "Tighten receiver_agent/prompts.py before debugging the graph "
+        "DDL.",
         file=sys.stderr,
     )
     return 1
