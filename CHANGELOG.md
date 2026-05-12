@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **``bqaa-revalidate-extractors`` CLI** in
+  `bigquery_agent_analytics.extractor_compilation.cli_revalidate`
+  and
+  [`docs/extractor_compilation_revalidate_cli.md`](docs/extractor_compilation_revalidate_cli.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  follow-up to Milestone C2.d — operationalizes
+  ``revalidate_compiled_extractors`` so ops can run periodic
+  revalidation without writing Python. **Local inputs
+  only** this round; ``--events-bq-query`` lands in a
+  follow-up so the auth/location/pagination surface gets
+  isolated from the operational-loop contract.
+  Flags: ``--bundles-root`` (auto-detects the fingerprint
+  from the first bundle's manifest; mixed fingerprints
+  fail-closed), ``--events-jsonl`` (one event per line,
+  malformed lines abort with line number), ``--reference-
+  extractors-module`` (dotted path; module exposes
+  ``EXTRACTORS: dict[str, callable]``, ``RESOLVED_GRAPH``
+  from ``resolve(ontology, binding)``, and optionally
+  ``SPEC`` — the CLI carries no ontology/binding flags
+  because the reference module owns the validator-input
+  contract), ``--thresholds-json`` (optional; JSON object
+  with any subset of ``RevalidationThresholds`` fields,
+  bounds-checked via the existing ``__post_init__``),
+  ``--report-out`` (combined JSON of the raw
+  ``RevalidationReport`` plus the ``ThresholdCheckResult``).
+  Exit codes are deliberately narrow: ``0`` pass / ``1``
+  threshold violation (report still written) / ``2``
+  usage-or-input error (report not written). Wired through
+  ``pyproject.toml [project.scripts]`` so
+  ``pip install`` exposes the binary.
 - **BigQuery-table bundle mirror** in
   `bigquery_agent_analytics.extractor_compilation.bq_bundle_mirror`
   and
