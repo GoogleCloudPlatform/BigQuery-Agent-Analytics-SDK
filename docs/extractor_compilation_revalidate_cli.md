@@ -55,7 +55,7 @@ Intentionally narrow so cron / GitHub Actions can branch on them:
 |------|---------|
 | `0` | Revalidation completed; if thresholds were supplied, every threshold passed. |
 | `1` | Revalidation completed but at least one threshold was violated. The report JSON is still written; the caller inspects `threshold_check.violations`. |
-| `2` | Usage / load / input error: bad flags (missing required, unrecognized), missing files, malformed JSONL, missing reference module surface, mixed-fingerprint bundle root, threshold validation failure, etc. The report is **not** written. `main(argv)` *returns* this code rather than raising `SystemExit` (argparse's own `error()` is routed through the same `_CliError` boundary). `--help` and `--version` still terminate via `SystemExit(0)` — that's the expected behavior for those flags. |
+| `2` | Usage / load / input error: bad flags (missing required, unrecognized), missing files, malformed JSONL, missing reference module surface, mixed-fingerprint bundle root, threshold validation failure, etc. The report is **not** written. `main(argv)` *returns* this code rather than raising `SystemExit` (argparse's own `error()` is routed through the same `_CliError` boundary). `--help` still terminates via `SystemExit(0)` — that's the expected behavior. The CLI does not define a `--version` action today. |
 
 ## Report JSON shape
 

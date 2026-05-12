@@ -149,10 +149,11 @@ def main(argv: Optional[list[str]] = None) -> int:
   ``_CliError`` from ``error()`` instead of calling
   ``sys.exit(2)``, so ``main(argv)`` reliably **returns**
   an exit code per its documented contract rather than
-  raising ``SystemExit`` mid-call. ``--help`` and
-  ``--version`` still go through argparse's own
-  ``SystemExit(0)`` path; that's the expected terminal
-  behavior for those flags."""
+  raising ``SystemExit`` mid-call. ``--help`` still goes
+  through argparse's own ``SystemExit(0)`` path; that's the
+  expected terminal behavior. The CLI does not define a
+  ``--version`` action (deliberately out of scope until the
+  package has a stable version-emission strategy)."""
   parser = _build_parser()
   try:
     args = parser.parse_args(argv)
@@ -191,9 +192,10 @@ class _NonExitingArgumentParser(argparse.ArgumentParser):
   the error through the same ``_CliError`` boundary every
   other usage failure uses.
 
-  ``exit()`` is **not** overridden, so ``--help`` and
-  ``--version`` still terminate via ``SystemExit(0)`` — that's
-  the expected terminal behavior for those flags."""
+  ``exit()`` is **not** overridden, so ``--help`` still
+  terminates via ``SystemExit(0)`` — that's the expected
+  terminal behavior. The CLI does not define a ``--version``
+  flag today."""
 
   def error(self, message: str) -> None:  # type: ignore[override]
     self.print_usage(sys.stderr)
