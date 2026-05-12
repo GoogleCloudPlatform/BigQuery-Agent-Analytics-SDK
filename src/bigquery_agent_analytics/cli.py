@@ -240,7 +240,7 @@ def _load_spec_from_args(
 # Evaluator factories                                                  #
 # ------------------------------------------------------------------ #
 
-_CODE_EVALUATORS = {
+_SYSTEM_EVALUATORS = {
     "latency": (
         lambda t: SystemEvaluator.latency(threshold_ms=t),
         lambda: SystemEvaluator.latency(),
@@ -459,7 +459,7 @@ def evaluate(
         kwargs["min_hit_rate"] = threshold
       ev = SystemEvaluator.context_cache_hit_rate(**kwargs)
     else:
-      entry = _CODE_EVALUATORS.get(evaluator)
+      entry = _SYSTEM_EVALUATORS.get(evaluator)
       if not entry:
         typer.echo(
             f"Error: unknown evaluator: {evaluator!r}.",

@@ -121,13 +121,13 @@ The SDK ships with seven ready-to-use evaluators:
 ```python
 from bigquery_agent_analytics import SystemEvaluator
 
-# Latency: score degrades linearly as avg latency approaches threshold
+# Latency: fails when average latency exceeds the threshold
 evaluator = SystemEvaluator.latency(threshold_ms=5000)
 
-# Turn count: penalizes sessions with too many back-and-forth turns
+# Turn count: fails when session turns exceed the max turns
 evaluator = SystemEvaluator.turn_count(max_turns=10)
 
-# Error rate: penalizes high tool error rates
+# Error rate: fails when tool error rate exceeds the max error rate
 evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
 
 # Token efficiency: checks total token usage stays within budget

@@ -281,7 +281,7 @@ class GraderPipeline:
       evaluator: SystemEvaluator,
       weight: float = 1.0,
   ) -> GraderPipeline:
-    """Adds a SystemEvaluator grader to the pipeline.
+    """Adds a code-based grader to the pipeline.
 
     Args:
         evaluator: A SystemEvaluator instance.

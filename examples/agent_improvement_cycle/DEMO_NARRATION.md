@@ -217,5 +217,5 @@ By default, the script runs a single cycle and stops. The `--auto` flag enables 
 ## [CLOSING]
 
 That's the agent improvement cycle. Capture sessions with the BigQuery Agent Analytics Plugin, evaluate quality with the SDK's LLM judge,
-check operational metrics with the SDK's SystemEvaluator, optimize prompts with Vertex AI, and measure the results — all automated, all repeatable. 
+check operational metrics with the SDK's SystemEvaluator, optimize prompts with Vertex AI, and measure the results — all automated, all repeatable.
 The golden eval set grows with every cycle, so failures you discover today become regression tests for tomorrow.

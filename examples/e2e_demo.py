@@ -59,9 +59,9 @@ from google.genai import types
 # ---------------------------------------------------------------------------
 from bigquery_agent_analytics import BigQueryTraceEvaluator
 from bigquery_agent_analytics import Client
-from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import InsightsConfig
 from bigquery_agent_analytics import LLMAsJudge
+from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import TraceFilter
 from bigquery_agent_analytics.trace_evaluator import MatchType
 

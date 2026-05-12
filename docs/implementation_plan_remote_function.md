@@ -220,30 +220,13 @@ Dispatch logic:
 ```python
 # Map CLI --evaluator to SDK factory
 EVALUATOR_FACTORIES = {
-    "latency": (
-        lambda t: SystemEvaluator.latency(threshold_ms=t),
-        lambda: SystemEvaluator.latency(),
-    ),
-    "error_rate": (
-        lambda t: SystemEvaluator.error_rate(max_error_rate=t),
-        lambda: SystemEvaluator.error_rate(),
-    ),
-    "turn_count": (
-        lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
-        lambda: SystemEvaluator.turn_count(),
-    ),
-    "token_efficiency": (
-        lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
-        lambda: SystemEvaluator.token_efficiency(),
-    ),
-    "ttft": (
-        lambda t: SystemEvaluator.ttft(threshold_ms=t),
-        lambda: SystemEvaluator.ttft(),
-    ),
-    "cost": (
-        lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
-        lambda: SystemEvaluator.cost_per_session(),
-    ),
+    "latency": lambda t: SystemEvaluator.latency(threshold_ms=t),
+    "error_rate": lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+    "turn_count": lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+    "token_efficiency": lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
+    "ttft": lambda t: SystemEvaluator.ttft(threshold_ms=t),
+    "cost": lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
+    "llm-judge": None,  # special handling
 }
 # context_cache_hit_rate is special-cased so callers can pass
 # fail_on_missing_telemetry in addition to threshold/min_hit_rate.
