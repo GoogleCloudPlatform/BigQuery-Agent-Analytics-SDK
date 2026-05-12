@@ -54,8 +54,9 @@ The auditor-side projections built by `build_joint_graph.py` are scoped to the c
 
 After `run_e2e_demo.sh` succeeds (or after the manual two-terminal flow returns zero on every step), you have:
 
-- `<PROJECT>.a2a_caller_demo.agent_events` — caller-side spans, including `A2A_INTERACTION` rows
+- `<PROJECT>.a2a_caller_demo.agent_events` — caller-side spans, including `A2A_INTERACTION` rows (ADK 1.33: written under the `audience_risk_reviewer` sub-session, not the supervisor's session — see `A2A_JOINT_LINEAGE.md` for the mapping)
 - `<PROJECT>.a2a_caller_demo.campaign_runs` — campaign ↔ caller-session map
+- `<PROJECT>.a2a_caller_demo.supervisor_a2a_invocations` — supervisor↔A2A-sub-session mapping that bridges the ADK 1.33 split-session telemetry shape, written by `run_caller_agent.py` after caller flush
 - `<PROJECT>.a2a_caller_demo.{extracted_biz_nodes,decision_points,candidates,…}` — caller graph backing tables
 - `<PROJECT>.a2a_caller_demo.agent_context_graph` — caller property graph
 - `<PROJECT>.a2a_receiver_demo.agent_events` — receiver-side spans
@@ -84,6 +85,8 @@ receiver.agent_events.session_id
 ```
 
 This works because [`adk-python`'s `convert_a2a_request_to_agent_run_request`](https://github.com/google/adk-python/blob/main/src/google/adk/a2a/converters/request_converter.py) sets `session_id := request.context_id`, and `run_receiver_server.py` runs an `InMemorySessionService` that honors explicit session ids. `build_joint_graph.py`'s `joint_a2a_edges` projection materializes the join.
+
+**Caller-side mapping (ADK 1.33).** `RemoteA2aAgent` in `google-adk` 1.33 spawns its own caller-side `InvocationContext` with a fresh `session_id`, so the `A2A_INTERACTION` row lives in a sibling caller-side session (`agent='audience_risk_reviewer'`) — *not* under the supervisor session that triggered the delegation. The two sessions share only `user_id` and `app_name`. `run_caller_agent.py` therefore materializes an explicit `supervisor_a2a_invocations` mapping table (chronological-rank pairing within the current run) and `build_joint_graph.remote_agent_invocations` reads from that mapping, so the auditor's `CallerCampaignRun -> RemoteAgentInvocation` edge keeps pointing at the supervisor session id. See [`A2A_JOINT_LINEAGE.md`](A2A_JOINT_LINEAGE.md#adk-133-sub-session-shape) for the full mapping schema and acceptance-gate G1.5.
 
 Per-span `a2a_task_id` propagation onto receiver spans is **deferred to a follow-up** because current ADK request conversion does not plumb `RequestContext.task_id` into the receiver invocation context for the BQ AA Plugin to stamp. The auditor join does not depend on it.
 
