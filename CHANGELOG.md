@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **BigQuery-table bundle mirror** in
+  `bigquery_agent_analytics.extractor_compilation.bq_bundle_mirror`
+  and
+  [`docs/extractor_compilation_bq_bundle_mirror.md`](docs/extractor_compilation_bq_bundle_mirror.md).
+  Issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  PR C2.c.3 — publishes compiled bundles to a BigQuery
+  table and syncs them back into a local directory for
+  C2.a's existing loader. Runtime path stays
+  ``sync_bundles_from_bq → discover_bundles →
+  from_bundles_root``; the mirror is a utility, not a
+  runtime loader. Public surface:
+  ``publish_bundles_to_bq(bundle_root, store,
+  bundle_fingerprint_allowlist=None)`` and
+  ``sync_bundles_from_bq(store, dest_dir,
+  bundle_fingerprint_allowlist=None)``. Both call
+  :func:`load_bundle` as a gate — publish refuses bundles
+  that wouldn't load at the runtime; sync refuses bundles
+  whose reconstruction the loader rejects, scrubbing any
+  partial directory it wrote. Strict
+  bundle-shape check: the table stores exactly two rows
+  per fingerprint (``manifest.json`` + the manifest's
+  ``module_filename``); ``unexpected_file`` codes reject
+  anything else. ``invalid_bundle_path`` rejects
+  traversal / absolute / backslash / NUL paths before
+  writing to disk. ``duplicate_row`` rejects two rows
+  sharing the same ``(fingerprint, bundle_path)`` (BigQuery
+  has no unique constraint; the mirror enforces uniqueness
+  at sync). ``malformed_row`` rejects rows with wrong
+  field types. Idempotent republish via DELETE+INSERT in
+  ``BigQueryBundleStore.publish_rows`` —
+  re-publishing the same fingerprint replaces the prior
+  rows rather than accumulating duplicates.
+  ``BundleStore`` is a Protocol so tests can pass in-memory
+  fakes; ``BigQueryBundleStore`` is the concrete
+  implementation wrapping ``google.cloud.bigquery``.
+  ``BUNDLE_MIRROR_TABLE_SCHEMA`` is exported for callers
+  who need to create the table themselves (or
+  ``BigQueryBundleStore.ensure_table()`` does it
+  idempotently). Failure codes are stable strings;
+  per-bundle problems land in ``failures`` instead of
+  raising. Store exceptions (BQ-side: network, auth, table
+  missing) propagate. Out of scope: GCS-backed signed-URL
+  fetch, caching / TTL, garbage collection, multi-region
+  replication.
 - **Revalidation harness for compiled structured extractors**
   in
   `bigquery_agent_analytics.extractor_compilation.revalidation`

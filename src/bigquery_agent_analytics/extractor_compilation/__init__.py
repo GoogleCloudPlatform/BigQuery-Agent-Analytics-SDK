@@ -42,6 +42,15 @@ from __future__ import annotations
 from .ast_validator import AstFailure
 from .ast_validator import AstReport
 from .ast_validator import validate_source
+from .bq_bundle_mirror import BigQueryBundleStore
+from .bq_bundle_mirror import BUNDLE_MIRROR_TABLE_SCHEMA
+from .bq_bundle_mirror import BundleRow
+from .bq_bundle_mirror import BundleStore
+from .bq_bundle_mirror import MirrorFailure
+from .bq_bundle_mirror import publish_bundles_to_bq
+from .bq_bundle_mirror import PublishResult
+from .bq_bundle_mirror import sync_bundles_from_bq
+from .bq_bundle_mirror import SyncResult
 from .bundle_loader import discover_bundles
 from .bundle_loader import DiscoveryResult
 from .bundle_loader import load_bundle
@@ -96,6 +105,10 @@ __all__ = [
     "AstFailure",
     "AstReport",
     "AttemptRecord",
+    "BUNDLE_MIRROR_TABLE_SCHEMA",
+    "BigQueryBundleStore",
+    "BundleRow",
+    "BundleStore",
     "CompileMeasurement",
     "CompileResult",
     "CompileSource",
@@ -108,9 +121,11 @@ __all__ = [
     "FieldMapping",
     "LLMClient",
     "Manifest",
+    "MirrorFailure",
     "OutcomeCallback",
     "PlanParseError",
     "PlanResolver",
+    "PublishResult",
     "RESOLVED_EXTRACTOR_PLAN_JSON_SCHEMA",
     "ResolvedExtractorPlan",
     "RetryCompileResult",
@@ -118,6 +133,7 @@ __all__ = [
     "RevalidationThresholds",
     "SmokeTestReport",
     "SpanHandlingRule",
+    "SyncResult",
     "ThresholdCheckResult",
     "WrappedRegistry",
     "build_ast_diagnostic",
@@ -139,8 +155,10 @@ __all__ = [
     "load_callable_from_source",
     "now_iso_utc",
     "parse_resolved_extractor_plan_json",
+    "publish_bundles_to_bq",
     "render_extractor_source",
     "revalidate_compiled_extractors",
+    "sync_bundles_from_bq",
     "run_smoke_test",
     "run_smoke_test_in_subprocess",
     "run_with_fallback",
