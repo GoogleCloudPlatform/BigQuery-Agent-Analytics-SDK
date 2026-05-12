@@ -342,19 +342,24 @@ def revalidate_compiled_extractors(
   2. For events whose decision is ``compiled_unchanged`` or
      ``compiled_filtered``, call the reference extractor
      separately and compare its output against the wrapper's
-     output via the parity comparator from
-     ``measurement.py``. Result is recorded as
-     ``parity_match`` / ``parity_divergence``.
+     output via three comparators: :func:`_compare_nodes`
+     and :func:`_compare_span_handling` from
+     ``measurement.py``, plus :func:`_compare_edges` defined
+     locally (kept here because the renderer doesn't emit
+     edges, so ``measure_compile`` doesn't need it).
+     Result is recorded as ``parity_match`` /
+     ``parity_divergence``.
   3. For ``fallback_for_event`` events the compiled output
      never reaches downstream, so parity is recorded as
      ``parity_not_checked``.
 
-  The reference call is wrapped in ``try/except Exception`` —
-  a reference exception on a single event is recorded as a
-  parity divergence ("``reference extractor raised ...``") and
-  the batch keeps going. The wrapper itself never crashes the
-  batch on compiled-extractor failures (per
-  :func:`run_with_fallback`'s contract).
+  Every failure mode on the reference side becomes a parity
+  divergence, never a batch abort: exceptions, non-
+  ``StructuredExtractionResult`` returns (including
+  ``None``), and comparator crashes all funnel into the
+  divergence channel with a descriptive string. The wrapper
+  itself never crashes the batch on compiled-extractor
+  failures (per :func:`run_with_fallback`'s contract).
 
   Args:
     events: Sample events to revalidate against. Typically a
