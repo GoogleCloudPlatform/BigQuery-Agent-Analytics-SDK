@@ -29,7 +29,7 @@ bqaa-revalidate-extractors \
 | `--events-jsonl` | yes | Path to a JSONL file (one event JSON object per line). Empty lines are skipped; malformed lines abort with exit 2 naming the line number. |
 | `--reference-extractors-module` | yes | Dotted Python path to a module exposing the reference-module contract below. |
 | `--thresholds-json` | no | Optional JSON file mapping `RevalidationThresholds` field names to numeric rates in `[0, 1]`. When omitted, no threshold check is performed and exit is 0 on a successful run. |
-| `--report-out` | yes | Path to write the combined JSON report. Parent directories are NOT created automatically. |
+| `--report-out` | yes | Path to write the combined JSON report. Parent directories are NOT created automatically; a missing parent directory fails at preflight with exit 2 before any work runs (no report written). Other write errors (permissions, disk full) also surface as clean exit 2. |
 
 ## Reference module contract
 
@@ -110,10 +110,10 @@ Unknown fields, out-of-range rates (`5.0` intended as 5%), NaN, and bool all fai
 
 ## Tests
 
-`tests/test_extractor_compilation_cli_revalidate.py` (15 cases):
+`tests/test_extractor_compilation_cli_revalidate.py` (18 cases):
 
 - **`TestCliEndToEnd`** (3) — happy path (exit 0, report written, `threshold_check: null`); threshold pass (exit 0, `ok: true`); threshold violation (exit 1, report still written with violations listed).
-- **`TestCliUsageErrors`** (11) — missing events file; malformed JSONL line; missing bundles root; mixed-fingerprint bundle root; empty bundle root; reference module not importable; reference module missing `EXTRACTORS`; reference module missing `RESOLVED_GRAPH`; bad `EXTRACTORS` shape; thresholds JSON with unknown field; thresholds JSON with out-of-range rate.
+- **`TestCliUsageErrors`** (14) — missing events file; malformed JSONL line; missing bundles root; mixed-fingerprint bundle root; empty bundle root; reference module not importable; reference module missing `EXTRACTORS`; reference module missing `RESOLVED_GRAPH`; bad `EXTRACTORS` shape; thresholds JSON with unknown field; thresholds JSON with out-of-range rate; **missing `--report-out` parent directory** (preflight catches it before any work runs); **invalid UTF-8 in `--events-jsonl`** (wrapped as clean exit 2); **invalid UTF-8 in `--thresholds-json`** (same).
 - **`test_console_script_entry_point_registered`** (1) — locks the `pyproject.toml` `[project.scripts]` entry so a typo in the entry-point string fails CI rather than breaking the binary at user-install time.
 
 ## Out of scope (deferred)

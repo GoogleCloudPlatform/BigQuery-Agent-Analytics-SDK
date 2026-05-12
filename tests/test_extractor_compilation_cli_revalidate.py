@@ -721,6 +721,123 @@ class TestCliUsageErrors:
     err = capsys.readouterr().err
     assert "validation failed" in err
 
+  def test_report_out_parent_missing_exits_two_cleanly(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+      cleanup_reference_modules,
+  ):
+    """``--report-out missing/report.json`` used to raise
+    ``FileNotFoundError`` out of ``_write_report``. Preflight
+    in ``_load_config`` now catches the missing parent
+    directory before doing any work; the CLI exits 2 with a
+    clean message instead of a traceback."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    events_path = _write_events_jsonl(tmp_path / "events.jsonl")
+    ref_module = cleanup_reference_modules("missing_parent")
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-jsonl",
+            str(events_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "does-not-exist" / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--report-out" in err
+    assert "does not exist" in err
+    # Crucially: no report leaked into the (nonexistent)
+    # parent dir.
+    assert not (tmp_path / "does-not-exist").exists()
+
+  def test_events_jsonl_invalid_utf8_exits_two_cleanly(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+      cleanup_reference_modules,
+  ):
+    """Invalid UTF-8 in ``--events-jsonl`` (e.g. a binary file
+    passed by mistake) used to escape as ``UnicodeDecodeError``.
+    Now surfaces as a clean exit 2 with the file path
+    named."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+
+    # Bytes that aren't valid UTF-8 — 0xff is never a valid
+    # start byte.
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_bytes(b"\xff\xfe not utf-8\n")
+
+    ref_module = cleanup_reference_modules("bad_utf8_events")
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-jsonl",
+            str(events_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--events-jsonl" in err
+    assert "UTF-8" in err
+    assert not (tmp_path / "report.json").exists()
+
+  def test_thresholds_json_invalid_utf8_exits_two_cleanly(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+      cleanup_reference_modules,
+  ):
+    """Same defensive shape on the thresholds reader."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    events_path = _write_events_jsonl(tmp_path / "events.jsonl")
+    ref_module = cleanup_reference_modules("bad_utf8_thresholds")
+
+    thresholds_path = tmp_path / "thresholds.json"
+    thresholds_path.write_bytes(b"\xff\xfe not utf-8")
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-jsonl",
+            str(events_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--thresholds-json",
+            str(thresholds_path),
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--thresholds-json" in err
+    assert "UTF-8" in err
+
   def test_console_script_entry_point_registered(self):
     """The ``console_scripts`` entry in ``pyproject.toml``
     points at :func:`main`. Lock with importlib metadata so

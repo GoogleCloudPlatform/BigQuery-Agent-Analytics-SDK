@@ -237,6 +237,25 @@ def _load_config(args: argparse.Namespace) -> _CliConfig:
   shapes line up → references resolve. A failure on an earlier
   gate prevents later gates from running with garbage inputs.
   """
+  # Preflight ``--report-out`` first so we fail fast on a bad
+  # destination *before* doing any work. The docs promise
+  # parent directories are not created automatically; if the
+  # parent doesn't exist we surface that here at exit 2 rather
+  # than letting a ``FileNotFoundError`` escape later from
+  # ``path.write_text(...)``. Permission / disk-full errors at
+  # write time are wrapped in :func:`_write_report` as a
+  # second line of defense.
+  report_parent = args.report_out.parent
+  # ``Path("foo").parent`` is ``Path(".")`` for a bare
+  # filename; treat the current working directory as
+  # implicitly present.
+  if str(report_parent) not in ("", ".") and not report_parent.is_dir():
+    raise _CliError(
+        f"--report-out parent directory {str(report_parent)!r} does not "
+        f"exist; create it before running revalidation (the CLI does not "
+        f"create parent directories automatically)"
+    )
+
   if not args.events_jsonl.is_file():
     raise _CliError(f"--events-jsonl {str(args.events_jsonl)!r} is not a file")
   events = _load_jsonl(args.events_jsonl)
@@ -315,23 +334,41 @@ def _load_jsonl(path: pathlib.Path) -> list[dict]:
   shaped events whose ``event_type`` lacks coverage, NOT to
   paper over corrupt input."""
   events: list[dict] = []
-  with path.open("r", encoding="utf-8") as fh:
-    for line_no, raw in enumerate(fh, start=1):
-      line = raw.strip()
-      if not line:
-        continue
-      try:
-        obj = json.loads(line)
-      except json.JSONDecodeError as exc:
-        raise _CliError(
-            f"--events-jsonl line {line_no}: invalid JSON: {exc.msg}"
-        ) from exc
-      if not isinstance(obj, dict):
-        raise _CliError(
-            f"--events-jsonl line {line_no}: expected a JSON object, got "
-            f"{type(obj).__name__}"
-        )
-      events.append(obj)
+  # Wrap open + iteration in try/except for OSError (permission
+  # denied, file removed between is_file check and open, etc.)
+  # and UnicodeError (invalid UTF-8 bytes — the docs promise
+  # JSONL but a tampered or wrong-encoding file would raise
+  # ``UnicodeDecodeError`` mid-iteration). Both surface as
+  # ``_CliError`` so the CLI exits cleanly at code 2 with the
+  # file path named, instead of leaking a raw traceback.
+  try:
+    with path.open("r", encoding="utf-8") as fh:
+      for line_no, raw in enumerate(fh, start=1):
+        line = raw.strip()
+        if not line:
+          continue
+        try:
+          obj = json.loads(line)
+        except json.JSONDecodeError as exc:
+          raise _CliError(
+              f"--events-jsonl line {line_no}: invalid JSON: {exc.msg}"
+          ) from exc
+        if not isinstance(obj, dict):
+          raise _CliError(
+              f"--events-jsonl line {line_no}: expected a JSON object, got "
+              f"{type(obj).__name__}"
+          )
+        events.append(obj)
+  except UnicodeError as exc:
+    raise _CliError(
+        f"--events-jsonl {str(path)!r}: not valid UTF-8 "
+        f"({type(exc).__name__}: {exc})"
+    ) from exc
+  except OSError as exc:
+    raise _CliError(
+        f"--events-jsonl {str(path)!r}: I/O error: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
   return events
 
 
@@ -484,7 +521,19 @@ def _load_thresholds(path: pathlib.Path) -> RevalidationThresholds:
   if not path.is_file():
     raise _CliError(f"--thresholds-json {str(path)!r} is not a file")
   try:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+  except UnicodeError as exc:
+    raise _CliError(
+        f"--thresholds-json {str(path)!r}: not valid UTF-8 "
+        f"({type(exc).__name__}: {exc})"
+    ) from exc
+  except OSError as exc:
+    raise _CliError(
+        f"--thresholds-json {str(path)!r}: I/O error: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
+  try:
+    raw = json.loads(text)
   except json.JSONDecodeError as exc:
     raise _CliError(f"--thresholds-json invalid JSON: {exc.msg}") from exc
   if not isinstance(raw, dict):
@@ -524,9 +573,21 @@ def _write_report(
           }
       ),
   }
-  path.write_text(
-      json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-  )
+  # Preflight in :func:`_load_config` catches the common
+  # missing-parent-dir typo; this catch handles the rest
+  # (permissions, disk full, parent removed between preflight
+  # and write). Surface as ``_CliError`` so :func:`main`
+  # converts it to ``EXIT_USAGE_ERROR`` rather than letting
+  # the traceback escape.
+  try:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+  except OSError as exc:
+    raise _CliError(
+        f"--report-out {str(path)!r}: I/O error writing report: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
 
 
 if __name__ == "__main__":  # pragma: no cover — invoked via console_scripts
