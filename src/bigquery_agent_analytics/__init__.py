@@ -720,6 +720,7 @@ from .ontology_runtime import FingerprintMismatchError
 from .ontology_runtime import LabelSynonymResolver
 from .ontology_runtime import MetaTableEmptyError
 from .ontology_runtime import MetaTableMissingError
+from .ontology_runtime import MetaTableMultipleRowsError
 from .ontology_runtime import OntologyRuntime
 from .ontology_runtime import ResolverCandidate
 
@@ -734,6 +735,7 @@ __all__.extend(
         "LabelSynonymResolver",
         "MetaTableEmptyError",
         "MetaTableMissingError",
+        "MetaTableMultipleRowsError",
         "OntologyRuntime",
         "ResolverCandidate",
     ]

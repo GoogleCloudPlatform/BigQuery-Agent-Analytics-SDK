@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import re
 from typing import Any, Optional, Protocol, runtime_checkable, Union
 
 from bigquery_ontology import Binding
@@ -107,6 +108,7 @@ __all__ = [
     "LabelSynonymResolver",
     "MetaTableEmptyError",
     "MetaTableMissingError",
+    "MetaTableMultipleRowsError",
     "OntologyRuntime",
     "ResolverCandidate",
 ]
@@ -123,6 +125,18 @@ _LABEL_KIND_PRIORITY: tuple[str, ...] = (
     "synonym",
     "notation",
 )
+
+# BigQuery table identifiers go into backtick-quoted SQL in
+# ``verify()`` and ``_run_lookup()``. Match the same strictness
+# as ``BigQueryBundleStore`` (Phase C): exactly three ASCII
+# segments, each ``[A-Za-z0-9_-]+``, no characters that could
+# break out of the backtick-quoted identifier. ``fullmatch``
+# (not ``match``) so a trailing newline can't sneak past
+# Python's lenient ``$``.
+_TABLE_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$"
+)
+
 
 # Columns the lookup expects on the main concept-index table.
 # Matches `_MAIN_COLUMNS` in
@@ -209,6 +223,22 @@ class MetaTableEmptyError(ConceptIndexError):
         f"concept index {table_id!r}: __meta sibling table is empty"
     )
     self.table_id = table_id
+
+
+class MetaTableMultipleRowsError(ConceptIndexError):
+  """The ``__meta`` sibling table has more than one row. PR
+  #92's emission writes exactly one meta row per table;
+  multiple rows indicate manual tampering (e.g. a duplicate
+  insert) and the runtime can't pick a "winning" fingerprint
+  without ambiguity. Fail-closed."""
+
+  def __init__(self, *, table_id: str, row_count_at_least: int) -> None:
+    super().__init__(
+        f"concept index {table_id!r}: __meta sibling table has "
+        f"{row_count_at_least}+ rows (expected exactly 1)"
+    )
+    self.table_id = table_id
+    self.row_count_at_least = row_count_at_least
 
 
 # ------------------------------------------------------------------ #
@@ -326,12 +356,30 @@ class ConceptIndexLookup:
       expected_compile_fingerprint: str,
       compiler_version: str,
   ) -> None:
+    # ``table_id`` is interpolated into backtick-quoted SQL in
+    # ``verify()`` and ``_run_lookup()``. Validate the shape at
+    # construction so a caller-supplied identifier containing a
+    # backtick, semicolon, whitespace, or comment marker can't
+    # break out of the quoted identifier and inject SQL. Same
+    # discipline as ``BigQueryBundleStore`` (Phase C).
+    # ``fullmatch`` (not ``match``) so a trailing newline can't
+    # sneak past Python's lenient ``$``.
+    if not isinstance(table_id, str):
+      raise ValueError(
+          f"table_id must be a string; got {type(table_id).__name__}"
+      )
+    if not _TABLE_ID_PATTERN.fullmatch(table_id):
+      raise ValueError(
+          f"table_id {table_id!r} is not a well-formed "
+          f"'project.dataset.table' identifier "
+          f"(allowed per segment: ASCII letters, digits, '_', "
+          f"'-'; exactly three segments)"
+      )
     self._bq_client = bq_client
     self._table_id = table_id
     self._meta_table_id = table_id + "__meta"
     self._expected_compile_fingerprint = expected_compile_fingerprint
     self._compiler_version = compiler_version
-    self._verified = False
 
   # -------------------------------------------------------- #
   # Properties                                               #
@@ -351,20 +399,32 @@ class ConceptIndexLookup:
 
   def verify(self) -> None:
     """Read the ``__meta`` sibling row and check it matches
-    the locally-computed compile_fingerprint. Idempotent —
-    re-running is a no-op after the first success.
+    the locally-computed compile_fingerprint.
+
+    **Always re-queries the table.** The caller can re-invoke
+    before a long batch to catch a table swap or
+    fingerprint-update mid-flight; the constructor calls this
+    eagerly so the initial mismatch surfaces at startup, but
+    subsequent calls hit BigQuery again — there's no cached
+    "already verified" fast path.
+
+    ``LIMIT 2`` so we can distinguish "exactly one meta row"
+    (the contract — PR #92's emission writes exactly one
+    row) from "multiple meta rows" (tampering). An empty
+    table and a multi-row table both fail closed with
+    distinct error codes.
 
     Raises:
       MetaTableMissingError: the ``__meta`` table doesn't
         exist or the query failed.
       MetaTableEmptyError: the ``__meta`` table has zero rows.
+      MetaTableMultipleRowsError: the ``__meta`` table has
+        more than one row.
       FingerprintMismatchError: the ``__meta`` row's
         ``compile_fingerprint`` differs from
         ``expected_compile_fingerprint``.
     """
-    if self._verified:
-      return
-    sql = f"SELECT compile_fingerprint " f"FROM `{self._meta_table_id}` LIMIT 1"
+    sql = f"SELECT compile_fingerprint FROM `{self._meta_table_id}` LIMIT 2"
     try:
       rows = list(self._bq_client.query(sql).result())
     except Exception as exc:  # noqa: BLE001 — record + raise
@@ -374,6 +434,14 @@ class ConceptIndexLookup:
       ) from exc
     if not rows:
       raise MetaTableEmptyError(table_id=self._table_id)
+    if len(rows) > 1:
+      # Re-read the actual row count for a clearer message.
+      # ``LIMIT 2`` saw at least two rows; the real count may
+      # be higher.
+      raise MetaTableMultipleRowsError(
+          table_id=self._table_id,
+          row_count_at_least=len(rows),
+      )
     actual = rows[0]["compile_fingerprint"]
     if actual != self._expected_compile_fingerprint:
       raise FingerprintMismatchError(
@@ -382,7 +450,6 @@ class ConceptIndexLookup:
           actual_compile_fingerprint=actual,
           compiler_version=self._compiler_version,
       )
-    self._verified = True
 
   # -------------------------------------------------------- #
   # Public lookup API                                        #
@@ -864,19 +931,26 @@ class OntologyRuntime:
     """Tuple of every entity, in declared order."""
     return tuple(self.ontology.entities)
 
-  def relationship(self, name: str) -> Optional[Relationship]:
-    """Return the relationship with the given name, or
-    ``None``."""
-    if not name:
-      return None
-    for rel in self.ontology.relationships:
-      if rel.name == name:
-        return rel
-    return None
-
   def relationships(self) -> tuple[Relationship, ...]:
     """Tuple of every relationship, in declared order."""
     return tuple(self.ontology.relationships)
+
+  def relationships_by_name(self, name: str) -> tuple[Relationship, ...]:
+    """Return every relationship whose ``name`` matches.
+
+    Returns a tuple (possibly empty, possibly multi-element)
+    rather than a single instance because relationship names
+    are **not unique** in this data model. Per the #58
+    reader contract, traversal-style names like
+    ``skos_broader`` can legally repeat across distinct
+    ``(from, to)`` endpoint pairs — a singular
+    ``relationship(name)`` accessor would silently return
+    the first match and hide the others, making
+    duplicate-name ontologies subtly wrong. Callers must
+    handle the tuple shape explicitly."""
+    if not name:
+      return ()
+    return tuple(rel for rel in self.ontology.relationships if rel.name == name)
 
   # -------------------------------------------------------- #
   # SKOS / label traversal                                   #
@@ -904,13 +978,15 @@ class OntologyRuntime:
     """Return ``(label, label_kind)`` tuples for every label
     declared on the entity.
 
-    Sources:
+    Sources (all six kinds the concept-index emission
+    produces):
 
     * Entity name itself → ``("Name", "name")``.
     * Each ``synonyms`` entry → ``(value, "synonym")``.
     * Annotation keys ``skos:prefLabel`` / ``skos:altLabel`` /
       ``skos:hiddenLabel`` (with or without ``@<lang>`` suffix)
       → ``(value, "pref" / "alt" / "hidden")``.
+    * Each ``skos:notation`` value → ``(value, "notation")``.
 
     Matches the kind taxonomy used by the concept-index
     emission so a caller comparing in-memory labels against
@@ -934,6 +1010,11 @@ class OntologyRuntime:
               labels.append((v, kind))
         elif isinstance(value, str):
           labels.append((value, kind))
+    # ``skos:notation`` is a first-class label_kind in the
+    # concept-index emission, so include every notation value
+    # here too. Scalar OR list.
+    for notation in self.notations_for(entity_name):
+      labels.append((notation, "notation"))
     return tuple(labels)
 
   def schemes_for(self, entity_name: str) -> tuple[str, ...]:
@@ -956,25 +1037,121 @@ class OntologyRuntime:
     """Return the entity's ``skos:notation`` value, or
     ``None``. When multiple notations are declared, returns
     the first (matching the emission's first-notation rule)."""
+    return _first_string_value(
+        self._annotation_raw(entity_name, "skos:notation")
+    )
+
+  def notations_for(self, entity_name: str) -> tuple[str, ...]:
+    """Return every ``skos:notation`` value declared on the
+    entity (scalar or list normalized to a tuple). Empty tuple
+    when the entity has none or doesn't exist.
+
+    Companion to :meth:`notation_for` for callers that need
+    every notation (the concept-index emission writes one
+    ``label_kind='notation'`` row per declared value)."""
+    return _all_string_values(
+        self._annotation_raw(entity_name, "skos:notation")
+    )
+
+  # -------------------------------------------------------- #
+  # SKOS traversal                                           #
+  # -------------------------------------------------------- #
+
+  def in_scheme(self, scheme: str) -> tuple[str, ...]:
+    """Return the names of entities that are members of
+    *scheme* (``skos:inScheme`` annotation contains the
+    scheme). Forward map: scheme → entities. Empty tuple
+    when the scheme has no members."""
+    if not scheme:
+      return ()
+    return tuple(
+        ent.name
+        for ent in self.ontology.entities
+        if scheme in self.schemes_for(ent.name)
+    )
+
+  def broader(self, entity_name: str) -> tuple[str, ...]:
+    """Return the entity names this concept declares as
+    ``skos:broader``. Direct parents — does not transitively
+    walk the hierarchy. Empty tuple when the entity has no
+    broader concepts or doesn't exist."""
+    return _all_string_values(self._annotation_raw(entity_name, "skos:broader"))
+
+  def narrower(self, entity_name: str) -> tuple[str, ...]:
+    """Return the entity names that declare this concept as
+    their ``skos:broader`` (direct children).
+
+    Inverse direction of :meth:`broader` — computed by walking
+    every entity's ``skos:broader`` annotation and returning
+    those whose value(s) include *entity_name*. Does not
+    transitively walk the hierarchy.
+    """
+    if not entity_name:
+      return ()
+    out: list[str] = []
+    for ent in self.ontology.entities:
+      if entity_name in _all_string_values(
+          ent.annotations.get("skos:broader") if ent.annotations else None
+      ):
+        out.append(ent.name)
+    return tuple(out)
+
+  def related(self, entity_name: str) -> tuple[str, ...]:
+    """Return the entity names this concept declares as
+    ``skos:related``. Empty tuple when the entity has none
+    or doesn't exist. The relation is *not* automatically
+    symmetric in this accessor — if A declares related=B but
+    B doesn't declare related=A, then ``related("A")`` returns
+    ``("B",)`` and ``related("B")`` returns ``()``. SKOS
+    treats ``related`` as symmetric; tooling that needs the
+    symmetric closure should combine ``related("A") +
+    related_inverse_walk(...)`` itself."""
+    return _all_string_values(self._annotation_raw(entity_name, "skos:related"))
+
+  # -------------------------------------------------------- #
+  # Internal: annotation reader                              #
+  # -------------------------------------------------------- #
+
+  def _annotation_raw(self, entity_name: str, key: str) -> Any:
+    """Return the raw annotation value (scalar / list / None)
+    for *key* on *entity_name*. Internal — public callers
+    should use the typed accessors above."""
     ent = self.entity(entity_name)
     if ent is None or not ent.annotations:
       return None
-    raw = ent.annotations.get("skos:notation")
-    if raw is None:
-      return None
-    if isinstance(raw, list):
-      for v in raw:
-        if isinstance(v, str):
-          return v
-      return None
-    if isinstance(raw, str):
-      return raw
-    return None
+    return ent.annotations.get(key)
 
 
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
 # ------------------------------------------------------------------ #
+
+
+def _first_string_value(raw: Any) -> Optional[str]:
+  """Return the first string from an annotation value (scalar
+  or list). ``None`` for missing / empty / non-string content."""
+  if raw is None:
+    return None
+  if isinstance(raw, list):
+    for v in raw:
+      if isinstance(v, str):
+        return v
+    return None
+  if isinstance(raw, str):
+    return raw
+  return None
+
+
+def _all_string_values(raw: Any) -> tuple[str, ...]:
+  """Return every string from an annotation value, scalar or
+  list. Empty tuple for missing / non-string content."""
+  if raw is None:
+    return ()
+  if isinstance(raw, list):
+    return tuple(v for v in raw if isinstance(v, str))
+  if isinstance(raw, str):
+    return (raw,)
+  return ()
 
 
 def _label_kind_for_annotation_key(key: str) -> Optional[str]:

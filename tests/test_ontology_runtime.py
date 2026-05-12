@@ -360,7 +360,11 @@ class TestOntologyRuntimeAccessors:
   def test_relationships_empty_when_none_declared(self, loaded_models):
     runtime = self._runtime(loaded_models)
     assert runtime.relationships() == ()
-    assert runtime.relationship("Nothing") is None
+    # `relationships_by_name` returns a tuple (never None /
+    # singular) because relationship names aren't unique per
+    # the #58 contract.
+    assert runtime.relationships_by_name("Nothing") == ()
+    assert runtime.relationships_by_name("") == ()
 
   def test_synonyms_for(self, loaded_models):
     runtime = self._runtime(loaded_models)
@@ -836,3 +840,432 @@ class TestEntityResolverProtocol:
     runtime, _ = _runtime_with_lookup(loaded_models, fake)
     resolver = LabelSynonymResolver(runtime)
     assert isinstance(resolver, EntityResolver)
+
+
+# ------------------------------------------------------------------ #
+# Round-1 reviewer findings — regression tests                        #
+# ------------------------------------------------------------------ #
+
+
+class TestRoundOneFindings:
+  """Reproducers + locks for PR #154 round-1 findings."""
+
+  # ---------- P1 #1 — table_id injection guard ----------
+
+  def test_lookup_rejects_malformed_table_id(self, loaded_models):
+    """``ConceptIndexLookup.__init__`` interpolates
+    ``table_id`` into backtick-quoted SQL. A caller-supplied
+    identifier containing a backtick, semicolon, whitespace,
+    comment marker, wrong dot count, or trailing newline is
+    rejected at construction so injection can't reach the
+    SQL."""
+    from bigquery_agent_analytics import ConceptIndexLookup
+
+    class _NoopClient:
+
+      def query(self, *_a, **_kw):
+        raise AssertionError("query() must not run on bad table_id")
+
+    fake = _NoopClient()
+    expected_fp = "f" * 64
+
+    def _construct(table_id):
+      ConceptIndexLookup(
+          bq_client=fake,
+          table_id=table_id,
+          expected_compile_fingerprint=expected_fp,
+          compiler_version=_COMPILER_VERSION,
+      )
+
+    # Wrong dot count.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("onlyone")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("two.parts")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("four.parts.here.tbl")
+    # Backtick — would break out of the quoted identifier.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("p.d.t`; DROP TABLE x; --")
+    # Semicolon / SQL injection markers.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("p.d.t;DROP")
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("p.d.t --comment")
+    # Whitespace.
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("p. d.t")
+    # Trailing newline (lenient ``$`` would accept).
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      _construct("p.d.t\n")
+    # Non-string.
+    with pytest.raises(ValueError, match=r"must be a string"):
+      _construct(None)
+    # Valid forms — should NOT raise.
+    ConceptIndexLookup(
+        bq_client=fake,
+        table_id="my-project.my_dataset.concept_index",
+        expected_compile_fingerprint=expected_fp,
+        compiler_version=_COMPILER_VERSION,
+    )
+
+  def test_runtime_propagates_table_id_validation(self, loaded_models):
+    """The validation flows through
+    ``OntologyRuntime.from_models`` so callers who never
+    construct ``ConceptIndexLookup`` directly still get the
+    protection."""
+    from bigquery_agent_analytics import OntologyRuntime
+
+    ontology, binding = loaded_models
+    with pytest.raises(ValueError, match=r"not a well-formed"):
+      OntologyRuntime.from_models(
+          ontology=ontology,
+          binding=binding,
+          compiler_version=_COMPILER_VERSION,
+          concept_index_table="bad`;DROP",
+          bq_client=_FakeBQClient(),
+      )
+
+  # ---------- P1 #2 — relationships_by_name (duplicate names) ----------
+
+  def test_relationships_by_name_returns_every_match(self):
+    """SKOS-style ontologies legally repeat relationship
+    names across endpoint pairs (e.g. ``skos_broader``
+    declared with multiple ``(from, to)`` pairs) per #58's
+    traversal-first contract — see
+    ``docs/entity_resolution_primitives.md:118`` ("after
+    #62's relaxed (name, from, to) uniqueness, a
+    skos_broader can repeat across endpoint pairs, so no
+    rt.relationship(name)"). The accessor must return every
+    match so callers handle the cardinality explicitly.
+
+    The current ``load_ontology`` enforces unique relationship
+    names (#62 hasn't shipped yet), so we build the Ontology
+    model directly via Pydantic to exercise the
+    duplicate-name shape the accessor must support."""
+    from bigquery_agent_analytics import OntologyRuntime
+    from bigquery_ontology.ontology_models import Entity
+    from bigquery_ontology.ontology_models import Keys
+    from bigquery_ontology.ontology_models import Ontology
+    from bigquery_ontology.ontology_models import Property
+    from bigquery_ontology.ontology_models import Relationship
+
+    keys = Keys(primary=["id"])
+    props = [Property(name="id", type="string")]
+    ontology = Ontology(
+        ontology="skos_dup_rel",
+        entities=[
+            Entity(name="A", keys=keys, properties=props),
+            Entity(name="B", keys=keys, properties=props),
+            Entity(name="C", keys=keys, properties=props),
+        ],
+        relationships=[
+            Relationship(name="skos_broader", **{"from": "A"}, to="B"),
+            Relationship(name="skos_broader", **{"from": "A"}, to="C"),
+        ],
+    )
+    # Binding has to be built directly too because
+    # ``load_binding`` validates against ``load_ontology``'s
+    # check. The runtime accessors don't read binding
+    # internals for this test.
+    from bigquery_ontology.binding_models import BigQueryTarget
+    from bigquery_ontology.binding_models import Binding
+    from bigquery_ontology.binding_models import EntityBinding
+    from bigquery_ontology.binding_models import PropertyBinding
+
+    binding = Binding(
+        binding="dup_bq",
+        ontology="skos_dup_rel",
+        target=BigQueryTarget(
+            backend="bigquery", project="test-proj", dataset="test_ds"
+        ),
+        entities=[
+            EntityBinding(
+                name=name,
+                source=f"{name.lower()}_table",
+                properties=[PropertyBinding(name="id", column="id")],
+            )
+            for name in ("A", "B", "C")
+        ],
+    )
+
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+    matches = runtime.relationships_by_name("skos_broader")
+    assert len(matches) == 2
+    endpoints = {(r.from_, r.to) for r in matches}
+    assert endpoints == {("A", "B"), ("A", "C")}
+
+  def test_singular_relationship_accessor_is_dropped(self, loaded_models):
+    """The unsafe singular ``relationship(name) ->
+    Relationship | None`` accessor was dropped — calling it
+    raises ``AttributeError`` so reviewers spotting an old
+    callsite can't silently regress."""
+    from bigquery_agent_analytics import OntologyRuntime
+
+    ontology, binding = loaded_models
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+    assert not hasattr(runtime, "relationship")
+
+  # ---------- P1 #2 — traversal helpers ----------
+
+  def _runtime(self, loaded_models):
+    from bigquery_agent_analytics import OntologyRuntime
+
+    ontology, binding = loaded_models
+    return OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+
+  def test_in_scheme_lists_member_entities(self, loaded_models):
+    runtime = self._runtime(loaded_models)
+    # ``Region`` declared in two schemes, ``CaliforniaRegion``
+    # declared in one (``GeoScheme``).
+    assert set(runtime.in_scheme("GeoScheme")) == {"Region", "CaliforniaRegion"}
+    assert runtime.in_scheme("AdminScheme") == ("Region",)
+    assert runtime.in_scheme("NoSuchScheme") == ()
+    assert runtime.in_scheme("") == ()
+
+  def test_broader_narrower_related(self, loaded_models):
+    """Build a small SKOS-broader hierarchy and verify both
+    directions of the traversal."""
+    import tempfile
+
+    from bigquery_agent_analytics import OntologyRuntime
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    yaml = textwrap.dedent(
+        """\
+        ontology: skos_hier
+        version: "0.1"
+        entities:
+          - name: Country
+            keys:
+              primary: [code]
+            properties:
+              - name: code
+                type: string
+            annotations:
+              skos:related: ["State"]
+          - name: State
+            keys:
+              primary: [code]
+            properties:
+              - name: code
+                type: string
+            annotations:
+              skos:broader: [Country]
+          - name: County
+            keys:
+              primary: [code]
+            properties:
+              - name: code
+                type: string
+            annotations:
+              skos:broader: [State]
+        """
+    )
+    binding_yaml = textwrap.dedent(
+        """\
+        binding: hier_bq
+        ontology: skos_hier
+        target:
+          backend: bigquery
+          project: test-proj
+          dataset: test_ds
+        entities:
+          - name: Country
+            source: countries
+            properties:
+              - name: code
+                column: code
+          - name: State
+            source: states
+            properties:
+              - name: code
+                column: code
+          - name: County
+            source: counties
+            properties:
+              - name: code
+                column: code
+        """
+    )
+    with tempfile.TemporaryDirectory() as raw:
+      tmp = pathlib.Path(raw)
+      (tmp / "ont.yaml").write_text(yaml, encoding="utf-8")
+      (tmp / "bnd.yaml").write_text(binding_yaml, encoding="utf-8")
+      ontology = load_ontology(str(tmp / "ont.yaml"))
+      binding = load_binding(str(tmp / "bnd.yaml"), ontology=ontology)
+
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+    )
+    # Broader is direct (not transitive).
+    assert runtime.broader("State") == ("Country",)
+    assert runtime.broader("County") == ("State",)
+    assert runtime.broader("Country") == ()
+    # Narrower is the inverse direction.
+    assert set(runtime.narrower("State")) == {"County"}
+    assert set(runtime.narrower("Country")) == {"State"}
+    assert runtime.narrower("County") == ()
+    # Related is what the annotation declared (not auto-
+    # symmetrized).
+    assert runtime.related("Country") == ("State",)
+    assert runtime.related("State") == ()
+
+  # ---------- P2 #1 — verify() always re-queries ----------
+
+  def test_verify_always_re_queries(self, loaded_models):
+    """``verify()`` must not cache — re-running must hit
+    BigQuery again so a table swap between startup and a
+    long batch is caught. The reviewer's reproducer: if the
+    table's ``__meta`` row changes after startup,
+    ``runtime.concept_index.verify()`` should NOT silently
+    return success."""
+    from bigquery_agent_analytics import FingerprintMismatchError
+    from bigquery_agent_analytics import OntologyRuntime
+
+    ontology, binding = loaded_models
+    expected = _expected_fingerprint(ontology, binding)
+
+    class _SwappableClient:
+      """Returns the matching fingerprint on the first
+      __meta call, then a mismatched one on the second."""
+
+      def __init__(self):
+        self.call_count = 0
+
+      def query(self, sql, job_config=None):
+        if "__meta" in sql:
+          self.call_count += 1
+          # First call: matching (construction-time verify
+          # succeeds). Subsequent calls: tampered.
+          if self.call_count == 1:
+            return _FakeJob([_meta_row(expected)])
+          return _FakeJob([_meta_row("0" * 64)])
+        return _FakeJob([])
+
+    client = _SwappableClient()
+    runtime = OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+        concept_index_table="p.d.t",
+        bq_client=client,
+    )
+    # Construction succeeded with the matching fingerprint.
+    # Re-running verify() hits BQ AGAIN and now sees the
+    # tampered row — must raise.
+    with pytest.raises(FingerprintMismatchError):
+      runtime.concept_index.verify()
+    # And calling a third time still re-queries (not
+    # cached) — same exception.
+    with pytest.raises(FingerprintMismatchError):
+      runtime.concept_index.verify()
+    assert client.call_count == 3  # construction + two re-checks
+
+  # ---------- P2 #2 — multiple __meta rows fail closed ----------
+
+  def test_multiple_meta_rows_fails_closed(self, loaded_models):
+    """PR #92 always writes exactly one ``__meta`` row.
+    A table with multiple rows indicates manual tampering;
+    the runtime can't pick a "winning" fingerprint and must
+    fail closed with a distinct error code."""
+    from bigquery_agent_analytics import MetaTableMultipleRowsError
+    from bigquery_agent_analytics import OntologyRuntime
+
+    ontology, binding = loaded_models
+    expected = _expected_fingerprint(ontology, binding)
+    fake = _FakeBQClient()
+    # Two rows — both with the "correct" fingerprint, so the
+    # bug we're catching is purely "multiple rows" not
+    # "wrong fingerprint."
+    fake.add_handler(
+        "__meta",
+        [_meta_row(expected), _meta_row(expected)],
+    )
+
+    with pytest.raises(MetaTableMultipleRowsError) as exc_info:
+      OntologyRuntime.from_models(
+          ontology=ontology,
+          binding=binding,
+          compiler_version=_COMPILER_VERSION,
+          concept_index_table="p.d.t",
+          bq_client=fake,
+      )
+    assert exc_info.value.table_id == "p.d.t"
+    assert exc_info.value.row_count_at_least == 2
+
+  def test_verify_uses_limit_2_to_detect_multi_row(self, loaded_models):
+    """Locks the implementation choice: ``LIMIT 2`` in the
+    verify SQL so a multi-row meta table is detectable
+    without scanning the whole table."""
+    from bigquery_agent_analytics import OntologyRuntime
+
+    captured = []
+
+    class _CaptureClient(_FakeBQClient):
+
+      def query(self, sql, job_config=None):
+        captured.append(sql)
+        return super().query(sql, job_config=job_config)
+
+    ontology, binding = loaded_models
+    expected = _expected_fingerprint(ontology, binding)
+    client = _CaptureClient()
+    client.add_handler("__meta", [_meta_row(expected)])
+
+    OntologyRuntime.from_models(
+        ontology=ontology,
+        binding=binding,
+        compiler_version=_COMPILER_VERSION,
+        concept_index_table="p.d.t",
+        bq_client=client,
+    )
+    meta_queries = [s for s in captured if "__meta" in s]
+    assert meta_queries
+    assert "LIMIT 2" in meta_queries[0]
+
+  # ---------- P2 #3 — labels_for emits notation ----------
+
+  def test_labels_for_includes_notation(self, loaded_models):
+    """``skos:notation`` is a first-class ``label_kind`` in
+    PR #92's emission; ``labels_for`` must surface it too so
+    a caller comparing in-memory labels against emitted rows
+    sees the full six-kind vocabulary (``name`` / ``pref`` /
+    ``alt`` / ``hidden`` / ``synonym`` / ``notation``)."""
+    runtime = self._runtime(loaded_models)
+    labels = runtime.labels_for("Region")
+    notation_pairs = [pair for pair in labels if pair[1] == "notation"]
+    assert ("REG", "notation") in notation_pairs
+
+    # CaliforniaRegion: notation "CA" should appear as
+    # label_kind='notation' even though "CA" also appears as
+    # a synonym — both kinds are emitted (matching PR #92's
+    # multiplicity contract that "Acct" declared in both
+    # synonyms AND skos:altLabel produces two distinct rows).
+    cal_labels = runtime.labels_for("CaliforniaRegion")
+    assert ("CA", "notation") in cal_labels
+    assert ("CA", "synonym") in cal_labels
+
+  def test_notations_for_returns_all_values(self, loaded_models):
+    """Companion ``notations_for`` accessor returns every
+    declared notation (scalar OR list normalized to a
+    tuple)."""
+    runtime = self._runtime(loaded_models)
+    assert runtime.notations_for("Region") == ("REG",)
+    assert runtime.notations_for("CaliforniaRegion") == ("CA",)
+    assert runtime.notations_for("Nope") == ()

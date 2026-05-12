@@ -82,14 +82,19 @@ candidates = resolver.resolve("California")
 
 | Method | Returns | Notes |
 |--------|---------|-------|
-| `entity(name, *, case_insensitive=False)` | `Entity \| None` | Single-entity lookup. |
+| `entity(name, *, case_insensitive=False)` | `Entity \| None` | Single-entity lookup. Entity names are unique per ontology. |
 | `entities()` | `tuple[Entity, ...]` | Declared order. |
-| `relationship(name)` | `Relationship \| None` | Single-rel lookup. |
 | `relationships()` | `tuple[Relationship, ...]` | Declared order. |
+| `relationships_by_name(name)` | `tuple[Relationship, ...]` | **Always a tuple, never None / singular.** Relationship names are NOT unique per the #58 contract: traversal-style names like `skos_broader` legally repeat across distinct `(from, to)` endpoint pairs (see [entity_resolution_primitives.md §3](entity_resolution_primitives.md)). A singular `relationship(name)` accessor would silently hide duplicates; callers must handle the tuple shape explicitly. |
 | `synonyms_for(entity_name)` | `tuple[str, ...]` | The `synonyms:` YAML field. |
 | `schemes_for(entity_name)` | `tuple[str, ...]` | `skos:inScheme` annotation values (scalar OR list). |
+| `in_scheme(scheme)` | `tuple[str, ...]` | Forward map: entity names that are members of this scheme. |
 | `notation_for(entity_name)` | `str \| None` | First `skos:notation` value if any. |
-| `labels_for(entity_name)` | `tuple[(label, kind), ...]` | Name + synonyms + `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` (with or without `@<lang>`). Kinds match the concept-index emission vocabulary. |
+| `notations_for(entity_name)` | `tuple[str, ...]` | Every `skos:notation` value (scalar or list normalized). |
+| `broader(entity_name)` | `tuple[str, ...]` | Direct parents from `skos:broader` (not transitive). |
+| `narrower(entity_name)` | `tuple[str, ...]` | Direct children — inverse of `broader`. |
+| `related(entity_name)` | `tuple[str, ...]` | `skos:related` values (not auto-symmetrized). |
+| `labels_for(entity_name)` | `tuple[(label, kind), ...]` | All six kinds the emission produces: name + synonyms + `skos:prefLabel` / `skos:altLabel` / `skos:hiddenLabel` (with or without `@<lang>`) + `skos:notation`. Same vocabulary as the concept-index emission. |
 | `annotations_for(entity_name)` | `dict[str, AnnotationValue]` | Raw annotations. |
 | `compile_fingerprint` (property) | `str` | Locally-computed full 64-hex sha256. |
 | `compile_id` (property) | `str` | 12-hex display token. |
@@ -120,8 +125,17 @@ Same discipline as Phase C compiled extractors: stale provenance must never prod
 | `FingerprintMismatchError` | `__meta` row's `compile_fingerprint` differs from the locally-computed value. The table was compiled from a different ontology + binding (or different compiler version). |
 | `MetaTableMissingError` | The `__meta` sibling doesn't exist or the query failed. Without it, the reader has no fingerprint to compare and must fail-closed. |
 | `MetaTableEmptyError` | `__meta` exists but contains zero rows. PR #92 emits exactly one meta row; an empty table indicates manual tampering. |
+| `MetaTableMultipleRowsError` | `__meta` has more than one row. PR #92 emits exactly one; multiple rows indicate manual tampering and the runtime can't pick a "winning" fingerprint without ambiguity. `verify()` uses `LIMIT 2` so this is detected without scanning the whole table. |
 
-All three subclass `ConceptIndexError` for blanket-catch.
+All four subclass `ConceptIndexError` for blanket-catch.
+
+### `verify()` always re-queries
+
+The constructor calls `verify()` eagerly so fingerprint mismatches surface at startup. Subsequent calls to `runtime.concept_index.verify()` always re-query BigQuery — there is no cached "already verified" fast path. The intent is operational: before a long batch, call `verify()` to catch a table swap or fingerprint update mid-flight.
+
+### `table_id` is validated at construction
+
+`ConceptIndexLookup.__init__` and `OntologyRuntime.from_models(concept_index_table=...)` both reject malformed `project.dataset.table` identifiers at construction. Same regex discipline as `BigQueryBundleStore` (Phase C): exactly three ASCII segments, each `[A-Za-z0-9_-]+`. Backticks, semicolons, whitespace, comment markers (`--`, `/*`), trailing newlines, and wrong dot counts all raise `ValueError` before any SQL is built — injection can't reach the SQL.
 
 ## Concept-index lookup API
 
@@ -135,7 +149,7 @@ Every method returns `list[ConceptIndexRowView]` carrying the full emission sche
 
 ## Tests
 
-CI suite — `tests/test_ontology_runtime.py` (39 cases) using in-memory fake BigQuery clients:
+CI suite — `tests/test_ontology_runtime.py` (50 cases) using in-memory fake BigQuery clients:
 
 - **`TestOntologyRuntimeConstruction`** (5) — in-memory + from-files factories; `concept_index_table` requires `bq_client`; eager fingerprint verification at construction; matching-fingerprint happy path.
 - **`TestOntologyRuntimeAccessors`** (10) — entity / relationships lookup, declared-order, case-sensitivity, synonyms / annotations / schemes / notation / labels traversal (covers SKOS `inScheme` list + scalar normalization, language-suffixed annotations), provenance properties (compile_fingerprint / compile_id).
@@ -144,8 +158,15 @@ CI suite — `tests/test_ontology_runtime.py` (39 cases) using in-memory fake Bi
 - **`TestExactEntityResolver`** (5) — known entity, missing entity, case-sensitivity (default + opt-in), empty query.
 - **`TestLabelSynonymResolver`** (5) — requires concept index; happy path; label-kind priority re-ranking (`name > pref > alt > hidden > synonym > notation`); limit cap; empty query.
 - **`TestEntityResolverProtocol`** (2) — both reference resolvers satisfy `isinstance(resolver, EntityResolver)`.
+- **`TestRoundOneFindings`** (11) — round-1 reviewer-finding reproducers:
+  - `table_id` rejected at construction: backtick / semicolon / whitespace / `--` / wrong dot count / trailing newline / non-string. Validation flows through `OntologyRuntime.from_models`.
+  - `relationships_by_name` returns every matching `Relationship` (locked via direct-model construction since `load_ontology` enforces #62's pre-relaxation uniqueness). The unsafe singular `relationship(name)` accessor is dropped — `hasattr(runtime, "relationship") is False`.
+  - SKOS traversal helpers: `in_scheme(scheme)`, `broader(entity)`, `narrower(entity)` (inverse direction), `related(entity)` (non-auto-symmetric).
+  - `verify()` always re-queries — locked with a swappable fake client that returns matching → mismatched fingerprints across calls; verifies the construction call + two subsequent re-checks all hit BigQuery (3 calls total).
+  - Multiple `__meta` rows → `MetaTableMultipleRowsError`; `verify()` SQL uses `LIMIT 2` so the multi-row case is detected without scanning the whole table.
+  - `labels_for()` emits notation as `label_kind='notation'` (matching PR #92's six-kind vocabulary).
 
-Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. Compiles a tiny ontology to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables, attaches the runtime, runs `LabelSynonymResolver` + notation lookups, asserts every candidate carries the runtime's `compile_fingerprint`, drops the tables on the way out.
+Live BQ suite — `tests/test_ontology_runtime_live.py` (1 case), gated behind `BQAA_RUN_LIVE_TESTS=1` + `BQAA_RUN_LIVE_ONTOLOGY_RUNTIME_TESTS=1` + `PROJECT_ID` + `DATASET_ID`. **Validated against real BigQuery** during round-1: compiles a tiny ontology to concept-index SQL via PR #92's emission path, executes the DDL to create real BQ tables (main + `__meta`), attaches the runtime, runs `LabelSynonymResolver` + notation lookups, asserts every candidate carries the runtime's `compile_fingerprint`, drops the tables on the way out. Round-trip passes end-to-end against `test-project-0728-467323`.
 
 ## Out of scope (deferred)
 
