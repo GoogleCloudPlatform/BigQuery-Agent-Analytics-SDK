@@ -23,6 +23,17 @@ Show the caller and receiver `agent_events` event-type counts.
 > context id that the caller sends and the receiver uses as its session
 > id.
 
+If a technical audience member asks about ADK 1.33's split-session
+shape:
+
+> Under ADK 1.33, the `RemoteA2aAgent` runs in its own caller-side
+> session, so the `A2A_INTERACTION` row lives in a sibling caller
+> session — not under the supervisor. The demo writes a small mapping
+> table, `supervisor_a2a_invocations`, that pairs each supervisor's
+> tool call to the corresponding A2A row by time window. The auditor
+> reads through that mapping, so the runtime shift doesn't break the
+> graph.
+
 User takeaway:
 
 > The system starts from actual runtime telemetry, not hand-authored
@@ -40,6 +51,16 @@ Point at:
 > The SDK builds a context graph for each side independently. That keeps
 > ownership clean: the caller graph describes the supervisor run, and the
 > receiver graph describes what the governance agent decided.
+
+If decision extraction came up:
+
+> Decision extraction goes through BigQuery's `AI.GENERATE` with a
+> typed SQL `output_schema` so we get a structured `decisions` array
+> back, not free-text JSON in a markdown fence. For this demo we also
+> ship a strict-prompt fallback parser so a single flaky model call
+> can't take the audit graph below threshold — if `AI.GENERATE` under-
+> extracts, the demo re-parses the receiver's known response shape and
+> rewrites `decision_points` and `candidates` deterministically.
 
 User takeaway:
 
@@ -166,6 +187,38 @@ User takeaway:
 > surface over what the agents actually did, queryable both by humans
 > (BigQuery Studio) and by other agents (the analyst's BQ tools).
 
+## Presenter aside — robustness
+
+Two design choices worth naming if a technical audience asks "what
+happens when ADK or the model shifts under you":
+
+- **ADK 1.33 split-session bridge.** ADK 1.33 changed
+  `RemoteA2aAgent` to run in its own caller-side session, so the
+  `A2A_INTERACTION` row no longer lives under the supervisor. The
+  demo materializes a small caller-side mapping table,
+  `supervisor_a2a_invocations`, that pairs each supervisor tool call
+  to its `A2A_INTERACTION` row by per-tool-call time window:
+  `supervisor_ts <= a2a_ts < next_supervisor_ts`, partitioned by
+  `user_id`. The auditor's `remote_agent_invocations` projection
+  reads through that mapping, so the `CallerCampaignRun ->
+  RemoteAgentInvocation` edge in the property graph stays valid
+  without touching the graph DDL. Gate G1.5 in
+  `run_caller_agent.py` rejects empty or NULL pairings.
+- **Receiver-extraction fallback.** Decision/candidate extraction
+  uses `AI.GENERATE` with a SQL `output_schema` first. If the
+  receiver-extraction gate sees fewer than the minimum required
+  decisions/candidates, the demo re-parses receiver `LLM_RESPONSE`
+  rows against the strict three-option contract from
+  `receiver_agent/prompts.py` and rewrites `decision_points` and
+  `candidates`. The receiver prompt is what makes the fallback
+  reliable; if the prompt drifts, the fallback under-performs and
+  the gate trips loudly rather than silently producing a thin
+  graph.
+
+Together those two design choices are why the demo can be re-run
+against today's preview Gemini models and today's experimental ADK
+A2A without the joint graph collapsing to zero.
+
 ## Questions To Invite
 
 - Can we run this against our own ADK agents?
@@ -173,10 +226,13 @@ User takeaway:
 - Can we add stricter redaction with IAM?
 - Can we carry task-level A2A ids onto receiver spans?
 - Can the context graph align decisions to an ontology?
+- How does this hold up when ADK or the model changes shape?
 
 The current answer:
 
 > Yes for real ADK agents and BigQuery-backed context graphs today. The
 > cross-project IAM/redaction, receiver task-id propagation, and ontology
 > alignment are follow-up tracks already split out from the implementation
-> issue.
+> issue. The ADK 1.33 sub-session shape and AI.GENERATE flakiness are
+> already absorbed by the supervisor↔A2A mapping table and the receiver
+> prompt-contract fallback parser, respectively.
