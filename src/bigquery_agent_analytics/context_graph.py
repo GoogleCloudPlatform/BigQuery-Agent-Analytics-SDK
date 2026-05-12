@@ -499,30 +499,30 @@ _EXTRACT_DECISION_POINTS_AI_QUERY = """\
 SELECT
   base.span_id,
   base.session_id,
-  REGEXP_REPLACE(
-    REGEXP_REPLACE(
-      AI.GENERATE(
-        CONCAT(
-          'Identify decision points in this agent payload. ',
-          'A decision point is where the agent evaluated multiple ',
-          'candidates and selected or rejected them. ',
-          'For each decision, return the decision_type, description, ',
-          'and all candidates with name, score (0-1), status ',
-          '(SELECTED or DROPPED), and rejection_rationale ',
-          '(null if selected, required reason if dropped).',
-          '\\n\\nPayload:\\n',
-          COALESCE(
-            JSON_EXTRACT_SCALAR(base.content, '$.text_summary'),
-            JSON_EXTRACT_SCALAR(base.content, '$.response'),
-            JSON_EXTRACT_SCALAR(base.content, '$.text'),
-            TO_JSON_STRING(base.content)
-          )
-        ),
-        endpoint => '{endpoint}'
-      ).result,
-      r'^```(?:json)?\\s*', ''),
-    r'\\s*```$', '')
-  AS decisions_json
+  TO_JSON_STRING(
+    AI.GENERATE(
+      CONCAT(
+        'Extract agent decision points from the payload. ',
+        'A decision point is present only when the payload shows the ',
+        'agent evaluated multiple candidates/options and selected or ',
+        'rejected them. Return zero decisions if no such decision is ',
+        'present. Preserve candidate names and rejection rationale text ',
+        'from the payload. Use status SELECTED or DROPPED. Use null ',
+        'rejection_rationale for selected candidates. Scores must be ',
+        'FLOAT64 values between 0 and 1 when present, otherwise 0.0.',
+        '\\n\\nPayload:\\n',
+        COALESCE(
+          JSON_EXTRACT_SCALAR(base.content, '$.text_summary'),
+          JSON_EXTRACT_SCALAR(base.content, '$.response'),
+          JSON_EXTRACT_SCALAR(base.content, '$.text'),
+          TO_JSON_STRING(base.content)
+        )
+      ),
+      endpoint => '{endpoint}',
+      model_params => JSON '{{"generationConfig": {{"temperature": 0.0, "topP": 0.1, "maxOutputTokens": 2048}}}}',
+      output_schema => 'decisions ARRAY<STRUCT<decision_type STRING, description STRING, candidates ARRAY<STRUCT<name STRING, score FLOAT64, status STRING, rejection_rationale STRING>>>>'
+    ).decisions
+  ) AS decisions_json
 FROM `{project}.{dataset}.{table}` AS base
 WHERE base.session_id IN UNNEST(@session_ids)
   AND base.event_type IN (
@@ -2015,10 +2015,12 @@ class ContextGraphManager:
   ) -> tuple[list[DecisionPoint], list[Candidate]]:
     """Server-side decision extraction using AI.GENERATE.
 
-    The model is asked in-prompt to return a JSON array; the SQL
-    strips markdown fences and this method parses each row's
-    ``decisions_json`` text into ``DecisionPoint`` + ``Candidate``
-    records. No ``output_schema`` arg is passed to ``AI.GENERATE``.
+    The query uses AI.GENERATE's SQL-style ``output_schema`` to return
+    a typed ``decisions`` array, then ``TO_JSON_STRING`` converts that
+    typed output into the ``decisions_json`` text this method parses
+    into ``DecisionPoint`` + ``Candidate`` records. This avoids the
+    nondeterministic markdown-fenced JSON parsing path while preserving
+    the existing Python parsing contract.
     """
     import json as _json
 

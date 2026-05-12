@@ -103,32 +103,37 @@ FROM `{project}.{caller}.campaign_runs`
     ),
     (
         "remote_agent_invocations",
-        # Filter to A2A_INTERACTION rows whose caller session is in
-        # the current caller_campaign_runs. Without this join, a
-        # rerun without ./reset.sh (the README's "skip reset if
-        # iterating" path) leaves stale A2A_INTERACTION rows in the
-        # caller agent_events table while run_caller_agent.py
-        # WRITE_TRUNCATEs campaign_runs to only the current run.
-        # The auditor projection would then carry orphaned remote
-        # invocations whose CallerCampaignRun source vanished, and
-        # Block 2's traversal would silently drop them.
+        # Read from the supervisor↔A2A-sub-session mapping that
+        # run_caller_agent.py materialized after caller flush.
+        #
+        # ADK 1.33's RemoteA2aAgent spawns its own caller-side
+        # InvocationContext with a fresh session_id, so the
+        # ``A2A_INTERACTION`` row no longer lives under the
+        # supervisor session and the old
+        # ``ev.session_id = ccr.caller_session_id`` join collapsed
+        # to zero rows. The mapping table carries both the
+        # supervisor session_id (FK to caller_campaign_runs) and
+        # the A2A sub-session ids (for receiver-side stitch via
+        # a2a_context_id), so this projection just joins
+        # mapping → campaign_runs to retain campaign-scope
+        # filtering (same rationale as the prior CTAS: no-reset
+        # reruns shouldn't carry orphan remote invocations through
+        # the auditor surface).
         """\
 CREATE OR REPLACE TABLE `{project}.{auditor}.remote_agent_invocations` AS
 SELECT
-  TO_HEX(SHA256(CONCAT(ev.session_id, ':', ev.span_id))) AS remote_invocation_id,
-  ev.session_id AS caller_session_id,
-  ev.span_id AS caller_span_id,
-  JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:task_id"')    AS a2a_task_id,
-  JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:context_id"') AS a2a_context_id,
-  COALESCE(
-    JSON_VALUE(ev.content, '$.metadata.adk_session_id'),
-    JSON_VALUE(ev.attributes, '$.a2a_metadata."a2a:response".metadata.adk_session_id')
-  ) AS receiver_session_id_from_response,
-  ev.timestamp
-FROM `{project}.{caller}.{caller_table}` AS ev
+  TO_HEX(SHA256(CONCAT(
+    m.a2a_invocation_session_id, ':', m.a2a_invocation_span_id
+  ))) AS remote_invocation_id,
+  m.caller_session_id,
+  m.a2a_invocation_span_id AS caller_span_id,
+  m.a2a_task_id,
+  m.a2a_context_id,
+  m.receiver_session_id_from_response,
+  m.a2a_invocation_timestamp AS timestamp
+FROM `{project}.{caller}.supervisor_a2a_invocations` AS m
 JOIN `{project}.{auditor}.caller_campaign_runs` AS ccr
-  ON ev.session_id = ccr.caller_session_id
-WHERE ev.event_type = 'A2A_INTERACTION'
+  ON m.caller_session_id = ccr.caller_session_id
 """,
     ),
     (

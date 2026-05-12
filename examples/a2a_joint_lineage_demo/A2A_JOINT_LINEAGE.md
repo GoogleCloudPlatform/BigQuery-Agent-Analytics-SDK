@@ -34,6 +34,27 @@ Why this equality holds:
 
 The `joint_a2a_edges` projection in `build_joint_graph.py` materializes this join as the `HandledBy` edge in the property graph.
 
+### ADK 1.33 sub-session shape
+
+Under `google-adk` 1.33, `RemoteA2aAgent` does **not** emit its `A2A_INTERACTION` row under the supervisor's `session_id`. The agent spawns its own caller-side `InvocationContext` with a fresh session id, so the row lands in a sibling caller-side session whose `agent = 'audience_risk_reviewer'` and `root_agent_name = 'audience_risk_reviewer'`. The two events share `user_id` and `app_name` but carry no foreign key linking them back to the supervisor.
+
+To keep the `CallerCampaignRun -> RemoteAgentInvocation` edge valid, `run_caller_agent.py` materializes an explicit mapping table after caller flush:
+
+```text
+<CALLER_DATASET>.supervisor_a2a_invocations
+  caller_session_id            ← supervisor session_id (FK → campaign_runs)
+  supervisor_span_id           ← TOOL_STARTING for audience_risk_reviewer
+  supervisor_ts                ← TOOL_STARTING timestamp
+  a2a_invocation_session_id    ← RemoteA2aAgent sub-session id
+  a2a_invocation_span_id       ← A2A_INTERACTION span id
+  a2a_invocation_timestamp     ← A2A_INTERACTION timestamp
+  a2a_task_id                  ← a2a_metadata."a2a:task_id"
+  a2a_context_id               ← a2a_metadata."a2a:context_id"
+  receiver_session_id_from_response  ← COALESCE of the two response paths
+```
+
+Each supervisor's `TOOL_STARTING` for `audience_risk_reviewer` is paired with the first `A2A_INTERACTION` in that tool call's time window: `supervisor_ts <= a2a_timestamp < next_supervisor_ts` for the same `user_id`. This is deterministic because campaign briefs run sequentially, and it is stricter than global row-number pairing: a stale or extra A2A sub-session row can no longer shift every later campaign. Gate G1.5 in `run_caller_agent.py` asserts mapping count == campaign count and rejects NULL `a2a_context_id` rows; `build_joint_graph.remote_agent_invocations` then reads from this mapping rather than from the raw `agent_events` table. The receiver-side stitch (`a2a_context_id == receiver.session_id`) is unchanged.
+
 ## What the auditor sees
 
 `build_joint_graph.py` writes six `CREATE OR REPLACE TABLE` projections into `<AUDITOR_DATASET>`:
@@ -41,7 +62,7 @@ The `joint_a2a_edges` projection in `build_joint_graph.py` materializes this joi
 | Auditor table | Source | Purpose |
 |---|---|---|
 | `caller_campaign_runs` | `<CALLER_DATASET>.campaign_runs` | Renames `session_id` → `caller_session_id` to match the graph DDL's `KEY (caller_session_id)` |
-| `remote_agent_invocations` | caller `agent_events` `WHERE event_type = 'A2A_INTERACTION'`, **scoped by `INNER JOIN caller_campaign_runs`** | One row per remote A2A call **for the current campaign run only**. Carries lineage IDs (task/context); drops raw `a2a_request` / `a2a_response` / `content`. The scope keeps no-reset reruns from carrying orphaned remote invocations whose `CallerCampaignRun` source vanished. |
+| `remote_agent_invocations` | `<CALLER_DATASET>.supervisor_a2a_invocations`, **scoped by `INNER JOIN caller_campaign_runs`** | One row per remote A2A call **for the current campaign run only**. Reads through the supervisor↔A2A-sub-session mapping that `run_caller_agent.py` materializes after caller flush (ADK 1.33 split-session shape — see above). Carries lineage IDs (task/context); drops raw `a2a_request` / `a2a_response` / `content`. The `caller_campaign_runs` join keeps no-reset reruns from carrying orphaned remote invocations whose `CallerCampaignRun` source vanished. |
 | `receiver_runs` | receiver `agent_events` `GROUP BY session_id`, **filtered to `session_id IN (SELECT a2a_context_id FROM remote_agent_invocations)`** | Receiver-side session roots **for sessions matched to current caller campaigns**. Smoke session + sessions left from prior runs are excluded. |
 | `receiver_planning_decisions` | `<RECEIVER_DATASET>.decision_points`, **filtered to `session_id IN (SELECT receiver_session_id FROM receiver_runs)`** | Receiver-side decisions extracted from `LLM_RESPONSE` text, scoped to the receiver sessions retained in `receiver_runs` |
 | `receiver_decision_options` | `<RECEIVER_DATASET>.candidates`, **filtered to `session_id IN (SELECT receiver_session_id FROM receiver_runs)`** | Receiver-side options weighed (`rejection_rationale` lives here as a property), same scoping as `receiver_planning_decisions` |
@@ -154,10 +175,12 @@ The default `run_analyst_agent.py` invocation fires four canned questions (one p
 | Symptom | Likely cause | Where it surfaces |
 |---|---|---|
 | `smoke_receiver.py` exits with "row count did not increase" | Receiver running with `to_a2a()`'s default plugin-free runner, or BQ AA Plugin failing to write | smoke gate before any caller campaign runs |
-| `run_caller_agent.py` G1 fails | Caller plugin failed to write or campaign produced no `A2A_INTERACTION` row | Per-session breakdown logged |
+| `run_caller_agent.py` G1 fails | Caller plugin failed to write, or supervisor LLM skipped the `audience_risk_reviewer` tool call (no `A2A_INTERACTION` agent='audience_risk_reviewer' rows materialized) | G1 prints observed-vs-expected counts |
+| `run_caller_agent.py` G1.5 fails | Supervisor↔A2A mapping count != campaign count, or rows have NULL `a2a_context_id` — the chronological TS↔A2A pairing misaligned (typically a receiver timeout where TOOL_STARTING fired but A2A_INTERACTION did not) | Inspect `<CALLER_DATASET>.supervisor_a2a_invocations` against the caller `agent_events` TOOL_STARTING vs A2A_INTERACTION timeline |
 | `run_caller_agent.py` G2 fails after polling | Receiver writes lagging beyond the poll window, or receiver plugin missing | G2 message names the failure mode |
 | `run_caller_agent.py` G3 fails | `context_id != session_id` — receiver session service rewriting ids, or non-`InMemorySessionService` | G3 message names this directly |
 | `build_org_graphs.py` receiver gate fails (decision_points < 3) | Receiver prompt isn't enforcing the three-option format | Tighten `receiver_agent/prompts.py`, not the graph DDL |
+| `build_org_graphs.py` prints "applying demo fallback parser" | BigQuery `AI.GENERATE` returned too few typed decision rows for the receiver's strict prompt-shaped output | The fallback parser reads the receiver `LLM_RESPONSE` format directly and rewrites `decision_points` / `candidates`; if the gate still fails, tighten `receiver_agent/prompts.py` |
 | `build_joint_graph.py` stitch-coverage gate fails (`unstitched_calls > 0`) | `a2a_context_id` doesn't match any `receiver_session_id` — receiver session service rewriting ids, or non-`InMemorySessionService` | Run Block 1 to inspect; usually the same root cause as G3 |
 | `build_joint_graph.py` aggregate receiver-scope gate fails (`scoped_decisions < N` or `scoped_candidates < M`) | Auditor scope chain dropped most rows on a no-reset rerun (receiver session ids changed between runs) | `./reset.sh && ./setup.sh`, or override `DEMO_MIN_RECEIVER_DECISIONS` / `DEMO_MIN_RECEIVER_CANDIDATES` if intentionally running fewer campaigns |
 | `build_joint_graph.py` per-receiver-session gate fails (lists sessions with `d=0` or `c<3`) | One specific receiver session has too-thin extraction *traversable through its retained decisions* — either the aggregate count looks fine but a specific session under-produces, or the session's candidates carry `decision_id` values that aren't in `receiver_planning_decisions` (so they're orphaned from the property graph traversal) | Inspect the receiver `agent_events` for the listed session ids; tighten `receiver_agent/prompts.py` if the `LLM_RESPONSE` text doesn't match the SELECTED\|DROPPED shape, or check the SDK extractor's per-session decision/candidate consistency |
