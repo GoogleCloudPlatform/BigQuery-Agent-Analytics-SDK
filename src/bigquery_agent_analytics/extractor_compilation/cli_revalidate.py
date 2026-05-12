@@ -18,13 +18,18 @@ follow-up to Milestone C2.d).
 Operationalizes :func:`revalidate_compiled_extractors` so ops
 can run periodic revalidation without writing Python.
 
-This first PR keeps the input surface deliberately small —
-**local inputs only**. A follow-up adds ``--events-bq-query``
-once the CLI contract is stable; that path drags in
-auth / location / pagination / error handling and is worth
-isolating.
+Two event sources, mutually exclusive (exactly one is
+required):
 
-Usage::
+* ``--events-jsonl`` for local JSONL files.
+* ``--events-bq-query-file`` for BigQuery — the SQL must
+  produce exactly one column named ``event_json`` (STRING)
+  containing a JSON-encoded event dict per row. The CLI does
+  NOT auto-shape ``bigquery.Row`` objects; the query writer
+  controls projection (typically via
+  ``TO_JSON_STRING(STRUCT(...))``).
+
+Usage (local JSONL)::
 
     bqaa-revalidate-extractors \\
         --bundles-root /var/bqaa/synced-bundles \\
@@ -32,6 +37,24 @@ Usage::
         --reference-extractors-module my_project.references \\
         --thresholds-json thresholds.json \\
         --report-out report.json
+
+Usage (BigQuery)::
+
+    bqaa-revalidate-extractors \\
+        --bundles-root /var/bqaa/synced-bundles \\
+        --events-bq-query-file events_query.sql \\
+        --bq-project my-project \\
+        --bq-location US \\
+        --reference-extractors-module my_project.references \\
+        --thresholds-json thresholds.json \\
+        --report-out report.json
+
+``--bq-project`` is optional: when absent, the BigQuery
+client falls back to Application Default Credentials /
+environment for project inference. If both the flag and the
+inferred project are absent, the CLI exits 2 with a clear
+message rather than failing later inside a BigQuery API
+call.
 
 Reference module contract:
 
@@ -80,12 +103,19 @@ can inspect rates without committing to a gate.
 
 Out of scope (deferred):
 
-* **BigQuery event source** (``--events-bq-query``). Follow-up
-  PR; brings auth + location + pagination + error handling.
+* **Pagination strategy for ultra-large corpora.**
+  ``client.query(...).result()`` paginates under the hood;
+  the CLI iterates the full result set into memory. Fine
+  for tens of thousands of events; a future
+  ``--events-row-limit`` or streaming-aggregation flag can
+  land if/when real corpora exceed that.
 * **Scheduled execution.** Operator owns cron / Cloud
   Scheduler / GitHub Actions; the CLI is a one-shot.
 * **BQ persistence of reports.** ``--report-out`` writes a
   local file; pushing it elsewhere is the caller's concern.
+* **Auto-row-shape inference.** Explicit non-goal — the
+  ``event_json`` single-column contract keeps the CLI
+  predictable; the query writer owns projection.
 """
 
 from __future__ import annotations
@@ -221,15 +251,55 @@ def _build_parser() -> argparse.ArgumentParser:
           "other bundle to match."
       ),
   )
-  parser.add_argument(
+  # Event source: exactly one of --events-jsonl or
+  # --events-bq-query-file. ``required=True`` on the group
+  # gives argparse's standard "one of the arguments ... is
+  # required" wording when neither is supplied, and the
+  # mutex check produces the standard "not allowed with"
+  # message when both are supplied — both routed through
+  # ``_CliError`` via ``_NonExitingArgumentParser.error()``.
+  event_source = parser.add_mutually_exclusive_group(required=True)
+  event_source.add_argument(
       "--events-jsonl",
       type=pathlib.Path,
-      required=True,
+      default=None,
       help=(
           "Path to a JSONL file (one event JSON object per line). "
           "Each event must have ``event_type``; events for "
           "event_types without a compiled OR reference extractor "
           "are counted under ``skipped_events`` in the report."
+      ),
+  )
+  event_source.add_argument(
+      "--events-bq-query-file",
+      type=pathlib.Path,
+      default=None,
+      help=(
+          "Path to a .sql file whose query produces exactly one "
+          "column named ``event_json`` (STRING) containing a "
+          "JSON-encoded event dict per row. The CLI does not "
+          "auto-shape BigQuery row schemas; the query writer "
+          "controls projection via ``TO_JSON_STRING(STRUCT(...))``."
+      ),
+  )
+  parser.add_argument(
+      "--bq-project",
+      default=None,
+      help=(
+          "BigQuery project ID for ``--events-bq-query-file``. "
+          "Optional: when omitted, the BigQuery client falls back "
+          "to Application Default Credentials / environment for "
+          "project inference. If both this flag is absent AND the "
+          "client cannot infer a project, the CLI exits 2 with a "
+          "clear message."
+      ),
+  )
+  parser.add_argument(
+      "--bq-location",
+      default="US",
+      help=(
+          "BigQuery location for ``--events-bq-query-file``. "
+          "Defaults to ``US``; ignored when ``--events-jsonl`` is used."
       ),
   )
   parser.add_argument(
@@ -297,9 +367,20 @@ def _load_config(args: argparse.Namespace) -> _CliConfig:
         f"create parent directories automatically)"
     )
 
-  if not args.events_jsonl.is_file():
-    raise _CliError(f"--events-jsonl {str(args.events_jsonl)!r} is not a file")
-  events = _load_jsonl(args.events_jsonl)
+  # Event source dispatch — exactly one of the two is set
+  # (argparse mutex group enforces ``required=True``).
+  if args.events_jsonl is not None:
+    if not args.events_jsonl.is_file():
+      raise _CliError(
+          f"--events-jsonl {str(args.events_jsonl)!r} is not a file"
+      )
+    events = _load_jsonl(args.events_jsonl)
+  else:
+    events = _load_events_from_bq(
+        query_file=args.events_bq_query_file,
+        project=args.bq_project,
+        location=args.bq_location,
+    )
 
   if not args.bundles_root.is_dir():
     raise _CliError(
@@ -410,6 +491,136 @@ def _load_jsonl(path: pathlib.Path) -> list[dict]:
         f"--events-jsonl {str(path)!r}: I/O error: "
         f"{type(exc).__name__}: {exc}"
     ) from exc
+  return events
+
+
+def _make_bq_client(*, project: Optional[str], location: str) -> Any:
+  """Construct a ``google.cloud.bigquery.Client``.
+
+  Centralized so tests can monkeypatch this one spot rather
+  than hooking every call site. Production callers go through
+  :func:`_load_events_from_bq`; tests use
+  ``monkeypatch.setattr`` against this module attribute to
+  inject an in-memory fake.
+
+  Project resolution: when ``project`` is ``None``, defer to
+  ADC / environment via the BigQuery client's default
+  inference. If the inference also fails (no
+  ``GOOGLE_CLOUD_PROJECT`` env var, no project in ADC), raise
+  :class:`_CliError` with a clear message — the CLI must NOT
+  silently fall back to ``None`` and confuse the user with a
+  downstream BigQuery error.
+  """
+  from google.cloud import bigquery  # type: ignore
+
+  if project is not None:
+    client = bigquery.Client(project=project, location=location)
+  else:
+    client = bigquery.Client(location=location)
+  if not client.project:
+    raise _CliError(
+        "--bq-project not provided and the BigQuery client could not "
+        "infer a project from Application Default Credentials / "
+        "environment. Set --bq-project explicitly."
+    )
+  return client
+
+
+def _load_events_from_bq(
+    *,
+    query_file: pathlib.Path,
+    project: Optional[str],
+    location: str,
+) -> list[dict]:
+  """Run *query_file*'s SQL against BigQuery and parse one
+  event per row from the ``event_json`` column.
+
+  Contract:
+
+  * The SQL must return a column named ``event_json``
+    containing a JSON-encoded event dict. The CLI does not
+    auto-shape ``bigquery.Row`` objects — the query writer
+    controls projection (typically via
+    ``TO_JSON_STRING(STRUCT(...))``).
+  * Every row's ``event_json`` must be a non-null string
+    that decodes to a JSON object. Missing column,
+    non-string value, malformed JSON, or non-dict decode all
+    raise :class:`_CliError` with the row index named, so
+    callers can find the offending row at exit 2.
+  * BigQuery-side exceptions (auth, query syntax, table not
+    found, permission denied) are caught and surfaced as a
+    single :class:`_CliError`. The exception type + message
+    are included so the operator can triage without
+    re-running.
+  """
+  if not query_file.is_file():
+    raise _CliError(f"--events-bq-query-file {str(query_file)!r} is not a file")
+  try:
+    sql = query_file.read_text(encoding="utf-8")
+  except UnicodeError as exc:
+    raise _CliError(
+        f"--events-bq-query-file {str(query_file)!r}: not valid UTF-8 "
+        f"({type(exc).__name__}: {exc})"
+    ) from exc
+  except OSError as exc:
+    raise _CliError(
+        f"--events-bq-query-file {str(query_file)!r}: I/O error: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
+  if not sql.strip():
+    raise _CliError(f"--events-bq-query-file {str(query_file)!r} is empty")
+
+  client = _make_bq_client(project=project, location=location)
+
+  try:
+    job = client.query(sql)
+    rows = list(job.result())
+  except _CliError:
+    raise
+  # Catch ``Exception`` (not ``BaseException``) so
+  # ``KeyboardInterrupt`` / ``SystemExit`` still propagate.
+  # The BigQuery client raises a mix of
+  # ``google.api_core.exceptions.*`` and lower-level
+  # exceptions; rather than enumerate, we route all of them
+  # through the same exit-2 boundary with the type + message.
+  except Exception as exc:  # noqa: BLE001 — record + abort
+    raise _CliError(
+        f"--events-bq-query-file: BigQuery query failed: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
+
+  events: list[dict] = []
+  for row_index, row in enumerate(rows):
+    # ``bigquery.Row`` supports ``row["column_name"]``.
+    # Catch ``KeyError`` plus the generic ``Exception`` for
+    # any other row-access path (some fake row substitutes
+    # may raise differently); surfacing the row index is the
+    # important property.
+    try:
+      raw = row["event_json"]
+    except (KeyError, IndexError) as exc:
+      raise _CliError(
+          f"--events-bq-query-file row {row_index}: missing required "
+          f"column 'event_json' ({type(exc).__name__}: {exc})"
+      ) from exc
+    if not isinstance(raw, str):
+      raise _CliError(
+          f"--events-bq-query-file row {row_index}: 'event_json' must "
+          f"be STRING; got {type(raw).__name__}={raw!r}"
+      )
+    try:
+      obj = json.loads(raw)
+    except json.JSONDecodeError as exc:
+      raise _CliError(
+          f"--events-bq-query-file row {row_index}: invalid JSON in "
+          f"'event_json': {exc.msg}"
+      ) from exc
+    if not isinstance(obj, dict):
+      raise _CliError(
+          f"--events-bq-query-file row {row_index}: 'event_json' "
+          f"decodes to {type(obj).__name__}, expected a JSON object"
+      )
+    events.append(obj)
   return events
 
 

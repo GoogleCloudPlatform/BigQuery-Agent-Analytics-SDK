@@ -895,6 +895,72 @@ class TestCliUsageErrors:
     err = capsys.readouterr().err
     assert "unrecognized arguments" in err
 
+  def test_both_event_sources_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+      cleanup_reference_modules,
+  ):
+    """``--events-jsonl`` and ``--events-bq-query-file`` are
+    mutually exclusive. Providing both returns 2 via the
+    argparse mutex group (routed through ``_CliError``)."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    events_path = _write_events_jsonl(tmp_path / "events.jsonl")
+    query_path = tmp_path / "q.sql"
+    query_path.write_text("SELECT 1", encoding="utf-8")
+    ref_module = cleanup_reference_modules("mutex_both")
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-jsonl",
+            str(events_path),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "not allowed with" in err
+
+  def test_neither_event_source_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      capsys: pytest.CaptureFixture,
+      cleanup_reference_modules,
+  ):
+    """Mutex group with ``required=True`` rejects "neither"
+    via argparse's ``one of the arguments ... is required``."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    ref_module = cleanup_reference_modules("mutex_neither")
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "one of the arguments" in err
+
   def test_console_script_entry_point_registered(self):
     """The ``console_scripts`` entry in ``pyproject.toml``
     points at :func:`main`. Lock with importlib metadata so
@@ -915,3 +981,454 @@ class TestCliUsageErrors:
         matches[0].value
         == "bigquery_agent_analytics.extractor_compilation.cli_revalidate:main"
     )
+
+
+# ------------------------------------------------------------------ #
+# BigQuery event source                                               #
+# ------------------------------------------------------------------ #
+
+
+class _FakeQueryJob:
+  """Stands in for ``bigquery.QueryJob``. ``.result()`` returns
+  an iterator over the configured rows."""
+
+  def __init__(self, rows):
+    self._rows = rows
+
+  def result(self):
+    return iter(self._rows)
+
+
+class _FakeBQClient:
+  """Stands in for ``bigquery.Client``. Configured with a set
+  of rows OR an exception to raise from ``query()``. Tests
+  inject by monkeypatching ``_make_bq_client``."""
+
+  def __init__(
+      self,
+      *,
+      project: str | None = "fake-project",
+      rows=None,
+      query_exception: Exception | None = None,
+  ):
+    self.project = project
+    self._rows = rows or []
+    self._query_exception = query_exception
+
+  def query(self, sql):
+    if self._query_exception is not None:
+      raise self._query_exception
+    return _FakeQueryJob(self._rows)
+
+
+def _event_json(span_id: str, decision_id: str = "d1") -> str:
+  """JSON-encoded BKA event for an ``event_json`` row."""
+  return json.dumps(
+      {
+          "event_type": "bka_decision",
+          "session_id": "sess1",
+          "span_id": span_id,
+          "content": {
+              "decision_id": decision_id,
+              "outcome": "approved",
+              "confidence": 0.9,
+          },
+      }
+  )
+
+
+def _install_fake_bq_client(monkeypatch, fake_client) -> None:
+  """Inject *fake_client* in place of the module-level
+  ``_make_bq_client`` factory. The closure ignores
+  ``project`` / ``location`` because the fake never connects
+  anywhere."""
+  from bigquery_agent_analytics.extractor_compilation import cli_revalidate
+
+  monkeypatch.setattr(
+      cli_revalidate,
+      "_make_bq_client",
+      lambda *, project, location: fake_client,
+  )
+
+
+class TestCliEventsBQ:
+  """End-to-end paths for ``--events-bq-query-file``.
+
+  All cases monkeypatch ``_make_bq_client`` to inject a fake
+  rather than hitting a real BigQuery API. Row-level errors
+  surface with the row index named so an operator can find
+  the offending row.
+  """
+
+  def test_bq_query_happy_path(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+  ):
+    """Two ``event_json`` rows, valid JSON, BKA shape.
+    Compiled bundle agrees with the reference. Exit 0;
+    report includes both events."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_happy")
+
+    rows = [
+        {"event_json": _event_json("sp1")},
+        {"event_json": _event_json("sp2")},
+    ]
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    report_out = tmp_path / "report.json"
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--bq-project",
+            "test-project",
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(report_out),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(report_out.read_text(encoding="utf-8"))
+    assert payload["report"]["total_events"] == 2
+    assert payload["report"]["total_compiled_unchanged"] == 2
+    assert payload["report"]["total_parity_matches"] == 2
+
+  def test_bq_project_inferred_from_adc(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+  ):
+    """``--bq-project`` is optional: a fake client with
+    ``project="adc-project"`` (simulating ADC inference) is
+    accepted; the CLI does not require the explicit flag."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_adc")
+
+    rows = [{"event_json": _event_json("sp1")}]
+    _install_fake_bq_client(
+        monkeypatch, _FakeBQClient(project="adc-project", rows=rows)
+    )
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 0
+
+  def test_bq_no_project_anywhere_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """No ``--bq-project`` flag AND ADC can't infer one → the
+    real factory raises ``_CliError``; the CLI exits 2 with
+    a clear "set --bq-project explicitly" message."""
+    from bigquery_agent_analytics.extractor_compilation import cli_revalidate
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_no_project")
+
+    # Patch the bigquery client constructor to return a
+    # project-less client; this is what bigquery.Client()
+    # produces when there's no ADC project.
+    class _NoProjectClient:
+      project = None
+
+      def query(self, *args, **kwargs):
+        raise AssertionError("query() must not run without a project")
+
+    # Re-patch the module's bigquery.Client lookup chain. The
+    # real factory calls ``bigquery.Client(location=...)``;
+    # patch that.
+    import google.cloud.bigquery as bq_module
+
+    monkeypatch.setattr(
+        bq_module, "Client", lambda **kwargs: _NoProjectClient()
+    )
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "--bq-project" in err
+    assert "Set --bq-project explicitly" in err
+
+  def test_bq_query_exception_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """BigQuery-side exception (auth, syntax, table-not-found
+    in production; ``RuntimeError`` here for portability) →
+    exit 2 with type + message; no traceback escapes."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("BAD SQL", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_exception")
+
+    _install_fake_bq_client(
+        monkeypatch,
+        _FakeBQClient(query_exception=RuntimeError("table not found")),
+    )
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "BigQuery query failed" in err
+    assert "table not found" in err
+
+  def test_bq_row_missing_event_json_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """Row missing the ``event_json`` column → exit 2 with
+    the row index named."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT * FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_missing_col")
+
+    rows = [
+        {"event_json": _event_json("sp1")},  # row 0 ok
+        {"some_other_column": "x"},  # row 1 missing
+    ]
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "row 1" in err
+    assert "event_json" in err
+
+  def test_bq_row_non_string_event_json_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """``event_json`` exists but isn't STRING (e.g. someone
+    projected the column without wrapping in
+    ``TO_JSON_STRING``) → exit 2 with the row index named."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text(
+        "SELECT struct_col AS event_json FROM t", encoding="utf-8"
+    )
+    ref_module = cleanup_reference_modules("bq_non_string")
+
+    rows = [{"event_json": {"event_type": "bka_decision"}}]  # dict, not str
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "row 0" in err
+    assert "must be STRING" in err
+
+  def test_bq_row_malformed_json_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """``event_json`` is STRING but not valid JSON → exit 2
+    with the row index named."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_bad_json")
+
+    rows = [{"event_json": "{not valid json"}]
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "row 0" in err
+    assert "invalid JSON" in err
+
+  def test_bq_row_non_dict_json_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """``event_json`` decodes to a JSON array, not an object
+    → exit 2 with the row index named."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("SELECT event_json FROM t", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_array_json")
+
+    rows = [{"event_json": '["not", "an", "object"]'}]
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=rows))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "row 0" in err
+    assert "expected a JSON object" in err
+
+  def test_bq_empty_query_file_returns_two(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """An empty (or whitespace-only) SQL file fails at the
+    CLI boundary rather than at BigQuery with a confusing
+    "empty query" message."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text("   \n  \n", encoding="utf-8")
+    ref_module = cleanup_reference_modules("bq_empty_sql")
+
+    _install_fake_bq_client(monkeypatch, _FakeBQClient(rows=[]))
+
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(tmp_path / "report.json"),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "is empty" in err

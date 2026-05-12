@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **``--events-bq-query-file`` for ``bqaa-revalidate-extractors``**
+  (issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
+  CLI follow-up). The CLI now accepts a BigQuery event
+  source in addition to ``--events-jsonl``; the two are
+  mutually exclusive and exactly one must be supplied.
+  Contract: the SQL must produce exactly one column named
+  ``event_json`` (STRING) per row, containing a JSON-encoded
+  event dict — same shape ``--events-jsonl`` consumes
+  line-by-line. The CLI does NOT auto-shape
+  ``bigquery.Row`` objects; the query writer controls
+  projection via ``TO_JSON_STRING(STRUCT(...))``. Row-level
+  errors (missing column, non-string value, malformed JSON,
+  non-dict decode) surface as exit 2 with the 0-based row
+  index named so an operator can find the offender with
+  ``LIMIT N OFFSET row_index``. BigQuery-side exceptions
+  (auth, syntax, table-not-found, permission) are caught and
+  surfaced with type + message — no traceback escapes.
+  ``--bq-project`` is optional: the BigQuery client falls
+  back to Application Default Credentials / environment for
+  project inference; if both are absent the CLI exits 2 with
+  ``Set --bq-project explicitly`` rather than confusing the
+  operator with a downstream API error. ``--bq-location``
+  defaults to ``US``. Client construction is centralized
+  behind ``_make_bq_client(project, location)`` so unit
+  tests inject in-memory fakes via ``monkeypatch.setattr``
+  rather than wiring through every call site. CI tests
+  (11 new cases) cover the happy path, ADC inference,
+  no-project-anywhere, query exceptions, every row-shape
+  failure mode, the mutex on event sources (both / neither),
+  and the empty-SQL-file edge. Live BQ test
+  (``tests/test_extractor_compilation_cli_revalidate_bq_live.py``)
+  is gated behind ``BQAA_RUN_LIVE_BQ_REVALIDATE_TESTS=1``;
+  it creates a temp table, inserts two ``event_json`` rows,
+  runs the CLI, asserts the report is written with both
+  events as compiled_unchanged + parity_matches, deletes
+  the table on the way out.
 - **``bqaa-revalidate-extractors`` CLI** in
   `bigquery_agent_analytics.extractor_compilation.cli_revalidate`
   and
