@@ -526,6 +526,50 @@ def _make_bq_client(*, project: Optional[str], location: str) -> Any:
   return client
 
 
+def _query_result_column_names(job: Any, rows: list) -> Optional[list[str]]:
+  """Return the column names produced by a BigQuery query job.
+
+  Order of preference:
+
+  1. ``job.schema`` (real ``bigquery.QueryJob`` populates this
+     once ``.result()`` returns, regardless of row count).
+     Each entry is a ``SchemaField`` exposing ``.name``; we
+     pull the names, sort them, and return the list. Sorting
+     is for stable comparison against the contract list
+     ``["event_json"]`` — order in the SQL projection isn't
+     part of the contract.
+  2. First-row keys via ``sorted(rows[0].keys())`` when the
+     job lacks a usable schema. Covers test fakes whose
+     ``_FakeQueryJob`` doesn't simulate schema metadata.
+  3. ``None`` when neither source is available — the
+     degenerate "fake job, zero rows, no schema" case.
+     :func:`_load_events_from_bq` treats ``None`` as "skip
+     the contract check" so the existing zero-row tests
+     keep passing; real BigQuery always populates
+     ``job.schema`` so production code never hits this
+     branch.
+  """
+  schema = getattr(job, "schema", None)
+  if schema:
+    names: list[str] = []
+    schema_ok = True
+    for field in schema:
+      name = getattr(field, "name", None)
+      if isinstance(name, str):
+        names.append(name)
+      else:
+        # Defensive — a fake or future schema shape that
+        # doesn't expose a string ``.name``. Fall through to
+        # row-key inspection rather than guess.
+        schema_ok = False
+        break
+    if schema_ok:
+      return sorted(names)
+  if rows:
+    return sorted(rows[0].keys())
+  return None
+
+
 def _load_events_from_bq(
     *,
     query_file: pathlib.Path,
@@ -602,21 +646,27 @@ def _load_events_from_bq(
     ) from exc
 
   # Enforce the "exactly one column named ``event_json``"
-  # contract before iterating. The docs + CLI help promise
-  # this; without the check, a query returning
-  # ``event_json, extra_col`` would silently accept the extra
-  # column because the row loop only reads
-  # ``row["event_json"]``. Check via the first row's keys
-  # (works for both ``bigquery.Row`` and dict fakes); empty
-  # result sets are a no-op (nothing to validate, harness
-  # produces a zero-event report).
-  if rows:
-    first_keys = sorted(rows[0].keys())
-    if first_keys != ["event_json"]:
-      raise _CliError(
-          f"--events-bq-query-file: query must produce exactly one "
-          f"column named 'event_json'; got {first_keys}"
-      )
+  # contract BEFORE iterating. The docs + CLI help promise
+  # this. Validation order:
+  #
+  # 1. Prefer ``job.schema`` — ``bigquery.QueryJob.schema``
+  #    is populated regardless of row count, so an empty
+  #    result set with the wrong schema (e.g. ``SELECT
+  #    event_json, extra_col FROM t WHERE FALSE``) is still
+  #    rejected.
+  # 2. Fall back to the first row's keys when the job lacks
+  #    schema metadata (test fakes that don't expose
+  #    ``schema``).
+  # 3. If neither is available — empty result AND no schema
+  #    attribute — silently accept; that's the degenerate
+  #    "test fake with zero rows" case, not a real BigQuery
+  #    outcome.
+  column_names = _query_result_column_names(job, rows)
+  if column_names is not None and column_names != ["event_json"]:
+    raise _CliError(
+        f"--events-bq-query-file: query must produce exactly one "
+        f"column named 'event_json'; got {column_names}"
+    )
 
   events: list[dict] = []
   for row_index, row in enumerate(rows):

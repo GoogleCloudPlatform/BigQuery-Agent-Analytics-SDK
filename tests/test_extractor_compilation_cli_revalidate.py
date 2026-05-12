@@ -988,12 +988,26 @@ class TestCliUsageErrors:
 # ------------------------------------------------------------------ #
 
 
+class _FakeSchemaField:
+  """Minimal stand-in for ``bigquery.SchemaField``. Only the
+  ``.name`` attribute is read by
+  :func:`_query_result_column_names`."""
+
+  def __init__(self, name: str) -> None:
+    self.name = name
+
+
 class _FakeQueryJob:
   """Stands in for ``bigquery.QueryJob``. ``.result()`` returns
-  an iterator over the configured rows."""
+  an iterator over the configured rows. ``schema`` is
+  optional — when ``None``, the column-contract check falls
+  back to the first row's keys (or skips entirely on zero
+  rows, which is fine for fakes but never happens against
+  real BigQuery)."""
 
-  def __init__(self, rows):
+  def __init__(self, rows, schema=None):
     self._rows = rows
+    self.schema = schema
 
   def result(self):
     return iter(self._rows)
@@ -1009,16 +1023,18 @@ class _FakeBQClient:
       *,
       project: str | None = "fake-project",
       rows=None,
+      schema=None,
       query_exception: Exception | None = None,
   ):
     self.project = project
     self._rows = rows or []
+    self._schema = schema
     self._query_exception = query_exception
 
   def query(self, sql):
     if self._query_exception is not None:
       raise self._query_exception
-    return _FakeQueryJob(self._rows)
+    return _FakeQueryJob(self._rows, schema=self._schema)
 
 
 def _event_json(span_id: str, decision_id: str = "d1") -> str:
@@ -1531,3 +1547,106 @@ class TestCliEventsBQ:
     assert "extra_col" in err
     # Report is not written for usage errors.
     assert not (tmp_path / "report.json").exists()
+
+  def test_bq_extra_column_rejected_on_empty_result_set(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+      capsys: pytest.CaptureFixture,
+  ):
+    """A query like ``SELECT event_json, extra_col FROM t WHERE
+    FALSE`` returns zero rows but still has the wrong schema.
+    The first-row-keys-only check would silently skip
+    validation and write a successful zero-event report.
+
+    The fix derives column names from ``job.schema`` first
+    (BigQuery populates this regardless of row count) so the
+    contract violation is caught even when no rows come
+    back."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text(
+        "SELECT event_json, extra_col FROM t WHERE FALSE", encoding="utf-8"
+    )
+    ref_module = cleanup_reference_modules("bq_extra_col_empty")
+
+    fake = _FakeBQClient(
+        rows=[],
+        schema=[
+            _FakeSchemaField("event_json"),
+            _FakeSchemaField("extra_col"),
+        ],
+    )
+    _install_fake_bq_client(monkeypatch, fake)
+
+    report_out = tmp_path / "report.json"
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(report_out),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "exactly one column" in err
+    assert "event_json" in err
+    assert "extra_col" in err
+    # No misleading zero-event report on the wrong-schema
+    # path.
+    assert not report_out.exists()
+
+  def test_bq_correct_schema_empty_result_set_succeeds(
+      self,
+      tmp_path: pathlib.Path,
+      monkeypatch: pytest.MonkeyPatch,
+      cleanup_reference_modules,
+  ):
+    """The complement of the previous case: zero rows BUT
+    correct schema → exit 0 with a zero-event report. Locks
+    the design choice that an empty-but-correctly-shaped
+    result is a valid (if uninteresting) revalidation
+    outcome, not a CLI error."""
+    from bigquery_agent_analytics.extractor_compilation.cli_revalidate import main
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    _build_bundle(bundles_root)
+    query_path = tmp_path / "events.sql"
+    query_path.write_text(
+        "SELECT event_json FROM t WHERE FALSE", encoding="utf-8"
+    )
+    ref_module = cleanup_reference_modules("bq_empty_correct")
+
+    fake = _FakeBQClient(
+        rows=[],
+        schema=[_FakeSchemaField("event_json")],
+    )
+    _install_fake_bq_client(monkeypatch, fake)
+
+    report_out = tmp_path / "report.json"
+    code = main(
+        [
+            "--bundles-root",
+            str(bundles_root),
+            "--events-bq-query-file",
+            str(query_path),
+            "--reference-extractors-module",
+            ref_module,
+            "--report-out",
+            str(report_out),
+        ]
+    )
+    assert code == 0
+    payload = json.loads(report_out.read_text(encoding="utf-8"))
+    assert payload["report"]["total_events"] == 0
