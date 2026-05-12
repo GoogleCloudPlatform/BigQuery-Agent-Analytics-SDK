@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Compiled-extractor rollout guide** at
+  [`docs/extractor_compilation_rollout_guide.md`](docs/extractor_compilation_rollout_guide.md).
+  Operational playbook for the Phase C pipeline (issue
+  [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75))
+  stitching the five stages — Compile, Publish, Sync, Wire,
+  Revalidate — into one flow. Treats Publish/Sync as the
+  remote-runtime path; local / co-located deployments can
+  shortcut to Compile → Wire → Revalidate. Worked BKA
+  example uses Python snippets for the non-CLI stages
+  (``measure_compile``, ``publish_bundles_to_bq``,
+  ``sync_bundles_from_bq``,
+  ``OntologyGraphManager.from_bundles_root``) and the real
+  ``bqaa-revalidate-extractors`` shell invocation only
+  where a CLI actually exists. Documents the four points
+  where ``load_bundle`` runs (compile smoke gate,
+  pre-publish, post-sync, runtime-startup discovery) so the
+  trust boundary is one mental model across the pipeline.
+  Includes a failure-recovery playbook keyed on the stable
+  failure codes each stage emits.
 - **``--events-bq-query-file`` for ``bqaa-revalidate-extractors``**
   (issue [#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75)
   CLI follow-up). The CLI now accepts a BigQuery event
