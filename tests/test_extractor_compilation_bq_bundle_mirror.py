@@ -708,3 +708,234 @@ class TestPublishFailures:
     assert publish.rows_written == 0
     codes = {f.code for f in publish.failures}
     assert "bundle_root_missing" in codes
+
+  def test_publish_rejects_duplicate_fingerprints_across_subdirs(
+      self, tmp_path: pathlib.Path
+  ):
+    """Two subdirs of ``bundle_root`` declaring the SAME
+    manifest fingerprint must NOT both publish — the mirror is
+    keyed on ``(fingerprint, bundle_path)`` and both would
+    INSERT logical duplicates that sync later rejects. The
+    fix: fail-closed at publish, neither subdir's rows are
+    written."""
+    from bigquery_agent_analytics.extractor_compilation import publish_bundles_to_bq
+
+    bundle_root = tmp_path / "bundles"
+    bundle_root.mkdir()
+    _build_bundle(bundle_root, name="copy-a", fingerprint=_VALID_FINGERPRINT_A)
+    _build_bundle(bundle_root, name="copy-b", fingerprint=_VALID_FINGERPRINT_A)
+
+    store = _InMemoryStore()
+    publish = publish_bundles_to_bq(bundle_root=bundle_root, store=store)
+
+    assert publish.published_fingerprints == ()
+    assert publish.rows_written == 0
+    codes = {f.code for f in publish.failures}
+    assert "duplicate_fingerprint" in codes
+    # The detail names both participating subdirs so an
+    # operator can find them.
+    detail = next(
+        f.detail for f in publish.failures if f.code == "duplicate_fingerprint"
+    )
+    assert "copy-a" in detail and "copy-b" in detail
+    # No rows leaked into the store.
+    assert store.all_rows() == []
+
+
+# ------------------------------------------------------------------ #
+# Round-2 reviewer findings                                           #
+# ------------------------------------------------------------------ #
+
+
+class TestRoundTwoFindings:
+  """Reproducers + locks for the four PR #148 reviewer findings.
+
+  The first three are functional bugs (sync would raise on a
+  malformed manifest, sync would destroy good local state on a
+  bad mirror row, publish would silently emit logical
+  duplicates). The fourth is a defensive raise on the store.
+  """
+
+  def _good_bundle(
+      self,
+      tmp_path: pathlib.Path,
+      *,
+      fingerprint: str = _VALID_FINGERPRINT_A,
+  ) -> pathlib.Path:
+    bundle_root = tmp_path / "bundles"
+    bundle_root.mkdir(exist_ok=True)
+    _build_bundle(bundle_root, name="bka", fingerprint=fingerprint)
+    return bundle_root
+
+  def test_sync_rejects_manifest_with_path_separator_in_module_filename(
+      self, tmp_path: pathlib.Path
+  ):
+    """Manifest row whose ``module_filename`` contains ``/``
+    used to slip past ``_validate_bundle_path`` and trigger
+    ``FileNotFoundError`` at the write step (the parent dir
+    doesn't exist). The shape check now catches it at
+    ``manifest_row_unreadable`` with a clear message."""
+    from bigquery_agent_analytics.extractor_compilation import BundleRow
+    from bigquery_agent_analytics.extractor_compilation import sync_bundles_from_bq
+
+    # bundle_path equals the malformed module_filename so the
+    # path-traversal check (which doesn't reject simple
+    # subdirs) would otherwise let this through.
+    manifest_payload = json.dumps(
+        {
+            "fingerprint": _VALID_FINGERPRINT_A,
+            "event_types": ["bka_decision"],
+            "module_filename": "subdir/extractor.py",
+            "function_name": "extract_bka",
+            "compiler_package_version": "0.0.0",
+            "template_version": "v0.1",
+            "transcript_builder_version": "tb-1",
+            "created_at": "2026-05-08T00:00:00Z",
+        },
+        sort_keys=True,
+        indent=2,
+    ).encode("utf-8")
+    store = _InMemoryStore()
+    store.publish_rows(
+        [
+            BundleRow(
+                bundle_fingerprint=_VALID_FINGERPRINT_A,
+                bundle_path="manifest.json",
+                file_content=manifest_payload,
+                event_types=("bka_decision",),
+                module_filename="subdir/extractor.py",
+                function_name="extract_bka",
+                published_at="2026-05-08T00:00:00Z",
+            ),
+            BundleRow(
+                bundle_fingerprint=_VALID_FINGERPRINT_A,
+                bundle_path="subdir/extractor.py",
+                file_content=_MINIMAL_VALID_SOURCE.encode("utf-8"),
+                event_types=("bka_decision",),
+                module_filename="subdir/extractor.py",
+                function_name="extract_bka",
+                published_at="2026-05-08T00:00:00Z",
+            ),
+        ]
+    )
+
+    sync = sync_bundles_from_bq(store=store, dest_dir=tmp_path / "synced")
+    assert sync.synced_fingerprints == ()
+    codes = {f.code for f in sync.failures}
+    assert "manifest_row_unreadable" in codes
+    # The bundle dir was never written — staging stays
+    # internal to sync.
+    assert not (tmp_path / "synced" / _VALID_FINGERPRINT_A).exists()
+
+  def test_sync_failure_preserves_existing_good_bundle(
+      self, tmp_path: pathlib.Path
+  ):
+    """If a previously-good bundle exists at
+    ``dest_dir/<fingerprint>/`` and a later sync brings back
+    corrupt rows for the same fingerprint, the existing good
+    bundle must NOT be destroyed. The staging-then-validate
+    flow writes to a side directory; the target is replaced
+    only after ``load_bundle`` succeeds on the staged copy."""
+    from bigquery_agent_analytics.extractor_compilation import BundleRow
+    from bigquery_agent_analytics.extractor_compilation import load_bundle
+    from bigquery_agent_analytics.extractor_compilation import LoadedBundle
+    from bigquery_agent_analytics.extractor_compilation import publish_bundles_to_bq
+    from bigquery_agent_analytics.extractor_compilation import sync_bundles_from_bq
+
+    # Step 1: publish a good bundle, sync it locally so we
+    # have an established good local state.
+    bundle_root = self._good_bundle(tmp_path)
+    store = _InMemoryStore()
+    publish_bundles_to_bq(bundle_root=bundle_root, store=store)
+    sync_dir = tmp_path / "synced"
+    initial_sync = sync_bundles_from_bq(store=store, dest_dir=sync_dir)
+    assert initial_sync.synced_fingerprints == (_VALID_FINGERPRINT_A,)
+
+    good_bundle = sync_dir / _VALID_FINGERPRINT_A
+    good_module_bytes = (good_bundle / "extractor.py").read_bytes()
+
+    # Step 2: corrupt the store — replace the module row with
+    # garbage source the loader will reject. Same fingerprint
+    # in the manifest row, so the corrupt re-sync targets the
+    # exact local directory we want to protect.
+    corrupt_manifest = (good_bundle / "manifest.json").read_bytes()
+    store_with_corruption = _InMemoryStore()
+    store_with_corruption.publish_rows(
+        [
+            BundleRow(
+                bundle_fingerprint=_VALID_FINGERPRINT_A,
+                bundle_path="manifest.json",
+                file_content=corrupt_manifest,
+                event_types=("bka_decision",),
+                module_filename="extractor.py",
+                function_name="extract_bka",
+                published_at="2026-05-08T00:00:00Z",
+            ),
+            BundleRow(
+                bundle_fingerprint=_VALID_FINGERPRINT_A,
+                bundle_path="extractor.py",
+                # No function named extract_bka → load_bundle
+                # rejects with function_not_found.
+                file_content=b"def something_else(event, spec): return None\n",
+                event_types=("bka_decision",),
+                module_filename="extractor.py",
+                function_name="extract_bka",
+                published_at="2026-05-08T00:00:00Z",
+            ),
+        ]
+    )
+
+    # Step 3: re-sync from the corrupt store. The bundle dir
+    # exists; the staged reconstruction must fail load_bundle;
+    # the existing good bundle must NOT be destroyed.
+    second_sync = sync_bundles_from_bq(
+        store=store_with_corruption, dest_dir=sync_dir
+    )
+    assert second_sync.synced_fingerprints == ()
+    codes = {f.code for f in second_sync.failures}
+    assert "bundle_load_failed" in codes
+
+    # Local good bundle is intact.
+    assert good_bundle.exists()
+    assert (good_bundle / "extractor.py").read_bytes() == good_module_bytes
+    outcome = load_bundle(
+        good_bundle, expected_fingerprint=_VALID_FINGERPRINT_A
+    )
+    assert isinstance(outcome, LoadedBundle)
+
+    # Staging directories were cleaned up — no orphaned
+    # ".staging-*" dirs left behind.
+    leftover_staging = [
+        p for p in sync_dir.iterdir() if p.name.startswith(".staging-")
+    ]
+    assert leftover_staging == []
+
+  def test_publish_rows_rejects_duplicate_input_pairs(self):
+    """``BigQueryBundleStore.publish_rows`` raises
+    ``ValueError`` on duplicate ``(fingerprint, path)`` input
+    pairs — defense in depth on top of the publisher-side
+    ``duplicate_fingerprint`` guard."""
+    from bigquery_agent_analytics.extractor_compilation import BigQueryBundleStore
+    from bigquery_agent_analytics.extractor_compilation import BundleRow
+
+    row = BundleRow(
+        bundle_fingerprint=_VALID_FINGERPRINT_A,
+        bundle_path="manifest.json",
+        file_content=b"{}",
+        event_types=("bka_decision",),
+        module_filename="extractor.py",
+        function_name="extract_bka",
+        published_at="2026-05-08T00:00:00Z",
+    )
+
+    class _FakeBQClient:
+
+      def query(self, *args, **kwargs):
+        raise AssertionError("DELETE must not run on duplicate input")
+
+      def insert_rows_json(self, *args, **kwargs):
+        raise AssertionError("INSERT must not run on duplicate input")
+
+    store = BigQueryBundleStore(bq_client=_FakeBQClient(), table_id="p.d.t")
+    with pytest.raises(ValueError, match=r"duplicate.*manifest\.json"):
+      store.publish_rows([row, row])

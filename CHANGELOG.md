@@ -27,20 +27,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   :func:`load_bundle` as a gate — publish refuses bundles
   that wouldn't load at the runtime; sync refuses bundles
   whose reconstruction the loader rejects, scrubbing any
-  partial directory it wrote. Strict
-  bundle-shape check: the table stores exactly two rows
-  per fingerprint (``manifest.json`` + the manifest's
+  partial directory it wrote. Sync writes each
+  fingerprint to a side-by-side **staging directory** and
+  runs ``load_bundle`` on the staged copy before atomically
+  replacing the target; corrupt mirror rows therefore
+  cannot destroy a previously-good local bundle.
+  Strict bundle-shape check: the table stores exactly two
+  rows per fingerprint (``manifest.json`` + the manifest's
   ``module_filename``); ``unexpected_file`` codes reject
-  anything else. ``invalid_bundle_path`` rejects
-  traversal / absolute / backslash / NUL paths before
-  writing to disk. ``duplicate_row`` rejects two rows
-  sharing the same ``(fingerprint, bundle_path)`` (BigQuery
-  has no unique constraint; the mirror enforces uniqueness
-  at sync). ``malformed_row`` rejects rows with wrong
-  field types. Idempotent republish via DELETE+INSERT in
+  anything else. The manifest's own ``module_filename`` is
+  shape-checked at sync (bare filename — no separators, no
+  ``..``, no NUL); a path-separator value surfaces as
+  ``manifest_row_unreadable`` instead of raising
+  ``FileNotFoundError`` at the write step.
+  ``invalid_bundle_path`` rejects traversal / absolute /
+  backslash / NUL paths before writing to disk.
+  ``duplicate_row`` rejects two rows sharing the same
+  ``(fingerprint, bundle_path)`` (BigQuery has no unique
+  constraint; the mirror enforces uniqueness at sync).
+  ``duplicate_fingerprint`` rejects publish-side cases
+  where two subdirs of ``bundle_root`` claim the same
+  manifest fingerprint — neither is published, so the
+  table can't end up with logical duplicates.
+  ``malformed_row`` rejects rows with wrong field types.
+  Idempotent republish via DELETE+INSERT in
   ``BigQueryBundleStore.publish_rows`` —
   re-publishing the same fingerprint replaces the prior
-  rows rather than accumulating duplicates.
+  rows rather than accumulating duplicates. The DELETE +
+  ``insert_rows_json`` are NOT a single atomic
+  transaction; a transient INSERT failure leaves rows
+  missing until the caller re-runs publish (recoverable;
+  documented in the class docstring).
+  ``publish_rows`` also raises ``ValueError`` on duplicate
+  ``(fingerprint, bundle_path)`` input pairs as defense in
+  depth.
   ``BundleStore`` is a Protocol so tests can pass in-memory
   fakes; ``BigQueryBundleStore`` is the concrete
   implementation wrapping ``google.cloud.bigquery``.

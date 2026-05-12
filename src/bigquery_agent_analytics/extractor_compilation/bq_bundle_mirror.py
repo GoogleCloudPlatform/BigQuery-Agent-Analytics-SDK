@@ -58,6 +58,13 @@ Publish-side:
   :func:`load_bundle` *before* publishing. ``detail`` carries
   the underlying loader code so we don't publish bundles the
   runtime would reject.
+* ``duplicate_fingerprint`` — two or more subdirs of
+  ``bundle_root`` declare the same manifest fingerprint. The
+  mirror is keyed on ``(bundle_fingerprint, bundle_path)``;
+  publishing both would land contents-of-the-loser in the
+  table and corrupt the bundle identity. Fail-closed: every
+  participating subdir gets a failure record and *no* rows
+  are emitted for that fingerprint.
 
 Sync-side:
 
@@ -66,7 +73,10 @@ Sync-side:
 * ``manifest_row_missing`` — bundle has rows but no row with
   ``bundle_path="manifest.json"``.
 * ``manifest_row_unreadable`` — the manifest row's content
-  isn't a valid :class:`Manifest`.
+  isn't a valid :class:`Manifest`. Also fires when the
+  parsed manifest's shape would let a path-escape or write
+  failure slip past :func:`_validate_bundle_path` (e.g.
+  ``module_filename`` containing a path separator).
 * ``invalid_bundle_path`` — a row's ``bundle_path`` traverses
   out of the bundle directory, is absolute, or contains
   forbidden characters. Sync is fail-closed here: the offender
@@ -116,6 +126,7 @@ import datetime
 import pathlib
 import shutil
 from typing import Any, Iterable, Iterator, Optional, Protocol
+import uuid
 
 from .bundle_loader import load_bundle
 from .bundle_loader import LoadFailure
@@ -270,13 +281,37 @@ class BigQueryBundleStore:
   ``fetch_rows`` assume the table already exists with the
   schema declared in :data:`BUNDLE_MIRROR_TABLE_SCHEMA`.
 
-  Idempotency contract: ``publish_rows`` issues a DELETE for
-  every ``(bundle_fingerprint, bundle_path)`` pair it's about
-  to write, then INSERTs the new rows in the same transaction.
-  Republishing the same fingerprint replaces the prior copy
-  rather than accumulating duplicate rows. The DELETE is
-  scoped to the keys being written — other fingerprints in
-  the table are untouched.
+  Idempotency contract — important caveats:
+
+  * ``publish_rows`` first DELETEs every
+    ``(bundle_fingerprint, bundle_path)`` pair it's about to
+    write, then calls ``insert_rows_json`` for the new
+    payload. The DELETE is scoped to the keys being written;
+    other fingerprints are untouched. Re-publishing the same
+    fingerprint replaces the prior copy.
+  * **The DELETE and INSERT are NOT a single atomic
+    transaction.** ``insert_rows_json`` is a streaming insert
+    that BigQuery does not enroll in a multi-statement
+    transaction with the DELETE query. If the DELETE
+    succeeds and the INSERT fails (network, quota, schema
+    drift), rows for the affected
+    ``(bundle_fingerprint, bundle_path)`` pairs will be
+    *missing* from the table until the caller re-runs
+    publish. The mirror is publish-side idempotent, so the
+    fix is to call :func:`publish_bundles_to_bq` again — but
+    operators should be aware that a transient INSERT failure
+    leaves a recoverable, not silent, gap. A
+    staging-table-plus-MERGE flow would close this gap and
+    is deliberately deferred (see module docstring).
+  * Duplicate ``(bundle_fingerprint, bundle_path)`` pairs
+    in the input raise ``ValueError`` *before* any DELETE
+    runs. BigQuery's ``insert_rows_json`` does not
+    deduplicate, so silently accepting duplicates would
+    leave the table with logical duplicates that sync later
+    rejects fail-closed. The publisher in
+    :func:`publish_bundles_to_bq` already guards against
+    cross-bundle duplicate fingerprints; this defensive
+    raise covers callers that build rows by hand.
   """
 
   def __init__(
@@ -343,16 +378,33 @@ class BigQueryBundleStore:
 
   def publish_rows(self, rows: Iterable[BundleRow]) -> int:
     """Upsert rows by ``(bundle_fingerprint, bundle_path)``.
-    Returns the count of rows actually written."""
+    Returns the count of rows actually written.
+
+    Raises ``ValueError`` if the input contains duplicate
+    ``(bundle_fingerprint, bundle_path)`` pairs. See the
+    class docstring for the DELETE+INSERT non-atomicity
+    contract.
+    """
     rows_list = list(rows)
     if not rows_list:
       return 0
+    # Defense in depth: refuse duplicate (fp, path) input
+    # pairs. The publisher de-duplicates by detecting
+    # ``duplicate_fingerprint`` earlier in the pipeline; this
+    # raise covers direct callers of the store.
+    pairs = [(r.bundle_fingerprint, r.bundle_path) for r in rows_list]
+    pair_counts = collections.Counter(pairs)
+    dupes = sorted(p for p, n in pair_counts.items() if n > 1)
+    if dupes:
+      raise ValueError(
+          f"publish_rows received duplicate "
+          f"(bundle_fingerprint, bundle_path) pairs: {dupes}"
+      )
     # 1. DELETE the (fp, path) pairs we're about to overwrite.
-    delete_pairs = sorted(
-        {(r.bundle_fingerprint, r.bundle_path) for r in rows_list}
-    )
+    delete_pairs = sorted(set(pairs))
     self._delete_pairs(delete_pairs)
-    # 2. INSERT the new rows.
+    # 2. INSERT the new rows. Note: this is NOT atomic with
+    # the DELETE above. See the class docstring.
     payload = [self._row_to_json(r) for r in rows_list]
     errors = self._bq_client.insert_rows_json(self._table_id, payload)
     if errors:
@@ -470,8 +522,19 @@ def publish_bundles_to_bq(
   published: list[str] = []
   skipped: list[str] = []
   failures: list[MirrorFailure] = []
-  rows_to_publish: list[BundleRow] = []
   now = _now_iso_utc()
+  # First-pass collect candidates by fingerprint so we can
+  # detect cross-subdir duplicate fingerprints before publishing
+  # any of them. Without this guard, two subdirs claiming the
+  # same fingerprint would each emit their own
+  # ``(fingerprint, manifest.json)`` + ``(fingerprint, module)``
+  # rows; ``BigQueryBundleStore.publish_rows`` would DELETE the
+  # composite keys (good) then INSERT both copies, leaving the
+  # table with duplicate logical rows that sync later rejects.
+  # Better to fail-closed at publish than to corrupt the table.
+  candidates: dict[str, list[tuple[str, list[BundleRow]]]] = (
+      collections.defaultdict(list)
+  )
 
   if not bundle_root.is_dir():
     failures.append(
@@ -554,7 +617,7 @@ def publish_bundles_to_bq(
       )
       continue
 
-    rows_to_publish.append(
+    bundle_rows = [
         BundleRow(
             bundle_fingerprint=fp,
             bundle_path=_MANIFEST_FILENAME,
@@ -563,9 +626,7 @@ def publish_bundles_to_bq(
             module_filename=manifest.module_filename,
             function_name=manifest.function_name,
             published_at=now,
-        )
-    )
-    rows_to_publish.append(
+        ),
         BundleRow(
             bundle_fingerprint=fp,
             bundle_path=manifest.module_filename,
@@ -574,8 +635,31 @@ def publish_bundles_to_bq(
             module_filename=manifest.module_filename,
             function_name=manifest.function_name,
             published_at=now,
-        )
-    )
+        ),
+    ]
+    candidates[fp].append((child.name, bundle_rows))
+
+  # Second pass: emit rows for fingerprints that appeared in
+  # exactly one subdir. Duplicate fingerprints get a
+  # ``duplicate_fingerprint`` failure naming all participating
+  # subdirs and contribute zero rows.
+  rows_to_publish: list[BundleRow] = []
+  for fp, entries in candidates.items():
+    if len(entries) > 1:
+      names = sorted(name for name, _ in entries)
+      failures.append(
+          MirrorFailure(
+              code="duplicate_fingerprint",
+              detail=(
+                  f"fingerprint {fp!r} declared by multiple subdirs "
+                  f"({names}); refusing to publish either"
+              ),
+              bundle_fingerprint=fp,
+          )
+      )
+      continue
+    _name, rows = entries[0]
+    rows_to_publish.extend(rows)
     published.append(fp)
 
   rows_written = store.publish_rows(rows_to_publish) if rows_to_publish else 0
@@ -721,6 +805,29 @@ def sync_bundles_from_bq(
       skipped.append(fp)
       continue
 
+    # ``Manifest.from_json`` is lenient about field types and
+    # values — it just maps keys. A mirrored manifest can
+    # therefore carry e.g. ``module_filename="subdir/foo.py"``
+    # which passes :func:`_validate_bundle_path` (no ``..``,
+    # not absolute) but would later raise ``FileNotFoundError``
+    # when sync writes to ``bundle_dir / "subdir/foo.py"``
+    # because the parent dir doesn't exist. Catch
+    # malformed-shape cases up front so the failure surfaces
+    # as a structured ``manifest_row_unreadable`` rather than
+    # bubbling out of the write step.
+    shape_problem = _validate_manifest_shape(manifest)
+    if shape_problem is not None:
+      failures.append(
+          MirrorFailure(
+              code="manifest_row_unreadable",
+              detail=shape_problem,
+              bundle_fingerprint=fp,
+              bundle_path=_MANIFEST_FILENAME,
+          )
+      )
+      skipped.append(fp)
+      continue
+
     # Step 2: validate every row's bundle_path is safe AND
     # is one of the two paths a bundle legitimately contains.
     # Path safety happens *before* checking the file set so
@@ -773,22 +880,47 @@ def sync_bundles_from_bq(
       skipped.append(fp)
       continue
 
-    # Step 3: write the two files to ``dest_dir/<fingerprint>/``
-    # and validate the reconstruction via load_bundle. On any
-    # failure, scrub the partial directory so callers don't
-    # keep half-synced bundles around.
+    # Step 3: write the two files to a *staging* directory and
+    # validate the reconstruction via load_bundle BEFORE
+    # touching any existing ``dest_dir/<fingerprint>/``. A bad
+    # mirror row must not destroy a previously-good local
+    # bundle: write somewhere safe, run the loader gate, then
+    # atomically replace the target only on success.
     bundle_dir = dest_dir / fp
-    if bundle_dir.exists():
-      shutil.rmtree(bundle_dir)
-    bundle_dir.mkdir(parents=True)
-    (bundle_dir / _MANIFEST_FILENAME).write_bytes(manifest_row.file_content)
-    (bundle_dir / manifest.module_filename).write_bytes(
-        by_path[manifest.module_filename].file_content
-    )
+    staging_dir = dest_dir / f".staging-{fp}-{uuid.uuid4().hex[:8]}"
+    if staging_dir.exists():
+      # Extraordinarily unlikely (collision on a uuid4 prefix)
+      # but be defensive — never reuse a populated staging dir.
+      shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True)
+    try:
+      (staging_dir / _MANIFEST_FILENAME).write_bytes(manifest_row.file_content)
+      (staging_dir / manifest.module_filename).write_bytes(
+          by_path[manifest.module_filename].file_content
+      )
+      load_outcome = load_bundle(staging_dir, expected_fingerprint=fp)
+    except Exception as exc:  # noqa: BLE001 — record + continue
+      # write failure (FileNotFoundError for a still-malformed
+      # path, disk full, etc.) — leave any pre-existing
+      # ``bundle_dir`` intact, scrub the staging dir.
+      shutil.rmtree(staging_dir, ignore_errors=True)
+      failures.append(
+          MirrorFailure(
+              code="bundle_load_failed",
+              detail=(
+                  f"writing staging bundle raised "
+                  f"{type(exc).__name__}: {exc}"
+              ),
+              bundle_fingerprint=fp,
+          )
+      )
+      skipped.append(fp)
+      continue
 
-    load_outcome = load_bundle(bundle_dir, expected_fingerprint=fp)
     if isinstance(load_outcome, LoadFailure):
-      shutil.rmtree(bundle_dir)
+      # Reconstructed bundle doesn't load — keep the old
+      # ``bundle_dir`` (if any) and toss the staging copy.
+      shutil.rmtree(staging_dir, ignore_errors=True)
       failures.append(
           MirrorFailure(
               code="bundle_load_failed",
@@ -798,6 +930,17 @@ def sync_bundles_from_bq(
       )
       skipped.append(fp)
       continue
+
+    # Atomic-ish replace: remove old ``bundle_dir`` (if any),
+    # then move staging into place. The window between the
+    # rmtree and the move is small and on the same filesystem,
+    # so we accept the tiny risk in exchange for simplicity.
+    # The crucial property — "don't destroy good local state
+    # because of bad mirror rows" — is preserved by the
+    # staging-then-validate flow above.
+    if bundle_dir.exists():
+      shutil.rmtree(bundle_dir)
+    shutil.move(str(staging_dir), str(bundle_dir))
 
     synced.append(fp)
 
@@ -840,6 +983,69 @@ def _validate_bundle_path(path: str) -> Optional[str]:
     return f"bundle_path is absolute: {path!r}"
   if any(part == ".." for part in pure.parts):
     return f"bundle_path contains '..': {path!r}"
+  return None
+
+
+def _validate_manifest_shape(manifest: Manifest) -> Optional[str]:
+  """Return a problem string if *manifest* would let sync write
+  outside the bundle directory or otherwise produce a broken
+  reconstruction, or ``None`` if it's safe.
+
+  Checks beyond ``Manifest.from_json``'s lenient field-mapping:
+
+  * ``fingerprint`` and ``function_name`` are non-empty
+    strings.
+  * ``event_types`` is a tuple of strings (the dataclass field
+    declares ``tuple[str, ...]`` but the JSON round-trip path
+    doesn't enforce element types).
+  * ``module_filename`` is a *bare* filename — no path
+    separators (forward slash or backslash), no ``..``, no
+    ``.``, no NUL, non-empty. C2.a's loader resolves it as
+    ``bundle_dir / module_filename``; a name containing
+    ``"subdir/foo.py"`` would otherwise raise
+    ``FileNotFoundError`` at sync's write step instead of
+    surfacing as a structured ``manifest_row_unreadable``.
+  """
+  if not isinstance(manifest.fingerprint, str) or not manifest.fingerprint:
+    return (
+        f"manifest fingerprint must be a non-empty string; got "
+        f"{type(manifest.fingerprint).__name__}={manifest.fingerprint!r}"
+    )
+  if not isinstance(manifest.function_name, str) or not manifest.function_name:
+    return (
+        f"manifest function_name must be a non-empty string; got "
+        f"{type(manifest.function_name).__name__}={manifest.function_name!r}"
+    )
+  if not isinstance(manifest.event_types, tuple):
+    return (
+        f"manifest event_types must be a tuple; got "
+        f"{type(manifest.event_types).__name__}"
+    )
+  for index, et in enumerate(manifest.event_types):
+    if not isinstance(et, str):
+      return (
+          f"manifest event_types[{index}] must be a string; got "
+          f"{type(et).__name__}={et!r}"
+      )
+  if (
+      not isinstance(manifest.module_filename, str)
+      or not manifest.module_filename
+  ):
+    return (
+        f"manifest module_filename must be a non-empty string; got "
+        f"{type(manifest.module_filename).__name__}="
+        f"{manifest.module_filename!r}"
+    )
+  mf = manifest.module_filename
+  if "\x00" in mf:
+    return "manifest module_filename contains NUL"
+  if "/" in mf or "\\" in mf:
+    return (
+        f"manifest module_filename must be a bare filename "
+        f"(no path separators); got {mf!r}"
+    )
+  if mf in (".", ".."):
+    return f"manifest module_filename must not be {mf!r}"
   return None
 
 
