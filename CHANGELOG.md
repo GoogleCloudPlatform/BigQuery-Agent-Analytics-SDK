@@ -29,9 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose reconstruction the loader rejects, scrubbing any
   partial directory it wrote. Sync writes each
   fingerprint to a side-by-side **staging directory** and
-  runs ``load_bundle`` on the staged copy before atomically
-  replacing the target; corrupt mirror rows therefore
-  cannot destroy a previously-good local bundle.
+  runs ``load_bundle`` on the staged copy before performing
+  a **staged replace** of the target (the rmtree+move pair
+  is not strictly atomic — a crash between the two leaves
+  the bundle absent on disk, recoverable by re-sync — but
+  the load-bundle-failure direction *is* atomic, so a bad
+  mirror row never destroys a previously-good local
+  bundle).
   Strict bundle-shape check: the table stores exactly two
   rows per fingerprint (``manifest.json`` + the manifest's
   ``module_filename``); ``unexpected_file`` codes reject
