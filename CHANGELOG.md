@@ -22,10 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``sync_bundles_from_bq``,
   ``OntologyGraphManager.from_bundles_root``) and the real
   ``bqaa-revalidate-extractors`` shell invocation only
-  where a CLI actually exists. Documents the four points
-  where ``load_bundle`` runs (compile smoke gate,
-  pre-publish, post-sync, runtime-startup discovery) so the
-  trust boundary is one mental model across the pipeline.
+  where a CLI actually exists. Documents the **four trust
+  gates** across the pipeline — the compile-time smoke gate
+  inside ``compile_extractor`` (``load_callable_from_source``
+  + ``run_smoke_test``, not ``load_bundle`` itself: there's
+  no manifest at compile time) plus three real
+  ``load_bundle`` runs at pre-publish, post-sync, and
+  runtime-startup discovery — so the trust model is one
+  mental model across the pipeline.
   Includes a failure-recovery playbook keyed on the stable
   failure codes each stage emits.
 - **``--events-bq-query-file`` for ``bqaa-revalidate-extractors``**

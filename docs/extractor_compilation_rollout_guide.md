@@ -139,9 +139,22 @@ assert not result.failures, result.failures
 
 **API:** `sync_bundles_from_bq`.
 
+In a distributed deployment the sync host is a different process from the publish host, so construct a fresh `BigQueryBundleStore` against the same `table_id` instead of reusing the publisher's handle:
+
 ```python
 import pathlib
-from bigquery_agent_analytics.extractor_compilation import sync_bundles_from_bq
+from google.cloud import bigquery
+from bigquery_agent_analytics.extractor_compilation import (
+    BigQueryBundleStore, sync_bundles_from_bq,
+)
+
+# Runtime-host process. Same table_id as the publisher; the
+# BigQuery client uses Application Default Credentials for
+# the runtime's service account.
+store = BigQueryBundleStore(
+    bq_client=bigquery.Client(project="my-project", location="US"),
+    table_id="my-project.my_dataset.compiled_bundles",
+)
 
 result = sync_bundles_from_bq(
     store=store,
@@ -332,8 +345,18 @@ publish_bundles_to_bq(bundle_root=bundle_root, store=store)
 
 ```python
 # === Stage 3: Sync (distributed runtimes only, on the runtime host) ===
-from bigquery_agent_analytics.extractor_compilation import sync_bundles_from_bq
+# Different process from publish — re-construct the store
+# against the same table_id (typically using the runtime's
+# service-account ADC).
+from google.cloud import bigquery
+from bigquery_agent_analytics.extractor_compilation import (
+    BigQueryBundleStore, sync_bundles_from_bq,
+)
 
+store = BigQueryBundleStore(
+    bq_client=bigquery.Client(project="my-project", location="US"),
+    table_id="my-project.my_dataset.compiled_bundles",
+)
 sync_bundles_from_bq(
     store=store,
     dest_dir=pathlib.Path("/tmp/synced-bundles"),
@@ -368,16 +391,16 @@ bqaa-revalidate-extractors \
     --report-out /var/log/bqaa/revalidate_$(date +%Y%m%d_%H%M).json
 ```
 
-## Trust boundaries — where `load_bundle` runs
+## Trust boundaries — the four gates
 
-The same `load_bundle` gate runs at four points so each handoff catches the next stage's surprises:
+Four gates run across the pipeline so each handoff catches the next stage's surprises:
 
-1. **Inside `compile_extractor`** — the smoke gate verifies the freshly-rendered module loads + the callable accepts `(event, spec)` + doesn't crash on the sample events.
-2. **Pre-publish, inside `publish_bundles_to_bq`** — the mirror never distributes a bundle the runtime would reject.
-3. **Post-sync, inside `sync_bundles_from_bq`** — the staged reconstruction must load before it replaces the previous `dest_dir/<fingerprint>/`. A bad mirror row can't destroy good local state.
-4. **At runtime startup, inside `discover_bundles`** — every loaded bundle's fingerprint must match the runtime's active inputs.
+1. **Compile-time smoke gate, inside `compile_extractor`** — `load_callable_from_source` + `run_smoke_test[_in_subprocess]` verify the freshly-rendered module imports, the callable accepts `(event, spec)`, and doesn't crash on the sample events. (This is NOT `load_bundle` itself — there's no manifest yet; the smoke check is the compile-time analog.)
+2. **Pre-publish gate, inside `publish_bundles_to_bq`** — `load_bundle(...)` runs against the local bundle before its rows are emitted. The mirror never distributes a bundle the runtime would reject.
+3. **Post-sync gate, inside `sync_bundles_from_bq`** — `load_bundle(...)` runs against the staged reconstruction before it replaces the previous `dest_dir/<fingerprint>/`. A bad mirror row can't destroy good local state.
+4. **Runtime-discovery gate, inside `discover_bundles`** — `load_bundle(...)` runs per child at startup; every loaded bundle's fingerprint must match the runtime's active inputs.
 
-This is why corrupted or drifted bundles don't reach the production extract path: there are four chances to catch them before a runtime call.
+This is why corrupted or drifted bundles don't reach the production extract path: four chances to catch them before a runtime call. Three of the gates are `load_bundle` itself (publish, sync, discovery); the compile-time gate is the smoke check that exists *before* the manifest is written.
 
 ## Cadence
 
