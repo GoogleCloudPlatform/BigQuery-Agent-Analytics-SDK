@@ -12,81 +12,66 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MAKO agent — the only authored Python in the migration v5
-demo.
+"""MAKO artifact pipeline for the migration v5 demo.
 
 Reads exactly one input — ``mako_core.ttl`` — and produces
-every other artifact the demo consumes:
+every TTL-derived artifact the demo consumes:
 
 * ``ontology.yaml`` — :func:`gm import-owl` output with
-  ``FILL_IN`` primary keys resolved programmatically.
+  ``FILL_IN`` primary keys resolved programmatically and
+  cross-namespace dangling relationships dropped.
 * ``binding.yaml`` — generated for a configurable
   ``(project, dataset)``.
 * ``table_ddl.sql`` — companion to the binding.
 * ``property_graph.sql`` — ``CREATE PROPERTY GRAPH`` SQL.
-  Edge-column names align with what the agent generates in
-  ``table_ddl.sql`` so Beat 1 of the notebook can apply both
-  cleanly.
-* ``events.jsonl`` — deterministic event stream whose
-  payloads carry only MAKO-declared data properties wrapped
-  in the BQ AA plugin's telemetry envelope.
+  Edge-column names align with ``table_ddl.sql`` so Beat 1
+  of the notebook can apply both cleanly.
 
-Authored input contract — the only two files in this
-directory that aren't agent outputs:
+**Events are NOT generated here.** The event stream's
+source of truth is the BQ AA plugin's ``agent_events``
+table, populated by the runnable agent in
+``mako_demo_agent.py`` talking to
+``BigQueryAgentAnalyticsPlugin``. An optional captured
+offline snapshot (for revalidation tests that need
+determinism) is produced by ``export_events_jsonl.py`` —
+that path's job is to export FROM the populated BQ table,
+not to synthesize events.
 
-1. ``mako_core.ttl`` — the user-authored MAKO ontology.
-2. ``mako_agent.py`` (this file) — the agent that imports,
-   normalizes, and instantiates that ontology.
+Authored input contract — the only files in this
+directory that are user-authored:
+
+1. ``mako_core.ttl`` — the MAKO ontology.
+2. ``mako_artifacts.py`` (this file) — the TTL → artifacts
+   pipeline.
+3. ``mako_demo_agent.py`` — the runnable agent that emits
+   real plugin traces through ``BigQueryAgentAnalyticsPlugin``.
+4. ``run_agent.py`` — the driver that runs the agent for N
+   sessions.
+5. ``export_events_jsonl.py`` — optional helper that
+   captures a deterministic offline snapshot from
+   ``agent_events`` for revalidation tests.
 
 Everything else under ``examples/migration_v5/`` is a
 reproducibility snapshot produced by
-:func:`regenerate_snapshots`. The notebook can either
-consume those snapshots as-is OR call the agent's APIs at
-runtime against a fresh dataset.
-
-Telemetry envelope vs. MAKO domain model:
-
-* The **MAKO ontology** declares the **domain entity
-  classes** (``AgentSession``, ``DecisionPoint``,
-  ``Candidate``, ``SelectionOutcome``, ``ContextSnapshot``)
-  and a small set of data properties on them
-  (``AgentSession.sessionId``, ``DecisionPoint.reversibility``,
-  ``ContextSnapshot.snapshotPayload`` /
-  ``snapshotTimestamp``; ``Candidate`` and
-  ``SelectionOutcome`` are structural classes with no data
-  properties). MAKO does NOT model the telemetry plumbing.
-* The **BQ AA plugin telemetry envelope** wraps each event
-  with ``event_type`` / ``session_id`` / ``span_id`` /
-  ``event_timestamp`` / ``content``. The ``content`` dict
-  carries the actual entity instance fields keyed by
-  MAKO-declared property names. The envelope is the
-  plugin's contract, not MAKO's.
-
-The agent generates events using only MAKO-declared
-properties for the inner payload; the envelope is the
-plugin contract.
+:func:`regenerate_snapshots` or by running the agent.
 
 FILL_IN resolution policy:
 
 The MAKO TTL doesn't declare ``owl:hasKey`` on most
 entities, so the OWL importer marks every concrete entity's
-primary key as ``FILL_IN``. The agent resolves this by
-synthesizing an ``id: string`` property + primary key on
-every entity that lacks one. This matches MAKO's "every
-artifact has a stable identifier" design contract; if a
-future TTL revision adds ``owl:hasKey`` declarations, the
-resolver leaves those alone.
+primary key as ``FILL_IN``. The artifact pipeline resolves
+this by synthesizing an ``id: string`` property + primary
+key on every entity that lacks one. This matches MAKO's
+"every artifact has a stable identifier" design contract;
+if a future TTL revision adds ``owl:hasKey`` declarations,
+the resolver leaves those alone.
 """
 
 from __future__ import annotations
 
-import dataclasses
-import datetime
-import hashlib
 import json
 import pathlib
-import random
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Optional
 
 import yaml
 
@@ -101,36 +86,40 @@ from bigquery_ontology.owl_importer import import_owl
 _FIXTURE_DIR = pathlib.Path(__file__).parent
 TTL_PATH = _FIXTURE_DIR / "mako_core.ttl"
 
-# Snapshot-output paths. The agent writes these via
-# :func:`regenerate_snapshots`; the notebook can either
-# consume them as-is or call the agent's pure APIs at
-# runtime.
+# Snapshot-output paths. :func:`regenerate_snapshots` writes
+# these; the notebook can either consume them as-is or call
+# the pure APIs at runtime against a fresh dataset.
+#
+# Note: ``events.jsonl`` is NOT in this list. The event
+# stream's source of truth is the BQ AA plugin's
+# ``agent_events`` table, populated by the runnable
+# ``mako_demo_agent.py`` agent. An optional captured
+# offline snapshot (for revalidation tests) is produced by
+# ``export_events_jsonl.py``.
 ONTOLOGY_PATH = _FIXTURE_DIR / "ontology.yaml"
 BINDING_PATH = _FIXTURE_DIR / "binding.yaml"
 TABLE_DDL_PATH = _FIXTURE_DIR / "table_ddl.sql"
 PROPERTY_GRAPH_PATH = _FIXTURE_DIR / "property_graph.sql"
-EVENTS_PATH = _FIXTURE_DIR / "events.jsonl"
 
 # MAKO namespace — passed to ``import_owl`` so we only pull
 # entities under that IRI prefix (not the imported PROV-O /
 # PKO / etc. classes).
 _MAKO_NAMESPACE = "https://ontology.yahoo.com/mako/"
 
-# Demo-focused entity allowlist. The agent's ``make_binding``
-# / ``make_property_graph_sql`` only consider these six.
-# This is **agent configuration**, not ontology curation —
-# the full imported ``ontology.yaml`` still contains all 41
-# MAKO entities; the binding scope is narrower because the
-# notebook's narrative focuses on the decision-flow core.
+# Demo-focused entity allowlist. ``make_binding`` /
+# ``make_property_graph_sql`` only consider these six. This
+# is **artifact configuration**, not ontology curation — the
+# full imported ``ontology.yaml`` still contains the 18
+# MAKO-namespace entities; the binding scope is narrower so
+# the notebook's four-guarantee narrative stays focused.
 #
-# Why these six (and not the smaller four-entity set you'd
-# expect from naive "session → decision → candidate" naming):
-# in MAKO, ``DecisionExecution`` is the **central hub** that
-# ties everything together (per the TTL, it's
-# ``partOfSession`` an AgentSession, ``atContextSnapshot`` a
-# ContextSnapshot, ``executedAtDecisionPoint`` a
-# DecisionPoint, ``hasSelectionOutcome`` a SelectionOutcome).
-# The decision-flow story doesn't hold together without
+# Why these six: in MAKO, ``DecisionExecution`` is the
+# central hub that ties everything together (per the TTL,
+# it's ``partOfSession`` an AgentSession,
+# ``atContextSnapshot`` a ContextSnapshot,
+# ``executedAtDecisionPoint`` a DecisionPoint,
+# ``hasSelectionOutcome`` a SelectionOutcome). The
+# decision-flow story doesn't hold together without
 # ``DecisionExecution`` in the binding.
 DEMO_ENTITIES: tuple[str, ...] = (
     "AgentSession",
@@ -140,55 +129,6 @@ DEMO_ENTITIES: tuple[str, ...] = (
     "SelectionOutcome",
     "ContextSnapshot",
 )
-
-# Stable RNG seed for deterministic event generation. Bump
-# only on intentional corpus changes — the notebook's
-# outputs round-trip byte-identically across runs.
-_EVENT_SEED = 20260512
-_SESSION_COUNT = 50
-
-# Telemetry-envelope shape constants. These match the BQ AA
-# plugin's event row schema; the agent generates events that
-# look like what the plugin would emit, so the demo's
-# extractors see the same surface as production.
-_PLUGIN_EVENT_TYPES = (
-    "agent_session_started",
-    "context_captured",
-    "mako_decision",
-    "agent_session_ended",
-)
-
-
-# ------------------------------------------------------------------ #
-# Telemetry envelope                                                  #
-# ------------------------------------------------------------------ #
-
-
-@dataclasses.dataclass(frozen=True)
-class TelemetryEvent:
-  """One row in the BQ AA plugin's event stream.
-
-  The envelope (``event_type``, ``session_id``, ``span_id``,
-  ``event_timestamp``) is the plugin's contract; ``content``
-  is a free-form dict that the demo agent populates using
-  MAKO-declared data properties. MAKO models the domain
-  entities; the envelope models the telemetry plumbing.
-  """
-
-  event_type: str
-  session_id: str
-  span_id: str
-  event_timestamp: str
-  content: dict
-
-  def to_dict(self) -> dict:
-    return {
-        "event_type": self.event_type,
-        "session_id": self.session_id,
-        "span_id": self.span_id,
-        "event_timestamp": self.event_timestamp,
-        "content": self.content,
-    }
 
 
 # ------------------------------------------------------------------ #
@@ -492,173 +432,6 @@ def make_property_graph_sql(
 
 
 # ------------------------------------------------------------------ #
-# Step 4: deterministic event generation                              #
-# ------------------------------------------------------------------ #
-
-
-def generate_events(
-    *,
-    seed: int = _EVENT_SEED,
-    session_count: int = _SESSION_COUNT,
-) -> list[TelemetryEvent]:
-  """Return the canonical seeded MAKO event corpus.
-
-  Deterministic: same seed + session count → byte-identical
-  output across machines so the notebook's outputs
-  round-trip cleanly.
-
-  Each session = one ``agent_session_started`` event + 2–4
-  ``(context_captured, mako_decision)`` pairs + one
-  ``agent_session_ended`` event. Inner content dicts carry
-  ONLY MAKO-declared data properties (``AgentSession.sessionId``,
-  ``DecisionPoint.reversibility``, ``ContextSnapshot.snapshotPayload``
-  / ``snapshotTimestamp``) plus ``id`` references. The
-  telemetry envelope (``event_type``, ``session_id``,
-  ``span_id``, ``event_timestamp``) is the plugin's
-  contract, not MAKO's.
-
-  Per MAKO:
-
-  * ``Candidate`` and ``SelectionOutcome`` are structural
-    classes with no data properties — events involving them
-    carry just ``id`` references.
-  * ``DecisionPoint.reversibility`` is a string (per the TTL
-    declaration). Values are picked from a small fixed
-    enumeration for the demo.
-  """
-  rng = random.Random(seed)
-  base_ts = datetime.datetime(2026, 5, 1, tzinfo=datetime.timezone.utc)
-  events: list[TelemetryEvent] = []
-
-  reversibility_values = ("reversible", "irreversible", "compensable")
-
-  for session_idx in range(1, session_count + 1):
-    session_id = _stable_id("session", session_idx)
-    session_start = base_ts + datetime.timedelta(hours=session_idx)
-
-    events.append(
-        TelemetryEvent(
-            event_type="agent_session_started",
-            session_id=session_id,
-            span_id=_stable_id("span_session_start", session_idx),
-            event_timestamp=_iso(session_start),
-            content={
-                # AgentSession data properties: sessionId.
-                "sessionId": session_id,
-            },
-        )
-    )
-
-    decisions_per_session = rng.randint(2, 4)
-    for decision_idx in range(1, decisions_per_session + 1):
-      decision_point_id = _stable_id(
-          "decision_point", session_idx, decision_idx
-      )
-      execution_id = _stable_id("execution", session_idx, decision_idx)
-      context_id = _stable_id("context", session_idx, decision_idx)
-      span_id = _stable_id("span_decision", session_idx, decision_idx)
-      trace_id = _stable_id("trace", session_idx, decision_idx)
-      decision_ts = session_start + datetime.timedelta(
-          minutes=10 * decision_idx
-      )
-
-      snapshot_ts = decision_ts - datetime.timedelta(seconds=2)
-      events.append(
-          TelemetryEvent(
-              event_type="context_captured",
-              session_id=session_id,
-              span_id=_stable_id("span_ctx", session_idx, decision_idx),
-              event_timestamp=_iso(snapshot_ts),
-              content={
-                  # ContextSnapshot data properties:
-                  # snapshotPayload, snapshotTimestamp.
-                  "id": context_id,
-                  "snapshotPayload": json.dumps(
-                      {
-                          "audience_size": rng.randint(1000, 100_000),
-                          "budget_remaining_usd": round(
-                              rng.uniform(50.0, 5000.0), 2
-                          ),
-                      }
-                  ),
-                  "snapshotTimestamp": _iso(snapshot_ts),
-              },
-          )
-      )
-
-      candidate_count = rng.randint(3, 5)
-      candidates = [
-          {
-              # Candidate has no MAKO-declared data
-              # properties; payload carries only id.
-              "id": _stable_id("cand", session_idx, decision_idx, cand_idx),
-          }
-          for cand_idx in range(candidate_count)
-      ]
-      selected_candidate_id = candidates[rng.randrange(len(candidates))]["id"]
-      outcome_id = _stable_id("outcome", session_idx, decision_idx)
-
-      events.append(
-          TelemetryEvent(
-              event_type="mako_decision",
-              session_id=session_id,
-              span_id=span_id,
-              event_timestamp=_iso(decision_ts),
-              content={
-                  # DecisionExecution data properties:
-                  # businessEntityId, latencyMs, spanId,
-                  # traceId — all imported from MAKO.
-                  "execution_id": execution_id,
-                  "businessEntityId": _stable_id(
-                      "business_entity", session_idx, decision_idx
-                  ),
-                  "latencyMs": rng.randint(20, 800),
-                  "spanId": span_id,
-                  "traceId": trace_id,
-                  # DecisionPoint data properties:
-                  # reversibility.
-                  "decision_point_id": decision_point_id,
-                  "reversibility": rng.choice(reversibility_values),
-                  # Referential targets the extractor uses to
-                  # wire the property graph's edges:
-                  # ``atContextSnapshot``,
-                  # ``evaluatesCandidate``,
-                  # ``hasSelectionOutcome``,
-                  # ``selectedCandidate``.
-                  "context_id": context_id,
-                  "candidates": candidates,
-                  "outcome_id": outcome_id,
-                  "selected_candidate_id": selected_candidate_id,
-              },
-          )
-      )
-
-    events.append(
-        TelemetryEvent(
-            event_type="agent_session_ended",
-            session_id=session_id,
-            span_id=_stable_id("span_session_end", session_idx),
-            event_timestamp=_iso(
-                session_start
-                + datetime.timedelta(minutes=10 * decisions_per_session + 1)
-            ),
-            content={
-                "sessionId": session_id,
-                "decisions_count": decisions_per_session,
-            },
-        )
-    )
-
-  return events
-
-
-def events_as_jsonl(events: Iterable[TelemetryEvent]) -> Iterator[str]:
-  """Yield one JSON-encoded event per line."""
-  for event in events:
-    yield json.dumps(event.to_dict())
-
-
-# ------------------------------------------------------------------ #
 # Step 5: regenerate the snapshot files                               #
 # ------------------------------------------------------------------ #
 
@@ -668,11 +441,15 @@ def regenerate_snapshots(
     project: str = "test-project-0728-467323",
     dataset: str = "migration_v5_demo",
 ) -> dict:
-  """Run the agent end-to-end and write every snapshot file.
+  """Regenerate every TTL-derived artifact snapshot.
 
-  Idempotent: byte-identical output across runs for the same
-  ``(project, dataset, seed)`` triple. Returns a small
-  summary dict for the notebook's setup cell to display.
+  Idempotent: byte-identical output across runs for the
+  same ``(project, dataset)`` pair. Returns a small summary
+  dict for the notebook's setup cell to display.
+
+  Does NOT produce events — events come from running
+  ``mako_demo_agent.py`` against this same
+  ``(project, dataset)`` with the BQ AA plugin enabled.
   """
   ontology, yaml_text = load_mako_ontology()
   ONTOLOGY_PATH.write_text(yaml_text, encoding="utf-8")
@@ -684,16 +461,10 @@ def regenerate_snapshots(
       make_property_graph_sql(binding, ontology=ontology), encoding="utf-8"
   )
 
-  events = generate_events()
-  EVENTS_PATH.write_text(
-      "\n".join(events_as_jsonl(events)) + "\n", encoding="utf-8"
-  )
-
   return {
       "ontology_entities": len(ontology.entities),
       "binding_entities": len(binding.entities),
       "binding_relationships": len(binding.relationships),
-      "events": len(events),
   }
 
 
@@ -750,16 +521,6 @@ def _to_snake_case(camel: str) -> str:
       out.append("_")
     out.append(ch.lower())
   return "".join(out)
-
-
-def _stable_id(prefix: str, *parts: Any) -> str:
-  key = ":".join((prefix, *(str(p) for p in parts)))
-  digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-  return f"{prefix}-{digest[:12]}"
-
-
-def _iso(ts: datetime.datetime) -> str:
-  return ts.isoformat()
 
 
 if __name__ == "__main__":  # pragma: no cover
