@@ -111,11 +111,15 @@ The flow, in order, per decision:
 4. Call ``commit_outcome`` with the ID of the winning
    candidate and a one-sentence rationale. This records a
    ``SelectionOutcome`` and the ``selectedCandidate`` edge.
-5. Call ``complete_execution`` with the decision point's ID
-   and a business entity ID. This records the
-   ``DecisionExecution`` (the MAKO central hub) and wires
-   the edges to ``AgentSession``, ``DecisionPoint``,
-   ``ContextSnapshot``, and ``SelectionOutcome``.
+5. Call ``complete_execution`` with the decision point's
+   ID, the context snapshot ID returned by
+   ``capture_context``, the outcome ID returned by
+   ``commit_outcome``, and a business entity ID. All four
+   arguments are required — the tool will fail without
+   them. This records the ``DecisionExecution`` (the MAKO
+   central hub) and wires the edges to ``AgentSession``,
+   ``DecisionPoint``, ``ContextSnapshot``, and
+   ``SelectionOutcome``.
 
 Always enumerate the candidates and reasoning in your text
 before calling each tool. The reasoning trace is what
