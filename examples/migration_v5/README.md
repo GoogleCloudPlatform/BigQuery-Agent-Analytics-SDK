@@ -121,6 +121,25 @@ The exporter's `SELECT` mirrors the BQ AA plugin's real schema (`google/adk/plug
 
 `make_table_ddl()` appends `session_id STRING, extracted_at TIMESTAMP` to every node and edge table because the materializer writes both on every `materialize()` call and `binding_validation.py` (lines 488, 806) requires them on every bound table. Without them, the notebook's binding-validate step would fail before ontology-build. When a domain property already maps to one of those columns (MAKO's `AgentSession.sessionId → session_id`), the metadata copy is skipped to avoid a duplicate-column error.
 
+### 8. Reference-extractor node_id convention (notebook follow-up)
+
+The materializer (`ontology_materializer._build_edge_row`, line 322) populates edge FK columns by **parsing the endpoint node_id**, not by reading node properties. `parse_key_segment` splits the segment `{session}:{Entity}:k1=v1,k2=v2` into a dict, and the materializer looks up each `rel.from_columns` / `rel.to_columns` entry against that dict. **Whatever key names the binding declares for FKs are the key names the extractor must put in the node_id** ---- mismatched keys produce empty-string FK values and silently break edges.
+
+Our binding's FK conventions:
+
+- **Heterogeneous edges** ---- FK column is `{entity_short}_id` (`decision_execution_id`, `decision_point_id`, `candidate_id`, ...). `AgentSession` is `session_id` because `_entity_id_column` strips the `agent_` prefix.
+- **Self-edges** ---- FK columns are `src_{entity_short}_id` / `dst_{entity_short}_id` (MAKO's `evolvedFrom` / `supersededBy` are DecisionExecution → DecisionExecution).
+
+A DecisionExecution node therefore participates in three FK-column shapes (regular, self-edge source, self-edge destination) and the reference extractor must encode all three keys in its node_id so every edge type resolves:
+
+```
+sess-001:DecisionExecution:id=exec-1,decision_execution_id=exec-1,src_decision_execution_id=exec-1,dst_decision_execution_id=exec-1
+```
+
+Single-FK entities are simpler ---- `Candidate` only needs `id=...,candidate_id=...`. The reference extractor (follow-up commit) will centralize this encoding in a small `node_id_for(entity, primary_key)` helper that derives the right key set from the binding rather than hard-coding it. Notebook cells that build `ExtractedNode` / `ExtractedEdge` instances by hand will call the helper too.
+
+**Why not just rename the FK columns to match the entity PK column everywhere?** Keeps the BQ-natural read shape (`SELECT decision_execution_id FROM evaluates_candidate` reads naturally; `SELECT id FROM evaluates_candidate` would be misleading). The encoding cost lives in the extractor where it belongs.
+
 ## Validation commands run (all pass)
 
 ```bash

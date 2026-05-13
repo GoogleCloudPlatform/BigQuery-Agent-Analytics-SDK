@@ -24,17 +24,24 @@ revalidation tests (Beat 3) have a deterministic offline
 corpus to gate against — same input every run regardless
 of when the live agent last ran.
 
-The selected columns mirror the BQ AA plugin's event
-schema exactly (see
-``google/adk/plugins/bigquery_agent_analytics_plugin.py::
-_get_events_schema``). The plugin emits ``timestamp``,
-``event_type``, ``agent``, ``session_id``, ``invocation_id``,
-``user_id``, ``trace_id``, ``span_id``, ``parent_span_id``,
-plus JSON ``content`` / ``attributes`` / ``latency_ms``
-columns. There is **no** ``event_id``, ``payload``,
-``agent_name``, or ``partition_date`` column — those were
-from an earlier draft schema and would cause the SELECT to
-fail.
+The selected columns are the subset of the BQ AA plugin's
+event schema that the notebook's revalidation tests need
+(see ``google/adk/plugins/bigquery_agent_analytics_plugin.py::
+_get_events_schema``). Top-level scalar fields ----
+``timestamp``, ``event_type``, ``agent``, ``session_id``,
+``invocation_id``, ``user_id``, ``trace_id``, ``span_id``,
+``parent_span_id``, ``status``, ``error_message``,
+``is_truncated`` ---- plus JSON ``content`` / ``attributes``
+/ ``latency_ms``. The plugin's full schema also includes
+``content_parts`` (a REPEATED RECORD for multimodal
+parts); this exporter omits it because the MAKO decision
+flow is text-only. Add it back with
+``TO_JSON_STRING(content_parts) AS content_parts_json`` if
+a future demo needs multimodal trace replay. There is
+**no** ``event_id``, ``payload``, ``agent_name``, or
+``partition_date`` column on the plugin's table; those
+names were from an earlier draft schema and would fail at
+query time.
 
 Usage:
 
