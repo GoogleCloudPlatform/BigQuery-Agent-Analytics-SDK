@@ -1,380 +1,401 @@
 ontology: mako
-
 entities:
-  - name: AgentDelegation
-    description: "Agent Delegation
+- name: AgentDelegation
+  description: 'Agent Delegation
 
-Record of one agent delegating a sub-task to another agent via A2A protocol."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
+    Record of one agent delegating a sub-task to another agent via A2A protocol.'
+  keys:
+    primary:
+    - id
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Activity
+  properties:
+  - name: id
+    type: string
+- name: AgentSession
+  description: 'Agent Session
+
+    A complete agent workflow session, grouping multiple DecisionExecutions. Inherits
+    prov:Activity transitively via pko:ProcedureExecution.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: sessionId
+    type: string
+  annotations:
+    owl:subClassOf_excluded: https://w3id.org/pko/ProcedureExecution
+- name: BusinessConstraint
+  description: 'Business Constraint
+
+    A rule or policy that governs decisions (budget cap, frequency limit, brand safety).'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: constraintType
+    type: string
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: Candidate
+  description: 'Candidate
+
+    An option evaluated at a DecisionPoint (e.g., an audience segment, a bid value,
+    a creative).'
+  extends: RoleTrait
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: ConstraintApplication
+  description: 'Constraint Application
+
+    Record that a BusinessConstraint was evaluated at a DecisionPoint, with pass/fail
+    result.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: constraintResult
+    type: string
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Activity
+- name: ContextEntityRef
+  description: 'Context Entity Reference
+
+    Typed reference to an entity captured in a ContextSnapshot, including the entity
+    URI and the version/revision observed at snapshot time.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: entityRevision
+    type: string
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: ContextSnapshot
+  description: 'Context Snapshot
+
+    Point-in-time capture of all entity states relevant to a decision. Immutable once
+    created.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: snapshotPayload
+    type: string
+  - name: snapshotTimestamp
+    type: timestamp
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: DecisionExecution
+  description: 'Decision Execution
+
+    A specific instance of executing a DecisionPoint, with timestamps and agent binding.
+    Inherits prov:Activity transitively via pko:StepExecution.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: businessEntityId
+    type: string
+  - name: latencyMs
+    type: integer
+  - name: spanId
+    type: string
+  - name: traceId
+    type: string
+  annotations:
+    owl:subClassOf_excluded: https://w3id.org/pko/StepExecution
+- name: DecisionPoint
+  description: 'Decision Point
+
+    A step that evaluates candidates and selects one or more. The atomic unit of decisioning
+    in MAKO.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: reversibility
+    type: string
+  annotations:
+    owl:subClassOf_excluded: https://w3id.org/pko/Step
+- name: HumanReviewGate
+  description: 'Human Review Gate
+
+    A human-in-the-loop approval or rejection point in the workflow.'
+  keys:
+    primary:
+    - id
+  annotations:
+    owl:subClassOf_excluded: https://w3id.org/pko/Step
+  properties:
+  - name: id
+    type: string
+- name: InterAgentMessage
+  description: 'Inter-Agent Message
+
+    Data payload passed between agents during delegation. Part of decision context.'
+  keys:
+    primary:
+    - id
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+  properties:
+  - name: id
+    type: string
+- name: ModelVersion
+  description: 'Model Version
+
+    Identifies which ML model version produced scores. Supports rollback analysis.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: modelName
+    type: string
+  - name: modelRegistryUri
+    type: string
     annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Activity"
-  - name: AgentSession
-    description: "Agent Session
+      xsd_type: anyURI
+  - name: modelTrainDate
+    type: timestamp
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: OutcomeSignal
+  description: 'Outcome Signal
 
-A complete agent workflow session, grouping multiple DecisionExecutions. Inherits prov:Activity transitively via pko:ProcedureExecution."
-    # no owl:hasKey in OWL source
-    # candidate data properties: sessionId
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: sessionId
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "https://w3id.org/pko/ProcedureExecution"
-  - name: BusinessConstraint
-    description: "Business Constraint
+    An observed real-world result (click, conversion, viewability) linked to a decision.'
+  keys:
+    primary:
+    - id
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+  properties:
+  - name: id
+    type: string
+- name: RejectionReason
+  description: 'Rejection Reason
 
-A rule or policy that governs decisions (budget cap, frequency limit, brand safety)."
-    # no owl:hasKey in OWL source
-    # candidate data properties: constraintType
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: constraintType
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: Candidate
-    description: "Candidate
+    Structured reason why a Candidate was not selected (rule-based, model-based, constraint-filtered,
+    or timeout).'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: rejectionCategory
+    type: string
+  - name: rejectionText
+    type: string
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: RewardComputation
+  description: 'Reward Computation
 
-An option evaluated at a DecisionPoint (e.g., an audience segment, a bid value, a creative)."
-    extends: RoleTrait
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: ConstraintApplication
-    description: "Constraint Application
+    Derivation of RL reward from OutcomeSignals, linked to model version.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: rewardValue
+    type: double
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Activity
+- name: RoleTrait
+  description: 'Role Trait
 
-Record that a BusinessConstraint was evaluated at a DecisionPoint, with pass/fail result."
-    # no owl:hasKey in OWL source
-    # candidate data properties: constraintResult
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: constraintResult
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Activity"
-  - name: ContextEntityRef
-    description: "Context Entity Reference
+    Marker class. Subclasses of mako:RoleTrait are orthogonal capability/role markers,
+    not primary type parents. Used to enforce single-primary-parent inheritance discipline
+    (REQ-ONT-022).'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+- name: Score
+  description: 'Score
 
-Typed reference to an entity captured in a ContextSnapshot, including the entity URI and the version/revision observed at snapshot time."
-    # no owl:hasKey in OWL source
-    # candidate data properties: entityRevision
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: entityRevision
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: ContextSnapshot
-    description: "Context Snapshot
+    A numeric assessment attached to a Candidate at a DecisionPoint. Carries model
+    version provenance.'
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
+  - name: confidenceInterval
+    type: string
+  - name: scoreValue
+    type: double
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+- name: SelectionOutcome
+  description: 'Selection Outcome
 
-Point-in-time capture of all entity states relevant to a decision. Immutable once created."
-    # no owl:hasKey in OWL source
-    # candidate data properties: snapshotTimestamp, snapshotPayload
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: snapshotPayload
-        type: string
-      - name: snapshotTimestamp
-        type: timestamp
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: DecisionExecution
-    description: "Decision Execution
-
-A specific instance of executing a DecisionPoint, with timestamps and agent binding. Inherits prov:Activity transitively via pko:StepExecution."
-    # no owl:hasKey in OWL source
-    # candidate data properties: traceId, spanId, latencyMs, businessEntityId
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: businessEntityId
-        type: string
-      - name: latencyMs
-        type: integer
-      - name: spanId
-        type: string
-      - name: traceId
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "https://w3id.org/pko/StepExecution"
-  - name: DecisionPoint
-    description: "Decision Point
-
-A step that evaluates candidates and selects one or more. The atomic unit of decisioning in MAKO."
-    # no owl:hasKey in OWL source
-    # candidate data properties: reversibility
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: reversibility
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "https://w3id.org/pko/Step"
-  - name: HumanReviewGate
-    description: "Human Review Gate
-
-A human-in-the-loop approval or rejection point in the workflow."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
-    annotations:
-      owl:subClassOf_excluded: "https://w3id.org/pko/Step"
-  - name: InterAgentMessage
-    description: "Inter-Agent Message
-
-Data payload passed between agents during delegation. Part of decision context."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: ModelVersion
-    description: "Model Version
-
-Identifies which ML model version produced scores. Supports rollback analysis."
-    # no owl:hasKey in OWL source
-    # candidate data properties: modelName, modelTrainDate, modelRegistryUri
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: modelName
-        type: string
-      - name: modelRegistryUri
-        type: string
-        annotations:
-          xsd_type: anyURI
-      - name: modelTrainDate
-        type: timestamp
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: OutcomeSignal
-    description: "Outcome Signal
-
-An observed real-world result (click, conversion, viewability) linked to a decision."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: RejectionReason
-    description: "Rejection Reason
-
-Structured reason why a Candidate was not selected (rule-based, model-based, constraint-filtered, or timeout)."
-    # no owl:hasKey in OWL source
-    # candidate data properties: rejectionCategory, rejectionText
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: rejectionCategory
-        type: string
-      - name: rejectionText
-        type: string
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: RewardComputation
-    description: "Reward Computation
-
-Derivation of RL reward from OutcomeSignals, linked to model version."
-    # no owl:hasKey in OWL source
-    # candidate data properties: rewardValue
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: rewardValue
-        type: double
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Activity"
-  - name: RoleTrait
-    description: "Role Trait
-
-Marker class. Subclasses of mako:RoleTrait are orthogonal capability/role markers, not primary type parents. Used to enforce single-primary-parent inheritance discipline (REQ-ONT-022)."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
-  - name: Score
-    description: "Score
-
-A numeric assessment attached to a Candidate at a DecisionPoint. Carries model version provenance."
-    # no owl:hasKey in OWL source
-    # candidate data properties: scoreValue, confidenceInterval
-    keys:
-      primary: [FILL_IN]
-    properties:
-      - name: confidenceInterval
-        type: string
-      - name: scoreValue
-        type: double
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: SelectionOutcome
-    description: "Selection Outcome
-
-The result of a DecisionPoint: which Candidate(s) were selected and why."
-    # no owl:hasKey in OWL source
-    keys:
-      primary: [FILL_IN]
-    annotations:
-      owl:subClassOf_excluded: "http://www.w3.org/ns/prov#Entity"
-
+    The result of a DecisionPoint: which Candidate(s) were selected and why.'
+  keys:
+    primary:
+    - id
+  annotations:
+    owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+  properties:
+  - name: id
+    type: string
 relationships:
-  - name: appliedConstraint
-    description: "applied constraint
+- name: appliedConstraint
+  description: 'applied constraint
 
-Which BusinessConstraint was evaluated."
-    from: ConstraintApplication
-    to: BusinessConstraint
-  - name: atContextSnapshot
-    description: "at context snapshot
+    Which BusinessConstraint was evaluated.'
+  from: ConstraintApplication
+  to: BusinessConstraint
+- name: atContextSnapshot
+  description: "at context snapshot\nThe ContextSnapshot of world state at decision\
+    \ time. Functional \u2014 exactly one snapshot per execution."
+  from: DecisionExecution
+  to: ContextSnapshot
+  cardinality: many_to_one
+- name: atDecisionPoint
+  description: 'at decision point
 
-The ContextSnapshot of world state at decision time. Functional — exactly one snapshot per execution."
-    from: DecisionExecution
-    to: ContextSnapshot
-    cardinality: many_to_one
-  - name: atDecisionPoint
-    description: "at decision point
+    Links a Score to the DecisionPoint where it was assigned.'
+  from: Score
+  to: DecisionPoint
+- name: carriesMessage
+  description: 'carries message
 
-Links a Score to the DecisionPoint where it was assigned."
-    from: Score
-    to: DecisionPoint
-  - name: carriesMessage
-    description: "carries message
+    Data passed during a delegation.'
+  from: AgentDelegation
+  to: InterAgentMessage
+- name: derivedReward
+  description: 'derived reward
 
-Data passed during a delegation."
-    from: AgentDelegation
-    to: InterAgentMessage
-  - name: delegatedBy
-    description: "delegated by
+    The OutcomeSignals used to compute reward.'
+  from: RewardComputation
+  to: OutcomeSignal
+- name: evaluatesCandidate
+  description: 'evaluates candidate
 
-The agent that delegated the task."
-    from: AgentDelegation
-    annotations:
-      owl:range_excluded: "http://www.w3.org/ns/prov#Agent"
-  - name: delegatedTo
-    description: "delegated to
+    Links a DecisionPoint to the Candidates it evaluates.'
+  from: DecisionPoint
+  to: Candidate
+- name: evolvedFrom
+  description: "evolved from\nTemporal lineage edge: links a DecisionExecution to\
+    \ a prior version of the same logical decision (e.g., across triage passes). Transitive\
+    \ \u2014 A evolvedFrom B evolvedFrom C \u22A8 A evolvedFrom C."
+  from: DecisionExecution
+  to: DecisionExecution
+  annotations:
+    owl:characteristics:
+    - Transitive
+- name: executedAtDecisionPoint
+  description: 'executed at decision point
 
-The agent receiving the delegated task."
-    from: AgentDelegation
-    annotations:
-      owl:range_excluded: "http://www.w3.org/ns/prov#Agent"
-  - name: derivedReward
-    description: "derived reward
+    Links a DecisionExecution to the DecisionPoint it instantiates. Functional. Sub-property
+    of pko:enactsStep so generic PKO queries see MAKO data.'
+  from: DecisionExecution
+  to: DecisionPoint
+  cardinality: many_to_one
+  annotations:
+    owl:subPropertyOf_excluded: https://w3id.org/pko/enactsStep
+- name: filteredByConstraint
+  description: 'filtered by constraint
 
-The OutcomeSignals used to compute reward."
-    from: RewardComputation
-    to: OutcomeSignal
-  - name: evaluatesCandidate
-    description: "evaluates candidate
+    Links a Candidate''s removal to the ConstraintApplication that caused it.'
+  from: Candidate
+  to: ConstraintApplication
+- name: hasRejectionReason
+  description: 'has rejection reason
 
-Links a DecisionPoint to the Candidates it evaluates."
-    from: DecisionPoint
-    to: Candidate
-  - name: evolvedFrom
-    description: "evolved from
+    Why a Candidate was not selected. Required for every rejected Candidate.'
+  from: Candidate
+  to: RejectionReason
+- name: hasScore
+  description: 'has score
 
-Temporal lineage edge: links a DecisionExecution to a prior version of the same logical decision (e.g., across triage passes). Transitive — A evolvedFrom B evolvedFrom C ⊨ A evolvedFrom C."
-    from: DecisionExecution
-    to: DecisionExecution
-    annotations:
-      owl:characteristics: [Transitive]
-  - name: executedAtDecisionPoint
-    description: "executed at decision point
+    The score assigned to a Candidate at this DecisionPoint.'
+  from: Candidate
+  to: Score
+- name: hasSelectionOutcome
+  description: "has selection outcome\nLinks a DecisionExecution to its SelectionOutcome.\
+    \ Functional \u2014 exactly one outcome per execution."
+  from: DecisionExecution
+  to: SelectionOutcome
+  cardinality: many_to_one
+- name: partOfSession
+  description: 'part of session
 
-Links a DecisionExecution to the DecisionPoint it instantiates. Functional. Sub-property of pko:enactsStep so generic PKO queries see MAKO data."
-    from: DecisionExecution
-    to: DecisionPoint
-    cardinality: many_to_one
-    annotations:
-      owl:subPropertyOf_excluded: "https://w3id.org/pko/enactsStep"
-  - name: filteredByConstraint
-    description: "filtered by constraint
+    Links a DecisionExecution to its parent AgentSession. Functional. Sub-property
+    of pko:isExecutionOf for PKO compatibility.'
+  from: DecisionExecution
+  to: AgentSession
+  cardinality: many_to_one
+  annotations:
+    owl:subPropertyOf_excluded: https://w3id.org/pko/isExecutionOf
+- name: producedOutcome
+  description: 'produced outcome
 
-Links a Candidate's removal to the ConstraintApplication that caused it."
-    from: Candidate
-    to: ConstraintApplication
-  - name: gateApprovedBy
-    description: "gate approved by
+    Observed result linked to a decision.'
+  from: DecisionExecution
+  to: OutcomeSignal
+- name: rejectedCandidate
+  description: 'rejected candidate
 
-The human (or human role) who resolved this gate."
-    from: HumanReviewGate
-    annotations:
-      owl:range_excluded: "http://www.w3.org/ns/prov#Agent"
-  - name: hasRejectionReason
-    description: "has rejection reason
+    The Candidate(s) that were rejected at this SelectionOutcome.'
+  from: SelectionOutcome
+  to: Candidate
+- name: scoredByModel
+  description: "scored by model\nWhich ModelVersion produced this Score. Functional\
+    \ \u2014 exactly one ModelVersion per Score. Required for ALL scores."
+  from: Score
+  to: ModelVersion
+  cardinality: many_to_one
+- name: selectedCandidate
+  description: 'selected candidate
 
-Why a Candidate was not selected. Required for every rejected Candidate."
-    from: Candidate
-    to: RejectionReason
-  - name: hasScore
-    description: "has score
+    The Candidate(s) that were selected at this SelectionOutcome.'
+  from: SelectionOutcome
+  to: Candidate
+- name: snapshotEntities
+  description: 'snapshot entities
 
-The score assigned to a Candidate at this DecisionPoint."
-    from: Candidate
-    to: Score
-  - name: hasSelectionOutcome
-    description: "has selection outcome
+    PROV-O qualified version of snapshot payload. References the actual prov:Entity
+    nodes whose states are captured at decision time. Replaces opaque JSON with a
+    typed graph reference set. Each referenced entity is a mako:ContextEntityRef carrying
+    state + version.'
+  from: ContextSnapshot
+  to: ContextEntityRef
+- name: supersededBy
+  description: 'superseded by
 
-Links a DecisionExecution to its SelectionOutcome. Functional — exactly one outcome per execution."
-    from: DecisionExecution
-    to: SelectionOutcome
-    cardinality: many_to_one
-  - name: partOfSession
-    description: "part of session
-
-Links a DecisionExecution to its parent AgentSession. Functional. Sub-property of pko:isExecutionOf for PKO compatibility."
-    from: DecisionExecution
-    to: AgentSession
-    cardinality: many_to_one
-    annotations:
-      owl:subPropertyOf_excluded: "https://w3id.org/pko/isExecutionOf"
-  - name: producedOutcome
-    description: "produced outcome
-
-Observed result linked to a decision."
-    from: DecisionExecution
-    to: OutcomeSignal
-  - name: refersToEntity
-    description: refers to entity
-    from: ContextEntityRef
-    cardinality: many_to_one
-    annotations:
-      owl:range_excluded: "http://www.w3.org/ns/prov#Entity"
-  - name: rejectedCandidate
-    description: "rejected candidate
-
-The Candidate(s) that were rejected at this SelectionOutcome."
-    from: SelectionOutcome
-    to: Candidate
-  - name: scoredByModel
-    description: "scored by model
-
-Which ModelVersion produced this Score. Functional — exactly one ModelVersion per Score. Required for ALL scores."
-    from: Score
-    to: ModelVersion
-    cardinality: many_to_one
-  - name: selectedCandidate
-    description: "selected candidate
-
-The Candidate(s) that were selected at this SelectionOutcome."
-    from: SelectionOutcome
-    to: Candidate
-  - name: snapshotEntities
-    description: "snapshot entities
-
-PROV-O qualified version of snapshot payload. References the actual prov:Entity nodes whose states are captured at decision time. Replaces opaque JSON with a typed graph reference set. Each referenced entity is a mako:ContextEntityRef carrying state + version."
-    from: ContextSnapshot
-    to: ContextEntityRef
-  - name: supersededBy
-    description: "superseded by
-
-Inverse of evolvedFrom. Transitive."
-    from: DecisionExecution
-    to: DecisionExecution
-    annotations:
-      owl:characteristics: [Transitive]
-      owl:inverseOf: evolvedFrom
+    Inverse of evolvedFrom. Transitive.'
+  from: DecisionExecution
+  to: DecisionExecution
+  annotations:
+    owl:characteristics:
+    - Transitive
+    owl:inverseOf: evolvedFrom
+annotations:
+  mako_demo:dropped_cross_namespace_relationships:
+  - delegatedBy
+  - delegatedTo
+  - gateApprovedBy
+  - refersToEntity

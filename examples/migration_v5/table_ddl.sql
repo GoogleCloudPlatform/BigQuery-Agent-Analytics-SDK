@@ -1,70 +1,15 @@
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.agent_session` (
-  id          STRING NOT NULL,
-  session_id  STRING,
-  started_at  TIMESTAMP,
-  PRIMARY KEY (id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.decision_point` (
-  id             STRING NOT NULL,
-  decision_type  STRING,
-  decided_at     TIMESTAMP,
-  PRIMARY KEY (id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.candidate` (
-  id               STRING NOT NULL,
-  candidate_label  STRING,
-  score            FLOAT64,
-  PRIMARY KEY (id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.selection_outcome` (
-  id                     STRING NOT NULL,
-  selected_candidate_id  STRING,
-  rationale              STRING,
-  PRIMARY KEY (id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.context_snapshot` (
-  id                  STRING NOT NULL,
-  snapshot_payload    STRING,
-  snapshot_timestamp  TIMESTAMP,
-  PRIMARY KEY (id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.contains_decision_point` (
-  from_id  STRING NOT NULL,
-  to_id    STRING NOT NULL,
-  -- TODO: uncomment if (from_id, to_id) is unique per row
-  -- PRIMARY KEY (from_id, to_id) NOT ENFORCED,
-  FOREIGN KEY (from_id) REFERENCES `test-project-0728-467323.migration_v5_demo.agent_session`(id) NOT ENFORCED,
-  FOREIGN KEY (to_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_point`(id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.has_candidate` (
-  from_id  STRING NOT NULL,
-  to_id    STRING NOT NULL,
-  -- TODO: uncomment if (from_id, to_id) is unique per row
-  -- PRIMARY KEY (from_id, to_id) NOT ENFORCED,
-  FOREIGN KEY (from_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_point`(id) NOT ENFORCED,
-  FOREIGN KEY (to_id) REFERENCES `test-project-0728-467323.migration_v5_demo.candidate`(id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.has_outcome` (
-  from_id  STRING NOT NULL,
-  to_id    STRING NOT NULL,
-  -- TODO: uncomment if (from_id, to_id) is unique per row
-  -- PRIMARY KEY (from_id, to_id) NOT ENFORCED,
-  FOREIGN KEY (from_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_point`(id) NOT ENFORCED,
-  FOREIGN KEY (to_id) REFERENCES `test-project-0728-467323.migration_v5_demo.selection_outcome`(id) NOT ENFORCED
-);
-
-CREATE TABLE `test-project-0728-467323.migration_v5_demo.has_context` (
-  from_id  STRING NOT NULL,
-  to_id    STRING NOT NULL,
-  -- TODO: uncomment if (from_id, to_id) is unique per row
-  -- PRIMARY KEY (from_id, to_id) NOT ENFORCED,
-  FOREIGN KEY (from_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_point`(id) NOT ENFORCED,
-  FOREIGN KEY (to_id) REFERENCES `test-project-0728-467323.migration_v5_demo.context_snapshot`(id) NOT ENFORCED
-);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.agent_session` (id STRING, session_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.candidate` (id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.context_snapshot` (id STRING, snapshot_payload STRING, snapshot_timestamp TIMESTAMP);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.decision_execution` (id STRING, business_entity_id STRING, latency_ms STRING, span_id STRING, trace_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.decision_point` (id STRING, reversibility STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.selection_outcome` (id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.at_context_snapshot` (decision_execution_id STRING, context_snapshot_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.evaluates_candidate` (decision_point_id STRING, candidate_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.evolved_from` (decision_execution_id STRING, decision_execution_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.executed_at_decision_point` (decision_execution_id STRING, decision_point_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.has_selection_outcome` (decision_execution_id STRING, selection_outcome_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.part_of_session` (decision_execution_id STRING, session_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.rejected_candidate` (selection_outcome_id STRING, candidate_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.selected_candidate` (selection_outcome_id STRING, candidate_id STRING);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.superseded_by` (decision_execution_id STRING, decision_execution_id STRING);

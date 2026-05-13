@@ -2,97 +2,106 @@
 
 **Status:** Phase 1 of [issue #107](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/107) — fixtures only. The four-guarantee notebook (`examples/migration_v5_demo_notebook.ipynb`) is a follow-up commit on this branch.
 
-This directory holds the inputs the four-guarantee MAKO demo notebook consumes. The fixtures are checked in *before* the notebook so the contracts that bake in here (entity subset, primary-key strategy, SKOS notation behavior, event shape) can be reviewed independently — not buried inside 30 executed notebook cells.
+The fixtures here exist so the four-guarantee MAKO demo notebook can run end-to-end against real BigQuery. **Per the issue's reshape requirement, exactly two files are user-authored inputs:**
 
-## What's in here
+| File | Authorship |
+|------|------------|
+| `mako_core.ttl` | **Authored.** The real MAKO ontology, pulled from the [reference gist](https://gist.github.com/haiyuan-eng-google/a69ff6282ebcc877f77f9aa4e3db1afd). Domain-agnostic decision semantics for Yahoo Monetization Platform. |
+| `mako_agent.py` | **Authored.** Loads `mako_core.ttl`, normalizes it (resolves OWL importer `FILL_IN`s + drops cross-namespace dangling relationships), generates a binding for any `(project, dataset)` pair, derives table DDL + property-graph SQL from the binding, and produces a deterministic event stream whose payloads carry only MAKO-declared properties. |
 
-| File | Origin | Purpose |
-|------|--------|---------|
-| `mako_core.ttl` | **User-authored input.** Pulled from the [reference gist](https://gist.github.com/haiyuan-eng-google/a69ff6282ebcc877f77f9aa4e3db1afd). | The real MAKO ontology (Yahoo Monetization Platform's "Monetization Agents Knowledge Ontology"). Domain-agnostic decision semantics, agent coordination, outcome tracking. |
-| `ontology.yaml` | **Auto-generated.** `gm import-owl mako_core.ttl --include-namespace https://ontology.yahoo.com/mako/`. | Full 41-entity auto-import of MAKO. Has 17 `FILL_IN` placeholders for `keys.primary` (the importer can't infer primary keys from OWL alone). The notebook displays this in Section 0 to show the realistic "import → resolve FILL_INs → curate" workflow. |
-| `ontology_demo.yaml` | **Hand-curated.** | 5-entity demo subset of MAKO with `FILL_IN`s resolved. Validates clean against `gm validate`. See "Design decisions" below for the curation rationale. |
-| `binding.yaml` | **Auto-scaffolded.** `gm scaffold --ontology ontology_demo.yaml --dataset migration_v5_demo --project test-project-0728-467323 --out .`. | The "one file in, two files out" minimum-input path. Maps the 5 demo entities to BigQuery tables. |
-| `table_ddl.sql` | Auto-scaffolded with `binding.yaml`. | Companion DDL. |
-| `property_graph.sql` | **User-authored** (Beat 1's "you own the graph definition" evidence). | `CREATE PROPERTY GRAPH` for the demo subset with a `__DATASET__` placeholder for per-run dataset substitution. |
-| `seed_events.py` | Demo-specific. | Deterministic seeded RNG generator → 404 events across 50 sessions. Same seed always produces byte-identical output so the notebook is reproducible. |
-| `reference_extractors.py` | Demo-specific. | Handwritten reference extractor for `mako_decision` events + the exact `EXTRACTORS` / `RESOLVED_GRAPH` / `SPEC` module contract `bqaa-revalidate-extractors` requires. |
-| `revalidation_thresholds.json` | Demo-specific. | Threshold gate values for the revalidation CLI in Beat 3. |
+Every other file in this directory is a **reproducibility snapshot** the agent regenerates from those two authored inputs:
+
+| File | Generator |
+|------|-----------|
+| `ontology.yaml` | `mako_agent.load_mako_ontology()` — `gm import-owl` output, FILL_INs resolved, dangling cross-namespace relationships dropped. |
+| `binding.yaml` | `mako_agent.make_binding(ontology, project=..., dataset=...)` — derived from the ontology with the demo entity set. |
+| `table_ddl.sql` | `mako_agent.make_table_ddl(binding)` — derived from the binding. |
+| `property_graph.sql` | `mako_agent.make_property_graph_sql(binding, ontology=...)` — derived; edge columns match `table_ddl.sql`. |
+| `events.jsonl` | `mako_agent.generate_events()` — 398 deterministic events across 50 sessions. |
+
+Run `python mako_agent.py --project X --dataset Y` to regenerate every snapshot for a fresh dataset.
 
 ## Design decisions — open for review
 
-These are the fixture contracts that get expensive to revisit once the notebook is built on top. Push back here, not in the notebook PR.
+These are the choices that get expensive to revisit once the notebook is built on top. Push back here.
 
-### 1. 5-entity demo subset of MAKO
+### 1. Six-entity demo allowlist (TTL-driven; the rest of MAKO is still loaded)
 
-MAKO has **41 entity classes**; the demo features **5**: `AgentSession`, `DecisionPoint`, `Candidate`, `SelectionOutcome`, `ContextSnapshot`.
+The full MAKO TTL imports as 18 entities (after dangling-relationship drops); the agent's `DEMO_ENTITIES` allowlist narrows the **binding scope** to six:
 
-These form a coherent narrative — *a session contains decision points; each picks among candidates against a context; selection produces an outcome.* The other 36 entities (BusinessConstraint, RewardComputation, AgentDelegation, HumanReviewGate, ModelVersion, InterAgentMessage, ...) scaffold the same way; the notebook calls this out explicitly in Section 0 ("here's the auto-import for all 41; we focus on these 5 for the four-guarantee narrative").
+- `AgentSession`
+- `DecisionExecution` (**the central hub** — MAKO ties everything together through this entity, not through `DecisionPoint` directly)
+- `DecisionPoint`
+- `Candidate`
+- `SelectionOutcome`
+- `ContextSnapshot`
 
-**Alternative I rejected:** ship the full 41 entities. Forces the notebook to deal with FILL_IN resolution across 17 entities + a binding spec touching all 41 + a property graph DDL with many more edges than the narrative needs. The story dilutes; the four guarantees blur.
+This is **agent configuration**, not ontology curation. The full 18-entity ontology is loaded into `Ontology`; the binding just scopes to six. The relationships in the binding are **derived from MAKO's actual declared relationships** by intersecting with the demo entity set — no hardcoded edge list. The agent picks up nine relationships from MAKO without any name authoring:
 
-### 2. `id` as the primary key everywhere
+```
+atContextSnapshot:        DecisionExecution → ContextSnapshot
+evaluatesCandidate:       DecisionPoint     → Candidate
+executedAtDecisionPoint:  DecisionExecution → DecisionPoint
+hasSelectionOutcome:      DecisionExecution → SelectionOutcome
+partOfSession:            DecisionExecution → AgentSession
+rejectedCandidate:        SelectionOutcome  → Candidate
+selectedCandidate:        SelectionOutcome  → Candidate
+... (and 2 others)
+```
 
-Every demo entity has `keys.primary: [id]` with `id: string`. Matches MAKO's "every artifact has a stable identifier" design contract. The seed events use `_stable_id(prefix, *parts)` (sha256 over `prefix:part1:part2`) so IDs are deterministic across notebook runs.
+### 2. FILL_IN resolution: synthesize `id: string` everywhere
 
-**Alternative I rejected:** compound natural keys (`session_id + decision_idx`, etc.). More authentic to how production systems often key entities, but it forces the notebook to thread the compound shape through `binding.yaml` properties, the `CREATE PROPERTY GRAPH` `KEY` clauses, and the reference extractor's `node_id` construction. Single string keys keep the four-guarantee story uncluttered.
+The MAKO TTL doesn't declare `owl:hasKey`, so the OWL importer marks 17 concrete entities' primary keys as `FILL_IN`. The agent resolves each one by synthesizing an `id: string` property + primary key. This matches MAKO's "every artifact has a stable identifier" design contract (per the TTL's role-trait + provenance framing). If a future MAKO revision adds `owl:hasKey` declarations, the resolver leaves those alone — only `FILL_IN` placeholders get rewritten.
 
-### 3. `skos:notation` on `DecisionPoint` is **NON-sorted**
+### 3. Telemetry envelope vs. MAKO domain model
 
-`DecisionPoint` declares `skos:notation: [DECISION_POINT, DP]`. First-authored is `DECISION_POINT`; lex-min is `DP`.
+The agent generates events with a clear separation:
 
-This is deliberate — exercises the round-3 lex-min display-token rule from the #58 reader (`notation_for()` returns lex-min, matching PR #92's emission) in Beat 4 of the notebook. If the demo only used single-notation entities, the notebook never proves that bit of the contract end-to-end. The other 4 entities use single-value notations to keep things simple.
+- **MAKO models the domain entities** (`AgentSession.sessionId`, `DecisionExecution.businessEntityId` / `latencyMs` / `spanId` / `traceId`, `DecisionPoint.reversibility`, `ContextSnapshot.snapshotPayload` / `snapshotTimestamp`). `Candidate` and `SelectionOutcome` are structural classes — MAKO declares no data properties on them; events involving them carry only `id` references.
+- **The BQ AA plugin telemetry envelope wraps each event** with `event_type` / `session_id` / `span_id` / `event_timestamp` / `content`. The envelope is the plugin's contract, not MAKO's. The agent's events look like what the plugin would emit so the demo's extractors see the same surface as production.
 
-### 4. Seeded event shape
+Every field inside the `content` dict either (a) names a MAKO-declared data property of the entity being instanced, or (b) is a foreign-key reference to another MAKO entity. No demo-only invented fields.
 
-- 50 sessions × (1 start + 2–4 (context + decision) pairs + 1 end) = **404 events**.
-- Event payload mirrors the BQ AA plugin's `event_type / session_id / span_id / event_timestamp / content` shape, so Beat 3 extractors see the same surface as production.
-- 4 decision types — `AUDIENCE_SEGMENT`, `BID_VALUE`, `CREATIVE_VARIANT`, `FREQUENCY_CAP`. MAKO is monetization-platform-flavored; these match the domain.
-- Seeded RNG (`_RANDOM_SEED = 20260512`); committed to one seed value, bumped only on intentional corpus change.
+### 4. Cross-namespace relationships dropped (with audit trail)
 
-**Coverage check:** each guarantee has at least one event the notebook can run against.
+MAKO extends PROV-O + PKO + DCAT. Four relationships in the TTL point to entities outside MAKO's own namespace (`delegatedBy → prov:Agent`, etc.); the OWL importer leaves them declared but without a materialized target. The agent drops these so the ontology loads cleanly and writes the dropped names into the ontology's top-level annotations under `mako_demo:dropped_cross_namespace_relationships`, so the loss is auditable from a loaded model.
 
-| Beat | What it exercises | Events involved |
-|------|-------------------|-----------------|
-| 1 (own) | `--skip-property-graph` build → no `CREATE OR REPLACE PROPERTY GRAPH` job emitted. | All 404 — Beat 1 needs the build to complete. |
-| 2 (validate) | `binding-validate` against a column-renamed table. | All 404 — Beat 2 fails *before* extraction touches events. |
-| 3 (extract cheaply) | Compile + measure + revalidate against `mako_decision` events. | 152 `mako_decision` events. |
-| 4 (resolve) | `LabelSynonymResolver` against concept-index-backed labels. | None — Beat 4 is over the ontology, not the event corpus. |
+### 5. `(project, dataset)` is a generator parameter, not a snapshot value
 
-### 5. Reference extractor scope
+`make_binding(...)` and `make_property_graph_sql(...)` take `project` + `dataset` arguments. The checked-in `binding.yaml` / `table_ddl.sql` / `property_graph.sql` are snapshots produced against the default `test-project-0728-467323` / `migration_v5_demo` so reviewers can `cat` them, but the notebook regenerates them at runtime against a fresh `migration_v5_demo_<8-hex>` dataset.
 
-Only `mako_decision` is handwritten. The other event types (`agent_session_started`, `context_captured`, `agent_session_ended`) pass through to the AI-extraction path or are ignored — the notebook frames this as "structured events extract deterministically; AI fills the gaps" per Beat 3.
+### 6. Deterministic events; reproducible across machines
 
-**Why not also extract `context_captured`?** The notebook needs at least one "AI fills the gap" event type to demonstrate the contrast. Keeping `context_captured` AI-handled gives the demo a clean before/after on AI cost.
+`generate_events(seed=20260512, session_count=50)` produces 398 events:
+- 50 `agent_session_started`
+- 50 `agent_session_ended`
+- 149 `context_captured` (~3 per session via `randint(2, 4)`)
+- 149 `mako_decision` (one per decision execution)
+
+Same `(seed, session_count)` always produces byte-identical output. The `mako_decision` events carry MAKO `DecisionExecution` properties + references to the related `DecisionPoint` / `Candidate` / `SelectionOutcome` / `ContextSnapshot` instances so the notebook's Beat 3 extractors can build the full decision flow.
 
 ## Validation commands run
 
 ```bash
-# Ontology validates clean.
-python -m bigquery_ontology.cli validate examples/migration_v5/ontology_demo.yaml
+# Agent runs end-to-end and regenerates every snapshot.
+PYTHONPATH=src python examples/migration_v5/mako_agent.py
+# → {"ontology_entities": 18, "binding_entities": 6,
+#    "binding_relationships": 9, "events": 398}
 
-# Binding validates against the ontology.
+# Generated ontology validates clean.
+python -m bigquery_ontology.cli validate examples/migration_v5/ontology.yaml
+
+# Generated binding validates against the generated ontology.
 python -m bigquery_ontology.cli validate examples/migration_v5/binding.yaml \
-    --ontology examples/migration_v5/ontology_demo.yaml
-
-# Seed generator produces 404 events across 50 sessions.
-PYTHONPATH=src:examples/migration_v5 python -c "
-import seed_events
-print(f'events: {len(seed_events.generate_events())}')"
-
-# Reference extractor produces the expected MAKO shape.
-PYTHONPATH=src:examples/migration_v5 python -c "
-import seed_events, reference_extractors
-ev = next(e for e in seed_events.generate_events() if e.event_type == 'mako_decision')
-out = reference_extractors.extract_mako_decision_event(ev.to_dict(), None)
-print(f'nodes: {len(out.nodes)} -> {[n.entity_name for n in out.nodes]}')
-print(f'edges: {len(out.edges)} -> {[e.relationship_name for e in out.edges]}')"
+    --ontology examples/migration_v5/ontology.yaml
 ```
 
-All four pass.
+All three pass.
 
 ## What's NOT in this commit
 
 - The notebook itself (`examples/migration_v5_demo_notebook.ipynb`). Lands as a follow-up commit on the same branch once the fixture shape is settled.
+- Reference extractor for `mako_decision` events. Will be regenerated by the agent (or a sibling helper) once the binding shape is locked.
 - NODE/FIELD/EDGE synthetic failure fixtures for Beat 3.6. Will land alongside the notebook commit — they're tightly coupled to the cell that exercises them.
 - End-to-end execution against real BigQuery. The notebook commit will execute every cell and inline the outputs.
 - `docs/README.md` / `CHANGELOG.md` entries. Land with the notebook PR so the index points at a complete artifact.
