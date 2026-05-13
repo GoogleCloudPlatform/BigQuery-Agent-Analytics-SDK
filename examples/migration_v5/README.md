@@ -115,7 +115,7 @@ The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`)
 
 If kept, `events.jsonl` is the output of `export_events_jsonl.py` reading from `agent_events`. The notebook may use it as an offline corpus for Beat 3's revalidation tests (deterministic input the threshold gates can lock against), but the demo's primary event surface is the live `agent_events` table.
 
-The exporter's `SELECT` mirrors the BQ AA plugin's real schema (`google/adk/plugins/bigquery_agent_analytics_plugin.py::_get_events_schema`): `timestamp`, `event_type`, `agent`, `session_id`, `invocation_id`, `user_id`, `trace_id`, `span_id`, `parent_span_id`, `status`, `error_message`, `is_truncated`, plus `content` / `attributes` / `latency_ms` (all JSON). There is no `event_id`, `payload`, `agent_name`, or `partition_date` column — the plugin partitions on `timestamp` (DAY).
+The exporter's `SELECT` projects the subset of the BQ AA plugin's schema the notebook needs (`google/adk/plugins/bigquery_agent_analytics_plugin.py::_get_events_schema`): `timestamp`, `event_type`, `agent`, `session_id`, `invocation_id`, `user_id`, `trace_id`, `span_id`, `parent_span_id`, `status`, `error_message`, `is_truncated`, plus `content` / `attributes` / `latency_ms` (all JSON). The plugin's full schema also includes `content_parts` (REPEATED RECORD for multimodal parts); the exporter omits it because the MAKO decision flow is text-only. Add it back with `TO_JSON_STRING(content_parts) AS content_parts_json` if a future demo needs multimodal trace replay. There is no `event_id`, `payload`, `agent_name`, or `partition_date` column on the plugin's table — the plugin partitions on `timestamp` (DAY).
 
 ### 7. Table DDL carries SDK metadata columns
 
@@ -123,7 +123,7 @@ The exporter's `SELECT` mirrors the BQ AA plugin's real schema (`google/adk/plug
 
 ### 8. Reference-extractor node_id convention (notebook follow-up)
 
-The materializer (`ontology_materializer._build_edge_row`, line 322) populates edge FK columns by **parsing the endpoint node_id**, not by reading node properties. `parse_key_segment` splits the segment `{session}:{Entity}:k1=v1,k2=v2` into a dict, and the materializer looks up each `rel.from_columns` / `rel.to_columns` entry against that dict. **Whatever key names the binding declares for FKs are the key names the extractor must put in the node_id** ---- mismatched keys produce empty-string FK values and silently break edges.
+The materializer (`ontology_materializer._route_edge`, line 314) populates edge FK columns by **parsing the endpoint node_id**, not by reading node properties. `parse_key_segment` splits the segment `{session}:{Entity}:k1=v1,k2=v2` into a dict, and the materializer looks up each `rel.from_columns` / `rel.to_columns` entry against that dict. **Whatever key names the binding declares for FKs are the key names the extractor must put in the node_id** ---- mismatched keys produce empty-string FK values and silently break edges.
 
 Our binding's FK conventions:
 
