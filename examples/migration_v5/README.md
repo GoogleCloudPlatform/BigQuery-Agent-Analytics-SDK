@@ -115,6 +115,12 @@ The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`)
 
 If kept, `events.jsonl` is the output of `export_events_jsonl.py` reading from `agent_events`. The notebook may use it as an offline corpus for Beat 3's revalidation tests (deterministic input the threshold gates can lock against), but the demo's primary event surface is the live `agent_events` table.
 
+The exporter's `SELECT` mirrors the BQ AA plugin's real schema (`google/adk/plugins/bigquery_agent_analytics_plugin.py::_get_events_schema`): `timestamp`, `event_type`, `agent`, `session_id`, `invocation_id`, `user_id`, `trace_id`, `span_id`, `parent_span_id`, `status`, `error_message`, `is_truncated`, plus `content` / `attributes` / `latency_ms` (all JSON). There is no `event_id`, `payload`, `agent_name`, or `partition_date` column — the plugin partitions on `timestamp` (DAY).
+
+### 7. Table DDL carries SDK metadata columns
+
+`make_table_ddl()` appends `session_id STRING, extracted_at TIMESTAMP` to every node and edge table because the materializer writes both on every `materialize()` call and `binding_validation.py` (lines 488, 806) requires them on every bound table. Without them, the notebook's binding-validate step would fail before ontology-build. When a domain property already maps to one of those columns (MAKO's `AgentSession.sessionId → session_id`), the metadata copy is skipped to avoid a duplicate-column error.
+
 ## Validation commands run (all pass)
 
 ```bash

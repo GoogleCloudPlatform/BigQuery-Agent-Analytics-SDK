@@ -24,6 +24,18 @@ revalidation tests (Beat 3) have a deterministic offline
 corpus to gate against — same input every run regardless
 of when the live agent last ran.
 
+The selected columns mirror the BQ AA plugin's event
+schema exactly (see
+``google/adk/plugins/bigquery_agent_analytics_plugin.py::
+_get_events_schema``). The plugin emits ``timestamp``,
+``event_type``, ``agent``, ``session_id``, ``invocation_id``,
+``user_id``, ``trace_id``, ``span_id``, ``parent_span_id``,
+plus JSON ``content`` / ``attributes`` / ``latency_ms``
+columns. There is **no** ``event_id``, ``payload``,
+``agent_name``, or ``partition_date`` column — those were
+from an earlier draft schema and would cause the SELECT to
+fail.
+
 Usage:
 
     PYTHONPATH=src python examples/migration_v5/export_events_jsonl.py \\
@@ -43,24 +55,59 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
+
+# BigQuery identifier discipline. ``project.dataset.table``
+# segments cannot be passed as query parameters, so the
+# table reference is interpolated directly into the SQL.
+# Validate each segment against the BQ-permitted character
+# set before interpolation so a hostile or malformed
+# ``--project / --dataset / --table`` argument cannot smuggle
+# whitespace, backticks, semicolons, or comment markers into
+# the query. Mirrors
+# ``bq_bundle_mirror._TABLE_ID_PATTERN`` (which uses the
+# same character class for the same reason).
+_BQ_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 _SELECT_SQL = """
 SELECT
-  event_id,
-  invocation_id,
-  session_id,
-  user_id,
-  agent_name,
+  timestamp,
   event_type,
-  TO_JSON_STRING(payload)         AS payload_json,
-  TO_JSON_STRING(content)         AS content_json,
-  event_timestamp,
-  partition_date
+  agent,
+  session_id,
+  invocation_id,
+  user_id,
+  trace_id,
+  span_id,
+  parent_span_id,
+  status,
+  error_message,
+  is_truncated,
+  TO_JSON_STRING(content)    AS content_json,
+  TO_JSON_STRING(attributes) AS attributes_json,
+  TO_JSON_STRING(latency_ms) AS latency_ms_json
 FROM `{table}`
-ORDER BY event_timestamp, event_id
+ORDER BY timestamp, span_id
 LIMIT @row_limit
 """
+
+
+def _validated_table_id(project: str, dataset: str, table: str) -> str:
+  for label, value in (
+      ("project", project),
+      ("dataset", dataset),
+      ("table", table),
+  ):
+    if not isinstance(value, str) or not _BQ_SEGMENT_PATTERN.fullmatch(value):
+      raise ValueError(
+          f"--{label} {value!r} is not a well-formed BigQuery "
+          f"identifier segment (allowed: ASCII letters, digits, "
+          f"'_', '-'; no whitespace, backticks, semicolons, or "
+          f"comment markers)"
+      )
+  return f"{project}.{dataset}.{table}"
 
 
 def main(argv=None) -> int:
@@ -85,7 +132,7 @@ def main(argv=None) -> int:
   parser.add_argument("--limit", type=int, default=200)
   args = parser.parse_args(argv)
 
-  table_id = f"{args.project}.{args.dataset}.{args.table}"
+  table_id = _validated_table_id(args.project, args.dataset, args.table)
   client = bigquery.Client(project=args.project, location=args.location)
   sql = _SELECT_SQL.format(table=table_id)
   job_config = bigquery.QueryJobConfig(
@@ -106,26 +153,34 @@ def main(argv=None) -> int:
 def _row_to_jsonl(row) -> str:
   """One JSON line per row. Keeps the plugin schema verbatim
   so downstream revalidation tests see the same shape they'd
-  see querying BQ directly. ``payload`` and ``content`` come
-  back as JSON-encoded strings (via ``TO_JSON_STRING`` in
-  SQL); decode them here so the JSONL nest is a single dict."""
-  payload = json.loads(row["payload_json"]) if row["payload_json"] else None
-  content = json.loads(row["content_json"]) if row["content_json"] else None
+  see querying BQ directly. JSON columns come back as
+  TO_JSON_STRING-encoded strings; decode them here so the
+  JSONL nest is a single dict.
+  """
   return json.dumps(
       {
-          "event_id": row["event_id"],
-          "invocation_id": row["invocation_id"],
-          "session_id": row["session_id"],
-          "user_id": row["user_id"],
-          "agent_name": row["agent_name"],
+          "timestamp": str(row["timestamp"]),
           "event_type": row["event_type"],
-          "payload": payload,
-          "content": content,
-          "event_timestamp": str(row["event_timestamp"]),
-          "partition_date": str(row["partition_date"]),
+          "agent": row["agent"],
+          "session_id": row["session_id"],
+          "invocation_id": row["invocation_id"],
+          "user_id": row["user_id"],
+          "trace_id": row["trace_id"],
+          "span_id": row["span_id"],
+          "parent_span_id": row["parent_span_id"],
+          "status": row["status"],
+          "error_message": row["error_message"],
+          "is_truncated": row["is_truncated"],
+          "content": _decode_json(row["content_json"]),
+          "attributes": _decode_json(row["attributes_json"]),
+          "latency_ms": _decode_json(row["latency_ms_json"]),
       },
       sort_keys=True,
   )
+
+
+def _decode_json(raw):
+  return json.loads(raw) if raw else None
 
 
 if __name__ == "__main__":  # pragma: no cover

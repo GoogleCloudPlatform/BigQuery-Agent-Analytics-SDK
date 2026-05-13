@@ -371,6 +371,14 @@ def make_table_ddl(binding: Binding, *, ontology: Ontology) -> str:
   :func:`make_property_graph_sql` references those same
   columns; the two SQL artifacts stay in sync because they
   share this binding.
+
+  Every node + edge table also carries the two SDK metadata
+  columns the materializer writes on every ``materialize()``
+  call: ``session_id STRING`` and ``extracted_at
+  TIMESTAMP``. The binding validator
+  (``binding_validation.py``) requires both columns on every
+  bound table — without them, the notebook's binding-validate
+  step would fail before ontology-build.
   """
   prop_types: dict[tuple[str, str], str] = {}
   for entity in ontology.entities:
@@ -379,22 +387,58 @@ def make_table_ddl(binding: Binding, *, ontology: Ontology) -> str:
 
   lines: list[str] = []
   for ebind in binding.entities:
+    bound_columns = {prop.column for prop in ebind.properties}
     cols = []
     for prop in ebind.properties:
       bq_type = prop_types.get((ebind.name, prop.name), "STRING")
       cols.append(f"{prop.column} {bq_type}")
+    cols.extend(_sdk_metadata_columns(bound_columns))
     lines.append(
         f"CREATE TABLE IF NOT EXISTS `{ebind.source}` ({', '.join(cols)});"
     )
 
   for rbind in binding.relationships:
     src_col, dst_col = rbind.from_columns[0], rbind.to_columns[0]
+    edge_cols = [f"{src_col} STRING", f"{dst_col} STRING"]
+    edge_cols.extend(_sdk_metadata_columns({src_col, dst_col}))
     lines.append(
         f"CREATE TABLE IF NOT EXISTS `{rbind.source}` "
-        f"({src_col} STRING, {dst_col} STRING);"
+        f"({', '.join(edge_cols)});"
     )
 
   return "\n".join(lines) + "\n"
+
+
+def _sdk_metadata_columns(already_present: set[str]) -> list[str]:
+  """Return DDL fragments for SDK metadata columns not yet
+  present in *already_present*.
+
+  Domain bindings can legitimately map a property onto
+  ``session_id`` — MAKO's ``AgentSession.sessionId`` is the
+  canonical example. The materializer's writes for those
+  rows still land in the same column, so it's safe to skip
+  the SDK metadata copy rather than emit ``CREATE TABLE
+  agent_session (session_id STRING, session_id STRING, ...)``.
+  ``extracted_at`` is unlikely to collide but is handled the
+  same way for symmetry.
+  """
+  return [
+      ddl
+      for col, ddl in _SDK_METADATA_DDL_BY_COLUMN.items()
+      if col not in already_present
+  ]
+
+
+# SDK metadata columns that the materializer
+# (``ontology_materializer._entity_columns`` /
+# ``_relationship_columns``) writes on every ``materialize()``
+# call. Binding validation
+# (``binding_validation.py:488,806``) requires both columns
+# on every bound table.
+_SDK_METADATA_DDL_BY_COLUMN = {
+    "session_id": "session_id STRING",
+    "extracted_at": "extracted_at TIMESTAMP",
+}
 
 
 def make_property_graph_sql(
