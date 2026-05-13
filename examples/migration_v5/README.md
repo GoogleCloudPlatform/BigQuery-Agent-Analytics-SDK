@@ -77,9 +77,33 @@ The MAKO TTL doesn't declare `owl:hasKey` on most entities, so the OWL importer 
 
 MAKO extends PROV-O + PKO + DCAT. Four relationships in the TTL point to entities outside MAKO's own namespace (`delegatedBy → prov:Agent`, etc.). The artifact pipeline drops these so the ontology loads cleanly and records the dropped names under the ontology's top-level `mako_demo:dropped_cross_namespace_relationships` annotation. The loss is auditable from a loaded model.
 
-### 4. Agent tools emit MAKO-shaped events through the plugin
+### 4. Agent uses realistic tool names; mapping is explicit
 
-Each tool in `mako_demo_agent.py` corresponds to one step in the MAKO decision flow and returns a dict whose keys carry MAKO-declared data properties (`reversibility`, `business_entity_id`, `snapshot_payload`) plus generated IDs the agent threads through to the next call. The plugin captures the full reasoning trace + tool calls into `agent_events`; the demo's value is in that captured trace, not in the tool internals.
+A real ADK agent exposes business/task-oriented tools, not tools whose argument names mirror TTL property names. The demo follows that convention — tool names are imperative business verbs (`capture_context`, `propose_decision_point`, `evaluate_candidate`, `commit_outcome`, `complete_execution`) and tool argument / return-value keys use ordinary snake_case (`audience_size`, `budget_remaining_usd`, `business_entity_id`).
+
+The **explicit mapping** between what the agent emits and what extraction materializes into the MAKO graph:
+
+| Tool field (trace) | Materialized → MAKO property | Materialization rule |
+|---|---|---|
+| `capture_context.audience_size` | `ContextSnapshot.snapshotPayload` (component) | Folded into the JSON `snapshotPayload` blob. |
+| `capture_context.budget_remaining_usd` | `ContextSnapshot.snapshotPayload` (component) | Same. |
+| `capture_context.context_id` | `ContextSnapshot.id` (primary key) | 1:1. |
+| `propose_decision_point.decision_point_id` | `DecisionPoint.id` (primary key) | 1:1. |
+| `propose_decision_point.reversibility` | `DecisionPoint.reversibility` | 1:1. |
+| `propose_decision_point.decision_type` | — | **Trace-only.** MAKO does not declare `decisionType` on `DecisionPoint`; the field exists in the trace for analytics but isn't materialized. |
+| `evaluate_candidate.candidate_id` | `Candidate.id` (primary key) | 1:1. |
+| `evaluate_candidate.candidate_label` | — | **Trace-only.** `Candidate` has no MAKO-declared data properties; the label exists in the trace as reasoning context. |
+| `evaluate_candidate.decision_point_id` | `evaluatesCandidate` edge (DecisionPoint → Candidate) | Edge endpoint. |
+| `commit_outcome.outcome_id` | `SelectionOutcome.id` | 1:1. |
+| `commit_outcome.selected_candidate_id` | `selectedCandidate` edge (SelectionOutcome → Candidate) | Edge endpoint. |
+| `commit_outcome.rationale` | — | **Trace-only.** `SelectionOutcome` has no MAKO-declared rationale field. |
+| `complete_execution.execution_id` | `DecisionExecution.id` | 1:1. |
+| `complete_execution.business_entity_id` | `DecisionExecution.businessEntityId` | 1:1 (column `business_entity_id`). |
+| `complete_execution.latency_ms` | `DecisionExecution.latencyMs` (INT64) | 1:1 (column `latency_ms`, **typed INT64** in `table_ddl.sql`). |
+| `complete_execution.{decision_point,context,outcome}_id` | `executedAtDecisionPoint` / `atContextSnapshot` / `hasSelectionOutcome` edges | Each is an edge endpoint pointing at the parent `DecisionExecution`. |
+| `session_id` (envelope) | `partOfSession` edge (DecisionExecution → AgentSession) | Plugin envelope; the extractor reads the BQ AA `session_id` field. |
+
+**Rule of thumb:** only fields with a TTL-declared target property are materialized; everything else stays in the raw `agent_events` trace as reasoning context. The mapping above is enforced by the reference extractor (lands in a follow-up commit) — the notebook can compare its output against this table to verify the contract.
 
 The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`). Same wiring pattern as `examples/decision_lineage_demo/agent/agent.py`.
 

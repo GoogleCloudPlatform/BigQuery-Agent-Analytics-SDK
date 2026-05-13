@@ -298,12 +298,31 @@ def make_binding(
   # relationships — agent picks the ones where BOTH endpoints
   # are in the demo entity set. No hardcoded "demo edges"
   # list: the binding's relationship set is fully TTL-driven.
+  #
+  # Column-name convention:
+  #
+  # * Heterogeneous edge (A → B): ``src_col = {a}_id``,
+  #   ``dst_col = {b}_id`` (e.g. ``decision_point_id`` /
+  #   ``candidate_id``).
+  # * Self-edge (A → A): naming the two columns the same
+  #   thing would produce ``CREATE TABLE foo (x_id STRING,
+  #   x_id STRING)`` — a duplicate-column error. MAKO has
+  #   ``evolvedFrom`` and ``supersededBy`` as
+  #   DecisionExecution → DecisionExecution self-edges; the
+  #   convention switches to ``src_{a}_id`` / ``dst_{a}_id``
+  #   only for self-edges. Heterogeneous edges keep the
+  #   simpler naming so the property graph reads naturally.
   relationships_block: list[dict] = []
   for rel in ontology.relationships:
     if rel.from_ not in scope or rel.to not in scope:
       continue
-    src_col = f"{_entity_id_column(rel.from_)}_id"
-    dst_col = f"{_entity_id_column(rel.to)}_id"
+    if rel.from_ == rel.to:
+      base = _entity_id_column(rel.from_)
+      src_col = f"src_{base}_id"
+      dst_col = f"dst_{base}_id"
+    else:
+      src_col = f"{_entity_id_column(rel.from_)}_id"
+      dst_col = f"{_entity_id_column(rel.to)}_id"
     relationships_block.append(
         {
             "name": rel.name,
@@ -333,28 +352,40 @@ def make_binding(
 # ------------------------------------------------------------------ #
 
 
-def make_table_ddl(binding: Binding) -> str:
+def make_table_ddl(binding: Binding, *, ontology: Ontology) -> str:
   """Generate ``CREATE TABLE`` SQL for every node + edge
   table referenced by *binding*.
 
-  Edge tables get explicit semantic source/destination
-  column names (e.g. ``session_id``, ``decision_point_id``)
-  rather than the scaffolder's ``from_id`` / ``to_id``
-  defaults. The property-graph SQL produced by
+  Column types are mapped from the ontology's
+  ``Property.type`` (which the OWL importer set from each
+  property's ``xsd:`` range) through :func:`_bq_type_for`
+  — ``integer`` → ``INT64``, ``double`` → ``FLOAT64``,
+  ``boolean`` → ``BOOL``, ``timestamp`` → ``TIMESTAMP``,
+  ``date`` → ``DATE``, ``string`` and unrecognized → ``STRING``.
+  Using ``STRING`` for everything silently lost the typing
+  the TTL declared (e.g. MAKO's
+  ``DecisionExecution.latencyMs`` is ``xsd:integer``).
+
+  Edge tables use the binding's ``from_columns`` /
+  ``to_columns``. The property-graph SQL produced by
   :func:`make_property_graph_sql` references those same
   columns; the two SQL artifacts stay in sync because they
   share this binding.
   """
+  prop_types: dict[tuple[str, str], str] = {}
+  for entity in ontology.entities:
+    for prop in entity.properties:
+      prop_types[(entity.name, prop.name)] = _bq_type_for(prop.type)
+
   lines: list[str] = []
   for ebind in binding.entities:
-    table = _table_ref_short(ebind.source)
-    columns = ", ".join(
-        f"{prop.column} STRING"
-        if not prop.name.endswith("Timestamp")
-        else f"{prop.column} TIMESTAMP"
-        for prop in ebind.properties
+    cols = []
+    for prop in ebind.properties:
+      bq_type = prop_types.get((ebind.name, prop.name), "STRING")
+      cols.append(f"{prop.column} {bq_type}")
+    lines.append(
+        f"CREATE TABLE IF NOT EXISTS `{ebind.source}` ({', '.join(cols)});"
     )
-    lines.append(f"CREATE TABLE IF NOT EXISTS `{ebind.source}` ({columns});")
 
   for rbind in binding.relationships:
     src_col, dst_col = rbind.from_columns[0], rbind.to_columns[0]
@@ -456,7 +487,9 @@ def regenerate_snapshots(
 
   binding = make_binding(ontology, project=project, dataset=dataset)
   BINDING_PATH.write_text(_binding_yaml(binding), encoding="utf-8")
-  TABLE_DDL_PATH.write_text(make_table_ddl(binding), encoding="utf-8")
+  TABLE_DDL_PATH.write_text(
+      make_table_ddl(binding, ontology=ontology), encoding="utf-8"
+  )
   PROPERTY_GRAPH_PATH.write_text(
       make_property_graph_sql(binding, ontology=ontology), encoding="utf-8"
   )
@@ -512,6 +545,35 @@ def _edge_table_name(edge_name: str) -> str:
 
 def _table_ref_short(qualified: str) -> str:
   return qualified.rsplit(".", 1)[-1]
+
+
+def _bq_type_for(property_type: Any) -> str:
+  """Map an ontology ``PropertyType`` (or its string value)
+  to a BigQuery column type.
+
+  Defaults to ``STRING`` for unknown values; the only types
+  the OWL importer can currently emit are those in
+  ``PropertyType`` (string / bytes / integer / double /
+  numeric / boolean / date / time / datetime / timestamp /
+  json), and they map 1:1 to BigQuery legacy SQL types.
+  """
+  # ``Property.type`` is a ``PropertyType`` enum; ``.value``
+  # gets the wire string. Handle bare strings too in case a
+  # caller passes one.
+  value = getattr(property_type, "value", property_type)
+  return {
+      "string": "STRING",
+      "bytes": "BYTES",
+      "integer": "INT64",
+      "double": "FLOAT64",
+      "numeric": "NUMERIC",
+      "boolean": "BOOL",
+      "date": "DATE",
+      "time": "TIME",
+      "datetime": "DATETIME",
+      "timestamp": "TIMESTAMP",
+      "json": "JSON",
+  }.get(value, "STRING")
 
 
 def _to_snake_case(camel: str) -> str:

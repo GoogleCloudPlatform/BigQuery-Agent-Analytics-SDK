@@ -69,9 +69,9 @@ relationships:
 - name: evolvedFrom
   source: test-project-0728-467323.migration_v5_demo.evolved_from
   from_columns:
-  - decision_execution_id
+  - src_decision_execution_id
   to_columns:
-  - decision_execution_id
+  - dst_decision_execution_id
   properties: []
 - name: executedAtDecisionPoint
   source: test-project-0728-467323.migration_v5_demo.executed_at_decision_point
@@ -111,7 +111,7 @@ relationships:
 - name: supersededBy
   source: test-project-0728-467323.migration_v5_demo.superseded_by
   from_columns:
-  - decision_execution_id
+  - src_decision_execution_id
   to_columns:
-  - decision_execution_id
+  - dst_decision_execution_id
   properties: []

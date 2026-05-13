@@ -29,8 +29,8 @@ CREATE OR REPLACE PROPERTY GRAPH `test-project-0728-467323.migration_v5_demo.mak
       DESTINATION KEY (candidate_id) REFERENCES `test-project-0728-467323.migration_v5_demo.candidate` (id)
       LABEL evaluatesCandidate,
     `test-project-0728-467323.migration_v5_demo.evolved_from` AS evolved_from
-      SOURCE KEY (decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
-      DESTINATION KEY (decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
+      SOURCE KEY (src_decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
+      DESTINATION KEY (dst_decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
       LABEL evolvedFrom,
     `test-project-0728-467323.migration_v5_demo.executed_at_decision_point` AS executed_at_decision_point
       SOURCE KEY (decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
@@ -53,7 +53,7 @@ CREATE OR REPLACE PROPERTY GRAPH `test-project-0728-467323.migration_v5_demo.mak
       DESTINATION KEY (candidate_id) REFERENCES `test-project-0728-467323.migration_v5_demo.candidate` (id)
       LABEL selectedCandidate,
     `test-project-0728-467323.migration_v5_demo.superseded_by` AS superseded_by
-      SOURCE KEY (decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
-      DESTINATION KEY (decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
+      SOURCE KEY (src_decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
+      DESTINATION KEY (dst_decision_execution_id) REFERENCES `test-project-0728-467323.migration_v5_demo.decision_execution` (id)
       LABEL supersededBy
   );
