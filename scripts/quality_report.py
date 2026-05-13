@@ -41,6 +41,7 @@ Usage:
     python quality_report.py --samples all        # show all sessions
     python quality_report.py --app-name my_agent  # filter to a specific agent
     python quality_report.py --output-json r.json # write structured JSON output
+    python quality_report.py --config config.json # use scope definitions from config
     python quality_report.py --env path/to/.env   # load a specific .env file
 """
 import warnings
@@ -161,48 +162,129 @@ def get_client():
 
 
 # ---------------------------------------------------------------------------
+# Scope configuration
+# ---------------------------------------------------------------------------
+
+_AGENT_CONFIG = None
+
+
+def _load_agent_config(config_path=None):
+  """Load agent config (scope decisions, etc.) from a JSON file.
+
+  When --config is provided, loads from that path.  Otherwise checks
+  for eval/agent_context.json relative to the repo root or script dir.
+  Returns None if no config is found (scope-aware eval is disabled).
+  """
+  global _AGENT_CONFIG
+  if _AGENT_CONFIG is not None:
+    return _AGENT_CONFIG
+
+  if not config_path:
+    return None
+
+  if not os.path.isfile(config_path):
+    logger.error("Config file not found: %s", config_path)
+    sys.exit(1)
+  with open(config_path) as f:
+    _AGENT_CONFIG = json.load(f)
+  return _AGENT_CONFIG
+
+
+def _build_scope_context(config=None):
+  """Build scope context string for the LLM judge from config."""
+  if not config:
+    return ""
+
+  scope_decisions = config.get("scope_decisions", [])
+  oos_topics = [
+      d["topic"] for d in scope_decisions
+      if d.get("decision") == "out_of_scope"
+  ]
+  if not oos_topics:
+    return ""
+
+  parts = [
+      "\n\nAGENT SCOPE CONTEXT (use this to judge responses correctly):",
+      "The following topics are OUT OF SCOPE: " + ", ".join(oos_topics) + ".",
+      "If the agent correctly declines a question about an out-of-scope "
+      "topic (says it cannot help with that topic, suggests what it CAN "
+      "help with), that is a MEANINGFUL response, not an unhelpful one.",
+  ]
+  return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Metric definitions
 # ---------------------------------------------------------------------------
 
-def get_eval_metrics():
+def get_eval_metrics(config_path=None):
   from bigquery_agent_analytics import (
       CategoricalMetricCategory,
       CategoricalMetricDefinition,
   )
 
+  config = _load_agent_config(config_path)
+  scope_context = _build_scope_context(config)
+
+  usefulness_definition = (
+      "Whether the agent's final response provides a genuinely useful, "
+      "substantive answer to the user's question. A response that apologizes, "
+      "says it cannot help, returns no data, provides only generic filler, "
+      "or loops without resolving the question is NOT useful."
+  )
+  if scope_context:
+    usefulness_definition = (
+        "Whether the agent's final response provides a genuinely useful, "
+        "substantive answer to the user's question. A response that apologizes, "
+        "says it cannot help, returns no data, provides only generic filler, "
+        "or loops without resolving the question is NOT useful -- UNLESS the "
+        "question is outside the agent's defined scope, in which case a "
+        "polite decline IS a correct and meaningful response."
+        + scope_context
+    )
+
+  categories = [
+      CategoricalMetricCategory(
+          name="meaningful",
+          definition=(
+              "The response directly and substantively addresses the user's "
+              "question with specific, actionable information."
+          ),
+      ),
+  ]
+  if scope_context:
+    categories.append(CategoricalMetricCategory(
+        name="declined",
+        definition=(
+            "The question is outside the agent's defined scope and the "
+            "agent correctly declined -- e.g. said it cannot help with "
+            "that topic, or suggested what it CAN help with. This is "
+            "the CORRECT behavior for out-of-scope questions."
+        ),
+    ))
+  categories.extend([
+      CategoricalMetricCategory(
+          name="unhelpful",
+          definition=(
+              "The response does NOT meaningfully answer the user's question. "
+              "Examples: apologies, 'I don't have that information', empty "
+              "data results, generic filler text, or the agent looping "
+              "without a resolution."
+          ),
+      ),
+      CategoricalMetricCategory(
+          name="partial",
+          definition=(
+              "The response partially addresses the question but is "
+              "incomplete, missing key details, or only tangentially relevant."
+          ),
+      ),
+  ])
+
   response_usefulness = CategoricalMetricDefinition(
       name="response_usefulness",
-      definition=(
-          "Whether the agent final response provides a genuinely useful, "
-          "substantive answer to the user question. A response that apologizes, "
-          "says it cannot help, returns no data, provides only generic filler, "
-          "or loops without resolving the question is NOT useful."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="meaningful",
-              definition=(
-                  "The response directly and substantively addresses the user "
-                  "question with specific, actionable information."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="unhelpful",
-              definition=(
-                  "The response technically succeeded (no error) but does NOT "
-                  "meaningfully answer the user question. Examples: apologies, "
-                  "saying I do not have that information, empty data results, "
-                  "generic filler text, or the agent looping without a resolution."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="partial",
-              definition=(
-                  "The response partially addresses the question but is "
-                  "incomplete, missing key details, or only tangentially relevant."
-              ),
-          ),
-      ],
+      definition=usefulness_definition,
+      categories=categories,
   )
 
   task_grounding = CategoricalMetricDefinition(
@@ -377,7 +459,7 @@ def resolve_trace_responses(traces):
 
 def run_evaluation(
     time_range=None, limit=100, model=None, persist=False, app_name=None,
-    session_ids=None,
+    config_path=None, session_id=None, session_ids=None,
 ) -> dict:
   from bigquery_agent_analytics import (
       CategoricalEvaluationConfig, TraceFilter,
@@ -385,8 +467,8 @@ def run_evaluation(
 
   model = model or EVAL_MODEL_ID
   client = get_client()
-  metrics = get_eval_metrics()
 
+  metrics = get_eval_metrics(config_path=config_path)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
       endpoint=model,
@@ -396,10 +478,9 @@ def run_evaluation(
       results_table="quality_eval_results" if persist else None,
   )
 
-  # When explicit session IDs are provided, filter directly by them
-  # instead of relying on time-based queries that can pick up stale
-  # sessions from prior runs.
-  if session_ids:
+  if session_id:
+    trace_filter = TraceFilter(session_ids=[session_id])
+  elif session_ids:
     trace_filter = TraceFilter(
         session_ids=session_ids,
         limit=len(session_ids),
@@ -445,6 +526,7 @@ def run_evaluation(
 def _category_label(category):
   labels = {
       "meaningful": "\u2705 HELPFUL",
+      "declined": "\u2705 DECLINED (OK)",
       "unhelpful": "\u274c NOT HELPFUL",
       "partial": "\u26a0\ufe0f  PARTIAL",
       "grounded": "\u2705 GROUNDED",
@@ -466,14 +548,17 @@ def run_browse(args):
       "Project: %s, Dataset: %s, Table: %s", PROJECT_ID, DATASET_ID, TABLE_ID
   )
 
-  time_range = args.time_period
-  if time_range and time_range.lower() == "all":
-    time_range = None
-  if time_range:
-    trace_filter = TraceFilter.from_cli_args(last=time_range)
+  if args.session:
+    trace_filter = TraceFilter(session_ids=[args.session])
   else:
-    trace_filter = TraceFilter()
-  trace_filter.limit = args.limit
+    time_range = args.time_period
+    if time_range and time_range.lower() == "all":
+      time_range = None
+    if time_range:
+      trace_filter = TraceFilter.from_cli_args(last=time_range)
+    else:
+      trace_filter = TraceFilter()
+    trace_filter.limit = args.limit
   if args.app_name:
     trace_filter.root_agent_name = args.app_name
 
@@ -553,12 +638,17 @@ def run_eval(args):
 
   t0 = time.time()
   try:
+    config_path = getattr(args, 'config', None)
+    if config_path:
+      logger.info("Scope config: %s", config_path)
     result = run_evaluation(
         time_range=args.time_period,
         limit=args.limit,
         model=model,
         persist=args.persist,
         app_name=args.app_name,
+        config_path=config_path,
+        session_id=args.session,
         session_ids=session_ids,
     )
   except Exception:
@@ -600,7 +690,7 @@ def run_eval(args):
 
 
 def _group_by_category(report):
-  by_category = {"unhelpful": [], "partial": [], "meaningful": []}
+  by_category = {"unhelpful": [], "partial": [], "meaningful": [], "declined": []}
   for sr in report.session_results:
     for mr in sr.metrics:
       if mr.metric_name == "response_usefulness":
@@ -619,6 +709,7 @@ def _build_agent_stats(report, resolved_map):
       agent_stats[agent] = {
           "total": 0,
           "meaningful": 0,
+          "declined": 0,
           "unhelpful": 0,
           "partial": 0,
           "unclassified": 0,
@@ -633,6 +724,8 @@ def _build_agent_stats(report, resolved_map):
         found_usefulness = True
         if mr.category == "meaningful":
           agent_stats[agent]["meaningful"] += 1
+        elif mr.category == "declined":
+          agent_stats[agent]["declined"] += 1
         elif mr.category == "unhelpful":
           agent_stats[agent]["unhelpful"] += 1
         elif mr.category == "partial":
@@ -660,10 +753,11 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
   }
 
   # --- Per-session details ---
-  _default_samples = {"unhelpful": 10, "partial": 5, "meaningful": 3, "unknown": 3}
+  _default_samples = {"unhelpful": 10, "partial": 5, "meaningful": 3, "declined": 3, "unknown": 3}
   for cat, cat_label in [
       ("unhelpful", "UNHELPFUL"),
       ("partial", "PARTIAL"),
+      ("declined", "DECLINED (out-of-scope)"),
       ("meaningful", "MEANINGFUL"),
       ("unknown", "UNCLASSIFIED (parse errors)"),
   ]:
@@ -714,7 +808,9 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
   agent_stats = _build_agent_stats(report, resolved_map)
 
   if agent_stats:
-    total_helpful_all = sum(s["meaningful"] for s in agent_stats.values())
+    total_helpful_all = sum(
+        s["meaningful"] + s["declined"] for s in agent_stats.values()
+    )
     total_unhelpful_all = sum(s["unhelpful"] for s in agent_stats.values())
 
     print(f"\n{hr}")
@@ -741,15 +837,16 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
         agent_stats.items(), key=lambda x: -x[1]["total"]
     ):
       total = stats["total"]
-      classified = stats["meaningful"] + stats["unhelpful"] + stats["partial"]
+      helpful = stats["meaningful"] + stats["declined"]
+      classified = helpful + stats["unhelpful"] + stats["partial"]
       helpful_pct = (
-          (stats["meaningful"] / classified * 100) if classified > 0 else 0
+          (helpful / classified * 100) if classified > 0 else 0
       )
       unhelpful_pct = (
           (stats["unhelpful"] / classified * 100) if classified > 0 else 0
       )
       helpful_contrib = (
-          (stats["meaningful"] / total_helpful_all * 100)
+          (helpful / total_helpful_all * 100)
           if total_helpful_all > 0
           else 0
       )
@@ -770,7 +867,8 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
           else ("\U0001f7e1" if helpful_pct >= 60 else "\U0001f534")
       )
       agent_name = f"{agent}{a2a_tag}"
-      helpful_str = f"{stats['meaningful']} ({helpful_pct:.0f}%)"
+      declined_tag = f"+{stats['declined']}d" if stats["declined"] else ""
+      helpful_str = f"{stats['meaningful']}{declined_tag} ({helpful_pct:.0f}%)"
       unhelpful_str = f"{stats['unhelpful']} ({unhelpful_pct:.0f}%)"
       partial_str = str(stats["partial"])
       errors_str = str(stats.get("unclassified", 0))
@@ -815,6 +913,7 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))
   meaningful_count = len(by_category.get("meaningful", []))
+  declined_count = len(by_category.get("declined", []))
   unknown_count = len(by_category.get("unknown", []))
   total = report.total_sessions
   fp_rate = (fp_count / total * 100) if total > 0 else 0.0
@@ -824,6 +923,8 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
   print(f"{'=' * 70}")
   print(f"  Total sessions evaluated : {total}")
   print(f"  Meaningful               : {meaningful_count}")
+  if declined_count:
+    print(f"  Declined (out-of-scope)  : {declined_count}")
   print(f"  Partial                  : {partial_count}")
   print(f"  Unhelpful                : {fp_count}")
   print(f"  Unhelpful rate           : {fp_rate:.1f}%")
@@ -892,6 +993,7 @@ def _write_md_report(report, resolved_map, args):
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))
   meaningful_count = len(by_category.get("meaningful", []))
+  declined_count = len(by_category.get("declined", []))
   unknown_count = len(by_category.get("unknown", []))
   total = report.total_sessions
   fp_rate = (fp_count / total * 100) if total > 0 else 0.0
@@ -903,6 +1005,8 @@ def _write_md_report(report, resolved_map, args):
   w("|--------|-------|")
   w(f"| Total sessions | {total} |")
   w(f"| Meaningful | {meaningful_count} |")
+  if declined_count:
+    w(f"| Declined (out-of-scope) | {declined_count} |")
   w(f"| Partial | {partial_count} |")
   w(f"| Unhelpful | {fp_count} |")
   w(f"| Unhelpful rate | {fp_rate:.1f}% |")
@@ -936,14 +1040,20 @@ def _write_md_report(report, resolved_map, args):
   if agent_stats:
     w("## Per-Agent Quality")
     w("")
-    w("| Agent | Sessions | Helpful | Unhelpful | Partial | Status |")
-    w("|-------|-------:|--------:|----------:|--------:|--------|")
+    has_declined = any(s["declined"] > 0 for s in agent_stats.values())
+    if has_declined:
+      w("| Agent | Sessions | Helpful | Declined | Unhelpful | Partial | Status |")
+      w("|-------|-------:|--------:|--------:|----------:|--------:|--------|")
+    else:
+      w("| Agent | Sessions | Helpful | Unhelpful | Partial | Status |")
+      w("|-------|-------:|--------:|----------:|--------:|--------|")
     for agent, stats in sorted(
         agent_stats.items(), key=lambda x: -x[1]["total"]
     ):
-      classified = stats["meaningful"] + stats["unhelpful"] + stats["partial"]
+      helpful = stats["meaningful"] + stats["declined"]
+      classified = helpful + stats["unhelpful"] + stats["partial"]
       helpful_pct = (
-          (stats["meaningful"] / classified * 100) if classified > 0 else 0
+          (helpful / classified * 100) if classified > 0 else 0
       )
       a2a_n = stats["a2a_count"]
       total = stats["total"]
@@ -957,11 +1067,19 @@ def _write_md_report(report, resolved_map, args):
           if helpful_pct >= 80
           else ("\U0001f7e1" if helpful_pct >= 60 else "\U0001f534")
       )
-      w(
-          f"| {agent}{a2a_tag} | {stats['total']} "
-          f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
-          f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
-      )
+      if has_declined:
+        w(
+            f"| {agent}{a2a_tag} | {stats['total']} "
+            f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
+            f"| {stats['declined']} "
+            f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
+        )
+      else:
+        w(
+            f"| {agent}{a2a_tag} | {stats['total']} "
+            f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
+            f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
+        )
     w("")
 
   # --- Unhelpful Sessions ---
@@ -1082,15 +1200,19 @@ def _build_json_output(report, resolved_map):
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))
   meaningful_count = len(by_category.get("meaningful", []))
+  declined_count = len(by_category.get("declined", []))
   total = report.total_sessions
 
   return {
       "summary": {
           "total_sessions": total,
           "meaningful": meaningful_count,
+          "declined": declined_count,
           "partial": partial_count,
           "unhelpful": fp_count,
-          "meaningful_rate": round(meaningful_count / total * 100, 1) if total else 0,
+          "meaningful_rate": round(
+              (meaningful_count + declined_count) / total * 100, 1
+          ) if total else 0,
           "unhelpful_rate": round(fp_count / total * 100, 1) if total else 0,
       },
       "category_distributions": {
@@ -1124,6 +1246,7 @@ Examples:
   %(prog)s --samples all             Show all sessions per category
   %(prog)s --app-name my_agent       Filter to a specific agent app
   %(prog)s --output-json report.json Write structured JSON output
+  %(prog)s --config config.json      Use scope definitions from config
       """,
   )
   parser.add_argument(
@@ -1171,6 +1294,12 @@ Examples:
       help="Max sample sessions to display per category, or 'all' (default: 10/5/3)",
   )
   parser.add_argument(
+      "--session",
+      type=str,
+      default=None,
+      help="Evaluate a specific session by ID",
+  )
+  parser.add_argument(
       "--app-name",
       type=str,
       default=None,
@@ -1191,6 +1320,17 @@ Examples:
       type=float,
       default=10.0,
       help="Unhelpful rate warning threshold in %% (default: 10)",
+  )
+  parser.add_argument(
+      "--config",
+      type=str,
+      default=None,
+      metavar="PATH",
+      help="Path to a JSON config file with scope definitions. "
+           "When provided, adds a 'declined' category for correctly "
+           "refused out-of-scope questions. Expected format: "
+           '{"scope_decisions": [{"topic": "...", "decision": "out_of_scope", '
+           '"reason": "..."}]}',
   )
   parser.add_argument(
       "--session-ids-file",

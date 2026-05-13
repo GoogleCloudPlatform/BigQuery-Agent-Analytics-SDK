@@ -287,4 +287,9 @@ class TestGroupByCategory:
   def test_empty_report(self):
     report = _FakeReport([])
     groups = _group_by_category(report)
-    assert groups == {"unhelpful": [], "partial": [], "meaningful": []}
+    assert groups == {
+        "unhelpful": [],
+        "partial": [],
+        "meaningful": [],
+        "declined": [],
+    }
