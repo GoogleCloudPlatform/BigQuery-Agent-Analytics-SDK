@@ -172,9 +172,11 @@ def test_capture_context_emits_context_snapshot():
   assert len(result.edges) == 0
   node = result.nodes[0]
   assert node.entity_name == "ContextSnapshot"
-  assert node.node_id == ("sess-A:ContextSnapshot:context_snapshot_id=ctx-42")
+  assert (
+      node.node_id == "sess-A:ContextSnapshot:context_snapshot_id=sess-A:ctx-42"
+  )
   prop_by_name = {p.name: p.value for p in node.properties}
-  assert prop_by_name["context_snapshot_id"] == "ctx-42"
+  assert prop_by_name["context_snapshot_id"] == "sess-A:ctx-42"
   # ``snapshot_payload`` must be a JSON-serialized STRING
   # (ontology declares xsd:string; validator rejects raw
   # dict values as ``unsupported_type``).
@@ -190,8 +192,9 @@ def test_propose_decision_point_emits_decision_point():
   result = reference_extractor.extract_mako_decision_event(event, None)
   assert len(result.nodes) == 1
   assert result.nodes[0].entity_name == "DecisionPoint"
-  assert result.nodes[0].node_id == (
-      "sess-A:DecisionPoint:decision_point_id=dp-42"
+  assert (
+      result.nodes[0].node_id
+      == "sess-A:DecisionPoint:decision_point_id=sess-A:dp-42"
   )
 
 
@@ -209,8 +212,10 @@ def test_evaluate_candidate_emits_node_and_edge():
   assert len(result.edges) == 1
   edge = result.edges[0]
   assert edge.relationship_name == "evaluatesCandidate"
-  assert edge.from_node_id == "sess-A:DecisionPoint:decision_point_id=dp-7"
-  assert edge.to_node_id == "sess-A:Candidate:candidate_id=cand-7"
+  assert (
+      edge.from_node_id == "sess-A:DecisionPoint:decision_point_id=sess-A:dp-7"
+  )
+  assert edge.to_node_id == "sess-A:Candidate:candidate_id=sess-A:cand-7"
 
 
 def test_commit_outcome_marks_span_partial_when_rationale_present():
@@ -278,8 +283,9 @@ def test_complete_execution_synthesizes_agent_session_and_hub_edges():
   part_of_session = next(
       e for e in result.edges if e.relationship_name == "partOfSession"
   )
-  assert part_of_session.from_node_id == (
-      "my-session:DecisionExecution:decision_execution_id=exec-1"
+  assert (
+      part_of_session.from_node_id
+      == "my-session:DecisionExecution:decision_execution_id=my-session:exec-1"
   )
   assert part_of_session.to_node_id == (
       "my-session:AgentSession:agent_session_id=my-session"
@@ -382,3 +388,101 @@ def test_two_sessions_dedupe_agent_session_nodes():
       "sess-A:AgentSession:agent_session_id=sess-A",
       "sess-B:AgentSession:agent_session_id=sess-B",
   }
+
+
+def test_two_sessions_have_unique_node_pk_values_and_edge_ids():
+  """Cross-session collision regression: two sessions whose
+  agent tools happen to emit identical raw IDs (same args
+  → same content-hashed IDs) must produce **distinct** PK
+  column values on the materialized rows AND distinct
+  ``edge_id`` values. Without session-scoping the
+  extracted graph would silently merge two sessions'
+  decision flows."""
+  events = _decision_flow("sess-A") + _decision_flow("sess-B")
+  results = [
+      reference_extractor.extract_mako_decision_event(ev, None) for ev in events
+  ]
+  merged = merge_extraction_results(results)
+
+  # Every node's PK property value must be unique across
+  # the whole graph (excluding AgentSession, whose PK is
+  # the session_id itself — already unique per session).
+  pk_property_names = {
+      "ContextSnapshot": "context_snapshot_id",
+      "DecisionPoint": "decision_point_id",
+      "Candidate": "candidate_id",
+      "SelectionOutcome": "selection_outcome_id",
+      "DecisionExecution": "decision_execution_id",
+      "AgentSession": "agent_session_id",
+  }
+  pk_values: list[tuple[str, str]] = []
+  for node in merged.nodes:
+    pk_name = pk_property_names[node.entity_name]
+    pk_value = next(p.value for p in node.properties if p.name == pk_name)
+    pk_values.append((node.entity_name, pk_value))
+  # Build set of all (entity, pk_value) pairs; duplicates
+  # within the same entity name are the bug.
+  seen: dict[str, set[str]] = {}
+  for entity, value in pk_values:
+    seen.setdefault(entity, set())
+    assert (
+        value not in seen[entity]
+    ), f"duplicate PK value {value!r} for entity {entity!r}"
+    seen[entity].add(value)
+
+  # Every edge_id must be unique.
+  edge_ids = [e.edge_id for e in merged.edges]
+  assert len(edge_ids) == len(set(edge_ids)), (
+      f"duplicate edge_id in merged graph: "
+      f"{[eid for eid in edge_ids if edge_ids.count(eid) > 1]}"
+  )
+
+
+def test_complete_execution_carries_envelope_span_and_trace():
+  """``DecisionExecution.spanId`` / ``traceId`` are MAKO-
+  declared provenance properties pulled from the plugin
+  envelope of the ``complete_execution`` event."""
+  event = _tool_event(
+      "complete_execution",
+      {
+          "execution_id": "exec-1",
+          "decision_point_id": "dp-1",
+          "context_id": "ctx-1",
+          "outcome_id": "out-1",
+      },
+      session_id="sess-1",
+      span_id="span-prov-1",
+  )
+  event["trace_id"] = "trace-prov-1"
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  exec_node = next(
+      n for n in result.nodes if n.entity_name == "DecisionExecution"
+  )
+  prop_by_name = {p.name: p.value for p in exec_node.properties}
+  assert prop_by_name["span_id"] == "span-prov-1"
+  assert prop_by_name["trace_id"] == "trace-prov-1"
+
+
+def test_complete_execution_omits_span_trace_when_missing():
+  """Provenance props are optional — sparse-event sources
+  (offline replay, synthetic fixtures) may omit them and
+  shouldn't trip the validator with empty-string
+  ``span_id`` / ``trace_id`` properties."""
+  event = _tool_event(
+      "complete_execution",
+      {
+          "execution_id": "exec-1",
+          "decision_point_id": "dp-1",
+          "context_id": "ctx-1",
+          "outcome_id": "out-1",
+      },
+      span_id="",
+  )
+  # No trace_id key at all
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  exec_node = next(
+      n for n in result.nodes if n.entity_name == "DecisionExecution"
+  )
+  prop_names = {p.name for p in exec_node.properties}
+  assert "span_id" not in prop_names
+  assert "trace_id" not in prop_names

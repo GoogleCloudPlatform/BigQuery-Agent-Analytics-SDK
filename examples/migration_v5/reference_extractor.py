@@ -87,6 +87,37 @@ _BINDING_PATH = _HERE / "binding.yaml"
 
 
 # ------------------------------------------------------------------ #
+# Session-scoping                                                      #
+# ------------------------------------------------------------------ #
+
+
+def _scoped_id(session_id: str, raw_id: str) -> str:
+  """Session-scope a raw tool ID so two sessions producing
+  the same tool output don't collide on the node table's
+  PK column.
+
+  The MAKO demo agent generates IDs via content-derived
+  sha1 prefixes (``ctx-<10hex>`` etc.). Sessions whose
+  ``capture_context`` calls happen to receive the same
+  ``(audience_size, budget_remaining_usd)`` pair produce
+  identical ``ctx-...`` IDs. Without scoping, both
+  sessions would write rows whose PK column carries the
+  same value — BigQuery doesn't enforce PK uniqueness, but
+  ``CREATE PROPERTY GRAPH`` declares ``KEY (...)`` and the
+  graph traversal semantics assume uniqueness.
+
+  The scoping is applied to **PK column values** (the
+  data the materializer writes to BigQuery), to the
+  **node_id** key segment (so ``parse_key_segment`` →
+  edge FK lookup sees the scoped value), and to **edge
+  IDs**. ``AgentSession`` is the one exception: its
+  identity is already the envelope ``session_id``, so
+  scoping ``session_id`` by itself is redundant.
+  """
+  return f"{session_id}:{raw_id}"
+
+
+# ------------------------------------------------------------------ #
 # Per-tool extractors                                                 #
 # ------------------------------------------------------------------ #
 
@@ -95,9 +126,10 @@ def _extract_capture_context(
     session_id: str, span_id: str, result: dict
 ) -> StructuredExtractionResult:
   """``capture_context`` → ``ContextSnapshot`` node."""
-  context_id = result.get("context_id")
-  if not context_id:
+  raw_context_id = result.get("context_id")
+  if not raw_context_id:
     return StructuredExtractionResult()
+  context_id = _scoped_id(session_id, raw_context_id)
 
   node_id = f"{session_id}:ContextSnapshot:context_snapshot_id={context_id}"
   properties = [ExtractedProperty(name="context_snapshot_id", value=context_id)]
@@ -133,9 +165,10 @@ def _extract_propose_decision_point(
     session_id: str, span_id: str, result: dict
 ) -> StructuredExtractionResult:
   """``propose_decision_point`` → ``DecisionPoint`` node."""
-  decision_point_id = result.get("decision_point_id")
-  if not decision_point_id:
+  raw_decision_point_id = result.get("decision_point_id")
+  if not raw_decision_point_id:
     return StructuredExtractionResult()
+  decision_point_id = _scoped_id(session_id, raw_decision_point_id)
 
   node_id = f"{session_id}:DecisionPoint:decision_point_id={decision_point_id}"
   properties = [
@@ -163,10 +196,12 @@ def _extract_evaluate_candidate(
 ) -> StructuredExtractionResult:
   """``evaluate_candidate`` → ``Candidate`` node +
   ``evaluatesCandidate`` edge (DecisionPoint → Candidate)."""
-  candidate_id = result.get("candidate_id")
-  decision_point_id = result.get("decision_point_id")
-  if not candidate_id or not decision_point_id:
+  raw_candidate_id = result.get("candidate_id")
+  raw_decision_point_id = result.get("decision_point_id")
+  if not raw_candidate_id or not raw_decision_point_id:
     return StructuredExtractionResult()
+  candidate_id = _scoped_id(session_id, raw_candidate_id)
+  decision_point_id = _scoped_id(session_id, raw_decision_point_id)
 
   candidate_node_id = f"{session_id}:Candidate:candidate_id={candidate_id}"
   decision_point_node_id = (
@@ -180,7 +215,14 @@ def _extract_evaluate_candidate(
       properties=[ExtractedProperty(name="candidate_id", value=candidate_id)],
   )
   edge = ExtractedEdge(
-      edge_id=f"evaluatesCandidate:{decision_point_id}:{candidate_id}",
+      # Edge IDs are session-scoped too: the materializer
+      # uses ``edge_id`` for delete-then-insert dedup. Two
+      # sessions producing the same ``(dp_id, cand_id)``
+      # pair would otherwise collide.
+      edge_id=(
+          f"{session_id}:evaluatesCandidate:"
+          f"{raw_decision_point_id}:{raw_candidate_id}"
+      ),
       relationship_name="evaluatesCandidate",
       from_node_id=decision_point_node_id,
       to_node_id=candidate_node_id,
@@ -203,10 +245,12 @@ def _extract_commit_outcome(
   ``SelectionOutcome``, so the span is marked
   ``partially_handled`` (the free-text rationale stays in
   the AI transcript)."""
-  outcome_id = result.get("outcome_id")
-  selected_candidate_id = result.get("selected_candidate_id")
-  if not outcome_id or not selected_candidate_id:
+  raw_outcome_id = result.get("outcome_id")
+  raw_selected_candidate_id = result.get("selected_candidate_id")
+  if not raw_outcome_id or not raw_selected_candidate_id:
     return StructuredExtractionResult()
+  outcome_id = _scoped_id(session_id, raw_outcome_id)
+  selected_candidate_id = _scoped_id(session_id, raw_selected_candidate_id)
 
   outcome_node_id = (
       f"{session_id}:SelectionOutcome:selection_outcome_id={outcome_id}"
@@ -224,7 +268,10 @@ def _extract_commit_outcome(
       ],
   )
   edge = ExtractedEdge(
-      edge_id=f"selectedCandidate:{outcome_id}:{selected_candidate_id}",
+      edge_id=(
+          f"{session_id}:selectedCandidate:"
+          f"{raw_outcome_id}:{raw_selected_candidate_id}"
+      ),
       relationship_name="selectedCandidate",
       from_node_id=outcome_node_id,
       to_node_id=candidate_node_id,
@@ -241,7 +288,10 @@ def _extract_commit_outcome(
 
 
 def _extract_complete_execution(
-    session_id: str, span_id: str, result: dict
+    session_id: str,
+    span_id: str,
+    trace_id: str,
+    result: dict,
 ) -> StructuredExtractionResult:
   """``complete_execution`` → ``DecisionExecution`` node +
   every edge that hangs off the central hub.
@@ -254,13 +304,29 @@ def _extract_complete_execution(
   whole hub-shape graph in one place — Beat 4.4's hub-
   shape traversal `(DecisionExecution)-[partOfSession]->
   (AgentSession)` is what consumes them.
+
+  ``DecisionExecution.spanId`` / ``DecisionExecution.traceId``
+  are MAKO-declared provenance properties; the values come
+  from the plugin envelope of the ``complete_execution``
+  event (it's the last tool call in the flow, so its
+  span/trace IDs are a stable handle for the whole
+  decision execution).
   """
-  execution_id = result.get("execution_id")
-  decision_point_id = result.get("decision_point_id")
-  context_id = result.get("context_id")
-  outcome_id = result.get("outcome_id")
-  if not (execution_id and decision_point_id and context_id and outcome_id):
+  raw_execution_id = result.get("execution_id")
+  raw_decision_point_id = result.get("decision_point_id")
+  raw_context_id = result.get("context_id")
+  raw_outcome_id = result.get("outcome_id")
+  if not (
+      raw_execution_id
+      and raw_decision_point_id
+      and raw_context_id
+      and raw_outcome_id
+  ):
     return StructuredExtractionResult()
+  execution_id = _scoped_id(session_id, raw_execution_id)
+  decision_point_id = _scoped_id(session_id, raw_decision_point_id)
+  context_id = _scoped_id(session_id, raw_context_id)
+  outcome_id = _scoped_id(session_id, raw_outcome_id)
 
   execution_node_id = (
       f"{session_id}:DecisionExecution:decision_execution_id={execution_id}"
@@ -291,6 +357,18 @@ def _extract_complete_execution(
     execution_properties.append(
         ExtractedProperty(name="latency_ms", value=result["latency_ms"])
     )
+  # Envelope-side provenance: span/trace IDs link the
+  # materialized DecisionExecution row back to the plugin
+  # trace. Only emit when present — sparse-event sources
+  # (offline replay, synthetic fixtures) may not carry them.
+  if span_id:
+    execution_properties.append(
+        ExtractedProperty(name="span_id", value=span_id)
+    )
+  if trace_id:
+    execution_properties.append(
+        ExtractedProperty(name="trace_id", value=trace_id)
+    )
 
   execution_node = ExtractedNode(
       node_id=execution_node_id,
@@ -315,25 +393,36 @@ def _extract_complete_execution(
 
   edges = [
       ExtractedEdge(
-          edge_id=f"executedAtDecisionPoint:{execution_id}:{decision_point_id}",
+          edge_id=(
+              f"{session_id}:executedAtDecisionPoint:"
+              f"{raw_execution_id}:{raw_decision_point_id}"
+          ),
           relationship_name="executedAtDecisionPoint",
           from_node_id=execution_node_id,
           to_node_id=decision_point_node_id,
       ),
       ExtractedEdge(
-          edge_id=f"atContextSnapshot:{execution_id}:{context_id}",
+          edge_id=(
+              f"{session_id}:atContextSnapshot:"
+              f"{raw_execution_id}:{raw_context_id}"
+          ),
           relationship_name="atContextSnapshot",
           from_node_id=execution_node_id,
           to_node_id=context_node_id,
       ),
       ExtractedEdge(
-          edge_id=f"hasSelectionOutcome:{execution_id}:{outcome_id}",
+          edge_id=(
+              f"{session_id}:hasSelectionOutcome:"
+              f"{raw_execution_id}:{raw_outcome_id}"
+          ),
           relationship_name="hasSelectionOutcome",
           from_node_id=execution_node_id,
           to_node_id=outcome_node_id,
       ),
       ExtractedEdge(
-          edge_id=f"partOfSession:{execution_id}:{session_id}",
+          # ``session_id`` is already the AgentSession's PK,
+          # so just including it once here is enough.
+          edge_id=f"{session_id}:partOfSession:{raw_execution_id}",
           relationship_name="partOfSession",
           from_node_id=execution_node_id,
           to_node_id=agent_session_node_id,
@@ -352,13 +441,17 @@ def _extract_complete_execution(
 # ------------------------------------------------------------------ #
 
 
+# ``complete_execution`` is dispatched separately (see the
+# ``extract_mako_decision_event`` body) because it also
+# consumes the envelope ``trace_id``. The handler table
+# carries only the unified-arity tools.
 _TOOL_HANDLERS = {
     "capture_context": _extract_capture_context,
     "propose_decision_point": _extract_propose_decision_point,
     "evaluate_candidate": _extract_evaluate_candidate,
     "commit_outcome": _extract_commit_outcome,
-    "complete_execution": _extract_complete_execution,
 }
+_KNOWN_TOOLS = set(_TOOL_HANDLERS) | {"complete_execution"}
 
 
 def extract_mako_decision_event(
@@ -392,7 +485,7 @@ def extract_mako_decision_event(
   if not isinstance(content, dict):
     return StructuredExtractionResult()
   tool_name = content.get("tool")
-  if tool_name not in _TOOL_HANDLERS:
+  if tool_name not in _KNOWN_TOOLS:
     return StructuredExtractionResult()
   result = content.get("result")
   if not isinstance(result, dict):
@@ -400,6 +493,17 @@ def extract_mako_decision_event(
 
   session_id = event.get("session_id") or ""
   span_id = event.get("span_id") or ""
+  # ``complete_execution`` carries the envelope-side
+  # provenance fields (span_id + trace_id) onto the
+  # materialized ``DecisionExecution`` row. Other tools
+  # don't need ``trace_id`` so the dispatch table holds
+  # the unified-arity ``(session, span, result)``
+  # handlers; the complete-execution branch is special-
+  # cased here rather than complicating every handler's
+  # signature.
+  if tool_name == "complete_execution":
+    trace_id = event.get("trace_id") or ""
+    return _extract_complete_execution(session_id, span_id, trace_id, result)
   return _TOOL_HANDLERS[tool_name](session_id, span_id, result)
 
 
