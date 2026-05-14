@@ -320,24 +320,40 @@ def make_binding(
   """
   scope = set(DEMO_ENTITIES) if entity_filter is None else set(entity_filter)
 
+  # Each entity's PK column is named ``{entity_short}_id``
+  # rather than a bare ``id``. The materializer
+  # (``_relationship_columns`` in ``ontology_materializer.py``)
+  # populates an edge's FK column type from the source
+  # entity's ``src_prop_map[col].sdk_type`` — that lookup
+  # requires the FK column name to exactly match a property
+  # column on the source entity. Using a bare ``id`` would
+  # work for one entity per edge but collide when both
+  # endpoints share the same PK column name (``id, id`` ─
+  # duplicate column). Per-entity PK names give every edge
+  # a clean ``{src_entity}_id, {dst_entity}_id`` shape and
+  # match the convention the original V5 spec used
+  # (``YMGO_Context_Graph_V3``: ``decision_id``,
+  # ``adUnitId``, etc.).
   entities_block: list[dict] = []
   for entity in ontology.entities:
     if entity.name not in scope:
       continue
     table_name = _entity_table_name(entity.name)
-    props = [{"name": "id", "column": "id"}]
+    pk_column = f"{_entity_id_column(entity.name)}_id"
+    props = [{"name": "id", "column": pk_column}]
     # Append every MAKO-declared property except ``id``
-    # (which the binding always projects as the primary
-    # key) — snake_case the column for BQ conventions.
+    # (PK, already added). The binding validator
+    # (``_check_property_coverage``) requires every non-
+    # derived ontology property to have a binding; dropping
+    # ``sessionId`` to avoid a column-name collision broke
+    # that check. Since ``_entity_id_column`` no longer
+    # strips ``agent_``, AgentSession's PK column is
+    # ``agent_session_id`` and ``sessionId`` keeps its
+    # natural ``session_id`` column without collision.
     for prop in entity.properties:
       if prop.name == "id":
         continue
-      props.append(
-          {
-              "name": prop.name,
-              "column": _to_snake_case(prop.name),
-          }
-      )
+      props.append({"name": prop.name, "column": _to_snake_case(prop.name)})
     entities_block.append(
         {
             "name": entity.name,
@@ -347,34 +363,37 @@ def make_binding(
     )
 
   # Edge set is derived from MAKO's actual declared
-  # relationships — agent picks the ones where BOTH endpoints
-  # are in the demo entity set. No hardcoded "demo edges"
-  # list: the binding's relationship set is fully TTL-driven.
+  # relationships — pick relationships whose endpoints are
+  # both in the demo scope. Two filters:
   #
-  # Column-name convention:
-  #
-  # * Heterogeneous edge (A → B): ``src_col = {a}_id``,
-  #   ``dst_col = {b}_id`` (e.g. ``decision_point_id`` /
-  #   ``candidate_id``).
-  # * Self-edge (A → A): naming the two columns the same
-  #   thing would produce ``CREATE TABLE foo (x_id STRING,
-  #   x_id STRING)`` — a duplicate-column error. MAKO has
-  #   ``evolvedFrom`` and ``supersededBy`` as
-  #   DecisionExecution → DecisionExecution self-edges; the
-  #   convention switches to ``src_{a}_id`` / ``dst_{a}_id``
-  #   only for self-edges. Heterogeneous edges keep the
-  #   simpler naming so the property graph reads naturally.
+  # 1. ``rel.from_ != rel.to`` — self-edges (MAKO's
+  #    ``evolvedFrom`` and ``supersededBy``,
+  #    DecisionExecution → DecisionExecution) are dropped.
+  #    The materializer's ``_relationship_columns`` requires
+  #    the edge's ``from_columns`` to name a property column
+  #    on the source entity. For a self-edge that would
+  #    mean two identical PK column names on the edge table
+  #    (duplicate-column error), and the workarounds
+  #    (``src_/dst_`` prefixes) miss the property lookup.
+  #    A future binding revision (or an SDK change that
+  #    accepts FK-to-PK column mapping) could re-add them;
+  #    for the demo, the heterogeneous edges carry the
+  #    decision-flow narrative.
+  # 2. Heterogeneous edges use ``{entity_short}_id`` as both
+  #    source and destination FK columns — the same name as
+  #    the source/destination entity's PK column. The
+  #    materializer can then resolve ``src_prop_map[col]``
+  #    cleanly.
   relationships_block: list[dict] = []
+  dropped_self_edges: list[str] = []
   for rel in ontology.relationships:
     if rel.from_ not in scope or rel.to not in scope:
       continue
     if rel.from_ == rel.to:
-      base = _entity_id_column(rel.from_)
-      src_col = f"src_{base}_id"
-      dst_col = f"dst_{base}_id"
-    else:
-      src_col = f"{_entity_id_column(rel.from_)}_id"
-      dst_col = f"{_entity_id_column(rel.to)}_id"
+      dropped_self_edges.append(rel.name)
+      continue
+    src_col = f"{_entity_id_column(rel.from_)}_id"
+    dst_col = f"{_entity_id_column(rel.to)}_id"
     relationships_block.append(
         {
             "name": rel.name,
@@ -515,14 +534,25 @@ def make_property_graph_sql(
   dataset = binding.target.dataset
   qualified_graph = f"{project}.{dataset}.{graph_name}"
 
+  # The PK column for each entity is the ``column`` of the
+  # property whose ``name`` is ``id`` (set by ``make_binding``
+  # to ``{entity_short}_id``). Both the ``KEY (...)`` of the
+  # node table and the ``REFERENCES <alias> (...)`` of every
+  # edge endpoint must use that column name; hard-coding
+  # ``id`` (the property's *logical* name) trips
+  # ``Unrecognized name: id`` because the underlying table
+  # column has the entity-specific name.
+  pk_column_by_entity: dict[str, str] = {}
   node_tables: list[str] = []
   for ebind in binding.entities:
     qualified_source = ebind.source
     short_name = _table_ref_short(qualified_source)
+    pk_col = next(p.column for p in ebind.properties if p.name == "id")
+    pk_column_by_entity[ebind.name] = pk_col
     cols = ", ".join(p.column for p in ebind.properties)
     node_tables.append(
         f"    `{qualified_source}` AS {short_name}\n"
-        f"      KEY (id)\n"
+        f"      KEY ({pk_col})\n"
         f"      LABEL {ebind.name} PROPERTIES ({cols})"
     )
 
@@ -542,12 +572,33 @@ def make_property_graph_sql(
     dst_col = rbind.to_columns[0]
     qualified_edge_source = rbind.source
     short = _table_ref_short(qualified_edge_source)
-    src_table = next(e.source for e in binding.entities if e.name == rel.from_)
-    dst_table = next(e.source for e in binding.entities if e.name == rel.to)
+    # ``SOURCE KEY ... REFERENCES`` and ``DESTINATION KEY ...
+    # REFERENCES`` name the **alias** the node table is declared
+    # under inside the same property graph, not the
+    # fully-qualified BigQuery table. BQ rejects qualified refs
+    # ("The referenced node table 'proj.ds.foo' is not defined in
+    # the property graph") because the alias is the in-graph
+    # identifier. Same shape ``gm compile`` emits.
+    src_alias = _table_ref_short(
+        next(e.source for e in binding.entities if e.name == rel.from_)
+    )
+    dst_alias = _table_ref_short(
+        next(e.source for e in binding.entities if e.name == rel.to)
+    )
+    # Edge tables require an explicit ``KEY (...)`` declaration
+    # alongside ``SOURCE KEY`` / ``DESTINATION KEY``. BigQuery
+    # rejects edge declarations without it
+    # ("graph element table keys must be explicitly defined").
+    # The natural composite key for an edge is the pair of FK
+    # columns the source + destination references point at —
+    # same shape ``gm compile`` emits.
+    src_pk = pk_column_by_entity[rel.from_]
+    dst_pk = pk_column_by_entity[rel.to]
     edge_tables.append(
         f"    `{qualified_edge_source}` AS {short}\n"
-        f"      SOURCE KEY ({src_col}) REFERENCES `{src_table}` (id)\n"
-        f"      DESTINATION KEY ({dst_col}) REFERENCES `{dst_table}` (id)\n"
+        f"      KEY ({src_col}, {dst_col})\n"
+        f"      SOURCE KEY ({src_col}) REFERENCES {src_alias} ({src_pk})\n"
+        f"      DESTINATION KEY ({dst_col}) REFERENCES {dst_alias} ({dst_pk})\n"
         f"      LABEL {rbind.name}"
     )
 
@@ -621,18 +672,21 @@ def _entity_table_name(entity_name: str) -> str:
 
 
 def _entity_id_column(entity_name: str) -> str:
-  """Column-name root for an entity's foreign-key references
-  (e.g. ``AgentSession`` → ``session``, used in
-  ``session_id``)."""
-  snake = _to_snake_case(entity_name)
-  # Strip a trailing "_session" / "_point" / "_outcome" /
-  # "_snapshot" suffix so the resulting column reads
-  # naturally: ``agent_session`` → ``session``,
-  # ``decision_point`` → ``decision_point``, etc. Keep the
-  # raw snake form when stripping would over-shorten.
-  if snake.startswith("agent_") and len(snake) > len("agent_"):
-    return snake[len("agent_") :]
-  return snake
+  """Column-name root for an entity's PK + foreign-key
+  references (e.g. ``AgentSession`` → ``agent_session``,
+  used in ``agent_session_id``).
+
+  Earlier drafts stripped a leading ``agent_`` so the FK
+  read ``session_id`` — but that collides with both the
+  SDK metadata column ``session_id`` and MAKO's
+  ``AgentSession.sessionId`` data property (also bound to
+  column ``session_id``), producing duplicate columns the
+  validator rejects. Keeping the full snake form gives
+  every entity a unique PK column and lets the SDK
+  metadata + ontology-declared ``sessionId`` co-exist
+  cleanly.
+  """
+  return _to_snake_case(entity_name)
 
 
 def _edge_table_name(edge_name: str) -> str:
