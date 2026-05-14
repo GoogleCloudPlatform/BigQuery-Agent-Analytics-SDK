@@ -161,7 +161,12 @@ PYTHONPATH=src python examples/migration_v5/run_agent.py --help
 PYTHONPATH=src python examples/migration_v5/export_events_jsonl.py --help
 ```
 
-A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells against a fresh scratch dataset on `test-project-0728-467323`) is captured with cell outputs inline in `examples/migration_v5_demo_notebook.ipynb`. The committed executed notebook's evidence: Beat 1 GQL count `before=0, after=2`, `rows_materialized total=35`, `property_graph_status='skipped:user_requested'`; Beat 2 drift detected + restored; Beat 3.6 NODE+FIELD+EDGE all fired; Beat 4 resolver returned `compile_id=eca9978b0550`, GRAPH_TABLE count = 4.
+A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells against a fresh scratch dataset on `test-project-0728-467323`) is captured with cell outputs inline in `examples/migration_v5_demo_notebook.ipynb`. Per-beat evidence (exact numbers depend on which `--sessions N` run produced the committed snapshot):
+
+- **Beat 1**: GQL `DecisionExecution` count `before=0, after=N>0`, `rows_materialized total>0`, `property_graph_status='skipped:user_requested'`, zero SDK-issued `CREATE OR REPLACE PROPERTY GRAPH` jobs.
+- **Beat 2**: `binding-validate` exits 1 with a `missing_column` failure after column rename; restore + re-validate exits 0; combined `ontology-build --skip-property-graph --validate-binding` matches Beat 1's status + non-zero `rows_materialized`.
+- **Beat 3.6**: synthetic `ExtractedGraph` triggers all three `FallbackScope` failures (`NODE + FIELD + EDGE`).
+- **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns zero rows (`AgentSession` synthesis from the plugin envelope lands with PR #156).
 
 ## What's NOT in this commit
 

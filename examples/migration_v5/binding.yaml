@@ -1,24 +1,24 @@
-binding: migration_v5_demo_binding
+binding: migration_v5_demo_56f9179f_binding
 ontology: mako
 target:
   backend: bigquery
   project: test-project-0728-467323
-  dataset: migration_v5_demo
+  dataset: migration_v5_demo_56f9179f
 entities:
 - name: AgentSession
-  source: test-project-0728-467323.migration_v5_demo.agent_session
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.agent_session
   properties:
   - name: id
     column: agent_session_id
   - name: sessionId
     column: session_id
 - name: Candidate
-  source: test-project-0728-467323.migration_v5_demo.candidate
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.candidate
   properties:
   - name: id
     column: candidate_id
 - name: ContextSnapshot
-  source: test-project-0728-467323.migration_v5_demo.context_snapshot
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.context_snapshot
   properties:
   - name: id
     column: context_snapshot_id
@@ -27,7 +27,7 @@ entities:
   - name: snapshotTimestamp
     column: snapshot_timestamp
 - name: DecisionExecution
-  source: test-project-0728-467323.migration_v5_demo.decision_execution
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.decision_execution
   properties:
   - name: id
     column: decision_execution_id
@@ -40,62 +40,62 @@ entities:
   - name: traceId
     column: trace_id
 - name: DecisionPoint
-  source: test-project-0728-467323.migration_v5_demo.decision_point
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.decision_point
   properties:
   - name: id
     column: decision_point_id
   - name: reversibility
     column: reversibility
 - name: SelectionOutcome
-  source: test-project-0728-467323.migration_v5_demo.selection_outcome
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.selection_outcome
   properties:
   - name: id
     column: selection_outcome_id
 relationships:
 - name: atContextSnapshot
-  source: test-project-0728-467323.migration_v5_demo.at_context_snapshot
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.at_context_snapshot
   from_columns:
   - decision_execution_id
   to_columns:
   - context_snapshot_id
   properties: []
 - name: evaluatesCandidate
-  source: test-project-0728-467323.migration_v5_demo.evaluates_candidate
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.evaluates_candidate
   from_columns:
   - decision_point_id
   to_columns:
   - candidate_id
   properties: []
 - name: executedAtDecisionPoint
-  source: test-project-0728-467323.migration_v5_demo.executed_at_decision_point
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.executed_at_decision_point
   from_columns:
   - decision_execution_id
   to_columns:
   - decision_point_id
   properties: []
 - name: hasSelectionOutcome
-  source: test-project-0728-467323.migration_v5_demo.has_selection_outcome
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.has_selection_outcome
   from_columns:
   - decision_execution_id
   to_columns:
   - selection_outcome_id
   properties: []
 - name: partOfSession
-  source: test-project-0728-467323.migration_v5_demo.part_of_session
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.part_of_session
   from_columns:
   - decision_execution_id
   to_columns:
   - agent_session_id
   properties: []
 - name: rejectedCandidate
-  source: test-project-0728-467323.migration_v5_demo.rejected_candidate
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.rejected_candidate
   from_columns:
   - selection_outcome_id
   to_columns:
   - candidate_id
   properties: []
 - name: selectedCandidate
-  source: test-project-0728-467323.migration_v5_demo.selected_candidate
+  source: test-project-0728-467323.migration_v5_demo_56f9179f.selected_candidate
   from_columns:
   - selection_outcome_id
   to_columns:
