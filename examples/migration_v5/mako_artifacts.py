@@ -176,6 +176,7 @@ def _normalize_imported_ontology(yaml_text: str) -> str:
   data = yaml.safe_load(yaml_text)
   data = _resolve_fill_in_primary_keys_dict(data)
   data = _drop_dangling_relationships(data)
+  data = _strip_inheritance(data)
   return yaml.safe_dump(data, sort_keys=False)
 
 
@@ -232,6 +233,57 @@ def _drop_dangling_relationships(data: dict) -> dict:
     # so the loss is auditable from the loaded model.
     annotations = data.setdefault("annotations", {})
     annotations["mako_demo:dropped_cross_namespace_relationships"] = dropped
+  return data
+
+
+def _strip_inheritance(data: dict) -> dict:
+  """Strip ``extends`` from every entity post-import.
+
+  The MAKO TTL marks ``mako:Candidate rdfs:subClassOf
+  mako:RoleTrait``; the OWL importer carries that through
+  as ``extends: RoleTrait``. The v0 ``gm compile`` (used by
+  the notebook's Section 4 concept-index emission) doesn't
+  support inheritance, so the binding compile fails with
+  ``compile-validation — Entity 'Candidate' uses 'extends';
+  v0 compilation does not support inheritance.``
+
+  ``RoleTrait`` is a marker class in MAKO (REQ-ONT-022 —
+  "single-primary-parent inheritance discipline"); it
+  carries no properties beyond the ``id`` PK that the
+  importer already added to every entity. Stripping the
+  ``extends`` clause has no semantic effect on the demo's
+  six-entity scope. The discarded inheritance is recorded
+  under ``mako_demo:stripped_inheritance`` on the entity
+  so the loss is visible.
+  """
+  # Ontology annotations are typed ``dict[str, str]``; the
+  # audit trail therefore serializes to strings. Per-entity
+  # records carry the ``extended`` parent in a flat key; the
+  # top-level summary is a comma-joined ``entity:parent`` list.
+  stripped: list[str] = []
+  for entity in data.get("entities", []):
+    if "extends" not in entity:
+      continue
+    stripped.append(f"{entity['name']}:{entity['extends']}")
+    annotations = entity.setdefault("annotations", {}) or {}
+    annotations["mako_demo:stripped_inheritance"] = entity["extends"]
+    entity["annotations"] = annotations
+    del entity["extends"]
+    # Stripping ``extends`` removes the entity's only path
+    # to a primary key (the parent class declared one). Add
+    # the same ``id: string`` PK the importer adds to every
+    # other concrete entity so the ontology still loads.
+    keys = entity.setdefault("keys", {})
+    if "primary" not in keys:
+      keys["primary"] = ["id"]
+    props = entity.setdefault("properties", []) or []
+    if not any(p.get("name") == "id" for p in props):
+      props.insert(0, {"name": "id", "type": "string"})
+      entity["properties"] = props
+  if stripped:
+    top_annotations = data.setdefault("annotations", {}) or {}
+    top_annotations["mako_demo:stripped_inheritance"] = ",".join(stripped)
+    data["annotations"] = top_annotations
   return data
 
 

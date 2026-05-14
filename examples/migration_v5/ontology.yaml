@@ -46,9 +46,15 @@ entities:
 
     An option evaluated at a DecisionPoint (e.g., an audience segment, a bid value,
     a creative).'
-  extends: RoleTrait
   annotations:
     owl:subClassOf_excluded: http://www.w3.org/ns/prov#Entity
+    mako_demo:stripped_inheritance: RoleTrait
+  keys:
+    primary:
+    - id
+  properties:
+  - name: id
+    type: string
 - name: ConstraintApplication
   description: 'Constraint Application
 
@@ -399,3 +405,4 @@ annotations:
   - delegatedTo
   - gateApprovedBy
   - refersToEntity
+  mako_demo:stripped_inheritance: Candidate:RoleTrait
