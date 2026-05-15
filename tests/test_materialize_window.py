@@ -509,6 +509,7 @@ def test_dry_run_returns_discovered_sessions_without_extracting(
       ontology_path=str(ontology_yaml),
       binding_path=str(binding_yaml),
       lookback_hours=6.0,
+      validate_binding=False,
       dry_run=True,
       bq_client=client,
       run_started_at=now,
@@ -555,6 +556,10 @@ def test_partial_failure_advances_checkpoint_only_to_last_success(
   fake_materializer = fake_materializer_cls.return_value
   fake_mat_result = mock.Mock()
   fake_mat_result.row_counts = {"DecisionExecution": 1}
+  # New: orchestrator iterates ``table_statuses`` after the
+  # ``materialize_with_status`` call. Set to an empty dict so
+  # the iteration doesn't blow up on a Mock object.
+  fake_mat_result.table_statuses = {}
   fake_materializer.materialize_with_status = mock.Mock(
       return_value=fake_mat_result
   )
@@ -572,6 +577,7 @@ def test_partial_failure_advances_checkpoint_only_to_last_success(
         ontology_path=str(ontology_yaml),
         binding_path=str(binding_yaml),
         lookback_hours=6.0,
+        validate_binding=False,
         bq_client=client,
         run_started_at=now,
     )
@@ -610,6 +616,7 @@ def test_empty_window_writes_heartbeat_state_row(fixture_paths):
         ontology_path=str(ontology_yaml),
         binding_path=str(binding_yaml),
         lookback_hours=6.0,
+        validate_binding=False,
         bq_client=client,
         run_started_at=now,
     )
@@ -618,3 +625,322 @@ def test_empty_window_writes_heartbeat_state_row(fixture_paths):
   assert result.sessions_discovered == 0
   assert result.checkpoint_written is None
   assert client.insert_rows_json.call_count == 1
+
+
+# ------------------------------------------------------------------ #
+# Round-2 regressions                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestStateReadSql:
+
+  def test_filters_null_last_completion_at(self):
+    """Heartbeat (empty window) and all-failed runs write a
+    state row with ``last_completion_at = NULL``. Reading those
+    as "the most recent checkpoint" would erase the prior real
+    checkpoint and bootstrap from --lookback-hours on the next
+    run — which can skip the failed session if lookback is short.
+    The select MUST filter on non-NULL."""
+    sql = mw.build_state_select_sql("p.d._bqaa_materialization_state")
+    assert "last_completion_at IS NOT NULL" in sql
+
+
+class TestPreScanBundleFingerprint:
+
+  def test_single_bundle_returns_its_fingerprint(self, tmp_path):
+    """One bundle in root → that bundle's fingerprint."""
+    bundle = tmp_path / "bundle_abc"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text('{"fingerprint": "abc123def456"}')
+    assert mw._pre_scan_bundle_fingerprint(tmp_path) == "abc123def456"
+
+  def test_multiple_bundles_same_fingerprint_ok(self, tmp_path):
+    """Two bundles, same fingerprint (e.g., re-compile cache
+    hit produced an identical sibling) → returns the shared
+    fingerprint without complaint."""
+    for name in ("a", "b"):
+      b = tmp_path / name
+      b.mkdir()
+      (b / "manifest.json").write_text('{"fingerprint": "shared-fp"}')
+    assert mw._pre_scan_bundle_fingerprint(tmp_path) == "shared-fp"
+
+  def test_mixed_fingerprints_rejected(self, tmp_path):
+    """Two bundles with different fingerprints → fail fast with
+    a summary that lists both. Mixed roots are a deployment bug
+    (operator forgot to clean up); the SDK refuses to guess
+    which is current."""
+    for name, fp in (("old", "fp-old"), ("new", "fp-new")):
+      b = tmp_path / name
+      b.mkdir()
+      (b / "manifest.json").write_text(f'{{"fingerprint": "{fp}"}}')
+    with pytest.raises(ValueError, match="mixed fingerprints"):
+      mw._pre_scan_bundle_fingerprint(tmp_path)
+
+  def test_no_bundles_rejected(self, tmp_path):
+    """Empty root → explicit error, not silent fallback."""
+    with pytest.raises(ValueError, match="contains no bundles"):
+      mw._pre_scan_bundle_fingerprint(tmp_path)
+
+  def test_missing_manifest_field_rejected(self, tmp_path):
+    """Malformed manifest (no ``fingerprint`` key) → clear error
+    so the operator knows which bundle is broken."""
+    bundle = tmp_path / "broken"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text('{"not_fingerprint": "x"}')
+    with pytest.raises(ValueError, match="no ``fingerprint`` field"):
+      mw._pre_scan_bundle_fingerprint(tmp_path)
+
+
+class TestFirstRunLookback:
+
+  def test_first_run_uses_lookback_hours_not_default_30min(self, fixture_paths):
+    """First run (no checkpoint row) must scan ``--lookback-hours``
+    back, not the 30-min ``DEFAULT_INITIAL_LOOKBACK_MINUTES``.
+    Regression: previously the bootstrap path used 30min, so
+    ``--lookback-hours 6`` actually only scanned 30 minutes —
+    a customer requesting 6h coverage got 30min coverage."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,  # we mock the manager; skip
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    expected_window_start = now - _dt.timedelta(hours=6)
+    assert result.window_start == expected_window_start, (
+        f"first-run window_start should be {expected_window_start}; "
+        f"got {result.window_start} (was the 30-min default applied?)"
+    )
+
+
+class TestEventsTableThreading:
+
+  def test_events_table_passed_through_to_manager(self, fixture_paths):
+    """``--events-table custom`` must reach
+    ``OntologyGraphManager.from_ontology_binding(table_id=custom)``.
+    A previous draft discovered from the configured table but
+    extracted from the hard-coded default — silent split."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    captured: dict[str, str] = {}
+
+    def _capture(**kwargs):
+      captured["table_id"] = kwargs.get("table_id")
+      return mock.Mock()
+
+    with (
+        mock.patch.object(mw, "_build_manager", side_effect=_capture),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          events_table="custom_events",
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert captured["table_id"] == "custom_events"
+
+
+class TestCheckpointCarryForward:
+
+  def test_failure_carries_forward_prior_checkpoint(self, fixture_paths):
+    """When this run produces zero successful sessions but a
+    prior checkpoint exists, the state row carries forward the
+    prior watermark. Operators reading the most recent row see
+    "still at X", not NULL."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    prior = _dt.datetime(2026, 5, 15, 12, 0, tzinfo=_dt.timezone.utc)
+    fail_ts = _dt.datetime(2026, 5, 15, 13, 0, tzinfo=_dt.timezone.utc)
+
+    # Client wired so state-read returns the prior checkpoint.
+    client = mock.Mock()
+    state_row = mock.Mock(last_completion_at=prior)
+    discovered = [_FakeBQRow(session_id="s-fail", completion_timestamp=fail_ts)]
+    client.query = mock.Mock(
+        side_effect=[
+            mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+            mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
+            mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
+        ]
+    )
+    client.insert_rows_json = mock.Mock(return_value=[])
+
+    fake_manager = mock.Mock(spec=["spec", "extract_graph"])
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(
+        side_effect=RuntimeError("simulated")
+    )
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=24.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert not result.ok
+    assert result.checkpoint_read == prior
+    # Carry-forward: prior watermark preserved in the report.
+    # (The DB-side filter ``last_completion_at IS NOT NULL``
+    # would also handle this on read; the carry-forward is the
+    # belt-and-suspenders observability win.)
+    assert result.checkpoint_written == prior
+
+
+class TestTableStatusesSurfaced:
+
+  def test_table_statuses_propagate_into_result(self, fixture_paths):
+    """``materialize_with_status`` returns per-table cleanup /
+    insert status. The orchestrator must surface that into
+    ``result.table_statuses`` so the JSON report shows which
+    tables hit streaming-buffer-pinned delete_failed states."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    ts = _dt.datetime(2026, 5, 15, 13, 0, tzinfo=_dt.timezone.utc)
+    discovered = [_FakeBQRow(session_id="s-1", completion_timestamp=ts)]
+    client = _stub_bq_client(discovered)
+
+    # Fake a TableStatus dataclass-like object.
+    fake_table_status = mock.Mock()
+    fake_table_status.table_ref = "p.d.entity"
+    fake_table_status.rows_attempted = 5
+    fake_table_status.rows_inserted = 5
+    fake_table_status.cleanup_status = "deleted"
+    fake_table_status.insert_status = "inserted"
+    fake_table_status.idempotent = True
+    fake_mat_result = mock.Mock()
+    fake_mat_result.row_counts = {"Entity": 5}
+    fake_mat_result.table_statuses = {"Entity": fake_table_status}
+
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(return_value=mock.Mock())
+
+    fake_materializer_cls = mock.Mock()
+    fake_materializer = fake_materializer_cls.return_value
+    fake_materializer.materialize_with_status = mock.Mock(
+        return_value=fake_mat_result
+    )
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert "Entity" in result.table_statuses
+    assert result.table_statuses["Entity"]["cleanup_status"] == "deleted"
+    assert result.table_statuses["Entity"]["rows_inserted"] == 5
+    assert result.table_statuses["Entity"]["idempotent"] is True
+
+
+class TestValidateBindingShortCircuit:
+
+  def test_failing_validation_raises_before_extraction(self, fixture_paths):
+    """``--validate-binding`` runs before extraction. A failing
+    report short-circuits with a ValueError; the materializer
+    is never constructed. This is the "fail before AI.GENERATE
+    spend" contract from #161."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    fake_failure = mock.Mock(
+        code=mock.Mock(value="missing_column"),
+        binding_path="binding.entities[0].properties[0].column",
+    )
+    fake_report = mock.Mock()
+    fake_report.ok = False
+    fake_report.failures = [fake_failure]
+
+    with (
+        mock.patch(
+            "bigquery_agent_analytics.binding_validation.validate_binding_against_bigquery",
+            return_value=fake_report,
+        ),
+        mock.patch.object(mw, "_build_manager") as mock_build,
+    ):
+      with pytest.raises(ValueError, match="binding-validate failed"):
+        mw.run_materialize_window(
+            project_id="test-proj",
+            dataset_id="test_ds",
+            ontology_path=str(ontology_yaml),
+            binding_path=str(binding_yaml),
+            lookback_hours=6.0,
+            validate_binding=True,
+            bq_client=client,
+            run_started_at=now,
+        )
+      # Manager was never constructed — extraction never started.
+      mock_build.assert_not_called()
+
+  def test_skipped_on_dry_run(self, fixture_paths):
+    """``--dry-run`` already opts out of side effects. Even with
+    ``--validate-binding`` on, dry-run skips the BQ-side check
+    (the binding may legitimately be ahead of the deployed
+    tables during preview)."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    with mock.patch(
+        "bigquery_agent_analytics.binding_validation.validate_binding_against_bigquery"
+    ) as mock_validate:
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=True,
+          dry_run=True,
+          bq_client=client,
+          run_started_at=now,
+      )
+      mock_validate.assert_not_called()

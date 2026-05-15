@@ -1836,12 +1836,22 @@ def materialize_window(
     location: Optional[str] = typer.Option(
         None, "--location", help="BigQuery location (e.g. 'US', 'EU')."
     ),
+    validate_binding: bool = typer.Option(
+        True,
+        "--validate-binding/--no-validate-binding",
+        help=(
+            "Pre-flight binding-validate against live BQ tables "
+            "before extraction. The 'fail before AI.GENERATE "
+            "spend' contract from #161. Default on. Skipped on "
+            "--dry-run regardless."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
         help=(
-            "Discover sessions + binding-validate but don't extract "
-            "or materialize. Writes no state-table row."
+            "Discover sessions but don't extract, validate, or "
+            "materialize. Writes no state-table row."
         ),
     ),
     fmt: str = typer.Option(
@@ -1882,6 +1892,7 @@ def materialize_window(
         reference_extractors_module=reference_extractors_module,
         max_sessions=max_sessions,
         location=location,
+        validate_binding=validate_binding,
         dry_run=dry_run,
     )
     typer.echo(format_output(result.to_json(), fmt))
@@ -1896,6 +1907,20 @@ def materialize_window(
 
 def main() -> None:
   """Entry point for ``bq-agent-sdk``."""
+  app()
+
+
+def _materialize_window_entry() -> None:
+  """Entry point for the standalone ``bqaa-materialize-window``
+  console script. Same code path as ``bq-agent-sdk
+  materialize-window``; the standalone name is the customer-
+  facing alias documented in #161, so Cloud Run Job specs can use
+  it directly without the parent subcommand chain.
+  """
+  # Insert the subcommand name at the front so users invoke
+  # ``bqaa-materialize-window --lookback-hours 6`` directly,
+  # without re-typing the parent command name.
+  sys.argv.insert(1, "materialize-window")
   app()
 
 

@@ -71,7 +71,6 @@ import traceback
 from typing import Any, Callable, Optional, Sequence
 
 from ._streaming_evaluation import compute_scan_start
-from ._streaming_evaluation import DEFAULT_INITIAL_LOOKBACK_MINUTES
 from ._streaming_evaluation import DEFAULT_OVERLAP_MINUTES
 
 # ------------------------------------------------------------------ #
@@ -146,6 +145,9 @@ class SessionResult:
   ok: bool
   completion_timestamp: _dt.datetime
   rows_materialized: dict[str, int] = dataclasses.field(default_factory=dict)
+  table_statuses: dict[str, dict[str, Any]] = dataclasses.field(
+      default_factory=dict
+  )
   error_code: Optional[str] = None
   error_detail: Optional[str] = None
 
@@ -346,7 +348,17 @@ def build_discovery_sql(
 
 
 def build_state_select_sql(state_table_ref: str) -> str:
-  """Most-recent state row for a given ``state_key``."""
+  """Most-recent state row for a given ``state_key`` whose
+  ``last_completion_at`` is non-NULL.
+
+  Empty-window heartbeat rows and all-failed runs both write
+  ``last_completion_at = NULL`` (we never advanced). Reading the
+  newest-by-timestamp row would erase the prior checkpoint and
+  bootstrap from ``--lookback-hours`` on the next run — which can
+  skip the failed session if the lookback is short. Filtering
+  for non-NULL ``last_completion_at`` returns the most recent
+  *successful* checkpoint, which is the watermark to advance
+  from."""
   state_table_ref_quoted = "`" + state_table_ref + "`"
   return (
       f"SELECT\n"
@@ -363,6 +375,7 @@ def build_state_select_sql(state_table_ref: str) -> str:
       f"  error_detail\n"
       f"FROM {state_table_ref_quoted}\n"
       f"WHERE state_key = @state_key\n"
+      f"  AND last_completion_at IS NOT NULL\n"
       f"ORDER BY run_started_at DESC\n"
       f"LIMIT 1\n"
   )
@@ -494,7 +507,6 @@ def run_materialize_window(
     events_table: str = "agent_events",
     lookback_hours: float,
     overlap_minutes: float = DEFAULT_OVERLAP_MINUTES,
-    initial_lookback_minutes: float = DEFAULT_INITIAL_LOOKBACK_MINUTES,
     completion_event_type: str = DEFAULT_COMPLETION_EVENT_TYPE,
     include_active_sessions: bool = False,
     state_table: Optional[str] = None,
@@ -503,6 +515,7 @@ def run_materialize_window(
     reference_extractors_module: Optional[str] = None,
     max_sessions: Optional[int] = None,
     location: Optional[str] = None,
+    validate_binding: bool = True,
     dry_run: bool = False,
     bq_client: Optional[Any] = None,
     run_started_at: Optional[_dt.datetime] = None,
@@ -522,9 +535,7 @@ def run_materialize_window(
       lookback_hours)``.
     overlap_minutes: Re-process events newer than
       ``last_checkpoint - overlap_minutes``. Default 15.
-    initial_lookback_minutes: First-run lookback when no
-      checkpoint exists. Default 30.
-    completion_event_type: ``event_type`` that marks a session
+        completion_event_type: ``event_type`` that marks a session
       as done. Defaults to BQ AA plugin's ``AGENT_COMPLETED``.
     include_active_sessions: If True, drop the completion-event
       filter and materialize every session seen in the window
@@ -583,6 +594,27 @@ def run_materialize_window(
 
   resolved_graph_name = graph_name or binding_obj.ontology
 
+  # Pre-flight binding validation against live BQ — the "fail
+  # before AI.GENERATE spend" contract from #161. Skipped on
+  # ``--dry-run`` (caller already opted out of side effects) and
+  # when explicitly disabled via ``--no-validate-binding``. A
+  # validation failure short-circuits with ValueError; the
+  # materializer is never constructed and no state row is written.
+  if validate_binding and not dry_run:
+    from .binding_validation import validate_binding_against_bigquery
+
+    report = validate_binding_against_bigquery(
+        ontology=ontology_obj, binding=binding_obj, bq_client=client
+    )
+    if not report.ok:
+      failure_msgs = "; ".join(
+          f"{f.code.value}:{f.binding_path}" for f in report.failures[:10]
+      )
+      raise ValueError(
+          f"binding-validate failed before extraction: "
+          f"{len(report.failures)} failures. {failure_msgs}"
+      )
+
   state_key = compute_state_key(
       project_id=project_id,
       dataset_id=dataset_id,
@@ -596,18 +628,22 @@ def run_materialize_window(
   ensure_state_table(client, state_table_ref)
   last_checkpoint = read_last_checkpoint(client, state_table_ref, state_key)
 
+  # Bootstrap (no checkpoint) → use ``--lookback-hours`` as the
+  # initial scan window. The previous draft used a hard-coded
+  # 30min default which made ``--lookback-hours 6`` actually scan
+  # 30 minutes on first run.
+  # Subsequent runs → ``compute_scan_start`` returns
+  # ``last_checkpoint - overlap_minutes`` (the bootstrap window
+  # arg is ignored when ``checkpoint_timestamp`` is set).
   scan_start = compute_scan_start(
       run_started,
       checkpoint_timestamp=last_checkpoint,
       overlap=_dt.timedelta(minutes=overlap_minutes),
-      initial_lookback=_dt.timedelta(
-          minutes=initial_lookback_minutes
-          if last_checkpoint is None
-          else lookback_hours * 60.0
-      ),
+      initial_lookback=_dt.timedelta(hours=lookback_hours),
   )
-  # ``lookback_hours`` is the hard upper bound on how far back we
-  # ever scan, even when the checkpoint is older. Trim if needed.
+  # ``lookback_hours`` is also the hard upper bound on how far
+  # back we ever scan — applies on subsequent runs when the
+  # checkpoint is very stale.
   hard_floor = run_started - _dt.timedelta(hours=lookback_hours)
   if scan_start < hard_floor:
     scan_start = hard_floor
@@ -688,6 +724,7 @@ def run_materialize_window(
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
       outcome_callback=outcomes_cb,
+      table_id=events_table,
   )
 
   # Materialize per session so a single-session failure doesn't
@@ -710,12 +747,27 @@ def run_materialize_window(
           session_ids=[session.session_id], use_ai_generate=True
       )
       mat = materializer.materialize_with_status(graph, [session.session_id])
+      # Capture per-session table statuses so the JSON report can
+      # show cleanup_status / insert_status per bound table — the
+      # operational signal that lets customers see streaming-
+      # buffer-pinned delete failures in the right granularity.
+      table_statuses_dict: dict[str, dict[str, Any]] = {}
+      for tbl_name, ts in (mat.table_statuses or {}).items():
+        table_statuses_dict[tbl_name] = {
+            "table_ref": ts.table_ref,
+            "rows_attempted": ts.rows_attempted,
+            "rows_inserted": ts.rows_inserted,
+            "cleanup_status": ts.cleanup_status,
+            "insert_status": ts.insert_status,
+            "idempotent": ts.idempotent,
+        }
       session_results.append(
           SessionResult(
               session_id=session.session_id,
               ok=True,
               completion_timestamp=session.completion_timestamp,
               rows_materialized=dict(mat.row_counts),
+              table_statuses=table_statuses_dict,
           )
       )
     except Exception as exc:  # noqa: BLE001 — orchestrator is the boundary
@@ -746,7 +798,17 @@ def run_materialize_window(
   # Note: an empty window is "ok" with no checkpoint write needed,
   # but we still write a heartbeat row so operators can see the
   # run happened.
-  checkpoint_written = last_success_ts
+  # Carry forward the prior checkpoint when no session succeeded
+  # this run. The DB-side filter in ``build_state_select_sql``
+  # already skips heartbeat/failure rows on read, but writing the
+  # carry-forward value makes the most recent state row self-
+  # documenting (operators see the watermark without an extra
+  # query). When ``last_success_ts`` is set, it's the advance;
+  # otherwise we replay the prior checkpoint so "no advance this
+  # run, still at X" is the visible answer.
+  checkpoint_written = (
+      last_success_ts if last_success_ts is not None else last_checkpoint
+  )
 
   failures = [
       {
@@ -799,6 +861,57 @@ def run_materialize_window(
 # ------------------------------------------------------------------ #
 
 
+def _pre_scan_bundle_fingerprint(bundles_root: pathlib.Path) -> str:
+  """Read ``manifest.json`` from every candidate bundle under
+  *bundles_root* and return the fingerprint shared by all.
+
+  ``discover_bundles`` requires an ``expected_fingerprint`` —
+  passing ``None`` silently rejects every bundle with
+  ``fingerprint_mismatch``. The CLI doesn't ask the operator to
+  type the 64-hex fingerprint by hand, so we read it from the
+  manifests on disk. The contract is "one root, one fingerprint";
+  mixed-fingerprint roots fail fast with a clear error.
+  """
+  import json as _json
+
+  if not bundles_root.is_dir():
+    raise ValueError(f"--bundles-root {str(bundles_root)!r} is not a directory")
+  fingerprints: dict[str, list[str]] = {}
+  for child in sorted(bundles_root.iterdir()):
+    manifest_path = child / "manifest.json"
+    if not manifest_path.is_file():
+      continue
+    try:
+      manifest = _json.loads(manifest_path.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
+      raise ValueError(
+          f"--bundles-root {str(bundles_root)!r}: unreadable manifest "
+          f"in {child.name}: {type(exc).__name__}: {exc}"
+      )
+    fp = manifest.get("fingerprint")
+    if not isinstance(fp, str) or not fp:
+      raise ValueError(
+          f"--bundles-root {str(bundles_root)!r}: {child.name}/manifest.json "
+          f"has no ``fingerprint`` field"
+      )
+    fingerprints.setdefault(fp, []).append(child.name)
+  if not fingerprints:
+    raise ValueError(
+        f"--bundles-root {str(bundles_root)!r} contains no bundles "
+        f"(no manifest.json files found in immediate subdirectories)"
+    )
+  if len(fingerprints) > 1:
+    summary = "; ".join(
+        f"{fp[:12]}=({', '.join(bundles)})"
+        for fp, bundles in fingerprints.items()
+    )
+    raise ValueError(
+        f"--bundles-root {str(bundles_root)!r} contains bundles with "
+        f"mixed fingerprints; one root, one fingerprint. Got: {summary}"
+    )
+  return next(iter(fingerprints))
+
+
 def _build_manager(
     *,
     project_id: str,
@@ -810,10 +923,19 @@ def _build_manager(
     bundles_root: Optional[str],
     reference_extractors_module: Optional[str],
     outcome_callback: Callable[[str, Any], None],
+    table_id: str,
 ) -> Any:
   """Construct the OntologyGraphManager — with compiled bundles
   wired when ``bundles_root`` is set, otherwise the plain
-  ``from_ontology_binding`` path."""
+  ``from_ontology_binding`` path.
+
+  ``table_id`` is the source telemetry table the manager reads
+  from during extraction. Must match ``--events-table`` — a
+  previous draft hard-coded ``agent_events`` here while discovery
+  read from the configured table, producing the silent split
+  ("discover from X, extract from Y") that #161 reviewer flagged
+  as P1.
+  """
   from .ontology_graph import OntologyGraphManager
 
   if bundles_root is None:
@@ -824,6 +946,7 @@ def _build_manager(
         binding=binding,
         location=location,
         bq_client=bq_client,
+        table_id=table_id,
     )
 
   if reference_extractors_module is None:
@@ -842,29 +965,34 @@ def _build_manager(
         f"a non-empty EXTRACTORS dict"
     )
 
-  # Bundle fingerprint must match the inputs the user just loaded.
-  # Compute the expected fingerprint the same way ``compile_extractor``
-  # does — sha256 over (ontology + binding + ...). For the operational
-  # MVP the operator pins one bundle and the SDK verifies on load; we
-  # let ``from_bundles_root``'s discovery enforce this.
+  # Pre-scan the bundles root for manifest fingerprints. The SDK's
+  # ``discover_bundles`` requires an ``expected_fingerprint`` (any
+  # mismatch is rejected as ``fingerprint_mismatch``) — passing
+  # ``None`` silently rejects every bundle. The CLI must supply
+  # the fingerprint, so we read it from the manifests on disk and
+  # enforce that all bundles in the root share one.
+  expected_fingerprint = _pre_scan_bundle_fingerprint(
+      pathlib.Path(bundles_root)
+  )
+
   from .extractor_compilation import discover_bundles
 
-  # Discover the first bundle in the root to extract its fingerprint
-  # without forcing the caller to pass it. If multiple bundles exist
-  # we leave selection to the runtime registry.
   discovery = discover_bundles(
-      bundles_root=pathlib.Path(bundles_root),
-      expected_fingerprint=None,  # accept whatever is on disk
+      pathlib.Path(bundles_root),
+      expected_fingerprint=expected_fingerprint,
   )
   if not discovery.registry:
-    raise ValueError(
-        f"--bundles-root {bundles_root!r} contained no loadable bundles"
+    # Every candidate bundle must have failed for some other
+    # reason (manifest_missing, smoke_failed, etc.). Surface the
+    # discovery failures so the operator can diagnose.
+    failure_summary = ", ".join(
+        f"{f.bundle_dir.name}={f.code}" for f in discovery.failures
     )
-  # Pick the first bundle's fingerprint as the "expected" gate. In
-  # production every bundle under one root should share a fingerprint
-  # (one compile produces one bundle); enforce that via the discovery
-  # contract.
-  expected_fingerprint = next(iter(discovery.loaded)).manifest.fingerprint
+    raise ValueError(
+        f"--bundles-root {bundles_root!r} matched fingerprint "
+        f"{expected_fingerprint!r} but produced no loadable bundles. "
+        f"Discovery failures: {failure_summary or '(none reported)'}"
+    )
 
   return OntologyGraphManager.from_bundles_root(
       project_id=project_id,
@@ -876,6 +1004,7 @@ def _build_manager(
       fallback_extractors=fallback_extractors,
       location=location,
       bq_client=bq_client,
+      table_id=table_id,
       on_outcome=outcome_callback,
   )
 
@@ -903,10 +1032,19 @@ def _build_result(
     ok: bool,
 ) -> MaterializeWindowResult:
   rows_materialized: dict[str, int] = {}
+  # Aggregate per-session table_statuses into the report. The
+  # latest seen status wins for each table; in a single batch
+  # there's typically one status per table per session, so this
+  # is "the most recent successful materialize's view" of each
+  # table. ``cleanup_status = 'delete_failed'`` is the signal
+  # operators read to spot streaming-buffer-pinned tables.
+  table_statuses_agg: dict[str, dict[str, Any]] = {}
   for r in session_results:
     if r.ok:
       for table, n in r.rows_materialized.items():
         rows_materialized[table] = rows_materialized.get(table, 0) + n
+      for table, ts in r.table_statuses.items():
+        table_statuses_agg[table] = ts
 
   failures = [
       {
@@ -929,7 +1067,7 @@ def _build_result(
       sessions_materialized=sum(1 for r in session_results if r.ok),
       sessions_failed=len(failures),
       rows_materialized=rows_materialized,
-      table_statuses={},  # populated in v1 once materializer surfaces them per-session
+      table_statuses=table_statuses_agg,
       compiled_outcomes=compiled_outcomes,
       failures=failures,
       ok=ok,

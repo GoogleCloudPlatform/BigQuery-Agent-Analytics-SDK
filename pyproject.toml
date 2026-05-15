@@ -63,6 +63,7 @@ all = [
 [project.scripts]
 bq-agent-sdk = "bigquery_agent_analytics.cli:main"
 bqaa-revalidate-extractors = "bigquery_agent_analytics.extractor_compilation.cli_revalidate:main"
+bqaa-materialize-window = "bigquery_agent_analytics.cli:_materialize_window_entry"
 gm = "bigquery_ontology.cli:main"
 
 [tool.hatch.build.targets.wheel]
