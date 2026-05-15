@@ -34,9 +34,14 @@ Design contract (per #161):
   query's row set from drifting across the run.
 * **Append-only state table** keyed on a content-derived
   ``state_key`` (sha256 of project + dataset + graph_name +
-  events_table + ontology_fingerprint + binding_fingerprint). A
-  config change auto-invalidates the previous checkpoint — the
-  right "this is the same config" signal.
+  events_table + ontology_fingerprint + binding_fingerprint +
+  discovery_mode, where ``discovery_mode`` is
+  ``terminal:<event_type>`` for normal cron runs and ``active``
+  for ``--include-active-sessions`` debug runs). A config change
+  — including a swap of ``--completion-event-type`` or a debug
+  mode flip — auto-invalidates the previous checkpoint so the
+  new predicate's run cannot inherit the old predicate's high-
+  water mark.
 * **Terminal-event-driven discovery**: query directly for events
   with ``event_type = @completion_event_type`` in the
   ``[scan_start, scan_end)`` window. Partition pruning falls out
