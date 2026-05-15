@@ -1,6 +1,6 @@
 # Migration v5 Demo — Fixture Foundation
 
-**Status:** The four-guarantee MAKO notebook (`examples/migration_v5_demo_notebook.ipynb`) is now live in this branch with end-to-end outputs from `test-project-0728-467323`. This README is the handoff doc for PR #156 (MAKO reference extractor + Beat 3 compile/runtime/savings cells).
+**Status:** The four-guarantee MAKO notebook (`examples/migration_v5_demo_notebook.ipynb`) is live end-to-end against `test-project-0728-467323`. PR [#155](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/155) shipped the fixture foundation; PR [#157](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/157) added `reference_extractor.py`; PR [#160](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/160) wired Beat 3 (compile + cache + runtime + savings) and Beat 4.4 (hub-shape non-zero) live.
 
 The demo's event source of truth is **a runnable agent talking to the BQ AA plugin**, not a hand-coded event generator. This directory's authored inputs are split accordingly.
 
@@ -46,7 +46,7 @@ ontology-build (extracts the graph)           tables             │ consume
 OntologyRuntime + LabelSynonymResolver                           ┘
 ```
 
-Beat 3's compile / runtime / savings cells are PR #156 placeholders; they require a MAKO-specific reference extractor (`extract_mako_decision_event`).
+Beat 3's compile / runtime / savings cells run live, using `reference_extractor.extract_mako_decision_event` as the runtime fallback under a focused compiled bundle that handles the `complete_execution` event type.
 
 ## Design decisions
 
@@ -88,9 +88,9 @@ The **explicit mapping** between what the agent emits and what extraction materi
 | `complete_execution.business_entity_id` | `DecisionExecution.businessEntityId` | 1:1 (column `business_entity_id`). |
 | `complete_execution.latency_ms` | `DecisionExecution.latencyMs` (INT64) | 1:1 (column `latency_ms`, **typed INT64** in `table_ddl.sql`). |
 | `complete_execution.{decision_point,context,outcome}_id` | `executedAtDecisionPoint` / `atContextSnapshot` / `hasSelectionOutcome` edges | Each is an edge endpoint pointing at the parent `DecisionExecution`. |
-| `session_id` (envelope) | `partOfSession` edge (DecisionExecution → AgentSession) | Plugin envelope; the reference extractor (PR #156) will synthesize an `AgentSession` node + `partOfSession` edge from this envelope field. The live notebook's hub-shape GQL traversal currently returns zero rows because of this gap. |
+| `session_id` (envelope) | `partOfSession` edge (DecisionExecution → AgentSession) | Plugin envelope. Both the compiled extractor (for `complete_execution` events; live in Beat 3.5) and the reference extractor (fallback path) synthesize the `AgentSession` node + `partOfSession` edge from this envelope field. Beat 4.4's hub-shape GQL traversal returns non-zero rows. |
 
-**Rule of thumb:** only fields with a TTL-declared target property are materialized; everything else stays in the raw `agent_events` trace as reasoning context. The mapping above is the contract PR #156's reference extractor implements.
+**Rule of thumb:** only fields with a TTL-declared target property are materialized; everything else stays in the raw `agent_events` trace as reasoning context. The mapping above is the contract `reference_extractor.extract_mako_decision_event` (and the compiled bundle Beat 3.3 emits) implement.
 
 The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`). Same wiring pattern as `examples/decision_lineage_demo/agent/agent.py`.
 
@@ -166,13 +166,11 @@ A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells a
 - **Beat 1**: GQL `DecisionExecution` count `before=0, after=N>0`, `rows_materialized total>0`, `property_graph_status='skipped:user_requested'`, zero SDK-issued `CREATE OR REPLACE PROPERTY GRAPH` jobs.
 - **Beat 2**: `binding-validate` exits 1 with a `missing_column` failure after column rename; restore + re-validate exits 0; combined `ontology-build --skip-property-graph --validate-binding` matches Beat 1's status + non-zero `rows_materialized`.
 - **Beat 3.6**: synthetic `ExtractedGraph` triggers all three `FallbackScope` failures (`NODE + FIELD + EDGE`).
-- **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns zero rows (`AgentSession` synthesis from the plugin envelope lands with PR #156).
+- **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns at least one row per current session — the compiled extractor wired in Beat 3.5 synthesizes the envelope-side `AgentSession` + `partOfSession`.
 
 ## What's NOT in this commit
 
-- **MAKO reference extractor** (`extract_mako_decision_event`). PR #156 ships it and flips Beat 3.3 / 3.4 / 3.5 / 3.7 from gated placeholders to live cells.
-- **`AgentSession` node + `partOfSession` edge synthesis** from the plugin envelope. Without it, Beat 4's hub-shape GQL traversal `(DecisionExecution)-[partOfSession]->(AgentSession)` returns zero rows. PR #156's reference extractor adds the envelope-to-graph translation.
-- `docs/README.md` / `CHANGELOG.md` entries — land alongside PR #156.
+- `docs/README.md` / `CHANGELOG.md` entries — staged for a follow-up PR alongside the user-facing release notes.
 
 ## Related
 

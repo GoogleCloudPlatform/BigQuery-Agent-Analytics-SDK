@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigquery-agent-analytics"
-version = "0.2.3"
+version = "0.3.0"
 description = "SDK for analyzing and evaluating agent traces stored in BigQuery."
 readme = "README.md"
 license = "Apache-2.0"
