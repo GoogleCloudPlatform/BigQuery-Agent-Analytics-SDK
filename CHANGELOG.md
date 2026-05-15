@@ -53,6 +53,45 @@ BQAA loop
 
 ### Added
 
+- **``A2A_INTERACTION`` typed view (``adk_a2a_interactions``)** in
+  ``src/bigquery_agent_analytics/views.py`` (PR
+  [#136](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/136)).
+  Surfaces the BQ AA Plugin's caller-side A2A delegation rows
+  with JSON-extracted lineage columns —
+  ``a2a_task_id``, ``a2a_context_id``, ``a2a_request``,
+  ``a2a_response``, plus a ``receiver_session_id_from_response``
+  COALESCE — so downstream consumers can join caller and receiver
+  traces without writing the JSON-extraction SQL by hand. Used by
+  the A2A joint-lineage demo's auditor projection.
+- **``CodeEvaluator.context_cache_hit_rate(...)`` + CLI support**
+  (PR [#114](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/114)).
+  New pre-built evaluator in
+  ``src/bigquery_agent_analytics/evaluators.py`` that measures
+  Gemini context-cache prefix-hit rate
+  (``cached_tokens / input_tokens``) per session, with
+  cold-start / warm rate thresholds and an explicit
+  ``fail_on_missing_telemetry`` switch. Wired through the
+  ``bqaa evaluate --evaluator context_cache_hit_rate`` CLI path
+  (``src/bigquery_agent_analytics/cli.py``).
+- **``gm compile --emit-concept-index`` / ``--concept-index-table``**
+  CLI flags in ``src/bigquery_ontology/cli.py`` (PR
+  [#92](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/92),
+  issue
+  [#58](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/58)
+  Phase 1). Emits a fingerprint-stamped concept-index table
+  (``label`` / ``synonym`` / ``notation`` rows + ``__meta``)
+  that the ontology runtime reader (above) verifies against.
+  ``--concept-index-table`` is required when ``--emit-concept-index``
+  is set — no silent global default.
+- **``ontology-build --skip-property-graph``** flag in
+  ``src/bigquery_agent_analytics/cli.py`` (PR
+  [#108](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/108),
+  issue
+  [#104](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/104)).
+  Materializes node and edge tables without issuing the
+  ``CREATE OR REPLACE PROPERTY GRAPH`` statement, letting users
+  own their property-graph DDL while still letting the SDK
+  populate the backing tables.
 - **Ontology runtime reader** in
   ``bigquery_agent_analytics.ontology_runtime`` and
   [`docs/ontology_runtime_reader.md`](docs/ontology_runtime_reader.md).
