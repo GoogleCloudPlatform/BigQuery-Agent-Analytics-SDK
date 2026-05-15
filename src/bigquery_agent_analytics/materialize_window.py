@@ -235,17 +235,32 @@ def compute_state_key(
     events_table: str,
     ontology_fingerprint: str,
     binding_fingerprint: str,
+    discovery_mode: str,
 ) -> str:
   """Content-derived hex key for the state table.
 
   Stable across re-runs against the same config. A change to ANY
   of the inputs (e.g. binding rename, new event source, ontology
-  bump) produces a new key, so the prior checkpoint is *implicitly*
-  invalidated. Operators don't need to manage a versioning column
-  by hand — the SDK's existing fingerprint helpers already
-  canonicalize the model contents, so equivalent YAML (different
-  whitespace, key order) produces the same fingerprint and the
-  same state key.
+  bump, terminal event swap) produces a new key, so the prior
+  checkpoint is *implicitly* invalidated. Operators don't need to
+  manage a versioning column by hand — the SDK's existing
+  fingerprint helpers already canonicalize the model contents, so
+  equivalent YAML (different whitespace, key order) produces the
+  same fingerprint and the same state key.
+
+  ``discovery_mode`` is one of ``terminal:<event_type>`` (normal
+  cron run) or ``active`` (``--include-active-sessions`` debug
+  mode). Including it in the key prevents two regressions:
+
+  * Operator switches from ``AGENT_COMPLETED`` to a custom terminal
+    event — the new predicate's run would otherwise inherit the
+    old predicate's high-water mark and skip historical
+    completions for the new event type.
+  * Debug run with ``--include-active-sessions`` shares state with
+    the production cron — the debug run discovers different
+    sessions (it has no terminal-event filter) and could advance
+    the production checkpoint past sessions production hasn't
+    seen as completed yet.
   """
   payload = "\x00".join(
       [
@@ -255,6 +270,7 @@ def compute_state_key(
           events_table,
           ontology_fingerprint,
           binding_fingerprint,
+          discovery_mode,
       ]
   ).encode("utf-8")
   return hashlib.sha256(payload).hexdigest()
@@ -590,14 +606,29 @@ def run_materialize_window(
   # healthy. Reject the operator typo at the boundary. The
   # ``include_active_sessions`` path drops the event-type filter
   # entirely, so the check is bypassed there.
-  if not include_active_sessions and (
-      not isinstance(completion_event_type, str)
-      or not completion_event_type.strip()
-  ):
-    raise ValueError(
-        f"--completion-event-type must be a non-empty string; "
-        f"got {completion_event_type!r}"
-    )
+  #
+  # Reject impure whitespace too — `` AGENT_COMPLETED `` would
+  # otherwise bind a spaced value into ``event_type =
+  # @completion_event_type`` and produce the same clean no-op
+  # heartbeat. Stripping silently would diverge from what the
+  # operator saw on the command line; explicit rejection forces
+  # them to fix the typo.
+  if not include_active_sessions:
+    if not isinstance(completion_event_type, str):
+      raise ValueError(
+          f"--completion-event-type must be a non-empty string; "
+          f"got {completion_event_type!r}"
+      )
+    if not completion_event_type.strip():
+      raise ValueError(
+          f"--completion-event-type must be a non-empty string; "
+          f"got {completion_event_type!r}"
+      )
+    if completion_event_type != completion_event_type.strip():
+      raise ValueError(
+          f"--completion-event-type must not have leading or trailing "
+          f"whitespace; got {completion_event_type!r}"
+      )
 
   from google.cloud import bigquery
 
@@ -637,6 +668,18 @@ def run_materialize_window(
 
   resolved_graph_name = graph_name or binding_obj.ontology
 
+  # Discovery-mode component of the state key. A switch from
+  # ``terminal:AGENT_COMPLETED`` to a custom event, or a swap to
+  # ``active`` (``--include-active-sessions`` debug mode), produces
+  # a new key so the prior predicate's high-water mark cannot
+  # advance the new predicate past historical completions it
+  # hasn't seen.
+  discovery_mode = (
+      "active"
+      if include_active_sessions
+      else f"terminal:{completion_event_type}"
+  )
+
   state_key = compute_state_key(
       project_id=project_id,
       dataset_id=dataset_id,
@@ -644,6 +687,7 @@ def run_materialize_window(
       events_table=events_table,
       ontology_fingerprint=ontology_fp,
       binding_fingerprint=binding_fp,
+      discovery_mode=discovery_mode,
   )
 
   # State table must exist for read/write. Idempotent CREATE.

@@ -47,6 +47,7 @@ class TestComputeStateKey:
         events_table="agent_events",
         ontology_fingerprint="sha256:abc",
         binding_fingerprint="sha256:def",
+        discovery_mode="terminal:AGENT_COMPLETED",
     )
     assert mw.compute_state_key(**args) == mw.compute_state_key(**args)
 
@@ -59,6 +60,7 @@ class TestComputeStateKey:
         events_table="t",
         ontology_fingerprint="o",
         binding_fingerprint="b",
+        discovery_mode="terminal:AGENT_COMPLETED",
     )
     a = mw.compute_state_key(project_id="proj-a", **base)
     b = mw.compute_state_key(project_id="proj-b", **base)
@@ -75,6 +77,7 @@ class TestComputeStateKey:
         graph_name="g",
         events_table="t",
         ontology_fingerprint="o",
+        discovery_mode="terminal:AGENT_COMPLETED",
     )
     a = mw.compute_state_key(binding_fingerprint="b1", **base)
     b = mw.compute_state_key(binding_fingerprint="b2", **base)
@@ -90,6 +93,7 @@ class TestComputeStateKey:
         events_table="t",
         ontology_fingerprint="o",
         binding_fingerprint="b",
+        discovery_mode="terminal:AGENT_COMPLETED",
     )
     assert len(key) == 64
     assert all(c in "0123456789abcdef" for c in key)
@@ -1691,3 +1695,205 @@ class TestCliHelpExitCodeDocsMentionDrift:
     result = CliRunner().invoke(app, ["materialize-window", "--help"])
     assert result.exit_code == 0
     assert "drift" in result.output.lower()
+
+
+# ------------------------------------------------------------------ #
+# Round-5 regressions                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestStateKeyIncludesDiscoveryMode:
+  """The checkpoint key must vary with the discovery predicate.
+  Two regressions a missing mode component would allow:
+
+  * Operator switches ``--completion-event-type`` from
+    ``AGENT_COMPLETED`` to a custom event. The new predicate
+    inherits the old high-water mark and skips historical
+    completions for the new event type.
+  * Debug ``--include-active-sessions`` run shares state with the
+    production cron. The debug mode has no terminal-event filter
+    and discovers different sessions; it could advance the
+    production checkpoint past sessions production hasn't yet
+    seen as completed."""
+
+  def test_different_terminal_events_produce_different_keys(self):
+    base = dict(
+        project_id="p",
+        dataset_id="d",
+        graph_name="g",
+        events_table="t",
+        ontology_fingerprint="o",
+        binding_fingerprint="b",
+    )
+    a = mw.compute_state_key(discovery_mode="terminal:AGENT_COMPLETED", **base)
+    b = mw.compute_state_key(discovery_mode="terminal:CUSTOM_TERMINAL", **base)
+    assert a != b
+
+  def test_active_mode_differs_from_terminal_mode(self):
+    """``--include-active-sessions`` debug mode must not share a
+    state row with the production terminal-event predicate."""
+    base = dict(
+        project_id="p",
+        dataset_id="d",
+        graph_name="g",
+        events_table="t",
+        ontology_fingerprint="o",
+        binding_fingerprint="b",
+    )
+    terminal = mw.compute_state_key(
+        discovery_mode="terminal:AGENT_COMPLETED", **base
+    )
+    active = mw.compute_state_key(discovery_mode="active", **base)
+    assert terminal != active
+
+
+class TestStateKeyDiscoveryModeWiring:
+  """End-to-end check that the orchestrator derives the right
+  ``discovery_mode`` from its flags. A code review catches the
+  string formula; this test catches a refactor that drops the
+  threading."""
+
+  def test_terminal_predicate_produces_terminal_mode_key(self, fixture_paths):
+    """A normal cron run with ``--completion-event-type X`` →
+    state_key matches a hand-computed
+    ``compute_state_key(discovery_mode="terminal:X", ...)``."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          completion_event_type="MY_TERMINAL",
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    # Same key derived from the same orchestrator inputs, with a
+    # *different* discovery_mode, must differ. The contract under
+    # test is the wiring, not the hash value itself.
+    other = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        completion_event_type="OTHER_TERMINAL",
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=_stub_bq_client([]),
+        run_started_at=now,
+    )
+    assert result.state_key != other.state_key
+
+  def test_active_mode_state_key_differs_from_terminal(self, fixture_paths):
+    """``--include-active-sessions`` produces a different
+    state_key from a terminal-event run with the same other
+    inputs, so debug runs don't share state with prod cron."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      terminal = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=_stub_bq_client([]),
+          run_started_at=now,
+      )
+      active = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          include_active_sessions=True,
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=_stub_bq_client([]),
+          run_started_at=now,
+      )
+
+    assert terminal.state_key != active.state_key
+
+
+class TestCompletionEventTypeWhitespaceRejected:
+  """``--completion-event-type " AGENT_COMPLETED "`` would bind a
+  spaced value into the discovery predicate and produce a clean
+  no-op heartbeat. Reject explicitly rather than stripping
+  silently — silent normalization would diverge from what the
+  operator typed."""
+
+  def test_leading_whitespace_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError,
+        match="--completion-event-type must not have leading or trailing",
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type=" AGENT_COMPLETED",
+          validate_binding=False,
+      )
+
+  def test_trailing_whitespace_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError,
+        match="--completion-event-type must not have leading or trailing",
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type="AGENT_COMPLETED ",
+          validate_binding=False,
+      )
+
+  def test_inner_whitespace_accepted(self, fixture_paths):
+    """Inner spaces are legal in BQ STRING values. Only outer
+    whitespace is the operator-typo class; inner spacing is the
+    operator's choice (e.g., a custom event named "user step")."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      # No raise — inner whitespace passes.
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type="user step",
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
