@@ -1912,16 +1912,27 @@ def main() -> None:
 
 def _materialize_window_entry() -> None:
   """Entry point for the standalone ``bqaa-materialize-window``
-  console script. Same code path as ``bq-agent-sdk
-  materialize-window``; the standalone name is the customer-
-  facing alias documented in #161, so Cloud Run Job specs can use
-  it directly without the parent subcommand chain.
+  console script.
+
+  Builds a Click command directly from the ``materialize_window``
+  callback so ``--help`` renders as
+  ``Usage: bqaa-materialize-window [OPTIONS]`` — collapsed, no
+  nested subcommand. ``typer.run`` would re-register the function
+  as a subcommand named ``materialize-window``, producing the
+  confusing
+  ``Usage: bqaa-materialize-window materialize-window [OPTIONS]``.
+  The function body is the same one registered on the main ``app``
+  as the ``materialize-window`` subcommand; both call paths share
+  the implementation.
   """
-  # Insert the subcommand name at the front so users invoke
-  # ``bqaa-materialize-window --lookback-hours 6`` directly,
-  # without re-typing the parent command name.
-  sys.argv.insert(1, "materialize-window")
-  app()
+  from typer.main import get_command_from_info
+  from typer.models import CommandInfo
+
+  info = CommandInfo(name=None, callback=materialize_window)
+  click_cmd = get_command_from_info(
+      info, pretty_exceptions_short=True, rich_markup_mode=None
+  )
+  click_cmd()
 
 
 if __name__ == "__main__":

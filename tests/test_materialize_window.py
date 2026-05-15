@@ -882,11 +882,17 @@ class TestTableStatusesSurfaced:
 
 class TestValidateBindingShortCircuit:
 
-  def test_failing_validation_raises_before_extraction(self, fixture_paths):
+  def test_failing_validation_returns_structured_ok_false(self, fixture_paths):
     """``--validate-binding`` runs before extraction. A failing
-    report short-circuits with a ValueError; the materializer
-    is never constructed. This is the "fail before AI.GENERATE
-    spend" contract from #161."""
+    report short-circuits with a structured ``ok=False`` result;
+    the materializer is never constructed and the CLI exits 1
+    (expected failure), not exit 2 (unexpected internal error).
+
+    Operators rely on the exit code shape: a binding drift is the
+    failure mode this validator was added to catch, so it has to
+    surface as a normal "this run did not succeed" — not as
+    "the SDK itself blew up". This is the "fail before AI.GENERATE
+    spend" contract from #161 with the right error-shape mapping."""
     ontology_yaml, binding_yaml = fixture_paths
     now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
     client = _stub_bq_client([])
@@ -906,19 +912,27 @@ class TestValidateBindingShortCircuit:
         ),
         mock.patch.object(mw, "_build_manager") as mock_build,
     ):
-      with pytest.raises(ValueError, match="binding-validate failed"):
-        mw.run_materialize_window(
-            project_id="test-proj",
-            dataset_id="test_ds",
-            ontology_path=str(ontology_yaml),
-            binding_path=str(binding_yaml),
-            lookback_hours=6.0,
-            validate_binding=True,
-            bq_client=client,
-            run_started_at=now,
-        )
-      # Manager was never constructed — extraction never started.
-      mock_build.assert_not_called()
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=True,
+          bq_client=client,
+          run_started_at=now,
+      )
+    # Result is structured ok=False, not an exception.
+    assert result.ok is False
+    assert result.sessions_discovered == 0
+    assert len(result.failures) == 1
+    assert result.failures[0]["error_code"] == "binding_validate_failed"
+    assert "binding-validate failed" in result.failures[0]["error_detail"]
+    # Manager was never constructed — extraction never started.
+    mock_build.assert_not_called()
+    # State row WAS appended — drift is recorded so the next run
+    # sees the failure in the state table audit trail.
+    assert client.insert_rows_json.call_count == 1
 
   def test_skipped_on_dry_run(self, fixture_paths):
     """``--dry-run`` already opts out of side effects. Even with
@@ -944,3 +958,497 @@ class TestValidateBindingShortCircuit:
           run_started_at=now,
       )
       mock_validate.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+# Round-3 regressions                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestNumericGuardrails:
+  """Operator-input guardrails. A typo like ``--lookback-hours=-6``
+  produces a negative scan window; without these checks the
+  arithmetic silently scans zero rows. The orchestrator must
+  reject nonsense at the boundary before any BQ side effect."""
+
+  @pytest.fixture
+  def _paths(self, tmp_path):
+    """Cheap fixture — the orchestrator should fail before any I/O,
+    so we don't need a real ontology/binding pair. The numeric
+    check runs at the top of the function, before file load."""
+    return tmp_path / "ontology.yaml", tmp_path / "binding.yaml"
+
+  def test_negative_lookback_hours_rejected(self, _paths):
+    ontology_yaml, binding_yaml = _paths
+    with pytest.raises(ValueError, match="--lookback-hours must be > 0"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=-6.0,
+          validate_binding=False,
+      )
+
+  def test_zero_lookback_hours_rejected(self, _paths):
+    """Zero window is also nonsense — empty range, nothing to
+    do. Reject for the same reason as negative."""
+    ontology_yaml, binding_yaml = _paths
+    with pytest.raises(ValueError, match="--lookback-hours must be > 0"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=0.0,
+          validate_binding=False,
+      )
+
+  def test_negative_overlap_minutes_rejected(self, _paths):
+    """Overlap of zero is fine (no extra rewind). Negative is a
+    typo — would compute a scan_start in the future and skip
+    everything."""
+    ontology_yaml, binding_yaml = _paths
+    with pytest.raises(ValueError, match="--overlap-minutes must be >= 0"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          overlap_minutes=-15.0,
+          validate_binding=False,
+      )
+
+  def test_zero_max_sessions_rejected(self, _paths):
+    """``--max-sessions 0`` would emit ``LIMIT 0`` and discover no
+    sessions on every run — silent zero work. ``None`` is the
+    "unlimited" sentinel; reject 0 and negative explicitly."""
+    ontology_yaml, binding_yaml = _paths
+    with pytest.raises(ValueError, match="--max-sessions must be unset or > 0"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          max_sessions=0,
+          validate_binding=False,
+      )
+
+  def test_negative_max_sessions_rejected(self, _paths):
+    ontology_yaml, binding_yaml = _paths
+    with pytest.raises(ValueError, match="--max-sessions must be unset or > 0"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          max_sessions=-1,
+          validate_binding=False,
+      )
+
+  def test_max_sessions_none_is_unlimited(self, fixture_paths):
+    """``None`` is the unlimited sentinel — no LIMIT clause in the
+    discovery SQL, no rejection. This is the load-bearing case
+    for the default Cloud Run Job spec which doesn't pass
+    ``--max-sessions``."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      # No raise → the None path is accepted.
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          max_sessions=None,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+
+class TestBindingValidateDriftStructured:
+  """P2.3: a binding-validate failure must return a structured
+  ``ok=False`` result, not raise. The CLI maps ``not result.ok``
+  to exit 1 (expected) — raising would map to exit 2 (unexpected
+  internal error) and confuse the operator who's watching for the
+  drift signal this validator was added to surface."""
+
+  def test_drift_returns_ok_false_with_binding_validate_failed_code(
+      self, fixture_paths
+  ):
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    fake_failure = mock.Mock(
+        code=mock.Mock(value="missing_column"),
+        binding_path="binding.entities[0].properties[0].column",
+    )
+    fake_report = mock.Mock()
+    fake_report.ok = False
+    fake_report.failures = [fake_failure]
+
+    with mock.patch(
+        "bigquery_agent_analytics.binding_validation.validate_binding_against_bigquery",
+        return_value=fake_report,
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=True,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert result.ok is False
+    assert result.failures[0]["error_code"] == "binding_validate_failed"
+    assert "missing_column" in result.failures[0]["error_detail"]
+
+  def test_drift_writes_state_row_for_audit_trail(self, fixture_paths):
+    """Append-only state table is the audit log. A drift failure
+    must be written there so the next run + downstream observability
+    queries see it — silent failures are the worst kind."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    fake_report = mock.Mock()
+    fake_report.ok = False
+    fake_report.failures = [
+        mock.Mock(
+            code=mock.Mock(value="missing_table"),
+            binding_path="binding.entities[0]",
+        )
+    ]
+
+    with mock.patch(
+        "bigquery_agent_analytics.binding_validation.validate_binding_against_bigquery",
+        return_value=fake_report,
+    ):
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=True,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    # Exactly one state row written.
+    assert client.insert_rows_json.call_count == 1
+    written_payload = client.insert_rows_json.call_args[0][1][0]
+    assert written_payload["ok"] is False
+    assert "binding-validate failed" in written_payload["error_detail"]
+
+
+class TestWorstStatusAggregation:
+  """P2.4: when two sessions touch the same bound table, the
+  aggregated ``table_statuses`` must NOT mask an earlier
+  ``delete_failed`` with a later clean ``deleted``. Worst-status
+  wins; operators rely on this surface to spot
+  streaming-buffer-pinned tables."""
+
+  def test_delete_failed_in_one_session_propagates_to_aggregate(self):
+    """Session A fails to delete (streaming buffer pinned),
+    session B's delete works clean. Final table_statuses must
+    show ``delete_failed`` — the failure is the operator signal,
+    not the success."""
+    ts_a = _dt.datetime(2026, 5, 15, 10, tzinfo=_dt.timezone.utc)
+    ts_b = _dt.datetime(2026, 5, 15, 11, tzinfo=_dt.timezone.utc)
+    results = [
+        mw.SessionResult(
+            session_id="a",
+            ok=True,
+            completion_timestamp=ts_a,
+            rows_materialized={"Entity": 3},
+            table_statuses={
+                "Entity": {
+                    "table_ref": "p.d.entity",
+                    "rows_attempted": 3,
+                    "rows_inserted": 3,
+                    "cleanup_status": "delete_failed",
+                    "insert_status": "inserted",
+                    "idempotent": False,
+                }
+            },
+        ),
+        mw.SessionResult(
+            session_id="b",
+            ok=True,
+            completion_timestamp=ts_b,
+            rows_materialized={"Entity": 2},
+            table_statuses={
+                "Entity": {
+                    "table_ref": "p.d.entity",
+                    "rows_attempted": 2,
+                    "rows_inserted": 2,
+                    "cleanup_status": "deleted",
+                    "insert_status": "inserted",
+                    "idempotent": True,
+                }
+            },
+        ),
+    ]
+    r = mw._build_result(
+        run_id="r",
+        state_key="k",
+        scan_start=_dt.datetime(2026, 5, 15, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 15, 12, tzinfo=_dt.timezone.utc),
+        checkpoint_read=None,
+        checkpoint_written=ts_b,
+        sessions_discovered=2,
+        session_results=results,
+        compiled_outcomes={
+            "compiled_unchanged": 0,
+            "compiled_filtered": 0,
+            "fallback_for_event": 0,
+        },
+        ok=True,
+    )
+    # Worst-status wins: delete_failed beats deleted.
+    assert r.table_statuses["Entity"]["cleanup_status"] == "delete_failed"
+    # Rows sum across sessions.
+    assert r.table_statuses["Entity"]["rows_attempted"] == 5
+    assert r.table_statuses["Entity"]["rows_inserted"] == 5
+    # Idempotent flag AND-ed — one non-idempotent session
+    # contaminates the table's overall idempotency claim.
+    assert r.table_statuses["Entity"]["idempotent"] is False
+
+  def test_insert_failed_propagates_to_aggregate(self):
+    """Insert-side parallel: ``insert_failed`` in one session must
+    survive aggregation against ``inserted`` in another."""
+    ts = _dt.datetime(2026, 5, 15, 10, tzinfo=_dt.timezone.utc)
+    results = [
+        mw.SessionResult(
+            session_id="a",
+            ok=True,
+            completion_timestamp=ts,
+            rows_materialized={"E": 1},
+            table_statuses={
+                "E": {
+                    "table_ref": "p.d.e",
+                    "rows_attempted": 1,
+                    "rows_inserted": 0,
+                    "cleanup_status": "deleted",
+                    "insert_status": "insert_failed",
+                    "idempotent": False,
+                }
+            },
+        ),
+        mw.SessionResult(
+            session_id="b",
+            ok=True,
+            completion_timestamp=ts,
+            rows_materialized={"E": 1},
+            table_statuses={
+                "E": {
+                    "table_ref": "p.d.e",
+                    "rows_attempted": 1,
+                    "rows_inserted": 1,
+                    "cleanup_status": "deleted",
+                    "insert_status": "inserted",
+                    "idempotent": True,
+                }
+            },
+        ),
+    ]
+    r = mw._build_result(
+        run_id="r",
+        state_key="k",
+        scan_start=ts,
+        scan_end=ts,
+        checkpoint_read=None,
+        checkpoint_written=ts,
+        sessions_discovered=2,
+        session_results=results,
+        compiled_outcomes={
+            "compiled_unchanged": 0,
+            "compiled_filtered": 0,
+            "fallback_for_event": 0,
+        },
+        ok=True,
+    )
+    assert r.table_statuses["E"]["insert_status"] == "insert_failed"
+    assert r.table_statuses["E"]["idempotent"] is False
+
+  def test_all_clean_aggregate_remains_clean(self):
+    """Sanity check — when nothing failed, the aggregate is clean
+    too. Otherwise the worst-status logic would be over-
+    pessimistic and the report would always look broken."""
+    ts = _dt.datetime(2026, 5, 15, 10, tzinfo=_dt.timezone.utc)
+    results = [
+        mw.SessionResult(
+            session_id="a",
+            ok=True,
+            completion_timestamp=ts,
+            rows_materialized={"E": 1},
+            table_statuses={
+                "E": {
+                    "table_ref": "p.d.e",
+                    "rows_attempted": 1,
+                    "rows_inserted": 1,
+                    "cleanup_status": "deleted",
+                    "insert_status": "inserted",
+                    "idempotent": True,
+                }
+            },
+        ),
+        mw.SessionResult(
+            session_id="b",
+            ok=True,
+            completion_timestamp=ts,
+            rows_materialized={"E": 1},
+            table_statuses={
+                "E": {
+                    "table_ref": "p.d.e",
+                    "rows_attempted": 1,
+                    "rows_inserted": 1,
+                    "cleanup_status": "deleted",
+                    "insert_status": "inserted",
+                    "idempotent": True,
+                }
+            },
+        ),
+    ]
+    r = mw._build_result(
+        run_id="r",
+        state_key="k",
+        scan_start=ts,
+        scan_end=ts,
+        checkpoint_read=None,
+        checkpoint_written=ts,
+        sessions_discovered=2,
+        session_results=results,
+        compiled_outcomes={
+            "compiled_unchanged": 0,
+            "compiled_filtered": 0,
+            "fallback_for_event": 0,
+        },
+        ok=True,
+    )
+    assert r.table_statuses["E"]["cleanup_status"] == "deleted"
+    assert r.table_statuses["E"]["insert_status"] == "inserted"
+    assert r.table_statuses["E"]["idempotent"] is True
+
+
+class TestCompileBundleFingerprintInReport:
+  """P3.1: when ``--bundles-root`` is set, the JSON report MUST
+  carry the compiled-bundle fingerprint. Operators reading
+  ``compiled_outcomes`` cross-reference with this to answer
+  "which bundle actually ran in this window?" — the same question
+  customers ask when telemetry from two adjacent runs looks
+  different."""
+
+  def test_fingerprint_resolved_and_surfaced(self, fixture_paths, tmp_path):
+    """``--bundles-root`` set → fingerprint flows into both the
+    dataclass field and the ``to_json()`` payload."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+
+    bundles_root = tmp_path / "bundles"
+    bundles_root.mkdir()
+    bundle_dir = bundles_root / "bundle_v1"
+    bundle_dir.mkdir()
+    (bundle_dir / "manifest.json").write_text('{"fingerprint": "fp-abc123def"}')
+
+    client = _stub_bq_client([])
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bundles_root=str(bundles_root),
+          reference_extractors_module="bigquery_agent_analytics",
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert result.compile_bundle_fingerprint == "fp-abc123def"
+    js = result.to_json()
+    assert js["compile_bundle_fingerprint"] == "fp-abc123def"
+
+  def test_fingerprint_none_when_bundles_root_unset(self, fixture_paths):
+    """Plain ``from_ontology_binding`` path (no compiled bundles)
+    → ``compile_bundle_fingerprint`` is ``None``, not a string,
+    not missing from the dict. Consumers can branch on `is None`
+    without a KeyError."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert result.compile_bundle_fingerprint is None
+    js = result.to_json()
+    assert "compile_bundle_fingerprint" in js
+    assert js["compile_bundle_fingerprint"] is None
+
+
+class TestStandaloneEntryHelp:
+  """P2.1: ``bqaa-materialize-window --help`` must render
+  ``Usage: bqaa-materialize-window [OPTIONS]`` — not the confusing
+  ``bqaa-materialize-window materialize-window [OPTIONS]`` that an
+  argv-injection hack would produce. The console-script alias is
+  customer-facing (Cloud Run Job specs use it directly)."""
+
+  def test_help_renders_clean_single_command_usage(self):
+    """Invoke the entry point via Typer's ``CliRunner`` to capture
+    ``--help`` output without spawning a subprocess. The check is
+    on the literal Usage line — that's what shows up first when an
+    operator runs the binary against ``--help``."""
+    import typer
+    from typer.testing import CliRunner
+
+    from bigquery_agent_analytics.cli import materialize_window
+
+    # Same construction the entry point uses.
+    runner = CliRunner()
+    # ``typer.run`` won't return; build the equivalent Typer app
+    # explicitly and invoke ``--help`` against it.
+    app = typer.Typer()
+    app.command()(materialize_window)
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    # Usage line should start with the binary name + [OPTIONS],
+    # NOT ``materialize-window materialize-window``.
+    assert "materialize-window materialize-window" not in result.output
