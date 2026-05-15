@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-15
+
+### Release highlights
+
+Substantial feature release covering three major workstreams that landed
+between 0.2.3 and 0.3.0:
+
+- **Compiled structured extractors — full Phase C pipeline**
+  ([#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75))
+  — deterministic source generation, JSON-to-plan parsing, LLM-driven plan
+  resolution, retry-on-gate-failure orchestration, runtime fallback wiring,
+  runtime extractor-registry adapter, orchestrator call-site swap,
+  compile-and-measure utility, revalidation harness, BigQuery-table bundle
+  mirror, ``bqaa-revalidate-extractors`` CLI with ``--events-bq-query-file``,
+  and an operational rollout guide. Replaces per-event LLM extraction with
+  deterministic code on the hot path while preserving the LLM fallback for
+  unrecognized event shapes.
+- **Ontology runtime reader**
+  ([#58](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/58)
+  reader follow-on to PR #92's concept-index emission) —
+  ``OntologyRuntime`` façade, ``EntityResolver`` Protocol with two reference
+  implementations (``ExactEntityResolver``, ``LabelSynonymResolver``), and
+  ``ConceptIndexLookup`` with fingerprint-strict verification across three
+  trust points (eager ``verify()`` at construction, explicit re-checks,
+  per-query ``WHERE compile_fingerprint`` defense in depth). Stable failure
+  codes (``FingerprintMismatchError``, ``MetaTableMissingError``,
+  ``MetaTableEmptyError``, ``MetaTableMultipleRowsError``).
+- **Binding + extraction validation toolkit**
+  ([#76](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/76),
+  [#105](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/105))
+  — ``validate_extracted_graph(...)``,
+  ``validate_extracted_graph_from_ontology(...)``,
+  ``validate_binding_against_bigquery(...)`` Python APIs;
+  ``bq-agent-sdk binding-validate`` CLI for pre-flight validation;
+  ``ontology-build --validate-binding`` and ``--location`` flags.
+
+Examples shipped alongside the SDK release: the MAKO four-guarantee notebook
+demonstrating the compiled-extractor pipeline end-to-end
+([#107](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/107)),
+and the A2A joint-lineage demo with auditor projections, the receiver
+``A2A_INTERACTION`` typed view, and an audit-analyst agent that closes the
+BQAA loop
+([#129](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/129)).
+
 ### Added
 
 - **Ontology runtime reader** in
