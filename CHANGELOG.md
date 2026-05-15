@@ -7,8 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-15
+
+### Release highlights
+
+Substantial feature release covering three major workstreams that landed
+between 0.2.3 and 0.3.0:
+
+- **Compiled structured extractors — full Phase C pipeline**
+  ([#75](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/75))
+  — deterministic source generation, JSON-to-plan parsing, LLM-driven plan
+  resolution, retry-on-gate-failure orchestration, runtime fallback wiring,
+  runtime extractor-registry adapter, orchestrator call-site swap,
+  compile-and-measure utility, revalidation harness, BigQuery-table bundle
+  mirror, ``bqaa-revalidate-extractors`` CLI with ``--events-bq-query-file``,
+  and an operational rollout guide. Replaces per-event LLM extraction with
+  deterministic code on the hot path while preserving the LLM fallback for
+  unrecognized event shapes.
+- **Ontology runtime reader**
+  ([#58](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/58)
+  reader follow-on to PR #92's concept-index emission) —
+  ``OntologyRuntime`` façade, ``EntityResolver`` Protocol with two reference
+  implementations (``ExactEntityResolver``, ``LabelSynonymResolver``), and
+  ``ConceptIndexLookup`` with fingerprint-strict verification across three
+  trust points (eager ``verify()`` at construction, explicit re-checks,
+  per-query ``WHERE compile_fingerprint`` defense in depth). Stable failure
+  codes (``FingerprintMismatchError``, ``MetaTableMissingError``,
+  ``MetaTableEmptyError``, ``MetaTableMultipleRowsError``).
+- **Binding + extraction validation toolkit**
+  ([#76](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/76),
+  [#105](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/105))
+  — ``validate_extracted_graph(...)``,
+  ``validate_extracted_graph_from_ontology(...)``,
+  ``validate_binding_against_bigquery(...)`` Python APIs;
+  ``bq-agent-sdk binding-validate`` CLI for pre-flight validation;
+  ``ontology-build --validate-binding`` and ``--location`` flags.
+
+Examples shipped alongside the SDK release: the MAKO four-guarantee notebook
+demonstrating the compiled-extractor pipeline end-to-end
+([#107](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/107)),
+and the A2A joint-lineage demo with auditor projections, the receiver
+``A2A_INTERACTION`` typed view, and an audit-analyst agent that closes the
+BQAA loop
+([#129](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/129)).
+
 ### Added
 
+- **``A2A_INTERACTION`` typed view (``adk_a2a_interactions``)** in
+  ``src/bigquery_agent_analytics/views.py`` (PR
+  [#136](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/136)).
+  Surfaces the BQ AA Plugin's caller-side A2A delegation rows
+  with JSON-extracted lineage columns —
+  ``a2a_task_id``, ``a2a_context_id``, ``a2a_request``,
+  ``a2a_response``, plus a ``receiver_session_id_from_response``
+  COALESCE — so downstream consumers can join caller and receiver
+  traces without writing the JSON-extraction SQL by hand. Used by
+  the A2A joint-lineage demo's auditor projection.
+- **``CodeEvaluator.context_cache_hit_rate(...)`` + CLI support**
+  (PR [#114](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/114)).
+  New pre-built evaluator in
+  ``src/bigquery_agent_analytics/evaluators.py`` that measures
+  Gemini context-cache prefix-hit rate
+  (``cached_tokens / input_tokens``) per session, with
+  cold-start / warm rate thresholds and an explicit
+  ``fail_on_missing_telemetry`` switch. Wired through the
+  ``bqaa evaluate --evaluator context_cache_hit_rate`` CLI path
+  (``src/bigquery_agent_analytics/cli.py``).
+- **``gm compile --emit-concept-index`` / ``--concept-index-table``**
+  CLI flags in ``src/bigquery_ontology/cli.py`` (PR
+  [#92](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/92),
+  issue
+  [#58](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/58)
+  Phase 1). Emits a fingerprint-stamped concept-index table
+  (``label`` / ``synonym`` / ``notation`` rows + ``__meta``)
+  that the ontology runtime reader (above) verifies against.
+  ``--concept-index-table`` is required when ``--emit-concept-index``
+  is set — no silent global default.
+- **``ontology-build --skip-property-graph``** flag in
+  ``src/bigquery_agent_analytics/cli.py`` (PR
+  [#108](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/108),
+  issue
+  [#104](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/104)).
+  Materializes node and edge tables without issuing the
+  ``CREATE OR REPLACE PROPERTY GRAPH`` statement, letting users
+  own their property-graph DDL while still letting the SDK
+  populate the backing tables.
 - **Ontology runtime reader** in
   ``bigquery_agent_analytics.ontology_runtime`` and
   [`docs/ontology_runtime_reader.md`](docs/ontology_runtime_reader.md).
