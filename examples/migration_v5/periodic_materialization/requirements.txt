@@ -1,0 +1,29 @@
+# Dependencies for the periodic-materialization example.
+#
+# This file is for the **local dry-run path** — used by
+# operators running ``run_job.py`` directly on their laptop.
+#
+# The Cloud Run Job deploy uses a DIFFERENT requirements.txt
+# generated dynamically by ``deploy_cloud_run_job.sh``. The
+# deploy script bundles the local SDK source into the staging
+# dir and installs it from there (``./sdk_src``), so the
+# deployed image uses the same SDK code as the local dry-run.
+# This avoids depending on a PyPI release that may not yet
+# contain ``bigquery-agent-analytics.materialize_window``
+# (added in PR #162; not yet in the 0.3.0 release).
+#
+# Local dry-run install path:
+#
+#   # From the repo root, install the SDK in editable mode:
+#   pip install -e .
+#
+#   # Then install this example's ancillary deps:
+#   pip install -r examples/migration_v5/periodic_materialization/requirements.txt
+#
+# Once a PyPI release containing materialize_window ships
+# (>=0.4.0), this file can pin the published version directly
+# (e.g., ``bigquery-agent-analytics>=0.4.0,<0.5.0``) and the
+# ``pip install -e .`` step won't be needed.
+
+google-cloud-bigquery>=3.0.0
+pyyaml>=6.0
