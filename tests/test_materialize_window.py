@@ -1452,3 +1452,242 @@ class TestStandaloneEntryHelp:
     # Usage line should start with the binary name + [OPTIONS],
     # NOT ``materialize-window materialize-window``.
     assert "materialize-window materialize-window" not in result.output
+
+
+# ------------------------------------------------------------------ #
+# Round-4 regressions                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestCheckpointNeverRegresses:
+  """A later run must never write a ``last_completion_at`` older
+  than the prior watermark. Two ways that could happen:
+
+  * The ``--overlap-minutes`` window pulls in events older than
+    the prior checkpoint. If a session inside the overlap succeeds
+    but a *later* session fails, the loop's last success is the
+    re-scanned (older) timestamp.
+  * An out-of-order rerun re-discovers a stale window.
+
+  In both cases, writing the older value would move the high-water
+  mark backwards and re-process already-materialized rows on the
+  next run (cost burn, not correctness — the materializer is
+  idempotent — but the operator surface lies)."""
+
+  def test_overlap_window_does_not_rewind_high_water_mark(self, fixture_paths):
+    """Prior checkpoint at 14:00. Discovery returns a 13:50
+    success (caught by ``--overlap-minutes``) followed by a 14:05
+    failure. Without the max(), the orchestrator would write
+    13:50 — regressing the watermark."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 30, tzinfo=_dt.timezone.utc)
+    prior = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    older_success = _dt.datetime(2026, 5, 15, 13, 50, tzinfo=_dt.timezone.utc)
+    later_failure = _dt.datetime(2026, 5, 15, 14, 5, tzinfo=_dt.timezone.utc)
+
+    client = mock.Mock()
+    state_row = mock.Mock(last_completion_at=prior)
+    discovered = [
+        _FakeBQRow(session_id="s-old", completion_timestamp=older_success),
+        _FakeBQRow(session_id="s-new", completion_timestamp=later_failure),
+    ]
+    client.query = mock.Mock(
+        side_effect=[
+            mock.Mock(result=mock.Mock(return_value=[])),  # DDL
+            mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
+            mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
+        ]
+    )
+    client.insert_rows_json = mock.Mock(return_value=[])
+
+    # First session succeeds (older timestamp); second raises.
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(
+        side_effect=[mock.Mock(), RuntimeError("simulated")]
+    )
+    fake_materializer_cls = mock.Mock()
+    fake_mat_result = mock.Mock()
+    fake_mat_result.row_counts = {"E": 1}
+    fake_mat_result.table_statuses = {}
+    fake_materializer_cls.return_value.materialize_with_status = mock.Mock(
+        return_value=fake_mat_result
+    )
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=24.0,
+          overlap_minutes=30.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    # Critical: checkpoint did NOT regress to ``older_success``.
+    # It stays at ``prior``, the higher watermark.
+    assert result.checkpoint_written == prior
+    assert result.checkpoint_written >= prior
+
+  def test_advance_when_success_is_newer_than_prior(self, fixture_paths):
+    """Sanity: when this run's last success IS newer than the
+    prior watermark, the checkpoint must still advance. Otherwise
+    the max-guard would freeze the watermark forever."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 30, tzinfo=_dt.timezone.utc)
+    prior = _dt.datetime(2026, 5, 15, 13, 0, tzinfo=_dt.timezone.utc)
+    new_success = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+
+    client = mock.Mock()
+    state_row = mock.Mock(last_completion_at=prior)
+    discovered = [
+        _FakeBQRow(session_id="s-new", completion_timestamp=new_success),
+    ]
+    client.query = mock.Mock(
+        side_effect=[
+            mock.Mock(result=mock.Mock(return_value=[])),
+            mock.Mock(result=mock.Mock(return_value=[state_row])),
+            mock.Mock(result=mock.Mock(return_value=discovered)),
+        ]
+    )
+    client.insert_rows_json = mock.Mock(return_value=[])
+
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(return_value=mock.Mock())
+    fake_materializer_cls = mock.Mock()
+    fake_mat_result = mock.Mock()
+    fake_mat_result.row_counts = {"E": 1}
+    fake_mat_result.table_statuses = {}
+    fake_materializer_cls.return_value.materialize_with_status = mock.Mock(
+        return_value=fake_mat_result
+    )
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert result.checkpoint_written == new_success
+
+
+class TestStateReadSqlOrdersByCompletion:
+  """The state-read query must order by ``last_completion_at DESC,
+  run_started_at DESC`` so an out-of-order run never shadows a
+  higher watermark. Ordering by ``run_started_at`` alone would
+  pick the most recent *run* even if it carried a lower watermark."""
+
+  def test_orders_by_last_completion_then_run_started(self):
+    sql = mw.build_state_select_sql("p.d._bqaa_materialization_state")
+    order_idx = sql.index("ORDER BY")
+    order_clause = sql[order_idx:]
+    assert "last_completion_at DESC" in order_clause
+    assert "run_started_at DESC" in order_clause
+    # Non-NULL filter retained as defense-in-depth.
+    assert "last_completion_at IS NOT NULL" in sql
+
+
+class TestCompletionEventTypeGuardrail:
+  """``--completion-event-type ""`` silently no-ops: every event
+  fails the ``event_type = ""`` predicate, zero sessions are
+  discovered, a clean heartbeat row is written, and the run looks
+  healthy. Reject the typo at the boundary."""
+
+  def test_empty_string_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError, match="--completion-event-type must be a non-empty string"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type="",
+          validate_binding=False,
+      )
+
+  def test_whitespace_only_rejected(self, fixture_paths):
+    """Whitespace-only is also nonsense — would bind ``event_type
+    = "   "`` and match nothing. Treated identically to empty."""
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError, match="--completion-event-type must be a non-empty string"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type="   ",
+          validate_binding=False,
+      )
+
+  def test_include_active_sessions_bypasses_check(self, fixture_paths):
+    """``--include-active-sessions`` drops the event-type filter
+    entirely (any session with at least one event in the window
+    counts). The completion-event-type guard is irrelevant in
+    that mode — don't false-reject an unused flag."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          completion_event_type="",
+          include_active_sessions=True,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+
+class TestCliHelpExitCodeDocsMentionDrift:
+  """The CLI help text must list binding-validation drift as one
+  of the exit-1 failure modes. A previous draft only mentioned
+  "session failure", which is misleading after the round-3 P2.3
+  change that maps drift to exit 1 (was exit 2)."""
+
+  def test_help_includes_drift_in_exit_1_description(self):
+    """Render the materialize-window subcommand help and assert
+    the exit-code section names drift explicitly."""
+    from typer.testing import CliRunner
+
+    from bigquery_agent_analytics.cli import app
+
+    result = CliRunner().invoke(app, ["materialize-window", "--help"])
+    assert result.exit_code == 0
+    assert "drift" in result.output.lower()

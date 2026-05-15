@@ -355,17 +355,25 @@ def build_discovery_sql(
 
 
 def build_state_select_sql(state_table_ref: str) -> str:
-  """Most-recent state row for a given ``state_key`` whose
-  ``last_completion_at`` is non-NULL.
+  """Highest-watermark state row for a given ``state_key``.
 
-  Empty-window heartbeat rows and all-failed runs both write
-  ``last_completion_at = NULL`` (we never advanced). Reading the
-  newest-by-timestamp row would erase the prior checkpoint and
-  bootstrap from ``--lookback-hours`` on the next run — which can
-  skip the failed session if the lookback is short. Filtering
-  for non-NULL ``last_completion_at`` returns the most recent
-  *successful* checkpoint, which is the watermark to advance
-  from."""
+  Earlier round filtered on non-NULL ``last_completion_at`` and
+  ordered by ``run_started_at DESC``. That was insufficient for
+  two interacting cases:
+
+  * **Carry-forward rows write the prior checkpoint** (not NULL)
+    on failure / empty-window, so the non-NULL filter alone no
+    longer separates "real advance" from "no advance".
+  * **Overlapping runs**: if a later run somehow recorded an
+    *older* ``last_completion_at`` than an earlier run (e.g. an
+    out-of-order rerun against the same state-key), ordering by
+    ``run_started_at`` would shadow the higher watermark.
+
+  Ordering by ``last_completion_at DESC, run_started_at DESC``
+  picks the highest watermark first and breaks ties by recency.
+  The non-NULL filter is retained for defense-in-depth — older
+  state rows pre-carry-forward may still carry NULLs, and we
+  never want one of those to win the ordering."""
   state_table_ref_quoted = "`" + state_table_ref + "`"
   return (
       f"SELECT\n"
@@ -383,7 +391,7 @@ def build_state_select_sql(state_table_ref: str) -> str:
       f"FROM {state_table_ref_quoted}\n"
       f"WHERE state_key = @state_key\n"
       f"  AND last_completion_at IS NOT NULL\n"
-      f"ORDER BY run_started_at DESC\n"
+      f"ORDER BY last_completion_at DESC, run_started_at DESC\n"
       f"LIMIT 1\n"
   )
 
@@ -575,6 +583,20 @@ def run_materialize_window(
   if max_sessions is not None and max_sessions <= 0:
     raise ValueError(
         f"--max-sessions must be unset or > 0; got {max_sessions!r}"
+    )
+  # Empty/whitespace completion-event-type silently turns the run
+  # into a no-op: the discovery query would bind ``event_type =
+  # ""``, match nothing, write a clean heartbeat row, and look
+  # healthy. Reject the operator typo at the boundary. The
+  # ``include_active_sessions`` path drops the event-type filter
+  # entirely, so the check is bypassed there.
+  if not include_active_sessions and (
+      not isinstance(completion_event_type, str)
+      or not completion_event_type.strip()
+  ):
+    raise ValueError(
+        f"--completion-event-type must be a non-empty string; "
+        f"got {completion_event_type!r}"
     )
 
   from google.cloud import bigquery
@@ -884,20 +906,31 @@ def run_materialize_window(
       and len(session_results) > 0
       or (not session_results)
   )
-  # Note: an empty window is "ok" with no checkpoint write needed,
-  # but we still write a heartbeat row so operators can see the
-  # run happened.
-  # Carry forward the prior checkpoint when no session succeeded
-  # this run. The DB-side filter in ``build_state_select_sql``
-  # already skips heartbeat/failure rows on read, but writing the
-  # carry-forward value makes the most recent state row self-
-  # documenting (operators see the watermark without an extra
-  # query). When ``last_success_ts`` is set, it's the advance;
-  # otherwise we replay the prior checkpoint so "no advance this
-  # run, still at X" is the visible answer.
-  checkpoint_written = (
-      last_success_ts if last_success_ts is not None else last_checkpoint
-  )
+  # Note: an empty window is "ok" with no checkpoint advance, but
+  # we still write a heartbeat row so operators can see the run
+  # happened.
+  #
+  # The written checkpoint is the **maximum** of the prior
+  # watermark and this run's last successful completion. Picking
+  # whichever value is higher prevents two regressions:
+  #
+  # * **Overlap rewind.** ``--overlap-minutes`` re-scans events
+  #   slightly older than the last checkpoint to catch late-
+  #   arriving rows. If a session inside that overlap succeeds
+  #   but a *later* session fails, ``last_success_ts`` is the
+  #   re-scanned (older) timestamp; writing that would move the
+  #   high-water mark backwards. Taking ``max`` keeps the prior
+  #   advance.
+  # * **No-advance carry-forward.** When no session succeeded,
+  #   ``last_success_ts`` is ``None`` — the prior checkpoint
+  #   carries forward so the most-recent state row is self-
+  #   documenting ("still at X" rather than NULL).
+  if last_success_ts is None:
+    checkpoint_written = last_checkpoint
+  elif last_checkpoint is None:
+    checkpoint_written = last_success_ts
+  else:
+    checkpoint_written = max(last_checkpoint, last_success_ts)
 
   failures = [
       {

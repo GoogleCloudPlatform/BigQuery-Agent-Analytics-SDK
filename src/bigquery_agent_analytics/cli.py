@@ -1869,9 +1869,14 @@ def materialize_window(
 
   Exit codes:
       0 — every discovered session materialized cleanly.
-      1 — at least one session failed (partial result; checkpoint
-          advanced only to the last successful session).
-      2 — unexpected error (load failure, missing flag, etc.).
+      1 — expected failure. Either at least one session failed
+          (partial result; checkpoint advanced only to the last
+          successful session) OR --validate-binding detected
+          schema drift against live BigQuery before extraction
+          (no sessions materialized; drift recorded in the state
+          table audit trail).
+      2 — unexpected internal error (load failure, missing flag,
+          programming bug).
   """
   try:
     from .materialize_window import run_materialize_window
