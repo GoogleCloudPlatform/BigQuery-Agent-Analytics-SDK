@@ -397,23 +397,38 @@ ff1e956df8b8    2026-05-16 04:38:59    3 / 3 / 0                       true
 
 (Row 1 is the deploy script's `--smoke` execution, which ran
 BEFORE the verification added `roles/aiplatform.user` to the
-deploy. AI.GENERATE failed for every session there, but the
-orchestrator still reported `ok=true` with empty
-`rows_materialized` — see the known issue below.)
+deploy. AI.GENERATE failed for every session there. At the time
+of #166, the orchestrator reported `ok=true` with empty
+`rows_materialized` — the silent-failure mode that PR #167
+fixed. Today, the same situation would produce `ok=false` with
+`failures[0].error_code = "empty_extraction"`.)
 
-### Known issue surfaced by this verification
+### Failure-mode surface (post-#167)
 
-The orchestrator currently reports `sessions_materialized ==
-sessions_discovered` and `ok=true` even when every per-event
-`AI.GENERATE` call failed. The `rows_materialized` dict is
-empty in that case, but `sessions_materialized` doesn't
-reflect the underlying failure. Operators monitoring on
-`jsonPayload.ok` would miss the silent extraction failure.
+The orchestrator distinguishes two zero-row session outcomes
+that look identical from `rows_materialized` alone:
 
-Tracked for SDK follow-up — out of scope for this example PR.
-Workaround: alert on
-`jsonPayload.rows_materialized == {}` in Cloud Logging /
-Monitoring as a second-line check.
+* **`empty_extraction`** — extraction (AI.GENERATE or compiled
+  bundle) returned an empty graph; no inserts attempted.
+  Diagnose by checking the runtime SA's `roles/aiplatform.user`
+  grant, AI.GENERATE quotas, or whether the session's events
+  legitimately had any MAKO content.
+
+* **`materialization_failed`** — extraction produced rows but
+  every insert returned an error. The `failures[].error_detail`
+  names the specific tables (e.g.,
+  `DecisionExecution: rows_attempted=3, insert_status='insert_failed'`),
+  and the aggregate `table_statuses` carries the per-table
+  diagnostic at the top level of the report. Diagnose by
+  checking the SA's dataset write perm on the graph dataset,
+  schema drift the binding-validate pre-flight missed, or
+  streaming-buffer pinning.
+
+In both cases: `ok=false`, CLI exit 1, the cron run shows up
+as a failed execution in Cloud Monitoring. Alert directly on
+`jsonPayload.ok=false` plus `jsonPayload.failures[].error_code`
+for the failure-mode breakdown — no second-line
+`rows_materialized == {}` check needed.
 
 ## Not in scope here
 

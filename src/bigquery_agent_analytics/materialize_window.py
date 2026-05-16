@@ -921,6 +921,81 @@ def run_materialize_window(
             "insert_status": ts.insert_status,
             "idempotent": ts.idempotent,
         }
+      # Zero-rows guard. ``row_counts`` only includes tables
+      # whose insert SUCCEEDED (per ``ontology_materializer.py``
+      # — see the ``inserted_tables`` filter at the build site).
+      # So ``total_rows == 0`` collapses two distinct failure
+      # modes that operators must triage differently:
+      #
+      #   * **empty_extraction** — the graph itself was empty.
+      #     Extraction (AI.GENERATE or compiled bundle) returned
+      #     no rows; nothing to insert. ``table_statuses`` will
+      #     be empty or have ``rows_attempted == 0`` everywhere.
+      #     Common cause: missing ``roles/aiplatform.user`` on
+      #     the runtime SA (surfaced by #166 live deploy), or
+      #     the session's events legitimately had no MAKO
+      #     content.
+      #
+      #   * **materialization_failed** — the graph HAD rows but
+      #     every insert returned an error. ``table_statuses``
+      #     will have entries with ``rows_attempted > 0`` and
+      #     ``insert_status == "insert_failed"``. Common cause:
+      #     dataset write-perm regression, streaming-buffer
+      #     pinning that hits a delete-then-insert idempotency
+      #     boundary, or a schema mismatch the binding-validate
+      #     pre-flight didn't catch.
+      #
+      # Operators chasing the wrong failure mode is the failure
+      # mode this PR was meant to prevent. Classify here.
+      total_rows = sum(int(v) for v in (mat.row_counts or {}).values())
+      if total_rows == 0:
+        any_attempted = any(
+            int(ts.get("rows_attempted", 0)) > 0
+            for ts in table_statuses_dict.values()
+        )
+        any_insert_failed = any(
+            ts.get("insert_status") == "insert_failed"
+            for ts in table_statuses_dict.values()
+        )
+        if any_attempted and any_insert_failed:
+          error_code = "materialization_failed"
+          error_detail = (
+              "session extracted rows but every insert failed: "
+              + "; ".join(
+                  f"{name}: rows_attempted={ts.get('rows_attempted')}, "
+                  f"insert_status={ts.get('insert_status')!r}, "
+                  f"cleanup_status={ts.get('cleanup_status')!r}"
+                  for name, ts in sorted(table_statuses_dict.items())
+              )
+              + ". Common causes: dataset write-permission "
+              "regression on the runtime SA, schema mismatch the "
+              "binding-validate pre-flight didn't catch, or "
+              "streaming-buffer pinning blocking a delete-then-"
+              "insert cycle."
+          )
+        else:
+          error_code = "empty_extraction"
+          error_detail = (
+              "session materialized zero rows across every entity "
+              "table and no inserts were attempted; usually means "
+              "extraction (AI.GENERATE or compiled bundle) returned "
+              "an empty graph. Common causes: missing "
+              "roles/aiplatform.user on the runtime SA, transient "
+              "AI.GENERATE rate limit, or the session's events did "
+              "not contain any extractable ontology content."
+          )
+        session_results.append(
+            SessionResult(
+                session_id=session.session_id,
+                ok=False,
+                completion_timestamp=session.completion_timestamp,
+                rows_materialized=dict(mat.row_counts),
+                table_statuses=table_statuses_dict,
+                error_code=error_code,
+                error_detail=error_detail,
+            )
+        )
+        break
       session_results.append(
           SessionResult(
               session_id=session.session_id,
@@ -1266,18 +1341,30 @@ def _build_result(
   # clean ``deleted``. Operators rely on the report as the
   # "did anything go wrong" signal — any delete failure must
   # bubble up.
+  # Aggregate ``table_statuses`` from EVERY session — including
+  # failed ones. The status surface ("did the delete succeed?
+  # did the insert succeed?") is operator-visible regardless of
+  # session-level success. Dropping failed sessions' statuses
+  # was the gap #167's reviewer flagged: when a session fails
+  # with ``materialization_failed``, the per-table diagnostic
+  # (rows_attempted=N, insert_status=insert_failed) belongs in
+  # the report so operators don't have to dig into log payloads
+  # to see which table broke.
+  #
+  # ``rows_materialized`` still aggregates only successful
+  # sessions — that's the "rows that actually landed" view.
   table_statuses_agg: dict[str, dict[str, Any]] = {}
   for r in session_results:
     if r.ok:
       for table, n in r.rows_materialized.items():
         rows_materialized[table] = rows_materialized.get(table, 0) + n
-      for table, ts in r.table_statuses.items():
-        if table in table_statuses_agg:
-          table_statuses_agg[table] = _merge_table_status(
-              table_statuses_agg[table], ts
-          )
-        else:
-          table_statuses_agg[table] = dict(ts)
+    for table, ts in r.table_statuses.items():
+      if table in table_statuses_agg:
+        table_statuses_agg[table] = _merge_table_status(
+            table_statuses_agg[table], ts
+        )
+      else:
+        table_statuses_agg[table] = dict(ts)
 
   failures = [
       {

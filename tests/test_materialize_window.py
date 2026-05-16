@@ -1897,3 +1897,307 @@ class TestCompletionEventTypeWhitespaceRejected:
           bq_client=client,
           run_started_at=now,
       )
+
+
+# ------------------------------------------------------------------ #
+# Round-7 regressions                                                  #
+# ------------------------------------------------------------------ #
+
+
+def _fake_mat_result(row_counts: dict[str, int]) -> mock.Mock:
+  """Build a fake ``materialize_with_status`` return value with
+  the given row_counts. Per-table statuses are auto-derived
+  to match (clean ``deleted``/``inserted``, idempotent)."""
+  result = mock.Mock()
+  result.row_counts = dict(row_counts)
+  result.table_statuses = {}
+  for table, n in row_counts.items():
+    ts = mock.Mock()
+    ts.table_ref = f"p.d.{table}"
+    ts.rows_attempted = n
+    ts.rows_inserted = n
+    ts.cleanup_status = "deleted"
+    ts.insert_status = "inserted"
+    ts.idempotent = True
+    result.table_statuses[table] = ts
+  return result
+
+
+class TestEmptyExtractionNotOk:
+  """Round-7 contract: a session that completes without raising
+  but produces zero rows across every entity table is NOT a
+  success. The live deploy in PR #166 surfaced the silent
+  failure mode — ``AI.GENERATE`` failed per-event, the SDK
+  swallowed the error, the graph was empty, and the orchestrator
+  reported ``ok=true`` with empty ``rows_materialized``. The fix:
+  treat zero-row extraction as a session failure with
+  ``error_code="empty_extraction"`` and exit non-zero."""
+
+  def test_all_sessions_zero_rows_reports_not_ok(self, fixture_paths):
+    """All discovered sessions extract to empty graphs (e.g.,
+    AI.GENERATE permission missing on the runtime SA). Expected:
+    ``ok=false``, the first session reported as ``empty_extraction``
+    failure, loop breaks (no waste of BQ quota on the rest)."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 16, 12, 0, tzinfo=_dt.timezone.utc)
+    discovered = [
+        _FakeBQRow(
+            session_id="s1",
+            completion_timestamp=_dt.datetime(
+                2026, 5, 16, 11, 0, tzinfo=_dt.timezone.utc
+            ),
+        ),
+        _FakeBQRow(
+            session_id="s2",
+            completion_timestamp=_dt.datetime(
+                2026, 5, 16, 11, 30, tzinfo=_dt.timezone.utc
+            ),
+        ),
+    ]
+    client = _stub_bq_client(discovered)
+
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(return_value=mock.Mock())
+
+    fake_materializer_cls = mock.Mock()
+    fake_materializer = fake_materializer_cls.return_value
+    fake_materializer.materialize_with_status = mock.Mock(
+        return_value=_fake_mat_result({})  # zero rows, no tables
+    )
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert not result.ok, (
+        "empty extraction across every session must surface as "
+        "result.ok=False"
+    )
+    assert result.sessions_discovered == 2
+    assert result.sessions_materialized == 0
+    assert result.sessions_failed == 1, (
+        "loop should break on first empty session — second session "
+        "not processed; reported failures count = 1"
+    )
+    assert result.failures, "failures list must include the empty session"
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    assert "extraction" in result.failures[0]["error_detail"].lower()
+
+  def test_partial_extraction_partial_failure_conservative_checkpoint(
+      self, fixture_paths
+  ):
+    """Session 1 extracts non-empty rows; session 2 returns
+    zero rows. Expected: partial-failure shape — ``ok=false``,
+    session 1 counted as materialized, session 2 in failures
+    with ``empty_extraction``, loop breaks at session 2,
+    checkpoint advances ONLY to session 1's completion
+    timestamp."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 16, 12, 0, tzinfo=_dt.timezone.utc)
+    ts1 = _dt.datetime(2026, 5, 16, 11, 0, tzinfo=_dt.timezone.utc)
+    ts2 = _dt.datetime(2026, 5, 16, 11, 30, tzinfo=_dt.timezone.utc)
+    ts3 = _dt.datetime(2026, 5, 16, 11, 45, tzinfo=_dt.timezone.utc)
+    discovered = [
+        _FakeBQRow(session_id="s1", completion_timestamp=ts1),
+        _FakeBQRow(session_id="s2", completion_timestamp=ts2),
+        _FakeBQRow(session_id="s3", completion_timestamp=ts3),
+    ]
+    client = _stub_bq_client(discovered)
+
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(return_value=mock.Mock())
+
+    fake_materializer_cls = mock.Mock()
+    fake_materializer = fake_materializer_cls.return_value
+    # Session 1: real rows. Session 2: empty extraction. Session
+    # 3: would also have real rows but the loop should break
+    # before reaching it.
+    fake_materializer.materialize_with_status = mock.Mock(
+        side_effect=[
+            _fake_mat_result({"DecisionExecution": 1, "Candidate": 3}),
+            _fake_mat_result({}),
+            _fake_mat_result({"DecisionExecution": 1}),
+        ]
+    )
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert not result.ok
+    assert result.sessions_discovered == 3
+    assert result.sessions_materialized == 1, "only s1 succeeded"
+    assert result.sessions_failed == 1, "s2 failed; s3 never tried"
+    assert result.failures[0]["session_id"] == "s2"
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    # Conservative checkpoint: stop at s1's timestamp, NOT s2's
+    # or s3's. Next run re-tries s2 (idempotent).
+    assert result.checkpoint_written == ts1
+    # Materialize was attempted exactly twice (s1 + s2), never
+    # for s3 — the break-on-failure semantics save BQ quota.
+    assert fake_materializer.materialize_with_status.call_count == 2
+
+  def test_insert_failure_classified_as_materialization_failed(
+      self, fixture_paths
+  ):
+    """The materializer can produce zero rows in
+    ``row_counts`` for two distinct reasons: extraction
+    returned an empty graph (``empty_extraction``) OR
+    extraction produced rows but every insert failed
+    (``materialization_failed``). The two failure modes need
+    different operator response (AI/IAM vs dataset write-perm /
+    schema) — classify them via ``table_statuses``.
+
+    Insert-failure shape: ``rows_attempted > 0`` on some
+    table, ``insert_status == "insert_failed"``, but
+    ``row_counts == {}`` because only successful inserts
+    populate row_counts (see
+    ``ontology_materializer.py``)."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 16, 12, 0, tzinfo=_dt.timezone.utc)
+    discovered = [
+        _FakeBQRow(
+            session_id="s1",
+            completion_timestamp=_dt.datetime(
+                2026, 5, 16, 11, 0, tzinfo=_dt.timezone.utc
+            ),
+        ),
+    ]
+    client = _stub_bq_client(discovered)
+
+    # Hand-build a ``materialize_with_status`` return value
+    # that mimics insert-failure: row_counts empty,
+    # table_statuses show real attempts that all failed.
+    fake_mat = mock.Mock()
+    fake_mat.row_counts = {}  # nothing succeeded → empty
+    fake_mat.table_statuses = {}
+    for table, n_attempted in (("DecisionExecution", 3), ("Candidate", 7)):
+      ts = mock.Mock()
+      ts.table_ref = f"p.d.{table}"
+      ts.rows_attempted = n_attempted
+      ts.rows_inserted = 0
+      ts.cleanup_status = "deleted"
+      ts.insert_status = "insert_failed"
+      ts.idempotent = False
+      fake_mat.table_statuses[table] = ts
+
+    fake_manager = mock.Mock()
+    fake_manager.spec = mock.Mock()
+    fake_manager.extract_graph = mock.Mock(return_value=mock.Mock())
+
+    fake_materializer_cls = mock.Mock()
+    fake_materializer = fake_materializer_cls.return_value
+    fake_materializer.materialize_with_status = mock.Mock(return_value=fake_mat)
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=fake_manager),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+            fake_materializer_cls,
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert not result.ok
+    assert result.failures[0]["error_code"] == "materialization_failed", (
+        f"insert-failed sessions must be classified as "
+        f"materialization_failed, not empty_extraction; got "
+        f"{result.failures[0]['error_code']}"
+    )
+    # The failure detail must name the specific tables that
+    # failed, so operators don't have to dig through log
+    # payloads.
+    detail = result.failures[0]["error_detail"]
+    assert "DecisionExecution" in detail
+    assert "Candidate" in detail
+    assert "insert_failed" in detail
+    # Crucial: failed-session table_statuses must surface in
+    # the aggregate report. Without this, an operator seeing
+    # ``ok=false`` would have no per-table diagnostic at the
+    # top level.
+    assert "DecisionExecution" in result.table_statuses, (
+        f"failed session's table_statuses must appear in the "
+        f"aggregate report; got {sorted(result.table_statuses)}"
+    )
+    assert (
+        result.table_statuses["DecisionExecution"]["insert_status"]
+        == "insert_failed"
+    )
+    assert result.table_statuses["DecisionExecution"]["rows_attempted"] == 3
+
+  def test_empty_window_remains_ok(self, fixture_paths):
+    """``sessions_discovered == 0`` (no terminal events in the
+    scan window) is a legitimate empty-window heartbeat. The
+    empty-extraction guard MUST NOT flip this to ok=false —
+    the new check is per-session and skipped when no sessions
+    were discovered. The orchestrator's existing "empty
+    session_results → ok=true" clause keeps holding."""
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 16, 12, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+      )
+
+    assert result.ok, (
+        "empty window (zero sessions discovered) must remain "
+        "ok=true — the empty-extraction guard is per-session and "
+        "should not fire when no sessions were processed"
+    )
+    assert result.sessions_discovered == 0
+    assert result.sessions_materialized == 0
+    assert result.sessions_failed == 0
+    assert result.failures == []
