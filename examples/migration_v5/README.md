@@ -168,39 +168,32 @@ A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells a
 - **Beat 3.6**: synthetic `ExtractedGraph` triggers all three `FallbackScope` failures (`NODE + FIELD + EDGE`).
 - **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns at least one row per current session — the compiled extractor wired in Beat 3.5 synthesizes the envelope-side `AgentSession` + `partOfSession`.
 
-## Run periodic materialization (Cloud Run Job + Cloud Scheduler)
+## Run this every N hours in production
 
-The notebook materializes a graph once, ad hoc. Real deployments want the graph kept fresh on a cron. `examples/migration_v5/periodic_materialization/` packages `bqaa-materialize-window` as a Cloud Run Job + Cloud Scheduler trigger, using the v5 demo binding (re-targeted to the customer's project at runtime).
+The notebook walks through the four guarantees once, ad hoc. Real deployments want the graph kept fresh on a cron — events arrive continuously, the materialized entity/relationship tables should follow within a chosen latency budget.
 
-**Local dry-run** — exercise the path against your own BigQuery without deploying:
+[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa-materialize-window` every N hours against your project, using the v5 demo binding (retargeted to your `(project, graph_dataset)` at deploy time).
 
-```bash
-pip install -r examples/migration_v5/periodic_materialization/requirements.txt
+The flow customers actually follow:
 
-BQAA_PROJECT_ID=your-project \
-BQAA_EVENTS_DATASET_ID=your_events_dataset \
-BQAA_GRAPH_DATASET_ID=your_graph_dataset \
-BQAA_LOOKBACK_HOURS=6 \
-python examples/migration_v5/periodic_materialization/run_job.py
-```
+1. **Get events** — point at your existing `agent_events` table (the BQ AA plugin already writes here; if you don't have one yet, seed via `python examples/migration_v5/run_agent.py --sessions 3` against a scratch dataset).
+2. **Local dry-run** — `python periodic_materialization/run_job.py` with env vars. Same code path as the deployed job, no Cloud Run required. Verifies your IAM / dataset setup before paying for a deploy.
+3. **Deploy** — one command:
 
-**Deploy** — one command, with `--smoke` to verify the deploy by running the job once and tailing logs:
+   ```bash
+   ./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+     --project your-project --region us-central1 \
+     --events-dataset your_events_dataset \
+     --graph-dataset your_graph_dataset \
+     --schedule "0 */6 * * *" --smoke
+   ```
 
-```bash
-./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
-  --project your-project \
-  --region us-central1 \
-  --events-dataset your_events_dataset \
-  --graph-dataset your_graph_dataset \
-  --schedule "0 */6 * * *" \
-  --smoke
-```
+   Deploys the Cloud Run Job, creates the runtime service account with narrow IAM (events-READ, graph-WRITE), wires the Cloud Scheduler trigger, and runs `--smoke` to verify in one shot.
 
-The deploy script bundles `run_job.py` + the demo artifacts (`ontology.yaml`, `binding.yaml`, `table_ddl.sql`) + `requirements.txt` into a staging dir, deploys via `gcloud run jobs deploy --source`, creates a service account, grants `roles/run.invoker`, and wires the Cloud Scheduler HTTP trigger.
+4. **Verify** — Cloud Logging shows the JSON report on every run (`jsonPayload.ok`, `sessions_materialized`, `rows_materialized`, per-table `table_statuses`). The state table at `<graph_dataset>._bqaa_materialization_state` is a queryable audit log.
+5. **Alert** — Cloud Monitoring on `severity=ERROR` OR `jsonPayload.ok=false`. The `jsonPayload.failures[].error_code` distinguishes `empty_extraction` (AI/IAM) from `materialization_failed` (schema/write-perm).
 
-The job's JSON report (per run) lands in Cloud Logging as a structured entry. Filter on `resource.labels.job_name` for the materialization audit log. The state table at `<graph_dataset>._bqaa_materialization_state` is a queryable history.
-
-See [`periodic_materialization/README.md`](./periodic_materialization/README.md) for the full operational contract, env-var reference, and troubleshooting notes.
+See **[`periodic_materialization/README.md`](./periodic_materialization/README.md)** for the full customer playbook: required APIs, IAM matrix, recommended schedules per latency target, Cloud Monitoring alert queries, state-table SQL, troubleshooting, and live-deployment evidence captured against the canonical test project.
 
 ## What's NOT in this commit
 
