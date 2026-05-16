@@ -35,6 +35,9 @@
 # 2. Creates the runtime + scheduler service account
 #    (``bqaa-periodic-sa``) if absent, and grants:
 #      * project-level ``roles/bigquery.jobUser`` (jobs.create).
+#      * project-level ``roles/aiplatform.user`` (the MAKO
+#        demo's extraction path calls ``AI.GENERATE``, which
+#        requires Vertex AI access).
 #      * dataset-level ``roles/bigquery.dataViewer`` on the
 #        events dataset (read-only access — events stay read-
 #        only per the README contract).
@@ -175,6 +178,43 @@ ARTIFACTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # ``examples/migration_v5/``, so the repo root is two dirs up.
 REPO_ROOT="$(cd "${ARTIFACTS_DIR}/../.." && pwd)"
 
+# Cleanup state — the staging dir is created later in section
+# 3, the IAM-venv may be created here if needed. Single trap so
+# both get removed on any exit path.
+STAGING=""
+IAM_VENV=""
+_cleanup() {
+  [[ -n "$STAGING" ]] && rm -rf "$STAGING"
+  [[ -n "$IAM_VENV" ]] && rm -rf "$IAM_VENV"
+}
+trap _cleanup EXIT
+
+# ----------------------------------------------------------- #
+# 0. Python preflight for dataset-level IAM grants             #
+# ----------------------------------------------------------- #
+#
+# The dataset-level IAM grants in section 2 use a Python
+# heredoc against ``google.cloud.bigquery`` (legacy
+# ``AccessEntry`` API). The ``bq add-iam-policy-binding``
+# command is gated on project allowlisting in some projects,
+# so we don't rely on it.
+#
+# If the operator's ``python3`` already has
+# ``google-cloud-bigquery`` (e.g., they ran ``pip install -e
+# .`` from the repo root for local dry-run), use it directly.
+# Otherwise create a one-shot temp venv with just that
+# dependency — keeps the deploy a single command from a clean
+# shell. Operator only needs ``gcloud`` + ``python3`` (the
+# universal baseline).
+PY_CMD="python3"
+if ! python3 -c "import google.cloud.bigquery" >/dev/null 2>&1; then
+  echo "==> creating temp venv with google-cloud-bigquery (for dataset IAM)"
+  IAM_VENV="$(mktemp -d -t bqaa-iam-venv-XXXXXXXX)"
+  python3 -m venv "$IAM_VENV" >/dev/null
+  "$IAM_VENV/bin/pip" install --quiet google-cloud-bigquery
+  PY_CMD="$IAM_VENV/bin/python"
+fi
+
 # ----------------------------------------------------------- #
 # 1. Pre-create the graph dataset (idempotent)                 #
 # ----------------------------------------------------------- #
@@ -220,6 +260,37 @@ fi
 SA_NAME="bqaa-periodic-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
 
+# Retry an IAM-binding command on the IAM-propagation race.
+# ``gcloud iam service-accounts create`` returns success once
+# the SA exists in one IAM replica, but
+# ``gcloud projects add-iam-policy-binding`` reads from a
+# different replica that can lag by several seconds. The
+# observed error is ``INVALID_ARGUMENT: Service account ...
+# does not exist``. Polling ``describe`` doesn't help (it hits
+# the same replica that already returned success). The reliable
+# fix is to retry the grant itself.
+_retry_iam() {
+  local attempts=0
+  local max=20
+  while [[ $attempts -lt $max ]]; do
+    if "$@" >/dev/null 2>/tmp/_iam_err.$$; then
+      rm -f /tmp/_iam_err.$$
+      return 0
+    fi
+    if ! grep -qE "(does not exist|Service account)" /tmp/_iam_err.$$; then
+      cat /tmp/_iam_err.$$ >&2
+      rm -f /tmp/_iam_err.$$
+      return 1
+    fi
+    sleep 3
+    attempts=$((attempts + 1))
+  done
+  echo "Error: IAM grant did not succeed after ${max} retries" >&2
+  cat /tmp/_iam_err.$$ >&2
+  rm -f /tmp/_iam_err.$$
+  return 1
+}
+
 if ! gcloud iam service-accounts describe "$SA_EMAIL" \
     --project "$PROJECT" >/dev/null 2>&1; then
   echo "==> creating service account: $SA_EMAIL"
@@ -246,29 +317,80 @@ fi
 # which appends to the dataset's IAM policy rather than
 # replacing it. Idempotent (re-adds are no-ops).
 echo "==> granting project-level roles/bigquery.jobUser to $SA_EMAIL"
-gcloud projects add-iam-policy-binding "$PROJECT" \
+_retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:${SA_EMAIL}" \
   --role roles/bigquery.jobUser \
   --condition=None \
-  --quiet >/dev/null
+  --quiet
 
-# ``bq add-iam-policy-binding`` defaults to table-shaped
-# resource identifiers; without ``--dataset`` it parses
-# ``PROJECT:DATASET`` as a malformed table ref and fails. The
-# flag is required for dataset-level grants.
-echo "==> granting dataset-level roles/bigquery.dataViewer on ${EVENTS_DATASET} to $SA_EMAIL"
-bq --project_id="$PROJECT" add-iam-policy-binding \
-  --dataset \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/bigquery.dataViewer" \
-  "${PROJECT}:${EVENTS_DATASET}" >/dev/null
+# The MAKO demo's extraction path uses BigQuery's
+# ``AI.GENERATE`` function under the hood (Gemini-backed
+# entity extraction from ``agent_events`` rows). Calling
+# ``AI.GENERATE`` requires Vertex AI access on top of BigQuery
+# perms. Without this grant, the AI call returns "user does
+# not have the permission to access resources used by
+# AI.GENERATE" and the orchestrator silently extracts an empty
+# graph for every session (the SDK currently swallows per-event
+# AI failures and reports ``sessions_materialized`` without
+# checking ``rows_materialized``). The verification round in
+# #166 surfaced this — the deploy looks ``ok=true`` but the
+# entity tables stay empty.
+echo "==> granting project-level roles/aiplatform.user to $SA_EMAIL"
+_retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/aiplatform.user \
+  --condition=None \
+  --quiet
 
-echo "==> granting dataset-level roles/bigquery.dataEditor on ${GRAPH_DATASET} to $SA_EMAIL"
-bq --project_id="$PROJECT" add-iam-policy-binding \
-  --dataset \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/bigquery.dataEditor" \
-  "${PROJECT}:${GRAPH_DATASET}" >/dev/null
+# Dataset-level IAM via the BigQuery Python client (the
+# ``AccessEntry``-based update API — legacy and fully
+# supported, vs ``bq add-iam-policy-binding`` which requires
+# project allowlisting in some environments).
+#
+# ``$PY_CMD`` was set in the preflight section 0: either the
+# operator's existing ``python3`` (if it has
+# ``google-cloud-bigquery`` installed) or a temp venv (if it
+# doesn't). The deploy script doesn't ask the operator to
+# install anything beyond ``gcloud`` + ``python3``.
+#
+# The grant logic is idempotent — it skips the update if the
+# binding is already present, so re-running the deploy is safe.
+_grant_dataset_iam() {
+  local dataset="$1"
+  local role="$2"  # legacy role keyword: READER / WRITER / OWNER
+  local role_display="$3"  # for the echo message
+  echo "==> granting dataset-level ${role_display} on ${dataset} to $SA_EMAIL"
+  "$PY_CMD" - <<EOF || { echo "Error: dataset-level IAM grant failed." >&2; exit 1; }
+import sys
+from google.cloud import bigquery
+client = bigquery.Client(project="${PROJECT}")
+ds = client.get_dataset("${PROJECT}.${dataset}")
+sa = "${SA_EMAIL}"
+role = "${role}"
+existing = [
+    e for e in ds.access_entries
+    if e.entity_type == "userByEmail"
+    and e.entity_id == sa
+    and e.role == role
+]
+if existing:
+    print(f"  already granted ({role})")
+    sys.exit(0)
+entries = list(ds.access_entries) + [
+    bigquery.AccessEntry(
+        role=role, entity_type="userByEmail", entity_id=sa
+    )
+]
+ds.access_entries = entries
+client.update_dataset(ds, ["access_entries"])
+print(f"  granted ({role})")
+EOF
+}
+
+# READER ≡ roles/bigquery.dataViewer.
+_grant_dataset_iam "$EVENTS_DATASET" "READER" "roles/bigquery.dataViewer"
+# WRITER ≡ roles/bigquery.dataEditor.
+_grant_dataset_iam "$GRAPH_DATASET" "WRITER" "roles/bigquery.dataEditor"
 
 # ----------------------------------------------------------- #
 # 3. Build self-contained staging dir                          #
@@ -289,8 +411,10 @@ bq --project_id="$PROJECT" add-iam-policy-binding \
 #     deploy generates its own requirements next to it in the
 #     staging dir.
 
+# ``STAGING`` is declared empty at the top of the script and
+# removed via the unified ``_cleanup`` trap, so we just assign
+# the mktemp result here — no second trap.
 STAGING="$(mktemp -d -t bqaa-cloud-run-job-XXXXXXXX)"
-trap 'rm -rf "$STAGING"' EXIT
 
 echo "==> staging at $STAGING"
 cp "${SCRIPT_DIR}/run_job.py" "$STAGING/"
@@ -320,11 +444,21 @@ google-cloud-bigquery>=3.0.0
 pyyaml>=6.0
 EOF
 
-# Procfile tells Buildpacks how to invoke the entrypoint.
-# Cloud Run Jobs ignore ``web:``; we use a custom ``--command``
-# below, but a Procfile keeps the staging dir self-documenting.
+# Procfile with a ``web:`` entry — required by Buildpacks at
+# build time, and used at runtime as the container's
+# entrypoint (Buildpacks wraps it in a venv-activation
+# script). Without a Procfile, Buildpacks fails with
+# ``provide a main.py or app.py file or set an entrypoint``;
+# with a non-``web`` Procfile, it fails with ``web process
+# not found in Procfile, found processes: [job]``.
+#
+# The ``web:`` label is Buildpacks' default process name; it
+# does NOT imply the container serves HTTP. Cloud Run Jobs
+# just execute the container's default entrypoint, regardless
+# of the Procfile label, and this Procfile's entrypoint is
+# what actually runs at job execution time.
 cat > "$STAGING/Procfile" <<'EOF'
-job: python run_job.py
+web: python run_job.py
 EOF
 
 # ----------------------------------------------------------- #
@@ -348,12 +482,20 @@ fi
 # all values are simple identifiers / numbers).
 ENV_VAR_FLAG="$(IFS=','; echo "${ENV_VARS[*]}")"
 
+# NOTE: no ``--command`` / ``--args``. Buildpacks-baked
+# containers wrap the entrypoint in a script that activates the
+# Python venv (where ``./sdk_src`` is installed). Overriding
+# with ``--command python --args run_job.py`` skips that
+# wrapper — the container then exec's a bare ``python`` that
+# isn't on PATH or can't find the venv packages, and Cloud Run
+# reports "Application failed to start: container exited
+# abnormally" with no Python output. Letting Buildpacks use the
+# Procfile's ``web: python run_job.py`` entrypoint preserves
+# the venv activation.
 gcloud run jobs deploy "$JOB_NAME" \
   --project "$PROJECT" \
   --region "$REGION" \
   --source "$STAGING" \
-  --command python \
-  --args run_job.py \
   --service-account "$SA_EMAIL" \
   --set-env-vars "$ENV_VAR_FLAG" \
   --task-timeout 30m \
