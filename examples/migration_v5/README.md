@@ -1,25 +1,53 @@
-# Migration v5 Demo — Fixture Foundation
+# Migration v5 Demo — Ontology-Driven Artifact Pipeline
 
-**Status:** The four-guarantee MAKO notebook (`examples/migration_v5_demo_notebook.ipynb`) is live end-to-end against `test-project-0728-467323`. PR [#155](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/155) shipped the fixture foundation; PR [#157](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/157) added `reference_extractor.py`; PR [#160](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/160) wired Beat 3 (compile + cache + runtime + savings) and Beat 4.4 (hub-shape non-zero) live.
+**Status:** The four-guarantee notebook (`examples/migration_v5_demo_notebook.ipynb`) is live end-to-end against `test-project-0728-467323` using the MAKO ontology as the canonical reference example. PR [#155](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/155) shipped the fixture foundation; PR [#157](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/157) added `reference_extractor.py`; PR [#160](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/160) wired Beat 3 + Beat 4.4 live.
 
-The demo's event source of truth is **a runnable agent talking to the BQ AA plugin**, not a hand-coded event generator. This directory's authored inputs are split accordingly.
+The demo's event source of truth is **a runnable agent talking to the BQ AA plugin**, not a hand-coded event generator. The artifact pipeline that turns a TTL into binding + DDL + property-graph SQL is **ontology-agnostic** — see `ontology_artifacts.py` — and the MAKO config (in `mako_artifacts.py`) is one concrete configuration of it.
+
+## Pluggable contract
+
+The pipeline takes a single :class:`ontology_artifacts.OntologyConfig` plus a target `(project, dataset)` and produces four files:
+
+| Generated file | What it is |
+|---|---|
+| `ontology.yaml` | `import-owl` output with `FILL_IN` PKs resolved, cross-namespace dangling relationships dropped, inheritance stripped. |
+| `binding.yaml` | Maps the configured entity allowlist onto BigQuery tables for the target `(project, dataset)`. Heterogeneous edges only; self-edges and out-of-scope relationships filtered. |
+| `table_ddl.sql` | `CREATE TABLE` SQL for every node + edge table, with SDK metadata columns (`session_id STRING, extracted_at TIMESTAMP`) on every bound table. |
+| `property_graph.sql` | `CREATE OR REPLACE PROPERTY GRAPH` over those tables. Node `KEY` + edge `SOURCE KEY ... REFERENCES` use the per-entity PK columns. |
+
+The pipeline applies three OWL-TTL normalizations generic enough to apply to any reasonable ontology:
+
+1. **`FILL_IN` PKs → `id: string`.** The OWL importer marks entities without `owl:hasKey` declarations as `FILL_IN`; the resolver synthesizes a stable `id` property. Entities that already declare `owl:hasKey` are left untouched.
+2. **Cross-namespace dangling relationships dropped.** TTLs that extend upstream ontologies (PROV-O, PKO, DCAT, …) often reference upstream entities the importer didn't pull; the pipeline drops these and records them under a `{annotation_prefix}:dropped_cross_namespace_relationships` audit annotation.
+3. **Inheritance stripped.** `gm compile` v0 doesn't support `extends:` clauses; the pipeline drops them and records the loss under `{annotation_prefix}:stripped_inheritance`.
+
+## Example ontologies in this directory
+
+This demo ships **two** ontology configs. The MAKO config is the load-bearing reference example (real production ontology, full agent, runnable demo); the Simple Request Flow config is a smoke fixture that proves the pipeline is genuinely ontology-agnostic.
+
+| Config | TTL | Where | Surface |
+|---|---|---|---|
+| `MAKO_CONFIG` | `mako_core.ttl` (Yahoo Monetization decision ontology, 18 namespace entities) | `mako_artifacts.py` | Full demo: notebook, `mako_demo_agent.py` (5 decision-flow tools), `reference_extractor.py`, periodic materialization deploy. |
+| `SIMPLE_REQUEST_FLOW_CONFIG` | `example_ontologies/simple_request_flow.ttl` (3-entity Request → Action → Outcome flow) | `example_ontologies/simple_request_flow_config.py` | Smoke fixture only. Exercised by `tests/test_migration_v5_ontology_artifacts.py`. No runnable agent ships with it. |
+
+A new ontology plugs in the same way: write a TTL, define an `OntologyConfig` naming it, call `regenerate_snapshots(your_config, project=..., dataset=...)`.
 
 ## Authorship boundary
 
 | File | Authored? | What it does |
 |------|-----------|--------------|
+| `ontology_artifacts.py` | **Authored.** | Generic ontology-agnostic pipeline: `OntologyConfig` dataclass + `load_ontology`, `make_binding`, `make_table_ddl`, `make_property_graph_sql`, `regenerate_snapshots`. **Does not generate events.** |
 | `mako_core.ttl` | **Authored.** | The real MAKO ontology, pulled from the [reference gist](https://gist.github.com/haiyuan-eng-google/a69ff6282ebcc877f77f9aa4e3db1afd). Domain-agnostic decision semantics for Yahoo Monetization Platform. |
-| `mako_artifacts.py` | **Authored.** | Pure-Python pipeline: imports the TTL → resolves `FILL_IN` primary keys → drops dangling cross-namespace relationships → strips inheritance → generates ontology / binding / table DDL / property-graph SQL for any `(project, dataset)`. **Does not generate events.** |
-| `mako_demo_agent.py` | **Authored.** | Runnable ADK agent + `BigQueryAgentAnalyticsPlugin` wiring. Defines five MAKO decision-flow tools (`capture_context`, `propose_decision_point`, `evaluate_candidate`, `commit_outcome`, `complete_execution`) and a system prompt that walks the agent through them. Real plugin traces land in `agent_events` when the agent runs. |
-| `run_agent.py` | **Authored.** | Driver. `python run_agent.py --sessions 50 --project X --dataset Y` runs the agent for N sessions and lets the plugin populate `agent_events`. |
+| `mako_artifacts.py` | **Authored.** | MAKO-specific config: `MAKO_CONFIG` + thin back-compat wrappers around the generic pipeline. The notebook imports from this module. |
+| `mako_demo_agent.py` | **Authored.** | Runnable ADK agent + `BigQueryAgentAnalyticsPlugin` wiring. Defines five MAKO decision-flow tools (`capture_context`, `propose_decision_point`, `evaluate_candidate`, `commit_outcome`, `complete_execution`) and a system prompt that walks the agent through them. Real plugin traces land in `agent_events` when the agent runs. MAKO-specific by design — the agent's tools mirror MAKO's decision flow. |
+| `run_agent.py` | **Authored.** | Driver. `python run_agent.py --sessions 50 --project X --dataset Y` runs the MAKO agent for N sessions and lets the plugin populate `agent_events`. |
 | `export_events_jsonl.py` | **Authored.** | Optional. Exports a pinned subset of `agent_events` to a local JSONL file for the notebook's deterministic offline revalidation tests. Not an event generator — it reads from BigQuery. |
-| `ontology.yaml` | **Generated** by `mako_artifacts.regenerate_snapshots()`. | TTL-import output with `FILL_IN`s resolved, dangling cross-namespace relationships dropped, inheritance stripped. |
-| `binding.yaml` | **Generated.** | Derived from the ontology + `(project, dataset)`. 6 entities + 7 heterogeneous relationships. |
-| `table_ddl.sql` | **Generated.** | Companion to the binding. Carries SDK metadata columns (`session_id STRING, extracted_at TIMESTAMP`) on every node and edge table. |
-| `property_graph.sql` | **Generated.** | `CREATE OR REPLACE PROPERTY GRAPH` over the same tables. Node KEY + edge `REFERENCES` use the per-entity PK columns. |
+| `example_ontologies/simple_request_flow.ttl` | **Authored.** | Pluggability smoke fixture (3 entities, 2 relationships, no cross-namespace imports). |
+| `example_ontologies/simple_request_flow_config.py` | **Authored.** | `SIMPLE_REQUEST_FLOW_CONFIG` — second `OntologyConfig` that plugs into the same generic pipeline. |
+| `ontology.yaml` / `binding.yaml` / `table_ddl.sql` / `property_graph.sql` | **Generated** for MAKO by `mako_artifacts.regenerate_snapshots()`. Checked in so reviewers can read them as-is. | TTL-derived artifacts for `(test-project-0728-467323, migration_v5_demo)`. The notebook regenerates against a fresh `migration_v5_demo_<8-hex>` dataset at runtime. |
 | `events.jsonl` | **Captured.** | Optional offline snapshot exported via `export_events_jsonl.py`. Not checked in; populated on demand. |
 
-Checked-in `binding.yaml` / `table_ddl.sql` / `property_graph.sql` target the default `(test-project-0728-467323, migration_v5_demo)` pair so reviewers can read them as-is. The notebook regenerates against a fresh `migration_v5_demo_<8-hex>` dataset at runtime.
+The Simple Request Flow config's snapshots are **not checked in** — they're regenerated to a tmpdir by the pluggability test. The TTL + config are the only files under `example_ontologies/`.
 
 ## Demo flow (what the notebook does)
 
@@ -27,7 +55,8 @@ Checked-in `binding.yaml` / `table_ddl.sql` / `property_graph.sql` target the de
 mako_core.ttl                                                    ┐
        │                                                         │
        ▼                                                         │ Beat 0 — setup
-mako_artifacts.regenerate_snapshots(project, dataset)            │
+ontology_artifacts.regenerate_snapshots(MAKO_CONFIG, ...)        │
+   (called via mako_artifacts.regenerate_snapshots)              │
        │                                                         │
        ├── ontology.yaml                                         │
        ├── binding.yaml                                          │
@@ -41,32 +70,34 @@ run_agent.py --sessions N    ────► ADK runner + BQ AA plugin     ┐ B
                                    agent_events table             ┘
 
 ontology-build --skip-property-graph    ────► populates the      ┐
-binding-validate                              MAKO node + edge   │ Beats 1–4
+binding-validate                              node + edge        │ Beats 1–4
 ontology-build (extracts the graph)           tables             │ consume
 OntologyRuntime + LabelSynonymResolver                           ┘
 ```
 
 Beat 3's compile / runtime / savings cells run live, using `reference_extractor.extract_mako_decision_event` as the runtime fallback under a focused compiled bundle that handles the `complete_execution` event type.
 
-## Design decisions
+## Reference example: MAKO design decisions
+
+The decisions below are documented in MAKO terms because MAKO is the load-bearing reference example, but the underlying pipeline behavior is general. Section numbers map to the transformations the generic pipeline applies (see "Pluggable contract" above).
 
 ### 1. MAKO `DecisionExecution` is the central hub
 
-The demo entity allowlist (`DEMO_ENTITIES` in `mako_artifacts.py`) is six entities: `AgentSession`, `DecisionExecution`, `DecisionPoint`, `Candidate`, `SelectionOutcome`, `ContextSnapshot`. `DecisionExecution` is non-obvious but load-bearing — per MAKO's TTL, it's the entity that's `partOfSession` an `AgentSession`, `atContextSnapshot` a `ContextSnapshot`, `executedAtDecisionPoint` a `DecisionPoint`, `hasSelectionOutcome` a `SelectionOutcome`. The decision-flow story doesn't hold together without it.
+The MAKO demo entity allowlist (`DEMO_ENTITIES` in `mako_artifacts.py`) is six entities: `AgentSession`, `DecisionExecution`, `DecisionPoint`, `Candidate`, `SelectionOutcome`, `ContextSnapshot`. `DecisionExecution` is non-obvious but load-bearing — per MAKO's TTL, it's the entity that's `partOfSession` an `AgentSession`, `atContextSnapshot` a `ContextSnapshot`, `executedAtDecisionPoint` a `DecisionPoint`, `hasSelectionOutcome` a `SelectionOutcome`. The decision-flow story doesn't hold together without it.
 
-The edge set is **TTL-driven with two filters**: `make_binding` walks `ontology.relationships` and picks every relationship whose endpoints both fall within `DEMO_ENTITIES` *and* which is not a self-edge. The current binding has **seven** real MAKO relationships (`atContextSnapshot`, `evaluatesCandidate`, `executedAtDecisionPoint`, `hasSelectionOutcome`, `partOfSession`, `rejectedCandidate`, `selectedCandidate`). MAKO's two self-edges (`evolvedFrom`, `supersededBy`, both DecisionExecution → DecisionExecution) are documented under design decision 9 below.
+The edge set is **TTL-driven with two filters**: `make_binding` walks `ontology.relationships` and picks every relationship whose endpoints both fall within the entity allowlist *and* which is not a self-edge. The current MAKO binding has **seven** real relationships (`atContextSnapshot`, `evaluatesCandidate`, `executedAtDecisionPoint`, `hasSelectionOutcome`, `partOfSession`, `rejectedCandidate`, `selectedCandidate`). MAKO's two self-edges (`evolvedFrom`, `supersededBy`, both DecisionExecution → DecisionExecution) are documented under design decision 9 below.
 
 ### 2. FILL_IN resolution: synthesize `id: string`
 
-The MAKO TTL doesn't declare `owl:hasKey` on most entities, so the OWL importer marks 17 concrete entities' primary keys as `FILL_IN`. `mako_artifacts.py` resolves each one to a synthesized `id: string` property + primary key. Matches MAKO's "every artifact has a stable identifier" design contract. If a future MAKO revision adds `owl:hasKey` declarations, the resolver leaves those alone — only `FILL_IN` placeholders get rewritten.
+The MAKO TTL doesn't declare `owl:hasKey` on most entities, so the OWL importer marks 17 concrete entities' primary keys as `FILL_IN`. The pipeline resolves each one to a synthesized `id: string` property + primary key. Matches MAKO's "every artifact has a stable identifier" design contract. If a future MAKO revision adds `owl:hasKey` declarations, the resolver leaves those alone — only `FILL_IN` placeholders get rewritten. This rule is **general** — any TTL with `FILL_IN` PKs gets the same treatment.
 
 ### 3. Cross-namespace relationships dropped (with audit trail)
 
-MAKO extends PROV-O + PKO + DCAT. Four relationships in the TTL point to entities outside MAKO's own namespace (`delegatedBy → prov:Agent`, etc.). The artifact pipeline drops these so the ontology loads cleanly and records the dropped names under the ontology's top-level `mako_demo:dropped_cross_namespace_relationships` annotation. The loss is auditable from a loaded model.
+MAKO extends PROV-O + PKO + DCAT. Four relationships in the TTL point to entities outside MAKO's own namespace (`delegatedBy → prov:Agent`, etc.). The artifact pipeline drops these so the ontology loads cleanly and records the dropped names under the ontology's top-level `mako_demo:dropped_cross_namespace_relationships` annotation. The loss is auditable from a loaded model. **General behavior**: any TTL extending upstream ontologies gets the same treatment; the annotation key uses the config's `annotation_prefix`.
 
 ### 4. Agent uses realistic tool names; mapping is explicit
 
-A real ADK agent exposes business/task-oriented tools, not tools whose argument names mirror TTL property names. The demo follows that convention — tool names are imperative business verbs (`capture_context`, `propose_decision_point`, `evaluate_candidate`, `commit_outcome`, `complete_execution`) and tool argument / return-value keys use ordinary snake_case (`audience_size`, `budget_remaining_usd`, `business_entity_id`).
+A real ADK agent exposes business/task-oriented tools, not tools whose argument names mirror TTL property names. The MAKO demo follows that convention — tool names are imperative business verbs (`capture_context`, `propose_decision_point`, `evaluate_candidate`, `commit_outcome`, `complete_execution`) and tool argument / return-value keys use ordinary snake_case (`audience_size`, `budget_remaining_usd`, `business_entity_id`).
 
 The **explicit mapping** between what the agent emits and what extraction materializes into the MAKO graph:
 
@@ -96,21 +127,21 @@ The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`)
 
 ### 5. `(project, dataset)` is a parameter, not a baked-in value
 
-`mako_artifacts.regenerate_snapshots(project=..., dataset=...)` and `run_agent.py --project X --dataset Y` both take the target as input. The checked-in snapshots use `test-project-0728-467323` / `migration_v5_demo` as defaults so reviewers can `cat` them; the notebook regenerates everything against a fresh `migration_v5_demo_<8-hex>` dataset at runtime.
+`mako_artifacts.regenerate_snapshots(project=..., dataset=...)` and `run_agent.py --project X --dataset Y` both take the target as input. The checked-in snapshots use `test-project-0728-467323` / `migration_v5_demo` as defaults so reviewers can `cat` them; the notebook regenerates everything against a fresh `migration_v5_demo_<8-hex>` dataset at runtime. The generic pipeline takes `(project, dataset)` the same way — they're never config-time constants.
 
 ### 6. `events.jsonl` is captured, not synthesized
 
 If kept, `events.jsonl` is the output of `export_events_jsonl.py` reading from `agent_events`. The notebook may use it as an offline corpus for Beat 3's revalidation tests (deterministic input the threshold gates can lock against), but the demo's primary event surface is the live `agent_events` table.
 
-The exporter's `SELECT` projects the subset of the BQ AA plugin's schema the notebook needs (`google/adk/plugins/bigquery_agent_analytics_plugin.py::_get_events_schema`): `timestamp`, `event_type`, `agent`, `session_id`, `invocation_id`, `user_id`, `trace_id`, `span_id`, `parent_span_id`, `status`, `error_message`, `is_truncated`, plus `content` / `attributes` / `latency_ms` (all JSON). The plugin's full schema also includes `content_parts` (REPEATED RECORD for multimodal parts); the exporter omits it because the MAKO decision flow is text-only. There is no `event_id`, `payload`, `agent_name`, or `partition_date` column on the plugin's table — the plugin partitions on `timestamp` (DAY).
+The exporter's `SELECT` projects the subset of the BQ AA plugin's schema the notebook needs (`google/adk/plugins/bigquery_agent_analytics_plugin.py::_get_events_schema`): `timestamp`, `event_type`, `agent`, `session_id`, `invocation_id`, `user_id`, `trace_id`, `span_id`, `parent_span_id`, `status`, `error_message`, `is_truncated`, plus `content` / `attributes` / `latency_ms` (all JSON). The plugin's full schema also includes `content_parts` (REPEATED RECORD for multimodal parts); the exporter omits it because the MAKO decision flow is text-only.
 
 ### 7. Table DDL carries SDK metadata columns
 
-`make_table_ddl()` appends `session_id STRING, extracted_at TIMESTAMP` to every node and edge table because the materializer writes both on every `materialize()` call and `binding_validation.py` requires them on every bound table. Without them, the notebook's binding-validate step would fail before ontology-build. When a domain property already maps to one of those columns (MAKO's `AgentSession.sessionId → session_id`), the metadata copy is skipped to avoid a duplicate-column error.
+`make_table_ddl()` appends `session_id STRING, extracted_at TIMESTAMP` to every node and edge table because the materializer writes both on every `materialize()` call and `binding_validation.py` requires them on every bound table. Without them, the notebook's binding-validate step would fail before ontology-build. When a domain property already maps to one of those columns (MAKO's `AgentSession.sessionId → session_id`), the metadata copy is skipped to avoid a duplicate-column error. **General behavior**: applies to every config.
 
 ### 8. Per-entity PK columns
 
-Every entity's PK column is `{entity_short}_id` (`decision_execution_id`, `candidate_id`, `agent_session_id`, …), not a bare `id`. The materializer's `_relationship_columns` (`ontology_materializer.py`) looks up edge FK columns in `src_prop_map[col].sdk_type` — that lookup requires the FK column to *exactly* name a column on the source entity. With bare `id`, every cross-entity edge would land `(id STRING, id STRING)` (duplicate-column error) and the FK→PK type lookup would still miss. Per-entity names match the convention the original V5 spec used (`YMGO_Context_Graph_V3`: `decision_id`, `adUnitId`) and the SDK's integration-test fixture (`tests/fixtures/test_binding.yaml`: `customer_id` → `cust_id`).
+Every entity's PK column is `{entity_short}_id` (`decision_execution_id`, `candidate_id`, `agent_session_id`, …), not a bare `id`. The materializer's `_relationship_columns` (`ontology_materializer.py`) looks up edge FK columns in `src_prop_map[col].sdk_type` — that lookup requires the FK column to *exactly* name a column on the source entity. With bare `id`, every cross-entity edge would land `(id STRING, id STRING)` (duplicate-column error) and the FK→PK type lookup would still miss. Per-entity names match the convention the original V5 spec used (`YMGO_Context_Graph_V3`: `decision_id`, `adUnitId`) and the SDK's integration-test fixture. **General behavior**: applies to every config; the Simple Request Flow binding produces `request_id` / `action_id` / `outcome_id` for the same reason.
 
 Notebook GQL queries reference `de.decision_execution_id` (not `de.id`); the Beat 4 cells carry an entity → PK column map for the same reason.
 
@@ -118,24 +149,28 @@ Notebook GQL queries reference `de.decision_execution_id` (not `de.id`); the Bea
 
 MAKO declares `evolvedFrom` and `supersededBy` as `DecisionExecution → DecisionExecution` self-edges. The materializer's FK→PK lookup can't disambiguate the two endpoints from a single source entity, and the natural composite key `(decision_execution_id, decision_execution_id)` is a duplicate-column error. `src_/dst_` prefixing avoids the duplicate but still misses the materializer's property-column lookup.
 
-The ontology still declares both edges (the TTL is unchanged); the binding scope drops them. A future binding revision could re-add self-edges if the SDK accepts FK-to-PK column mapping or the materializer learns to handle them via per-endpoint prefixes; for now the seven heterogeneous edges carry the decision-flow narrative end-to-end.
+The ontology still declares both edges (the TTL is unchanged); the binding scope drops them. A future binding revision could re-add self-edges if the SDK accepts FK-to-PK column mapping or the materializer learns to handle them via per-endpoint prefixes; for now the seven heterogeneous edges carry the decision-flow narrative end-to-end. **General behavior**: any config's binding drops self-edges with the same rationale.
 
-### 10. Inheritance stripped from MAKO entities
+### 10. Inheritance stripped from entities
 
-The MAKO TTL declares `mako:Candidate rdfs:subClassOf mako:RoleTrait`; the OWL importer surfaces this as `Candidate.extends: RoleTrait`. `gm compile` v0 doesn't support inheritance and rejects the binding (`compile-validation — Entity 'Candidate' uses 'extends'`), which blocks Section 4's `--emit-concept-index` step. `_strip_inheritance` drops `extends` from the post-import YAML and audit-trails the discard under `mako_demo:stripped_inheritance`. `RoleTrait` is a marker class in MAKO (REQ-ONT-022) with no properties beyond the `id` PK every other entity already has, so the discard has no semantic effect on the demo's six-entity scope.
+The MAKO TTL declares `mako:Candidate rdfs:subClassOf mako:RoleTrait`; the OWL importer surfaces this as `Candidate.extends: RoleTrait`. `gm compile` v0 doesn't support inheritance and rejects the binding (`compile-validation — Entity 'Candidate' uses 'extends'`), which blocks Section 4's `--emit-concept-index` step. The pipeline drops `extends` from the post-import YAML and audit-trails the discard under the config's `annotation_prefix` (`mako_demo:stripped_inheritance` for MAKO). `RoleTrait` is a marker class in MAKO (REQ-ONT-022) with no properties beyond the `id` PK every other entity already has, so the discard has no semantic effect on the demo's six-entity scope. **General behavior**: applies to any TTL with `extends:` clauses.
 
 ## Validation commands run (all pass)
 
 ```bash
-# Artifact pipeline runs end-to-end and regenerates snapshots.
+# MAKO artifact pipeline runs end-to-end and regenerates snapshots.
 PYTHONPATH=src python examples/migration_v5/mako_artifacts.py
-# → {"ontology_entities": 18, "binding_entities": 6,
-#    "binding_relationships": 7}
+# → {"binding_entities": 6, "binding_relationships": 7,
+#    "ontology_entities": 18}
 
-# Generated ontology validates clean.
+# Generic pipeline works against the Simple Request Flow smoke fixture.
+PYTHONPATH=src pytest tests/test_migration_v5_ontology_artifacts.py
+# → 8 passed (MAKO snapshot regression + pluggability assertions)
+
+# Generated MAKO ontology validates clean.
 python -m bigquery_ontology.cli validate examples/migration_v5/ontology.yaml
 
-# Generated binding validates against the generated ontology.
+# Generated MAKO binding validates against the generated ontology.
 python -m bigquery_ontology.cli validate examples/migration_v5/binding.yaml \
     --ontology examples/migration_v5/ontology.yaml
 
@@ -172,11 +207,11 @@ A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells a
 
 The notebook walks through the four guarantees once, ad hoc. Real deployments want the graph kept fresh on a cron — events arrive continuously, the materialized entity/relationship tables should follow within a chosen latency budget.
 
-[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa-materialize-window` every N hours against your project, using the v5 demo binding (retargeted to your `(project, graph_dataset)` at deploy time).
+[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa-materialize-window` every N hours against your project, using your binding (the MAKO config is the worked example; any `OntologyConfig` works).
 
 The flow customers actually follow:
 
-1. **Get events** — point at your existing `agent_events` table (the BQ AA plugin already writes here; if you don't have one yet, seed via `python examples/migration_v5/run_agent.py --sessions 3` against a scratch dataset).
+1. **Get events** — point at your existing `agent_events` table (the BQ AA plugin already writes here; if you don't have one yet, seed via `python examples/migration_v5/run_agent.py --sessions 3` against a scratch dataset to populate it with MAKO traces).
 2. **Local dry-run** — `python periodic_materialization/run_job.py` with env vars. Same code path as the deployed job, no Cloud Run required. Verifies your IAM / dataset setup before paying for a deploy.
 3. **Deploy** — one command:
 

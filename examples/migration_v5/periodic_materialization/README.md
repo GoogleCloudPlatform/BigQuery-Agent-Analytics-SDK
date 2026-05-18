@@ -3,9 +3,12 @@
 Run `bqaa-materialize-window` on a cron, against your own
 BigQuery project, with one local command and one deploy command.
 
-The MAKO demo (`examples/migration_v5/`) ships the ontology,
-binding, and entity-table DDL. This directory wraps them in a
-hands-off scheduled deployment: a Cloud Run Job that fires every
+The migration v5 demo (`examples/migration_v5/`) ships the
+ontology, binding, and entity-table DDL — MAKO is the
+canonical reference example, but the pipeline is
+ontology-agnostic (see `ontology_artifacts.py`). This
+directory wraps the bound artifacts in a hands-off scheduled
+deployment: a Cloud Run Job that fires every
 N hours via Cloud Scheduler, materializes the last N hours of
 events into your graph dataset, and emits a structured JSON
 report to Cloud Logging.
@@ -79,7 +82,7 @@ gcloud services enable \
   --project=your-project
 ```
 
-`aiplatform.googleapis.com` is required because the MAKO demo's
+`aiplatform.googleapis.com` is required because the demo's
 extraction path calls `AI.GENERATE`. Without it, every session
 will fail with `error_code = "empty_extraction"` (surfaced as a
 hard `ok=false` since PR #167).
@@ -255,7 +258,7 @@ The script:
    * Project-level `roles/bigquery.jobUser` —
      `bigquery.jobs.create` only.
    * Project-level `roles/aiplatform.user` — required because
-     the MAKO demo's extraction path calls BigQuery's
+     the demo's extraction path calls BigQuery's
      `AI.GENERATE` function (Gemini-backed entity extraction).
      Without this grant, the AI call returns "user does not
      have the permission to access resources used by
@@ -638,7 +641,7 @@ that look identical from `rows_materialized` alone:
   bundle) returned an empty graph; no inserts attempted.
   Diagnose by checking the runtime SA's `roles/aiplatform.user`
   grant, AI.GENERATE quotas, or whether the session's events
-  legitimately had any MAKO content.
+  legitimately had any content the bound ontology models.
 
 * **`materialization_failed`** — extraction produced rows but
   every insert returned an error. The `failures[].error_detail`
