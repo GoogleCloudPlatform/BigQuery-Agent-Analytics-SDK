@@ -7,7 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-18
+
+### Release highlights
+
+Focused follow-up to 0.3.0 that publishes the periodic-materialization
+production path. The `bqaa-materialize-window` CLI merged after the
+0.3.0 cut, so customers `pip install`-ing the SDK couldn't run the
+cron path the migration v5 playbook documents. 0.3.1 closes that gap
+and ships the surrounding deployment artifacts and a behavior fix:
+
+- **`bqaa-materialize-window` CLI on PyPI** ([#162](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/162))
+  — cron-friendly scheduled-graph-refresh command, available as a
+  standalone console script and as a `bq-agent-sdk materialize-window`
+  subcommand.
+- **Empty-extraction silent-failure mode closed** ([#167](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/167))
+  — `ok=true` is now an honest signal; per-session extraction
+  failures classify as `empty_extraction` vs `materialization_failed`
+  and flip `ok=false`. **Operator-visible behavior change** (see
+  Fixed).
+- **Cloud Run Job + Cloud Scheduler example** ([#165](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/165),
+  [#166](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/166))
+  — packaged deployment template under
+  `examples/migration_v5/periodic_materialization/` with
+  one-command deploy + `--smoke` end-to-end verification.
+- **Customer playbook** ([#168](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/168))
+  — the production cron path documented end-to-end: required
+  APIs/IAM, recommended schedules, JSON log shape, Cloud Monitoring
+  alerts, state-table inspection, teardown, troubleshooting.
+
 ### Added
+
+- **`bqaa-materialize-window` console script** (PR
+  [#162](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/162)).
+  New cron-friendly entry point for keeping the materialized graph
+  fresh on a schedule. Shipped as a standalone console script
+  (`bqaa-materialize-window`) and as a `bq-agent-sdk
+  materialize-window` subcommand; both call paths share
+  `src/bigquery_agent_analytics/materialize_window.py`. Terminal-
+  event-driven discovery (`event_type = @completion_event_type`,
+  partition-pruned), pinned `run_started_at` snapshot, append-only
+  state table keyed on a content-derived `state_key` (project +
+  dataset + graph + events_table + ontology fingerprint + binding
+  fingerprint + discovery mode), overlap-windowed re-scan for
+  late-arriving events, per-session loop with idempotent retries
+  and checkpoint advance only on success, worst-status-wins
+  per-table aggregation, structured JSON report with C2 compiled-
+  extractor outcome counters (`compiled_unchanged` /
+  `compiled_filtered` / `fallback_for_event`), binding-validate
+  pre-flight, checkpoint that never regresses across overlap
+  re-scans, numeric/identifier guardrails at the boundary. Exit
+  codes: `0` clean, `1` expected failure (session error or
+  binding drift), `2` unexpected internal error.
+
+- **Migration v5 Cloud Run Job + Cloud Scheduler example** in
+  [`examples/migration_v5/periodic_materialization/`](examples/migration_v5/periodic_materialization/)
+  (PRs
+  [#165](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/165),
+  [#166](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/166)).
+  Packaged Cloud Run Job + Cloud Scheduler deployment that wraps
+  `bqaa-materialize-window` for the migration v5 binding. One-
+  command `deploy_cloud_run_job.sh` creates a runtime service
+  account with narrow IAM (`dataViewer` on the events dataset,
+  `dataEditor` on the graph dataset, `bigquery.jobUser` +
+  `aiplatform.user` at the project, `run.invoker` on the job for
+  the scheduler SA), deploys the job, wires the Cloud Scheduler
+  trigger, and optionally runs `--smoke` to verify end-to-end in
+  one shot. IAM matrix, dataset-role contract (events read-only,
+  graph read/write), and live-deploy evidence captured against the
+  canonical test project.
 
 - **Migration v5 periodic materialization playbook** in
   [`examples/migration_v5/periodic_materialization/README.md`](examples/migration_v5/periodic_materialization/README.md)
@@ -19,6 +87,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cloud Monitoring alerts, state-table inspection, teardown, and
   troubleshooting. Complements the migration v5 four-guarantee
   notebook by covering the production cron path.
+
+### Fixed
+
+- **`materialize-window` no longer reports `ok=true` on silent
+  extraction failures** (PR
+  [#167](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/167)).
+  Previously, when per-event extraction returned an empty graph
+  (e.g., runtime SA missing `roles/aiplatform.user` so every
+  `AI.GENERATE` call failed and was swallowed), the orchestrator
+  reported `sessions_materialized == sessions_discovered`,
+  `ok=true`, and an empty `rows_materialized` dict. Operators
+  alerting on `jsonPayload.ok` saw "all good" while the entity
+  tables stayed empty. Now, after `materialize_with_status`
+  succeeds, the orchestrator inspects the materialized rows and
+  per-table statuses; sessions producing zero materialized rows
+  break the loop and classify the failure as
+  `empty_extraction` (extraction returned empty — check AI/IAM)
+  or `materialization_failed` (extraction produced rows but every
+  insert failed — check write perms / schema). `ok=false` is the
+  unmistakable red signal, and `failures[].error_code`
+  distinguishes the failure mode without log digging. Per-table
+  statuses now also surface in `result.table_statuses` for
+  failed sessions (previously only `ok` sessions contributed).
+  **Operator-visible behavior change**: alerts on
+  `jsonPayload.ok=false` are sufficient; no second-line
+  `rows_materialized == {}` check needed. The empty-window
+  heartbeat path (`sessions_discovered == 0`) is unchanged — an
+  idle cron firing still reports `ok=true`.
 
 ## [0.3.0] - 2026-05-15
 
