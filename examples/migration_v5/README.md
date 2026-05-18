@@ -195,10 +195,6 @@ The flow customers actually follow:
 
 See **[`periodic_materialization/README.md`](./periodic_materialization/README.md)** for the full customer playbook: required APIs, IAM matrix, recommended schedules per latency target, Cloud Monitoring alert queries, state-table SQL, troubleshooting, and live-deployment evidence captured against the canonical test project.
 
-## What's NOT in this commit
-
-- `docs/README.md` / `CHANGELOG.md` entries — staged for a follow-up PR alongside the user-facing release notes.
-
 ## Related
 
 - [#107 storyboard](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/107) — per-cell plan the notebook implements.

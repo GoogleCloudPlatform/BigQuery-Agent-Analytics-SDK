@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Migration v5 periodic materialization playbook** in
+  [`examples/migration_v5/periodic_materialization/README.md`](examples/migration_v5/periodic_materialization/README.md)
+  (PR [#168](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/168)).
+  Documents the customer path for keeping the MAKO graph fresh on
+  a schedule: local dry-run via `run_job.py`, Cloud Run Job +
+  Cloud Scheduler deployment with `--smoke`, required APIs and
+  IAM, recommended schedules, Cloud Logging JSON report shape,
+  Cloud Monitoring alerts, state-table inspection, teardown, and
+  troubleshooting. Complements the migration v5 four-guarantee
+  notebook by covering the production cron path.
+
 ## [0.3.0] - 2026-05-15
 
 ### Release highlights
