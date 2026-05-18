@@ -165,7 +165,8 @@ PYTHONPATH=src python examples/migration_v5/mako_artifacts.py
 
 # Generic pipeline works against the Simple Request Flow smoke fixture.
 PYTHONPATH=src pytest tests/test_migration_v5_ontology_artifacts.py
-# → 8 passed (MAKO snapshot regression + pluggability assertions)
+# → 10 passed (MAKO snapshot regression + pluggability assertions
+#   + owl:hasKey regression coverage)
 
 # Generated MAKO ontology validates clean.
 python -m bigquery_ontology.cli validate examples/migration_v5/ontology.yaml
