@@ -40,6 +40,15 @@ import sys
 import pytest
 import yaml
 
+# The ontology-artifact pipeline pulls
+# ``bigquery_ontology.owl_importer``, which requires
+# ``rdflib`` (an optional dep behind the ``[owl]`` extra).
+# CI's default install is ``.[dev]`` only, so skip the whole
+# module when rdflib isn't present — mirrors the pattern in
+# ``tests/test_owl_import_bridge.py`` and
+# ``tests/bigquery_ontology/test_owl_importer.py``.
+pytest.importorskip("rdflib")
+
 # ``mako_artifacts`` and ``ontology_artifacts`` are sibling
 # modules inside ``examples/migration_v5/`` that import each
 # other top-level (the notebook + run_agent.py do the same).
