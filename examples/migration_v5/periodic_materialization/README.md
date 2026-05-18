@@ -10,6 +10,28 @@ N hours via Cloud Scheduler, materializes the last N hours of
 events into your graph dataset, and emits a structured JSON
 report to Cloud Logging.
 
+## Customer playbook (skim this first)
+
+The customer-facing sequence — every section below corresponds
+to a numbered step here:
+
+| # | Step | Where |
+|---|------|-------|
+| 0 | Enable required APIs + grant runtime IAM | [Prerequisites](#prerequisites) |
+| 1 | Decide your **events** vs **graph** dataset names | [Datasets](#dataset-roles-events-vs-graph) |
+| 2 | Local dry-run against your project (no Cloud Run) | [Local dry-run](#local-dry-run) |
+| 3 | Pick a schedule | [Recommended schedules](#recommended-schedules) |
+| 4 | Deploy with `--smoke` (verifies in one shot) | [Deploy to Cloud Run + Cloud Scheduler](#deploy-to-cloud-run-cloud-scheduler) |
+| 5 | Read the JSON log shape per run | [Expected JSON log shape](#expected-json-log-shape) |
+| 6 | Wire the Cloud Monitoring alert on `ok=false` | [Cloud Monitoring alerts](#cloud-monitoring-alerts) |
+| 7 | Query the state-table audit log | [Inspecting results](#inspecting-results) |
+| 8 | If something looks wrong | [Failure-mode surface](#failure-mode-surface-post-167) + [Troubleshooting](#troubleshooting) |
+| 9 | Tear down or redeploy | [Cleanup and redeploy](#cleanup-and-redeploy) |
+
+The rest of the doc has design rationale, the exact IAM matrix,
+operational notes, and the captured evidence from the live
+deployment verification in PR #166.
+
 ## Production shape
 
 ```
@@ -41,8 +63,51 @@ full prose.
 
 ## Prerequisites
 
+### Required APIs
+
+Enable these in the target project before deploying. The
+deploy script enables Cloud Scheduler itself if missing; the
+others should already be on or operators need them anyway:
+
+```bash
+gcloud services enable \
+  bigquery.googleapis.com \
+  run.googleapis.com \
+  cloudscheduler.googleapis.com \
+  cloudbuild.googleapis.com \
+  aiplatform.googleapis.com \
+  --project=your-project
+```
+
+`aiplatform.googleapis.com` is required because the MAKO demo's
+extraction path calls `AI.GENERATE`. Without it, every session
+will fail with `error_code = "empty_extraction"` (surfaced as a
+hard `ok=false` since PR #167).
+
+### Required IAM
+
+The deploy script creates a single runtime service account
+(`bqaa-periodic-sa@PROJECT.iam.gserviceaccount.com`) and grants
+the minimum set of roles. Operators with appropriate write
+permissions can override or split the SAs later — the structure
+makes it a small edit.
+
+| Scope | Role | Why |
+|---|---|---|
+| Project | `roles/bigquery.jobUser` | Run BQ jobs (DDL, discovery, state writes) |
+| Project | `roles/aiplatform.user` | Call `AI.GENERATE` for entity extraction |
+| Cloud Run Job | `roles/run.invoker` | Cloud Scheduler invokes the job. Granted on the specific job resource, not project-wide |
+| Events DS | `roles/bigquery.dataViewer` | Read `agent_events`; events stay read-only |
+| Graph DS | `roles/bigquery.dataEditor` | Write entity/relationship tables + `_bqaa_materialization_state` |
+
+The deploy script handles every grant. For production
+hardening, split the runtime SA from the scheduler-caller SA;
+the script's structure makes that a small edit.
+
+### General prerequisites
+
 * GCP project with the BigQuery, Cloud Run, Cloud Scheduler, and
-  Cloud Build APIs enabled.
+  Cloud Build APIs enabled (per above).
 * **Events dataset** (`BQAA_EVENTS_DATASET_ID`) already exists
   with a populated `agent_events` table. The BQ AA plugin writes
   to this; if you've never run an agent against BQAA, seed one
@@ -65,6 +130,31 @@ full prose.
   manual install required. If it does (e.g., you ran
   `pip install -e .` from the repo root), the script reuses
   that directly.
+
+## Dataset roles (events vs graph)
+
+Two distinct datasets, two distinct lifecycles. The deploy
+script enforces this at the IAM layer (events READER, graph
+EDITOR) so a misconfigured run can't write to the events
+dataset.
+
+| Dataset | Holds | Lifecycle | IAM for runtime SA |
+|---|---|---|---|
+| **Events** (`BQAA_EVENTS_DATASET_ID`) | `agent_events` table — raw event stream written by the BQ AA plugin. | Owned + written by the agent runtime, never the materialization job. Pre-existing. | `roles/bigquery.dataViewer` only (read) |
+| **Graph** (`BQAA_GRAPH_DATASET_ID`) | Entity tables (`decision_execution`, `candidate`, …), relationship tables (`evaluates_candidate`, …), and the `_bqaa_materialization_state` audit/checkpoint table. | Created by the deploy script's `bq mk` if missing. Owned by the materialization job. | `roles/bigquery.dataEditor` (read + write) |
+
+The events dataset is **read-only** for the periodic job. The
+graph dataset is the only write target. The state table is
+co-located with the graph dataset — that decision means a
+predicate switch (e.g., swapping `--completion-event-type`)
+auto-invalidates the checkpoint because the `state_key` SHA
+changes; see the orchestrator design contract for the full
+treatment.
+
+If you have multiple agent applications writing to one events
+dataset, run one materialization job per application with
+different graph datasets. State-keys won't collide; checkpoints
+stay isolated.
 
 ## Local dry-run
 
@@ -103,6 +193,34 @@ Exit codes mirror the SDK CLI:
 * `1` — expected failure: at least one session failed, or
   binding-validate detected schema drift against live BigQuery.
 * `2` — unexpected internal error (config missing, code bug).
+
+## Recommended schedules
+
+Pick a schedule + window based on how stale you can tolerate
+the graph being. The orchestrator's overlap-windowed re-scan
+catches late-arriving events; pair `overlap-minutes` with the
+ingestion lag you actually see on your `agent_events` stream
+(if your plugin writes are synchronous, 15min is plenty; if
+events trickle in over hours, scale up).
+
+| Latency target | Cron | `--lookback-hours` | `--overlap-minutes` | Notes |
+|---|---|---|---|---|
+| **~1 hour** | `0 * * * *` | `2` | `15` | Tight window + small overlap. Best for low-latency monitoring use cases. Higher BQ cost per day (24 runs). |
+| **~6 hours** | `0 */6 * * *` | `8` | `30` | Default in the deploy script. Good balance for dashboarding / reporting use cases. 4 runs per day. |
+| **Daily** | `0 2 * * *` | `30` | `60` | Catch-up window covers any late-arriving events from the prior day. 1 run per day. Pair with off-peak `02:00` to avoid contending with daytime BQ slots. |
+| **Backfill** | (manual) | depends | depends | For one-shot catch-up: `bqaa-materialize-window --lookback-hours $N` with N covering the gap. Defer to a future `--backfill --from/--to` mode once it ships. |
+
+Rules of thumb:
+
+* `lookback-hours` is an upper bound on history scanned, not
+  the typical scan size. The orchestrator scans
+  `[max(checkpoint - overlap, run_started - lookback), run_started)`,
+  so steady-state runs scan only the new + overlap window.
+* `overlap-minutes` should cover your ingestion's worst-case
+  lag. Conservative is fine — the materializer is idempotent
+  on the session-id boundary.
+* `max-sessions` (optional) caps per-run cost. Useful for the
+  first few runs against a large backlog.
 
 ## Deploy to Cloud Run + Cloud Scheduler
 
@@ -198,6 +316,114 @@ Each entry includes:
 * `compiled_outcomes` — C2 (compiled-extractor) telemetry.
 * `failures` — list of failed sessions with error codes.
 * `ok` — overall success boolean.
+
+### Expected JSON log shape
+
+A successful run looks like this in `jsonPayload`:
+
+```json
+{
+  "severity": "INFO",
+  "message": "materialization complete",
+  "run_id": "2d52338e16db",
+  "state_key": "3bafe7195e806340bce25b565493d24de073518d2a1c299fb668dc4f86499e5c",
+  "window_start": "2026-05-15T17:40:19.542872Z",
+  "window_end": "2026-05-16T04:48:45.518518Z",
+  "checkpoint_read": "2026-05-15T17:55:19.542872Z",
+  "checkpoint_written": "2026-05-15T17:55:19.542872Z",
+  "sessions_discovered": 3,
+  "sessions_materialized": 3,
+  "sessions_failed": 0,
+  "rows_materialized": {
+    "DecisionExecution": 3,
+    "Candidate": 11,
+    "...": "..."
+  },
+  "table_statuses": {
+    "project.graph_ds.decision_execution": {
+      "rows_attempted": 3,
+      "rows_inserted": 3,
+      "cleanup_status": "deleted",
+      "insert_status": "inserted",
+      "idempotent": true
+    }
+  },
+  "compiled_outcomes": {
+    "compiled_unchanged": 0,
+    "compiled_filtered": 0,
+    "fallback_for_event": 0
+  },
+  "failures": [],
+  "ok": true
+}
+```
+
+A failed run swaps `ok: true` for `ok: false` and populates
+`failures[].error_code` with either `empty_extraction` or
+`materialization_failed` — see
+[Failure-mode surface](#failure-mode-surface-post-167) for the
+distinction.
+
+### Cloud Monitoring alerts
+
+Wire a single log-based alert on `jsonPayload.ok=false`. With
+PR #167's classifier, this is the only signal needed —
+extraction failures and insert failures both surface here.
+
+```bash
+# Create a log-based metric that counts failed runs.
+gcloud logging metrics create bqaa_periodic_failed_runs \
+  --project=your-project \
+  --description="Periodic materialization runs that reported ok=false." \
+  --log-filter='resource.type="cloud_run_job"
+                AND resource.labels.job_name="bqaa-periodic-materialization"
+                AND jsonPayload.message="materialization complete"
+                AND jsonPayload.ok=false'
+
+# Then alert on the metric > 0 over a 1h window (any failed run
+# in the last hour fires the alert). The Cloud Monitoring UI is
+# the easier place to set the threshold; gcloud equivalent uses
+# the alpha command's ``--condition-filter`` + ``--if`` flags
+# (the older ``--threshold-value`` / ``--threshold-comparison``
+# pair was removed):
+gcloud alpha monitoring policies create \
+  --project=your-project \
+  --notification-channels=projects/your-project/notificationChannels/CHANNEL_ID \
+  --display-name="BQAA periodic materialization failed" \
+  --condition-display-name="ok=false runs in the last hour" \
+  --condition-filter='metric.type="logging.googleapis.com/user/bqaa_periodic_failed_runs" AND resource.type="cloud_run_job"' \
+  --aggregation='{"alignmentPeriod": "3600s", "perSeriesAligner": "ALIGN_SUM"}' \
+  --if='> 0' \
+  --duration=60s
+```
+
+For drill-down on the failure mode, filter on the error code.
+``--freshness`` is the portable way to limit the time window
+(``date -u -v-1d`` is macOS-only; ``gcloud logging read`` accepts
+``--freshness=1d`` directly on every supported platform):
+
+```bash
+# All AI / extraction failures in the last 24h.
+gcloud logging read \
+  'resource.type="cloud_run_job"
+   AND jsonPayload.failures.error_code="empty_extraction"' \
+  --project=your-project \
+  --freshness=1d \
+  --limit=50
+
+# All schema / write-perm failures in the last 24h.
+gcloud logging read \
+  'resource.type="cloud_run_job"
+   AND jsonPayload.failures.error_code="materialization_failed"' \
+  --project=your-project \
+  --freshness=1d \
+  --limit=50
+```
+
+Two distinct error codes → two distinct on-call runbooks. The
+`error_detail` field names the specific failing tables for
+`materialization_failed`, so the on-call doesn't have to
+correlate with separate logs to find what broke.
 
 **The state table.** Co-located with the graph dataset (NOT
 the events dataset — the events dataset stays read-only per
@@ -427,8 +653,50 @@ that look identical from `rows_materialized` alone:
 In both cases: `ok=false`, CLI exit 1, the cron run shows up
 as a failed execution in Cloud Monitoring. Alert directly on
 `jsonPayload.ok=false` plus `jsonPayload.failures[].error_code`
-for the failure-mode breakdown — no second-line
-`rows_materialized == {}` check needed.
+for the failure-mode breakdown — no second-line check needed.
+
+## Cleanup and redeploy
+
+### Redeploy (no resource churn)
+
+Re-running the deploy script with the same flags is fully
+idempotent — same service account (`bqaa-periodic-sa`), same
+job name, same Scheduler trigger name, same graph dataset. The
+existing IAM bindings are detected and skipped (`already
+granted (READER)` etc.); only the container image gets rebuilt
+to reflect any source changes. Run after any code change to
+`run_job.py` or the demo artifacts.
+
+### Tear down a deployment
+
+Three resources to remove. Run in this order so the Scheduler
+doesn't try to invoke a deleted job between the two deletes:
+
+```bash
+# 1. Stop the cron from firing.
+gcloud scheduler jobs delete bqaa-periodic-materialization-cron \
+  --project=your-project --location=us-central1 --quiet
+
+# 2. Delete the Cloud Run Job.
+gcloud run jobs delete bqaa-periodic-materialization \
+  --project=your-project --region=us-central1 --quiet
+
+# 3. (Optional) Drop the graph dataset — destroys ALL
+# materialized entity/relationship tables AND the state-table
+# audit log. Skip if you want to preserve history.
+bq --project_id=your-project rm -r -f your_graph_dataset
+```
+
+The events dataset is never modified by the deploy and stays
+untouched. The runtime service account (`bqaa-periodic-sa`)
+persists across teardowns — drop it manually if you're
+permanently retiring the deployment:
+
+```bash
+gcloud iam service-accounts delete \
+  bqaa-periodic-sa@your-project.iam.gserviceaccount.com \
+  --project=your-project --quiet
+```
 
 ## Not in scope here
 
