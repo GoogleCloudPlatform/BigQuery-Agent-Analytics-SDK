@@ -165,7 +165,7 @@ def get_client():
 # Scope configuration
 # ---------------------------------------------------------------------------
 
-_AGENT_CONFIG = None
+_AGENT_CONFIG_CACHE: dict[str, dict] = {}
 
 
 def _load_agent_config(config_path=None):
@@ -174,18 +174,23 @@ def _load_agent_config(config_path=None):
   When --config is provided, loads from that path.  Otherwise checks
   for eval/data/agent_context.json relative to the repo root or script dir.
   Returns None if no config is found (scope-aware eval is disabled).
+
+  Raises:
+    FileNotFoundError: If an explicit config_path does not exist.
   """
-  global _AGENT_CONFIG
-  if _AGENT_CONFIG is not None:
-    return _AGENT_CONFIG
+  cache_key = config_path or "_AUTO_"
+  if cache_key in _AGENT_CONFIG_CACHE:
+    return _AGENT_CONFIG_CACHE[cache_key]
 
   if config_path:
     if not os.path.isfile(config_path):
-      logger.error("Config file not found: %s", config_path)
-      sys.exit(1)
+      raise FileNotFoundError(
+          f"Config file not found: {config_path}"
+      )
     with open(config_path) as f:
-      _AGENT_CONFIG = json.load(f)
-    return _AGENT_CONFIG
+      result = json.load(f)
+    _AGENT_CONFIG_CACHE[cache_key] = result
+    return result
 
   # Auto-discover agent_context.json from known locations
   for base in [_repo_root, _script_dir]:
@@ -193,8 +198,9 @@ def _load_agent_config(config_path=None):
     if os.path.isfile(candidate):
       logger.info("Auto-discovered agent context: %s", candidate)
       with open(candidate) as f:
-        _AGENT_CONFIG = json.load(f)
-      return _AGENT_CONFIG
+        result = json.load(f)
+      _AGENT_CONFIG_CACHE[cache_key] = result
+      return result
 
   return None
 
@@ -416,7 +422,7 @@ def get_a2a_response(trace) -> tuple:
           logger.warning(
               "Failed to parse A2A payload for session, skipping"
           )
-          return None, None
+          return "(no response)", span.agent or "remote_agent"
   return None, None
 
 
@@ -446,6 +452,8 @@ def resolve_trace_responses(traces):
       if a2a_resp:
         response = a2a_resp
         answered_by = a2a_agent
+        # Mark as A2A even for "(no response)" — the interaction happened,
+        # so the session should be attributed to the remote agent in stats.
         is_a2a = True
         remote_lookups += 1
 
@@ -645,15 +653,21 @@ def run_eval(args):
   # Load session IDs from file if provided
   session_ids = None
   if args.session_ids_file:
-    import json as _json
     with open(args.session_ids_file) as _f:
-      _data = _json.load(_f)
+      _data = json.load(_f)
     # Accepts either a list of objects with "session_id" keys
-    # (run_eval.py output) or a plain list of strings.
+    # (e.g. output of examples/agent_improvement_cycle/eval/run_eval.py)
+    # or a plain list of strings.
     if _data and isinstance(_data[0], dict):
       session_ids = [r["session_id"] for r in _data if r.get("session_id")]
     else:
       session_ids = [s for s in _data if s]
+    if not session_ids:
+      logger.error(
+          "No session IDs found in %s — file may be empty or missing "
+          "'session_id' fields.", args.session_ids_file
+      )
+      sys.exit(1)
     logger.info("Filtering to %d session IDs from %s", len(session_ids), args.session_ids_file)
 
   t0 = time.time()
@@ -684,7 +698,7 @@ def run_eval(args):
   result["report"].details["time_period"] = args.time_period or "all"
   result["report"].details["limit"] = args.limit
   result["report"].details["persist"] = args.persist
-  result["report"].details["samples"] = args.samples or "default (10/5/3)"
+  result["report"].details["samples"] = args.samples or None
   _print_eval_results(result["report"], result["resolved_map"], samples=args.samples,
                       unhelpful_threshold=args.threshold)
 
@@ -1368,7 +1382,8 @@ Examples:
            "When provided, adds a 'declined' category for correctly "
            "refused out-of-scope questions. Expected format: "
            '{"scope_decisions": [{"topic": "...", "decision": "out_of_scope", '
-           '"reason": "..."}]}',
+           '"reason": "..."}]}. '
+           "Only 'topic' and 'decision' are used; 'reason' is documentation-only.",
   )
   parser.add_argument(
       "--session-ids-file",

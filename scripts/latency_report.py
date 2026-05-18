@@ -41,27 +41,53 @@ warnings.filterwarnings("ignore")
 
 import argparse
 import json
+import logging
 import os
-import re
 import sys
+from collections import Counter
 from datetime import datetime
 
-from bigquery_agent_analytics import Client, TraceFilter
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_repo_root = os.path.join(_script_dir, "..")
+
+logger = logging.getLogger("latency_report")
 
 
-def parse_period(period_str: str):
-    """Parse '1h', '30m', '2d' into timedelta."""
-    from datetime import timedelta
-    match = re.match(r"^(\d+)([mhd])$", period_str)
-    if not match:
-        raise ValueError(f"Invalid period: {period_str} (use e.g. 1h, 30m, 2d)")
-    val, unit = int(match.group(1)), match.group(2)
-    if unit == "m":
-        return timedelta(minutes=val)
-    elif unit == "h":
-        return timedelta(hours=val)
-    elif unit == "d":
-        return timedelta(days=val)
+def _configure_logging():
+  """Configure logging format. Called once from main()."""
+  log_level = os.environ.get("LOGLEVEL", "INFO").upper()
+  logging.basicConfig(
+      level=getattr(logging, log_level, logging.INFO),
+      format="%(asctime)s [%(levelname)s] %(message)s",
+      datefmt="%H:%M:%S",
+  )
+  for _noisy in (
+      "google.genai", "google_genai",
+      "google.adk", "google_adk",
+      "google.auth", "google_auth",
+      "httpx", "httpcore",
+  ):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
+
+
+def _load_dotenv(env_file=None):
+  """Load .env file if present (optional convenience)."""
+  try:
+    from dotenv import load_dotenv
+
+    if env_file:
+      load_dotenv(env_file, override=True)
+      return
+
+    for candidate in [
+        os.path.join(_script_dir, ".env"),
+        os.path.join(_repo_root, ".env"),
+    ]:
+      if os.path.isfile(candidate):
+        load_dotenv(candidate, override=False)
+        break
+  except ImportError:
+    pass
 
 
 def _positive_int(value):
@@ -138,8 +164,17 @@ def _extract_text(span):
     return None
 
 
+_A2A_NOISE_EVENTS = frozenset({
+    'USER_MESSAGE_RECEIVED',
+    'INVOCATION_STARTING',
+    'INVOCATION_COMPLETED',
+})
+
+
 def stitch_a2a_traces(traces, client):
     """Fetch and inline A2A remote agent spans into parent traces.
+
+    Mutates *traces* in place.
 
     When the supervisor calls a remote agent via A2A, only
     AGENT_STARTING/COMPLETED are logged in the parent session.
@@ -165,14 +200,11 @@ def stitch_a2a_traces(traces, client):
             try:
                 remote_trace = client.get_session_trace(remote_sid)
             except Exception as e:
-                print(f"  Could not fetch {agent_name} A2A session: {e}")
+                logger.warning("Could not fetch %s A2A session: %s", agent_name, e)
                 continue
 
-            # Skip wrapper events that add noise
-            skip = {'USER_MESSAGE_RECEIVED', 'INVOCATION_STARTING',
-                    'INVOCATION_COMPLETED'}
             interesting = [s for s in remote_trace.spans
-                           if s.event_type not in skip]
+                           if s.event_type not in _A2A_NOISE_EVENTS]
             if not interesting:
                 continue
 
@@ -185,9 +217,10 @@ def stitch_a2a_traces(traces, client):
                     rs.parent_span_id = a2a_span_id
 
             trace.spans.extend(interesting)
-            print(f"  Stitched {agent_name}: "
-                  f"{len(interesting)} spans from A2A session "
-                  f"{remote_sid[:12]}...")
+            logger.info(
+                "Stitched %s: %d spans from A2A session %s...",
+                agent_name, len(interesting), remote_sid[:12],
+            )
 
 
 def render_timing_tree(trace, verbose=False):
@@ -303,7 +336,6 @@ def render_waterfall(trace):
             labels[i] += " [A2A]"
 
     # Number duplicate labels so they're distinguishable
-    from collections import Counter
     counts = Counter(labels)
     seen = {}
     for i, lbl in enumerate(labels):
@@ -379,9 +411,6 @@ def render_summary_table(traces):
             lines.append(f"    {agent:<30} {format_ms(a):>8}  (n={len(lats)})")
 
     return "\n".join(lines)
-
-
-_script_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 def _build_json_output(traces):
@@ -483,6 +512,7 @@ examples:
   %(prog)s --app-name my_agent      Filter by root agent name
   %(prog)s --verbose                Show questions and responses
   %(prog)s --no-stitch              Skip A2A session stitching
+  %(prog)s --env path/to/.env       Load environment from a specific .env file
       """,
     )
     parser.add_argument(
@@ -524,9 +554,21 @@ examples:
     )
     parser.add_argument(
         "--output-json", type=str, default=None, metavar="PATH",
-        help="Write structured latency results as JSON to the given file path",
+        help="Write structured latency results as JSON to the given file path. "
+             "Use '-' to write JSON to stdout (human output goes to stderr)",
+    )
+    parser.add_argument(
+        "--env", type=str, default=None, metavar="PATH",
+        help="Path to .env file to load (overrides default .env discovery). "
+             "Use this to point at a different agent's environment, e.g. "
+             "--env examples/agent_improvement_cycle/.env",
     )
     args = parser.parse_args()
+
+    _configure_logging()
+    _load_dotenv(env_file=args.env)
+
+    from bigquery_agent_analytics import Client, TraceFilter
 
     project_id = os.getenv("PROJECT_ID")
     dataset_id = os.getenv("DATASET_ID")
@@ -535,9 +577,11 @@ examples:
 
     for var in ("PROJECT_ID", "DATASET_ID", "TABLE_ID", "DATASET_LOCATION"):
         if not os.getenv(var):
-            print(f"ERROR: Required environment variable {var} is not set.")
-            print("Set it in your shell or create a .env file with these variables,")
-            print("or pass --env path/to/.env. See scripts/README.md.")
+            logger.error(
+                "Required environment variable %s is not set. "
+                "Set it in your shell, create a .env file, or pass --env.",
+                var,
+            )
             sys.exit(1)
 
     client = Client(
@@ -559,59 +603,68 @@ examples:
         trace_filter.root_agent_name = args.app_name
     trace_filter.limit = args.limit
 
-    print(f"Fetching traces from {project_id}.{dataset_id}.{table_id}...")
+    # When --output-json -, send human-readable output to stderr
+    # so that stdout contains only machine-readable JSON.
+    json_to_stdout = args.output_json == "-"
+    out = sys.stderr if json_to_stdout else sys.stdout
+
+    logger.info(
+        "Fetching traces from %s.%s.%s...",
+        project_id, dataset_id, table_id,
+    )
     traces = client.list_traces(filter_criteria=trace_filter)
 
     if not traces:
-        print("No traces found.")
+        logger.info("No traces found.")
         sys.exit(0)
 
-    print(f"Found {len(traces)} trace(s)")
+    logger.info("Found %d trace(s)", len(traces))
     if not args.no_stitch:
         stitch_a2a_traces(traces, client)
-    print()
+    print(file=out)
 
     for trace in traces:
         # Custom timing tree
-        print(render_timing_tree(trace, verbose=args.verbose))
+        print(render_timing_tree(trace, verbose=args.verbose), file=out)
 
         # Waterfall
         if not args.no_waterfall:
-            print(render_waterfall(trace))
+            print(render_waterfall(trace), file=out)
 
         # SDK's built-in render (opt-in, truncates at 120 chars)
         if args.sdk_tree:
-            print()
-            print("SDK Trace Tree:")
-            print("─" * 70)
+            print(file=out)
+            print("SDK Trace Tree:", file=out)
+            print("─" * 70, file=out)
             trace.render(color=True)
 
-        print()
-        print("═" * 70)
-        print()
+        print(file=out)
+        print("═" * 70, file=out)
+        print(file=out)
 
     # Summary across traces
-    print(render_summary_table(traces))
+    print(render_summary_table(traces), file=out)
 
     # Markdown report
     if args.report:
         report_path = _write_md_report(
             traces, project_id, dataset_id, table_id, dataset_location
         )
-        print(f"\n  Markdown report: {report_path}")
+        print(f"\n  Markdown report: {report_path}", file=out)
 
     # JSON output
     if args.output_json:
         output = _build_json_output(traces)
-        if args.output_json == "-":
+        if json_to_stdout:
             json.dump(output, sys.stdout, indent=2, default=str)
             sys.stdout.write("\n")
+            print("  JSON report: (stdout)", file=sys.stderr)
         else:
             json_path = os.path.abspath(args.output_json)
             os.makedirs(os.path.dirname(json_path), exist_ok=True)
             with open(json_path, "w") as f:
                 json.dump(output, f, indent=2, default=str)
-            print(f"\n  JSON report: {json_path}")
+            print(f"\n  JSON report: {json_path}", file=out)
 
 
 if __name__ == "__main__":
