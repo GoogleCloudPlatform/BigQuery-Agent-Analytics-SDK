@@ -4,14 +4,17 @@ Run `bqaa-materialize-window` on a cron, against your own
 BigQuery project, with one local command and one deploy command.
 
 The migration v5 demo (`examples/migration_v5/`) ships the
-ontology, binding, and entity-table DDL — MAKO is the
-canonical reference example, but the pipeline is
-ontology-agnostic (see `ontology_artifacts.py`). This
-directory wraps the bound artifacts in a hands-off scheduled
-deployment: a Cloud Run Job that fires every
-N hours via Cloud Scheduler, materializes the last N hours of
-events into your graph dataset, and emits a structured JSON
-report to Cloud Logging.
+ontology, binding, and entity-table DDL. The artifact
+pipeline that produced them (`ontology_artifacts.py`) is
+ontology-agnostic, but **this deploy bundles the checked-in
+MAKO snapshots** — running against a different ontology means
+regenerating those snapshots for your config first and
+re-pointing the deploy at the new files. This directory wraps
+the bundled MAKO artifacts in a hands-off scheduled
+deployment: a Cloud Run Job that fires every N hours via
+Cloud Scheduler, materializes the last N hours of events into
+your graph dataset, and emits a structured JSON report to
+Cloud Logging.
 
 ## Customer playbook (skim this first)
 

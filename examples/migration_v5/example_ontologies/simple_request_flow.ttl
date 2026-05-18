@@ -37,23 +37,38 @@
 
 # =============================================================================
 # Entities
+#
+# Each entity declares ``owl:hasKey`` so the pipeline exercises the real-key
+# path (not just the FILL_IN synthesis path MAKO uses). The PR review found
+# the prior version of this fixture didn't catch a bug where ``make_binding``
+# hard-coded ``id`` as the bound PK property; declaring ``owl:hasKey`` here
+# makes the regression test in ``tests/test_migration_v5_ontology_artifacts.py``
+# meaningful.
 # =============================================================================
 
 rf:Request a owl:Class ;
     rdfs:label "Request" ;
-    rdfs:comment "An incoming ask. The entry point of the flow." .
+    rdfs:comment "An incoming ask. The entry point of the flow." ;
+    owl:hasKey ( rf:requestId ) .
 
 rf:Action a owl:Class ;
     rdfs:label "Action" ;
-    rdfs:comment "The work performed in response to a Request." .
+    rdfs:comment "The work performed in response to a Request." ;
+    owl:hasKey ( rf:actionId ) .
 
 rf:Outcome a owl:Class ;
     rdfs:label "Outcome" ;
-    rdfs:comment "The result of an Action. Terminal node of the flow." .
+    rdfs:comment "The result of an Action. Terminal node of the flow." ;
+    owl:hasKey ( rf:outcomeId ) .
 
 # =============================================================================
 # Data properties
 # =============================================================================
+
+rf:requestId a owl:DatatypeProperty ;
+    rdfs:label "request id" ;
+    rdfs:domain rf:Request ;
+    rdfs:range xsd:string .
 
 rf:requestText a owl:DatatypeProperty ;
     rdfs:label "request text" ;
@@ -65,6 +80,11 @@ rf:requestedAt a owl:DatatypeProperty ;
     rdfs:domain rf:Request ;
     rdfs:range xsd:dateTime .
 
+rf:actionId a owl:DatatypeProperty ;
+    rdfs:label "action id" ;
+    rdfs:domain rf:Action ;
+    rdfs:range xsd:string .
+
 rf:actionType a owl:DatatypeProperty ;
     rdfs:label "action type" ;
     rdfs:domain rf:Action ;
@@ -74,6 +94,11 @@ rf:executedAt a owl:DatatypeProperty ;
     rdfs:label "executed at" ;
     rdfs:domain rf:Action ;
     rdfs:range xsd:dateTime .
+
+rf:outcomeId a owl:DatatypeProperty ;
+    rdfs:label "outcome id" ;
+    rdfs:domain rf:Outcome ;
+    rdfs:range xsd:string .
 
 rf:outcomeStatus a owl:DatatypeProperty ;
     rdfs:label "outcome status" ;

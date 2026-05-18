@@ -40,24 +40,24 @@ import sys
 import pytest
 import yaml
 
-# Examples live outside ``src/``. Add the repo root so the
-# imports below resolve.
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-  sys.path.insert(0, str(_REPO_ROOT))
-
 # ``mako_artifacts`` and ``ontology_artifacts`` are sibling
-# modules inside ``examples/migration_v5/``. They import each
-# other as top-level (the notebook + run_agent.py do the
-# same), so add that directory to ``sys.path`` too.
+# modules inside ``examples/migration_v5/`` that import each
+# other top-level (the notebook + run_agent.py do the same).
+# This test uses the same sibling-style import surface those
+# callers do — only ``examples/migration_v5/`` needs to be on
+# sys.path. Don't mix package-style (``examples.migration_v5.X``)
+# imports here: that path requires both the repo root AND the
+# v5 dir on sys.path, and silently masks regressions in the
+# notebook's import contract (see PR #172 review).
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _V5_DIR = _REPO_ROOT / "examples" / "migration_v5"
 if str(_V5_DIR) not in sys.path:
   sys.path.insert(0, str(_V5_DIR))
 
 ontology_artifacts = importlib.import_module("ontology_artifacts")
-mako_artifacts = importlib.import_module("examples.migration_v5.mako_artifacts")
+mako_artifacts = importlib.import_module("mako_artifacts")
 simple_config_mod = importlib.import_module(
-    "examples.migration_v5.example_ontologies.simple_request_flow_config"
+    "example_ontologies.simple_request_flow_config"
 )
 
 from bigquery_ontology import load_binding_from_string
@@ -160,7 +160,12 @@ def test_simple_request_flow_pk_columns_are_per_entity(tmp_path):
   ``{entity_short}_id`` (not bare ``id``) so edge tables get
   clean ``{src}_id, {dst}_id`` shapes without column-name
   collisions. Cover the simple ontology to make sure the
-  convention isn't accidentally MAKO-specific."""
+  convention isn't accidentally MAKO-specific.
+
+  PK property names are entity-declared (``requestId`` etc.
+  via ``owl:hasKey``) — they're the FIRST entry in each
+  binding entity's property list (``make_binding`` inserts the
+  PK at position 0)."""
   tmp_config = dataclasses.replace(
       simple_config_mod.SIMPLE_REQUEST_FLOW_CONFIG, snapshot_dir=tmp_path
   )
@@ -171,10 +176,7 @@ def test_simple_request_flow_pk_columns_are_per_entity(tmp_path):
   parsed = yaml.safe_load(binding_yaml)
 
   pk_column_by_entity = {
-      ent["name"]: next(
-          p["column"] for p in ent["properties"] if p["name"] == "id"
-      )
-      for ent in parsed["entities"]
+      ent["name"]: ent["properties"][0]["column"] for ent in parsed["entities"]
   }
   assert pk_column_by_entity == {
       "Action": "action_id",
@@ -197,6 +199,72 @@ def test_simple_request_flow_property_graph_sql_uses_configured_graph_name(
   pg_sql = (tmp_path / "property_graph.sql").read_text(encoding="utf-8")
   assert "simple_request_flow_graph" in pg_sql
   assert "mako_demo_graph" not in pg_sql
+
+
+def test_simple_request_flow_binds_declared_owl_haskey_property(tmp_path):
+  """Regression for PR #172 review (P1): the generic pipeline
+  must bind the entity's declared primary-key property, not a
+  hard-coded ``id``.
+
+  The Simple Request Flow TTL declares
+  ``owl:hasKey ( rf:requestId )`` (and similar for Action /
+  Outcome), so each entity's PK property name is
+  ``requestId`` / ``actionId`` / ``outcomeId`` — NOT the
+  synthesized ``id`` MAKO's FILL_IN path produces. Before the
+  fix, ``make_binding`` always emitted
+  ``{name: id, column: request_id}``, which made
+  ``load_binding_from_string`` raise ``Entity binding
+  'Request': property 'id' is not declared on this element``.
+  """
+  tmp_config = dataclasses.replace(
+      simple_config_mod.SIMPLE_REQUEST_FLOW_CONFIG, snapshot_dir=tmp_path
+  )
+  ontology_artifacts.regenerate_snapshots(
+      tmp_config, project="smoke-proj", dataset="smoke_ds"
+  )
+  binding_yaml = (tmp_path / "binding.yaml").read_text(encoding="utf-8")
+  parsed = yaml.safe_load(binding_yaml)
+
+  props_by_entity = {
+      ent["name"]: {p["name"] for p in ent["properties"]}
+      for ent in parsed["entities"]
+  }
+  # Declared PK property names show up in the binding.
+  assert "requestId" in props_by_entity["Request"]
+  assert "actionId" in props_by_entity["Action"]
+  assert "outcomeId" in props_by_entity["Outcome"]
+  # And the synthesized ``id`` is NOT injected when a real
+  # ``owl:hasKey`` is present.
+  for entity_name in ("Request", "Action", "Outcome"):
+    assert "id" not in props_by_entity[entity_name], (
+        f"Entity {entity_name} should not have a synthesized 'id' "
+        "property when the TTL declares owl:hasKey."
+    )
+
+
+def test_simple_request_flow_property_graph_resolves_owl_haskey_pk_column(
+    tmp_path,
+):
+  """The property-graph SQL generator must look up each
+  entity's PK property by its declared name, not by a
+  hard-coded ``id``. Verifies the second half of the PR #172
+  P1 fix — ``KEY (...)`` and ``REFERENCES ... (...)`` resolve
+  to the right column for an ``owl:hasKey`` ontology."""
+  tmp_config = dataclasses.replace(
+      simple_config_mod.SIMPLE_REQUEST_FLOW_CONFIG, snapshot_dir=tmp_path
+  )
+  ontology_artifacts.regenerate_snapshots(
+      tmp_config, project="smoke-proj", dataset="smoke_ds"
+  )
+  pg_sql = (tmp_path / "property_graph.sql").read_text(encoding="utf-8")
+  # Per-entity PK columns appear as node-table KEYs.
+  assert "KEY (request_id)" in pg_sql
+  assert "KEY (action_id)" in pg_sql
+  assert "KEY (outcome_id)" in pg_sql
+  # Edge endpoints reference the per-entity PK column.
+  assert "REFERENCES request (request_id)" in pg_sql
+  assert "REFERENCES action (action_id)" in pg_sql
+  assert "REFERENCES outcome (outcome_id)" in pg_sql
 
 
 def test_simple_request_flow_uses_its_own_annotation_prefix():

@@ -337,14 +337,23 @@ def make_binding(
   for entity in ontology.entities:
     if entity.name not in scope:
       continue
+    # The PK property name comes from the ontology — either the
+    # synthesized ``id`` the FILL_IN resolver added, or the real
+    # property declared by ``owl:hasKey`` in the TTL. Hard-coding
+    # ``"id"`` here broke TTLs that declared their own keys (the
+    # binding ended up declaring an ``id`` property the entity
+    # didn't have). Single-column PK is assumed; composite PKs
+    # would need extra bind logic + property-graph KEY handling
+    # and are out of scope for the current demo.
+    pk_property_name = _primary_key_property_name(entity)
     table_name = _entity_table_name(entity.name)
     pk_column = f"{_entity_id_column(entity.name)}_id"
-    props = [{"name": "id", "column": pk_column}]
-    # Append every ontology-declared property except ``id``
-    # (PK, already added). The binding validator requires
-    # every non-derived ontology property to have a binding.
+    props = [{"name": pk_property_name, "column": pk_column}]
+    # Append every ontology-declared property except the PK
+    # (already added). The binding validator requires every
+    # non-derived ontology property to have a binding.
     for prop in entity.properties:
-      if prop.name == "id":
+      if prop.name == pk_property_name:
         continue
       props.append({"name": prop.name, "column": _to_snake_case(prop.name)})
     entities_block.append(
@@ -507,19 +516,26 @@ def make_property_graph_sql(
   dataset = binding.target.dataset
   qualified_graph = f"{project}.{dataset}.{graph_name}"
 
-  # The PK column for each entity is the ``column`` of the
-  # property whose ``name`` is ``id`` (set by ``make_binding``
-  # to ``{entity_short}_id``). Both the ``KEY (...)`` of the
-  # node table and the ``REFERENCES <alias> (...)`` of every
-  # edge endpoint must use that column name; hard-coding
-  # ``id`` trips ``Unrecognized name: id`` because the
-  # underlying table column has the entity-specific name.
+  # The PK column for each entity is set by ``make_binding`` to
+  # ``{entity_short}_id``; the bound *property* name is whatever
+  # the ontology's primary key declares (synthesized ``id`` for
+  # the FILL_IN path, or the real property declared by
+  # ``owl:hasKey`` otherwise). Both the ``KEY (...)`` of the node
+  # table and the ``REFERENCES <alias> (...)`` of every edge
+  # endpoint must use the COLUMN name, so we look the property
+  # up by its ontology-derived name first, then read its column.
+  pk_name_by_entity = {
+      e.name: _primary_key_property_name(e) for e in ontology.entities
+  }
   pk_column_by_entity: dict[str, str] = {}
   node_tables: list[str] = []
   for ebind in binding.entities:
     qualified_source = ebind.source
     short_name = _table_ref_short(qualified_source)
-    pk_col = next(p.column for p in ebind.properties if p.name == "id")
+    pk_property_name = pk_name_by_entity[ebind.name]
+    pk_col = next(
+        p.column for p in ebind.properties if p.name == pk_property_name
+    )
     pk_column_by_entity[ebind.name] = pk_col
     cols = ", ".join(p.column for p in ebind.properties)
     node_tables.append(
@@ -630,6 +646,32 @@ def _binding_yaml(binding: Binding) -> str:
   """
   payload = binding.model_dump(by_alias=True, exclude_none=True, mode="json")
   return yaml.safe_dump(payload, sort_keys=False)
+
+
+def _primary_key_property_name(entity: Any) -> str:
+  """Return the entity's primary-key property name.
+
+  After the normalization passes have run, every entity has
+  ``keys.primary`` populated — either the synthesized ``id``
+  the FILL_IN resolver added, or the real property the TTL
+  declared via ``owl:hasKey``. This helper centralizes the
+  single-column-PK assumption: the binding generator and the
+  property-graph SQL generator both need the same name.
+
+  Raises ``ValueError`` if the entity has no primary key (a
+  malformed-input guard; the normalization passes should
+  prevent this).
+  """
+  keys = getattr(entity, "keys", None)
+  primary = getattr(keys, "primary", None) if keys is not None else None
+  if not primary:
+    raise ValueError(
+        f"Entity {entity.name!r} has no primary key. The "
+        "ontology-artifact pipeline assumes every entity declares "
+        "one (synthesized via FILL_IN resolution or declared via "
+        "owl:hasKey)."
+    )
+  return primary[0]
 
 
 def _entity_table_name(entity_name: str) -> str:
