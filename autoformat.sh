@@ -21,9 +21,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> Running isort (import sorting)..."
-isort "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" "${REPO_ROOT}/examples/"
+isort "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" "${REPO_ROOT}/examples/" "${REPO_ROOT}/scripts/"
 
 echo "==> Running pyink (code formatting)..."
-pyink --config "${REPO_ROOT}/pyproject.toml" "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" "${REPO_ROOT}/examples/"
+pyink --config "${REPO_ROOT}/pyproject.toml" "${REPO_ROOT}/src/" "${REPO_ROOT}/tests/" "${REPO_ROOT}/examples/" "${REPO_ROOT}/scripts/"
 
 echo "==> Done. All Python files formatted."

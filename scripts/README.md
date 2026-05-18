@@ -193,6 +193,7 @@ Or run the Python script directly:
 
 ```bash
 python scripts/latency_report.py --limit 5 --time-period 1h
+python scripts/latency_report.py --env path/to/.env --limit 5
 ```
 
 ### Output

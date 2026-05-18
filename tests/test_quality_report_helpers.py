@@ -573,6 +573,26 @@ class TestLoadAgentConfig:
     finally:
       os.unlink(path)
 
+  def test_cache_isolates_paths(self):
+    import json as _json
+
+    paths = []
+    for content in [{"a": 1}, {"b": 2}]:
+      with tempfile.NamedTemporaryFile(
+          mode="w", suffix=".json", delete=False
+      ) as f:
+        _json.dump(content, f)
+        paths.append(f.name)
+    try:
+      c1 = _load_agent_config(paths[0])
+      c2 = _load_agent_config(paths[1])
+      assert c1 != c2
+      assert c1 == {"a": 1}
+      assert c2 == {"b": 2}
+    finally:
+      for p in paths:
+        os.unlink(p)
+
   def test_auto_discover_returns_none(self):
     # With no config file in known locations, should return None
     result = _load_agent_config(None)
