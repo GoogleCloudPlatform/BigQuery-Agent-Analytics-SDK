@@ -104,25 +104,29 @@ These filters can be combined (e.g. `--app-name my_agent --session-ids-file ids.
 The evaluation uses two categorical metrics:
 
 - **response_usefulness** - Whether the agent's response provides a genuinely
-  useful answer. Categories: `meaningful`, `unhelpful`, `partial`.
+  useful answer. Categories: `meaningful`, `declined`, `unhelpful`, `partial`.
 
 - **task_grounding** - Whether the response is grounded in tool-retrieved data
   or fabricated. Categories: `grounded`, `ungrounded`, `no_tool_needed`.
 
+The **`declined`** category is always available — the LLM judge can classify
+polite refusals of out-of-scope questions as correct behavior rather than
+marking them as `unhelpful`.
+
 ### Scope-Aware Evaluation (`--config`)
 
-By default, the script uses three categories for response usefulness:
-`meaningful`, `unhelpful`, and `partial`. When you provide a config file
-with `--config`, the script adds a fourth category — **`declined`** — for
-questions the agent correctly refuses because they're out of scope.
+For more accurate scope evaluation, provide a config file that tells the
+LLM judge exactly which topics your agent intentionally does not handle:
 
 ```bash
 ./scripts/quality_report.sh --config agent_context.json --report
 ```
 
-Create a JSON config file with `scope_decisions` that define which topics
-your agent intentionally does not handle. You don't need to commit this
-file — it's specific to your agent's deployment:
+The script also auto-discovers `eval/data/agent_context.json` relative to
+the repo root or script directory, so `--config` is only needed to point
+at a non-default location.
+
+Create a JSON config file with `scope_decisions`:
 
 ```json
 {
@@ -146,14 +150,11 @@ file — it's specific to your agent's deployment:
 }
 ```
 
-The LLM judge is told which topics are out of scope, so it can
-correctly classify polite refusals as `declined` (correct behavior)
+Without a config, the LLM judge can still classify obvious declines as
+`declined`, but it won't know which specific topics are out of scope. With
+the config, the judge is told exactly which topics are out of scope, so it
+can correctly classify polite refusals as `declined` (correct behavior)
 rather than `unhelpful` (a bug).
-
-Without `--config`, a question like *"What are the salary bands?"* that
-the agent correctly refuses would be scored as `unhelpful`. With the
-config, the same response is scored as `declined` — the agent did the
-right thing.
 
 ### A2A Support
 

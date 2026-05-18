@@ -30,10 +30,26 @@ from quality_report import _build_agent_stats  # noqa: E402
 from quality_report import _extract_a2a_text
 from quality_report import _group_by_category
 from quality_report import _is_single_word_routing
+from quality_report import get_a2a_response
+from quality_report import get_user_input
 
 # ---------------------------------------------------------------------------
 # Lightweight stubs for report objects
 # ---------------------------------------------------------------------------
+
+
+class _FakeSpan:
+
+  def __init__(self, event_type, content, agent=None):
+    self.event_type = event_type
+    self.content = content
+    self.agent = agent
+
+
+class _FakeTrace:
+
+  def __init__(self, spans):
+    self.spans = spans
 
 
 class _FakeMetric:
@@ -293,3 +309,134 @@ class TestGroupByCategory:
         "meaningful": [],
         "declined": [],
     }
+
+
+# ================================================================== #
+# get_user_input                                                       #
+# ================================================================== #
+
+
+class TestGetUserInput:
+
+  def test_single_message(self):
+    trace = _FakeTrace([
+        _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "Hello"}),
+    ])
+    assert get_user_input(trace) == "Hello"
+
+  def test_multi_turn_returns_last(self):
+    trace = _FakeTrace([
+        _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "First question"}),
+        _FakeSpan("LLM_RESPONSE", {"response": "Answer 1"}),
+        _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "Follow-up question"}),
+    ])
+    assert get_user_input(trace) == "Follow-up question"
+
+  def test_text_summary_preferred(self):
+    trace = _FakeTrace([
+        _FakeSpan("USER_MESSAGE_RECEIVED", {
+            "text_summary": "Summary", "text": "Full text"
+        }),
+    ])
+    assert get_user_input(trace) == "Summary"
+
+  def test_string_content(self):
+    trace = _FakeTrace([
+        _FakeSpan("USER_MESSAGE_RECEIVED", "plain string"),
+    ])
+    assert get_user_input(trace) == "plain string"
+
+  def test_no_user_messages(self):
+    trace = _FakeTrace([
+        _FakeSpan("LLM_RESPONSE", {"response": "something"}),
+    ])
+    assert get_user_input(trace) == ""
+
+  def test_empty_spans(self):
+    trace = _FakeTrace([])
+    assert get_user_input(trace) == ""
+
+  def test_none_content_skipped(self):
+    trace = _FakeTrace([
+        _FakeSpan("USER_MESSAGE_RECEIVED", None),
+    ])
+    assert get_user_input(trace) == ""
+
+
+# ================================================================== #
+# get_a2a_response                                                     #
+# ================================================================== #
+
+
+class TestGetA2AResponse:
+
+  def test_dict_content(self):
+    payload = {
+        "artifacts": [{"parts": [{"kind": "text", "text": "A2A answer"}]}],
+        "metadata": {"adk_app_name": "remote"},
+    }
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", payload, agent="fallback_agent"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text == "A2A answer"
+    assert agent == "remote"
+
+  def test_null_content_returns_no_response(self):
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", None, agent="remote_agent"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text == "(no response)"
+    assert agent == "remote_agent"
+
+  def test_empty_dict_returns_no_response(self):
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", {}, agent="remote_agent"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text == "(no response)"
+    assert agent == "remote_agent"
+
+  def test_returns_last_a2a_interaction(self):
+    payload1 = {
+        "artifacts": [{"parts": [{"kind": "text", "text": "First"}]}],
+    }
+    payload2 = {
+        "artifacts": [{"parts": [{"kind": "text", "text": "Second"}]}],
+    }
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", payload1, agent="agent1"),
+        _FakeSpan("A2A_INTERACTION", payload2, agent="agent2"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text == "Second"
+
+  def test_no_a2a_interactions(self):
+    trace = _FakeTrace([
+        _FakeSpan("LLM_RESPONSE", {"response": "hi"}),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text is None
+    assert agent is None
+
+  def test_string_content_json(self):
+    import json
+    payload = {
+        "artifacts": [{"parts": [{"kind": "text", "text": "parsed"}]}],
+        "metadata": {"adk_app_name": "json_agent"},
+    }
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", json.dumps(payload), agent="fallback"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text == "parsed"
+    assert agent == "json_agent"
+
+  def test_invalid_json_string(self):
+    trace = _FakeTrace([
+        _FakeSpan("A2A_INTERACTION", "not json", agent="agent"),
+    ])
+    text, agent = get_a2a_response(trace)
+    assert text is None
+    assert agent is None

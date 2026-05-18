@@ -172,22 +172,31 @@ def _load_agent_config(config_path=None):
   """Load agent config (scope decisions, etc.) from a JSON file.
 
   When --config is provided, loads from that path.  Otherwise checks
-  for eval/agent_context.json relative to the repo root or script dir.
+  for eval/data/agent_context.json relative to the repo root or script dir.
   Returns None if no config is found (scope-aware eval is disabled).
   """
   global _AGENT_CONFIG
   if _AGENT_CONFIG is not None:
     return _AGENT_CONFIG
 
-  if not config_path:
-    return None
+  if config_path:
+    if not os.path.isfile(config_path):
+      logger.error("Config file not found: %s", config_path)
+      sys.exit(1)
+    with open(config_path) as f:
+      _AGENT_CONFIG = json.load(f)
+    return _AGENT_CONFIG
 
-  if not os.path.isfile(config_path):
-    logger.error("Config file not found: %s", config_path)
-    sys.exit(1)
-  with open(config_path) as f:
-    _AGENT_CONFIG = json.load(f)
-  return _AGENT_CONFIG
+  # Auto-discover agent_context.json from known locations
+  for base in [_repo_root, _script_dir]:
+    candidate = os.path.join(base, "eval", "data", "agent_context.json")
+    if os.path.isfile(candidate):
+      logger.info("Auto-discovered agent context: %s", candidate)
+      with open(candidate) as f:
+        _AGENT_CONFIG = json.load(f)
+      return _AGENT_CONFIG
+
+  return None
 
 
 def _build_scope_context(config=None):
@@ -226,65 +235,52 @@ def get_eval_metrics(config_path=None):
   config = _load_agent_config(config_path)
   scope_context = _build_scope_context(config)
 
-  usefulness_definition = (
-      "Whether the agent's final response provides a genuinely useful, "
-      "substantive answer to the user's question. A response that apologizes, "
-      "says it cannot help, returns no data, provides only generic filler, "
-      "or loops without resolving the question is NOT useful."
-  )
-  if scope_context:
-    usefulness_definition = (
-        "Whether the agent's final response provides a genuinely useful, "
-        "substantive answer to the user's question. A response that apologizes, "
-        "says it cannot help, returns no data, provides only generic filler, "
-        "or loops without resolving the question is NOT useful -- UNLESS the "
-        "question is outside the agent's defined scope, in which case a "
-        "polite decline IS a correct and meaningful response."
-        + scope_context
-    )
-
-  categories = [
-      CategoricalMetricCategory(
-          name="meaningful",
-          definition=(
-              "The response directly and substantively addresses the user's "
-              "question with specific, actionable information."
-          ),
-      ),
-  ]
-  if scope_context:
-    categories.append(CategoricalMetricCategory(
-        name="declined",
-        definition=(
-            "The question is outside the agent's defined scope and the "
-            "agent correctly declined -- e.g. said it cannot help with "
-            "that topic, or suggested what it CAN help with. This is "
-            "the CORRECT behavior for out-of-scope questions."
-        ),
-    ))
-  categories.extend([
-      CategoricalMetricCategory(
-          name="unhelpful",
-          definition=(
-              "The response does NOT meaningfully answer the user's question. "
-              "Examples: apologies, 'I don't have that information', empty "
-              "data results, generic filler text, or the agent looping "
-              "without a resolution."
-          ),
-      ),
-      CategoricalMetricCategory(
-          name="partial",
-          definition=(
-              "The response partially addresses the question but is "
-              "incomplete, missing key details, or only tangentially relevant."
-          ),
-      ),
-  ])
-
   response_usefulness = CategoricalMetricDefinition(
       name="response_usefulness",
-      definition=usefulness_definition,
-      categories=categories,
+      definition=(
+          "Whether the agent final response provides a genuinely useful, "
+          "substantive answer to the user question. A response that apologizes, "
+          "says it cannot help, returns no data, provides only generic filler, "
+          "or loops without resolving the question is NOT useful -- UNLESS the "
+          "question is outside the agent's defined scope, in which case a "
+          "polite decline IS a correct and meaningful response." + scope_context
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="meaningful",
+              definition=(
+                  "The response directly and substantively addresses the user "
+                  "question with specific, actionable information."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="declined",
+              definition=(
+                  "The question is outside the agent's defined scope and the "
+                  "agent correctly declined -- e.g. said it cannot help with "
+                  "that topic, or suggested what it CAN help with. This is "
+                  "the CORRECT behavior for out-of-scope questions."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="unhelpful",
+              definition=(
+                  "The response does NOT meaningfully answer the user question "
+                  "AND the question IS within the agent's scope. Examples: "
+                  "apologies for in-scope topics, saying 'I do not have that "
+                  "information' when the agent has a tool that covers the topic, "
+                  "empty data results, generic filler text, or the agent looping "
+                  "without a resolution."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="partial",
+              definition=(
+                  "The response partially addresses the question but is "
+                  "incomplete, missing key details, or only tangentially relevant."
+              ),
+          ),
+      ],
   )
 
   task_grounding = CategoricalMetricDefinition(
@@ -327,14 +323,26 @@ def get_eval_metrics(config_path=None):
 # ---------------------------------------------------------------------------
 
 def get_user_input(trace) -> str:
+  """Return the last user message in the trace.
+
+  Multi-turn sessions have multiple USER_MESSAGE_RECEIVED events.  We want
+  the *last* one so that question/response pairs stay aligned — the response
+  resolution helpers (get_a2a_response, get_responding_agent) already search
+  in reverse and return the most recent answer.
+  """
+  result = ""
   for span in trace.spans:
     if span.event_type == "USER_MESSAGE_RECEIVED":
       c = span.content
       if isinstance(c, dict):
-        return c.get("text_summary") or c.get("text") or ""
+        text = c.get("text_summary") or c.get("text") or ""
       elif c:
-        return str(c)
-  return ""
+        text = str(c)
+      else:
+        text = ""
+      if text:
+        result = text
+  return result
 
 
 def get_responding_agent(trace) -> str:
@@ -379,19 +387,31 @@ def _extract_a2a_text(payload) -> tuple:
 
 
 def get_a2a_response(trace) -> tuple:
+  """Return the last A2A response in the trace.
+
+  For multi-turn sessions we must return the *last* A2A interaction to stay
+  aligned with get_user_input (which also returns the last user message).
+  If the last A2A interaction has null/empty content (e.g. the remote agent
+  returned nothing), we return ("(no response)", agent) rather than falling
+  through to an earlier turn's response — that would create a misleading
+  question/response mismatch in the quality report.
+  """
   for span in reversed(trace.spans):
     if span.event_type == "A2A_INTERACTION":
       c = span.content
       if isinstance(c, dict):
         text, agent = _extract_a2a_text(c)
-        if text:
-          return text, agent or span.agent or "remote_agent"
+        agent = agent or span.agent or "remote_agent"
+        return (text or "(no response)"), agent
+      elif c is None:
+        # Null content means the remote agent returned nothing
+        return "(no response)", span.agent or "remote_agent"
       elif isinstance(c, str):
         try:
           parsed = json.loads(c)
           text, agent = _extract_a2a_text(parsed)
-          if text:
-            return text, agent or span.agent or "remote_agent"
+          agent = agent or span.agent or "remote_agent"
+          return (text or "(no response)"), agent
         except (json.JSONDecodeError, TypeError):
           logger.warning(
               "Failed to parse A2A payload for session, skipping"
@@ -923,8 +943,7 @@ def _print_eval_results(report, resolved_map, samples=None, unhelpful_threshold=
   print(f"{'=' * 70}")
   print(f"  Total sessions evaluated : {total}")
   print(f"  Meaningful               : {meaningful_count}")
-  if declined_count:
-    print(f"  Declined (out-of-scope)  : {declined_count}")
+  print(f"  Declined (out-of-scope)  : {declined_count}")
   print(f"  Partial                  : {partial_count}")
   print(f"  Unhelpful                : {fp_count}")
   print(f"  Unhelpful rate           : {fp_rate:.1f}%")
@@ -1005,8 +1024,7 @@ def _write_md_report(report, resolved_map, args):
   w("|--------|-------|")
   w(f"| Total sessions | {total} |")
   w(f"| Meaningful | {meaningful_count} |")
-  if declined_count:
-    w(f"| Declined (out-of-scope) | {declined_count} |")
+  w(f"| Declined (out-of-scope) | {declined_count} |")
   w(f"| Partial | {partial_count} |")
   w(f"| Unhelpful | {fp_count} |")
   w(f"| Unhelpful rate | {fp_rate:.1f}% |")
@@ -1040,13 +1058,8 @@ def _write_md_report(report, resolved_map, args):
   if agent_stats:
     w("## Per-Agent Quality")
     w("")
-    has_declined = any(s["declined"] > 0 for s in agent_stats.values())
-    if has_declined:
-      w("| Agent | Sessions | Helpful | Declined | Unhelpful | Partial | Status |")
-      w("|-------|-------:|--------:|--------:|----------:|--------:|--------|")
-    else:
-      w("| Agent | Sessions | Helpful | Unhelpful | Partial | Status |")
-      w("|-------|-------:|--------:|----------:|--------:|--------|")
+    w("| Agent | Sessions | Helpful | Declined | Unhelpful | Partial | Status |")
+    w("|-------|-------:|--------:|--------:|----------:|--------:|--------|")
     for agent, stats in sorted(
         agent_stats.items(), key=lambda x: -x[1]["total"]
     ):
@@ -1067,19 +1080,12 @@ def _write_md_report(report, resolved_map, args):
           if helpful_pct >= 80
           else ("\U0001f7e1" if helpful_pct >= 60 else "\U0001f534")
       )
-      if has_declined:
-        w(
-            f"| {agent}{a2a_tag} | {stats['total']} "
-            f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
-            f"| {stats['declined']} "
-            f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
-        )
-      else:
-        w(
-            f"| {agent}{a2a_tag} | {stats['total']} "
-            f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
-            f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
-        )
+      w(
+          f"| {agent}{a2a_tag} | {stats['total']} "
+          f"| {stats['meaningful']} ({helpful_pct:.0f}%) "
+          f"| {stats['declined']} "
+          f"| {stats['unhelpful']} | {stats['partial']} | {status} |"
+      )
     w("")
 
   # --- Unhelpful Sessions ---
@@ -1090,6 +1096,38 @@ def _write_md_report(report, resolved_map, args):
     w("## Unhelpful Sessions")
     if len(shown) < len(unhelpful_sessions):
       w(f"\n*Showing {len(shown)} of {len(unhelpful_sessions)}*")
+    w("")
+    for sr in shown:
+      sid = sr.session_id
+      ctx = resolved_map.get(sid, {})
+      question = ctx.get("question", "")
+      response = ctx.get("response", "")
+      answered_by = ctx.get("answered_by", "")
+      a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
+
+      q = " ".join(question.split()) if question else "(none)"
+      r = " ".join(response.split()) if response else "(none)"
+
+      w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
+      w("")
+      w(f"- **Question:** {q}")
+      r_display = (r[:500] + "\u2026") if len(r) > 500 else r
+      w(f"- **Response:** {r_display}")
+      for mr in sr.metrics:
+        label = _category_label(mr.category)
+        display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
+        w(f"- **{display}:** {label}")
+        if mr.justification:
+          w(f"  - *{mr.justification}*")
+      w("")
+
+  # --- Declined Sessions ---
+  declined_sessions = by_category.get("declined", [])
+  if declined_sessions:
+    shown = declined_sessions if _md_samples is None else declined_sessions[:_md_samples]
+    w("## Declined Sessions")
+    if len(shown) < len(declined_sessions):
+      w(f"\n*Showing {len(shown)} of {len(declined_sessions)}*")
     w("")
     for sr in shown:
       sid = sr.session_id
