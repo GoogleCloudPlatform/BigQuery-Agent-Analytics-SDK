@@ -113,11 +113,25 @@ CREATE TABLE IF NOT EXISTS `{table_ref}` (
   sessions_failed INT64,
   ok BOOL NOT NULL,
   error_detail STRING,
-  report_json STRING
+  report_json STRING,
+  mode STRING
 )
 PARTITION BY DATE(run_started_at)
 CLUSTER BY state_key, run_started_at
 """
+
+# ``mode`` was added to the schema in the ``--backfill`` follow-up
+# (issue #177). Older state tables were created without it; running
+# ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` on every
+# ``ensure_state_table`` call is idempotent in BigQuery and brings
+# pre-existing tables up to the current schema without a destructive
+# migration. Reads default missing rows to ``mode='steady'``.
+_STATE_TABLE_MODE_MIGRATIONS = (
+    "ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS mode STRING",
+)
+
+STATE_MODE_STEADY = "steady"
+STATE_MODE_BACKFILL = "backfill"
 
 
 # Identifier validation for BQ identifiers we interpolate into SQL.
@@ -166,6 +180,15 @@ class StateRow:
   ``compute_scan_start`` lower bound. On partial failure it's the
   MAX completion timestamp among *successfully* materialized
   sessions — never advancing past a failure.
+
+  ``mode`` identifies the orchestrator mode that wrote the row:
+  :data:`STATE_MODE_STEADY` for normal cron-driven advances,
+  :data:`STATE_MODE_BACKFILL` for ``--backfill --from/--to`` runs.
+  Backfill rows are written under a distinct ``state_key`` (via the
+  ``--state-key-suffix`` plumbing) so they never advance the
+  steady-state checkpoint; the ``mode`` column is the audit-trail
+  signal that distinguishes the two streams when an operator joins
+  them in a single query.
   """
 
   state_key: str
@@ -180,6 +203,7 @@ class StateRow:
   ok: bool
   error_detail: Optional[str] = None
   report_json: Optional[str] = None
+  mode: str = STATE_MODE_STEADY
 
 
 @dataclasses.dataclass(frozen=True)
@@ -241,6 +265,7 @@ def compute_state_key(
     ontology_fingerprint: str,
     binding_fingerprint: str,
     discovery_mode: str,
+    state_key_suffix: Optional[str] = None,
 ) -> str:
   """Content-derived hex key for the state table.
 
@@ -266,18 +291,27 @@ def compute_state_key(
     sessions (it has no terminal-event filter) and could advance
     the production checkpoint past sessions production hasn't
     seen as completed yet.
+
+  ``state_key_suffix`` (optional) is folded into the same hash. It
+  exists so backfill or ad-hoc re-extraction runs can carve out a
+  separate state-key namespace from the steady-state cron — the
+  backfill writes its own ``_bqaa_materialization_state`` rows
+  without polluting the steady checkpoint stream. When unset, the
+  hash is byte-identical to the prior (suffix-less) computation,
+  so existing state keys do not drift.
   """
-  payload = "\x00".join(
-      [
-          project_id,
-          dataset_id,
-          graph_name,
-          events_table,
-          ontology_fingerprint,
-          binding_fingerprint,
-          discovery_mode,
-      ]
-  ).encode("utf-8")
+  components = [
+      project_id,
+      dataset_id,
+      graph_name,
+      events_table,
+      ontology_fingerprint,
+      binding_fingerprint,
+      discovery_mode,
+  ]
+  if state_key_suffix:
+    components.append(f"suffix:{state_key_suffix}")
+  payload = "\x00".join(components).encode("utf-8")
   return hashlib.sha256(payload).hexdigest()
 
 
@@ -423,8 +457,19 @@ def build_state_select_sql(state_table_ref: str) -> str:
 
 
 def ensure_state_table(bq_client: Any, state_table_ref: str) -> None:
-  """Create the state table if it doesn't exist. Idempotent."""
+  """Create the state table if it doesn't exist + apply additive
+  schema migrations. Idempotent.
+
+  Newer SDK versions add columns to the state table (currently:
+  ``mode``). The ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``
+  statements below run every time and bring pre-existing tables up
+  to the current schema without a destructive migration. Reads of
+  the migrated column on rows written by older SDK versions return
+  ``NULL``; callers default missing values to ``STATE_MODE_STEADY``.
+  """
   bq_client.query(_STATE_TABLE_DDL.format(table_ref=state_table_ref)).result()
+  for migration in _STATE_TABLE_MODE_MIGRATIONS:
+    bq_client.query(migration.format(table_ref=state_table_ref)).result()
 
 
 def read_last_checkpoint(
@@ -474,6 +519,7 @@ def append_state_row(
       "ok": row.ok,
       "error_detail": row.error_detail,
       "report_json": row.report_json,
+      "mode": row.mode,
   }
   errors = bq_client.insert_rows_json(state_table_ref, [payload])
   if errors:
@@ -529,6 +575,47 @@ def _iso_optional(value: Optional[_dt.datetime]) -> Optional[str]:
   return _iso(value) if value is not None else None
 
 
+def _parse_backfill_timestamp(
+    flag_name: str, value: Optional[str]
+) -> Optional[_dt.datetime]:
+  """Parse a backfill window bound from the CLI / env-var surface.
+
+  Accepts ``None`` or empty string as "unset" (the materializer's
+  own validator then enforces the required-when-backfill contract).
+  Empty-string handling matters for env-var pass-through: a
+  defaulted-but-unset env var in ``run_job.py`` arrives as ``""``,
+  not ``None``.
+
+  Accepts UTC ISO 8601 with either ``Z`` or ``+00:00`` suffix and
+  normalizes to a tz-aware UTC datetime. ``Z`` is handled
+  explicitly so the parser works on Python 3.10 (3.11+ added
+  native ``Z`` support to ``fromisoformat``).
+
+  Raises ``ValueError`` with the flag name embedded in the
+  message so the operator can fix the typo without digging.
+  """
+  if value is None or value == "":
+    return None
+  normalized = value.strip()
+  if not normalized:
+    return None
+  # Python 3.10 ``datetime.fromisoformat`` doesn't recognize ``Z``;
+  # rewrite to ``+00:00`` so the parse succeeds across all
+  # supported versions.
+  if normalized.endswith("Z"):
+    normalized = normalized[:-1] + "+00:00"
+  try:
+    parsed = _dt.datetime.fromisoformat(normalized)
+  except ValueError as exc:
+    raise ValueError(
+        f"{flag_name} must be a UTC ISO 8601 timestamp "
+        f"(e.g. 2026-05-01T00:00:00Z); got {value!r}"
+    ) from exc
+  if parsed.tzinfo is None:
+    parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+  return parsed.astimezone(_dt.timezone.utc)
+
+
 # ------------------------------------------------------------------ #
 # Orchestrator                                                         #
 # ------------------------------------------------------------------ #
@@ -555,6 +642,10 @@ def run_materialize_window(
     dry_run: bool = False,
     bq_client: Optional[Any] = None,
     run_started_at: Optional[_dt.datetime] = None,
+    backfill: bool = False,
+    from_time: Optional[_dt.datetime] = None,
+    to_time: Optional[_dt.datetime] = None,
+    state_key_suffix: Optional[str] = None,
 ) -> MaterializeWindowResult:
   """The end-to-end run.
 
@@ -568,7 +659,9 @@ def run_materialize_window(
       ``--dataset-id``).
     lookback_hours: Window size. The discovery query lower bound
       is ``max(last_checkpoint - overlap, run_started_at -
-      lookback_hours)``.
+      lookback_hours)``. **Ignored when ``backfill=True``**: the
+      backfill window comes from ``from_time`` / ``to_time``
+      directly and is not bounded by the lookback cap.
     overlap_minutes: Re-process events newer than
       ``last_checkpoint - overlap_minutes``. Default 15.
         completion_event_type: ``event_type`` that marks a session
@@ -591,6 +684,22 @@ def run_materialize_window(
       materialize.
     bq_client: Optional pre-configured BigQuery client.
     run_started_at: Test seam. Defaults to UTC ``now``.
+    backfill: If True, runs in backfill mode. ``from_time`` and
+      ``to_time`` are required and used as the absolute scan
+      window; the steady-state checkpoint is neither read nor
+      advanced. State rows written by the run carry
+      ``mode=STATE_MODE_BACKFILL``. Pairs with
+      ``state_key_suffix`` to carve out a distinct state-key
+      stream so backfill runs cannot pollute the steady-state
+      checkpoint.
+    from_time, to_time: UTC datetimes defining the backfill scan
+      window ``[from_time, to_time)``. Required when
+      ``backfill=True``; ignored otherwise.
+    state_key_suffix: Optional string folded into
+      :func:`compute_state_key`. Recommended for any non-
+      steady-state run (backfill, ad-hoc re-extraction) so the
+      run's state rows occupy a distinct ``state_key`` namespace
+      and do not advance the steady-state checkpoint.
   """
   # Numeric guardrails — reject nonsense at the boundary so the
   # orchestrator's downstream arithmetic (timedeltas, LIMIT clauses)
@@ -605,6 +714,41 @@ def run_materialize_window(
     raise ValueError(
         f"--max-sessions must be unset or > 0; got {max_sessions!r}"
     )
+
+  # Backfill mode validation. Both bounds are required; window must
+  # be non-empty (from < to). Backfill without ``state_key_suffix``
+  # is allowed but discouraged — the run still gets its own state
+  # row via the ``mode='backfill'`` audit column, but the suffix is
+  # the mechanism that prevents the backfill from sharing the
+  # steady-state's ``state_key`` namespace. Operators backfilling
+  # against the same config more than once should always pass a
+  # suffix (the CLI doc'string says so).
+  if backfill:
+    if from_time is None or to_time is None:
+      raise ValueError(
+          "--backfill requires both --from and --to (UTC ISO 8601). "
+          f"Got from_time={from_time!r}, to_time={to_time!r}."
+      )
+    # Normalize tz-naive boundaries to UTC so comparisons + state
+    # writes don't depend on the caller's locale.
+    if from_time.tzinfo is None:
+      from_time = from_time.replace(tzinfo=_dt.timezone.utc)
+    if to_time.tzinfo is None:
+      to_time = to_time.replace(tzinfo=_dt.timezone.utc)
+    if from_time >= to_time:
+      raise ValueError(
+          f"--backfill requires --from < --to; got {from_time!r} >= {to_time!r}."
+      )
+  else:
+    # ``from_time`` / ``to_time`` are meaningless outside backfill.
+    # Reject the misconfiguration loudly rather than silently
+    # ignoring it — an operator who passed them without ``--backfill``
+    # probably intended backfill mode.
+    if from_time is not None or to_time is not None:
+      raise ValueError(
+          "--from and --to are only valid with --backfill. "
+          f"Got from_time={from_time!r}, to_time={to_time!r}, backfill=False."
+      )
   # Empty/whitespace completion-event-type silently turns the run
   # into a no-op: the discovery query would bind ``event_type =
   # ""``, match nothing, write a clean heartbeat row, and look
@@ -693,10 +837,23 @@ def run_materialize_window(
       ontology_fingerprint=ontology_fp,
       binding_fingerprint=binding_fp,
       discovery_mode=discovery_mode,
+      state_key_suffix=state_key_suffix,
   )
+
+  # Tag every state-row write with the orchestrator mode. The
+  # ``state_key_suffix`` keeps the storage namespaces apart; ``mode``
+  # is the audit-trail signal so an operator joining the two streams
+  # in a single query can tell them apart at a glance.
+  current_state_mode = STATE_MODE_BACKFILL if backfill else STATE_MODE_STEADY
 
   # State table must exist for read/write. Idempotent CREATE.
   ensure_state_table(client, state_table_ref)
+  # In backfill mode the steady-state checkpoint is irrelevant to
+  # the scan window (``from_time`` / ``to_time`` are absolute).
+  # Reading it is still cheap and surfaces in the JSON report as
+  # ``checkpoint_read`` for audit clarity, but a fresh ``state_key``
+  # (when ``state_key_suffix`` is set) means the read returns
+  # ``None`` and the bootstrap path triggers — that's expected.
   last_checkpoint = read_last_checkpoint(client, state_table_ref, state_key)
 
   # Pre-flight binding validation against live BQ — the "fail
@@ -766,30 +923,44 @@ def run_materialize_window(
               ok=False,
               error_detail=drift_detail,
               report_json=json.dumps(drift_result.to_json()),
+              mode=current_state_mode,
           ),
       )
       return drift_result
 
-  # Bootstrap (no checkpoint) → use ``--lookback-hours`` as the
-  # initial scan window. The previous draft used a hard-coded
-  # 30min default which made ``--lookback-hours 6`` actually scan
-  # 30 minutes on first run.
-  # Subsequent runs → ``compute_scan_start`` returns
-  # ``last_checkpoint - overlap_minutes`` (the bootstrap window
-  # arg is ignored when ``checkpoint_timestamp`` is set).
-  scan_start = compute_scan_start(
-      run_started,
-      checkpoint_timestamp=last_checkpoint,
-      overlap=_dt.timedelta(minutes=overlap_minutes),
-      initial_lookback=_dt.timedelta(hours=lookback_hours),
-  )
-  # ``lookback_hours`` is also the hard upper bound on how far
-  # back we ever scan — applies on subsequent runs when the
-  # checkpoint is very stale.
-  hard_floor = run_started - _dt.timedelta(hours=lookback_hours)
-  if scan_start < hard_floor:
-    scan_start = hard_floor
-  scan_end = run_started
+  if backfill:
+    # Backfill mode: ``from_time`` / ``to_time`` are the absolute
+    # scan window. The lookback cap intentionally does NOT apply —
+    # an operator backfilling six weeks of history must not have
+    # the window silently clipped to ``lookback_hours``. The
+    # numeric guardrail (``lookback_hours > 0``) still ran at the
+    # boundary above; the value is unused here.
+    assert from_time is not None and to_time is not None  # validated above
+    scan_start = from_time
+    scan_end = to_time
+  else:
+    # Steady-state mode: original behavior.
+    #
+    # Bootstrap (no checkpoint) → use ``--lookback-hours`` as the
+    # initial scan window. The previous draft used a hard-coded
+    # 30min default which made ``--lookback-hours 6`` actually
+    # scan 30 minutes on first run.
+    # Subsequent runs → ``compute_scan_start`` returns
+    # ``last_checkpoint - overlap_minutes`` (the bootstrap window
+    # arg is ignored when ``checkpoint_timestamp`` is set).
+    scan_start = compute_scan_start(
+        run_started,
+        checkpoint_timestamp=last_checkpoint,
+        overlap=_dt.timedelta(minutes=overlap_minutes),
+        initial_lookback=_dt.timedelta(hours=lookback_hours),
+    )
+    # ``lookback_hours`` is also the hard upper bound on how far
+    # back we ever scan — applies on subsequent runs when the
+    # checkpoint is very stale.
+    hard_floor = run_started - _dt.timedelta(hours=lookback_hours)
+    if scan_start < hard_floor:
+      scan_start = hard_floor
+    scan_end = run_started
 
   # Bind the discovery parameters. ``completion_event_type`` and
   # ``include_active_sessions`` interact here.
@@ -1097,6 +1268,7 @@ def run_materialize_window(
           ok=result.ok,
           error_detail=(failures[0]["error_detail"] if failures else None),
           report_json=json.dumps(result.to_json()),
+          mode=current_state_mode,
       ),
   )
 

@@ -55,6 +55,18 @@ Env vars (all set by the deploy script via
   events table sometimes lags ingestion by tens of minutes.
 * ``BQAA_MAX_SESSIONS`` (default unset/unlimited) — cost
   guardrail.
+* ``BQAA_BACKFILL`` (default ``false``) — set ``true`` to run a
+  one-shot backfill of a fixed historical window instead of the
+  steady-state cron. When set, ``BQAA_FROM`` and ``BQAA_TO`` are
+  required. Steady-state cron jobs leave this unset.
+* ``BQAA_FROM`` (required when ``BQAA_BACKFILL=true``) — UTC ISO
+  8601 lower bound, inclusive (e.g. ``2026-05-01T00:00:00Z``).
+* ``BQAA_TO`` (required when ``BQAA_BACKFILL=true``) — UTC ISO
+  8601 upper bound, exclusive (e.g. ``2026-05-08T00:00:00Z``).
+* ``BQAA_STATE_KEY_SUFFIX`` (default unset) — optional suffix
+  folded into the state-key SHA so a backfill / re-extraction
+  run writes its state rows in a distinct namespace from the
+  steady-state cron. Recommended whenever ``BQAA_BACKFILL=true``.
 
 Exit codes mirror the CLI:
 
@@ -326,6 +338,16 @@ def main() -> int:
   overlap_minutes = _optional_env_float("BQAA_OVERLAP_MINUTES", 15.0)
   max_sessions = _optional_env_int("BQAA_MAX_SESSIONS")
 
+  # Backfill plumbing. ``BQAA_BACKFILL`` is a string env var; the
+  # canonical truthy values are ``"true"`` / ``"1"`` (case-insensitive).
+  # Everything else (including unset and the empty string) is false
+  # so a defaulted env var doesn't accidentally flip the mode.
+  backfill_raw = os.environ.get("BQAA_BACKFILL", "").strip().lower()
+  backfill = backfill_raw in ("true", "1", "yes")
+  from_time_raw = os.environ.get("BQAA_FROM") or None
+  to_time_raw = os.environ.get("BQAA_TO") or None
+  state_key_suffix = os.environ.get("BQAA_STATE_KEY_SUFFIX") or None
+
   _emit(
       "INFO",
       message="periodic materialization starting",
@@ -336,6 +358,10 @@ def main() -> int:
       lookback_hours=lookback_hours,
       overlap_minutes=overlap_minutes,
       max_sessions=max_sessions,
+      backfill=backfill,
+      from_time=from_time_raw,
+      to_time=to_time_raw,
+      state_key_suffix=state_key_suffix,
   )
 
   try:
@@ -385,6 +411,12 @@ def main() -> int:
     state_table_ref = (
         f"{project_id}.{graph_dataset_id}._bqaa_materialization_state"
     )
+    # Parse backfill window bounds at the boundary. Empty / unset
+    # env vars become ``None``; the materializer's own validator
+    # then enforces "both required when backfill=True".
+    parsed_from = mw._parse_backfill_timestamp("BQAA_FROM", from_time_raw)
+    parsed_to = mw._parse_backfill_timestamp("BQAA_TO", to_time_raw)
+
     result = mw.run_materialize_window(
         project_id=project_id,
         dataset_id=events_dataset_id,
@@ -398,6 +430,10 @@ def main() -> int:
         validate_binding=True,
         bq_client=bq_client,
         run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        backfill=backfill,
+        from_time=parsed_from,
+        to_time=parsed_to,
+        state_key_suffix=state_key_suffix,
     )
 
     # Structured JSON report for Cloud Logging. Cloud Logging

@@ -460,7 +460,9 @@ def fixture_paths(tmp_path):
 
 def _stub_bq_client(discovered_rows):
   """A BigQuery client whose ``.query()`` returns:
-  - the DDL response (anything; we just check it was called)
+  - the CREATE TABLE response (anything; we just check it was called)
+  - one response per additive schema-migration ALTER
+    (currently: ``ADD COLUMN IF NOT EXISTS mode STRING``)
   - the state-table read (empty → bootstrap)
   - the discovery query (returns ``discovered_rows``)
   ``.insert_rows_json`` returns [] (no errors).
@@ -468,9 +470,13 @@ def _stub_bq_client(discovered_rows):
   client = mock.Mock()
 
   # Each .query() call's .result() yields a different row set.
-  # We sequence them via side_effect on the query() Mock.
+  # We sequence them via side_effect on the query() Mock. Keep the
+  # ALTER-TABLE response count in sync with
+  # ``_STATE_TABLE_MODE_MIGRATIONS`` in
+  # ``src/bigquery_agent_analytics/materialize_window.py``.
   results = [
       mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
       mock.Mock(result=mock.Mock(return_value=[])),  # state read
       mock.Mock(result=mock.Mock(return_value=discovered_rows)),  # discovery
   ]
@@ -788,6 +794,7 @@ class TestCheckpointCarryForward:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1498,6 +1505,7 @@ class TestCheckpointNeverRegresses:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # DDL
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1558,7 +1566,8 @@ class TestCheckpointNeverRegresses:
     ]
     client.query = mock.Mock(
         side_effect=[
-            mock.Mock(result=mock.Mock(return_value=[])),
+            mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
             mock.Mock(result=mock.Mock(return_value=[state_row])),
             mock.Mock(result=mock.Mock(return_value=discovered)),
         ]
@@ -2201,3 +2210,233 @@ class TestEmptyExtractionNotOk:
     assert result.sessions_materialized == 0
     assert result.sessions_failed == 0
     assert result.failures == []
+
+
+# ====================================================================== #
+# Backfill mode + state-key suffix + ``mode`` column (PR A, issue #177)   #
+# ====================================================================== #
+
+
+class TestStateKeySuffixIsolation:
+  """``state_key_suffix`` folds into the SHA so backfill / re-extraction
+  runs occupy a distinct state-key namespace from the steady-state cron.
+  Without the suffix the hash is byte-identical to the prior (suffix-less)
+  computation, so existing checkpoints don't drift after the SDK upgrade.
+  """
+
+  _BASE = dict(
+      project_id="proj",
+      dataset_id="ds",
+      graph_name="g",
+      events_table="agent_events",
+      ontology_fingerprint="ofp",
+      binding_fingerprint="bfp",
+      discovery_mode="terminal:AGENT_COMPLETED",
+  )
+
+  def test_suffix_unset_is_byte_identical_to_legacy_hash(self):
+    legacy = mw.compute_state_key(**self._BASE)
+    with_none = mw.compute_state_key(state_key_suffix=None, **self._BASE)
+    with_empty = mw.compute_state_key(state_key_suffix="", **self._BASE)
+    assert legacy == with_none, "suffix=None must not drift the hash"
+    assert legacy == with_empty, (
+        "suffix='' must not drift the hash either — env-var pass-through "
+        "delivers empty strings for unset values; flipping the hash on "
+        "those would silently invalidate every existing checkpoint"
+    )
+
+  def test_different_suffixes_produce_different_state_keys(self):
+    week1 = mw.compute_state_key(
+        state_key_suffix="backfill-may-w1", **self._BASE
+    )
+    week2 = mw.compute_state_key(
+        state_key_suffix="backfill-may-w2", **self._BASE
+    )
+    steady = mw.compute_state_key(**self._BASE)
+    assert week1 != week2
+    assert week1 != steady
+    assert week2 != steady
+
+
+class TestBackfillValidation:
+  """The orchestrator rejects misconfigurations at the boundary so an
+  operator typo doesn't silently degrade to a no-op or, worse, pollute
+  the steady-state checkpoint stream."""
+
+  def test_backfill_requires_both_from_and_to(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match="--backfill requires both --from"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=None,
+      )
+
+  def test_backfill_requires_from_less_than_to(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match="requires --from < --to"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+      )
+
+  def test_from_to_without_backfill_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError, match="--from and --to are only valid with --backfill"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=False,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+      )
+
+
+class TestBackfillTimestampParser:
+  """``_parse_backfill_timestamp`` handles the formats env-var
+  pass-through actually delivers."""
+
+  def test_accepts_z_suffix_iso8601(self):
+    parsed = mw._parse_backfill_timestamp("--from", "2026-05-01T00:00:00Z")
+    assert parsed == _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+
+  def test_accepts_explicit_utc_offset(self):
+    parsed = mw._parse_backfill_timestamp("--from", "2026-05-01T00:00:00+00:00")
+    assert parsed == _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+
+  def test_none_and_empty_string_are_unset(self):
+    assert mw._parse_backfill_timestamp("--from", None) is None
+    assert mw._parse_backfill_timestamp("--from", "") is None
+    assert mw._parse_backfill_timestamp("--from", "   ") is None
+
+  def test_invalid_input_raises_with_flag_name(self):
+    with pytest.raises(ValueError, match="--from must be a UTC ISO 8601"):
+      mw._parse_backfill_timestamp("--from", "not-a-date")
+
+
+class TestBackfillScanWindow:
+  """The backfill scan window is the operator-supplied [from, to)
+  range, not the lookback-derived window. The lookback cap does NOT
+  clip the backfill — an operator backfilling six weeks of history
+  must not have their window silently truncated to ``lookback_hours``."""
+
+  def test_backfill_window_uses_from_to_directly(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    # ``run_started_at`` is fixed in 2026-05-20; the backfill window
+    # is one full week earlier (May 1 → May 8). A lookback-derived
+    # window would scan May 19 → May 20; backfill must scan the
+    # explicit range instead.
+    now = _dt.datetime(2026, 5, 20, 12, tzinfo=_dt.timezone.utc)
+    from_ts = _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+    to_ts = _dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=24.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+          backfill=True,
+          from_time=from_ts,
+          to_time=to_ts,
+          state_key_suffix="backfill-may-w1",
+      )
+    assert result.window_start == from_ts, (
+        "backfill scan_start must be the supplied --from, not "
+        "lookback-derived from run_started_at"
+    )
+    assert (
+        result.window_end == to_ts
+    ), "backfill scan_end must be the supplied --to, not run_started_at"
+
+
+class TestStateRowModeColumn:
+  """``mode`` round-trips through ``append_state_row`` and identifies
+  whether a state row was written by a steady-state or backfill run.
+  Default is ``'steady'`` so pre-existing callers continue to write
+  the expected value."""
+
+  def test_state_row_defaults_to_steady_mode(self):
+    row = mw.StateRow(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+    )
+    assert row.mode == mw.STATE_MODE_STEADY
+
+  def test_append_state_row_includes_mode_in_payload(self):
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    row = mw.StateRow(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+        mode=mw.STATE_MODE_BACKFILL,
+    )
+    mw.append_state_row(client, "p.d.t", row)
+    call_args = client.insert_rows_json.call_args
+    payload = call_args[0][1][0]
+    assert payload["mode"] == "backfill"
+
+
+class TestEnsureStateTableMigration:
+  """``ensure_state_table`` runs the schema-evolution ALTERs every call.
+  ``ADD COLUMN IF NOT EXISTS`` is idempotent in BigQuery; the test
+  asserts the calls are issued, not their side effect."""
+
+  def test_ensure_state_table_runs_create_and_alter(self):
+    client = mock.Mock()
+    client.query = mock.Mock(
+        return_value=mock.Mock(result=mock.Mock(return_value=[]))
+    )
+    mw.ensure_state_table(client, "p.d._bqaa_materialization_state")
+    queries = [args[0][0] for args in client.query.call_args_list]
+    create = next(q for q in queries if q.startswith("CREATE TABLE"))
+    assert (
+        "mode STRING" in create
+    ), "fresh tables must include the mode column in the initial DDL"
+    alters = [q for q in queries if q.startswith("ALTER TABLE")]
+    assert any("ADD COLUMN IF NOT EXISTS mode STRING" in q for q in alters), (
+        "ensure_state_table must run ADD COLUMN IF NOT EXISTS for the "
+        "mode column on every call so pre-migration tables get patched "
+        "without a destructive migration"
+    )
