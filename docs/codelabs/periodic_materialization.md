@@ -279,13 +279,23 @@ relationships:
     to_columns:   [outcome_id]
 ```
 
-### Apply the DDL
+### Render the placeholders in binding.yaml
 
-Substitute the placeholders and apply both SQL files:
+The materializer reads `binding.yaml` directly — there is no template step in the CLI — so substitute the shell variables once before any tool reads the file:
 
 ```bash
-envsubst < property_graph.sql | bq query --use_legacy_sql=false
+envsubst < binding.yaml > binding.yaml.tmp && mv binding.yaml.tmp binding.yaml
+```
+
+After this, `binding.yaml` should contain your real project ID and graph dataset name instead of the `${...}` markers. Skip this step and `materialize-window` will validate against literal `${PROJECT_ID}` text and fail closed.
+
+### Apply the DDL
+
+Table DDL runs first (the property graph references those tables; BigQuery rejects a `CREATE PROPERTY GRAPH` that points at tables that don't yet exist):
+
+```bash
 envsubst < table_ddl.sql      | bq query --use_legacy_sql=false
+envsubst < property_graph.sql | bq query --use_legacy_sql=false
 ```
 
 You should see five `CREATE TABLE` results and one `CREATE PROPERTY GRAPH` result. If you re-run, the `IF NOT EXISTS` clauses make the table creation idempotent and the property graph is replaced.
@@ -518,38 +528,47 @@ bq query --use_legacy_sql=false \
 
 You should see five rows. If you see zero, check that the local run reported `sessions_materialized > 0`.
 
-## Deploy as a Cloud Run Job + Cloud Scheduler
+## Run the deploy as a worked example
 Duration: 0:10
 
-The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It wraps the same `bqaa-materialize-window` command, creates a runtime service account with the narrow IAM the job needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end.
+The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It runs `bqaa-materialize-window` as a Cloud Run Job, creates a runtime service account with the narrow IAM the job needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end. The script today bundles its own demo artifacts (the migration v5 ontology, binding, and property-graph DDL); the artifacts the codelab walked you through are not yet pluggable into this script. Adapting the script to bundle arbitrary artifacts is an open follow-up (see [issue #176](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues)).
 
-Point the deploy at your codelab artifacts. The script accepts `--ontology` and `--binding` paths so you can supply the demo files you saved earlier:
+For this codelab, the cleanest way to see the full Cloud Run + Cloud Scheduler shape end-to-end is to run the deploy as-is. It deploys the migration v5 example into your project — separate datasets from the ones you've been using — so you can observe a real `bqaa-periodic-materialization` job firing on cron, the JSON-log output, and the IAM grants the deploy expects. Once you've seen the moving parts you can fork the script to bundle your own artifacts.
+
+### Deploy the migration v5 example
 
 ```bash
 cd $HOME/BigQuery-Agent-Analytics-SDK/examples/migration_v5/periodic_materialization
 
+# Use separate datasets so the demo deploy doesn't collide with
+# the codelab's tables.
+bq --location=US mk --dataset "$PROJECT_ID:bqaa_demo_events" || true
+bq --location=US mk --dataset "$PROJECT_ID:bqaa_demo_graph"  || true
+
 ./deploy_cloud_run_job.sh \
     --project "$PROJECT_ID" \
     --region "$REGION" \
-    --events-dataset "$EVENTS_DATASET" \
-    --graph-dataset "$GRAPH_DATASET" \
-    --ontology ~/bqaa-codelab/ontology.yaml \
-    --binding $HOME/bqaa-codelab/binding.yaml \
+    --events-dataset bqaa_demo_events \
+    --graph-dataset  bqaa_demo_graph \
     --schedule "0 */6 * * *" \
     --smoke
 ```
 
 The first deploy takes about three minutes. You should see, in order:
 
-1. Creating the runtime service account.
-2. Granting IAM: `dataViewer` on `$EVENTS_DATASET`, `dataEditor` on `$GRAPH_DATASET`, `bigquery.jobUser` and `aiplatform.user` at the project, `run.invoker` on the job for the scheduler service account.
+1. Creating the runtime service account `bqaa-periodic-sa`.
+2. Granting IAM: `dataViewer` on the events dataset, `dataEditor` on the graph dataset, `bigquery.jobUser` and `aiplatform.user` at the project, `run.invoker` on the Cloud Run Job for the scheduler service account.
 3. Building the container via Cloud Build.
-4. Deploying the Cloud Run Job.
-5. Creating the Cloud Scheduler trigger (cron `0 */6 * * *` — every six hours on the hour).
+4. Deploying the Cloud Run Job `bqaa-periodic-materialization`.
+5. Creating the Cloud Scheduler trigger `bqaa-periodic-materialization-cron` (cron `0 */6 * * *` — every six hours on the hour).
 6. Running the smoke check.
-7. A structured JSON report identical to the local-run output.
+7. A structured JSON report.
 
-If the smoke check reports `ok: true`, the production deploy is complete. The job will fire again at the top of the next six-hour window. Re-run `seed_events.py` between windows to see the row counts climb.
+If the smoke check reports `ok: true`, the production-shape deploy is complete. The job will fire again at the top of the next six-hour window.
+
+### Until the deploy script accepts your artifacts: cron the local command
+
+For the codelab graph you authored, the simplest "every six hours" cadence today is to run the same `bqaa-materialize-window` command from a Cloud Build trigger (or Cloud Workflows, or any external scheduler) on a cron. The local command from the previous section is what fires; the artifacts live in your git repository or a Cloud Storage bucket the scheduler reads from. The migration v5 deploy script is the worked example of how to package the same command into a Cloud Run Job once you're ready.
 
 ### Read the JSON log
 
@@ -618,28 +637,30 @@ Conversational Analytics resolves the question against the graph and returns a s
 ## Clean up
 Duration: 0:03
 
-Tear down what you created so you don't get billed for an idle Cloud Run Job.
+Tear down what you created so you don't get billed for an idle Cloud Run Job. The resource names below match the defaults the deploy script uses (`bqaa-periodic-materialization` for the job, `bqaa-periodic-materialization-cron` for the scheduler, `bqaa-periodic-sa` for the service account). If you customized any of them with `--job-name`, substitute accordingly.
 
 ```bash
 # Cloud Scheduler trigger
 gcloud scheduler jobs delete \
-    bqaa-materialize-window-trigger \
+    bqaa-periodic-materialization-cron \
     --location="$REGION" \
     --project="$PROJECT_ID" --quiet
 
 # Cloud Run Job
 gcloud run jobs delete \
-    bqaa-materialize-window \
+    bqaa-periodic-materialization \
     --region="$REGION" \
     --project="$PROJECT_ID" --quiet
 
-# BigQuery datasets (events + graph + materialization state)
+# BigQuery datasets (codelab + demo deploy)
 bq rm -r -f --dataset "$PROJECT_ID:$EVENTS_DATASET"
 bq rm -r -f --dataset "$PROJECT_ID:$GRAPH_DATASET"
+bq rm -r -f --dataset "$PROJECT_ID:bqaa_demo_events" 2>/dev/null || true
+bq rm -r -f --dataset "$PROJECT_ID:bqaa_demo_graph"  2>/dev/null || true
 
 # Runtime service account (optional)
 gcloud iam service-accounts delete \
-    "bqaa-materialize-window@$PROJECT_ID.iam.gserviceaccount.com" \
+    "bqaa-periodic-sa@$PROJECT_ID.iam.gserviceaccount.com" \
     --project="$PROJECT_ID" --quiet
 ```
 

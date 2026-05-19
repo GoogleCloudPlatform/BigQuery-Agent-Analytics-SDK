@@ -2,7 +2,7 @@
 
 *BigQuery property graphs and BigQuery Conversational Analytics are in Preview on Google Cloud. The BigQuery Agent Analytics Plugin and SDK are generally available. Examples in this post use synthetic data.*
 
-Today we are making it dramatically easier to keep a BigQuery property graph of your AI agent's decisions current with the events your agents are actually producing — on a schedule, with one Cloud Run Job, and no new database. The new periodic-materialization deploy in the BigQuery Agent Analytics SDK takes the events captured by the BigQuery Agent Analytics Plugin and writes them into the property graph you already defined, every N hours, on the same BigQuery dataset where the events live.
+Today we are making it dramatically easier to keep a BigQuery property graph of your AI agent's decisions current with the events your agents are actually producing — on a schedule, with one Cloud Run Job, and no new database. The new periodic-materialization deploy in the BigQuery Agent Analytics SDK takes the events captured by the BigQuery Agent Analytics Plugin and writes them into the property graph you already defined, every N hours, in the same BigQuery project. Events stay in a read-only events dataset; the graph lives in a separate read/write graph dataset; the runtime service account is granted exactly the narrow IAM each side needs.
 
 This is the small operational change that converts agent observability from "engineering will dig through logs" into "the audit team asks the question and gets an answer in seconds."
 
@@ -14,13 +14,13 @@ The hard part is the next question. The risk officer wants to know why agent A-1
 
 A trained engineer can SQL their way to most traversals — given two weeks. The audit committee meets on Thursday. The state regulator is on the phone Monday morning. The cost of the engineering-led answer isn't the engineering hour — it's the decision the executive can't defend until the answer arrives.
 
-The new periodic-materialization deploy moves the join from the audit-hour to a background schedule. Your agent's events keep flowing into BigQuery; your property graph stays fresh in the same dataset; the audit question becomes a single query. Same BigQuery project. Same IAM. Same billing.
+The new periodic-materialization deploy moves the join from the audit-hour to a background schedule. Your agent's events keep flowing into the events dataset; your property graph stays fresh in the graph dataset next door; the audit question becomes a single query. Same BigQuery project. Same IAM. Same billing.
 
 ## How periodic materialization works
 
 The SDK ships three building blocks. You provide one input — the property graph that describes your decision domain — and the deploy script handles the rest.
 
-**1. Events flow in continuously.** The BigQuery Agent Analytics Plugin, which is generally available and a drop-in for ADK, writes every agent event to `agent_events` via the BigQuery Storage Write API. Twenty event types, sixteen columns, seventeen auto-generated typed views. The plugin uses OpenTelemetry-compatible identifiers when your team has OTel configured and works standalone otherwise.
+**1. Events flow in continuously.** The BigQuery Agent Analytics Plugin, which is generally available and a drop-in for ADK, writes every agent event to `agent_events` via the BigQuery Storage Write API. The full event-type catalog (decision events, LLM requests and responses, tool calls, human-in-the-loop approvals, agent-to-agent interactions) lands in one sixteen-column table, with auto-generated typed views per event type. The plugin uses OpenTelemetry-compatible identifiers when your team has OTel configured and works standalone otherwise.
 
 ```python
 from google.adk.plugins import BigQueryAgentAnalyticsPlugin
@@ -80,6 +80,16 @@ FROM GRAPH_TABLE (
            so.rationale AS rationale)
 );
 ```
+
+The result is one row per option the agent weighed, with the rationale recorded against the chosen outcome. The audit-committee meeting reads it directly off the screen (synthetic):
+
+| Request | Question the agent answered | Option considered | Confidence | Outcome | Rationale |
+|---|---|---|---|---|---|
+| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Decline | **0.83 (chosen)** | committed | *"DTI exceeds 40% threshold and two recent late payments fall inside the 90-day risk window."* |
+| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Refer to human | 0.51 | — | *"DTI is borderline but recent payment behavior is the harder signal."* |
+| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Approve | 0.14 | — | *"DTI breach is structural, not transient."* |
+
+Three seconds from question to answer. The audit-committee meeting is no longer a budget request.
 
 The same graph supports SQL aggregations for portfolio questions ("how many declines, what was the average confidence, which rationales drove them?") and scheduled queries for monitoring patterns ("alert me when any decline cites X for borrowers under 25"). Engineers query in SQL or GQL. Data scientists run aggregates in notebooks. Business users on the BigQuery Conversational Analytics Preview ask the same questions in natural language; Conversational Analytics resolves them against the property graph configured as a knowledge source and returns a structured answer card.
 
