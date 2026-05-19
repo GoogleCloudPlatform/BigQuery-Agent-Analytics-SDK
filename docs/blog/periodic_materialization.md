@@ -2,7 +2,7 @@
 
 *BigQuery property graphs and BigQuery Conversational Analytics are in Preview on Google Cloud. The BigQuery Agent Analytics Plugin and SDK are generally available. Examples in this post use synthetic data.*
 
-Today we are making it dramatically easier to keep a BigQuery property graph of your AI agent's decisions current with the events your agents are actually producing — on a schedule, with one Cloud Run Job, and no new database. The new periodic-materialization deploy in the BigQuery Agent Analytics SDK takes the events captured by the BigQuery Agent Analytics Plugin and writes them into the property graph you already defined, every N hours, in the same BigQuery project. Events stay in a read-only events dataset; the graph lives in a separate read/write graph dataset; the runtime service account is granted exactly the narrow IAM each side needs.
+Today we are making it dramatically easier to keep a BigQuery property graph of your AI agent's decisions current with the events your agents are actually producing — on a schedule, against the same BigQuery project, with no new database to stand up. The new `bqaa-materialize-window` command in the BigQuery Agent Analytics SDK takes the events captured by the BigQuery Agent Analytics Plugin and writes them into the property graph you already defined, every N hours. Run it from Cloud Build, Cloud Workflows, an external scheduler, or — for the canonical worked example — wrap it in a Cloud Run Job + Cloud Scheduler trigger using the deploy script shipped with the SDK's migration v5 demo. Events stay in a read-only events dataset; the graph lives in a separate read/write graph dataset; the runtime service account is granted exactly the narrow IAM each side needs.
 
 This is the small operational change that converts agent observability from "engineering will dig through logs" into "the audit team asks the question and gets an answer in seconds."
 
@@ -42,7 +42,7 @@ bq query --use_legacy_sql=false < property_graph.sql
 
 The graph captures your domain language: what the agent saw, what it decided, what options were on the table, what the outcome was. This is the only artifact you author. Engineering teams that already think in graphs can write it directly; teams new to graphs can start from the migration v5 demo in the SDK repository and edit.
 
-**3. The SDK runs a Cloud Run Job every N hours that materializes events into your graph.** One command — `deploy_cloud_run_job.sh` — creates a Cloud Run Job that runs `bqaa-materialize-window`, a Cloud Scheduler trigger that fires on a cron expression you pick, and a runtime service account with narrow IAM (events read-only, graph read/write). The `--smoke` flag runs the job once after deploy and tails the logs so you know the deploy works end-to-end.
+**3. The SDK runs `bqaa-materialize-window` against the binding you point it at.** You hand the command your events dataset and the path to the binding that describes your graph. It scans the last N hours of `agent_events`, extracts the structured shape per session, materializes the entity and relationship tables, and emits a structured JSON report. Schedule the command however your team already schedules jobs: Cloud Build trigger, Workflows, GitHub Actions, an external cron. The SDK's migration v5 demo also ships a `deploy_cloud_run_job.sh` script that wraps the command as a Cloud Run Job with a Cloud Scheduler trigger — the canonical worked example of the production pattern, using the demo's bundled artifacts. Bring your own scheduler for your own graph.
 
 ```bash
 ./deploy_cloud_run_job.sh \
@@ -53,7 +53,7 @@ The graph captures your domain language: what the agent saw, what it decided, wh
     --smoke
 ```
 
-Every six hours the job:
+Every six hours, on whatever cadence you pick, the job:
 
 - Scans the last six hours of `agent_events`.
 - Picks out the sessions that completed in that window.
@@ -63,33 +63,36 @@ Every six hours the job:
 
 A checkpoint table — `_bqaa_materialization_state` in the same graph dataset — doubles as a queryable audit log: which window ran when, how many sessions materialized, how many rows per table, whether the run was clean. Late-arriving events get caught by an overlap window on the next run; the checkpoint never regresses.
 
-**4. The audit answer is a single query.** Once the graph is fresh, the executive's question is one traversal:
+**4. The audit answer is a single query.** Once the graph is fresh, the executive's question is one traversal — every option the agent weighed, which one it chose, and the rationale:
 
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
   graph_v5.agent_decisions_graph
-  MATCH (de:DecisionExecution)
-        -[:atContextSnapshot]-> (cs:ContextSnapshot),
-        (de) -[:executedAtDecisionPoint]-> (dp:DecisionPoint),
-        (de) -[:hasSelectionOutcome]-> (so:SelectionOutcome)
+  MATCH (de:DecisionExecution) -[:executedAtDecisionPoint]-> (dp:DecisionPoint),
+        (dp) -[:evaluatesCandidate]-> (option:Candidate),
+        (de) -[:hasSelectionOutcome]-> (so:SelectionOutcome),
+        (so) -[:selectedCandidate]-> (chosen:Candidate)
   WHERE de.business_entity_id = 'customer-4029-7'
-  COLUMNS (cs.snapshot_payload AS context,
-           dp.decision_point_id AS decision_point,
-           so.outcome_id AS outcome,
-           so.rationale AS rationale)
+  COLUMNS (
+    de.decision_execution_id AS decision,
+    dp.decision_point_id      AS question,
+    option.candidate_id       AS option_considered,
+    chosen.candidate_id       AS chosen_option,
+    so.rationale              AS rationale
+  )
 );
 ```
 
-The result is one row per option the agent weighed, with the rationale recorded against the chosen outcome. The audit-committee meeting reads it directly off the screen (synthetic):
+The result is one row per option the agent weighed; `chosen_option` is the same on every row and identifies the one the agent committed. The audit-committee meeting reads it directly off the screen (synthetic):
 
-| Request | Question the agent answered | Option considered | Confidence | Outcome | Rationale |
-|---|---|---|---|---|---|
-| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Decline | **0.83 (chosen)** | committed | *"DTI exceeds 40% threshold and two recent late payments fall inside the 90-day risk window."* |
-| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Refer to human | 0.51 | — | *"DTI is borderline but recent payment behavior is the harder signal."* |
-| req-9c2e | *"Approve $340K mortgage for customer 4029-7?"* | Approve | 0.14 | — | *"DTI breach is structural, not transient."* |
+| decision | question | option_considered | chosen_option | rationale |
+|---|---|---|---|---|
+| de-9c2e | dp-mortgage-approval | cand-decline | **cand-decline ✓** | *"DTI exceeds 40% threshold and two recent late payments fall inside the 90-day risk window."* |
+| de-9c2e | dp-mortgage-approval | cand-refer-to-human | cand-decline | *"DTI exceeds 40% threshold and two recent late payments fall inside the 90-day risk window."* |
+| de-9c2e | dp-mortgage-approval | cand-approve | cand-decline | *"DTI exceeds 40% threshold and two recent late payments fall inside the 90-day risk window."* |
 
-Three seconds from question to answer. The audit-committee meeting is no longer a budget request.
+The agent considered three options, picked `cand-decline`, and recorded the rationale once against the chosen outcome. Drill in with `MATCH (cs:ContextSnapshot)` to see what the agent saw before it decided; aggregate over `DecisionExecution` for portfolio-level questions. Three seconds from question to answer. The audit-committee meeting is no longer a budget request.
 
 The same graph supports SQL aggregations for portfolio questions ("how many declines, what was the average confidence, which rationales drove them?") and scheduled queries for monitoring patterns ("alert me when any decline cites X for borrowers under 25"). Engineers query in SQL or GQL. Data scientists run aggregates in notebooks. Business users on the BigQuery Conversational Analytics Preview ask the same questions in natural language; Conversational Analytics resolves them against the property graph configured as a knowledge source and returns a structured answer card.
 
@@ -127,4 +130,4 @@ The SDK repository ships a worked end-to-end example, including the property-gra
 
 BigQuery property graphs / GQL and BigQuery Conversational Analytics are in Preview on Google Cloud — check the Preview documentation for your region. The BigQuery Agent Analytics Plugin and SDK are generally available and ship with this release.
 
-Three commands, one Cloud Run Job, the audit answer waiting before the meeting starts. That is the operational change worth making this week.
+One command on the cron of your choice, the audit answer waiting before the meeting starts. That is the operational change worth making this week.

@@ -19,7 +19,8 @@ The codelab is self-contained from scratch. You will create the BigQuery dataset
 
 - A BigQuery property graph that describes a generic agent decision flow (Decision Request → Decision Option → Decision Outcome).
 - A populated `agent_events` table with a small synthetic event corpus you can re-generate.
-- A Cloud Run Job + Cloud Scheduler trigger that re-materializes the graph every six hours from `agent_events`.
+- A working `bqaa-materialize-window` run that fills the graph from those events. Cron this command from your scheduler of choice (Cloud Build, Workflows, external cron) to keep the graph fresh.
+- A Cloud Run Job + Cloud Scheduler trigger walked end-to-end against the SDK's bundled migration v5 demo artifacts as the deployment-pattern reference. (The deploy script doesn't yet accept arbitrary artifact paths; the codelab's custom graph runs through `materialize-window` directly.)
 - An audit-style GQL query that traces a single decision end-to-end.
 
 ### What you'll learn
@@ -139,7 +140,7 @@ DecisionRequest --[evaluatesOption]--> DecisionOption
 
 ### Save the property-graph DDL
 
-Create a working directory and save the property-graph schema. The `${PROJECT}` / `${GRAPH_DATASET}` placeholders will be filled by your shell when you apply the DDL:
+Create a working directory and save the property-graph schema. The `${PROJECT_ID}` / `${GRAPH_DATASET}` placeholders will be filled by your shell when you apply the DDL:
 
 ```bash
 mkdir -p ~/bqaa-codelab && cd ~/bqaa-codelab
@@ -531,7 +532,7 @@ You should see five rows. If you see zero, check that the local run reported `se
 ## Run the deploy as a worked example
 Duration: 0:10
 
-The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It runs `bqaa-materialize-window` as a Cloud Run Job, creates a runtime service account with the narrow IAM the job needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end. The script today bundles its own demo artifacts (the migration v5 ontology, binding, and property-graph DDL); the artifacts the codelab walked you through are not yet pluggable into this script. Adapting the script to bundle arbitrary artifacts is an open follow-up (see [issue #176](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues)).
+The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It runs `bqaa-materialize-window` as a Cloud Run Job, creates a runtime service account with the narrow IAM the job needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end. The script today bundles its own demo artifacts (the migration v5 ontology, binding, and property-graph DDL); the artifacts the codelab walked you through are not yet pluggable into this script. Adapting the script to accept arbitrary artifact paths is an open follow-up; file an issue or PR against the SDK repository if your team needs it.
 
 For this codelab, the cleanest way to see the full Cloud Run + Cloud Scheduler shape end-to-end is to run the deploy as-is. It deploys the migration v5 example into your project — separate datasets from the ones you've been using — so you can observe a real `bqaa-periodic-materialization` job firing on cron, the JSON-log output, and the IAM grants the deploy expects. Once you've seen the moving parts you can fork the script to bundle your own artifacts.
 
@@ -684,4 +685,4 @@ The pattern works wherever an agent makes consequential decisions: credit underw
 - [BigQuery property graphs documentation](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
 - [BigQuery Conversational Analytics documentation](https://docs.cloud.google.com/bigquery/docs/conversational-analytics) (Preview).
 
-The hard part of agent governance was never the events. It was the join, the traversal, and the cadence. With periodic materialization, all three are one Cloud Run Job away.
+The hard part of agent governance was never the events. It was the join, the traversal, and the cadence. With `bqaa-materialize-window` on whatever cron your team already runs, all three are one query away.
