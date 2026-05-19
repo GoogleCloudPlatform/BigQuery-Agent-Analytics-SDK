@@ -241,12 +241,13 @@ def get_eval_metrics(config_path=None):
   """Return the list of categorical metric definitions for quality evaluation.
 
   Metrics returned:
-    - ``response_usefulness`` — whether the agent response is helpful,
-      unhelpful, partial, or a correct scope decline.  The ``declined``
-      category is always present; when *config_path* provides out-of-scope
-      topic definitions, the LLM judge receives additional context to
-      distinguish polite refusals from failures.
-    - ``task_grounding`` — whether the response is grounded in tool data.
+    - ``response_usefulness`` — helpful, unhelpful, partial, or declined.
+    - ``task_grounding`` — grounded in tool data vs fabricated.
+    - ``correctness`` — factual accuracy of the response.
+    - ``tool_usage`` — whether the agent used its tools correctly.
+    - ``specificity`` — concrete details vs vague answer.
+    - ``scope_compliance`` — stayed within defined scope.
+    - ``first_time_right`` — correct on first attempt without corrections.
   """
   from bigquery_agent_analytics import CategoricalMetricCategory
   from bigquery_agent_analytics import CategoricalMetricDefinition
@@ -334,7 +335,178 @@ def get_eval_metrics(config_path=None):
       ],
   )
 
-  return [response_usefulness, task_grounding]
+  correctness = CategoricalMetricDefinition(
+      name="correctness",
+      definition=(
+          "Whether the facts stated in the agent response are accurate. "
+          "Evaluate based on the information the agent retrieved from its "
+          "tools and whether it was conveyed faithfully."
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="correct",
+              definition=(
+                  "All facts stated by the agent are accurate and consistent "
+                  "with the tool results retrieved."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="mostly_correct",
+              definition=(
+                  "The response is mostly correct but contains a minor "
+                  "inaccuracy, omission, or imprecise wording."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="incorrect",
+              definition=(
+                  "The response contains wrong facts, hallucinated information, "
+                  "or claims contradicted by the tool results."
+              ),
+          ),
+      ],
+  )
+
+  tool_usage = CategoricalMetricDefinition(
+      name="tool_usage",
+      definition=(
+          "Whether the agent used its available tools correctly to answer "
+          "the question, rather than relying on general knowledge."
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="proper",
+              definition=(
+                  "The agent used its tools and based the answer on the "
+                  "tool results. Tools were called with appropriate parameters."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="partial",
+              definition=(
+                  "The agent partially used tools, or tool usage was unclear "
+                  "or incomplete. Some information may not be tool-derived."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="none",
+              definition=(
+                  "The agent answered from general knowledge without looking "
+                  "up information via tools, even though tools were available "
+                  "and the question warranted their use."
+              ),
+          ),
+      ],
+  )
+
+  specificity = CategoricalMetricDefinition(
+      name="specificity",
+      definition=(
+          "Whether the agent response provides specific, concrete details "
+          "(numbers, dates, dollar amounts, limits) rather than vague or "
+          "generic statements."
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="specific",
+              definition=(
+                  "The response includes specific and complete details: exact "
+                  "numbers, percentages, dollar amounts, dates, or limits."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="somewhat_specific",
+              definition=(
+                  "The response is somewhat specific but missing some key "
+                  "details that would make it fully actionable."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="vague",
+              definition=(
+                  "The response is vague, generic, or missing key specifics "
+                  "that the user needs to act on the information."
+              ),
+          ),
+      ],
+  )
+
+  scope_compliance = CategoricalMetricDefinition(
+      name="scope_compliance",
+      definition=(
+          "Whether the agent correctly handled the scope of the question. "
+          "An agent should answer in-scope questions and politely decline "
+          "out-of-scope ones." + scope_context
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="compliant",
+              definition=(
+                  "The agent correctly answered an in-scope question OR "
+                  "correctly declined an out-of-scope question."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="partially_compliant",
+              definition=(
+                  "The agent answered but with unnecessary caveats, excessive "
+                  "hedging, or was partially out of scope."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="non_compliant",
+              definition=(
+                  "The agent tried to answer an out-of-scope question it "
+                  "should have declined, OR refused to answer an in-scope "
+                  "question it should have handled."
+              ),
+          ),
+      ],
+  )
+
+  first_time_right = CategoricalMetricDefinition(
+      name="first_time_right",
+      definition=(
+          "Whether the agent's FIRST response in the conversation was "
+          "satisfactory, without needing user corrections or follow-ups "
+          "to fix errors. For single-turn conversations, evaluate the "
+          "only response. For multi-turn, focus on whether the first "
+          "substantive answer was correct."
+      ),
+      categories=[
+          CategoricalMetricCategory(
+              name="correct",
+              definition=(
+                  "The first response was correct and complete. No correction "
+                  "or significant clarification was needed from the user."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="clarification_needed",
+              definition=(
+                  "The first response was mostly right but needed minor "
+                  "clarification or a follow-up to be fully useful."
+              ),
+          ),
+          CategoricalMetricCategory(
+              name="correction_needed",
+              definition=(
+                  "The first response was wrong, vague, or incomplete enough "
+                  "that the user had to push back or correct the agent."
+              ),
+          ),
+      ],
+  )
+
+  return [
+      response_usefulness,
+      task_grounding,
+      correctness,
+      tool_usage,
+      specificity,
+      scope_compliance,
+      first_time_right,
+  ]
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +618,18 @@ def get_a2a_response(trace) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def _count_trace_metrics(trace):
+  """Extract multi-turn efficiency metrics from a trace."""
+  user_turns = 0
+  tool_calls = 0
+  for span in trace.spans:
+    if span.event_type == "USER_MESSAGE_RECEIVED":
+      user_turns += 1
+    elif span.event_type == "TOOL_COMPLETED":
+      tool_calls += 1
+  return user_turns, tool_calls
+
+
 def resolve_trace_responses(traces):
   results = []
   remote_lookups = 0
@@ -477,6 +661,8 @@ def resolve_trace_responses(traces):
     if trace.total_latency_ms is not None:
       latency_s = round(trace.total_latency_ms / 1000, 1)
 
+    user_turns, tool_calls = _count_trace_metrics(trace)
+
     results.append(
         {
             "session_id": trace.session_id,
@@ -490,6 +676,8 @@ def resolve_trace_responses(traces):
             "response": (response or ""),
             "latency_s": latency_s,
             "is_a2a": is_a2a,
+            "user_turns": user_turns,
+            "tool_calls": tool_calls,
         }
     )
 
@@ -585,6 +773,25 @@ def _category_label(category):
       "grounded": "\u2705 GROUNDED",
       "ungrounded": "\u274c NOT GROUNDED",
       "no_tool_needed": "\u2796 NO TOOL NEEDED",
+      # correctness
+      "correct": "\u2705 CORRECT",
+      "mostly_correct": "\u26a0\ufe0f  MOSTLY CORRECT",
+      "incorrect": "\u274c INCORRECT",
+      # tool_usage
+      "proper": "\u2705 PROPER",
+      # "partial" already covered above
+      "none": "\u274c NONE",
+      # specificity
+      "specific": "\u2705 SPECIFIC",
+      "somewhat_specific": "\u26a0\ufe0f  SOMEWHAT SPECIFIC",
+      "vague": "\u274c VAGUE",
+      # scope_compliance
+      "compliant": "\u2705 COMPLIANT",
+      "partially_compliant": "\u26a0\ufe0f  PARTIALLY COMPLIANT",
+      "non_compliant": "\u274c NON-COMPLIANT",
+      # first_time_right
+      "clarification_needed": "\u26a0\ufe0f  CLARIFICATION NEEDED",
+      "correction_needed": "\u274c CORRECTION NEEDED",
   }
   return labels.get(category, (category or "?").upper())
 
@@ -818,7 +1025,69 @@ def _build_agent_stats(report, resolved_map):
 _METRIC_LABELS = {
     "response_usefulness": "Usefulness",
     "task_grounding": "Grounding",
+    "correctness": "Correctness",
+    "tool_usage": "Tool Usage",
+    "specificity": "Specificity",
+    "scope_compliance": "Scope",
+    "first_time_right": "First-Time Right",
 }
+
+# Maps category → numeric score (0-2) for dimension averaging.
+_DIMENSION_SCORES = {
+    "correctness": {"correct": 2, "mostly_correct": 1, "incorrect": 0},
+    "tool_usage": {"proper": 2, "partial": 1, "none": 0},
+    "specificity": {"specific": 2, "somewhat_specific": 1, "vague": 0},
+    "scope_compliance": {
+        "compliant": 2,
+        "partially_compliant": 1,
+        "non_compliant": 0,
+    },
+    "first_time_right": {
+        "correct": 2,
+        "clarification_needed": 1,
+        "correction_needed": 0,
+    },
+}
+
+_DIMENSION_NAMES = list(_DIMENSION_SCORES.keys())
+
+# Short descriptions for the markdown report's Quality Dimensions table.
+_DIMENSION_DESCRIPTIONS = {
+    "correctness": "Are the facts in the response accurate?",
+    "tool_usage": "Did the agent use its tools to verify facts?",
+    "specificity": "Does the response include specific numbers, dates, limits?",
+    "scope_compliance": "Did the agent correctly handle in-scope vs out-of-scope?",
+    "first_time_right": "Was the first response correct without user corrections?",
+}
+
+
+def _compute_dimension_averages(report):
+  """Compute average 0-2 score for each fine-grained dimension."""
+  dim_totals = {d: [] for d in _DIMENSION_NAMES}
+  for sr in report.session_results:
+    for mr in sr.metrics:
+      if mr.metric_name in _DIMENSION_SCORES:
+        score_map = _DIMENSION_SCORES[mr.metric_name]
+        score = score_map.get(mr.category, 0)
+        dim_totals[mr.metric_name].append(score)
+  return {
+      d: round(sum(scores) / len(scores), 2) if scores else 0
+      for d, scores in dim_totals.items()
+  }
+
+
+def _compute_multiturn_stats(resolved_map):
+  """Compute multi-turn efficiency statistics from resolved traces."""
+  user_turns = [r.get("user_turns", 0) for r in resolved_map.values()]
+  tool_calls = [r.get("tool_calls", 0) for r in resolved_map.values()]
+  total = len(user_turns)
+  if not total:
+    return {}
+  return {
+      "avg_user_turns": round(sum(user_turns) / total, 1),
+      "avg_tool_calls": round(sum(tool_calls) / total, 1),
+      "multi_turn_sessions": sum(1 for t in user_turns if t > 1),
+  }
 
 
 def _print_eval_results(
@@ -877,7 +1146,10 @@ def _print_eval_results(
       print(f"  Question:    {q}")
       print(f'  Response:    "{r}"')
 
+      # Primary metrics with justifications
       for mr in sr.metrics:
+        if mr.metric_name not in ("response_usefulness", "task_grounding"):
+          continue
         mr_label = _category_label(mr.category)
         if mr.parse_error:
           mr_label += "  [parse error]"
@@ -888,6 +1160,17 @@ def _print_eval_results(
         if mr.parse_error and mr.raw_response:
           raw = mr.raw_response[:300]
           print(f"  {'Raw LLM out:':<15}{repr(raw)}")
+
+      # Compact scorecard for quality dimensions
+      dim_parts = []
+      for mr in sr.metrics:
+        if mr.metric_name in ("response_usefulness", "task_grounding"):
+          continue
+        display_name = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
+        mr_label = _category_label(mr.category)
+        dim_parts.append(f"{display_name}: {mr_label}")
+      if dim_parts:
+        print(f"  {'Dimensions:':<15}{' | '.join(dim_parts)}")
 
   # --- Per-agent breakdown ---
   agent_stats = _build_agent_stats(report, resolved_map)
@@ -1021,8 +1304,28 @@ def _print_eval_results(
   if a2a_session_ids:
     print(f"  A2A sessions detected    : {len(a2a_session_ids)}")
 
+  # --- Dimension averages (0-2 scale) ---
+  dim_avgs = _compute_dimension_averages(report)
+  if any(v > 0 for v in dim_avgs.values()):
+    print(f"\n  Quality Dimensions (0-2 scale):")
+    for dim, avg in dim_avgs.items():
+      bar = "#" * int(avg * 25)
+      label = _METRIC_LABELS.get(dim, dim)
+      print(f"    {label:<20s}: {avg:.2f} / 2.00  {bar}")
+
+  # --- Multi-turn efficiency ---
+  mt_stats = _compute_multiturn_stats(resolved_map)
+  if mt_stats:
+    print(f"\n  Multi-Turn Efficiency:")
+    print(f"    Avg user turns       : {mt_stats['avg_user_turns']}")
+    print(f"    Avg tool calls       : {mt_stats['avg_tool_calls']}")
+    if mt_stats["multi_turn_sessions"] > 0:
+      print(f"    Multi-turn sessions  : {mt_stats['multi_turn_sessions']}")
+
   print("\n  Category Distributions:")
   for metric_name, dist in report.category_distributions.items():
+    if metric_name not in ("response_usefulness", "task_grounding"):
+      continue
     print(f"\n  [{metric_name}]")
     dist_total = sum(dist.values())
     for category, count in sorted(dist.items(), key=lambda x: -x[1]):
@@ -1058,6 +1361,77 @@ def _print_eval_results(
 # ---------------------------------------------------------------------------
 # Markdown report generation
 # ---------------------------------------------------------------------------
+
+
+def _md_dimension_scorecard(sr):
+  """Build a compact one-line scorecard for the 5 quality dimensions."""
+  _SCORECARD_ICONS = {
+      "correct": "\u2705",
+      "mostly_correct": "\u26a0\ufe0f",
+      "incorrect": "\u274c",
+      "proper": "\u2705",
+      "partial": "\u26a0\ufe0f",
+      "none": "\u274c",
+      "specific": "\u2705",
+      "somewhat_specific": "\u26a0\ufe0f",
+      "vague": "\u274c",
+      "compliant": "\u2705",
+      "partially_compliant": "\u26a0\ufe0f",
+      "non_compliant": "\u274c",
+      "clarification_needed": "\u26a0\ufe0f",
+      "correction_needed": "\u274c",
+  }
+  parts = []
+  for mr in sr.metrics:
+    if mr.metric_name in ("response_usefulness", "task_grounding"):
+      continue
+    label = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
+    icon = _SCORECARD_ICONS.get(mr.category, "\u2705")
+    parts.append(f"{label} {icon}")
+  return " | ".join(parts)
+
+
+def _md_write_session_section(
+    w, title, sessions, md_samples, resolved_map, a2a_session_ids
+):
+  """Write a section of per-session details to the markdown report."""
+  shown = sessions if md_samples is None else sessions[:md_samples]
+  w(f"## {title}")
+  if len(shown) < len(sessions):
+    w(f"\n*Showing {len(shown)} of {len(sessions)}*")
+  w("")
+  for sr in shown:
+    sid = sr.session_id
+    ctx = resolved_map.get(sid, {})
+    question = ctx.get("question", "")
+    response = ctx.get("response", "")
+    answered_by = ctx.get("answered_by", "")
+    a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
+
+    q = " ".join(question.split()) if question else "(none)"
+    r = " ".join(response.split()) if response else "(none)"
+
+    w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
+    w("")
+    w(f"- **Question:** {q}")
+    r_display = (r[:500] + "\u2026") if len(r) > 500 else r
+    w(f"- **Response:** {r_display}")
+
+    # Primary metrics with justifications
+    for mr in sr.metrics:
+      if mr.metric_name not in ("response_usefulness", "task_grounding"):
+        continue
+      label = _category_label(mr.category)
+      display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
+      w(f"- **{display}:** {label}")
+      if mr.justification:
+        w(f"  - *{mr.justification}*")
+
+    # Compact scorecard for quality dimensions
+    scorecard = _md_dimension_scorecard(sr)
+    if scorecard:
+      w(f"- **Dimensions:** {scorecard}")
+    w("")
 
 
 def _write_md_report(report, resolved_map, args):
@@ -1110,10 +1484,56 @@ def _write_md_report(report, resolved_map, args):
     w(f"| A2A sessions | {len(a2a_session_ids)} |")
   w("")
 
-  # --- Category Distributions ---
+  # --- Quality Dimensions (0-2 scale) ---
+  dim_avgs = _compute_dimension_averages(report)
+  if any(v > 0 for v in dim_avgs.values()):
+    w("## Quality Dimensions")
+    w("")
+    w(
+        "Each session is scored 0-2 on five dimensions. "
+        "Scores are averaged across all sessions."
+    )
+    w("")
+    w("| Dimension | Avg Score | Rating | What it measures |")
+    w("|-----------|----------:|--------|------------------|")
+    for dim, avg in dim_avgs.items():
+      label = _METRIC_LABELS.get(dim, dim)
+      rating = (
+          "\U0001f7e2"
+          if avg >= 1.5
+          else ("\U0001f7e1" if avg >= 1.0 else "\U0001f534")
+      )
+      desc = _DIMENSION_DESCRIPTIONS.get(dim, "")
+      w(f"| {label} | {avg:.2f} / 2.00 | {rating} | {desc} |")
+    w("")
+    w(
+        "*Rating: "
+        "\U0001f7e2 >= 1.50 (good) "
+        "| \U0001f7e1 >= 1.00 (needs attention) "
+        "| \U0001f534 < 1.00 (problem area)*"
+    )
+    w("")
+
+  # --- Multi-Turn Efficiency ---
+  mt_stats = _compute_multiturn_stats(resolved_map)
+  if mt_stats:
+    w("## Multi-Turn Efficiency")
+    w("")
+    w("| Metric | Value |")
+    w("|--------|-------|")
+    w(f"| Avg user turns | {mt_stats['avg_user_turns']} |")
+    w(f"| Avg tool calls | {mt_stats['avg_tool_calls']} |")
+    if mt_stats["multi_turn_sessions"] > 0:
+      w(f"| Multi-turn sessions | {mt_stats['multi_turn_sessions']} |")
+    w("")
+
+  # --- Category Distributions (primary metrics only) ---
+  _PRIMARY_METRICS = {"response_usefulness", "task_grounding"}
   w("## Category Distributions")
   w("")
   for metric_name, dist in report.category_distributions.items():
+    if metric_name not in _PRIMARY_METRICS:
+      continue
     w(f"### {metric_name}")
     w("")
     w("| Category | Count | % |")
@@ -1170,110 +1590,38 @@ def _write_md_report(report, resolved_map, args):
       else (int(args.samples) if args.samples else None)
   )
   if unhelpful_sessions:
-    shown = (
-        unhelpful_sessions
-        if _md_samples is None
-        else unhelpful_sessions[:_md_samples]
+    _md_write_session_section(
+        w,
+        "Unhelpful Sessions",
+        unhelpful_sessions,
+        _md_samples,
+        resolved_map,
+        a2a_session_ids,
     )
-    w("## Unhelpful Sessions")
-    if len(shown) < len(unhelpful_sessions):
-      w(f"\n*Showing {len(shown)} of {len(unhelpful_sessions)}*")
-    w("")
-    for sr in shown:
-      sid = sr.session_id
-      ctx = resolved_map.get(sid, {})
-      question = ctx.get("question", "")
-      response = ctx.get("response", "")
-      answered_by = ctx.get("answered_by", "")
-      a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
-
-      q = " ".join(question.split()) if question else "(none)"
-      r = " ".join(response.split()) if response else "(none)"
-
-      w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
-      w("")
-      w(f"- **Question:** {q}")
-      r_display = (r[:500] + "\u2026") if len(r) > 500 else r
-      w(f"- **Response:** {r_display}")
-      for mr in sr.metrics:
-        label = _category_label(mr.category)
-        display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
-        w(f"- **{display}:** {label}")
-        if mr.justification:
-          w(f"  - *{mr.justification}*")
-      w("")
 
   # --- Declined Sessions ---
   declined_sessions = by_category.get("declined", [])
   if declined_sessions:
-    shown = (
-        declined_sessions
-        if _md_samples is None
-        else declined_sessions[:_md_samples]
+    _md_write_session_section(
+        w,
+        "Declined Sessions",
+        declined_sessions,
+        _md_samples,
+        resolved_map,
+        a2a_session_ids,
     )
-    w("## Declined Sessions")
-    if len(shown) < len(declined_sessions):
-      w(f"\n*Showing {len(shown)} of {len(declined_sessions)}*")
-    w("")
-    for sr in shown:
-      sid = sr.session_id
-      ctx = resolved_map.get(sid, {})
-      question = ctx.get("question", "")
-      response = ctx.get("response", "")
-      answered_by = ctx.get("answered_by", "")
-      a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
-
-      q = " ".join(question.split()) if question else "(none)"
-      r = " ".join(response.split()) if response else "(none)"
-
-      w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
-      w("")
-      w(f"- **Question:** {q}")
-      r_display = (r[:500] + "\u2026") if len(r) > 500 else r
-      w(f"- **Response:** {r_display}")
-      for mr in sr.metrics:
-        label = _category_label(mr.category)
-        display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
-        w(f"- **{display}:** {label}")
-        if mr.justification:
-          w(f"  - *{mr.justification}*")
-      w("")
 
   # --- Partial Sessions ---
   partial_sessions = by_category.get("partial", [])
   if partial_sessions:
-    shown = (
-        partial_sessions
-        if _md_samples is None
-        else partial_sessions[:_md_samples]
+    _md_write_session_section(
+        w,
+        "Partial Sessions",
+        partial_sessions,
+        _md_samples,
+        resolved_map,
+        a2a_session_ids,
     )
-    w("## Partial Sessions")
-    if len(shown) < len(partial_sessions):
-      w(f"\n*Showing {len(shown)} of {len(partial_sessions)}*")
-    w("")
-    for sr in shown:
-      sid = sr.session_id
-      ctx = resolved_map.get(sid, {})
-      question = ctx.get("question", "")
-      response = ctx.get("response", "")
-      answered_by = ctx.get("answered_by", "")
-      a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
-
-      q = " ".join(question.split()) if question else "(none)"
-      r = " ".join(response.split()) if response else "(none)"
-
-      w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
-      w("")
-      w(f"- **Question:** {q}")
-      r_display = (r[:500] + "\u2026") if len(r) > 500 else r
-      w(f"- **Response:** {r_display}")
-      for mr in sr.metrics:
-        label = _category_label(mr.category)
-        display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
-        w(f"- **{display}:** {label}")
-        if mr.justification:
-          w(f"  - *{mr.justification}*")
-      w("")
 
   # --- Execution Details ---
   w("## Execution Details")
@@ -1324,6 +1672,8 @@ def _build_json_output(report, resolved_map):
             "answered_by": ctx.get("answered_by", ""),
             "is_a2a": ctx.get("is_a2a", False),
             "latency_s": ctx.get("latency_s"),
+            "user_turns": ctx.get("user_turns", 0),
+            "tool_calls": ctx.get("tool_calls", 0),
             "metrics": metrics,
         }
     )
@@ -1333,6 +1683,9 @@ def _build_json_output(report, resolved_map):
   meaningful_count = len(by_category.get("meaningful", []))
   declined_count = len(by_category.get("declined", []))
   total = report.total_sessions
+
+  dim_avgs = _compute_dimension_averages(report)
+  mt_stats = _compute_multiturn_stats(resolved_map)
 
   return {
       "summary": {
@@ -1347,6 +1700,8 @@ def _build_json_output(report, resolved_map):
           if total
           else 0,
           "unhelpful_rate": round(fp_count / total * 100, 1) if total else 0,
+          "dimension_averages": dim_avgs,
+          **mt_stats,
       },
       "category_distributions": {
           k: dict(v) for k, v in report.category_distributions.items()

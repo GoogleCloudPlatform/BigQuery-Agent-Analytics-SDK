@@ -101,17 +101,37 @@ These filters can be combined (e.g. `--app-name my_agent --session-ids-file ids.
 
 ### Metrics
 
-The evaluation uses two categorical metrics:
+The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
 
-- **response_usefulness** - Whether the agent's response provides a genuinely
-  useful answer. Categories: `meaningful`, `declined`, `unhelpful`, `partial`.
+**Primary metrics** classify each session:
 
-- **task_grounding** - Whether the response is grounded in tool-retrieved data
-  or fabricated. Categories: `grounded`, `ungrounded`, `no_tool_needed`.
+| Metric | Categories | What it measures |
+|--------|------------|------------------|
+| `response_usefulness` | `meaningful`, `declined`, `unhelpful`, `partial` | Whether the response provides a genuinely useful answer |
+| `task_grounding` | `grounded`, `ungrounded`, `no_tool_needed` | Whether the response is based on tool-retrieved data or fabricated |
 
 The **`declined`** category is always available — the LLM judge can classify
 polite refusals of out-of-scope questions as correct behavior rather than
 marking them as `unhelpful`.
+
+**Quality dimensions** score each session 0-2 and are averaged across all
+sessions to produce the Quality Dimensions table in the report:
+
+| Dimension | 2 (best) | 1 (middle) | 0 (worst) |
+|-----------|----------|------------|-----------|
+| `correctness` | All facts accurate | Minor inaccuracy | Wrong facts or hallucinations |
+| `tool_usage` | Tools used properly | Partial tool use | No tool use when needed |
+| `specificity` | Specific numbers, dates, limits | Missing some details | Vague or generic |
+| `scope_compliance` | Correctly handled scope | Unnecessary caveats | Wrong scope decision |
+| `first_time_right` | Correct on first try | Needed clarification | User had to correct |
+
+**Multi-turn efficiency** metrics are extracted from trace spans:
+
+| Metric | Description |
+|--------|-------------|
+| Avg user turns | Average number of user messages per session |
+| Avg tool calls | Average number of tool calls per session |
+| Multi-turn sessions | Sessions with more than one user message |
 
 ### Scope-Aware Evaluation (`--config`)
 

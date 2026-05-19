@@ -28,6 +28,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from quality_report import _AGENT_CONFIG_CACHE  # noqa: E402
 from quality_report import _build_agent_stats
 from quality_report import _build_scope_context
+from quality_report import _compute_dimension_averages
+from quality_report import _compute_multiturn_stats
+from quality_report import _count_trace_metrics
 from quality_report import _extract_a2a_text
 from quality_report import _group_by_category
 from quality_report import _is_single_word_routing
@@ -599,3 +602,158 @@ class TestLoadAgentConfig:
     # May return None or a config if one exists in the repo
     # Just verify it doesn't raise
     assert result is None or isinstance(result, dict)
+
+
+# ================================================================== #
+# _count_trace_metrics                                                #
+# ================================================================== #
+
+
+class TestCountTraceMetrics:
+
+  def test_counts_user_messages_and_tools(self):
+    trace = _FakeTrace(
+        [
+            _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "Q1"}),
+            _FakeSpan("LLM_RESPONSE", {"response": "A1"}),
+            _FakeSpan("TOOL_COMPLETED", {"tool": "search"}),
+            _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "Q2"}),
+            _FakeSpan("TOOL_COMPLETED", {"tool": "lookup"}),
+        ]
+    )
+    user_turns, tool_calls = _count_trace_metrics(trace)
+    assert user_turns == 2
+    assert tool_calls == 2
+
+  def test_empty_trace(self):
+    trace = _FakeTrace([])
+    user_turns, tool_calls = _count_trace_metrics(trace)
+    assert user_turns == 0
+    assert tool_calls == 0
+
+  def test_single_turn_no_tools(self):
+    trace = _FakeTrace(
+        [
+            _FakeSpan("USER_MESSAGE_RECEIVED", {"text": "Q"}),
+            _FakeSpan("LLM_RESPONSE", {"response": "A"}),
+        ]
+    )
+    user_turns, tool_calls = _count_trace_metrics(trace)
+    assert user_turns == 1
+    assert tool_calls == 0
+
+  def test_tool_starting_not_counted(self):
+    trace = _FakeTrace(
+        [
+            _FakeSpan("TOOL_STARTING", {"tool": "search"}),
+            _FakeSpan("TOOL_COMPLETED", {"tool": "search"}),
+        ]
+    )
+    _, tool_calls = _count_trace_metrics(trace)
+    assert tool_calls == 1
+
+
+# ================================================================== #
+# _compute_dimension_averages                                         #
+# ================================================================== #
+
+
+class TestComputeDimensionAverages:
+
+  def test_basic_averages(self):
+    sessions = [
+        _FakeSession(
+            "s1",
+            [
+                _FakeMetric("correctness", "correct"),
+                _FakeMetric("tool_usage", "proper"),
+                _FakeMetric("specificity", "specific"),
+                _FakeMetric("scope_compliance", "compliant"),
+                _FakeMetric("first_time_right", "correct"),
+            ],
+        ),
+        _FakeSession(
+            "s2",
+            [
+                _FakeMetric("correctness", "incorrect"),
+                _FakeMetric("tool_usage", "none"),
+                _FakeMetric("specificity", "vague"),
+                _FakeMetric("scope_compliance", "non_compliant"),
+                _FakeMetric("first_time_right", "correction_needed"),
+            ],
+        ),
+    ]
+    report = _FakeReport(sessions)
+    avgs = _compute_dimension_averages(report)
+    assert avgs["correctness"] == 1.0  # (2+0)/2
+    assert avgs["tool_usage"] == 1.0
+    assert avgs["specificity"] == 1.0
+    assert avgs["scope_compliance"] == 1.0
+    assert avgs["first_time_right"] == 1.0
+
+  def test_all_perfect(self):
+    sessions = [
+        _FakeSession(
+            "s1",
+            [
+                _FakeMetric("correctness", "correct"),
+                _FakeMetric("specificity", "specific"),
+            ],
+        ),
+    ]
+    report = _FakeReport(sessions)
+    avgs = _compute_dimension_averages(report)
+    assert avgs["correctness"] == 2.0
+    assert avgs["specificity"] == 2.0
+
+  def test_empty_report(self):
+    report = _FakeReport([])
+    avgs = _compute_dimension_averages(report)
+    assert all(v == 0 for v in avgs.values())
+
+  def test_missing_dimensions(self):
+    sessions = [
+        _FakeSession(
+            "s1",
+            [_FakeMetric("response_usefulness", "meaningful")],
+        ),
+    ]
+    report = _FakeReport(sessions)
+    avgs = _compute_dimension_averages(report)
+    # Non-dimension metrics should not contribute
+    assert avgs["correctness"] == 0
+
+
+# ================================================================== #
+# _compute_multiturn_stats                                            #
+# ================================================================== #
+
+
+class TestComputeMultiturnStats:
+
+  def test_basic_stats(self):
+    resolved = {
+        "s1": {"user_turns": 3, "tool_calls": 2},
+        "s2": {"user_turns": 1, "tool_calls": 4},
+    }
+    stats = _compute_multiturn_stats(resolved)
+    assert stats["avg_user_turns"] == 2.0
+    assert stats["avg_tool_calls"] == 3.0
+    assert stats["multi_turn_sessions"] == 1
+
+  def test_empty_map(self):
+    assert _compute_multiturn_stats({}) == {}
+
+  def test_all_single_turn(self):
+    resolved = {
+        "s1": {"user_turns": 1, "tool_calls": 0},
+        "s2": {"user_turns": 1, "tool_calls": 1},
+    }
+    stats = _compute_multiturn_stats(resolved)
+    assert stats["avg_user_turns"] == 1.0
+    assert stats["multi_turn_sessions"] == 0
+
+  def test_missing_keys_default_zero(self):
+    resolved = {"s1": {}, "s2": {"user_turns": 2}}
+    stats = _compute_multiturn_stats(resolved)
+    assert stats["avg_user_turns"] == 1.0  # (0+2)/2
