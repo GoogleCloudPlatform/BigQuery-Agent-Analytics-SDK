@@ -2,9 +2,9 @@
 
 Output of `./scripts/latency_report.sh --limit 3 --time-period 1h`:
 
-**Project:** my-gcp-project  
-**Dataset:** agent_logs.agent_events  
-**Location:** us-central1  
+**Project:** my-gcp-project
+**Dataset:** agent_logs.agent_events
+**Location:** us-central1
 
 ```
 Fetching traces from my-gcp-project.agent_logs.agent_events...

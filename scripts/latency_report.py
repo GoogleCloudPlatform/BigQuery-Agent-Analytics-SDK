@@ -377,7 +377,7 @@ def render_waterfall(trace):
     lines.append(f"  {label:<{label_w}} {bar} {format_ms(span.latency_ms)}")
 
   lines.append(f"  {'':{label_w}} {'─' * BAR_W}")
-  # Time axis labels
+  # Time axis labels (approximate alignment; format_ms width varies)
   markers = f"  {'':{label_w}} 0{'':>{BAR_W//2-1}}{format_ms(total_ms/2)}{'':>{BAR_W//2-1}}{format_ms(total_ms)}"
   lines.append(markers)
 
@@ -557,8 +557,9 @@ examples:
   parser.add_argument(
       "--time-period",
       type=str,
-      help="Time range filter (e.g. 1h, 30m, 7d). "
-      "If omitted, fetches the latest traces regardless of age",
+      default=None,
+      help="Time range filter: 1h, 30m, 7d (default: no time filter, "
+      "fetches the latest traces by --limit)",
   )
   parser.add_argument(
       "--app-name",

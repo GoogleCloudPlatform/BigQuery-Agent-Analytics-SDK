@@ -21,7 +21,8 @@ scripts/reports/
 examples/*/reports/
 examples/*/reports_*/
 examples/*/trials_*/
-*.log
+scripts/**/*.log
+examples/**/*.log
 
 # Local workspace metadata
 .code*/

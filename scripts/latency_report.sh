@@ -46,14 +46,7 @@ elif [ -f "${SCRIPT_DIR}/../.env" ]; then
     set +a
 fi
 
-# Validate required env vars
-for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
-    if [ -z "${!var}" ]; then
-        echo "ERROR: Required environment variable ${var} is not set."
-        echo "Set it in your shell or create a .env file with these variables,"
-        echo "or pass --env path/to/.env. See scripts/README.md."
-        exit 1
-    fi
-done
+# Env validation is handled by the Python script with structured logging;
+# the shell wrapper only needs to load the .env file.
 
 python3 "${SCRIPT_DIR}/latency_report.py" "$@"
