@@ -630,6 +630,114 @@ def _count_trace_metrics(trace):
   return user_turns, tool_calls
 
 
+def _extract_conversation(trace):
+  """Reconstruct the multi-turn conversation from trace spans.
+
+  Returns a list of ``{"role": "user"|"agent", "text": str}`` dicts
+  representing the full conversation in chronological order.
+  """
+  # Collect user messages with their span indices.
+  user_msgs = []
+  for i, span in enumerate(trace.spans):
+    if span.event_type == "USER_MESSAGE_RECEIVED":
+      c = span.content
+      if isinstance(c, dict):
+        text = c.get("text_summary") or c.get("text") or ""
+      elif c:
+        text = str(c)
+      else:
+        text = ""
+      if text:
+        user_msgs.append((i, text))
+
+  if not user_msgs:
+    return []
+
+  turns = []
+  for msg_idx, (span_idx, user_text) in enumerate(user_msgs):
+    turns.append({"role": "user", "text": user_text})
+
+    # Boundary: next user message or end of spans.
+    end_idx = (
+        user_msgs[msg_idx + 1][0]
+        if msg_idx + 1 < len(user_msgs)
+        else len(trace.spans)
+    )
+
+    # Walk backwards to find the last substantive LLM_RESPONSE for this turn.
+    for span in reversed(trace.spans[span_idx:end_idx]):
+      if span.event_type == "LLM_RESPONSE":
+        c = span.content
+        if isinstance(c, dict):
+          text = c.get("response", "")
+        elif c:
+          text = str(c)
+        else:
+          text = ""
+        if (
+            text
+            and not text.startswith("call:")
+            and not _is_single_word_routing(text)
+        ):
+          turns.append({"role": "agent", "text": text})
+          break
+
+  return turns
+
+
+def _infer_corrections(conversation, model):
+  """Use LLM to count corrections and verifications in a conversation.
+
+  Classifies each user follow-up message (after the first) as a correction,
+  verification request, or normal follow-up.  Returns (corrections, verifications).
+  """
+  user_turns = [t for t in conversation if t["role"] == "user"]
+  if len(user_turns) <= 1:
+    return 0, 0
+
+  formatted = []
+  for t in conversation:
+    role = "User" if t["role"] == "user" else "Agent"
+    formatted.append(f"{role}: {t['text']}")
+  conv_text = "\n\n".join(formatted)
+
+  prompt = (
+      "Analyze this conversation between a user and an AI agent.\n\n"
+      f"<conversation>\n{conv_text}\n</conversation>\n\n"
+      "Count user follow-up messages (all messages after the first question) "
+      "and classify each as:\n"
+      "- CORRECTION: The user disputes, corrects, or says the agent got "
+      "something wrong\n"
+      "- VERIFICATION: The user asks the agent to verify, double-check, or "
+      "provide more specifics about a claim\n"
+      "- FOLLOWUP: Normal continuation, new related question, or satisfied "
+      "acknowledgment\n\n"
+      'Return ONLY a JSON object: {"corrections": <int>, "verifications": <int>}'
+  )
+
+  try:
+    from google import genai
+
+    client = genai.Client()
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config={"temperature": 0.0},
+    )
+    raw = response.text.strip()
+    # Strip markdown code fences if present.
+    if raw.startswith("```"):
+      lines = raw.split("\n")
+      raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    result = json.loads(raw)
+    return int(result.get("corrections", 0)), int(
+        result.get("verifications", 0)
+    )
+  except Exception:
+    logger.debug("Failed to infer corrections, defaulting to 0", exc_info=True)
+    return 0, 0
+
+
 def resolve_trace_responses(traces):
   results = []
   remote_lookups = 0
@@ -662,6 +770,7 @@ def resolve_trace_responses(traces):
       latency_s = round(trace.total_latency_ms / 1000, 1)
 
     user_turns, tool_calls = _count_trace_metrics(trace)
+    conversation = _extract_conversation(trace) if user_turns > 1 else []
 
     results.append(
         {
@@ -678,6 +787,9 @@ def resolve_trace_responses(traces):
             "is_a2a": is_a2a,
             "user_turns": user_turns,
             "tool_calls": tool_calls,
+            "conversation": conversation,
+            "corrections": 0,
+            "verifications": 0,
         }
     )
 
@@ -753,10 +865,124 @@ def run_evaluation(
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
+  # Infer corrections/verifications for multi-turn sessions.
+  mt_sessions = [r for r in resolved if r.get("user_turns", 0) > 1]
+  if mt_sessions:
+    logger.info(
+        "Inferring corrections for %d multi-turn sessions...",
+        len(mt_sessions),
+    )
+    for r in mt_sessions:
+      conv = r.get("conversation", [])
+      if conv:
+        corrections, verifications = _infer_corrections(conv, model)
+        r["corrections"] = corrections
+        r["verifications"] = verifications
+
   return {
       "report": report,
       "resolved_map": resolved_map,
   }
+
+
+def generate_quality_report(
+    session_ids: list[str],
+    model: str | None = None,
+) -> dict:
+  """Evaluate sessions and return a structured quality report dict.
+
+  This is the main public API for programmatic use.  It combines
+  ``run_evaluation`` (trace fetching, LLM scoring, correction inference)
+  with ``_build_json_output`` (structured dict) in a single call.
+
+  Args:
+      session_ids: BigQuery session IDs to evaluate.
+      model: Eval model override (default: EVAL_MODEL_ID env or
+          gemini-2.5-flash).
+
+  Returns:
+      Dict with ``summary`` and ``sessions`` keys, compatible with
+      evolve.py / bottleneck.py / score_and_compare.py.
+  """
+  # Ensure config is loaded (no-op if already initialized via main()).
+  if PROJECT_ID is None:
+    _load_config()
+  if not model:
+    model = os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
+  t0 = time.time()
+  result = run_evaluation(session_ids=session_ids, model=model)
+  elapsed = time.time() - t0
+
+  output = _build_json_output(result["report"], result["resolved_map"])
+  output["summary"]["elapsed_seconds"] = round(elapsed, 1)
+  return output
+
+
+def print_quality_report(report: dict):
+  """Print a formatted quality report from a ``generate_quality_report`` dict.
+
+  Accepts the structured dict returned by ``generate_quality_report``,
+  NOT the raw SDK ``CategoricalEvaluationReport`` object.  For the raw
+  object, use ``_print_eval_results`` instead.
+  """
+  summary = report["summary"]
+  sessions = report.get("sessions", [])
+
+  print("\n" + "=" * 70)
+  print("  QUALITY REPORT")
+  print("=" * 70)
+  print(f"  Sessions:             {summary['total_sessions']}")
+  print(f"  Meaningful:           {summary['meaningful']}")
+  print(f"  Declined (correct):   {summary['declined']}")
+  print(f"  Partial:              {summary['partial']}")
+  print(f"  Unhelpful:            {summary['unhelpful']}")
+  print(f"  Meaningful rate:      {summary['meaningful_rate']}%")
+
+  if "correction_rate" in summary:
+    total_c = sum(s.get("corrections", 0) for s in sessions)
+    total_v = sum(s.get("verifications", 0) for s in sessions)
+    print(
+        f"  Correction rate:      {summary['correction_rate']}%"
+        f" ({total_c} corrections)"
+    )
+    print(
+        f"  Verification rate:    {summary['verification_rate']}%"
+        f" ({total_v} verifications)"
+    )
+
+  if "avg_user_turns" in summary:
+    print(f"  Avg user turns:       {summary['avg_user_turns']}")
+  if "avg_tool_calls" in summary:
+    print(f"  Avg tool calls:       {summary['avg_tool_calls']}")
+
+  dim_avgs = summary.get("dimension_averages", {})
+  if dim_avgs:
+    print("\n  Quality Dimensions (0-2 scale):")
+    for dim, avg in dim_avgs.items():
+      bar = "#" * int(avg * 25)
+      print(f"    {dim:<20s}: {avg:.2f} / 2.00  {bar}")
+
+  problems = [
+      s
+      for s in sessions
+      if s.get("metrics", {}).get("response_usefulness", {}).get("category")
+      in ("unhelpful", "partial")
+  ]
+  if problems:
+    print(f"\n  Problem Sessions ({len(problems)}):")
+    for s in problems[:10]:
+      cat = s["metrics"]["response_usefulness"]["category"]
+      q = s.get("question", "")[:60]
+      reason = (
+          s.get("quality_scores", {})
+          .get("correctness", {})
+          .get("reason", "")[:80]
+      )
+      print(f"    [{cat}] {q}")
+      if reason:
+        print(f"      {reason}")
+
+  print("=" * 70)
 
 
 # ---------------------------------------------------------------------------
@@ -1080,14 +1306,27 @@ def _compute_multiturn_stats(resolved_map):
   """Compute multi-turn efficiency statistics from resolved traces."""
   user_turns = [r.get("user_turns", 0) for r in resolved_map.values()]
   tool_calls = [r.get("tool_calls", 0) for r in resolved_map.values()]
+  corrections = [r.get("corrections", 0) for r in resolved_map.values()]
+  verifications = [r.get("verifications", 0) for r in resolved_map.values()]
   total = len(user_turns)
   if not total:
     return {}
-  return {
+  mt_count = sum(1 for t in user_turns if t > 1)
+  stats = {
       "avg_user_turns": round(sum(user_turns) / total, 1),
       "avg_tool_calls": round(sum(tool_calls) / total, 1),
-      "multi_turn_sessions": sum(1 for t in user_turns if t > 1),
+      "multi_turn_sessions": mt_count,
   }
+  if mt_count > 0:
+    stats["correction_rate"] = round(
+        sum(1 for c in corrections if c > 0) / total * 100, 1
+    )
+    stats["verification_rate"] = round(
+        sum(1 for v in verifications if v > 0) / total * 100, 1
+    )
+    stats["avg_corrections"] = round(sum(corrections) / total, 2)
+    stats["avg_verifications"] = round(sum(verifications) / total, 2)
+  return stats
 
 
 def _print_eval_results(
@@ -1321,6 +1560,9 @@ def _print_eval_results(
     print(f"    Avg tool calls       : {mt_stats['avg_tool_calls']}")
     if mt_stats["multi_turn_sessions"] > 0:
       print(f"    Multi-turn sessions  : {mt_stats['multi_turn_sessions']}")
+    if "correction_rate" in mt_stats:
+      print(f"    Correction rate      : {mt_stats['correction_rate']}%")
+      print(f"    Verification rate    : {mt_stats['verification_rate']}%")
 
   print("\n  Category Distributions:")
   for metric_name, dist in report.category_distributions.items():
@@ -1525,6 +1767,9 @@ def _write_md_report(report, resolved_map, args):
     w(f"| Avg tool calls | {mt_stats['avg_tool_calls']} |")
     if mt_stats["multi_turn_sessions"] > 0:
       w(f"| Multi-turn sessions | {mt_stats['multi_turn_sessions']} |")
+    if "correction_rate" in mt_stats:
+      w(f"| Correction rate | {mt_stats['correction_rate']}% |")
+      w(f"| Verification rate | {mt_stats['verification_rate']}% |")
     w("")
 
   # --- Category Distributions (primary metrics only) ---
@@ -1659,24 +1904,36 @@ def _build_json_output(report, resolved_map):
   for sr in report.session_results:
     ctx = resolved_map.get(sr.session_id, {})
     metrics = {}
+    quality_scores = {}
     for mr in sr.metrics:
       metrics[mr.metric_name] = {
           "category": mr.category,
           "justification": mr.justification,
       }
-    sessions.append(
-        {
-            "session_id": sr.session_id,
-            "question": ctx.get("question", ""),
-            "response": ctx.get("response", ""),
-            "answered_by": ctx.get("answered_by", ""),
-            "is_a2a": ctx.get("is_a2a", False),
-            "latency_s": ctx.get("latency_s"),
-            "user_turns": ctx.get("user_turns", 0),
-            "tool_calls": ctx.get("tool_calls", 0),
-            "metrics": metrics,
+      if mr.metric_name in _DIMENSION_SCORES:
+        score_map = _DIMENSION_SCORES[mr.metric_name]
+        quality_scores[mr.metric_name] = {
+            "score": score_map.get(mr.category, 0),
+            "reason": mr.justification or "",
         }
-    )
+    session_dict = {
+        "session_id": sr.session_id,
+        "question": ctx.get("question", ""),
+        "response": ctx.get("response", ""),
+        "answered_by": ctx.get("answered_by", ""),
+        "is_a2a": ctx.get("is_a2a", False),
+        "latency_s": ctx.get("latency_s"),
+        "user_turns": ctx.get("user_turns", 0),
+        "tool_calls": ctx.get("tool_calls", 0),
+        "corrections": ctx.get("corrections", 0),
+        "verifications": ctx.get("verifications", 0),
+        "metrics": metrics,
+        "quality_scores": quality_scores,
+    }
+    conversation = ctx.get("conversation", [])
+    if conversation:
+      session_dict["conversation"] = conversation
+    sessions.append(session_dict)
 
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))

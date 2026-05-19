@@ -32,11 +32,14 @@ from quality_report import _compute_dimension_averages
 from quality_report import _compute_multiturn_stats
 from quality_report import _count_trace_metrics
 from quality_report import _extract_a2a_text
+from quality_report import _extract_conversation
 from quality_report import _group_by_category
 from quality_report import _is_single_word_routing
 from quality_report import _load_agent_config
+from quality_report import generate_quality_report
 from quality_report import get_a2a_response
 from quality_report import get_user_input
+from quality_report import print_quality_report
 
 # ---------------------------------------------------------------------------
 # Lightweight stubs for report objects
@@ -757,3 +760,142 @@ class TestComputeMultiturnStats:
     resolved = {"s1": {}, "s2": {"user_turns": 2}}
     stats = _compute_multiturn_stats(resolved)
     assert stats["avg_user_turns"] == 1.0  # (0+2)/2
+
+  def test_corrections_stats_present_for_multiturn(self):
+    resolved = {
+        "s1": {
+            "user_turns": 3,
+            "tool_calls": 2,
+            "corrections": 1,
+            "verifications": 0,
+        },
+        "s2": {
+            "user_turns": 1,
+            "tool_calls": 1,
+            "corrections": 0,
+            "verifications": 0,
+        },
+    }
+    stats = _compute_multiturn_stats(resolved)
+    assert stats["multi_turn_sessions"] == 1
+    assert "correction_rate" in stats
+    assert "verification_rate" in stats
+    assert stats["correction_rate"] == 50.0  # 1 of 2 sessions
+    assert stats["avg_corrections"] == 0.5  # 1 total / 2 sessions
+
+  def test_corrections_stats_absent_when_all_single_turn(self):
+    resolved = {
+        "s1": {
+            "user_turns": 1,
+            "tool_calls": 0,
+            "corrections": 0,
+            "verifications": 0,
+        },
+    }
+    stats = _compute_multiturn_stats(resolved)
+    assert stats["multi_turn_sessions"] == 0
+    assert "correction_rate" not in stats
+
+
+# ---------------------------------------------------------------------------
+# _extract_conversation
+# ---------------------------------------------------------------------------
+
+
+class _FakeConvSpan:
+  """Minimal span stub for conversation extraction tests."""
+
+  def __init__(self, event_type, content=None, agent=None):
+    self.event_type = event_type
+    self.content = content
+    self.agent = agent
+
+
+class TestExtractConversation:
+
+  def test_single_turn(self):
+    spans = [
+        _FakeConvSpan("USER_MESSAGE_RECEIVED", {"text": "Hello"}),
+        _FakeConvSpan("LLM_RESPONSE", {"response": "call:transfer_to_agent"}),
+        _FakeConvSpan(
+            "LLM_RESPONSE", {"response": "Hi there! How can I help?"}
+        ),
+    ]
+    trace = type("T", (), {"spans": spans})()
+    conv = _extract_conversation(trace)
+    assert len(conv) == 2
+    assert conv[0] == {"role": "user", "text": "Hello"}
+    assert conv[1]["role"] == "agent"
+    assert "Hi there" in conv[1]["text"]
+
+  def test_multi_turn(self):
+    spans = [
+        _FakeConvSpan("USER_MESSAGE_RECEIVED", {"text": "What is PTO?"}),
+        _FakeConvSpan("LLM_RESPONSE", {"response": "call:policy_agent"}),
+        _FakeConvSpan("LLM_RESPONSE", {"response": "20 days per year."}),
+        _FakeConvSpan("USER_MESSAGE_RECEIVED", {"text": "Are you sure?"}),
+        _FakeConvSpan("LLM_RESPONSE", {"response": "Yes, verified."}),
+    ]
+    trace = type("T", (), {"spans": spans})()
+    conv = _extract_conversation(trace)
+    assert len(conv) == 4
+    assert conv[0]["text"] == "What is PTO?"
+    assert conv[1]["text"] == "20 days per year."
+    assert conv[2]["text"] == "Are you sure?"
+    assert conv[3]["text"] == "Yes, verified."
+
+  def test_empty_trace(self):
+    trace = type("T", (), {"spans": []})()
+    assert _extract_conversation(trace) == []
+
+  def test_routing_response_skipped(self):
+    spans = [
+        _FakeConvSpan("USER_MESSAGE_RECEIVED", {"text": "Hello"}),
+        _FakeConvSpan("LLM_RESPONSE", {"response": "call:agent_x"}),
+    ]
+    trace = type("T", (), {"spans": spans})()
+    conv = _extract_conversation(trace)
+    # Only user turn, no agent response (routing was skipped)
+    assert len(conv) == 1
+    assert conv[0]["role"] == "user"
+
+  def test_no_user_messages(self):
+    spans = [
+        _FakeConvSpan("LLM_RESPONSE", {"response": "orphaned response"}),
+    ]
+    trace = type("T", (), {"spans": spans})()
+    assert _extract_conversation(trace) == []
+
+
+# ---------------------------------------------------------------------------
+# Public API (generate_quality_report / print_quality_report)
+# ---------------------------------------------------------------------------
+
+
+class TestPublicAPI:
+
+  def test_generate_quality_report_is_callable(self):
+    assert callable(generate_quality_report)
+    import inspect
+
+    sig = inspect.signature(generate_quality_report)
+    assert "session_ids" in sig.parameters
+    assert "model" in sig.parameters
+
+  def test_print_quality_report_minimal(self, capsys):
+    report = {
+        "summary": {
+            "total_sessions": 5,
+            "meaningful": 3,
+            "declined": 1,
+            "partial": 1,
+            "unhelpful": 0,
+            "meaningful_rate": 80.0,
+            "dimension_averages": {"correctness": 1.8},
+        },
+        "sessions": [],
+    }
+    print_quality_report(report)
+    out = capsys.readouterr().out
+    assert "80.0%" in out
+    assert "correctness" in out
