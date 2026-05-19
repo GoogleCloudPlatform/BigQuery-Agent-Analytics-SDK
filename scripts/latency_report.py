@@ -557,9 +557,8 @@ examples:
   parser.add_argument(
       "--time-period",
       type=str,
-      default=None,
-      help="Time range filter: 1h, 30m, 7d (default: no time filter, "
-      "fetches the latest traces by --limit)",
+      default="all",
+      help="Time range filter: 1h, 30m, 7d, or 'all' (default: all)",
   )
   parser.add_argument(
       "--app-name",
@@ -647,10 +646,13 @@ examples:
   )
 
   # Build filter
+  time_period = args.time_period
+  if time_period and time_period.lower() == "all":
+    time_period = None
   if args.session:
     trace_filter = TraceFilter(session_ids=[args.session])
-  elif args.time_period:
-    trace_filter = TraceFilter.from_cli_args(last=args.time_period)
+  elif time_period:
+    trace_filter = TraceFilter.from_cli_args(last=time_period)
   else:
     trace_filter = TraceFilter()
 
