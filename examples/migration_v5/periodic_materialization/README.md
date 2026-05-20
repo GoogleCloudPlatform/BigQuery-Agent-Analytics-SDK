@@ -101,7 +101,7 @@ makes it a small edit.
 | Scope | Role | Why |
 |---|---|---|
 | Project | `roles/bigquery.jobUser` | Run BQ jobs (DDL, discovery, state writes) |
-| Project | `roles/aiplatform.user` | Call `AI.GENERATE` for entity extraction |
+| Project | `roles/aiplatform.user` | Call `AI.GENERATE` for entity extraction. Granted in `--extraction-mode=ai-fallback` (default); skipped (and idempotently removed if pre-existing) in `--extraction-mode=compiled-only` |
 | Cloud Run Job | `roles/run.invoker` | Cloud Scheduler invokes the job. Granted on the specific job resource, not project-wide |
 | Events DS | `roles/bigquery.dataViewer` | Read `agent_events`; events stay read-only |
 | Graph DS | `roles/bigquery.dataEditor` | Write entity/relationship tables + `_bqaa_materialization_state` |
@@ -260,14 +260,21 @@ The script:
 3. **Grants narrow IAM** to the SA:
    * Project-level `roles/bigquery.jobUser` —
      `bigquery.jobs.create` only.
-   * Project-level `roles/aiplatform.user` — required because
-     the demo's extraction path calls BigQuery's
-     `AI.GENERATE` function (Gemini-backed entity extraction).
-     Without this grant, the AI call returns "user does not
-     have the permission to access resources used by
-     AI.GENERATE" and the orchestrator silently extracts an
-     empty graph for every session. Surfaced by the live
-     verification in PR #166.
+   * Project-level `roles/aiplatform.user` — required in the
+     default `--extraction-mode=ai-fallback` mode because the
+     demo's extraction path calls BigQuery's `AI.GENERATE`
+     function (Gemini-backed entity extraction). Without this
+     grant, the AI call returns "user does not have the
+     permission to access resources used by AI.GENERATE" and
+     the orchestrator silently extracts an empty graph for every
+     session. Surfaced by the live verification in PR #166. In
+     `--extraction-mode=compiled-only` the SDK never calls
+     `AI.GENERATE` (proven by `TestCompiledOnlyMakesZeroLLMCalls`),
+     so the deploy script skips this grant **and**
+     idempotently removes any pre-existing
+     `roles/aiplatform.user` binding from the same SA, so a
+     customer who flips an existing deploy from ai-fallback to
+     compiled-only ends up with no Vertex AI dependency at all.
    * Dataset-level `roles/bigquery.dataViewer` on
      **events** — read-only access. The events dataset stays
      effectively read-only per the contract above.

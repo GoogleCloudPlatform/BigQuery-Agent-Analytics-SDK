@@ -2866,22 +2866,23 @@ class TestCompiledOnlyMode:
 
 
 class TestCompiledOnlyMakesZeroLLMCalls:
-  """The SDK contract that *will* justify dropping
-  ``roles/aiplatform.user`` from the runtime SA's IAM once a
-  follow-up PR vendors compiled-extractor bundles into
-  ``deploy_cloud_run_job.sh``. B2 ships compiled-only mode at the
-  SDK / CLI / Python API surface but rejects
-  ``--extraction-mode=compiled-only`` on the deploy script today
-  because the bundles aren't yet staged into the Cloud Run image
-  (see ``TestDeployScriptExtractionModeBoundary``).
-
-  Asserts at the orchestrator boundary that compiled-only mode
-  passes ``use_ai_generate=False`` to ``extract_graph`` and that
-  the manager's ``_extract_via_ai_generate`` is never called. B1
+  """The SDK contract that justifies dropping
+  ``roles/aiplatform.user`` from the runtime SA's IAM in
+  ``--extraction-mode=compiled-only`` mode. Asserts at the
+  orchestrator boundary that compiled-only mode passes
+  ``use_ai_generate=False`` to ``extract_graph`` and that the
+  manager's ``_extract_via_ai_generate`` is never called. B1
   already pins that ``on_unhandled_span='fail'`` skips the AI
   branch; this test pins the materialize_window contract that
   routes through B1 correctly so a future regression is caught
   here before a customer's runtime SA starts billing Vertex AI.
+
+  The deploy script (``deploy_cloud_run_job.sh``) uses this same
+  contract: in compiled-only mode it skips the
+  ``roles/aiplatform.user`` grant and idempotently removes any
+  pre-existing grant on the same SA — see
+  ``TestDeployScriptExtractionModeBoundary`` for the shell-side
+  verification.
   """
 
   def test_compiled_only_extract_graph_use_ai_generate_is_false(
@@ -2961,16 +2962,146 @@ class TestCompiledOnlyMakesZeroLLMCalls:
 
 
 # ====================================================================== #
+# _build_manager reference-only path                                      #
+# ====================================================================== #
+
+
+class TestBuildManagerReferenceOnly:
+  """The deploy-path follow-up adds a third sub-path to
+  ``_build_manager``: ``bundles_root=None`` AND
+  ``reference_extractors_module=<dotted-path>``. The reference
+  module's ``EXTRACTORS`` dict registers structured extractors on
+  the manager directly — no compiled bundles, no AI.GENERATE.
+
+  This is the compiled-only deploy story for customers who
+  don't pre-compile fingerprint-stable bundles: ship the
+  reference module, set ``BQAA_REFERENCE_EXTRACTORS_MODULE``,
+  drop ``roles/aiplatform.user``. Customers who want compiled
+  bundles still get the bundles path by additionally setting
+  ``BQAA_BUNDLES_ROOT`` — the existing
+  ``bundles_root is not None`` branch handles that case."""
+
+  def test_reference_only_mode_loads_extractors_from_module(self, monkeypatch):
+    """``_build_manager(bundles_root=None,
+    reference_extractors_module='X')`` imports ``X`` and threads
+    its ``EXTRACTORS`` dict into the manager via the
+    ``extractors=`` kwarg on ``from_ontology_binding``."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("bqaa_test_ref_extractors")
+    fake_mod.EXTRACTORS = {"TOOL_COMPLETED": lambda event, spec: None}
+    monkeypatch.setitem(sys.modules, "bqaa_test_ref_extractors", fake_mod)
+
+    captured = {}
+
+    class _FakeManager:
+      pass
+
+    def _fake_from_ontology_binding(**kwargs):
+      captured.update(kwargs)
+      return _FakeManager()
+
+    monkeypatch.setattr(
+        "bigquery_agent_analytics.ontology_graph.OntologyGraphManager"
+        ".from_ontology_binding",
+        classmethod(lambda cls, **kw: _fake_from_ontology_binding(**kw)),
+    )
+
+    result = mw._build_manager(
+        project_id="p",
+        dataset_id="d",
+        ontology=mock.Mock(),
+        binding=mock.Mock(),
+        location="US",
+        bq_client=mock.Mock(),
+        bundles_root=None,
+        reference_extractors_module="bqaa_test_ref_extractors",
+        outcome_callback=lambda *_a, **_k: None,
+        table_id="agent_events",
+    )
+    assert isinstance(result, _FakeManager)
+    assert captured["extractors"] is fake_mod.EXTRACTORS
+
+  def test_reference_only_mode_rejects_empty_extractors(self, monkeypatch):
+    """The ``EXTRACTORS`` dict must be a non-empty dict; the
+    validator catches a stale / partially-wired reference module
+    at the boundary rather than producing an empty-extractor
+    manager that silently fails every span under
+    ``on_unhandled_span='fail'``."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("bqaa_test_empty_ref")
+    fake_mod.EXTRACTORS = {}
+    monkeypatch.setitem(sys.modules, "bqaa_test_empty_ref", fake_mod)
+
+    with pytest.raises(ValueError, match="non-empty EXTRACTORS dict"):
+      mw._build_manager(
+          project_id="p",
+          dataset_id="d",
+          ontology=mock.Mock(),
+          binding=mock.Mock(),
+          location="US",
+          bq_client=mock.Mock(),
+          bundles_root=None,
+          reference_extractors_module="bqaa_test_empty_ref",
+          outcome_callback=lambda *_a, **_k: None,
+          table_id="agent_events",
+      )
+
+  def test_legacy_no_extractors_path_still_works(self, monkeypatch):
+    """``bundles_root=None`` AND
+    ``reference_extractors_module=None`` keeps the existing
+    AI-only path: manager is constructed without extractors so
+    ``extract_graph(..., use_ai_generate=True)`` falls through to
+    ``AI.GENERATE``."""
+    captured = {}
+
+    class _FakeManager:
+      pass
+
+    def _fake_from_ontology_binding(**kwargs):
+      captured.update(kwargs)
+      return _FakeManager()
+
+    monkeypatch.setattr(
+        "bigquery_agent_analytics.ontology_graph.OntologyGraphManager"
+        ".from_ontology_binding",
+        classmethod(lambda cls, **kw: _fake_from_ontology_binding(**kw)),
+    )
+
+    mw._build_manager(
+        project_id="p",
+        dataset_id="d",
+        ontology=mock.Mock(),
+        binding=mock.Mock(),
+        location="US",
+        bq_client=mock.Mock(),
+        bundles_root=None,
+        reference_extractors_module=None,
+        outcome_callback=lambda *_a, **_k: None,
+        table_id="agent_events",
+    )
+    # ``extractors`` defaults to ``None`` (NOT an empty dict) so
+    # ``from_ontology_binding`` doesn't register any structured
+    # extractors and ``extract_graph`` routes through the
+    # AI.GENERATE path.
+    assert captured.get("extractors") is None
+
+
+# ====================================================================== #
 # Deploy-script boundary (PR B2 review P1)                                 #
 # ====================================================================== #
 
 
 class TestDeployScriptExtractionModeBoundary:
-  """Mechanically verifies the deploy-script reject for
-  ``--extraction-mode=compiled-only``. The reject is in shell, not
-  Python, so we shell out — but the contract still belongs in the
-  test suite because B2's PR body advertises the rejection as the
-  gate behavior."""
+  """Mechanically verifies the deploy-script's ``--extraction-mode``
+  contract. The contract is in shell, not Python, so each case
+  shells out — but the contract still belongs in the test suite
+  because the PR body advertises both modes as supported deploy
+  paths and the conditional IAM grant as the user-visible behavior
+  delta."""
 
   def _deploy_script_path(self) -> pathlib.Path:
     return (
@@ -2981,14 +3112,39 @@ class TestDeployScriptExtractionModeBoundary:
         / "deploy_cloud_run_job.sh"
     )
 
-  def test_compiled_only_rejected_with_actionable_error(self):
-    """``--extraction-mode=compiled-only`` must exit non-zero with
-    an error pointing at the missing bundles wiring and the CLI-
-    direct workaround. Customers who shell-trap this error need
-    the migration path in the message."""
+  def _reference_extractor_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "reference_extractor.py"
+    )
+
+  def test_deploy_script_shell_syntax_clean(self):
+    """``bash -n`` confirms the validator block + the conditional
+    IAM grant parse cleanly."""
     script = self._deploy_script_path()
     if not script.exists():
       pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_compiled_only_now_accepted_by_validator(self):
+    """``--extraction-mode=compiled-only`` must pass the
+    validator block (i.e., reach gcloud / actual deploy work
+    before failing). The earlier ``B2``-era reject ("compiled-only
+    is not yet supported") is gone — this test would have failed
+    before the deploy-path follow-up, so it pins the lift."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    # We don't have gcloud / a real GCP project in the test env,
+    # so the script will fail later — but it must NOT fail with
+    # the validator's compiled-only reject message.
     result = subprocess.run(
         [
             "bash",
@@ -3008,30 +3164,21 @@ class TestDeployScriptExtractionModeBoundary:
         ],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
     )
-    assert result.returncode != 0
     msg = result.stdout + result.stderr
-    assert "compiled-only is not yet supported" in msg
-    assert "bundles-root" in msg
-    assert "ai-fallback" in msg
-
-  def test_deploy_script_shell_syntax_clean(self):
-    """``bash -n`` confirms the new validator block + the
-    restored unconditional IAM grant parse cleanly."""
-    script = self._deploy_script_path()
-    if not script.exists():
-      pytest.skip("deploy script not present in this checkout")
-    result = subprocess.run(
-        ["bash", "-n", str(script)], capture_output=True, text=True
+    assert "is not yet supported" not in msg, (
+        "deploy script still rejects compiled-only at the validator"
+        f" block; full output:\n{msg}"
     )
     assert (
-        result.returncode == 0
-    ), f"deploy script has a shell syntax error: {result.stderr}"
+        "--extraction-mode must be 'ai-fallback' or 'compiled-only'" not in msg
+    )
 
   def test_invalid_extraction_mode_value_rejected(self):
     """Operator typo path (``compiled_only`` with underscore, etc.)
-    — the catch-all branch must reject with a clear error."""
+    — the catch-all branch must reject with a clear error naming
+    both supported modes."""
     script = self._deploy_script_path()
     if not script.exists():
       pytest.skip("deploy script not present in this checkout")
@@ -3058,4 +3205,61 @@ class TestDeployScriptExtractionModeBoundary:
     )
     assert result.returncode != 0
     msg = result.stdout + result.stderr
-    assert "must be 'ai-fallback'" in msg
+    assert "ai-fallback" in msg
+    assert "compiled-only" in msg
+
+  def test_reference_extractor_present_for_compiled_only_staging(self):
+    """Compiled-only mode imports
+    ``BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor`` at
+    runtime; the module must exist next to the deploy artifact so
+    the staging block can copy it into the Cloud Run image."""
+    ref = self._reference_extractor_path()
+    assert (
+        ref.is_file()
+    ), f"reference_extractor.py missing at {ref}; compiled-only deploy can't stage it"
+    body = ref.read_text()
+    assert (
+        "EXTRACTORS = {" in body or "EXTRACTORS=" in body
+    ), "reference_extractor.py must expose an EXTRACTORS dict"
+
+  def test_compiled_only_wires_reference_extractor_env_var(self):
+    """The deploy script's ENV_VARS array must set
+    ``BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor`` in
+    compiled-only mode. Without this env var, ``_build_manager``
+    would construct a manager with an empty extractor registry and
+    ``on_unhandled_span='fail'`` would fail every session."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    # Static check: the env var is wired inside an
+    # ``if [[ "$EXTRACTION_MODE" == "compiled-only" ]]`` block.
+    # We assert both the env var line and the guard appear in the
+    # same script — a missing guard would set the env var
+    # unconditionally, which is harmless but defeats the test of
+    # the conditional path.
+    assert "BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor" in body
+    assert '"$EXTRACTION_MODE" == "compiled-only"' in body
+
+  def test_compiled_only_skips_aiplatform_user_grant(self):
+    """The deploy script must guard the
+    ``roles/aiplatform.user`` ``add-iam-policy-binding`` behind
+    the ``ai-fallback`` branch, and idempotently remove the role
+    on the ``compiled-only`` branch. Without the conditional, the
+    "compiled-only ⇒ no Vertex AI dependency" story silently
+    breaks for any customer who flips an existing ai-fallback
+    deploy to compiled-only."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    # Conditional gate present.
+    assert '"$EXTRACTION_MODE" == "ai-fallback"' in body, (
+        "deploy script must gate the aiplatform.user grant on"
+        " --extraction-mode=ai-fallback"
+    )
+    # Idempotent remove on the compiled-only branch.
+    assert "remove-iam-policy-binding" in body, (
+        "deploy script must idempotently remove a pre-existing"
+        " aiplatform.user grant when switching to compiled-only"
+    )
+    # The remove uses the standard idempotent shell idiom — the
+    # binding may not exist for SAs that were never granted the
+    # role, so failure on that case is suppressed.
+    assert "|| true" in body

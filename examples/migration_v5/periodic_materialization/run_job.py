@@ -72,16 +72,22 @@ Env vars (all set by the deploy script via
   existing behavior (structured extractors + AI.GENERATE for
   gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
   span the compiled extractors don't cover surfaces as a typed
-  ``empty_extraction`` failure with sample diagnostics. The SDK
-  surface for ``compiled-only`` is fully supported, but
-  ``deploy_cloud_run_job.sh`` rejects it today because that script
-  does not yet stage bundles / a reference extractor module into
-  the Cloud Run image — a follow-up PR will wire the bundles and
-  lift the deploy reject (and make the
-  ``roles/aiplatform.user`` grant conditional). Until then,
-  customers who want compiled-only build their own Cloud Run
-  image and set ``BQAA_BUNDLES_ROOT`` /
-  ``BQAA_REFERENCE_EXTRACTORS_MODULE`` themselves.
+  ``empty_extraction`` failure with sample diagnostics.
+* ``BQAA_REFERENCE_EXTRACTORS_MODULE`` (default unset, set to
+  ``reference_extractor`` by the deploy script in
+  compiled-only mode) — dotted module path whose ``EXTRACTORS``
+  dict registers structured extractors on the manager.
+  Required for ``compiled-only`` to produce non-empty graphs;
+  the deploy script stages ``reference_extractor.py`` into the
+  container and sets this automatically. Customers who want a
+  different extractor module can override.
+* ``BQAA_BUNDLES_ROOT`` (default unset) — absolute path to a
+  directory of pre-compiled extractor bundles. When set, the
+  manager loads those bundles with
+  ``BQAA_REFERENCE_EXTRACTORS_MODULE`` as the fallback path.
+  When unset, the reference module's ``EXTRACTORS`` registry
+  is used directly — the simpler compiled-only path that
+  needs no offline bundle-build step.
 
 Exit codes mirror the CLI:
 
@@ -369,6 +375,18 @@ def main() -> int:
   extraction_mode = (
       os.environ.get("BQAA_EXTRACTION_MODE") or "ai-fallback"
   ).strip()
+  # Reference module + bundles root. Both default to None;
+  # ``compiled-only`` mode requires at least one of them to be set
+  # at the SDK boundary (else the manager has no structured
+  # extractors and every span fails ``on_unhandled_span='fail'``).
+  # The deploy script sets ``BQAA_REFERENCE_EXTRACTORS_MODULE`` to
+  # ``reference_extractor`` in compiled-only mode; ``BQAA_BUNDLES_ROOT``
+  # is left unset by default (operators who pre-compile bundles
+  # set it themselves).
+  reference_extractors_module = (
+      os.environ.get("BQAA_REFERENCE_EXTRACTORS_MODULE") or None
+  )
+  bundles_root = os.environ.get("BQAA_BUNDLES_ROOT") or None
 
   _emit(
       "INFO",
@@ -385,6 +403,8 @@ def main() -> int:
       to_time=to_time_raw,
       state_key_suffix=state_key_suffix,
       extraction_mode=extraction_mode,
+      bundles_root=bundles_root,
+      reference_extractors_module=reference_extractors_module,
   )
 
   try:
@@ -458,6 +478,8 @@ def main() -> int:
         to_time=parsed_to,
         state_key_suffix=state_key_suffix,
         extraction_mode=extraction_mode,
+        bundles_root=bundles_root,
+        reference_extractors_module=reference_extractors_module,
     )
 
     # Structured JSON report for Cloud Logging. Cloud Logging
