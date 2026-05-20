@@ -224,18 +224,6 @@ def _build_scope_context(config=None):
 
   parts = []
 
-  # Ground truth for factual verification
-  ground_truth = config.get("ground_truth")
-  if ground_truth:
-    parts.append(
-        "\n\nGROUND TRUTH POLICY DATA (use this to verify factual accuracy):"
-        f" {ground_truth}"
-        " When judging whether a response is 'meaningful', check that the"
-        " facts match this ground truth. A response that provides accurate,"
-        " specific information matching the ground truth IS meaningful."
-    )
-
-  # Scope context
   scope_decisions = config.get("scope_decisions", [])
   oos_topics = [
       d["topic"] for d in scope_decisions if d.get("decision") == "out_of_scope"
