@@ -2866,16 +2866,22 @@ class TestCompiledOnlyMode:
 
 
 class TestCompiledOnlyMakesZeroLLMCalls:
-  """The contract that justifies dropping ``roles/aiplatform.user``
-  from the runtime SA's IAM in ``deploy_cloud_run_job.sh`` when
-  ``--extraction-mode=compiled-only`` is selected.
+  """The SDK contract that *will* justify dropping
+  ``roles/aiplatform.user`` from the runtime SA's IAM once a
+  follow-up PR vendors compiled-extractor bundles into
+  ``deploy_cloud_run_job.sh``. B2 ships compiled-only mode at the
+  SDK / CLI / Python API surface but rejects
+  ``--extraction-mode=compiled-only`` on the deploy script today
+  because the bundles aren't yet staged into the Cloud Run image
+  (see ``TestDeployScriptExtractionModeBoundary``).
 
   Asserts at the orchestrator boundary that compiled-only mode
   passes ``use_ai_generate=False`` to ``extract_graph`` and that
   the manager's ``_extract_via_ai_generate`` is never called. B1
   already pins that ``on_unhandled_span='fail'`` skips the AI
   branch; this test pins the materialize_window contract that
-  routes through B1 correctly.
+  routes through B1 correctly so a future regression is caught
+  here before a customer's runtime SA starts billing Vertex AI.
   """
 
   def test_compiled_only_extract_graph_use_ai_generate_is_false(

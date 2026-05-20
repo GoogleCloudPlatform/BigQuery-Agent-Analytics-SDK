@@ -72,10 +72,16 @@ Env vars (all set by the deploy script via
   existing behavior (structured extractors + AI.GENERATE for
   gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
   span the compiled extractors don't cover surfaces as a typed
-  ``empty_extraction`` failure with sample diagnostics. Set
-  ``compiled-only`` when you also drop ``roles/aiplatform.user``
-  from the runtime SA (the deploy script does both together
-  when ``--extraction-mode=compiled-only`` is passed).
+  ``empty_extraction`` failure with sample diagnostics. The SDK
+  surface for ``compiled-only`` is fully supported, but
+  ``deploy_cloud_run_job.sh`` rejects it today because that script
+  does not yet stage bundles / a reference extractor module into
+  the Cloud Run image — a follow-up PR will wire the bundles and
+  lift the deploy reject (and make the
+  ``roles/aiplatform.user`` grant conditional). Until then,
+  customers who want compiled-only build their own Cloud Run
+  image and set ``BQAA_BUNDLES_ROOT`` /
+  ``BQAA_REFERENCE_EXTRACTORS_MODULE`` themselves.
 
 Exit codes mirror the CLI:
 
