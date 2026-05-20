@@ -245,7 +245,8 @@ class TestNormalizeRelationshipColumns:
     """Semantic check: if a dict entry references a property the
     endpoint entity doesn't declare, raise with the bad name."""
     with pytest.raises(
-        ValueError, match=r"no property named 'not_a_real_property'"
+        ValueError,
+        match=r"no primary-key property named 'not_a_real_property'",
     ):
       normalize_relationship_columns(
           [{"src_x": "not_a_real_property"}],
@@ -306,7 +307,8 @@ class TestEndToEndBindingLoad:
     ont = load_ontology_from_string(_TOY_ONTOLOGY)
     binding = load_binding_from_string(binding_yaml, ontology=ont)
     with pytest.raises(
-        ValueError, match=r"no property named 'not_a_real_property'"
+        ValueError,
+        match=r"no primary-key property named 'not_a_real_property'",
     ):
       resolve(ontology=ont, binding=binding)
 
@@ -407,3 +409,214 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
       assert rel.to_column_mapping is not None
       assert len(rel.from_column_mapping) == len(rb.from_columns)
       assert len(rel.to_column_mapping) == len(rb.to_columns)
+
+
+# ------------------------------------------------------------------ #
+# PR #191 review fixes — inherited PK + PK-only target restriction    #
+# ------------------------------------------------------------------ #
+
+
+_INHERITANCE_ONTOLOGY = textwrap.dedent(
+    """
+    ontology: inherits
+    entities:
+      - name: Party
+        keys:
+          primary: [party_id]
+        properties:
+          - {name: party_id, type: string}
+          - {name: display_name, type: string}
+      - name: Person
+        extends: Party
+        properties:
+          - {name: email, type: string}
+      - name: Account
+        keys:
+          primary: [account_id]
+        properties:
+          - {name: account_id, type: string}
+    relationships:
+      - name: ownsAccount
+        from: Person
+        to: Account
+    """
+).strip()
+
+
+_INHERITANCE_BINDING = textwrap.dedent(
+    """
+    binding: inherits_bq
+    ontology: inherits
+    target:
+      backend: bigquery
+      project: p
+      dataset: d
+    entities:
+      - name: Person
+        source: p.d.person
+        properties:
+          - {name: party_id, column: party_id}
+          - {name: display_name, column: display_name}
+          - {name: email, column: email}
+      - name: Account
+        source: p.d.account
+        properties:
+          - {name: account_id, column: account_id}
+    relationships:
+      - name: ownsAccount
+        source: p.d.owns_account
+        from_columns: [src_party_id]
+        to_columns: [dst_account_id]
+    """
+).strip()
+
+
+class TestInheritedKeyRegression:
+  """Regression for PR #191 review (P1): a relationship whose
+  endpoint inherits its PK from a parent (e.g. ``Person extends
+  Party`` where ``Party`` owns ``keys.primary: [party_id]``) must
+  resolve cleanly. Previously ``normalize_relationship_columns``
+  read ``endpoint.keys`` directly and bailed with "no primary key
+  declared" for inherited keys; mirroring the arity check's
+  ``_effective_keys`` call fixes it.
+  """
+
+  def test_relationship_endpoint_with_inherited_pk_resolves(self):
+    """Person inherits ``party_id`` from Party. The legacy
+    ``list[str]`` shape must resolve to the inherited PK as the
+    default target property."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    ont = load_ontology_from_string(_INHERITANCE_ONTOLOGY)
+    binding = load_binding_from_string(_INHERITANCE_BINDING, ontology=ont)
+    resolved = resolve(ontology=ont, binding=binding)
+    rel = resolved.relationships[0]
+    # Legacy str entry on the from side resolves to the inherited
+    # PK property name.
+    assert rel.from_column_mapping == (("src_party_id", "party_id"),)
+    # Account is not inherited; its PK resolves normally.
+    assert rel.to_column_mapping == (("dst_account_id", "account_id"),)
+
+  def test_inherited_pk_accepted_as_explicit_target(self):
+    """Explicit dict entries can target inherited PKs too."""
+    binding_yaml = textwrap.dedent(
+        """
+        binding: inherits_bq
+        ontology: inherits
+        target:
+          backend: bigquery
+          project: p
+          dataset: d
+        entities:
+          - name: Person
+            source: p.d.person
+            properties:
+              - {name: party_id, column: party_id}
+              - {name: display_name, column: display_name}
+              - {name: email, column: email}
+          - name: Account
+            source: p.d.account
+            properties:
+              - {name: account_id, column: account_id}
+        relationships:
+          - name: ownsAccount
+            source: p.d.owns_account
+            from_columns: [{src_party_id: party_id}]
+            to_columns:   [{dst_account_id: account_id}]
+        """
+    ).strip()
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    ont = load_ontology_from_string(_INHERITANCE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    resolved = resolve(ontology=ont, binding=binding)
+    rel = resolved.relationships[0]
+    assert rel.from_column_mapping == (("src_party_id", "party_id"),)
+
+
+class TestExplicitMappingPKOnly:
+  """Regression for PR #191 review (P2): explicit
+  ``target_property`` must be one of the endpoint's effective
+  primary-key properties. The PR is explicitly FK→PK; allowing
+  any-declared-property would let C2's materializer fix consume a
+  canonical mapping that points an edge endpoint at a non-key
+  column, which doesn't uniquely identify the target row."""
+
+  def test_explicit_mapping_to_non_pk_property_rejected(self):
+    """``display_name`` is a real declared property on Party (and
+    thus on Person via inheritance), but it is NOT a PK property.
+    A binding that targets it must be rejected at the
+    normalization step before C2 ever sees it."""
+    binding_yaml = textwrap.dedent(
+        """
+        binding: inherits_bq
+        ontology: inherits
+        target:
+          backend: bigquery
+          project: p
+          dataset: d
+        entities:
+          - name: Person
+            source: p.d.person
+            properties:
+              - {name: party_id, column: party_id}
+              - {name: display_name, column: display_name}
+              - {name: email, column: email}
+          - name: Account
+            source: p.d.account
+            properties:
+              - {name: account_id, column: account_id}
+        relationships:
+          - name: ownsAccount
+            source: p.d.owns_account
+            from_columns: [{src_display_name: display_name}]
+            to_columns:   [{dst_account_id: account_id}]
+        """
+    ).strip()
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    ont = load_ontology_from_string(_INHERITANCE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    with pytest.raises(
+        ValueError, match=r"has no primary-key property named 'display_name'"
+    ):
+      resolve(ontology=ont, binding=binding)
+
+  def test_non_pk_target_error_lists_effective_pk_properties(self):
+    """The error message names the effective PK property set so the
+    operator can fix the typo without inspecting the ontology by
+    hand."""
+    binding_yaml = textwrap.dedent(
+        """
+        binding: inherits_bq
+        ontology: inherits
+        target:
+          backend: bigquery
+          project: p
+          dataset: d
+        entities:
+          - name: Person
+            source: p.d.person
+            properties:
+              - {name: party_id, column: party_id}
+              - {name: display_name, column: display_name}
+              - {name: email, column: email}
+          - name: Account
+            source: p.d.account
+            properties:
+              - {name: account_id, column: account_id}
+        relationships:
+          - name: ownsAccount
+            source: p.d.owns_account
+            from_columns: [{src_email: email}]
+            to_columns:   [{dst_account_id: account_id}]
+        """
+    ).strip()
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    ont = load_ontology_from_string(_INHERITANCE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    with pytest.raises(ValueError) as excinfo:
+      resolve(ontology=ont, binding=binding)
+    # Error names the available PK set (inherited from Party).
+    assert "['party_id']" in str(excinfo.value)
