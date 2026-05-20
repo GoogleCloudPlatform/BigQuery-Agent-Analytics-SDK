@@ -25,6 +25,8 @@ Live BigQuery integration is covered separately (a follow-up).
 from __future__ import annotations
 
 import datetime as _dt
+import pathlib
+import subprocess
 from unittest import mock
 
 import pytest
@@ -2950,3 +2952,104 @@ class TestCompiledOnlyMakesZeroLLMCalls:
     assert isinstance(result, ExtractedGraph)
     assert mgr._extract_via_ai_generate.called is False
     assert mgr._extract_payloads.called is False
+
+
+# ====================================================================== #
+# Deploy-script boundary (PR B2 review P1)                                 #
+# ====================================================================== #
+
+
+class TestDeployScriptExtractionModeBoundary:
+  """Mechanically verifies the deploy-script reject for
+  ``--extraction-mode=compiled-only``. The reject is in shell, not
+  Python, so we shell out — but the contract still belongs in the
+  test suite because B2's PR body advertises the rejection as the
+  gate behavior."""
+
+  def _deploy_script_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "deploy_cloud_run_job.sh"
+    )
+
+  def test_compiled_only_rejected_with_actionable_error(self):
+    """``--extraction-mode=compiled-only`` must exit non-zero with
+    an error pointing at the missing bundles wiring and the CLI-
+    direct workaround. Customers who shell-trap this error need
+    the migration path in the message."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--extraction-mode",
+            "compiled-only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    msg = result.stdout + result.stderr
+    assert "compiled-only is not yet supported" in msg
+    assert "bundles-root" in msg
+    assert "ai-fallback" in msg
+
+  def test_deploy_script_shell_syntax_clean(self):
+    """``bash -n`` confirms the new validator block + the
+    restored unconditional IAM grant parse cleanly."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_invalid_extraction_mode_value_rejected(self):
+    """Operator typo path (``compiled_only`` with underscore, etc.)
+    — the catch-all branch must reject with a clear error."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--extraction-mode",
+            "compiled_only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    msg = result.stdout + result.stderr
+    assert "must be 'ai-fallback'" in msg
