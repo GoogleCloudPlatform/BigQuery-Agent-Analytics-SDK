@@ -802,21 +802,22 @@ class OntologyGraphManager:
                     detail=exc.detail,
                 )
             )
-          # structured_unhandled: spans seen in raw_events but not
-          # claimed by any extractor (no matching event_type) and not
-          # already accounted for by an extractor_exception.
-          handled_span_ids = (
-              set(structured_result.fully_handled_span_ids)
-              | set(structured_result.partially_handled_span_ids)
-              | {
-                  exc.span_id
-                  for exc in structured_result.exceptions
-                  if exc.span_id
-              }
-          )
+          # structured_unhandled: spans seen in raw_events but for
+          # which NO registered extractor was even invoked
+          # (event_type didn't match any key in self.extractors).
+          # An extractor that matched and returned an empty
+          # StructuredExtractionResult (e.g.
+          # reference_extractor._extract_capture_context's
+          # missing-required-field path) is NOT unhandled — the
+          # extractor recognized the event and concluded there was
+          # nothing structured to emit. That's a legitimate silent
+          # outcome and B2's compiled-only failure semantics should
+          # NOT flip ok=false on it. Use the orchestrator's
+          # ``invoked_span_ids`` set to distinguish the two cases.
+          invoked_span_ids = set(structured_result.invoked_span_ids)
           for event in raw_events:
             span_id = event.get("span_id")
-            if not span_id or span_id in handled_span_ids:
+            if not span_id or span_id in invoked_span_ids:
               continue
             diagnostics.append(
                 ExtractionDiagnostic(

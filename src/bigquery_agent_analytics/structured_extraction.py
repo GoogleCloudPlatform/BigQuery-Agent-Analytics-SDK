@@ -81,6 +81,17 @@ class StructuredExtractionResult:
         when ``run_structured_extractors`` ran with
         ``capture_extractor_exceptions=True``. Empty list on the
         default (propagating) path.
+    invoked_span_ids: Span IDs for which a registered extractor was
+        invoked (regardless of whether it produced output, returned
+        empty, or raised). Populated by
+        :func:`run_structured_extractors` for diagnostic emission;
+        individual extractor implementations should not set this
+        directly — the orchestrator owns it. The
+        ``structured_unhandled`` diagnostic in ``extract_graph``
+        uses this set to distinguish "no matching extractor" (a real
+        coverage gap) from "extractor matched but emitted nothing"
+        (a legitimate silent outcome, e.g. when a required field is
+        missing from the event content).
   """
 
   nodes: list[ExtractedNode] = field(default_factory=list)
@@ -88,6 +99,7 @@ class StructuredExtractionResult:
   fully_handled_span_ids: set[str] = field(default_factory=set)
   partially_handled_span_ids: set[str] = field(default_factory=set)
   exceptions: list[ExtractorException] = field(default_factory=list)
+  invoked_span_ids: set[str] = field(default_factory=set)
 
 
 # Type alias for extractor callables.
@@ -120,6 +132,7 @@ def merge_extraction_results(
   fully_handled: set[str] = set()
   partially_handled: set[str] = set()
   all_exceptions: list[ExtractorException] = []
+  invoked: set[str] = set()
 
   for result in results:
     for node in result.nodes:
@@ -128,6 +141,7 @@ def merge_extraction_results(
     fully_handled |= result.fully_handled_span_ids
     partially_handled |= result.partially_handled_span_ids
     all_exceptions.extend(result.exceptions)
+    invoked |= result.invoked_span_ids
 
   return StructuredExtractionResult(
       nodes=list(node_map.values()),
@@ -135,6 +149,7 @@ def merge_extraction_results(
       fully_handled_span_ids=fully_handled,
       partially_handled_span_ids=partially_handled,
       exceptions=all_exceptions,
+      invoked_span_ids=invoked,
   )
 
 
@@ -260,6 +275,7 @@ def run_structured_extractors(
   """
   results: list[StructuredExtractionResult] = []
   exceptions: list[ExtractorException] = []
+  invoked: set[str] = set()
 
   for event in events:
     event_type = event.get('event_type')
@@ -268,13 +284,21 @@ def run_structured_extractors(
     extractor = extractors.get(event_type)
     if extractor is None:
       continue
+    # The orchestrator owns ``invoked_span_ids``. Record before the
+    # call so a raising extractor still contributes its span to the
+    # invoked set (the call WAS attempted; the diagnostic stream
+    # surfaces it as ``extractor_exception``, not
+    # ``structured_unhandled``).
+    span_id = event.get('span_id')
+    if span_id:
+      invoked.add(span_id)
     if capture_extractor_exceptions:
       try:
         results.append(extractor(event, spec))
       except Exception as exc:  # noqa: BLE001 — by design when capturing
         exceptions.append(
             ExtractorException(
-                span_id=event.get('span_id'),
+                span_id=span_id,
                 event_type=event_type,
                 detail=f'{type(exc).__name__}: {exc}',
             )
@@ -289,12 +313,15 @@ def run_structured_extractors(
       if results
       else StructuredExtractionResult()
   )
-  if exceptions:
-    merged = StructuredExtractionResult(
-        nodes=merged.nodes,
-        edges=merged.edges,
-        fully_handled_span_ids=merged.fully_handled_span_ids,
-        partially_handled_span_ids=merged.partially_handled_span_ids,
-        exceptions=exceptions,
-    )
-  return merged
+  # Always attach the orchestrator's view of ``invoked_span_ids`` +
+  # propagate any locally-caught exceptions (preserving any
+  # exceptions an extractor result already carried — symmetric to
+  # how nodes / edges / span_ids merge).
+  return StructuredExtractionResult(
+      nodes=merged.nodes,
+      edges=merged.edges,
+      fully_handled_span_ids=merged.fully_handled_span_ids,
+      partially_handled_span_ids=merged.partially_handled_span_ids,
+      exceptions=merged.exceptions + exceptions,
+      invoked_span_ids=merged.invoked_span_ids | invoked,
+  )

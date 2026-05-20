@@ -425,3 +425,138 @@ class TestExtractionDiagnosticModel:
     assert d.session_id is None
     assert d.event_type is None
     assert d.detail is None
+
+  def test_model_dump_includes_diagnostics_field(self):
+    """Documenting the serialization-shape change from PR #189
+    review (P2): ``ExtractedGraph.model_dump()`` now includes
+    ``'diagnostics': []`` even when the caller never opted into
+    the diagnostics-emitting path. Existing JSON consumers that
+    ignore unknown keys (the standard pattern) keep working; only
+    strict-shape consumers need to add a passthrough."""
+    g = ExtractedGraph(name="x")
+    dumped = g.model_dump()
+    assert "diagnostics" in dumped
+    assert dumped["diagnostics"] == []
+
+
+# ---------------------------------------------------------------- #
+# structured_unhandled precise semantics (PR #189 review P2)        #
+# ---------------------------------------------------------------- #
+
+
+class TestStructuredUnhandledPreciseSemantics:
+  """``structured_unhandled`` means "no registered extractor was
+  invoked for this span" — NOT "an extractor matched but produced
+  empty output." The distinction matters because:
+
+  * A recognized event whose content is missing a required field
+    (e.g. ``reference_extractor._extract_capture_context`` when
+    ``context_id`` is absent) returns an empty
+    ``StructuredExtractionResult()``. That's a legitimate silent
+    outcome.
+  * B2's compiled-only failure semantics will translate
+    ``structured_unhandled`` to typed ``empty_extraction`` failures
+    that flip ``ok=false``. Counting the silent-outcome case as
+    "unhandled" would page on-call for events the SDK handled
+    correctly."""
+
+  def _empty_extractor(self, event, spec):
+    """Recognized event-type, empty result — mirrors the
+    reference extractor's missing-required-field path."""
+    return StructuredExtractionResult()
+
+  def test_matched_extractor_returning_empty_is_not_unhandled(self):
+    """An extractor that matches by event_type and returns empty
+    does NOT contribute a ``structured_unhandled`` diagnostic.
+    The orchestrator's ``invoked_span_ids`` set records the
+    invocation; ``structured_unhandled`` filters against that
+    set."""
+    mgr = _build_manager(
+        extractors={"E": self._empty_extractor},
+        raw_events=[
+            {"event_type": "E", "span_id": "s-empty-output"},
+            {"event_type": "UNKNOWN", "span_id": "s-truly-unhandled"},
+        ],
+    )
+    result = mgr.extract_graph(
+        ["sess-1"],
+        use_ai_generate=False,
+        run_structured=True,
+        on_unhandled_span="fail",
+    )
+    unhandled = {
+        d.span_id
+        for d in result.diagnostics
+        if d.diagnostic_code == "structured_unhandled"
+    }
+    assert unhandled == {"s-truly-unhandled"}, (
+        "only the span with no matching extractor counts as "
+        "structured_unhandled; the empty-output path is a "
+        "legitimate silent outcome"
+    )
+
+  def test_invoked_span_ids_records_every_extractor_call(self):
+    """``run_structured_extractors`` populates
+    ``invoked_span_ids`` for every event whose event_type matches
+    an extractor, whether the extractor returns empty, returns
+    full output, or raises (when capturing)."""
+    events = [
+        {"event_type": "OK", "span_id": "s-ok"},
+        {"event_type": "EMPTY", "span_id": "s-empty"},
+        {"event_type": "BOOM", "span_id": "s-boom"},
+        {"event_type": "UNKNOWN", "span_id": "s-no-match"},
+    ]
+    extractors = {
+        "OK": _ok_extractor,
+        "EMPTY": self._empty_extractor,
+        "BOOM": _raising_extractor,
+    }
+    result = run_structured_extractors(
+        events, extractors, _ToySpec(), capture_extractor_exceptions=True
+    )
+    assert result.invoked_span_ids == {"s-ok", "s-empty", "s-boom"}, (
+        "every span whose event_type matched a registered extractor "
+        "must appear in invoked_span_ids; s-no-match must not "
+        "because no extractor was even invoked for it"
+    )
+
+  def test_merge_preserves_invoked_span_ids(self):
+    """``merge_extraction_results`` unions ``invoked_span_ids``
+    just like the other span-id sets so the diagnostic stream
+    reflects the full orchestrator view."""
+    r1 = StructuredExtractionResult(invoked_span_ids={"a", "b"})
+    r2 = StructuredExtractionResult(invoked_span_ids={"b", "c"})
+    from bigquery_agent_analytics.structured_extraction import merge_extraction_results
+
+    merged = merge_extraction_results([r1, r2])
+    assert merged.invoked_span_ids == {"a", "b", "c"}
+
+  def test_merge_preserves_exceptions_from_both_sources(self):
+    """``run_structured_extractors`` concatenates
+    ``merged.exceptions + local_exceptions`` — symmetric to how
+    nodes / edges / span_ids merge. Earlier drafts replaced
+    ``merged.exceptions`` with just the local list, which would
+    silently drop any exceptions an extractor already carried in
+    its return value (PR #189 review informational finding)."""
+    pre_existing_exc = ExtractorException(
+        span_id="s-pre", event_type="EARLIER", detail="from extractor"
+    )
+
+    def _ext_with_baked_in_exc(event, spec):
+      return StructuredExtractionResult(exceptions=[pre_existing_exc])
+
+    events = [
+        {"event_type": "BAKED", "span_id": "s-pre"},
+        {"event_type": "BOOM", "span_id": "s-boom"},
+    ]
+    extractors = {
+        "BAKED": _ext_with_baked_in_exc,
+        "BOOM": _raising_extractor,
+    }
+    result = run_structured_extractors(
+        events, extractors, _ToySpec(), capture_extractor_exceptions=True
+    )
+    # Both exceptions surface — the baked-in one from the
+    # extractor's return value and the orchestrator-caught one.
+    spans = {exc.span_id for exc in result.exceptions}
+    assert spans == {"s-pre", "s-boom"}

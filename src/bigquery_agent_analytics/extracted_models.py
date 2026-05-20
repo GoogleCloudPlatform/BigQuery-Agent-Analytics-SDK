@@ -47,6 +47,16 @@ class ExtractedEdge(BaseModel):
 
 DiagnosticCode = Literal[
     # Per-span — attributable from the structured-extraction pipeline.
+    #
+    # ``structured_unhandled`` carries a precise meaning: no
+    # registered extractor was *invoked* for the span (its
+    # ``event_type`` didn't match any key in the extractor
+    # registry). An extractor that matched and returned an empty
+    # ``StructuredExtractionResult()`` — e.g. a recognized event
+    # whose content is missing a required field — is NOT
+    # unhandled; that's a legitimate silent outcome and downstream
+    # compiled-only failure semantics should not flip ``ok=false``
+    # on it.
     "structured_fully_handled",
     "structured_partially_handled",
     "structured_unhandled",
@@ -131,7 +141,10 @@ class ExtractedGraph(BaseModel):
           "Per-span / session diagnostics emitted by the extraction "
           "pipeline when the caller opts into the diagnostics-"
           "emitting path. Empty list on the legacy bool surface so "
-          "existing callers see byte-identical ``ExtractedGraph`` "
-          "values."
+          "the extraction semantics are unchanged. Note: this is an "
+          "additive Pydantic field, so ``model_dump()`` now includes "
+          "``'diagnostics': []`` even for legacy callers — strict-"
+          "shape JSON consumers should add a passthrough for the "
+          "new key."
       ),
   )
