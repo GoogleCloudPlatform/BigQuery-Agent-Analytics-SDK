@@ -383,9 +383,17 @@ _retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
 #   step, a customer who flips an existing deploy from
 #   ai-fallback to compiled-only inherits the old role grant and
 #   the "compiled-only ⇒ no Vertex AI dependency" story silently
-#   breaks. ``remove-iam-policy-binding`` is idempotent only when
-#   the binding exists; we route stderr to ``/dev/null`` and
-#   ``|| true`` so a never-granted SA doesn't tank the deploy.
+#   breaks.
+#
+#   The remove is **deferred** until AFTER the new revision has
+#   been successfully deployed (and, if ``--smoke`` is set, after
+#   the smoke run passes). If we removed the role here and any
+#   later step failed (staging, buildpacks, ``gcloud run jobs
+#   deploy``, scheduler wiring), the previously-deployed
+#   ai-fallback container — still running under the existing
+#   schedule — would lose its required Vertex AI role mid-
+#   transition. Deferring keeps the existing scheduled deploy
+#   functional through every failure-of-the-new-deploy path.
 if [[ "$EXTRACTION_MODE" == "ai-fallback" ]]; then
   echo "==> granting project-level roles/aiplatform.user to $SA_EMAIL"
   _retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
@@ -395,12 +403,7 @@ if [[ "$EXTRACTION_MODE" == "ai-fallback" ]]; then
     --quiet
 else
   echo "==> compiled-only mode: skipping roles/aiplatform.user grant on $SA_EMAIL"
-  echo "==> idempotently removing any pre-existing roles/aiplatform.user grant from $SA_EMAIL"
-  gcloud projects remove-iam-policy-binding "$PROJECT" \
-    --member "serviceAccount:${SA_EMAIL}" \
-    --role roles/aiplatform.user \
-    --condition=None \
-    --quiet 2>/dev/null || true
+  echo "==> (any pre-existing roles/aiplatform.user grant will be removed after deploy succeeds)"
 fi
 
 # Dataset-level IAM via the BigQuery Python client (the
@@ -646,6 +649,12 @@ echo "Service account:     ${SA_EMAIL}"
 if [[ "$SMOKE" == true ]]; then
   echo
   echo "==> running smoke execution (--smoke)"
+  # Capture the exit status so a failed smoke skips the deferred
+  # ``compiled-only`` IAM remove below: if the new revision can't
+  # even complete one execution, the existing schedule on the
+  # previous container is the safer fallback, and that fallback
+  # still needs ``roles/aiplatform.user``.
+  set +e
   EXECUTION_NAME="$(
     gcloud run jobs execute "$JOB_NAME" \
       --project "$PROJECT" \
@@ -653,6 +662,8 @@ if [[ "$SMOKE" == true ]]; then
       --wait \
       --format='value(metadata.name)'
   )"
+  SMOKE_RC=$?
+  set -e
   echo "==> execution: $EXECUTION_NAME"
   echo "==> tailing logs (last 50 lines):"
   gcloud logging read \
@@ -663,6 +674,38 @@ if [[ "$SMOKE" == true ]]; then
     --limit 50 \
     --format='value(textPayload,jsonPayload)' \
     || true
+  if [[ $SMOKE_RC -ne 0 ]]; then
+    echo "Error: smoke execution failed (exit ${SMOKE_RC}); leaving existing IAM unchanged." >&2
+    exit "$SMOKE_RC"
+  fi
+fi
+
+# ----------------------------------------------------------- #
+# 8. Compiled-only: deferred IAM remove                        #
+# ----------------------------------------------------------- #
+#
+# Runs ONLY after every earlier step succeeded — the new
+# revision is deployed, scheduler is wired, and (if ``--smoke``)
+# the new revision proved it can complete an execution. Any
+# failure before this point exited non-zero (``set -e`` at the
+# top of the script + the explicit ``exit "$SMOKE_RC"`` above),
+# so the existing ai-fallback deploy keeps its
+# ``roles/aiplatform.user`` and its schedule keeps working
+# during a botched transition.
+#
+# ``remove-iam-policy-binding`` is idempotent only when the
+# binding exists; we route stderr to ``/dev/null`` and
+# ``|| true`` so a never-granted SA (the common first-deploy
+# case) doesn't tank the script.
+if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
+  echo
+  echo "==> compiled-only deploy succeeded; idempotently removing any"
+  echo "    pre-existing roles/aiplatform.user grant from $SA_EMAIL"
+  gcloud projects remove-iam-policy-binding "$PROJECT" \
+    --member "serviceAccount:${SA_EMAIL}" \
+    --role roles/aiplatform.user \
+    --condition=None \
+    --quiet 2>/dev/null || true
 fi
 
 echo

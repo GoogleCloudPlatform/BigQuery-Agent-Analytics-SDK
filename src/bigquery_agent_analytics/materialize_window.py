@@ -819,6 +819,31 @@ def run_materialize_window(
         f"{sorted(_VALID_EXTRACTION_MODES)!r}; got {extraction_mode!r}."
     )
 
+  # Compiled-only requires an extractor source. Without one,
+  # ``_build_manager`` would take the legacy no-extractors path and
+  # ``extract_graph(..., run_structured=True, use_ai_generate=False,
+  # on_unhandled_span='fail')`` would emit an empty graph with no
+  # diagnostics — defeating the typed ``empty_extraction`` failure
+  # surface compiled-only mode is supposed to guarantee. Catch the
+  # silent-empty failure mode at the boundary, before any BigQuery
+  # work runs.
+  if (
+      extraction_mode == EXTRACTION_MODE_COMPILED_ONLY
+      and bundles_root is None
+      and reference_extractors_module is None
+  ):
+    raise ValueError(
+        "--extraction-mode=compiled-only requires either "
+        "--bundles-root or --reference-extractors-module (or both). "
+        "Neither is set, so the orchestrator would build a manager "
+        "with no structured extractors and silently emit empty "
+        "graphs for every session. Pass --reference-extractors-module "
+        "for the simple reference-only path (e.g. "
+        "--reference-extractors-module=reference_extractor on the "
+        "migration v5 demo), or pre-compile bundles and pass "
+        "--bundles-root alongside --reference-extractors-module."
+    )
+
   # Numeric guardrails — reject nonsense at the boundary so the
   # orchestrator's downstream arithmetic (timedeltas, LIMIT clauses)
   # never produces a "scan into the future" or an unbounded loop.

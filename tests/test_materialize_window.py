@@ -33,6 +33,27 @@ import pytest
 
 from bigquery_agent_analytics import materialize_window as mw
 
+# Stub reference-extractor module for tests that pass
+# ``extraction_mode="compiled-only"``. The orchestrator's boundary
+# check now requires ``reference_extractors_module`` (or
+# ``bundles_root``) when compiled-only is set, so any test that
+# would otherwise omit both has to pass this stub's dotted path.
+# Tests using ``_patch_orchestrator_for_extraction`` never trigger
+# the actual import (``_build_manager`` is mocked), but registering
+# the module in ``sys.modules`` makes the test suite robust against
+# any future refactor that lets the import path run.
+_TEST_REF_MODULE = "bqaa_test_compiled_only_stub_ref"
+_TEST_REF_DUMMY_EXTRACTOR = lambda event, spec: None  # noqa: E731
+
+import sys as _sys
+import types as _types
+
+if _TEST_REF_MODULE not in _sys.modules:
+  _stub_ref_mod = _types.ModuleType(_TEST_REF_MODULE)
+  _stub_ref_mod.EXTRACTORS = {"TOOL_COMPLETED": _TEST_REF_DUMMY_EXTRACTOR}
+  _sys.modules[_TEST_REF_MODULE] = _stub_ref_mod
+
+
 # ------------------------------------------------------------------ #
 # compute_state_key                                                    #
 # ------------------------------------------------------------------ #
@@ -2632,6 +2653,62 @@ class TestExtractionModeFlag:
           extraction_mode="LLM_ONLY",
       )
 
+  def test_compiled_only_without_extractor_source_rejected(self, fixture_paths):
+    """``compiled-only`` without ``bundles_root`` or
+    ``reference_extractors_module`` must raise at the boundary.
+
+    Without an extractor source, ``_build_manager`` takes the
+    legacy no-extractors path and ``extract_graph(...,
+    run_structured=True, use_ai_generate=False,
+    on_unhandled_span='fail')`` silently emits an empty graph
+    with no diagnostics — defeating the typed
+    ``empty_extraction`` failure surface compiled-only mode is
+    supposed to guarantee. The boundary check makes the
+    misconfiguration loud instead of silent."""
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError,
+        match=r"--extraction-mode=compiled-only requires either",
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          extraction_mode="compiled-only",
+          # No bundles_root, no reference_extractors_module —
+          # the misconfiguration this guard protects against.
+      )
+
+  def test_compiled_only_with_reference_module_accepted(
+      self, fixture_paths, monkeypatch
+  ):
+    """The mirror case: compiled-only is fine when at least one of
+    ``bundles_root`` or ``reference_extractors_module`` is set. The
+    boundary check only rejects the both-missing combination."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])  # zero discovered sessions; fast path
+    # Should NOT raise — reference_extractors_module satisfies the
+    # boundary check. ``_TEST_REF_MODULE`` is the stub registered
+    # at module load time.
+    mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    # No sessions discovered ⇒ no extract calls; the test just
+    # asserts the boundary check let the call through.
+    assert tracker["extract_calls"] == []
+
   def test_default_is_ai_fallback(self, fixture_paths, monkeypatch):
     """``extraction_mode`` defaults to ``ai-fallback`` — existing
     callers see the legacy ``extract_graph(..., use_ai_generate=True)``
@@ -2697,6 +2774,7 @@ class TestCompiledOnlyMode:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     assert len(tracker["extract_calls"]) == 1
     _, kwargs = tracker["extract_calls"][0]
@@ -2736,6 +2814,7 @@ class TestCompiledOnlyMode:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     assert result.ok is False, (
         "an unhandled diagnostic in compiled-only mode must flip "
@@ -2783,6 +2862,7 @@ class TestCompiledOnlyMode:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     assert result.ok is False
     assert result.failures[0]["error_code"] == "empty_extraction"
@@ -2822,6 +2902,7 @@ class TestCompiledOnlyMode:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     assert result.ok is True
     assert not result.failures
@@ -2857,6 +2938,7 @@ class TestCompiledOnlyMode:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     detail = result.failures[0]["error_detail"]
     # Counts surface in the prose: "25 structured_unhandled" total.
@@ -2911,6 +2993,7 @@ class TestCompiledOnlyMakesZeroLLMCalls:
         bq_client=client,
         run_started_at=now,
         extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
     )
     for _, kwargs in tracker["extract_calls"]:
       assert kwargs.get("use_ai_generate") is False, (
@@ -3263,3 +3346,62 @@ class TestDeployScriptExtractionModeBoundary:
     # binding may not exist for SAs that were never granted the
     # role, so failure on that case is suppressed.
     assert "|| true" in body
+
+  def test_compiled_only_iam_remove_is_deferred_until_after_deploy(self):
+    """The compiled-only ``remove-iam-policy-binding`` for
+    ``roles/aiplatform.user`` must run AFTER ``gcloud run jobs
+    deploy`` succeeds (and, if ``--smoke``, after the smoke
+    execution). If we removed the role at the same point we
+    grant the ai-fallback role, an early failure in the new
+    deploy (buildpack failure, image registry hiccup, quota)
+    would strip the existing schedule's Vertex AI access while
+    the previous ai-fallback container is still scheduled —
+    breaking the cron during a botched transition.
+
+    This is the source-order check: the line offset of the
+    compiled-only ``remove-iam-policy-binding`` must come AFTER
+    ``gcloud run jobs deploy``. Without this assertion, a future
+    refactor that moves the remove back next to the grant block
+    would silently re-introduce the regression."""
+    script = self._deploy_script_path()
+    lines = script.read_text().splitlines()
+    deploy_line = None
+    remove_line = None
+    for i, line in enumerate(lines):
+      if deploy_line is None and "gcloud run jobs deploy" in line:
+        deploy_line = i
+      if "remove-iam-policy-binding" in line and remove_line is None:
+        remove_line = i
+    assert (
+        deploy_line is not None
+    ), "deploy script must contain a 'gcloud run jobs deploy' line"
+    assert (
+        remove_line is not None
+    ), "deploy script must contain a 'remove-iam-policy-binding' line"
+    assert remove_line > deploy_line, (
+        "compiled-only remove-iam-policy-binding must come AFTER"
+        " 'gcloud run jobs deploy' so a failed deploy doesn't strip"
+        f" the existing schedule's IAM (remove at line {remove_line + 1},"
+        f" deploy at line {deploy_line + 1})"
+    )
+
+  def test_smoke_failure_propagates_before_iam_remove(self):
+    """If ``--smoke`` is requested and the smoke execution fails,
+    the deploy script must exit BEFORE the compiled-only remove
+    runs. Otherwise a smoke failure (new revision crashes on its
+    first invocation) would still strip the existing schedule's
+    Vertex AI access, leaving the customer with neither a working
+    new deploy nor a recoverable old one.
+
+    Static checks: the script must capture the smoke exit status
+    and propagate a non-zero exit before the compiled-only remove
+    block."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    assert (
+        "SMOKE_RC=" in body
+    ), "deploy script must capture the smoke execution exit code"
+    assert 'exit "$SMOKE_RC"' in body, (
+        "deploy script must propagate a non-zero smoke exit code"
+        " before the compiled-only IAM remove runs"
+    )
