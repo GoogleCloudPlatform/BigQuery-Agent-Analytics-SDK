@@ -182,9 +182,16 @@ def _load_agent_config(config_path=None):
   for eval/data/agent_context.json relative to the repo root or script dir.
   Returns None if no config is found (scope-aware eval is disabled).
 
+  Pass ``config_path="none"`` to explicitly disable scope context
+  (no auto-discovery).
+
   Raises:
     FileNotFoundError: If an explicit config_path does not exist.
   """
+  # Explicit disable — skip auto-discovery
+  if config_path and config_path.lower() == "none":
+    return None
+
   cache_key = config_path or "_AUTO_"
   if cache_key in _AGENT_CONFIG_CACHE:
     return _AGENT_CONFIG_CACHE[cache_key]
@@ -215,21 +222,49 @@ def _build_scope_context(config=None):
   if not config:
     return ""
 
+  parts = []
+
+  # Ground truth for factual verification
+  ground_truth = config.get("ground_truth")
+  if ground_truth:
+    parts.append(
+        "\n\nGROUND TRUTH POLICY DATA (use this to verify factual accuracy):"
+        f" {ground_truth}"
+        " When judging whether a response is 'meaningful', check that the"
+        " facts match this ground truth. A response that provides accurate,"
+        " specific information matching the ground truth IS meaningful."
+    )
+
+  # Scope context
   scope_decisions = config.get("scope_decisions", [])
   oos_topics = [
       d["topic"] for d in scope_decisions if d.get("decision") == "out_of_scope"
   ]
-  if not oos_topics:
-    return ""
+  if oos_topics:
+    in_scope = config.get("in_scope_topics", [])
+    parts.append(
+        "\n\nAGENT SCOPE CONTEXT (use this to judge responses correctly):"
+    )
+    if in_scope:
+      parts.append(
+          "The following topics are IN SCOPE (the agent has tools to answer"
+          " these): " + ", ".join(in_scope) + "."
+      )
+    parts.append(
+        "ONLY the following topics are OUT OF SCOPE: "
+        + ", ".join(oos_topics)
+        + "."
+    )
+    parts.append(
+        "IMPORTANT: 'declined' means the TOPIC ITSELF is out of scope"
+        " (one of the topics listed above). If the question is about an"
+        " IN-SCOPE topic but the agent failed to find the answer, that"
+        " is 'unhelpful', NOT 'declined'. An agent saying 'I don't have"
+        " that information' about benefits, holidays, PTO, expenses, or"
+        " other in-scope topics is UNHELPFUL."
+    )
 
-  parts = [
-      "\n\nAGENT SCOPE CONTEXT (use this to judge responses correctly):",
-      "The following topics are OUT OF SCOPE: " + ", ".join(oos_topics) + ".",
-      "If the agent correctly declines a question about an out-of-scope "
-      "topic (says it cannot help with that topic, suggests what it CAN "
-      "help with), that is a MEANINGFUL response, not an unhelpful one.",
-  ]
-  return " ".join(parts)
+  return " ".join(parts) if parts else ""
 
 
 # ---------------------------------------------------------------------------
@@ -254,53 +289,77 @@ def get_eval_metrics(config_path=None):
 
   config = _load_agent_config(config_path)
   scope_context = _build_scope_context(config)
+  # Only enable "declined" category when actual scope decisions exist
+  has_scope = bool(
+      config
+      and any(
+          d.get("decision") == "out_of_scope"
+          for d in config.get("scope_decisions", [])
+      )
+  )
+
+  # Build usefulness categories — only include "declined" when scope
+  # context is provided, otherwise the judge has no basis for it.
+  usefulness_categories = [
+      CategoricalMetricCategory(
+          name="meaningful",
+          definition=(
+              "The response directly and substantively addresses the user "
+              "question with specific, actionable information."
+          ),
+      ),
+  ]
+  if has_scope:
+    usefulness_categories.append(
+        CategoricalMetricCategory(
+            name="declined",
+            definition=(
+                "The TOPIC of the question is explicitly listed as out of "
+                "scope (see AGENT SCOPE CONTEXT above) and the agent "
+                "correctly declined. Use this ONLY when the topic itself "
+                "is out of scope -- NOT when the agent simply failed to "
+                "find an answer for an in-scope topic."
+            ),
+        ),
+    )
+  usefulness_categories.extend([
+      CategoricalMetricCategory(
+          name="unhelpful",
+          definition=(
+              "The response does NOT meaningfully answer the user question. "
+              "This includes: (1) The agent said 'I don't have that "
+              "information', gave generic advice, or directed the user "
+              "elsewhere instead of using its tools. (2) The agent "
+              "apologized without answering. (3) Empty data results or "
+              "generic filler text. (4) The agent looped without resolution."
+          ),
+      ),
+      CategoricalMetricCategory(
+          name="partial",
+          definition=(
+              "The response partially addresses the question but is "
+              "incomplete, missing key details, or only tangentially relevant."
+          ),
+      ),
+  ])
+
+  usefulness_definition = (
+      "Whether the agent final response provides a genuinely useful, "
+      "substantive answer to the user question. A response that apologizes, "
+      "says it cannot help, returns no data, provides only generic filler, "
+      "or loops without resolving the question is NOT useful."
+  )
+  if has_scope:
+    usefulness_definition += (
+        " UNLESS the question is outside the agent's defined scope, "
+        "in which case a polite decline IS a correct and meaningful "
+        "response." + scope_context
+    )
 
   response_usefulness = CategoricalMetricDefinition(
       name="response_usefulness",
-      definition=(
-          "Whether the agent final response provides a genuinely useful, "
-          "substantive answer to the user question. A response that apologizes, "
-          "says it cannot help, returns no data, provides only generic filler, "
-          "or loops without resolving the question is NOT useful -- UNLESS the "
-          "question is outside the agent's defined scope, in which case a "
-          "polite decline IS a correct and meaningful response." + scope_context
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="meaningful",
-              definition=(
-                  "The response directly and substantively addresses the user "
-                  "question with specific, actionable information."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="declined",
-              definition=(
-                  "The question is outside the agent's defined scope and the "
-                  "agent correctly declined -- e.g. said it cannot help with "
-                  "that topic, or suggested what it CAN help with. This is "
-                  "the CORRECT behavior for out-of-scope questions."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="unhelpful",
-              definition=(
-                  "The response does NOT meaningfully answer the user question "
-                  "AND the question IS within the agent's scope. Examples: "
-                  "apologies for in-scope topics, saying 'I do not have that "
-                  "information' when the agent has a tool that covers the topic, "
-                  "empty data results, generic filler text, or the agent looping "
-                  "without a resolution."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="partial",
-              definition=(
-                  "The response partially addresses the question but is "
-                  "incomplete, missing key details, or only tangentially relevant."
-              ),
-          ),
-      ],
+      definition=usefulness_definition,
+      categories=usefulness_categories,
   )
 
   task_grounding = CategoricalMetricDefinition(
@@ -888,6 +947,7 @@ def run_evaluation(
 def generate_quality_report(
     session_ids: list[str],
     model: str | None = None,
+    config_path: str | None = None,
 ) -> dict:
   """Evaluate sessions and return a structured quality report dict.
 
@@ -899,6 +959,8 @@ def generate_quality_report(
       session_ids: BigQuery session IDs to evaluate.
       model: Eval model override (default: EVAL_MODEL_ID env or
           gemini-2.5-flash).
+      config_path: Path to agent context JSON for scope-aware scoring.
+          Pass ``"none"`` to disable scope context (no auto-discovery).
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys, compatible with
@@ -910,7 +972,9 @@ def generate_quality_report(
   if not model:
     model = os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
   t0 = time.time()
-  result = run_evaluation(session_ids=session_ids, model=model)
+  result = run_evaluation(
+      session_ids=session_ids, model=model, config_path=config_path,
+  )
   elapsed = time.time() - t0
 
   output = _build_json_output(result["report"], result["resolved_map"])
@@ -2072,8 +2136,9 @@ Examples:
       type=str,
       default=None,
       metavar="PATH",
-      help="Path to a JSON config file with scope definitions. "
-      "When provided, adds a 'declined' category for correctly "
+      help="Path to a JSON config file with scope definitions, or 'none' "
+      "to disable scope context (skip auto-discovery). "
+      "When a path is provided, adds a 'declined' category for correctly "
       "refused out-of-scope questions. Expected format: "
       '{"scope_decisions": [{"topic": "...", "decision": "out_of_scope", '
       '"reason": "..."}]}. '
