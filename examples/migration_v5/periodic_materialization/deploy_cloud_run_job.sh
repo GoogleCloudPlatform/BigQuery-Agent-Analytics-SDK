@@ -693,19 +693,57 @@ fi
 # ``roles/aiplatform.user`` and its schedule keeps working
 # during a botched transition.
 #
-# ``remove-iam-policy-binding`` is idempotent only when the
-# binding exists; we route stderr to ``/dev/null`` and
-# ``|| true`` so a never-granted SA (the common first-deploy
-# case) doesn't tank the script.
+# ``remove-iam-policy-binding`` is naturally non-idempotent:
+# gcloud returns non-zero with "Policy binding not found" if the
+# binding doesn't exist. We treat *that specific error* as
+# success (the common first-deploy case where the SA was never
+# granted the role), but surface every other failure
+# (``PERMISSION_DENIED``, org-policy reject, transient gcloud
+# errors, malformed condition) so the script's "Done." doesn't
+# claim victory while the role silently stays attached. The
+# previous ``2>/dev/null || true`` swallowed all of those.
 if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
   echo
   echo "==> compiled-only deploy succeeded; idempotently removing any"
   echo "    pre-existing roles/aiplatform.user grant from $SA_EMAIL"
+  REMOVE_STDERR="$(mktemp -t bqaa-iam-remove-stderr-XXXXXXXX)"
+  set +e
   gcloud projects remove-iam-policy-binding "$PROJECT" \
     --member "serviceAccount:${SA_EMAIL}" \
     --role roles/aiplatform.user \
     --condition=None \
-    --quiet 2>/dev/null || true
+    --quiet 2>"$REMOVE_STDERR"
+  REMOVE_RC=$?
+  set -e
+  if [[ $REMOVE_RC -ne 0 ]]; then
+    # gcloud's "binding doesn't exist" error wording is stable
+    # across the current release channels: "Policy binding not
+    # found" (most cases). We match that exact substring so a
+    # future gcloud wording change becomes a loud failure, not a
+    # silent regression. Other failures (permission, network,
+    # org policy) carry different wording and fall through to
+    # the propagate-and-exit branch.
+    if grep -q "Policy binding not found" "$REMOVE_STDERR"; then
+      echo "    (no pre-existing roles/aiplatform.user grant — nothing to remove)"
+    else
+      echo "Error: failed to remove roles/aiplatform.user from $SA_EMAIL" >&2
+      echo "  gcloud exit code: $REMOVE_RC" >&2
+      echo "  gcloud stderr:" >&2
+      sed 's/^/    /' "$REMOVE_STDERR" >&2
+      echo "" >&2
+      echo "The new compiled-only revision is deployed and scheduled," >&2
+      echo "but $SA_EMAIL may still hold roles/aiplatform.user, which" >&2
+      echo "contradicts the 'no Vertex AI IAM' guarantee for" >&2
+      echo "--extraction-mode=compiled-only. Resolve the cause above," >&2
+      echo "then re-run this script or remove the role manually:" >&2
+      echo "  gcloud projects remove-iam-policy-binding $PROJECT \\" >&2
+      echo "    --member 'serviceAccount:$SA_EMAIL' \\" >&2
+      echo "    --role roles/aiplatform.user --condition=None" >&2
+      rm -f "$REMOVE_STDERR"
+      exit "$REMOVE_RC"
+    fi
+  fi
+  rm -f "$REMOVE_STDERR"
 fi
 
 echo

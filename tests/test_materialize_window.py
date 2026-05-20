@@ -3342,10 +3342,47 @@ class TestDeployScriptExtractionModeBoundary:
         "deploy script must idempotently remove a pre-existing"
         " aiplatform.user grant when switching to compiled-only"
     )
-    # The remove uses the standard idempotent shell idiom — the
-    # binding may not exist for SAs that were never granted the
-    # role, so failure on that case is suppressed.
-    assert "|| true" in body
+
+  def test_compiled_only_iam_remove_distinguishes_absent_from_failure(self):
+    """The compiled-only ``remove-iam-policy-binding`` must
+    treat "binding doesn't exist" as success (idempotent first-
+    deploy case) but surface every other failure
+    (``PERMISSION_DENIED``, transient gcloud errors, org-policy
+    rejects). The previous ``2>/dev/null || true`` swallowed all
+    of them, so a real removal failure would print "Done." while
+    the role silently stayed attached — contradicting the
+    compiled-only "no Vertex AI IAM" guarantee.
+
+    Static check: the remove block must capture stderr to a temp
+    file, capture ``REMOVE_RC``, match on the
+    "Policy binding not found" stderr signature for the
+    absent-binding case, and ``exit "$REMOVE_RC"`` for every
+    other non-zero exit."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    assert "REMOVE_RC=" in body, (
+        "deploy script must capture the remove-iam-policy-binding exit"
+        " code instead of swallowing it"
+    )
+    assert "Policy binding not found" in body, (
+        "deploy script must match gcloud's stable absent-binding"
+        " stderr signature so other failures surface"
+    )
+    assert 'exit "$REMOVE_RC"' in body, (
+        "deploy script must propagate a non-zero remove exit code"
+        " for any failure other than the absent-binding case"
+    )
+    # The legacy "swallow everything" idiom must be gone from the
+    # remove block. We allow ``|| true`` to appear elsewhere in
+    # the script (the logging-tail block uses it for the harmless
+    # "no logs yet" case), but we negatively assert against the
+    # specific swallow shape the reviewer flagged.
+    assert "--quiet 2>/dev/null || true" not in body, (
+        "deploy script must not swallow remove-iam-policy-binding"
+        " errors with `--quiet 2>/dev/null || true`; that hides"
+        " PERMISSION_DENIED and transient gcloud failures behind"
+        " a 'Done.' message"
+    )
 
   def test_compiled_only_iam_remove_is_deferred_until_after_deploy(self):
     """The compiled-only ``remove-iam-policy-binding`` for
