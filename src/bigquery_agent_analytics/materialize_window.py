@@ -684,14 +684,13 @@ def run_materialize_window(
       materialize.
     bq_client: Optional pre-configured BigQuery client.
     run_started_at: Test seam. Defaults to UTC ``now``.
-    backfill: If True, runs in backfill mode. ``from_time`` and
-      ``to_time`` are required and used as the absolute scan
-      window; the steady-state checkpoint is neither read nor
-      advanced. State rows written by the run carry
-      ``mode=STATE_MODE_BACKFILL``. Pairs with
-      ``state_key_suffix`` to carve out a distinct state-key
-      stream so backfill runs cannot pollute the steady-state
-      checkpoint.
+    backfill: If True, runs in backfill mode. ``from_time``,
+      ``to_time``, and ``state_key_suffix`` are all required.
+      The window ``[from_time, to_time)`` is the absolute scan
+      range; the steady-state checkpoint is neither read nor
+      advanced (the run uses a distinct ``state_key`` carved
+      out by the suffix). State rows written by the run carry
+      ``mode=STATE_MODE_BACKFILL`` as an audit signal.
     from_time, to_time: UTC datetimes defining the backfill scan
       window ``[from_time, to_time)``. Required when
       ``backfill=True``; ignored otherwise.
@@ -715,19 +714,32 @@ def run_materialize_window(
         f"--max-sessions must be unset or > 0; got {max_sessions!r}"
     )
 
-  # Backfill mode validation. Both bounds are required; window must
-  # be non-empty (from < to). Backfill without ``state_key_suffix``
-  # is allowed but discouraged — the run still gets its own state
-  # row via the ``mode='backfill'`` audit column, but the suffix is
-  # the mechanism that prevents the backfill from sharing the
-  # steady-state's ``state_key`` namespace. Operators backfilling
-  # against the same config more than once should always pass a
-  # suffix (the CLI doc'string says so).
+  # Backfill mode validation. Both bounds are required, the window
+  # must be non-empty (from < to), AND ``state_key_suffix`` must be
+  # set. The suffix is what carves the backfill out of the steady-
+  # state ``state_key`` namespace; ``read_last_checkpoint`` filters
+  # only by ``state_key``, so a backfill that shares the steady-
+  # state key would write a row that the next cron run reads as its
+  # checkpoint. ``mode='backfill'`` on the row is an audit signal,
+  # not a filter — it does not protect the checkpoint stream.
+  # Reject the missing-suffix configuration loudly at the boundary;
+  # this is the contract the CLI's ``--backfill`` help text
+  # promises ("without reading or advancing the steady-state
+  # checkpoint"). PR #188 review.
   if backfill:
     if from_time is None or to_time is None:
       raise ValueError(
           "--backfill requires both --from and --to (UTC ISO 8601). "
           f"Got from_time={from_time!r}, to_time={to_time!r}."
+      )
+    if not state_key_suffix:
+      raise ValueError(
+          "--backfill requires --state-key-suffix so the backfill's "
+          "state rows occupy a distinct state_key namespace from the "
+          "steady-state cron. Without a suffix a successful backfill "
+          "row would later be read by the steady-state checkpoint "
+          "and silently rewind the cron's high-water mark. "
+          "Recommended: a short stable name like 'backfill-may-w1'."
       )
     # Normalize tz-naive boundaries to UTC so comparisons + state
     # writes don't depend on the caller's locale.

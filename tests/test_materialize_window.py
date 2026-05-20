@@ -2287,8 +2287,67 @@ class TestBackfillValidation:
           binding_path=str(binding_yaml),
           lookback_hours=6.0,
           backfill=True,
+          # Pass a suffix so this test reaches the from<to check
+          # instead of being short-circuited by the
+          # suffix-required check.
+          state_key_suffix="reversed-window",
           from_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
           to_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+      )
+
+  def test_backfill_requires_state_key_suffix(self, fixture_paths):
+    """Regression for PR #188 review (P1): backfill without
+    ``--state-key-suffix`` would write a state row under the
+    steady-state ``state_key`` and silently rewind the next
+    steady-state cron's high-water mark. ``read_last_checkpoint``
+    filters only by ``state_key``, so ``mode='backfill'`` on the
+    row is an audit signal that does NOT protect the checkpoint
+    stream — the suffix is what carves out a distinct namespace.
+
+    Asserted before any BigQuery client interaction: the
+    validation runs at the boundary so the failure mode is loud,
+    fast, and cheap. The fake client's ``query`` raises on call
+    so the test fails if anything tries to hit BigQuery before
+    the suffix check fires."""
+    ontology_yaml, binding_yaml = fixture_paths
+    bq_client = mock.Mock()
+    bq_client.query = mock.Mock(
+        side_effect=AssertionError(
+            "BigQuery work must NOT start before the suffix check fires"
+        )
+    )
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix=None,
+          bq_client=bq_client,
+      )
+    # Empty string is treated as unset too, matching the env-var
+    # pass-through semantics in ``_parse_backfill_timestamp`` and
+    # the env-var reader in ``run_job.py``.
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix="",
+          bq_client=bq_client,
       )
 
   def test_from_to_without_backfill_rejected(self, fixture_paths):

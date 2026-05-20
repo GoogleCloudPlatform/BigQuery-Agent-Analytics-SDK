@@ -1860,9 +1860,11 @@ def materialize_window(
         help=(
             "Backfill mode: re-materialize a fixed historical window "
             "given by --from / --to without reading or advancing the "
-            "steady-state checkpoint. Recommended companion: "
-            "--state-key-suffix to keep the backfill's state rows in "
-            "a separate namespace from the steady-state cron."
+            "steady-state checkpoint. REQUIRES --state-key-suffix so "
+            "the backfill's state rows occupy a distinct state_key "
+            "namespace from the steady-state cron — without a suffix "
+            "the backfill row would later be read as the cron's "
+            "checkpoint and silently rewind the high-water mark."
         ),
     ),
     from_time: Optional[str] = typer.Option(
