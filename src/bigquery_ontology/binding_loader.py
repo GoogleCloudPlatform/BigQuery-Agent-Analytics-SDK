@@ -517,6 +517,16 @@ def edge_column_names(
   ``to_columns`` shim). The canonical
   ``(edge_column, target_property)`` form is produced by
   :func:`normalize_relationship_columns`.
+
+  Important: returns column names in **declared binding order**, not
+  in endpoint-PK declaration order. Consumers that pair these
+  columns positionally with the endpoint's PK columns (DDL emitters,
+  property-graph compilers) must NOT use this function for permuted
+  dict-shape bindings; they should go through
+  :func:`require_legacy_column_shape` to assert the legacy
+  list-of-strings shape (which is implicitly PK-ordered) until they
+  are wired to consume :func:`normalize_relationship_columns`
+  output directly.
   """
   out: list[str] = []
   for entry in column_entries:
@@ -526,6 +536,63 @@ def edge_column_names(
       # Pydantic validator guarantees a single key.
       out.append(next(iter(entry.keys())))
   return tuple(out)
+
+
+def require_legacy_column_shape(
+    column_entries: list,
+    *,
+    consumer_name: str,
+    side: str,
+    relationship_name: str,
+) -> tuple[str, ...]:
+  """Assert ``column_entries`` uses the legacy ``list[str]`` shape.
+
+  Returns the list-view as ``tuple[str, ...]`` when every entry is a
+  bare string. Raises ``ValueError`` with a precise, actionable
+  error if any entry is a dict.
+
+  Background: PR C1 (issue #179) introduced an explicit
+  ``{edge_column: target_property}`` dict-shape entry on
+  ``RelationshipBinding.from_columns`` / ``to_columns`` so C2 can
+  bind self-edges (same entity on both ends) by giving each side a
+  distinct edge column name. The dict shape parses cleanly through
+  :class:`RelationshipBinding` and resolves into the canonical
+  ``ResolvedRelationship.from_column_mapping`` /
+  ``to_column_mapping`` via :func:`normalize_relationship_columns`,
+  but a handful of public surfaces — the property-graph DDL
+  compiler in ``graph_ddl_compiler.compile_graph``, the legacy
+  ``runtime_spec.graph_spec_from_ontology_binding`` converter —
+  still read ``rb.from_columns`` / ``rb.to_columns`` as
+  ``list[str]`` and would silently mispair edge columns against
+  endpoint PK columns (or simply crash at the next ``''.join``)
+  when handed a dict.
+
+  Routing those consumers through this helper makes the boundary
+  explicit: legacy bindings flow through unchanged; new dict-shape
+  bindings get a clear "this consumer needs the canonical mapping"
+  error pointing at the offending entry and the migration path
+  (route through ``resolve()`` and consume
+  ``ResolvedRelationship.from_column_mapping``). C2 lifts the
+  restriction on a consumer-by-consumer basis as it wires the
+  canonical mapping through them.
+  """
+  for idx, entry in enumerate(column_entries):
+    if isinstance(entry, dict):
+      raise ValueError(
+          f"{consumer_name}: relationship binding "
+          f"{relationship_name!r} {side}_columns[{idx}] uses the "
+          f"explicit FK→PK mapping shape ({entry!r}) introduced in "
+          "#179, but this consumer is not yet wired through the "
+          "canonical mapping. Either revert this entry to the legacy "
+          "``[edge_column_name, ...]`` list-of-strings shape, or "
+          "route your code through ``resolve()`` and consume "
+          "``ResolvedRelationship.from_column_mapping`` / "
+          "``to_column_mapping`` directly. C2 (issue #179 follow-up) "
+          "will lift this restriction."
+      )
+  # All entries are str at this point — the pydantic validator
+  # already rejected anything else.
+  return tuple(column_entries)
 
 
 def _primary_key_len(entity_name: str, entity_map: dict[str, Entity]) -> int:

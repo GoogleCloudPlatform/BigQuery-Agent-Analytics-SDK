@@ -766,3 +766,84 @@ class TestCompositePKCoverageInvariant:
     resolved = resolve(ontology=ont, binding=binding)
     rel = resolved.relationships[0]
     assert rel.to_column_mapping == (("b_k1", "k1"), ("b_k2", "k2"))
+
+
+# ------------------------------------------------------------------ #
+# Raw-binding consumer guards (PR #191 review P1)                      #
+# ------------------------------------------------------------------ #
+
+
+class TestRawBindingConsumerGuards:
+  """C1 introduced the dict-shape ``ColumnRef`` at the binding-model
+  boundary, but a couple of consumers (``compile_graph``,
+  ``graph_spec_from_ontology_binding``) read ``rb.from_columns`` /
+  ``rb.to_columns`` directly as ``list[str]`` and would silently
+  mispair (or crash) on a dict-shape binding. C2 will wire them
+  through the canonical mapping; until then, those boundaries raise
+  with a precise error pointing at the migration path. This test
+  class pins the contract."""
+
+  def _dict_shape_binding(self):
+    binding_yaml = _binding_with_columns("[{src_id: id}]", "[{dst_id: id}]")
+    ont = load_ontology_from_string(_TOY_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    return ont, binding
+
+  def test_compile_graph_rejects_dict_shape(self):
+    """``compile_graph`` pairs edge columns positionally with the
+    endpoint's PK columns when emitting ``SOURCE KEY ...
+    REFERENCES from_node (...)``. Until C2 wires the canonical
+    mapping through, a dict-shape binding must raise — not crash
+    at ``str.join`` or mispair silently."""
+    from bigquery_ontology.graph_ddl_compiler import compile_graph
+
+    ont, binding = self._dict_shape_binding()
+    with pytest.raises(
+        ValueError,
+        match=r"compile_graph: relationship binding 'linksTo' from_columns",
+    ):
+      compile_graph(ont, binding)
+
+  def test_graph_spec_from_ontology_binding_rejects_dict_shape(self):
+    """The legacy ``GraphSpec`` converter targets
+    ``BindingSpec.from_columns: list[str]``; a dict-shape entry
+    would pydantic-error there. Catch at the boundary with the
+    same actionable error as ``compile_graph``."""
+    from bigquery_agent_analytics.runtime_spec import graph_spec_from_ontology_binding
+
+    ont, binding = self._dict_shape_binding()
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"graph_spec_from_ontology_binding: relationship "
+            r"binding 'linksTo' from_columns"
+        ),
+    ):
+      graph_spec_from_ontology_binding(ont, binding)
+
+  def test_consumer_guard_error_names_migration_path(self):
+    """The error message tells the operator how to fix this: route
+    through ``resolve()`` and read
+    ``ResolvedRelationship.from_column_mapping``."""
+    from bigquery_ontology.graph_ddl_compiler import compile_graph
+
+    ont, binding = self._dict_shape_binding()
+    with pytest.raises(ValueError) as excinfo:
+      compile_graph(ont, binding)
+    msg = str(excinfo.value)
+    assert "resolve()" in msg
+    assert "from_column_mapping" in msg
+
+  def test_legacy_shape_passes_through_both_consumers(self):
+    """The whole point of the guard is to keep legacy bindings
+    working unchanged — sanity-check that ``list[str]`` bindings
+    still flow through both consumers."""
+    from bigquery_agent_analytics.runtime_spec import graph_spec_from_ontology_binding
+    from bigquery_ontology.graph_ddl_compiler import compile_graph
+
+    binding_yaml = _binding_with_columns("[src_id]", "[dst_id]")
+    ont = load_ontology_from_string(_TOY_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    # Both consumers run cleanly.
+    compile_graph(ont, binding)
+    graph_spec_from_ontology_binding(ont, binding)

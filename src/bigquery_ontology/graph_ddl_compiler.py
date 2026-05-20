@@ -242,16 +242,40 @@ def _resolve_edge_table(
       owner=f"relationship {rel.name!r}",
   )
 
+  # ``compile_graph`` is one of the consumers C1 didn't wire through
+  # the canonical FK→PK mapping yet (issue #179): it pairs edge
+  # columns positionally with the endpoint's PK columns when
+  # emitting ``SOURCE KEY (...) REFERENCES from_node (...)``. The
+  # dict-shape binding introduced in #179 would silently mispair
+  # (or, more commonly, crash at the next ``str.join``). Until C2
+  # wires the canonical mapping through here, require legacy
+  # list-of-strings on both sides — the error names the offending
+  # entry and the migration path.
+  from .binding_loader import require_legacy_column_shape
+
+  from_columns_legacy = require_legacy_column_shape(
+      list(rb.from_columns),
+      consumer_name="compile_graph",
+      side="from",
+      relationship_name=rb.name,
+  )
+  to_columns_legacy = require_legacy_column_shape(
+      list(rb.to_columns),
+      consumer_name="compile_graph",
+      side="to",
+      relationship_name=rb.name,
+  )
+
   return ResolvedEdgeTable(
       # Same rationale as ResolvedNodeTable.alias: use the relationship name
       # so the DDL reads by logical name rather than physical table
       # basename.
       alias=rel.name,
       source=rb.source,
-      from_columns=tuple(rb.from_columns),
+      from_columns=from_columns_legacy,
       from_node_alias=from_node.alias,
       from_node_key_columns=from_node.key_columns,
-      to_columns=tuple(rb.to_columns),
+      to_columns=to_columns_legacy,
       to_node_alias=to_node.alias,
       to_node_key_columns=to_node.key_columns,
       key_columns=_resolve_edge_key_columns(rel, rb, column_by_property),
@@ -298,7 +322,24 @@ def _resolve_edge_key_columns(
   enforced by the ontology loader, so at most one of the first two
   branches can fire.
   """
-  from_to_columns = tuple(rb.from_columns) + tuple(rb.to_columns)
+  # See the comment in ``_resolve_edge_table`` for the rationale:
+  # ``compile_graph`` doesn't yet consume the canonical FK→PK
+  # mapping, so we still rely on the legacy list-of-strings shape
+  # here. The same helper enforces that contract with an
+  # actionable error for dict-shape bindings.
+  from .binding_loader import require_legacy_column_shape
+
+  from_to_columns = require_legacy_column_shape(
+      list(rb.from_columns),
+      consumer_name="compile_graph._resolve_edge_key_columns",
+      side="from",
+      relationship_name=rb.name,
+  ) + require_legacy_column_shape(
+      list(rb.to_columns),
+      consumer_name="compile_graph._resolve_edge_key_columns",
+      side="to",
+      relationship_name=rb.name,
+  )
   if rel.keys is None:
     return from_to_columns
   if rel.keys.primary:
