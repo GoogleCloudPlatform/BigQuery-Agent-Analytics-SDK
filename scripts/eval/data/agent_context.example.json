@@ -1,0 +1,29 @@
+{
+  "scope_decisions": [
+    {
+      "topic": "stock_options",
+      "decision": "out_of_scope",
+      "reason": "No tool or data source covers equity compensation"
+    },
+    {
+      "topic": "salary_bands",
+      "decision": "out_of_scope",
+      "reason": "Compensation data is confidential"
+    },
+    {
+      "topic": "promotions",
+      "decision": "out_of_scope",
+      "reason": "No tool covers career progression"
+    },
+    {
+      "topic": "it_support",
+      "decision": "out_of_scope",
+      "reason": "No tool covers IT support"
+    },
+    {
+      "topic": "office_locations",
+      "decision": "out_of_scope",
+      "reason": "No tool covers office/facilities info"
+    }
+  ]
+}

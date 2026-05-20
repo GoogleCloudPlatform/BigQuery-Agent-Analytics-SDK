@@ -62,6 +62,7 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --output-json report.json    # write structured JSON output
 ./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
 ./scripts/quality_report.sh --config config.json    # scope-aware eval with config
+./scripts/quality_report.sh --session <session_id>  # evaluate single session (verbose)
 ```
 
 Or run the Python script directly:
@@ -73,14 +74,26 @@ python scripts/quality_report.py --limit 50 --report
 ### Output
 
 **Console output** includes:
-- Per-session details grouped by category (unhelpful, partial, meaningful)
+- Per-session details grouped by category (unhelpful, partial, meaningful, declined)
 - Per-agent quality table with helpful/unhelpful rates and status indicators
+- Quality Dimensions summary (0-2 scale with color ratings)
+- Multi-turn efficiency metrics (corrections, verifications)
 - Unhelpful contribution ranking
 - Category distributions
 - Execution details (elapsed time, execution mode)
 
-**Markdown report** (`--report` flag) is saved to `scripts/reports/` and includes
-all the above in a structured markdown format suitable for sharing or archiving.
+When `--session` is used, the console shows **all 7 metrics with full
+justifications** for the single session (verbose mode). See
+[sample single-session output](sample_quality_report_session.md).
+
+**Markdown report** (`--report` flag) is saved to `scripts/reports/` and includes:
+- Summary table and Quality Dimensions scores
+- **Dimension drilldowns** — for any dimension rated below 1.50 (needs attention
+  or problem area), the report lists the sessions that scored poorly with
+  question, response, the judge's justification, and the full conversation
+  for multi-turn sessions
+- Per-agent breakdown, category distributions
+- Unhelpful / Declined / Partial session details with conversations
 
 **Log files** are saved to `scripts/reports/` for each eval run.
 
@@ -110,9 +123,10 @@ The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
 | `response_usefulness` | `meaningful`, `declined`, `unhelpful`, `partial` | Whether the response provides a genuinely useful answer |
 | `task_grounding` | `grounded`, `ungrounded`, `no_tool_needed` | Whether the response is based on tool-retrieved data or fabricated |
 
-The **`declined`** category is always available — the LLM judge can classify
-polite refusals of out-of-scope questions as correct behavior rather than
-marking them as `unhelpful`.
+The **`declined`** category is only included when scope context is provided
+(via `--config` or auto-discovered `agent_context.json`). Without scope
+context, the judge has no basis for distinguishing intentional declines
+from failures, so only `meaningful`, `unhelpful`, and `partial` are used.
 
 **Quality dimensions** score each session 0-2 and are averaged across all
 sessions to produce the Quality Dimensions table in the report:
@@ -133,6 +147,31 @@ sessions to produce the Quality Dimensions table in the report:
 | Avg tool calls | Average number of tool calls per session |
 | Multi-turn sessions | Sessions with more than one user message |
 
+### Dimension Drilldowns
+
+When the markdown report (`--report`) includes a Quality Dimension rated
+below 1.50 (yellow or red), the report automatically adds a drilldown
+section listing the sessions that scored poorly on that dimension. Each
+entry shows:
+
+- The question and response (last turn for multi-turn sessions)
+- The dimension verdict and the judge's justification
+- A collapsible conversation block for multi-turn sessions
+
+This makes it easy to go from "Tool Usage is 0.60 — red" to seeing
+exactly which sessions had low tool usage and why.
+
+### Single-Session Evaluation (`--session`)
+
+Evaluate a single session and see all 7 metrics with full justifications:
+
+```bash
+./scripts/quality_report.sh --session conv_484affd8
+```
+
+This is useful for verifying whether the LLM judge scored a specific
+session correctly, or for debugging individual conversations.
+
 ### Scope-Aware Evaluation (`--config`)
 
 For more accurate scope evaluation, provide a config file that tells the
@@ -145,6 +184,14 @@ LLM judge exactly which topics your agent intentionally does not handle:
 The script also auto-discovers `eval/data/agent_context.json` relative to
 the repo root or script directory, so `--config` is only needed to point
 at a non-default location.
+
+A sample config is provided at `scripts/eval/data/agent_context.example.json`.
+Copy it and customize for your agent:
+
+```bash
+cp scripts/eval/data/agent_context.example.json scripts/eval/data/agent_context.json
+# Edit with your agent's scope decisions
+```
 
 Create a JSON config file with `scope_decisions`:
 
@@ -182,9 +229,10 @@ The script automatically detects and resolves responses from remote A2A
 (Agent-to-Agent) agents by extracting `A2A_INTERACTION` events from traces.
 
 
-### Sample report output
+### Sample output
 
-[Sample quality report](sample_quality_report.md)
+- [Sample quality report](sample_quality_report.md) — full multi-session report
+- [Sample single-session report](sample_quality_report_session.md) — verbose single-session output
 
 ---
 

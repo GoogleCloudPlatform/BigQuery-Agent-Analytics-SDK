@@ -241,15 +241,9 @@ def _build_scope_context(config=None):
       d["topic"] for d in scope_decisions if d.get("decision") == "out_of_scope"
   ]
   if oos_topics:
-    in_scope = config.get("in_scope_topics", [])
     parts.append(
         "\n\nAGENT SCOPE CONTEXT (use this to judge responses correctly):"
     )
-    if in_scope:
-      parts.append(
-          "The following topics are IN SCOPE (the agent has tools to answer"
-          " these): " + ", ".join(in_scope) + "."
-      )
     parts.append(
         "ONLY the following topics are OUT OF SCOPE: "
         + ", ".join(oos_topics)
@@ -257,11 +251,10 @@ def _build_scope_context(config=None):
     )
     parts.append(
         "IMPORTANT: 'declined' means the TOPIC ITSELF is out of scope"
-        " (one of the topics listed above). If the question is about an"
-        " IN-SCOPE topic but the agent failed to find the answer, that"
+        " (one of the topics listed above). If the question is about any"
+        " other topic but the agent failed to find the answer, that"
         " is 'unhelpful', NOT 'declined'. An agent saying 'I don't have"
-        " that information' about benefits, holidays, PTO, expenses, or"
-        " other in-scope topics is UNHELPFUL."
+        " that information' about a topic not listed above is UNHELPFUL."
     )
 
   return " ".join(parts) if parts else ""

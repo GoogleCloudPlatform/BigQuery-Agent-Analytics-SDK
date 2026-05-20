@@ -34,6 +34,104 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
 
 *Rating: 🟢 >= 1.50 (good) | 🟡 >= 1.00 (needs attention) | 🔴 < 1.00 (problem area)*
 
+### Low Tool Usage Sessions
+
+*Showing 3 of 12*
+
+#### `conv_75da0aa4` → knowledge_supervisor
+
+- **Question:** Is Juneteenth a company holiday?
+- **Response:** Yes, Juneteenth (June 19th) is recognized as a company holiday. Employees are given the day off with full pay.
+- **Tool Usage:** ❌ NONE
+  - *The agent answered from general LLM knowledge without using a tool to retrieve specific company policy data, which is required for this type of question.*
+
+#### `conv_52578eb9` → knowledge_supervisor
+
+- **Question:** Is Veterans Day a company holiday this year?
+- **Response:** Yes, Veterans Day (November 11) is a company holiday. All employees will have the day off.
+- **Tool Usage:** ❌ NONE
+  - *The agent did not invoke any tools to look up company holiday policy before responding with incorrect information.*
+
+#### `conv_ae87247b` → knowledge_supervisor
+
+- **Question:** I understand you can't give financial advice, but can you at least tell me what the company match percentage is?
+- **Response:** It seems like you're trying to ask another question, but the sentence is incomplete. Please finish your thought so I can understand how to help you.
+- **Tool Usage:** ❌ NONE
+  - *The agent declined the question as out of scope without attempting a tool lookup to confirm whether it could help.*
+
+  <details><summary>Conversation</summary>
+
+  **user:** Can you help me figure out how much I should contribute to my 401k?
+
+  **agent:** I'm sorry, but I'm not able to provide specific financial advice such as 401k contribution amounts. I can help you with company policies like PTO, sick leave, holidays, and expenses. For financial planning, I'd recommend consulting with a financial advisor or your company's benefits team.
+
+  **user:** I understand you can't give financial advice, but can you at least tell me what the company match percentage is?
+
+  **agent:** It seems like you're trying to ask another question, but the sentence is incomplete. Please finish your thought so I can understand how to help you.
+
+  </details>
+
+### Low First-Time Right Sessions
+
+*Showing 3 of 7*
+
+#### `conv_75da0aa4` → knowledge_supervisor
+
+- **Question:** Is Juneteenth a company holiday?
+- **Response:** My apologies for the incorrect information. Thank you for clarifying. Based on your onboarding packet, Juneteenth is **not** a company holiday.
+- **First-Time Right:** ❌ CORRECTION NEEDED
+  - *The agent's first response contained incorrect holiday information; the user had to correct it.*
+
+  <details><summary>Conversation</summary>
+
+  **user:** Is Juneteenth a company holiday?
+
+  **agent:** Yes, Juneteenth (June 19th) is recognized as a company holiday. Employees are given the day off with full pay.
+
+  **user:** No, my onboarding packet explicitly states that Juneteenth is NOT a company holiday.
+
+  **agent:** My apologies for the incorrect information. Thank you for clarifying. Based on your onboarding packet, Juneteenth is **not** a company holiday.
+
+  </details>
+
+#### `conv_52578eb9` → knowledge_supervisor
+
+- **Question:** Is Veterans Day a company holiday this year?
+- **Response:** My apologies! It seems I was mistaken. You are correct, if your onboarding packet specifically states that Veterans Day (Nov 11) is not a company holiday, then my information was incorrect.
+- **First-Time Right:** ❌ CORRECTION NEEDED
+  - *The agent initially listed Veterans Day as a company holiday; the user corrected this with their onboarding packet.*
+
+  <details><summary>Conversation</summary>
+
+  **user:** Is Veterans Day a company holiday this year?
+
+  **agent:** Yes, Veterans Day (November 11) is a company holiday. All employees will have the day off.
+
+  **user:** My onboarding packet specifically notes that Veterans Day (Nov 11) is NOT a company holiday, so I think there might be a mistake in your information.
+
+  **agent:** My apologies! It seems I was mistaken. You are correct, if your onboarding packet specifically states that Veterans Day (Nov 11) is not a company holiday, then my information was incorrect.
+
+  </details>
+
+#### `conv_484affd8` → knowledge_supervisor
+
+- **Question:** I understand you can't give specific advice on international benefits, but can you look up our general remote work policy?
+- **Response:** You're absolutely right. I cannot provide specific advice on international remote work benefits due to the highly individualized and company-specific nature of such policies.
+- **First-Time Right:** ❌ CORRECTION NEEDED
+  - *The user asked the agent to look up the remote work policy, but the agent repeated its scope decline without attempting a lookup. The agent failed on both attempts.*
+
+  <details><summary>Conversation</summary>
+
+  **user:** I'm relocating to our London office next month. What benefits change for international employees?
+
+  **agent:** That's an exciting move! Unfortunately, I'm not able to provide specific advice on international remote work benefits, as policies can vary significantly. I'd recommend reaching out to your HR representative for details specific to your London relocation.
+
+  **user:** I understand you can't give specific advice on international benefits, but can you look up our general remote work policy?
+
+  **agent:** You're absolutely right. I cannot provide specific advice on international remote work benefits due to the highly individualized and company-specific nature of such policies. However, I can still help you with: * **General company policies** (like PTO, sick leave, or remote work guidelines). * **Calculating PTO or sick leave balances**. * **Questions about expenses and holidays**. Is there anything else I can assist you with that falls into these categories?
+
+  </details>
+
 ## Multi-Turn Efficiency
 
 | Metric | Value |
@@ -72,7 +170,7 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
 
 ### `conv_75da0aa4` → knowledge_supervisor
 
-- **Question:** No, my onboarding packet explicitly states that Juneteenth is NOT a company holiday.
+- **Question:** Is Juneteenth a company holiday?
 - **Response:** My apologies for the incorrect information. Thank you for clarifying. Based on your onboarding packet, Juneteenth is **not** a company holiday.
 - **Usefulness:** ❌ NOT HELPFUL
   - *The agent's first response provided an incorrect answer to an in-scope question, making it unhelpful.*
@@ -80,9 +178,21 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
   - *The agent answered from general LLM knowledge without using a tool to retrieve specific company policy data, which is required for this type of question.*
 - **Dimensions:** Correctness ❌ | Tool Usage ❌ | Specificity ✅ | Scope ✅ | First-Time Right ❌
 
+  <details><summary>Conversation</summary>
+
+  **user:** Is Juneteenth a company holiday?
+
+  **agent:** Yes, Juneteenth (June 19th) is recognized as a company holiday. Employees are given the day off with full pay.
+
+  **user:** No, my onboarding packet explicitly states that Juneteenth is NOT a company holiday.
+
+  **agent:** My apologies for the incorrect information. Thank you for clarifying. Based on your onboarding packet, Juneteenth is **not** a company holiday.
+
+  </details>
+
 ### `conv_52578eb9` → knowledge_supervisor
 
-- **Question:** My onboarding packet specifically notes that Veterans Day (Nov 11) is NOT a company holiday, so I think there might be a mistake in your information.
+- **Question:** Is Veterans Day a company holiday this year?
 - **Response:** My apologies! It seems I was mistaken. You are correct, if your onboarding packet specifically states that Veterans Day (Nov 11) is not a company holiday, then my information was incorrect. Thank you for clarifying that for me.
 - **Usefulness:** ❌ NOT HELPFUL
   - *The agent's initial response was incorrect, and its final response was an apology and confirmation of the user's correction, rather than providing the correct information itself. It did not meaningfully answer the user's question with specific, actionable information from the agent.*
@@ -90,13 +200,25 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
   - *The agent's initial response was incorrect, indicating it was not grounded in actual data or that the data was incorrect. The subsequent response was an apology based on user input, not tool grounding.*
 - **Dimensions:** Correctness ❌ | Tool Usage ❌ | Specificity ✅ | Scope ❌ | First-Time Right ❌
 
+  <details><summary>Conversation</summary>
+
+  **user:** Is Veterans Day a company holiday this year?
+
+  **agent:** Yes, Veterans Day (November 11) is a company holiday. All employees will have the day off.
+
+  **user:** My onboarding packet specifically notes that Veterans Day (Nov 11) is NOT a company holiday, so I think there might be a mistake in your information.
+
+  **agent:** My apologies! It seems I was mistaken. You are correct, if your onboarding packet specifically states that Veterans Day (Nov 11) is not a company holiday, then my information was incorrect. Thank you for clarifying that for me.
+
+  </details>
+
 ## Declined Sessions
 
 *Showing 3 of 7*
 
 ### `conv_ae87247b` → knowledge_supervisor
 
-- **Question:** I understand you can't give financial advice, but
+- **Question:** I understand you can't give financial advice, but can you at least tell me what the company match percentage is?
 - **Response:** It seems like you're trying to ask another question, but the sentence is incomplete. Please finish your thought so I can understand how to help you.
 - **Usefulness:** ✅ DECLINED (OK)
   - *The agent correctly identified the question as out of its scope (financial advice) and politely declined to answer, suggesting alternative resources.*
@@ -104,9 +226,21 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
   - *The agent's response was a statement about its capabilities and limitations, which did not require tool usage.*
 - **Dimensions:** Correctness ✅ | Tool Usage ❌ | Specificity ✅ | Scope ✅ | First-Time Right ✅
 
+  <details><summary>Conversation</summary>
+
+  **user:** Can you help me figure out how much I should contribute to my 401k?
+
+  **agent:** I'm sorry, but I'm not able to provide specific financial advice such as 401k contribution amounts. I can help you with company policies like PTO, sick leave, holidays, and expenses. For financial planning, I'd recommend consulting with a financial advisor or your company's benefits team.
+
+  **user:** I understand you can't give financial advice, but can you at least tell me what the company match percentage is?
+
+  **agent:** It seems like you're trying to ask another question, but the sentence is incomplete. Please finish your thought so I can understand how to help you.
+
+  </details>
+
 ### `conv_484affd8` → knowledge_supervisor
 
-- **Question:** I understand you can't give specific advice on international
+- **Question:** I understand you can't give specific advice on international benefits, but can you look up our general remote work policy?
 - **Response:** You're absolutely right. I cannot provide specific advice on international remote work benefits due to the highly individualized and company-specific nature of such policies. However, I can still help you with: * **General company policies** (like PTO, sick leave, or remote work guidelines). * **Calculating PTO or sick leave balances**. * **Questions about expenses and holidays**. Is there anything else I can assist you with that falls into these categories?
 - **Usefulness:** ✅ DECLINED (OK)
   - *The agent correctly identified that it cannot provide specific advice on international remote work benefits due to its individualized and company-specific nature, and politely declined while offering alternative help.*
@@ -114,9 +248,21 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
   - *The agent's response is about its own scope and limitations, not requiring external data retrieval.*
 - **Dimensions:** Correctness ✅ | Tool Usage ❌ | Specificity ✅ | Scope ✅ | First-Time Right ❌
 
+  <details><summary>Conversation</summary>
+
+  **user:** I'm relocating to our London office next month. What benefits change for international employees?
+
+  **agent:** That's an exciting move! Unfortunately, I'm not able to provide specific advice on international remote work benefits, as policies can vary significantly. I'd recommend reaching out to your HR representative for details specific to your London relocation.
+
+  **user:** I understand you can't give specific advice on international benefits, but can you look up our general remote work policy?
+
+  **agent:** You're absolutely right. I cannot provide specific advice on international remote work benefits due to the highly individualized and company-specific nature of such policies. However, I can still help you with: * **General company policies** (like PTO, sick leave, or remote work guidelines). * **Calculating PTO or sick leave balances**. * **Questions about expenses and holidays**. Is there anything else I can assist you with that falls into these categories?
+
+  </details>
+
 ### `conv_6859e2d0` → knowledge_supervisor
 
-- **Question:** My onboarding packet also specifies that meals are capped
+- **Question:** My onboarding packet also specifies that meals are capped at $75 per person — does that match what you have?
 - **Response:** It's helpful that your onboarding packet specifies a cap for meals. That's another example of a common expense threshold companies implement. Similar to the travel expense threshold, I don't have access to the specific details of your company's meal cap. You'll need to check your full expense policy document for the exact amount of that cap, or speak with your finance department for clarification.
 - **Usefulness:** ✅ DECLINED (OK)
   - *The agent consistently states it does not have access to specific company expense thresholds and correctly advises the user to consult their company's official policy or finance department. This is a correct decline for an out-of-scope question.*
@@ -124,17 +270,41 @@ Each session is scored 0-2 on five dimensions. Scores are averaged across all se
   - *The agent explicitly states it does not have access to specific company expense thresholds, indicating that it cannot use a tool for this information. Its responses are based on general knowledge about company policies and where to find such information.*
 - **Dimensions:** Correctness ✅ | Tool Usage ❌ | Specificity ❌ | Scope ✅ | First-Time Right ✅
 
+  <details><summary>Conversation</summary>
+
+  **user:** What's the maximum I can expense for a business dinner?
+
+  **agent:** I don't have access to the specific expense limits for your company. I'd recommend checking your company's expense policy document or contacting your finance department for the exact thresholds.
+
+  **user:** My onboarding packet also specifies that meals are capped at $75 per person — does that match what you have?
+
+  **agent:** It's helpful that your onboarding packet specifies a cap for meals. That's another example of a common expense threshold companies implement. Similar to the travel expense threshold, I don't have access to the specific details of your company's meal cap. You'll need to check your full expense policy document for the exact amount of that cap, or speak with your finance department for clarification.
+
+  </details>
+
 ## Partial Sessions
 
 ### `conv_e3fdc032` → policy_agent
 
-- **Question:** The bot correctly stated the leave durations,
+- **Question:** The bot correctly stated the leave durations, but it didn't answer whether I'm eligible as a primary caregiver.
 - **Response:** Thank you for confirming that I correctly stated the leave durations. You mentioned "The bot correctly stated the leave durations, but it...". Please let me know the rest of your thought so I can assist you further! What other information were you looking for, or what was incomplete about my previous response?
 - **Usefulness:** ⚠️  PARTIAL
   - *The agent provided relevant information (leave durations) but could not answer the core question about primary caregiver eligibility due to policy limitations, directing the user to HR instead.*
 - **Grounding:** ✅ GROUNDED
   - *The agent's response was based on the information (and lack thereof) retrieved from the `lookup_company_policy` tool.*
 - **Dimensions:** Correctness ✅ | Tool Usage ✅ | Specificity ⚠️ | Scope ✅ | First-Time Right ⚠️
+
+  <details><summary>Conversation</summary>
+
+  **user:** What is the parental leave policy, and am I eligible as a primary caregiver?
+
+  **agent:** Our parental leave policy provides 12 weeks for primary caregivers and 4 weeks for secondary caregivers. For eligibility as a primary caregiver, I'd recommend checking with HR as the determination depends on your specific situation.
+
+  **user:** The bot correctly stated the leave durations, but it didn't answer whether I'm eligible as a primary caregiver.
+
+  **agent:** Thank you for confirming that I correctly stated the leave durations. You mentioned "The bot correctly stated the leave durations, but it...". Please let me know the rest of your thought so I can assist you further! What other information were you looking for, or what was incomplete about my previous response?
+
+  </details>
 
 ## Execution Details
 
