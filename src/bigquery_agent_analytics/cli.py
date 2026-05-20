@@ -1895,6 +1895,21 @@ def materialize_window(
             "state_key and a fresh checkpoint stream."
         ),
     ),
+    extraction_mode: str = typer.Option(
+        "ai-fallback",
+        "--extraction-mode",
+        help=(
+            "Extraction path for each session's events. "
+            "'ai-fallback' (default) — structured extractors run "
+            "and AI.GENERATE fills any gaps; existing behavior. "
+            "'compiled-only' — structured extractors only; no AI "
+            "call; unhandled spans surface as typed "
+            "'empty_extraction' failures with sample diagnostics. "
+            "Pick 'compiled-only' to drop roles/aiplatform.user "
+            "from the runtime SA (no LLM calls under this mode, "
+            "asserted by SDK tests)."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1952,6 +1967,7 @@ def materialize_window(
         backfill=backfill,
         from_time=parsed_from,
         to_time=parsed_to,
+        extraction_mode=extraction_mode,
         state_key_suffix=state_key_suffix,
     )
     typer.echo(format_output(result.to_json(), fmt))

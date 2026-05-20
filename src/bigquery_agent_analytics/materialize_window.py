@@ -133,6 +133,29 @@ _STATE_TABLE_MODE_MIGRATIONS = (
 STATE_MODE_STEADY = "steady"
 STATE_MODE_BACKFILL = "backfill"
 
+# Extraction modes (B2, issue #178 follow-up).
+#
+# ``ai-fallback`` is the default and the existing behavior: structured
+# extractors run when registered, ``AI.GENERATE`` fills any gaps. The
+# call into :func:`OntologyGraphManager.extract_graph` stays on the
+# legacy bool surface so existing call-stacks are unaffected.
+#
+# ``compiled-only`` opts into B1's orthogonal-flag surface with
+# ``on_unhandled_span="fail"``: structured extractors run, ``AI.GENERATE``
+# is NOT called, and unhandled spans surface as
+# ``ExtractionDiagnostic`` codes (``structured_unhandled`` or
+# ``extractor_exception``). The orchestrator translates those codes
+# into a typed ``empty_extraction`` failure on the session ahead of
+# the materializer's row-count classifier so the failure surface
+# carries the diagnostic samples directly. Customers running with
+# this mode can drop ``roles/aiplatform.user`` from the runtime
+# service account (zero AI calls is asserted by a covering test).
+EXTRACTION_MODE_AI_FALLBACK = "ai-fallback"
+EXTRACTION_MODE_COMPILED_ONLY = "compiled-only"
+_VALID_EXTRACTION_MODES = frozenset(
+    {EXTRACTION_MODE_AI_FALLBACK, EXTRACTION_MODE_COMPILED_ONLY}
+)
+
 
 # Identifier validation for BQ identifiers we interpolate into SQL.
 # Mirrors ``bq_bundle_mirror._TABLE_ID_PATTERN``. Each segment of
@@ -564,6 +587,84 @@ def make_outcome_counter() -> tuple[Callable[[str, Any], None], dict[str, int]]:
 # ------------------------------------------------------------------ #
 
 
+def _classify_compiled_only_diagnostics(
+    session: Any, graph: Any
+) -> Optional[Any]:
+  """Translate B1's ``ExtractionDiagnostic`` codes into a typed
+  ``empty_extraction`` ``SessionResult`` for compiled-only mode.
+
+  Returns ``None`` when the session's diagnostic stream is clean
+  (no ``structured_unhandled`` or ``extractor_exception``) — the
+  caller should proceed with materialization. Returns a populated
+  ``SessionResult`` otherwise.
+
+  Compiled-only mode treats any ``structured_unhandled`` or
+  ``extractor_exception`` count as a session-level failure: the
+  whole point of opting into compiled-only is to forbid silent
+  AI.GENERATE billing on extractor gaps. Partial coverage is not
+  acceptable in this mode; operators wanting "best-effort" should
+  use ``ai-fallback``. The translation runs ahead of
+  ``materialize_with_status`` so the failure surface carries the
+  diagnostic samples directly (specific span_id / event_type) —
+  more actionable than the row-count classifier's generic
+  "extraction returned empty" string.
+
+  Args:
+    session: The ``DiscoveredSession`` being processed (used for
+      ``session_id`` / ``completion_timestamp`` on the result).
+    graph: The ``ExtractedGraph`` returned by ``extract_graph(...,
+      on_unhandled_span="fail")``.
+
+  Returns:
+    ``None`` when no unhandled / exception diagnostics fired, or a
+    ``SessionResult`` with ``ok=False``, ``error_code='empty_extraction'``,
+    and ``error_detail`` carrying up to 10 diagnostic samples for
+    log readability.
+  """
+  unhandled_count = 0
+  exception_count = 0
+  samples: list[str] = []
+  for diag in getattr(graph, "diagnostics", []) or []:
+    code = getattr(diag, "diagnostic_code", None)
+    if code not in ("structured_unhandled", "extractor_exception"):
+      continue
+    if code == "structured_unhandled":
+      unhandled_count += 1
+    else:
+      exception_count += 1
+    if len(samples) < 10:
+      sample = (
+          f"{code} span_id={diag.span_id!r} " f"event_type={diag.event_type!r}"
+      )
+      detail = getattr(diag, "detail", None)
+      if detail:
+        sample += f" detail={detail!r}"
+      samples.append(sample)
+  if unhandled_count == 0 and exception_count == 0:
+    return None
+  total = unhandled_count + exception_count
+  more_note = ""
+  if total > len(samples):
+    more_note = f" (+{total - len(samples)} more not shown)"
+  return SessionResult(
+      session_id=session.session_id,
+      ok=False,
+      completion_timestamp=session.completion_timestamp,
+      error_code="empty_extraction",
+      error_detail=(
+          f"compiled-only extraction-mode: "
+          f"{unhandled_count} structured_unhandled + "
+          f"{exception_count} extractor_exception diagnostic(s) "
+          f"fired on this session{more_note}. The compiled "
+          "extractor set does not cover every event type seen "
+          "here. To resolve, either extend the compiled "
+          "extractors (preferred) or re-run with "
+          "``--extraction-mode=ai-fallback`` to let AI.GENERATE "
+          "fill the gaps. Sample diagnostics: " + "; ".join(samples)
+      ),
+  )
+
+
 def _iso(value: _dt.datetime) -> str:
   """Coerce to UTC isoformat with a trailing ``Z`` for JSON."""
   if value.tzinfo is None:
@@ -646,6 +747,7 @@ def run_materialize_window(
     from_time: Optional[_dt.datetime] = None,
     to_time: Optional[_dt.datetime] = None,
     state_key_suffix: Optional[str] = None,
+    extraction_mode: str = EXTRACTION_MODE_AI_FALLBACK,
 ) -> MaterializeWindowResult:
   """The end-to-end run.
 
@@ -699,7 +801,24 @@ def run_materialize_window(
       steady-state run (backfill, ad-hoc re-extraction) so the
       run's state rows occupy a distinct ``state_key`` namespace
       and do not advance the steady-state checkpoint.
+    extraction_mode: One of :data:`EXTRACTION_MODE_AI_FALLBACK`
+      (default) or :data:`EXTRACTION_MODE_COMPILED_ONLY`. Default
+      preserves the legacy ``extract_graph(..., use_ai_generate=True)``
+      path. ``compiled-only`` routes through B1's orthogonal-flag
+      surface with ``on_unhandled_span="fail"`` so ``AI.GENERATE``
+      is never called and structured-extractor gaps surface as
+      typed ``empty_extraction`` failures (with sample diagnostics
+      in ``error_detail``) ahead of the materializer's row-count
+      classifier.
   """
+  # Extraction-mode validation. Reject the typo at the boundary so
+  # downstream code never has to handle an unknown mode silently.
+  if extraction_mode not in _VALID_EXTRACTION_MODES:
+    raise ValueError(
+        f"--extraction-mode must be one of "
+        f"{sorted(_VALID_EXTRACTION_MODES)!r}; got {extraction_mode!r}."
+    )
+
   # Numeric guardrails — reject nonsense at the boundary so the
   # orchestrator's downstream arithmetic (timedeltas, LIMIT clauses)
   # never produces a "scan into the future" or an unbounded loop.
@@ -1099,9 +1218,40 @@ def run_materialize_window(
   session_results: list[SessionResult] = []
   for session in discovered:
     try:
-      graph = manager.extract_graph(
-          session_ids=[session.session_id], use_ai_generate=True
-      )
+      if extraction_mode == EXTRACTION_MODE_COMPILED_ONLY:
+        # Orthogonal-flag surface (B1): structured extractors only,
+        # no ``AI.GENERATE`` call, unhandled spans surface as
+        # ``structured_unhandled`` / ``extractor_exception``
+        # diagnostics in ``graph.diagnostics``. We translate those
+        # to a typed ``empty_extraction`` failure below — before
+        # the row-count classifier so compiled-only's failure
+        # detail carries the diagnostic samples directly.
+        graph = manager.extract_graph(
+            session_ids=[session.session_id],
+            use_ai_generate=False,
+            run_structured=True,
+            on_unhandled_span="fail",
+        )
+      else:
+        # Default ``ai-fallback`` mode keeps the legacy bool path —
+        # zero behavior change vs pre-#178 for every existing
+        # caller (notebook, run_job.py, anyone calling the CLI
+        # without ``--extraction-mode``).
+        graph = manager.extract_graph(
+            session_ids=[session.session_id], use_ai_generate=True
+        )
+
+      # Compiled-only failure surface: translate B1 diagnostics
+      # into a typed ``empty_extraction`` row when the structured
+      # extractors didn't cover the session.
+      if extraction_mode == EXTRACTION_MODE_COMPILED_ONLY:
+        failure_result = _classify_compiled_only_diagnostics(session, graph)
+        if failure_result is not None:
+          session_results.append(failure_result)
+          # Conservative stop, same shape as exception path below —
+          # the checkpoint advances only to the prior success.
+          break
+
       mat = materializer.materialize_with_status(graph, [session.session_id])
       # Capture per-session table statuses so the JSON report can
       # show cleanup_status / insert_status per bound table — the

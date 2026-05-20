@@ -67,6 +67,15 @@ Env vars (all set by the deploy script via
   folded into the state-key SHA so a backfill / re-extraction
   run writes its state rows in a distinct namespace from the
   steady-state cron. Recommended whenever ``BQAA_BACKFILL=true``.
+* ``BQAA_EXTRACTION_MODE`` (default ``ai-fallback``) — one of
+  ``ai-fallback`` or ``compiled-only``. ``ai-fallback`` keeps the
+  existing behavior (structured extractors + AI.GENERATE for
+  gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
+  span the compiled extractors don't cover surfaces as a typed
+  ``empty_extraction`` failure with sample diagnostics. Set
+  ``compiled-only`` when you also drop ``roles/aiplatform.user``
+  from the runtime SA (the deploy script does both together
+  when ``--extraction-mode=compiled-only`` is passed).
 
 Exit codes mirror the CLI:
 
@@ -347,6 +356,13 @@ def main() -> int:
   from_time_raw = os.environ.get("BQAA_FROM") or None
   to_time_raw = os.environ.get("BQAA_TO") or None
   state_key_suffix = os.environ.get("BQAA_STATE_KEY_SUFFIX") or None
+  # Default ``ai-fallback`` keeps the legacy extract_graph(...,
+  # use_ai_generate=True) path; ``compiled-only`` opts into B1's
+  # diagnostics-emitting path with no AI calls. The materializer's
+  # own validator rejects any other value at the boundary.
+  extraction_mode = (
+      os.environ.get("BQAA_EXTRACTION_MODE") or "ai-fallback"
+  ).strip()
 
   _emit(
       "INFO",
@@ -362,6 +378,7 @@ def main() -> int:
       from_time=from_time_raw,
       to_time=to_time_raw,
       state_key_suffix=state_key_suffix,
+      extraction_mode=extraction_mode,
   )
 
   try:
@@ -434,6 +451,7 @@ def main() -> int:
         from_time=parsed_from,
         to_time=parsed_to,
         state_key_suffix=state_key_suffix,
+        extraction_mode=extraction_mode,
     )
 
     # Structured JSON report for Cloud Logging. Cloud Logging

@@ -2521,3 +2521,432 @@ class TestEnsureStateTableMigration:
         "mode column on every call so pre-migration tables get patched "
         "without a destructive migration"
     )
+
+
+# ====================================================================== #
+# Extraction mode (PR B2, issue #178 follow-up)                            #
+# ====================================================================== #
+
+
+def _diag(code, **kwargs):
+  """Build an ExtractionDiagnostic from kwargs without a Pydantic import
+  chain in every test (keeps the dict-construction explicit and lets
+  tests pass plain values regardless of the Pydantic version's
+  ``model_construct`` quirks)."""
+  from bigquery_agent_analytics.extracted_models import ExtractionDiagnostic
+
+  return ExtractionDiagnostic(diagnostic_code=code, **kwargs)
+
+
+def _patch_orchestrator_for_extraction(
+    monkeypatch,
+    *,
+    diagnostics_per_session=None,
+    nodes_per_session=None,
+):
+  """Patch ``_build_manager`` and ``OntologyMaterializer`` so the
+  orchestrator runs end-to-end without BQ. Returns a tracker dict
+  with the call counts the tests assert on.
+  """
+  from bigquery_agent_analytics import materialize_window as mw_mod
+  from bigquery_agent_analytics.extracted_models import ExtractedGraph
+  from bigquery_agent_analytics.extracted_models import ExtractedNode
+
+  diagnostics_per_session = diagnostics_per_session or {}
+  nodes_per_session = nodes_per_session or {}
+
+  tracker = {
+      "extract_calls": [],  # list of (session_id, kwargs) tuples
+  }
+
+  class _FakeManager:
+
+    def __init__(self):
+      self.spec = mock.Mock()
+      self.extractors = {"E": lambda *_args, **_kw: None}
+
+    def extract_graph(self, session_ids, *args, **kwargs):
+      tracker["extract_calls"].append((tuple(session_ids), dict(kwargs)))
+      sid = session_ids[0]
+      return ExtractedGraph(
+          name="g",
+          nodes=[
+              ExtractedNode(node_id=f"n-{sid}", entity_name="E")
+              for _ in range(nodes_per_session.get(sid, 0))
+          ],
+          diagnostics=diagnostics_per_session.get(sid, []),
+      )
+
+  class _FakeMaterializeStatus:
+
+    def __init__(self, row_counts, table_statuses):
+      self.row_counts = row_counts
+      self.table_statuses = table_statuses
+
+  class _FakeMaterializer:
+
+    def __init__(self, *_args, **_kwargs):
+      pass
+
+    def materialize_with_status(self, graph, session_ids):
+      # Mirror what the real materializer would return: one row per
+      # node, status entries with rows_attempted = rows_inserted.
+      n = len(graph.nodes)
+      table_statuses = {}
+      if n:
+        table_statuses["E"] = mock.Mock(
+            table_ref="t",
+            rows_attempted=n,
+            rows_inserted=n,
+            cleanup_status="deleted",
+            insert_status="inserted",
+            idempotent=True,
+        )
+      return _FakeMaterializeStatus(
+          row_counts={"E": n} if n else {},
+          table_statuses=table_statuses,
+      )
+
+  monkeypatch.setattr(mw_mod, "_build_manager", lambda **_kw: _FakeManager())
+  monkeypatch.setattr(
+      "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+      _FakeMaterializer,
+  )
+  return tracker
+
+
+class TestExtractionModeFlag:
+  """Boundary contract for the new ``--extraction-mode`` flag."""
+
+  def test_unknown_extraction_mode_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match=r"--extraction-mode must be one of"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          extraction_mode="LLM_ONLY",
+      )
+
+  def test_default_is_ai_fallback(self, fixture_paths, monkeypatch):
+    """``extraction_mode`` defaults to ``ai-fallback`` — existing
+    callers see the legacy ``extract_graph(..., use_ai_generate=True)``
+    path with no behavior change."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client(
+        [
+            _FakeBQRow(
+                session_id="s1",
+                completion_timestamp=_dt.datetime.now(_dt.timezone.utc),
+            )
+        ]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+    )
+    assert len(tracker["extract_calls"]) == 1
+    _, kwargs = tracker["extract_calls"][0]
+    assert kwargs == {"use_ai_generate": True}, (
+        "default path must use the legacy bool surface so existing "
+        "callers see byte-identical extraction behavior"
+    )
+
+
+class TestCompiledOnlyMode:
+  """``extraction_mode='compiled-only'`` routes through B1's
+  orthogonal-flag surface AND translates diagnostics into typed
+  ``empty_extraction`` failures."""
+
+  def test_compiled_only_uses_orthogonal_flags(
+      self, fixture_paths, monkeypatch
+  ):
+    """The actual ``extract_graph`` invocation in compiled-only
+    mode uses ``run_structured=True, use_ai_generate=False,
+    on_unhandled_span='fail'`` — the B1 contract."""
+    ontology_yaml, binding_yaml = fixture_paths
+    # Empty diagnostics → clean session.
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        nodes_per_session={
+            "s1": 3
+        },  # at least one row so empty-extraction guard doesn't trip
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    assert len(tracker["extract_calls"]) == 1
+    _, kwargs = tracker["extract_calls"][0]
+    assert kwargs == {
+        "use_ai_generate": False,
+        "run_structured": True,
+        "on_unhandled_span": "fail",
+    }, "compiled-only must opt into B1's orthogonal-flag surface"
+
+  def test_unhandled_diagnostic_surfaces_empty_extraction(
+      self, fixture_paths, monkeypatch
+  ):
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag(
+                    "structured_unhandled",
+                    span_id="span-x",
+                    event_type="UNKNOWN",
+                ),
+            ],
+        },
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    assert result.ok is False, (
+        "an unhandled diagnostic in compiled-only mode must flip "
+        "the session result to ok=False"
+    )
+    assert result.failures, "failures[] must surface the diagnostic"
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    detail = result.failures[0]["error_detail"]
+    assert "span-x" in detail and "UNKNOWN" in detail, (
+        "error_detail must name the offending span_id + event_type so "
+        "operators can grep Cloud Logging for the failing event shape"
+    )
+
+  def test_extractor_exception_diagnostic_surfaces_empty_extraction(
+      self, fixture_paths, monkeypatch
+  ):
+    """``extractor_exception`` diagnostics (extractor raised, B1's
+    ``capture_extractor_exceptions=True`` path) are also fatal in
+    compiled-only mode."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag(
+                    "extractor_exception",
+                    span_id="span-boom",
+                    event_type="E",
+                    detail="RuntimeError: extractor crashed",
+                ),
+            ],
+        },
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    assert result.ok is False
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    detail = result.failures[0]["error_detail"]
+    assert "span-boom" in detail
+    assert "extractor crashed" in detail, (
+        "the captured exception detail must surface in error_detail "
+        "so operators can pinpoint the extractor bug"
+    )
+
+  def test_compiled_only_clean_session_passes(self, fixture_paths, monkeypatch):
+    """When the diagnostic stream has only handled codes (no
+    unhandled, no exception), compiled-only mode passes
+    materialization normally."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag("structured_fully_handled", span_id="span-1"),
+                _diag("structured_partially_handled", span_id="span-2"),
+            ],
+        },
+        nodes_per_session={"s1": 5},
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    assert result.ok is True
+    assert not result.failures
+    assert result.sessions_materialized == 1
+
+  def test_diagnostic_samples_capped_at_ten(self, fixture_paths, monkeypatch):
+    """The error_detail caps diagnostic samples at 10 + says how
+    many more exist — keeps Cloud Logging payloads readable when a
+    customer's session has dozens of unhandled spans."""
+    ontology_yaml, binding_yaml = fixture_paths
+    many = [
+        _diag(
+            "structured_unhandled",
+            span_id=f"span-{i}",
+            event_type=f"TYPE_{i}",
+        )
+        for i in range(25)
+    ]
+    _patch_orchestrator_for_extraction(
+        monkeypatch, diagnostics_per_session={"s1": many}
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    detail = result.failures[0]["error_detail"]
+    # Counts surface in the prose: "25 structured_unhandled" total.
+    assert "25 structured_unhandled" in detail
+    # The "(+N more not shown)" note appears (15 more = 25 - 10 cap).
+    assert "+15 more" in detail
+
+
+class TestCompiledOnlyMakesZeroLLMCalls:
+  """The contract that justifies dropping ``roles/aiplatform.user``
+  from the runtime SA's IAM in ``deploy_cloud_run_job.sh`` when
+  ``--extraction-mode=compiled-only`` is selected.
+
+  Asserts at the orchestrator boundary that compiled-only mode
+  passes ``use_ai_generate=False`` to ``extract_graph`` and that
+  the manager's ``_extract_via_ai_generate`` is never called. B1
+  already pins that ``on_unhandled_span='fail'`` skips the AI
+  branch; this test pins the materialize_window contract that
+  routes through B1 correctly.
+  """
+
+  def test_compiled_only_extract_graph_use_ai_generate_is_false(
+      self, fixture_paths, monkeypatch
+  ):
+    """The ``extract_graph`` kwargs in compiled-only mode include
+    ``use_ai_generate=False``. Any future regression that flips
+    this to True trips the test before a customer's runtime SA
+    starts charging Vertex AI for calls it shouldn't be making."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        nodes_per_session={"s1": 1},
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+    )
+    for _, kwargs in tracker["extract_calls"]:
+      assert kwargs.get("use_ai_generate") is False, (
+          "compiled-only must NOT pass use_ai_generate=True; that "
+          "would route through _extract_via_ai_generate and bill "
+          "Vertex AI on a deploy where roles/aiplatform.user has "
+          "intentionally been dropped"
+      )
+      assert kwargs.get("on_unhandled_span") == "fail", (
+          "compiled-only must pass on_unhandled_span='fail' so B1's "
+          "_extract_graph_impl skips the AI branch (and the stub "
+          "branch); any other value risks an LLM call"
+      )
+
+  def test_compiled_only_does_not_call_extract_via_ai_generate(self):
+    """Inline B1-style integration: build a real
+    ``OntologyGraphManager``-shaped object whose
+    ``_extract_via_ai_generate`` raises if called, and verify
+    that ``on_unhandled_span='fail'`` never reaches it. Belt-
+    and-braces for the materializer→extract_graph contract."""
+    from bigquery_agent_analytics.extracted_models import ExtractedGraph
+    from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
+
+    mgr = OntologyGraphManager.__new__(OntologyGraphManager)
+    mgr.extractors = {}
+    mgr.spec = mock.Mock()
+    mgr.spec.name = "g"
+    mgr._fetch_raw_events = mock.Mock(return_value=[])
+    mgr._extract_via_ai_generate = mock.Mock(
+        side_effect=AssertionError(
+            "_extract_via_ai_generate must NOT be called in compiled-only mode"
+        )
+    )
+    mgr._extract_payloads = mock.Mock(
+        side_effect=AssertionError(
+            "_extract_payloads must NOT be called in compiled-only mode"
+        )
+    )
+    result = mgr.extract_graph(
+        ["s1"],
+        use_ai_generate=False,
+        run_structured=True,
+        on_unhandled_span="fail",
+    )
+    # No assertion error fired — neither branch was called.
+    assert isinstance(result, ExtractedGraph)
+    assert mgr._extract_via_ai_generate.called is False
+    assert mgr._extract_payloads.called is False

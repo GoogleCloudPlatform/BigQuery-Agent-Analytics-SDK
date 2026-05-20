@@ -91,6 +91,7 @@ OVERLAP_MINUTES="15"
 MAX_SESSIONS=""
 JOB_NAME="bqaa-periodic-materialization"
 SMOKE=false
+EXTRACTION_MODE="ai-fallback"
 
 # Print usage. Exit code is the caller's choice: ``usage 0``
 # for ``--help`` (success), ``usage 1`` for parse / required-arg
@@ -116,6 +117,14 @@ Optional:
   --job-name NAME              Cloud Run Job name
                                (default: bqaa-periodic-materialization).
   --smoke                      After deploy, run the job once + tail logs.
+  --extraction-mode MODE       'ai-fallback' (default) — structured extractors
+                               run and AI.GENERATE fills any gaps; existing
+                               behavior. 'compiled-only' — structured
+                               extractors only; no AI.GENERATE call; skips
+                               the roles/aiplatform.user IAM grant on the
+                               runtime SA. Pick 'compiled-only' for regulated
+                               deploys that must not have an LLM in the
+                               extraction path.
   -h | --help                  Show this help.
 EOF
   exit "${1:-1}"
@@ -152,6 +161,7 @@ while [[ $# -gt 0 ]]; do
     --max-sessions)    require_arg "$1" "${2-}"; MAX_SESSIONS="$2"; shift 2 ;;
     --job-name)        require_arg "$1" "${2-}"; JOB_NAME="$2"; shift 2 ;;
     --smoke)           SMOKE=true; shift ;;
+    --extraction-mode) require_arg "$1" "${2-}"; EXTRACTION_MODE="$2"; shift 2 ;;
     -h|--help)         usage 0 ;;
     *)                 echo "Unknown argument: $1" >&2; usage 1 ;;
   esac
@@ -168,6 +178,18 @@ for var in PROJECT REGION EVENTS_DATASET GRAPH_DATASET SCHEDULE; do
     exit 1
   fi
 done
+
+# Validate ``--extraction-mode`` at the boundary. The materializer
+# rejects unknown values too, but failing here means an operator
+# typo (e.g. ``compiled_only`` with an underscore) doesn't spend
+# 3 minutes on a Cloud Build before raising.
+case "$EXTRACTION_MODE" in
+  ai-fallback|compiled-only) ;;
+  *)
+    echo "Error: --extraction-mode must be 'ai-fallback' or 'compiled-only'; got '$EXTRACTION_MODE'." >&2
+    exit 1
+    ;;
+esac
 
 SCHEDULER_NAME="${JOB_NAME}-cron"
 
@@ -335,12 +357,23 @@ _retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
 # checking ``rows_materialized``). The verification round in
 # #166 surfaced this — the deploy looks ``ok=true`` but the
 # entity tables stay empty.
-echo "==> granting project-level roles/aiplatform.user to $SA_EMAIL"
-_retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
-  --member "serviceAccount:${SA_EMAIL}" \
-  --role roles/aiplatform.user \
-  --condition=None \
-  --quiet
+# Conditional ``roles/aiplatform.user`` grant. Only needed when
+# the orchestrator's extraction path actually calls AI.GENERATE.
+# In ``--extraction-mode=compiled-only`` mode the SDK skips
+# ``_extract_via_ai_generate`` entirely (asserted by
+# ``tests/test_materialize_window.py``'s zero-LLM-call coverage),
+# so the grant is dropped to keep the runtime SA's blast radius
+# minimal — table stakes for regulated-industry deploys.
+if [[ "$EXTRACTION_MODE" == "ai-fallback" ]]; then
+  echo "==> granting project-level roles/aiplatform.user to $SA_EMAIL"
+  _retry_iam gcloud projects add-iam-policy-binding "$PROJECT" \
+    --member "serviceAccount:${SA_EMAIL}" \
+    --role roles/aiplatform.user \
+    --condition=None \
+    --quiet
+else
+  echo "==> skipping roles/aiplatform.user grant (--extraction-mode=$EXTRACTION_MODE; no AI.GENERATE calls)"
+fi
 
 # Dataset-level IAM via the BigQuery Python client (the
 # ``AccessEntry``-based update API — legacy and fully
@@ -474,6 +507,7 @@ ENV_VARS=(
   "BQAA_LOCATION=${BQ_LOCATION}"
   "BQAA_LOOKBACK_HOURS=${LOOKBACK_HOURS}"
   "BQAA_OVERLAP_MINUTES=${OVERLAP_MINUTES}"
+  "BQAA_EXTRACTION_MODE=${EXTRACTION_MODE}"
 )
 if [[ -n "${MAX_SESSIONS}" ]]; then
   ENV_VARS+=("BQAA_MAX_SESSIONS=${MAX_SESSIONS}")
