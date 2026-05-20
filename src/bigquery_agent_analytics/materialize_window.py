@@ -714,18 +714,31 @@ def run_materialize_window(
         f"--max-sessions must be unset or > 0; got {max_sessions!r}"
     )
 
+  # Normalize ``state_key_suffix`` at the boundary so a whitespace-
+  # only value ("   ") doesn't slip past the missing-suffix check
+  # and become an opaque component of the state-key hash. The CLI's
+  # ``--state-key-suffix`` and the env-var pass-through in
+  # ``run_job.py`` both deliver raw operator input here; the strip
+  # happens once, applies to both surfaces, and propagates into
+  # ``compute_state_key`` cleanly. Net behavior for a callable
+  # passing a non-trivial suffix is unchanged.
+  if state_key_suffix is not None:
+    stripped = state_key_suffix.strip()
+    state_key_suffix = stripped if stripped else None
+
   # Backfill mode validation. Both bounds are required, the window
   # must be non-empty (from < to), AND ``state_key_suffix`` must be
-  # set. The suffix is what carves the backfill out of the steady-
-  # state ``state_key`` namespace; ``read_last_checkpoint`` filters
-  # only by ``state_key``, so a backfill that shares the steady-
-  # state key would write a row that the next cron run reads as its
-  # checkpoint. ``mode='backfill'`` on the row is an audit signal,
-  # not a filter — it does not protect the checkpoint stream.
-  # Reject the missing-suffix configuration loudly at the boundary;
-  # this is the contract the CLI's ``--backfill`` help text
-  # promises ("without reading or advancing the steady-state
-  # checkpoint"). PR #188 review.
+  # set (post-normalization above). The suffix is what carves the
+  # backfill out of the steady-state ``state_key`` namespace;
+  # ``read_last_checkpoint`` filters only by ``state_key``, so a
+  # backfill that shares the steady-state key would write a row
+  # that the next cron run reads as its checkpoint.
+  # ``mode='backfill'`` on the row is an audit signal, not a
+  # filter — it does not protect the checkpoint stream. Reject the
+  # missing-suffix configuration loudly at the boundary; this is
+  # the contract the CLI's ``--backfill`` help text promises
+  # ("without reading or advancing the steady-state checkpoint").
+  # PR #188 review.
   if backfill:
     if from_time is None or to_time is None:
       raise ValueError(

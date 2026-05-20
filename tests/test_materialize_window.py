@@ -2349,6 +2349,28 @@ class TestBackfillValidation:
           state_key_suffix="",
           bq_client=bq_client,
       )
+    # Whitespace-only suffix is treated as unset too. Without the
+    # boundary strip, ``"   "`` is truthy in Python and would slip
+    # past the missing-suffix check, then become an opaque
+    # whitespace token in the state-key hash — an unreadable
+    # namespace that's nearly impossible to debug. The boundary
+    # normalization in ``run_materialize_window`` makes the
+    # behavior here identical to the empty-string case.
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix="   ",
+          bq_client=bq_client,
+      )
 
   def test_from_to_without_backfill_rejected(self, fixture_paths):
     ontology_yaml, binding_yaml = fixture_paths
