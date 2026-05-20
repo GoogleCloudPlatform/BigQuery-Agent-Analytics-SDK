@@ -1910,6 +1910,22 @@ def materialize_window(
             "asserted by SDK tests)."
         ),
     ),
+    max_session_age_hours: Optional[float] = typer.Option(
+        None,
+        "--max-session-age-hours",
+        help=(
+            "Enable the orphan-session watchdog (issue #180). When "
+            "set, the orchestrator additionally scans for sessions "
+            "whose first event is older than N hours but which "
+            "never emitted the completion event. Each new orphan "
+            "surfaces as a typed 'session_orphaned' failure in the "
+            "JSON report; the state table records per-scan "
+            "(mode='orphan_scan') and cumulative "
+            "(mode='orphan_ledger') audit rows under the same "
+            "state_key. Disabled by default; skipped in --backfill "
+            "mode."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1969,6 +1985,7 @@ def materialize_window(
         to_time=parsed_to,
         extraction_mode=extraction_mode,
         state_key_suffix=state_key_suffix,
+        max_session_age_hours=max_session_age_hours,
     )
     typer.echo(format_output(result.to_json(), fmt))
     if not result.ok:

@@ -485,7 +485,8 @@ def _stub_bq_client(discovered_rows):
   """A BigQuery client whose ``.query()`` returns:
   - the CREATE TABLE response (anything; we just check it was called)
   - one response per additive schema-migration ALTER
-    (currently: ``ADD COLUMN IF NOT EXISTS mode STRING``)
+    (currently three: ``mode``, ``orphan_watermark``,
+    ``flagged_session_ids``)
   - the state-table read (empty → bootstrap)
   - the discovery query (returns ``discovered_rows``)
   ``.insert_rows_json`` returns [] (no errors).
@@ -499,7 +500,9 @@ def _stub_bq_client(discovered_rows):
   # ``src/bigquery_agent_analytics/materialize_window.py``.
   results = [
       mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
-      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER orphan_watermark
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER flagged_session_ids
       mock.Mock(result=mock.Mock(return_value=[])),  # state read
       mock.Mock(result=mock.Mock(return_value=discovered_rows)),  # discovery
   ]
@@ -818,6 +821,12 @@ class TestCheckpointCarryForward:
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
             mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1528,7 +1537,13 @@ class TestCheckpointNeverRegresses:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # DDL
-            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1590,7 +1605,13 @@ class TestCheckpointNeverRegresses:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
-            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),
             mock.Mock(result=mock.Mock(return_value=discovered)),
         ]
@@ -2535,14 +2556,25 @@ class TestEnsureStateTableMigration:
     mw.ensure_state_table(client, "p.d._bqaa_materialization_state")
     queries = [args[0][0] for args in client.query.call_args_list]
     create = next(q for q in queries if q.startswith("CREATE TABLE"))
-    assert (
-        "mode STRING" in create
-    ), "fresh tables must include the mode column in the initial DDL"
+    # Fresh tables include every current column in the initial DDL —
+    # ``mode`` (issue #177) plus the orphan-watchdog columns
+    # (issue #180: ``orphan_watermark``, ``flagged_session_ids``).
+    assert "mode STRING" in create
+    assert "orphan_watermark TIMESTAMP" in create
+    assert "flagged_session_ids ARRAY<STRING>" in create
     alters = [q for q in queries if q.startswith("ALTER TABLE")]
-    assert any("ADD COLUMN IF NOT EXISTS mode STRING" in q for q in alters), (
-        "ensure_state_table must run ADD COLUMN IF NOT EXISTS for the "
-        "mode column on every call so pre-migration tables get patched "
-        "without a destructive migration"
+    # Every additive column has an idempotent ADD COLUMN IF NOT
+    # EXISTS so pre-migration tables get patched up without a
+    # destructive migration.
+    assert any("ADD COLUMN IF NOT EXISTS mode STRING" in q for q in alters)
+    assert any(
+        "ADD COLUMN IF NOT EXISTS orphan_watermark TIMESTAMP" in q
+        for q in alters
+    )
+    assert any(
+        "ADD COLUMN IF NOT EXISTS" in q
+        and "flagged_session_ids ARRAY<STRING>" in q
+        for q in alters
     )
 
 
@@ -3442,3 +3474,299 @@ class TestDeployScriptExtractionModeBoundary:
         "deploy script must propagate a non-zero smoke exit code"
         " before the compiled-only IAM remove runs"
     )
+
+
+# ====================================================================== #
+# Orphan-session watchdog (PR D, issue #180)                              #
+# ====================================================================== #
+
+
+def _orphan_state_row(mode, *, flagged=(), watermark=None, run_started_at=None):
+  """Build a fake BQ row matching the ``orphan_ledger`` /
+  ``orphan_scan`` read shape."""
+  row = mock.Mock()
+  row.state_key = "sk"
+  row.run_started_at = run_started_at or _dt.datetime(
+      2026, 5, 20, tzinfo=_dt.timezone.utc
+  )
+  row.orphan_watermark = watermark
+  row.flagged_session_ids = list(flagged)
+  row.mode = mode
+  return row
+
+
+class TestOrphanWatchdogBuilders:
+  """Pin the SQL shape the watchdog emits. Two reasons: (1) the
+  discovery query has to use strict ``>`` on the watermark so the
+  boundary session from the previous scan isn't reconsidered;
+  (2) the cumulative ledger's running-set exclusion must be in
+  the WHERE clause, not a post-filter, so BigQuery doesn't scan
+  already-flagged sessions on every pass."""
+
+  def test_orphan_select_uses_strict_gt_on_watermark(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    assert "timestamp > COALESCE(@orphan_watermark" in sql, (
+        "discovery must use strict `>` on the watermark so the "
+        "boundary session isn't reconsidered on the next scan"
+    )
+
+  def test_orphan_select_filters_terminal_event_count_zero(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    assert "COUNTIF(event_type = 'AGENT_COMPLETED')" in sql
+    assert "terminal_event_count = 0" in sql
+
+  def test_orphan_select_excludes_already_flagged(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    assert "NOT IN UNNEST(@already_flagged)" in sql
+
+  def test_orphan_ledger_select_filters_on_ledger_mode_only(self):
+    sql = mw.build_orphan_ledger_select_sql("p.d._bqaa_materialization_state")
+    # State table is shared across mode kinds; the ledger read
+    # must filter on mode='orphan_ledger' so a fresh steady row
+    # doesn't shadow the most recent ledger.
+    assert "mode = 'orphan_ledger'" in sql
+
+  def test_resolved_orphan_sql_bounded_to_flagged_set(self):
+    sql = mw.build_resolved_orphan_sql("p.d.agent_events")
+    # The probe must be parameterized on the previously-flagged set
+    # rather than scanning the full events table.
+    assert "IN UNNEST(@previously_flagged)" in sql
+    assert "event_type = 'AGENT_COMPLETED'" in sql
+
+
+class TestOrphanWatchdogScan:
+  """End-to-end scan via a stub BigQuery client. Covers the
+  read-ledger / discover / probe-resolved / write-rows flow."""
+
+  def _stub(self, *, ledger_rows, discovery_rows, resolved_rows):
+    """Sequence: ledger select → discovery → resolved probe.
+    ``ensure_state_table`` is NOT called by ``run_orphan_watchdog``
+    itself (the caller handles that)."""
+    client = mock.Mock()
+    client.query = mock.Mock(
+        side_effect=[
+            mock.Mock(result=mock.Mock(return_value=ledger_rows)),
+            mock.Mock(result=mock.Mock(return_value=discovery_rows)),
+            mock.Mock(result=mock.Mock(return_value=resolved_rows)),
+        ]
+    )
+    client.insert_rows_json = mock.Mock(return_value=[])
+    return client
+
+  def test_first_scan_flags_new_orphans_and_writes_both_rows(self):
+    """Fresh state_key, no ledger row yet. Discovery returns two
+    in-flight sessions. Both audit + ledger rows must be written
+    with the new orphans + the cutoff watermark."""
+    now = _dt.datetime(2026, 5, 20, 12, 0, tzinfo=_dt.timezone.utc)
+    client = self._stub(
+        ledger_rows=[],
+        discovery_rows=[
+            mock.Mock(
+                session_id="orphan-A",
+                first_event_at=now - _dt.timedelta(hours=12),
+            ),
+            mock.Mock(
+                session_id="orphan-B",
+                first_event_at=now - _dt.timedelta(hours=18),
+            ),
+        ],
+        resolved_rows=[],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-1",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ("orphan-A", "orphan-B")
+    assert result.cumulative_flagged == ("orphan-A", "orphan-B")
+    assert result.resolved_orphans == ()
+    assert result.previous_watermark is None
+    assert result.cutoff_at == now - _dt.timedelta(hours=6)
+
+    # Two state rows written (audit + ledger).
+    assert client.insert_rows_json.call_count == 2
+    audit_payload = client.insert_rows_json.call_args_list[0][0][1][0]
+    ledger_payload = client.insert_rows_json.call_args_list[1][0][1][0]
+    assert audit_payload["mode"] == mw.STATE_MODE_ORPHAN_SCAN
+    assert audit_payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+    assert ledger_payload["mode"] == mw.STATE_MODE_ORPHAN_LEDGER
+    assert ledger_payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+
+  def test_carries_forward_previously_flagged_unless_resolved(self):
+    """Second scan with previously-flagged sessions. One resolved
+    (late terminal event arrived), one new orphan discovered.
+    Cumulative ledger = (prior - resolved) ∪ new."""
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A", "orphan-B", "orphan-C"),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[
+            mock.Mock(
+                session_id="orphan-D",
+                first_event_at=now - _dt.timedelta(hours=10),
+            )
+        ],
+        # Late terminal event for orphan-B → drop from ledger.
+        resolved_rows=[mock.Mock(session_id="orphan-B")],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-2",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ("orphan-D",)
+    assert result.resolved_orphans == ("orphan-B",)
+    # Order: carry-forward (in original ledger order, minus
+    # resolved) + newly discovered. The append order matters for
+    # operators reading the ledger as a stable diff target.
+    assert result.cumulative_flagged == (
+        "orphan-A",
+        "orphan-C",
+        "orphan-D",
+    )
+    assert result.previous_watermark == prior_watermark
+
+  def test_empty_scan_still_writes_ledger_so_running_set_persists(self):
+    """No new orphans this scan, but the ledger row must still be
+    written so the cumulative set survives. Without this, a quiet
+    scan would drop the running set and next scan would re-flag
+    everything."""
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-3",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ()
+    assert result.resolved_orphans == ()
+    # Running set persists.
+    assert result.cumulative_flagged == ("orphan-A",)
+    # Ledger row written with the carry-forward set so next scan
+    # reads the same running set even on a no-op scan.
+    assert client.insert_rows_json.call_count == 2
+    ledger_payload = client.insert_rows_json.call_args_list[1][0][1][0]
+    assert ledger_payload["flagged_session_ids"] == ["orphan-A"]
+    # Watermark advances every scan, regardless of outcome —
+    # next scan's `>` boundary moves forward so cost stays bounded.
+    # ``_iso`` shortens ``+00:00`` to ``Z`` in the serialized form.
+    expected_cutoff = now - _dt.timedelta(hours=6)
+    assert ledger_payload["orphan_watermark"] == (
+        expected_cutoff.isoformat().replace("+00:00", "Z")
+    )
+
+  def test_rejects_non_positive_max_session_age_hours(self):
+    with pytest.raises(ValueError, match="must be > 0"):
+      mw.run_orphan_watchdog(
+          mock.Mock(),
+          events_table_ref="p.d.agent_events",
+          state_table_ref="p.d._bqaa_materialization_state",
+          state_key="sk",
+          run_id="r",
+          run_started_at=_dt.datetime.now(_dt.timezone.utc),
+          max_session_age_hours=0,
+      )
+
+
+class TestOrphanWatchdogOrchestratorIntegration:
+  """The orchestrator threads orphan_result through
+  MaterializeWindowResult and surfaces typed
+  ``session_orphaned`` failures so existing #167 alerting fires."""
+
+  def test_max_session_age_hours_none_skips_watchdog(
+      self, fixture_paths, monkeypatch
+  ):
+    """Default off: no orphan-related queries, no `orphan` key in
+    the JSON payload, ok stays True."""
+    ontology_yaml, binding_yaml = fixture_paths
+    _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])
+    result = mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+    )
+    assert result.orphan_result is None
+    assert "orphan" not in result.to_json()
+    assert result.ok is True
+
+  def test_max_session_age_hours_skipped_in_backfill_mode(
+      self, fixture_paths, monkeypatch
+  ):
+    """Backfill scans a fixed historical window where the
+    ``what's still in-flight?`` question is undefined. The
+    watchdog must skip even if the flag is set on a backfill run."""
+    ontology_yaml, binding_yaml = fixture_paths
+    _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])
+    result = mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        backfill=True,
+        from_time=_dt.datetime(2026, 4, 1, tzinfo=_dt.timezone.utc),
+        to_time=_dt.datetime(2026, 4, 8, tzinfo=_dt.timezone.utc),
+        state_key_suffix="backfill-april",
+        max_session_age_hours=6.0,
+    )
+    assert result.orphan_result is None
+
+  def test_invalid_max_session_age_hours_rejected_at_boundary(
+      self, fixture_paths
+  ):
+    """Negative / zero values are operator typos — fail fast at
+    the boundary rather than producing a degenerate cutoff."""
+    ontology_yaml, binding_yaml = fixture_paths
+    for bad in (0, -1, -0.5):
+      with pytest.raises(
+          ValueError, match=r"--max-session-age-hours must be > 0"
+      ):
+        mw.run_materialize_window(
+            project_id="p",
+            dataset_id="d",
+            ontology_path=str(ontology_yaml),
+            binding_path=str(binding_yaml),
+            lookback_hours=6.0,
+            validate_binding=False,
+            bq_client=_stub_bq_client([]),
+            max_session_age_hours=bad,
+        )

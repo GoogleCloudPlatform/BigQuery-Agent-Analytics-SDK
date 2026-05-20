@@ -88,6 +88,14 @@ Env vars (all set by the deploy script via
   When unset, the reference module's ``EXTRACTORS`` registry
   is used directly — the simpler compiled-only path that
   needs no offline bundle-build step.
+* ``BQAA_MAX_SESSION_AGE_HOURS`` (default unset) — enables the
+  orphan-session watchdog (issue #180). When set to a positive
+  number, the orchestrator additionally scans for sessions
+  whose first event is older than N hours but which never
+  emitted ``AGENT_COMPLETED``. Each new orphan surfaces as a
+  typed ``session_orphaned`` failure in the JSON report; the
+  state table records per-scan + cumulative audit rows. Skipped
+  automatically in ``BQAA_BACKFILL=true`` mode.
 
 Exit codes mirror the CLI:
 
@@ -387,6 +395,20 @@ def main() -> int:
       os.environ.get("BQAA_REFERENCE_EXTRACTORS_MODULE") or None
   )
   bundles_root = os.environ.get("BQAA_BUNDLES_ROOT") or None
+  # Orphan-session watchdog (issue #180). Unset means disabled —
+  # mirrors the CLI flag. ``_optional_env_float`` raises ``exit 2``
+  # on a non-numeric value at the boundary, and the materializer's
+  # own validator rejects ``<= 0`` so a deployed
+  # ``BQAA_MAX_SESSION_AGE_HOURS=-1`` typo fails fast instead of
+  # producing a degenerate cutoff.
+  max_session_age_hours_raw = os.environ.get("BQAA_MAX_SESSION_AGE_HOURS")
+  max_session_age_hours: Optional[float]
+  if max_session_age_hours_raw is None or not max_session_age_hours_raw.strip():
+    max_session_age_hours = None
+  else:
+    max_session_age_hours = _optional_env_float(
+        "BQAA_MAX_SESSION_AGE_HOURS", 0.0
+    )
 
   _emit(
       "INFO",
@@ -405,6 +427,7 @@ def main() -> int:
       extraction_mode=extraction_mode,
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
+      max_session_age_hours=max_session_age_hours,
   )
 
   try:
@@ -480,6 +503,7 @@ def main() -> int:
         extraction_mode=extraction_mode,
         bundles_root=bundles_root,
         reference_extractors_module=reference_extractors_module,
+        max_session_age_hours=max_session_age_hours,
     )
 
     # Structured JSON report for Cloud Logging. Cloud Logging

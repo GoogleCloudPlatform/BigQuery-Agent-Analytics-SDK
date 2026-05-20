@@ -644,7 +644,7 @@ fixed. Today, the same situation would produce `ok=false` with
 
 ### Failure-mode surface (post-#167)
 
-The orchestrator distinguishes two zero-row session outcomes
+The orchestrator distinguishes three session-level outcomes
 that look identical from `rows_materialized` alone:
 
 * **`empty_extraction`** — extraction (AI.GENERATE or compiled
@@ -663,10 +663,32 @@ that look identical from `rows_materialized` alone:
   schema drift the binding-validate pre-flight missed, or
   streaming-buffer pinning.
 
-In both cases: `ok=false`, CLI exit 1, the cron run shows up
-as a failed execution in Cloud Monitoring. Alert directly on
+* **`session_orphaned`** *(only when `--max-session-age-hours`
+  is set, issue #180)* — a session's first event landed before
+  the configured cutoff but the session never emitted
+  `AGENT_COMPLETED`. The orphan-watchdog scan flagged it as
+  in-flight-too-long. `failures[].error_detail` names the
+  session_id, the cutoff timestamp, and the missing terminal
+  event_type, plus a remediation hint pointing at the
+  cumulative ledger row (`mode='orphan_ledger'`) in the state
+  table. Diagnose by triaging the underlying agent failure or
+  by emitting the missing terminal event (the watchdog drops
+  the session from the ledger on its next pass once
+  `AGENT_COMPLETED` appears).
+
+In all three cases: `ok=false`, CLI exit 1, the cron run shows
+up as a failed execution in Cloud Monitoring. Alert directly on
 `jsonPayload.ok=false` plus `jsonPayload.failures[].error_code`
 for the failure-mode breakdown — no second-line check needed.
+
+The orphan watchdog also persists a structured audit trail in
+the state table: `mode='orphan_scan'` for the per-cron-pass
+delta (`flagged_session_ids` = sessions newly flagged this
+scan, `orphan_watermark` = the scan's cutoff that becomes the
+next scan's exclusive `>` boundary) and `mode='orphan_ledger'`
+for the cumulative running set after the resolved-orphan
+sweep. Operators reading the ledger see "what's currently
+unresolved" without having to diff across runs.
 
 ## Cleanup and redeploy
 

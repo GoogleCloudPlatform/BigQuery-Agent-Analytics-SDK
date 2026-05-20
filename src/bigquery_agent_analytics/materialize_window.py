@@ -114,24 +114,54 @@ CREATE TABLE IF NOT EXISTS `{table_ref}` (
   ok BOOL NOT NULL,
   error_detail STRING,
   report_json STRING,
-  mode STRING
+  mode STRING,
+  orphan_watermark TIMESTAMP,
+  flagged_session_ids ARRAY<STRING>
 )
 PARTITION BY DATE(run_started_at)
 CLUSTER BY state_key, run_started_at
 """
 
-# ``mode`` was added to the schema in the ``--backfill`` follow-up
-# (issue #177). Older state tables were created without it; running
-# ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` on every
-# ``ensure_state_table`` call is idempotent in BigQuery and brings
-# pre-existing tables up to the current schema without a destructive
-# migration. Reads default missing rows to ``mode='steady'``.
+# Additive schema migrations. Older state tables were created
+# without these columns; running ``ALTER TABLE ... ADD COLUMN IF
+# NOT EXISTS`` on every ``ensure_state_table`` call is idempotent
+# in BigQuery and brings pre-existing tables up to the current
+# schema without a destructive migration. Reads of the migrated
+# columns on rows written by older SDK versions return ``NULL``;
+# callers default missing values per-column:
+#
+# * ``mode`` -> ``STATE_MODE_STEADY`` (issue #177, backfill follow-up).
+# * ``orphan_watermark`` -> ``None`` (issue #180, orphan watchdog).
+# * ``flagged_session_ids`` -> ``[]`` (issue #180).
 _STATE_TABLE_MODE_MIGRATIONS = (
     "ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS mode STRING",
+    "ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS orphan_watermark TIMESTAMP",
+    (
+        "ALTER TABLE `{table_ref}` ADD COLUMN IF NOT EXISTS"
+        " flagged_session_ids ARRAY<STRING>"
+    ),
 )
 
 STATE_MODE_STEADY = "steady"
 STATE_MODE_BACKFILL = "backfill"
+# Orphan watchdog modes (issue #180).
+#
+# ``orphan_scan`` is a per-scan audit row — one row per cron pass
+# when ``max_session_age_hours`` is enabled. ``sessions_discovered``
+# holds the count of orphan sessions newly flagged in THIS scan,
+# ``flagged_session_ids`` holds those new session_ids, and
+# ``orphan_watermark`` holds the upper bound (``cutoff_at``) of the
+# scan window so the next pass uses strict ``>`` on the same column.
+#
+# ``orphan_ledger`` is the cumulative ledger row written alongside
+# every ``orphan_scan``. ``flagged_session_ids`` holds the running
+# set of all unresolved orphan session_ids known for this state_key.
+# Append-only by run, with reads picking the most recent row per
+# state_key — same shape as the steady checkpoint, so a future
+# ``orphan_scan`` filters its discovery against the read-back
+# ledger's flagged set even on scans that find zero new orphans.
+STATE_MODE_ORPHAN_SCAN = "orphan_scan"
+STATE_MODE_ORPHAN_LEDGER = "orphan_ledger"
 
 # Extraction modes (B2, issue #178 follow-up).
 #
@@ -227,6 +257,15 @@ class StateRow:
   error_detail: Optional[str] = None
   report_json: Optional[str] = None
   mode: str = STATE_MODE_STEADY
+  # Orphan-watchdog fields (issue #180). Populated only for rows
+  # whose ``mode`` is :data:`STATE_MODE_ORPHAN_SCAN` (the per-scan
+  # audit row carries that scan's newly-flagged session_ids and the
+  # cutoff watermark) or :data:`STATE_MODE_ORPHAN_LEDGER` (the
+  # cumulative ledger carries the running set of all unresolved
+  # orphan session_ids and the advancing scan watermark). Left at
+  # the dataclass defaults for steady / backfill rows.
+  orphan_watermark: Optional[_dt.datetime] = None
+  flagged_session_ids: Optional[tuple[str, ...]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -252,10 +291,16 @@ class MaterializeWindowResult:
   # reading ``compiled_outcomes`` cross-reference with this to
   # confirm which bundle ran.
   compile_bundle_fingerprint: Optional[str] = None
+  # Orphan-watchdog result (issue #180). Populated only when the
+  # caller passes ``max_session_age_hours``. ``None`` means the
+  # watchdog was disabled for this run (default). The string
+  # forward-reference resolves at runtime because the actual class
+  # is declared further down in the module.
+  orphan_result: Optional["OrphanScanResult"] = None
 
   def to_json(self) -> dict[str, Any]:
     """JSON-serializable dict (timestamps → ISO 8601 UTC strings)."""
-    return {
+    payload = {
         "run_id": self.run_id,
         "state_key": self.state_key,
         "window_start": _iso(self.window_start),
@@ -272,6 +317,17 @@ class MaterializeWindowResult:
         "ok": self.ok,
         "compile_bundle_fingerprint": self.compile_bundle_fingerprint,
     }
+    if self.orphan_result is not None:
+      payload["orphan"] = {
+          "cutoff_at": _iso(self.orphan_result.cutoff_at),
+          "previous_watermark": _iso_optional(
+              self.orphan_result.previous_watermark
+          ),
+          "new_orphans": list(self.orphan_result.new_orphans),
+          "resolved_orphans": list(self.orphan_result.resolved_orphans),
+          "cumulative_flagged": list(self.orphan_result.cumulative_flagged),
+      }
+    return payload
 
 
 # ------------------------------------------------------------------ #
@@ -543,10 +599,365 @@ def append_state_row(
       "error_detail": row.error_detail,
       "report_json": row.report_json,
       "mode": row.mode,
+      "orphan_watermark": _iso_optional(row.orphan_watermark),
+      # ``insert_rows_json`` accepts a list of strings for an
+      # ARRAY<STRING> column. ``None`` is encoded as a NULL ARRAY
+      # at the column level — distinct from the empty array which
+      # signals "scan ran, zero unresolved orphans".
+      "flagged_session_ids": (
+          list(row.flagged_session_ids)
+          if row.flagged_session_ids is not None
+          else None
+      ),
   }
   errors = bq_client.insert_rows_json(state_table_ref, [payload])
   if errors:
     raise RuntimeError(f"insert into {state_table_ref} failed: {errors!r}")
+
+
+# ------------------------------------------------------------------ #
+# Orphan watchdog (issue #180)                                          #
+# ------------------------------------------------------------------ #
+#
+# Three SQL helpers + one orchestrator-level scan function. The
+# helpers are kept as pure SQL-builders so tests can pin the
+# query shape without round-tripping through a fake BigQuery
+# client, and so the discovery query is auditable.
+#
+# The watchdog model has three durable shapes in the state table:
+#
+# 1. ``orphan_ledger`` — one most-recent row per ``state_key``,
+#    carrying the cumulative set of unresolved orphan session_ids
+#    in ``flagged_session_ids`` and the upper-bound scan watermark
+#    in ``orphan_watermark``.
+# 2. ``orphan_scan`` — one row per cron pass, carrying that scan's
+#    *newly* flagged session_ids (the delta) and the same watermark.
+# 3. ``ok=false`` failures threaded into the regular run's
+#    ``failures[]`` with ``error_code='session_orphaned'`` so
+#    existing Cloud Monitoring alerts on the failure surface fire
+#    immediately — no separate alert wiring per #167's classifier.
+
+
+@dataclasses.dataclass(frozen=True)
+class OrphanLedger:
+  """Read-side view of the most recent ``orphan_ledger`` row."""
+
+  orphan_watermark: Optional[_dt.datetime]
+  flagged_session_ids: tuple[str, ...]
+
+  @classmethod
+  def empty(cls) -> "OrphanLedger":
+    """Initial state for a fresh deploy / state_key never scanned."""
+    return cls(orphan_watermark=None, flagged_session_ids=())
+
+
+@dataclasses.dataclass(frozen=True)
+class OrphanScanResult:
+  """Result of one orphan-watchdog scan."""
+
+  cutoff_at: _dt.datetime
+  previous_watermark: Optional[_dt.datetime]
+  new_orphans: tuple[str, ...]
+  resolved_orphans: tuple[str, ...]
+  cumulative_flagged: tuple[str, ...]
+
+
+def build_orphan_select_sql(events_table_ref: str) -> str:
+  """SQL: sessions whose ``MIN(timestamp)`` falls in
+  ``(@orphan_watermark, @cutoff_at]`` and which never emitted
+  ``AGENT_COMPLETED``.
+
+  ``@orphan_watermark`` uses strict ``>`` so the boundary session
+  from the previous scan isn't reconsidered — matches the
+  steady checkpoint's exclusive-lower-bound semantics. ``@cutoff_at``
+  is the inclusive upper bound (the orchestrator computes it as
+  ``now - max_session_age_hours`` so anything more recent has had
+  enough time to emit a terminal event).
+
+  The discovery is by ``MIN(timestamp)`` (first event) rather than
+  ``MAX``: an in-flight session that started before the cutoff but
+  is still emitting events is the orphan-watchdog's concern; a
+  session whose newest event is before the cutoff but which started
+  even earlier was already covered by a prior scan.
+
+  ``@already_flagged`` (the previous ledger's cumulative set) is
+  excluded with ``NOT IN UNNEST(...)`` so the per-scan ``orphan_scan``
+  row records only the delta — operators reading the audit trail
+  see "how many new orphans appeared this scan" without having to
+  diff against the previous scan's set themselves. The
+  ``orphan_ledger`` row written alongside ``orphan_scan`` carries
+  the full cumulative set after the resolve step.
+  """
+  return f"""\
+WITH session_envelope AS (
+  SELECT
+    session_id,
+    MIN(timestamp) AS first_event_at,
+    COUNTIF(event_type = 'AGENT_COMPLETED') AS terminal_event_count
+  FROM `{events_table_ref}`
+  WHERE timestamp > COALESCE(@orphan_watermark, TIMESTAMP('1970-01-01'))
+    AND timestamp <= @cutoff_at
+  GROUP BY session_id
+)
+SELECT session_id, first_event_at
+FROM session_envelope
+WHERE terminal_event_count = 0
+  AND session_id NOT IN UNNEST(@already_flagged)
+ORDER BY first_event_at, session_id
+"""
+
+
+def build_resolved_orphan_sql(events_table_ref: str) -> str:
+  """SQL: subset of the previously-flagged orphan session_ids
+  that have since emitted ``AGENT_COMPLETED``.
+
+  Run after the discovery query so the orchestrator can drop
+  resolved orphans from the cumulative ledger. The "resolved"
+  signal is real-world: a late terminal event arrived, the
+  steady cron will pick the session up on its next pass, and the
+  watchdog's running ledger should not keep flagging it as
+  unresolved.
+
+  The probe is bounded to the previously-flagged set to keep
+  scan cost proportional to the unresolved-orphan count rather
+  than the full events table — the watchdog is a low-traffic
+  signal compared to the steady cron, and we don't want it to
+  dominate query bytes.
+  """
+  return f"""\
+SELECT DISTINCT session_id
+FROM `{events_table_ref}`
+WHERE session_id IN UNNEST(@previously_flagged)
+  AND event_type = 'AGENT_COMPLETED'
+"""
+
+
+def build_orphan_ledger_select_sql(state_table_ref: str) -> str:
+  """Most recent ``orphan_ledger`` row for a given ``state_key``.
+
+  Mirrors :func:`build_state_select_sql` (mode='steady') but
+  filters on ``mode = 'orphan_ledger'`` so the steady checkpoint
+  doesn't interfere — they share the same state_key but live in
+  disjoint row groups.
+
+  Returns ``flagged_session_ids`` (ARRAY<STRING>) and
+  ``orphan_watermark`` (TIMESTAMP). The
+  :class:`OrphanLedger.empty` factory is used when no row exists
+  yet (fresh deploy / state_key never scanned).
+  """
+  state_table_ref_quoted = "`" + state_table_ref + "`"
+  return (
+      f"SELECT\n"
+      f"  state_key,\n"
+      f"  run_started_at,\n"
+      f"  orphan_watermark,\n"
+      f"  flagged_session_ids\n"
+      f"FROM {state_table_ref_quoted}\n"
+      f"WHERE state_key = @state_key\n"
+      f"  AND mode = '{STATE_MODE_ORPHAN_LEDGER}'\n"
+      f"ORDER BY run_started_at DESC\n"
+      f"LIMIT 1\n"
+  )
+
+
+def read_orphan_ledger(
+    bq_client: Any, state_table_ref: str, state_key: str
+) -> OrphanLedger:
+  """Load the most recent ``orphan_ledger`` row for ``state_key``,
+  or :meth:`OrphanLedger.empty` when none exists."""
+  from google.cloud import bigquery
+
+  rows = list(
+      bq_client.query(
+          build_orphan_ledger_select_sql(state_table_ref),
+          job_config=bigquery.QueryJobConfig(
+              query_parameters=[
+                  bigquery.ScalarQueryParameter(
+                      "state_key", "STRING", state_key
+                  ),
+              ]
+          ),
+      ).result()
+  )
+  if not rows:
+    return OrphanLedger.empty()
+  row = rows[0]
+  flagged_raw = getattr(row, "flagged_session_ids", None) or ()
+  return OrphanLedger(
+      orphan_watermark=getattr(row, "orphan_watermark", None),
+      flagged_session_ids=tuple(flagged_raw),
+  )
+
+
+def discover_orphan_sessions(
+    bq_client: Any,
+    events_table_ref: str,
+    *,
+    orphan_watermark: Optional[_dt.datetime],
+    cutoff_at: _dt.datetime,
+    already_flagged: tuple[str, ...],
+) -> tuple[str, ...]:
+  """Query for new orphan session_ids in
+  ``(orphan_watermark, cutoff_at]``."""
+  from google.cloud import bigquery
+
+  rows = list(
+      bq_client.query(
+          build_orphan_select_sql(events_table_ref),
+          job_config=bigquery.QueryJobConfig(
+              query_parameters=[
+                  bigquery.ScalarQueryParameter(
+                      "orphan_watermark", "TIMESTAMP", orphan_watermark
+                  ),
+                  bigquery.ScalarQueryParameter(
+                      "cutoff_at", "TIMESTAMP", cutoff_at
+                  ),
+                  bigquery.ArrayQueryParameter(
+                      "already_flagged", "STRING", list(already_flagged)
+                  ),
+              ]
+          ),
+      ).result()
+  )
+  return tuple(r.session_id for r in rows)
+
+
+def probe_resolved_orphans(
+    bq_client: Any,
+    events_table_ref: str,
+    *,
+    previously_flagged: tuple[str, ...],
+) -> tuple[str, ...]:
+  """Subset of ``previously_flagged`` that now has terminal events."""
+  if not previously_flagged:
+    return ()
+  from google.cloud import bigquery
+
+  rows = list(
+      bq_client.query(
+          build_resolved_orphan_sql(events_table_ref),
+          job_config=bigquery.QueryJobConfig(
+              query_parameters=[
+                  bigquery.ArrayQueryParameter(
+                      "previously_flagged",
+                      "STRING",
+                      list(previously_flagged),
+                  ),
+              ]
+          ),
+      ).result()
+  )
+  return tuple(r.session_id for r in rows)
+
+
+def run_orphan_watchdog(
+    bq_client: Any,
+    *,
+    events_table_ref: str,
+    state_table_ref: str,
+    state_key: str,
+    run_id: str,
+    run_started_at: _dt.datetime,
+    max_session_age_hours: float,
+) -> OrphanScanResult:
+  """End-to-end orphan-watchdog scan.
+
+  Reads the most recent ``orphan_ledger`` row, runs the discovery
+  query against ``(orphan_watermark, cutoff_at]``, probes for
+  late-arriving terminal events on previously-flagged session_ids,
+  and writes two state rows:
+
+  * ``orphan_scan`` — audit row for this scan: new orphans only,
+    cutoff watermark.
+  * ``orphan_ledger`` — cumulative set after the resolve step:
+    ``(previous_flagged - resolved) ∪ new_orphans``.
+
+  The cutoff is computed as ``run_started_at - max_session_age_hours``
+  and stored as both ``scan_end`` (this scan's audit window upper
+  bound) and ``orphan_watermark`` (the next scan's exclusive lower
+  bound — strict ``>`` skips the boundary session). The advance is
+  unconditional: even if zero new orphans are found, the watermark
+  advances so the next scan does less work.
+
+  Returns the result so the orchestrator can thread the new orphans
+  into the run's ``failures[]`` as ``session_orphaned`` typed
+  failures.
+  """
+  if max_session_age_hours <= 0:
+    raise ValueError(
+        f"max_session_age_hours must be > 0; got {max_session_age_hours!r}"
+    )
+  cutoff_at = run_started_at - _dt.timedelta(hours=max_session_age_hours)
+
+  ledger = read_orphan_ledger(bq_client, state_table_ref, state_key)
+  new_orphans = discover_orphan_sessions(
+      bq_client,
+      events_table_ref,
+      orphan_watermark=ledger.orphan_watermark,
+      cutoff_at=cutoff_at,
+      already_flagged=ledger.flagged_session_ids,
+  )
+  resolved_orphans = probe_resolved_orphans(
+      bq_client,
+      events_table_ref,
+      previously_flagged=ledger.flagged_session_ids,
+  )
+
+  # Cumulative ledger: drop resolved, union new. Preserve previous
+  # declaration order for stable diffs, then append new orphans in
+  # the order discovery returned them (sorted by ``first_event_at``).
+  resolved_set = set(resolved_orphans)
+  carry_forward = tuple(
+      s for s in ledger.flagged_session_ids if s not in resolved_set
+  )
+  cumulative_flagged = carry_forward + new_orphans
+
+  audit_row = StateRow(
+      state_key=state_key,
+      run_id=run_id,
+      run_started_at=run_started_at,
+      scan_start=ledger.orphan_watermark
+      or _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc),
+      scan_end=cutoff_at,
+      last_completion_at=None,
+      sessions_discovered=len(new_orphans),
+      sessions_materialized=0,
+      sessions_failed=len(new_orphans),
+      ok=len(new_orphans) == 0,
+      error_detail=None,
+      report_json=None,
+      mode=STATE_MODE_ORPHAN_SCAN,
+      orphan_watermark=cutoff_at,
+      flagged_session_ids=new_orphans,
+  )
+  ledger_row = StateRow(
+      state_key=state_key,
+      run_id=run_id,
+      run_started_at=run_started_at,
+      scan_start=ledger.orphan_watermark
+      or _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc),
+      scan_end=cutoff_at,
+      last_completion_at=None,
+      sessions_discovered=len(cumulative_flagged),
+      sessions_materialized=0,
+      sessions_failed=len(cumulative_flagged),
+      ok=len(cumulative_flagged) == 0,
+      error_detail=None,
+      report_json=None,
+      mode=STATE_MODE_ORPHAN_LEDGER,
+      orphan_watermark=cutoff_at,
+      flagged_session_ids=cumulative_flagged,
+  )
+  append_state_row(bq_client, state_table_ref, audit_row)
+  append_state_row(bq_client, state_table_ref, ledger_row)
+
+  return OrphanScanResult(
+      cutoff_at=cutoff_at,
+      previous_watermark=ledger.orphan_watermark,
+      new_orphans=new_orphans,
+      resolved_orphans=resolved_orphans,
+      cumulative_flagged=cumulative_flagged,
+  )
 
 
 # ------------------------------------------------------------------ #
@@ -748,6 +1159,7 @@ def run_materialize_window(
     to_time: Optional[_dt.datetime] = None,
     state_key_suffix: Optional[str] = None,
     extraction_mode: str = EXTRACTION_MODE_AI_FALLBACK,
+    max_session_age_hours: Optional[float] = None,
 ) -> MaterializeWindowResult:
   """The end-to-end run.
 
@@ -810,7 +1222,35 @@ def run_materialize_window(
       typed ``empty_extraction`` failures (with sample diagnostics
       in ``error_detail``) ahead of the materializer's row-count
       classifier.
+    max_session_age_hours: If set (and > 0), enables the
+      orphan-session watchdog (issue #180). After the steady
+      discover+materialize pass, the orchestrator additionally
+      scans for sessions whose first event is older than the
+      cutoff but which never emitted ``AGENT_COMPLETED``. Each
+      new orphan surfaces as a typed
+      ``error_code='session_orphaned'`` entry in ``failures[]``
+      and flips ``ok`` to False — slotting into PR #167's
+      failure-mode classifier so existing Cloud Monitoring
+      alerts fire without separate wiring. The watchdog state
+      lives in the same state table under
+      ``mode='orphan_scan'`` (per-pass audit) +
+      ``mode='orphan_ledger'`` (cumulative ledger) rows; the
+      scan watermark advances unconditionally so the next pass
+      does less work. Skipped in ``backfill=True`` mode
+      (backfill runs scan a fixed historical window where the
+      "what's still in-flight?" question is undefined).
+      ``None`` (default) disables the watchdog.
   """
+  # Orphan-watchdog validation. Like the numeric guardrails below,
+  # a typo at the boundary (``--max-session-age-hours=-1`` or ``0``)
+  # is rejected here rather than producing a "scan into the future"
+  # cutoff or a degenerate "everything is an orphan" cutoff.
+  if max_session_age_hours is not None and max_session_age_hours <= 0:
+    raise ValueError(
+        f"--max-session-age-hours must be > 0 when set; got "
+        f"{max_session_age_hours!r}"
+    )
+
   # Extraction-mode validation. Reject the typo at the boundary so
   # downstream code never has to handle an unknown mode silently.
   if extraction_mode not in _VALID_EXTRACTION_MODES:
@@ -1437,6 +1877,50 @@ def run_materialize_window(
       if not r.ok
   ]
 
+  # Orphan-watchdog scan (issue #180). Runs after the steady pass
+  # so a partial steady failure doesn't block the watchdog signal,
+  # and so the steady state row is written with its own counts
+  # before the orphan rows are appended. Disabled in backfill mode
+  # (the "what's still in-flight?" question is undefined when the
+  # scan window is a fixed historical slice).
+  orphan_result: Optional[OrphanScanResult] = None
+  orphan_failures: list[dict[str, Any]] = []
+  if max_session_age_hours is not None and not backfill:
+    qualified_events_ref = (
+        events_table
+        if events_table.count(".") >= 2
+        else f"{project_id}.{dataset_id}.{events_table}"
+    )
+    orphan_result = run_orphan_watchdog(
+        client,
+        events_table_ref=qualified_events_ref,
+        state_table_ref=state_table_ref,
+        state_key=state_key,
+        run_id=run_id,
+        run_started_at=run_started,
+        max_session_age_hours=max_session_age_hours,
+    )
+    cutoff_iso = orphan_result.cutoff_at.isoformat()
+    for orphan_session_id in orphan_result.new_orphans:
+      orphan_failures.append(
+          {
+              "session_id": orphan_session_id,
+              "error_code": "session_orphaned",
+              "error_detail": (
+                  f"session {orphan_session_id!r} has first event older than "
+                  f"{max_session_age_hours} hours (cutoff {cutoff_iso}) but "
+                  f"never emitted '{completion_event_type}'. The orphan "
+                  f"watchdog flagged it on this scan and recorded it in the "
+                  f"cumulative ledger (state_key={state_key!r}, "
+                  f"mode='{STATE_MODE_ORPHAN_LEDGER}'). Resolve by either "
+                  f"emitting the missing terminal event (the watchdog will "
+                  f"drop the session from the ledger on its next pass) or "
+                  f"triaging the underlying agent failure."
+              ),
+          }
+      )
+
+  combined_failures = failures + orphan_failures
   result = _build_result(
       run_id=run_id,
       state_key=state_key,
@@ -1447,11 +1931,17 @@ def run_materialize_window(
       sessions_discovered=len(discovered),
       session_results=session_results,
       compiled_outcomes=outcomes_counts,
-      ok=ok and not failures,
+      ok=ok and not combined_failures,
       compile_bundle_fingerprint=compile_bundle_fingerprint,
+      extra_failures=orphan_failures,
+      orphan_result=orphan_result,
   )
 
-  # Append-only state row.
+  # Append-only state row for the steady pass. The orphan watchdog
+  # writes its own ``orphan_scan`` + ``orphan_ledger`` rows inside
+  # ``run_orphan_watchdog`` above, so the steady row only reports
+  # the steady-pass counts here — keeping the audit trail per-row
+  # type.
   append_state_row(
       client,
       state_table_ref,
@@ -1465,7 +1955,7 @@ def run_materialize_window(
           sessions_discovered=len(discovered),
           sessions_materialized=sum(1 for r in session_results if r.ok),
           sessions_failed=len(failures),
-          ok=result.ok,
+          ok=ok and not failures,
           error_detail=(failures[0]["error_detail"] if failures else None),
           report_json=json.dumps(result.to_json()),
           mode=current_state_mode,
@@ -1730,6 +2220,8 @@ def _build_result(
     compiled_outcomes: dict[str, int],
     ok: bool,
     compile_bundle_fingerprint: Optional[str] = None,
+    extra_failures: Optional[Sequence[dict[str, Any]]] = None,
+    orphan_result: Optional[OrphanScanResult] = None,
 ) -> MaterializeWindowResult:
   rows_materialized: dict[str, int] = {}
   # Aggregate per-session table_statuses into the report with
@@ -1773,6 +2265,13 @@ def _build_result(
       for r in session_results
       if not r.ok
   ]
+  # Orphan-watchdog failures (issue #180) are merged into the
+  # report's ``failures[]`` so the existing #167 classifier +
+  # Cloud Monitoring alerts surface them without separate wiring.
+  # They also count toward ``sessions_failed`` so the operator-
+  # visible "did this run cleanly?" signal is honest.
+  if extra_failures:
+    failures.extend(extra_failures)
 
   return MaterializeWindowResult(
       run_id=run_id,
@@ -1790,4 +2289,5 @@ def _build_result(
       failures=failures,
       ok=ok,
       compile_bundle_fingerprint=compile_bundle_fingerprint,
+      orphan_result=orphan_result,
   )

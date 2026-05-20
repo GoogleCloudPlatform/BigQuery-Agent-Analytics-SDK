@@ -92,6 +92,7 @@ MAX_SESSIONS=""
 JOB_NAME="bqaa-periodic-materialization"
 SMOKE=false
 EXTRACTION_MODE="ai-fallback"
+MAX_SESSION_AGE_HOURS=""
 
 # Print usage. Exit code is the caller's choice: ``usage 0``
 # for ``--help`` (success), ``usage 1`` for parse / required-arg
@@ -128,6 +129,16 @@ Optional:
                                roles/aiplatform.user grant and idempotently
                                removes any pre-existing grant from a prior
                                ai-fallback deploy of the same SA.
+  --max-session-age-hours N    Enable the orphan-session watchdog (issue
+                               #180). When set, each cron pass additionally
+                               scans for sessions whose first event is
+                               older than N hours but which never emitted
+                               AGENT_COMPLETED. Each new orphan surfaces
+                               as a typed 'session_orphaned' failure in
+                               the JSON report; the state table records
+                               per-scan + cumulative audit rows. Disabled
+                               by default; skipped automatically in any
+                               backfill run.
   -h | --help                  Show this help.
 EOF
   exit "${1:-1}"
@@ -165,6 +176,8 @@ while [[ $# -gt 0 ]]; do
     --job-name)        require_arg "$1" "${2-}"; JOB_NAME="$2"; shift 2 ;;
     --smoke)           SMOKE=true; shift ;;
     --extraction-mode) require_arg "$1" "${2-}"; EXTRACTION_MODE="$2"; shift 2 ;;
+    --max-session-age-hours)
+                       require_arg "$1" "${2-}"; MAX_SESSION_AGE_HOURS="$2"; shift 2 ;;
     -h|--help)         usage 0 ;;
     *)                 echo "Unknown argument: $1" >&2; usage 1 ;;
   esac
@@ -562,6 +575,13 @@ fi
 # set it themselves on a custom image.
 if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
   ENV_VARS+=("BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor")
+fi
+# Orphan-session watchdog (issue #180). Only wired when the
+# operator explicitly opts in via ``--max-session-age-hours``;
+# default deploys ship without the watchdog so they don't pay
+# the extra discovery query.
+if [[ -n "${MAX_SESSION_AGE_HOURS}" ]]; then
+  ENV_VARS+=("BQAA_MAX_SESSION_AGE_HOURS=${MAX_SESSION_AGE_HOURS}")
 fi
 # Comma-join for --set-env-vars (no shell-quoting issues since
 # all values are simple identifiers / numbers).
