@@ -693,7 +693,7 @@ WITH session_envelope AS (
   SELECT
     session_id,
     MIN(timestamp) AS first_event_at,
-    COUNTIF(event_type = 'AGENT_COMPLETED') AS terminal_event_count
+    COUNTIF(event_type = @completion_event_type) AS terminal_event_count
   FROM `{events_table_ref}`
   WHERE timestamp > COALESCE(@orphan_watermark, TIMESTAMP('1970-01-01'))
     AND timestamp <= @cutoff_at
@@ -709,7 +709,7 @@ ORDER BY first_event_at, session_id
 
 def build_resolved_orphan_sql(events_table_ref: str) -> str:
   """SQL: subset of the previously-flagged orphan session_ids
-  that have since emitted ``AGENT_COMPLETED``.
+  that have since emitted the configured terminal event.
 
   Run after the discovery query so the orchestrator can drop
   resolved orphans from the cumulative ledger. The "resolved"
@@ -718,17 +718,35 @@ def build_resolved_orphan_sql(events_table_ref: str) -> str:
   watchdog's running ledger should not keep flagging it as
   unresolved.
 
-  The probe is bounded to the previously-flagged set to keep
-  scan cost proportional to the unresolved-orphan count rather
-  than the full events table — the watchdog is a low-traffic
-  signal compared to the steady cron, and we don't want it to
-  dominate query bytes.
+  Two predicates jointly bound the scan cost:
+
+  * ``session_id IN UNNEST(@previously_flagged)`` keeps the row
+    fan-out small even on huge events tables.
+  * ``timestamp > @resolve_lower_bound AND timestamp <=
+    @resolve_upper_bound`` enables partition pruning on the
+    plugin's timestamp-partitioned table. Without it, BigQuery
+    would scan every partition once the ledger held any flagged
+    session — turning the watchdog into a query-byte regression
+    as the customer's event history grows.
+
+  The orchestrator passes ``resolve_lower_bound`` =
+  ``previous_orphan_watermark`` (advances every scan; events
+  before that cutoff were either resolved earlier or never had
+  a terminal event in scope) and ``resolve_upper_bound`` =
+  ``run_started_at``. Late terminal events whose ``timestamp``
+  is more than ``max_session_age_hours`` in the past
+  (theoretically possible if an agent emits with a stale
+  emission time) won't be picked up — operators with that
+  pattern should widen the bound, but the common case keeps the
+  partition predicate tight.
   """
   return f"""\
 SELECT DISTINCT session_id
 FROM `{events_table_ref}`
 WHERE session_id IN UNNEST(@previously_flagged)
-  AND event_type = 'AGENT_COMPLETED'
+  AND event_type = @completion_event_type
+  AND timestamp > @resolve_lower_bound
+  AND timestamp <= @resolve_upper_bound
 """
 
 
@@ -796,9 +814,18 @@ def discover_orphan_sessions(
     orphan_watermark: Optional[_dt.datetime],
     cutoff_at: _dt.datetime,
     already_flagged: tuple[str, ...],
+    completion_event_type: str,
 ) -> tuple[str, ...]:
   """Query for new orphan session_ids in
-  ``(orphan_watermark, cutoff_at]``."""
+  ``(orphan_watermark, cutoff_at]``.
+
+  ``completion_event_type`` mirrors ``run_materialize_window``'s
+  ``--completion-event-type`` flag — the terminal-event name the
+  watchdog scans for. Defaults flow from the orchestrator so a
+  deploy configured for a custom terminal event (e.g.
+  ``MY_TERMINAL``) doesn't get false ``session_orphaned``
+  failures the steady cron just successfully materialized.
+  """
   from google.cloud import bigquery
 
   rows = list(
@@ -815,6 +842,11 @@ def discover_orphan_sessions(
                   bigquery.ArrayQueryParameter(
                       "already_flagged", "STRING", list(already_flagged)
                   ),
+                  bigquery.ScalarQueryParameter(
+                      "completion_event_type",
+                      "STRING",
+                      completion_event_type,
+                  ),
               ]
           ),
       ).result()
@@ -827,8 +859,19 @@ def probe_resolved_orphans(
     events_table_ref: str,
     *,
     previously_flagged: tuple[str, ...],
+    completion_event_type: str,
+    resolve_lower_bound: _dt.datetime,
+    resolve_upper_bound: _dt.datetime,
 ) -> tuple[str, ...]:
-  """Subset of ``previously_flagged`` that now has terminal events."""
+  """Subset of ``previously_flagged`` that now has terminal events
+  in ``(resolve_lower_bound, resolve_upper_bound]``.
+
+  The timestamp bounds let BigQuery prune partitions on the
+  plugin's timestamp-partitioned events table. Without them, the
+  probe scans every partition once the ledger has any flagged
+  session — turning the watchdog into a query-byte regression as
+  event history grows.
+  """
   if not previously_flagged:
     return ()
   from google.cloud import bigquery
@@ -842,6 +885,21 @@ def probe_resolved_orphans(
                       "previously_flagged",
                       "STRING",
                       list(previously_flagged),
+                  ),
+                  bigquery.ScalarQueryParameter(
+                      "completion_event_type",
+                      "STRING",
+                      completion_event_type,
+                  ),
+                  bigquery.ScalarQueryParameter(
+                      "resolve_lower_bound",
+                      "TIMESTAMP",
+                      resolve_lower_bound,
+                  ),
+                  bigquery.ScalarQueryParameter(
+                      "resolve_upper_bound",
+                      "TIMESTAMP",
+                      resolve_upper_bound,
                   ),
               ]
           ),
@@ -859,6 +917,7 @@ def run_orphan_watchdog(
     run_id: str,
     run_started_at: _dt.datetime,
     max_session_age_hours: float,
+    completion_event_type: str = DEFAULT_COMPLETION_EVENT_TYPE,
 ) -> OrphanScanResult:
   """End-to-end orphan-watchdog scan.
 
@@ -896,11 +955,26 @@ def run_orphan_watchdog(
       orphan_watermark=ledger.orphan_watermark,
       cutoff_at=cutoff_at,
       already_flagged=ledger.flagged_session_ids,
+      completion_event_type=completion_event_type,
+  )
+  # Resolved-orphan probe lower bound: use the previous orphan
+  # watermark when present (events written before that cutoff
+  # were already in scope of a prior scan); fall back to the
+  # epoch for the bootstrap case where the previous ledger never
+  # advanced a watermark — when ``previously_flagged`` is empty
+  # the probe short-circuits and the bound isn't sent anyway, so
+  # this fallback path is only exercised by a future code path
+  # that pre-seeds the ledger.
+  resolve_lower_bound = ledger.orphan_watermark or _dt.datetime(
+      1970, 1, 1, tzinfo=_dt.timezone.utc
   )
   resolved_orphans = probe_resolved_orphans(
       bq_client,
       events_table_ref,
       previously_flagged=ledger.flagged_session_ids,
+      completion_event_type=completion_event_type,
+      resolve_lower_bound=resolve_lower_bound,
+      resolve_upper_bound=run_started_at,
   )
 
   # Cumulative ledger: drop resolved, union new. Preserve previous
@@ -1899,6 +1973,7 @@ def run_materialize_window(
         run_id=run_id,
         run_started_at=run_started,
         max_session_age_hours=max_session_age_hours,
+        completion_event_type=completion_event_type,
     )
     cutoff_iso = orphan_result.cutoff_at.isoformat()
     for orphan_session_id in orphan_result.new_orphans:

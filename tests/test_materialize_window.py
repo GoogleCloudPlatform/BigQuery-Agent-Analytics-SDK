@@ -3512,7 +3512,12 @@ class TestOrphanWatchdogBuilders:
 
   def test_orphan_select_filters_terminal_event_count_zero(self):
     sql = mw.build_orphan_select_sql("p.d.agent_events")
-    assert "COUNTIF(event_type = 'AGENT_COMPLETED')" in sql
+    # ``completion_event_type`` must be parameter-bound, not a
+    # literal — operators using ``--completion-event-type=MY_TERMINAL``
+    # would otherwise see the watchdog flag sessions the steady
+    # cron just successfully materialized (PR #224 P1).
+    assert "event_type = @completion_event_type" in sql
+    assert "'AGENT_COMPLETED'" not in sql
     assert "terminal_event_count = 0" in sql
 
   def test_orphan_select_excludes_already_flagged(self):
@@ -3531,7 +3536,18 @@ class TestOrphanWatchdogBuilders:
     # The probe must be parameterized on the previously-flagged set
     # rather than scanning the full events table.
     assert "IN UNNEST(@previously_flagged)" in sql
-    assert "event_type = 'AGENT_COMPLETED'" in sql
+    # Completion event type is parameter-bound (PR #224 P1).
+    assert "event_type = @completion_event_type" in sql
+    assert "'AGENT_COMPLETED'" not in sql
+
+  def test_resolved_orphan_sql_has_timestamp_partition_predicate(self):
+    """PR #224 P2: without a timestamp predicate, the resolve probe
+    can't prune partitions on the plugin's timestamp-partitioned
+    events table — turning the watchdog into a query-byte
+    regression as event history grows. Pin both bounds."""
+    sql = mw.build_resolved_orphan_sql("p.d.agent_events")
+    assert "timestamp > @resolve_lower_bound" in sql
+    assert "timestamp <= @resolve_upper_bound" in sql
 
 
 class TestOrphanWatchdogScan:
@@ -3695,6 +3711,101 @@ class TestOrphanWatchdogScan:
           run_started_at=_dt.datetime.now(_dt.timezone.utc),
           max_session_age_hours=0,
       )
+
+  def test_custom_completion_event_type_is_query_bound(self):
+    """PR #224 P1: the watchdog must use the configured
+    ``completion_event_type`` (matching the steady cron's
+    ``--completion-event-type``) as a parameter binding, not the
+    hardcoded ``'AGENT_COMPLETED'`` literal. Without this, deploys
+    with a custom terminal event would see the watchdog falsely
+    flag sessions that the steady cron just materialized."""
+    from google.cloud.bigquery import ArrayQueryParameter
+    from google.cloud.bigquery import ScalarQueryParameter
+
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=now - _dt.timedelta(hours=7),
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-custom",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+        completion_event_type="MY_TERMINAL",
+    )
+    # Extract every ScalarQueryParameter named completion_event_type
+    # across the discovery + resolve calls and assert they all
+    # carry the custom event name. Both queries must respect it.
+    completion_params = []
+    for call in client.query.call_args_list:
+      job_config = call.kwargs.get("job_config")
+      if job_config is None:
+        continue
+      for param in job_config.query_parameters:
+        if (
+            isinstance(param, ScalarQueryParameter)
+            and param.name == "completion_event_type"
+        ):
+          completion_params.append(param.value)
+    assert (
+        len(completion_params) >= 2
+    ), "completion_event_type must be bound on both discovery and resolve probes"
+    assert all(
+        v == "MY_TERMINAL" for v in completion_params
+    ), f"watchdog must forward the configured event_type; saw {completion_params!r}"
+
+  def test_resolved_probe_passes_timestamp_partition_bounds(self):
+    """PR #224 P2: the resolve probe must carry
+    ``resolve_lower_bound`` and ``resolve_upper_bound`` so BigQuery
+    can prune partitions. Lower bound = previous ledger watermark,
+    upper bound = run_started_at."""
+    from google.cloud.bigquery import ScalarQueryParameter
+
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-bounds",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    # The third query call is the resolve probe (ledger read,
+    # discovery, resolve — in that order).
+    resolve_call = client.query.call_args_list[2]
+    params = {
+        p.name: p
+        for p in resolve_call.kwargs["job_config"].query_parameters
+        if isinstance(p, ScalarQueryParameter)
+    }
+    assert "resolve_lower_bound" in params
+    assert "resolve_upper_bound" in params
+    assert params["resolve_lower_bound"].value == prior_watermark
+    assert params["resolve_upper_bound"].value == now
 
 
 class TestOrphanWatchdogOrchestratorIntegration:
