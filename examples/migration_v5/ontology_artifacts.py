@@ -323,16 +323,18 @@ def make_binding(
   )
 
   # Each entity's PK column is named ``{entity_short}_id``
-  # rather than a bare ``id``. The materializer
-  # (``_relationship_columns`` in ``ontology_materializer.py``)
-  # populates an edge's FK column type from the source
-  # entity's ``src_prop_map[col].sdk_type`` — that lookup
-  # requires the FK column name to exactly match a property
-  # column on the source entity. Using a bare ``id`` would
-  # work for one entity per edge but collide when both
-  # endpoints share the same PK column name (``id, id`` —
-  # duplicate column). Per-entity PK names give every edge a
-  # clean ``{src_entity}_id, {dst_entity}_id`` shape.
+  # rather than a bare ``id``. Heterogeneous edges still keep the
+  # legacy ``list[str]`` binding shape (``from_columns:
+  # [<src_entity>_id]``), so the PK column name has to be unique
+  # per entity — otherwise ``from_columns + to_columns`` would
+  # land ``id, id`` on the edge table (duplicate column).
+  # Self-edges go through the dict-shape ``[{src_<col>_id:
+  # <pk_prop>}]`` (C2 / #179 follow-up) so they can disambiguate
+  # by naming explicit ``src_/dst_`` prefixed FK columns; the
+  # canonical FK→PK mapping resolves those into the endpoint's
+  # PK property type at materialization time. Per-entity PK names
+  # give every heterogeneous edge a clean
+  # ``{src_entity}_id, {dst_entity}_id`` shape.
   entities_block: list[dict] = []
   for entity in ontology.entities:
     if entity.name not in scope:

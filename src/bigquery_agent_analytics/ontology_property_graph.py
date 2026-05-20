@@ -178,28 +178,62 @@ def compile_edge_table_clause(
 
   table_ref = _resolve_table_ref(rel.source, project_id, dataset_id)
 
-  from_cols = list(rel.from_columns) or list(src.key_columns)
-  to_cols = list(rel.to_columns) or list(tgt.key_columns)
+  # Two paths, mirroring ``bigquery_ontology.graph_ddl_compiler``:
+  #
+  # * Canonical mapping path (``rel.from_column_mapping is not None``)
+  #   — populated for every binding that goes through ``resolve()``
+  #   per #179. We project the ``(edge_col, target_prop_logical)``
+  #   pairs into the endpoint's PK-column declaration order, so the
+  #   emitted ``SOURCE KEY (...)`` (edge FK cols) positionally
+  #   references ``src.key_columns`` (PK cols) — the contract PG
+  #   DDL requires. ``normalize_relationship_columns`` already
+  #   enforces the permutation invariant on the resolver side, so
+  #   the order projection is well-defined.
+  # * Legacy path (``from_column_mapping is None``) — manually-
+  #   constructed ``ResolvedRelationship`` from older callers. Keep
+  #   the exact-match check the V4 compiler shipped with: it was
+  #   already too strict for self-edges, but those couldn't reach
+  #   this path before C2 anyway.
+  if rel.from_column_mapping is not None:
+    src_col_to_logical = {p.column: p.logical_name for p in src.properties}
+    target_prop_to_edge_col = {
+        target_prop: edge_col
+        for edge_col, target_prop in rel.from_column_mapping
+    }
+    from_cols = [
+        target_prop_to_edge_col[src_col_to_logical[pk_col]]
+        for pk_col in src.key_columns
+    ]
+  else:
+    from_cols = list(rel.from_columns) or list(src.key_columns)
+    if list(from_cols) != list(src.key_columns):
+      raise ValueError(
+          f"Relationship {rel.name!r}: from_columns {list(from_cols)} "
+          f"do not match {rel.from_entity} primary key "
+          f"{list(src.key_columns)}. Property Graph DDL requires "
+          f"exact key matching. Subset bindings are supported for "
+          f"materialization but not for Property Graph compilation."
+      )
 
-  # Validate that binding columns match the entity's full PK.
-  # Property Graph requires SOURCE/DESTINATION KEY to exactly
-  # match the referenced NODE TABLE KEY.
-  if list(from_cols) != list(src.key_columns):
-    raise ValueError(
-        f"Relationship {rel.name!r}: from_columns {list(from_cols)} "
-        f"do not match {rel.from_entity} primary key "
-        f"{list(src.key_columns)}. Property Graph DDL requires "
-        f"exact key matching. Subset bindings are supported for "
-        f"materialization but not for Property Graph compilation."
-    )
-  if list(to_cols) != list(tgt.key_columns):
-    raise ValueError(
-        f"Relationship {rel.name!r}: to_columns {list(to_cols)} "
-        f"do not match {rel.to_entity} primary key "
-        f"{list(tgt.key_columns)}. Property Graph DDL requires "
-        f"exact key matching. Subset bindings are supported for "
-        f"materialization but not for Property Graph compilation."
-    )
+  if rel.to_column_mapping is not None:
+    tgt_col_to_logical = {p.column: p.logical_name for p in tgt.properties}
+    target_prop_to_edge_col = {
+        target_prop: edge_col for edge_col, target_prop in rel.to_column_mapping
+    }
+    to_cols = [
+        target_prop_to_edge_col[tgt_col_to_logical[pk_col]]
+        for pk_col in tgt.key_columns
+    ]
+  else:
+    to_cols = list(rel.to_columns) or list(tgt.key_columns)
+    if list(to_cols) != list(tgt.key_columns):
+      raise ValueError(
+          f"Relationship {rel.name!r}: to_columns {list(to_cols)} "
+          f"do not match {rel.to_entity} primary key "
+          f"{list(tgt.key_columns)}. Property Graph DDL requires "
+          f"exact key matching. Subset bindings are supported for "
+          f"materialization but not for Property Graph compilation."
+      )
 
   # Session key columns for SOURCE and DESTINATION endpoints.
   # Default: edge's own session_id (V4 behavior).
