@@ -66,6 +66,13 @@ relationships:
   to_columns:
   - candidate_id
   properties: []
+- name: evolvedFrom
+  source: test-project-0728-467323.migration_v5_demo.evolved_from
+  from_columns:
+  - src_decision_execution_id: id
+  to_columns:
+  - dst_decision_execution_id: id
+  properties: []
 - name: executedAtDecisionPoint
   source: test-project-0728-467323.migration_v5_demo.executed_at_decision_point
   from_columns:
@@ -100,4 +107,11 @@ relationships:
   - selection_outcome_id
   to_columns:
   - candidate_id
+  properties: []
+- name: supersededBy
+  source: test-project-0728-467323.migration_v5_demo.superseded_by
+  from_columns:
+  - src_decision_execution_id: id
+  to_columns:
+  - dst_decision_execution_id: id
   properties: []

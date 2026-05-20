@@ -30,6 +30,11 @@ CREATE OR REPLACE PROPERTY GRAPH `test-project-0728-467323.migration_v5_demo.mak
       SOURCE KEY (decision_point_id) REFERENCES decision_point (decision_point_id)
       DESTINATION KEY (candidate_id) REFERENCES candidate (candidate_id)
       LABEL evaluatesCandidate,
+    `test-project-0728-467323.migration_v5_demo.evolved_from` AS evolved_from
+      KEY (src_decision_execution_id, dst_decision_execution_id)
+      SOURCE KEY (src_decision_execution_id) REFERENCES decision_execution (decision_execution_id)
+      DESTINATION KEY (dst_decision_execution_id) REFERENCES decision_execution (decision_execution_id)
+      LABEL evolvedFrom,
     `test-project-0728-467323.migration_v5_demo.executed_at_decision_point` AS executed_at_decision_point
       KEY (decision_execution_id, decision_point_id)
       SOURCE KEY (decision_execution_id) REFERENCES decision_execution (decision_execution_id)
@@ -54,5 +59,10 @@ CREATE OR REPLACE PROPERTY GRAPH `test-project-0728-467323.migration_v5_demo.mak
       KEY (selection_outcome_id, candidate_id)
       SOURCE KEY (selection_outcome_id) REFERENCES selection_outcome (selection_outcome_id)
       DESTINATION KEY (candidate_id) REFERENCES candidate (candidate_id)
-      LABEL selectedCandidate
+      LABEL selectedCandidate,
+    `test-project-0728-467323.migration_v5_demo.superseded_by` AS superseded_by
+      KEY (src_decision_execution_id, dst_decision_execution_id)
+      SOURCE KEY (src_decision_execution_id) REFERENCES decision_execution (decision_execution_id)
+      DESTINATION KEY (dst_decision_execution_id) REFERENCES decision_execution (decision_execution_id)
+      LABEL supersededBy
   );

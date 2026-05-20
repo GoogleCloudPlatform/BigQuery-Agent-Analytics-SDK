@@ -126,7 +126,15 @@ def test_mako_shim_regenerate_still_works():
   )
   assert len(ontology.entities) == 18
   assert len(binding.entities) == 6
-  assert len(binding.relationships) == 7
+  # Seven heterogeneous + two ``DecisionExecution`` self-edges
+  # (``evolvedFrom``, ``supersededBy``) — the latter re-added in C2
+  # via the dict-shape ``from_columns: [{src_<col>: <pk>}]`` syntax.
+  assert len(binding.relationships) == 9
+  rel_by_name = {r.name: r for r in binding.relationships}
+  for self_edge in ("evolvedFrom", "supersededBy"):
+    rb = rel_by_name[self_edge]
+    assert rb.from_columns == [{"src_decision_execution_id": "id"}]
+    assert rb.to_columns == [{"dst_decision_execution_id": "id"}]
 
 
 # ------------------------------------------------------------------ #

@@ -6,8 +6,10 @@ CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.decision_
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.selection_outcome` (selection_outcome_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.at_context_snapshot` (decision_execution_id STRING, context_snapshot_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.evaluates_candidate` (decision_point_id STRING, candidate_id STRING, session_id STRING, extracted_at TIMESTAMP);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.evolved_from` (src_decision_execution_id STRING, dst_decision_execution_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.executed_at_decision_point` (decision_execution_id STRING, decision_point_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.has_selection_outcome` (decision_execution_id STRING, selection_outcome_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.part_of_session` (decision_execution_id STRING, agent_session_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.rejected_candidate` (selection_outcome_id STRING, candidate_id STRING, session_id STRING, extracted_at TIMESTAMP);
 CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.selected_candidate` (selection_outcome_id STRING, candidate_id STRING, session_id STRING, extracted_at TIMESTAMP);
+CREATE TABLE IF NOT EXISTS `test-project-0728-467323.migration_v5_demo.superseded_by` (src_decision_execution_id STRING, dst_decision_execution_id STRING, session_id STRING, extracted_at TIMESTAMP);

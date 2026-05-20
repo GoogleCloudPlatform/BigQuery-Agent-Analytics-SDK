@@ -375,15 +375,55 @@ class TestResolvedRelationshipShape:
 
 
 class TestExistingMigrationV5BindingByteIdenticalSQL:
-  """The migration v5 binding uses the legacy ``list[str]`` shape
-  exclusively. C1 must produce byte-identical resolved relationships
-  for it — the field shape grew but the values that flow into
-  downstream SQL compilers stay the same."""
+  """The migration v5 binding mixes both shapes: heterogeneous
+  edges use the legacy ``list[str]`` form, and (post-C2) the two
+  ``DecisionExecution → DecisionExecution`` self-edges use the
+  dict-shape ``[{src_<col>: <pk_prop>}]``. ``resolve()`` must
+  produce the same list-view edge-column names regardless of the
+  binding shape — that's the contract downstream surfaces depend
+  on for byte-identical SQL output across the two shapes."""
 
-  def test_migration_v5_legacy_binding_round_trips(self):
-    """Load the committed migration v5 binding (legacy shape) and
-    confirm every relationship's list-view ``from_columns`` /
-    ``to_columns`` are unchanged, byte-for-byte."""
+  def test_migration_v5_binding_round_trips_via_edge_column_names(self):
+    """Load the committed migration v5 binding and confirm every
+    relationship's ``ResolvedRelationship.from_columns`` /
+    ``to_columns`` list-view equals the same shape extracted from
+    the upstream binding via ``edge_column_names``."""
+    import pathlib
+
+    from bigquery_ontology.binding_loader import edge_column_names
+
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    ont_path = repo_root / "examples" / "migration_v5" / "ontology.yaml"
+    binding_path = repo_root / "examples" / "migration_v5" / "binding.yaml"
+    if not ont_path.exists() or not binding_path.exists():
+      pytest.skip("migration_v5 snapshots not checked in")
+    ont = load_ontology_from_string(ont_path.read_text())
+    binding = load_binding_from_string(binding_path.read_text(), ontology=ont)
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    resolved = resolve(ontology=ont, binding=binding)
+    binding_rels = {r.name: r for r in binding.relationships}
+    for rel in resolved.relationships:
+      rb = binding_rels[rel.name]
+      expected_from = edge_column_names(list(rb.from_columns))
+      expected_to = edge_column_names(list(rb.to_columns))
+      assert (
+          rel.from_columns == expected_from
+      ), f"list-view drift on {rel.name}.from_columns"
+      assert (
+          rel.to_columns == expected_to
+      ), f"list-view drift on {rel.name}.to_columns"
+      # Canonical mapping is populated for both shapes.
+      assert rel.from_column_mapping is not None
+      assert rel.to_column_mapping is not None
+      assert len(rel.from_column_mapping) == len(rb.from_columns)
+      assert len(rel.to_column_mapping) == len(rb.to_columns)
+
+  def test_migration_v5_self_edges_use_dict_shape_correctly(self):
+    """The two self-edges (``evolvedFrom``, ``supersededBy``) must
+    resolve to ``ResolvedRelationship`` with distinct ``src_*`` /
+    ``dst_*`` edge columns and the canonical mapping pointing each
+    back at the endpoint's PK property (``id``)."""
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
@@ -396,22 +436,18 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
     from bigquery_agent_analytics.resolved_spec import resolve
 
     resolved = resolve(ontology=ont, binding=binding)
-    # Each relationship's list-view columns equal the original
-    # binding YAML values exactly.
-    binding_rels = {r.name: r for r in binding.relationships}
-    for rel in resolved.relationships:
-      rb = binding_rels[rel.name]
-      assert rel.from_columns == tuple(
-          rb.from_columns
-      ), f"list-view drift on {rel.name}.from_columns"
-      assert rel.to_columns == tuple(
-          rb.to_columns
-      ), f"list-view drift on {rel.name}.to_columns"
-      # Canonical mapping is populated even for the legacy shape.
-      assert rel.from_column_mapping is not None
-      assert rel.to_column_mapping is not None
-      assert len(rel.from_column_mapping) == len(rb.from_columns)
-      assert len(rel.to_column_mapping) == len(rb.to_columns)
+    by_name = {r.name: r for r in resolved.relationships}
+    for self_edge in ("evolvedFrom", "supersededBy"):
+      assert (
+          self_edge in by_name
+      ), f"migration v5 binding missing self-edge {self_edge!r}"
+      r = by_name[self_edge]
+      assert r.from_entity == "DecisionExecution"
+      assert r.to_entity == "DecisionExecution"
+      assert r.from_columns == ("src_decision_execution_id",)
+      assert r.to_columns == ("dst_decision_execution_id",)
+      assert r.from_column_mapping == (("src_decision_execution_id", "id"),)
+      assert r.to_column_mapping == (("dst_decision_execution_id", "id"),)
 
 
 # ------------------------------------------------------------------ #
@@ -775,13 +811,18 @@ class TestCompositePKCoverageInvariant:
 
 class TestRawBindingConsumerGuards:
   """C1 introduced the dict-shape ``ColumnRef`` at the binding-model
-  boundary, but a couple of consumers (``compile_graph``,
+  boundary; two consumers (``compile_graph``,
   ``graph_spec_from_ontology_binding``) read ``rb.from_columns`` /
-  ``rb.to_columns`` directly as ``list[str]`` and would silently
-  mispair (or crash) on a dict-shape binding. C2 will wire them
-  through the canonical mapping; until then, those boundaries raise
-  with a precise error pointing at the migration path. This test
-  class pins the contract."""
+  ``rb.to_columns`` directly as ``list[str]`` at the time. C2
+  (#179 follow-up) wires ``compile_graph`` through the canonical
+  mapping so dict-shape bindings produce correct DDL (self-edges,
+  multi-PK permutations).
+
+  ``graph_spec_from_ontology_binding`` still targets the local
+  ``BindingSpec.from_columns: list[str]`` shape — widening that
+  spec is a larger refactor explicitly out of C2 scope — so the
+  guard for that surface remains, with the same actionable error
+  pointing at the canonical resolve path."""
 
   def _dict_shape_binding(self):
     binding_yaml = _binding_with_columns("[{src_id: id}]", "[{dst_id: id}]")
@@ -789,26 +830,44 @@ class TestRawBindingConsumerGuards:
     binding = load_binding_from_string(binding_yaml, ontology=ont)
     return ont, binding
 
-  def test_compile_graph_rejects_dict_shape(self):
-    """``compile_graph`` pairs edge columns positionally with the
-    endpoint's PK columns when emitting ``SOURCE KEY ...
-    REFERENCES from_node (...)``. Until C2 wires the canonical
-    mapping through, a dict-shape binding must raise — not crash
-    at ``str.join`` or mispair silently."""
+  def test_compile_graph_now_accepts_dict_shape(self):
+    """C2: ``compile_graph`` consumes the canonical FK→PK mapping,
+    so a dict-shape binding compiles to valid PG DDL. The emitted
+    DDL must reference the endpoint's PK column on the right-hand
+    side of ``REFERENCES`` and the edge's FK column on the left."""
     from bigquery_ontology.graph_ddl_compiler import compile_graph
 
     ont, binding = self._dict_shape_binding()
-    with pytest.raises(
-        ValueError,
-        match=r"compile_graph: relationship binding 'linksTo' from_columns",
-    ):
-      compile_graph(ont, binding)
+    ddl = compile_graph(ont, binding)
+    # Edge col on the LHS of SOURCE KEY, endpoint PK column on the
+    # RHS of REFERENCES.
+    assert "SOURCE KEY (src_id) REFERENCES" in ddl
+    assert "DESTINATION KEY (dst_id) REFERENCES" in ddl
 
-  def test_graph_spec_from_ontology_binding_rejects_dict_shape(self):
+  def test_compile_graph_dict_shape_byte_identical_to_legacy_for_simple_case(
+      self,
+  ):
+    """When the dict-shape entry expresses the same FK→PK mapping
+    as the legacy ``list[str]`` shape (edge_col == prop_name is the
+    one structural difference legacy could express; here both
+    shapes describe the same mapping, just with different
+    declarations), the emitted DDL must be byte-identical. C2's
+    refactor must not produce different output for legacy
+    callers."""
+    from bigquery_ontology.graph_ddl_compiler import compile_graph
+
+    ont = load_ontology_from_string(_TOY_ONTOLOGY)
+    legacy_yaml = _binding_with_columns("[src_id]", "[dst_id]")
+    dict_yaml = _binding_with_columns("[{src_id: id}]", "[{dst_id: id}]")
+    legacy = load_binding_from_string(legacy_yaml, ontology=ont)
+    dict_b = load_binding_from_string(dict_yaml, ontology=ont)
+    assert compile_graph(ont, legacy) == compile_graph(ont, dict_b)
+
+  def test_graph_spec_from_ontology_binding_still_rejects_dict_shape(self):
     """The legacy ``GraphSpec`` converter targets
-    ``BindingSpec.from_columns: list[str]``; a dict-shape entry
-    would pydantic-error there. Catch at the boundary with the
-    same actionable error as ``compile_graph``."""
+    ``BindingSpec.from_columns: list[str]``; widening that spec
+    is out of C2 scope. The guard remains, with the actionable
+    error still pointing at the canonical resolve path."""
     from bigquery_agent_analytics.runtime_spec import graph_spec_from_ontology_binding
 
     ont, binding = self._dict_shape_binding()
@@ -821,15 +880,15 @@ class TestRawBindingConsumerGuards:
     ):
       graph_spec_from_ontology_binding(ont, binding)
 
-  def test_consumer_guard_error_names_migration_path(self):
+  def test_remaining_consumer_guard_error_names_migration_path(self):
     """The error message tells the operator how to fix this: route
     through ``resolve()`` and read
     ``ResolvedRelationship.from_column_mapping``."""
-    from bigquery_ontology.graph_ddl_compiler import compile_graph
+    from bigquery_agent_analytics.runtime_spec import graph_spec_from_ontology_binding
 
     ont, binding = self._dict_shape_binding()
     with pytest.raises(ValueError) as excinfo:
-      compile_graph(ont, binding)
+      graph_spec_from_ontology_binding(ont, binding)
     msg = str(excinfo.value)
     assert "resolve()" in msg
     assert "from_column_mapping" in msg
