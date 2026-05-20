@@ -471,6 +471,39 @@ def normalize_relationship_columns(
         f"Relationship binding {relationship_name!r}: {side}_columns "
         f"entry [{idx}] has unexpected type {type(entry).__name__}."
     )
+
+  # Coverage invariant: the canonical mapping's target-property
+  # sequence must be a permutation of the endpoint's effective PK
+  # properties (each PK property covered exactly once). Arity has
+  # already been enforced upstream (``_check_relationship_endpoint_arity``)
+  # so ``len(targets) == len(endpoint_pk_properties)``; if every
+  # target is also in the PK set (which the per-entry check above
+  # guarantees) and the targets are unique, the three conditions
+  # together imply the permutation invariant.
+  #
+  # Without this check a composite PK ``[k1, k2]`` could be bound as
+  # two entries that both target ``k1``, leaving ``k2`` uncovered —
+  # C2's materializer would then consume a canonical endpoint
+  # mapping that cannot uniquely identify the target row.
+  target_sequence = [target for _, target in canonical]
+  if len(set(target_sequence)) != len(target_sequence):
+    # Find the first duplicate for a precise error.
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for target in target_sequence:
+      if target in seen and target not in duplicates:
+        duplicates.append(target)
+      seen.add(target)
+    raise ValueError(
+        f"Relationship binding {relationship_name!r}: {side}_columns "
+        f"covers some endpoint PK properties more than once "
+        f"({duplicates!r}) which necessarily leaves at least one PK "
+        "property uncovered. The canonical mapping must be a "
+        "permutation of the endpoint's effective primary-key "
+        f"properties {sorted(endpoint_pk_property_set)!r} — each PK "
+        "property mapped exactly once. C2's materializer needs this "
+        "invariant so the edge uniquely identifies the target row."
+    )
   return tuple(canonical)
 
 

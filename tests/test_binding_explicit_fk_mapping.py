@@ -287,8 +287,8 @@ class TestEndToEndBindingLoad:
     assert rb.to_columns == ["dst_id"]
 
   def test_dict_binding_loads(self):
-    """The new shape parses cleanly when target_property names a
-    real endpoint property."""
+    """The new shape parses cleanly when target_property names an
+    effective primary-key property on the endpoint."""
     binding_yaml = _binding_with_columns("[{src_id: id}]", "[{dst_id: id}]")
     ont = load_ontology_from_string(_TOY_ONTOLOGY)
     binding = load_binding_from_string(binding_yaml, ontology=ont)
@@ -623,3 +623,146 @@ class TestExplicitMappingPKOnly:
       resolve(ontology=ont, binding=binding)
     # Error names the available PK set (inherited from Party).
     assert "['party_id']" in str(excinfo.value)
+
+
+# ------------------------------------------------------------------ #
+# Composite-PK coverage invariant (PR #191 review P2)                  #
+# ------------------------------------------------------------------ #
+
+
+_COMPOSITE_ONTOLOGY = textwrap.dedent(
+    """
+    ontology: composite
+    entities:
+      - name: ABody
+        keys:
+          primary: [a_id]
+        properties:
+          - {name: a_id, type: string}
+      - name: BPair
+        keys:
+          primary: [k1, k2]
+        properties:
+          - {name: k1, type: string}
+          - {name: k2, type: string}
+    relationships:
+      - name: refs
+        from: ABody
+        to: BPair
+    """
+).strip()
+
+
+def _composite_binding(to_columns_yaml: str) -> str:
+  return textwrap.dedent(
+      f"""
+      binding: composite_bq
+      ontology: composite
+      target:
+        backend: bigquery
+        project: p
+        dataset: d
+      entities:
+        - name: ABody
+          source: p.d.a
+          properties:
+            - {{name: a_id, column: a_id}}
+        - name: BPair
+          source: p.d.b
+          properties:
+            - {{name: k1, column: k1}}
+            - {{name: k2, column: k2}}
+      relationships:
+        - name: refs
+          source: p.d.refs
+          from_columns: [a_id]
+          to_columns: {to_columns_yaml}
+      """
+  ).strip()
+
+
+class TestCompositePKCoverageInvariant:
+  """Regression for PR #191 review (P2): the canonical mapping must
+  be a permutation of the endpoint's effective PK properties — each
+  PK property covered exactly once. Arity already matches by the
+  time the per-entry PK check runs; without an additional "no
+  duplicate target" check, a composite PK ``[k1, k2]`` could be
+  bound as two entries that both target ``k1``, silently dropping
+  ``k2``. C2 would then consume a canonical endpoint mapping that
+  cannot uniquely identify the target row.
+  """
+
+  def test_legitimate_composite_pk_permutation_resolves(self):
+    """The intended use of the explicit shape for composite PKs:
+    each PK property mapped exactly once, in either declaration
+    order or any permutation."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    binding_yaml = _composite_binding("[{b_k1: k1}, {b_k2: k2}]")
+    ont = load_ontology_from_string(_COMPOSITE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    resolved = resolve(ontology=ont, binding=binding)
+    rel = resolved.relationships[0]
+    assert rel.to_column_mapping == (("b_k1", "k1"), ("b_k2", "k2"))
+
+  def test_reversed_composite_pk_permutation_resolves(self):
+    """Permutation, not strict declaration order — the explicit
+    shape lets the binding author choose whichever edge column
+    name they want for each PK."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    binding_yaml = _composite_binding("[{b_k2: k2}, {b_k1: k1}]")
+    ont = load_ontology_from_string(_COMPOSITE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    resolved = resolve(ontology=ont, binding=binding)
+    rel = resolved.relationships[0]
+    assert rel.to_column_mapping == (("b_k2", "k2"), ("b_k1", "k1"))
+
+  def test_duplicate_target_property_rejected(self):
+    """The original bug: both entries target the same PK
+    property. With arity matching, that necessarily leaves one
+    PK property uncovered."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    binding_yaml = _composite_binding("[{b_k1_left: k1}, {b_k1_right: k1}]")
+    ont = load_ontology_from_string(_COMPOSITE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    with pytest.raises(
+        ValueError,
+        match=(r"covers some endpoint PK properties more than once " r".*'k1'"),
+    ):
+      resolve(ontology=ont, binding=binding)
+
+  def test_duplicate_target_error_names_offending_property(self):
+    """The error message names the duplicated PK property and the
+    full effective PK set so the operator can fix the typo
+    without inspecting the ontology by hand."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    binding_yaml = _composite_binding("[{b_k2_left: k2}, {b_k2_right: k2}]")
+    ont = load_ontology_from_string(_COMPOSITE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    with pytest.raises(ValueError) as excinfo:
+      resolve(ontology=ont, binding=binding)
+    msg = str(excinfo.value)
+    assert "'k2'" in msg, "duplicated PK property must appear in the error"
+    assert "'k1'" in msg, (
+        "effective PK set must appear in the error so the operator can "
+        "see what was supposed to be covered"
+    )
+
+  def test_legacy_str_shape_unaffected_by_permutation_check(self):
+    """The duplicate-target check is for the explicit dict shape.
+    The legacy ``list[str]`` shape resolves entries to the
+    endpoint's Nth PK property by position — it's structurally
+    impossible to produce a duplicate target through that path
+    when the arity check already matched. Sanity-check that
+    composite-PK legacy bindings still resolve cleanly."""
+    from bigquery_agent_analytics.resolved_spec import resolve
+
+    binding_yaml = _composite_binding("[b_k1, b_k2]")
+    ont = load_ontology_from_string(_COMPOSITE_ONTOLOGY)
+    binding = load_binding_from_string(binding_yaml, ontology=ont)
+    resolved = resolve(ontology=ont, binding=binding)
+    rel = resolved.relationships[0]
+    assert rel.to_column_mapping == (("b_k1", "k1"), ("b_k2", "k2"))
