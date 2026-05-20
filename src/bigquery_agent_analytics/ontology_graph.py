@@ -651,8 +651,11 @@ class OntologyGraphManager:
     merging both into one graph. ``extract_graph(session_ids, False)``
     runs neither and returns a stub via ``_extract_payloads``.
     Diagnostics are NOT emitted on this surface — the returned
-    ``ExtractedGraph.diagnostics`` is an empty list, byte-identical
-    to today.
+    ``ExtractedGraph.diagnostics`` is an empty list and the
+    extraction semantics are unchanged. Note: ``model_dump()`` now
+    includes a ``'diagnostics': []`` key as an additive field
+    (see ``ExtractedGraph.diagnostics`` for the compatibility
+    contract).
 
     **Orthogonal-flag surface** (new in #178). Pass both
     ``run_structured`` and ``on_unhandled_span`` to opt into the
@@ -742,8 +745,9 @@ class OntologyGraphManager:
     The public ``extract_graph`` validates inputs + resolves the
     legacy bool to internal mode flags; this private method runs the
     actual extraction. Splitting them keeps the legacy and diagnostic
-    paths byte-identical at the merge step — the only difference is
-    whether diagnostics are emitted.
+    paths semantically identical at the merge step — the only
+    runtime difference is whether diagnostics are emitted into the
+    returned ``ExtractedGraph``.
     """
     diagnostics: list[ExtractionDiagnostic] = []
     structured_nodes: list[ExtractedNode] = []
@@ -869,9 +873,12 @@ class OntologyGraphManager:
     else:
       result = ai_graph
 
-    # Attach diagnostics only on the new path. Legacy callers see an
-    # empty ``diagnostics`` list — Pydantic default — so the return
-    # value is byte-identical for the back-compat surface.
+    # Attach diagnostics only on the new path. Legacy callers see
+    # an empty ``diagnostics`` list — Pydantic default — so the
+    # extraction semantics are unchanged for the back-compat
+    # surface. (``model_dump()`` does pick up the new field as an
+    # additive key; see ``ExtractedGraph.diagnostics`` description
+    # for the compatibility contract.)
     if emit_diagnostics and diagnostics:
       result = result.model_copy(update={"diagnostics": diagnostics})
     return result

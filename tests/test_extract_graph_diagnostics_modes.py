@@ -17,8 +17,11 @@ diagnostics emission (issue #178).
 
 Covers:
 
-* Legacy bool surface (``extract_graph(session_ids, True/False)``) is
-  byte-identical to today and emits no diagnostics.
+* Legacy bool surface (``extract_graph(session_ids, True/False)``)
+  preserves the existing extraction semantics and emits no
+  diagnostics. ``ExtractedGraph.model_dump()`` does pick up an
+  additive ``'diagnostics': []`` key — see the model surface for
+  the precise compatibility contract.
 * New orthogonal surface (``run_structured`` + ``on_unhandled_span``)
   emits each of the five diagnostic codes on a code path that
   produces it.

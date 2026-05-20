@@ -77,8 +77,10 @@ class ExtractionDiagnostic(BaseModel):
   Legacy callers using the bool-only surface
   (``extract_graph(session_ids, use_ai_generate=True/False)``) see an
   empty ``ExtractedGraph.diagnostics`` list — diagnostics are not
-  emitted on the back-compat path, so existing call sites are
-  byte-identical to today.
+  emitted on the back-compat path, so the extraction semantics are
+  unchanged. (``model_dump()`` does pick up the ``diagnostics``
+  field as an additive key; see
+  ``ExtractedGraph.diagnostics`` for the compatibility contract.)
 
   The diagnostic codes are deliberately narrow to what the
   ``run_structured_extractors`` framework can honestly attribute.
