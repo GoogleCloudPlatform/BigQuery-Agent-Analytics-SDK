@@ -553,28 +553,27 @@ def require_legacy_column_shape(
 
   Background: PR C1 (issue #179) introduced an explicit
   ``{edge_column: target_property}`` dict-shape entry on
-  ``RelationshipBinding.from_columns`` / ``to_columns`` so C2 can
-  bind self-edges (same entity on both ends) by giving each side a
-  distinct edge column name. The dict shape parses cleanly through
-  :class:`RelationshipBinding` and resolves into the canonical
-  ``ResolvedRelationship.from_column_mapping`` /
-  ``to_column_mapping`` via :func:`normalize_relationship_columns`,
-  but a handful of public surfaces — the property-graph DDL
-  compiler in ``graph_ddl_compiler.compile_graph``, the legacy
-  ``runtime_spec.graph_spec_from_ontology_binding`` converter —
-  still read ``rb.from_columns`` / ``rb.to_columns`` as
-  ``list[str]`` and would silently mispair edge columns against
-  endpoint PK columns (or simply crash at the next ``''.join``)
-  when handed a dict.
+  ``RelationshipBinding.from_columns`` / ``to_columns`` so the
+  binding can express self-edges (same entity on both ends) by
+  giving each side a distinct edge column name. The dict shape
+  parses cleanly through :class:`RelationshipBinding` and resolves
+  into the canonical ``ResolvedRelationship.from_column_mapping`` /
+  ``to_column_mapping`` via :func:`normalize_relationship_columns`.
 
-  Routing those consumers through this helper makes the boundary
-  explicit: legacy bindings flow through unchanged; new dict-shape
-  bindings get a clear "this consumer needs the canonical mapping"
-  error pointing at the offending entry and the migration path
-  (route through ``resolve()`` and consume
-  ``ResolvedRelationship.from_column_mapping``). C2 lifts the
-  restriction on a consumer-by-consumer basis as it wires the
-  canonical mapping through them.
+  After PR C2 (#179 follow-up), every modern consumer — the
+  materializer, the binding validator, the extracted-graph
+  validator, ``bigquery_ontology.graph_ddl_compiler.compile_graph``,
+  and the public ``bigquery_agent_analytics.ontology_property_graph``
+  PG compiler — reads the canonical mapping directly and handles
+  both shapes. This helper is retained for the one legacy consumer
+  that still targets the local ``BindingSpec.from_columns:
+  list[str]`` shape (``runtime_spec.graph_spec_from_ontology_binding``,
+  which feeds the older ``GraphSpec`` model used by the TTL
+  importer and the combined-spec loader). Widening ``BindingSpec``
+  itself is a separate refactor; until then, this helper gives
+  ``graph_spec_from_ontology_binding`` a precise, actionable error
+  when handed a dict-shape binding instead of silently mispairing
+  edge columns against endpoint PK columns at the next ``''.join``.
   """
   for idx, entry in enumerate(column_entries):
     if isinstance(entry, dict):
@@ -582,13 +581,15 @@ def require_legacy_column_shape(
           f"{consumer_name}: relationship binding "
           f"{relationship_name!r} {side}_columns[{idx}] uses the "
           f"explicit FK→PK mapping shape ({entry!r}) introduced in "
-          "#179, but this consumer is not yet wired through the "
-          "canonical mapping. Either revert this entry to the legacy "
-          "``[edge_column_name, ...]`` list-of-strings shape, or "
-          "route your code through ``resolve()`` and consume "
-          "``ResolvedRelationship.from_column_mapping`` / "
-          "``to_column_mapping`` directly. C2 (issue #179 follow-up) "
-          "will lift this restriction."
+          "#179. This consumer targets the legacy "
+          "``BindingSpec.from_columns: list[str]`` shape and cannot "
+          "represent the dict form. Either route your code through "
+          "``bigquery_agent_analytics.resolved_spec.resolve()`` and "
+          "consume ``ResolvedRelationship.from_column_mapping`` / "
+          "``to_column_mapping`` directly (recommended — used by the "
+          "materializer, the PG DDL compilers, and the binding/graph "
+          "validators), or revert this entry to the legacy "
+          "``[edge_column_name, ...]`` list-of-strings shape."
       )
   # All entries are str at this point — the pydantic validator
   # already rejected anything else.
