@@ -242,8 +242,11 @@ class TestNormalizeRelationshipColumns:
     assert mapping == (("src_decision_execution_id", "id"),)
 
   def test_target_property_must_exist_on_endpoint(self):
-    """Semantic check: if a dict entry references a property the
-    endpoint entity doesn't declare, raise with the bad name."""
+    """Semantic check: if a dict entry references a property that
+    isn't an effective primary-key property on the endpoint,
+    raise with the bad name. ``not_a_real_property`` isn't
+    declared at all on ``Source``; the inheritance fixture below
+    covers the more nuanced "declared but not a PK" case."""
     with pytest.raises(
         ValueError,
         match=r"no primary-key property named 'not_a_real_property'",
@@ -543,7 +546,7 @@ class TestExplicitMappingPKOnly:
   column, which doesn't uniquely identify the target row."""
 
   def test_explicit_mapping_to_non_pk_property_rejected(self):
-    """``display_name`` is a real declared property on Party (and
+    """``display_name`` is a real declared (non-PK) property on Party (and
     thus on Person via inheritance), but it is NOT a PK property.
     A binding that targets it must be rejected at the
     normalization step before C2 ever sees it."""

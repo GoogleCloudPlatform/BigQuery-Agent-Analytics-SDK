@@ -336,9 +336,10 @@ def _check_relationship_endpoint_arity(
 
   Works against both legacy ``list[str]`` and the new
   ``list[dict[str, str]]`` shape — each list entry counts as one
-  column regardless of which shape it takes. The semantic check that
-  every ``target_property`` names a real property on the endpoint is
-  in :func:`_check_relationship_target_properties`.
+  column regardless of which shape it takes. The semantic check
+  that every ``target_property`` names an effective primary-key
+  property on the endpoint is in
+  :func:`normalize_relationship_columns`.
   """
   from_pk = _primary_key_len(rel.from_, entity_map)
   to_pk = _primary_key_len(rel.to, entity_map)

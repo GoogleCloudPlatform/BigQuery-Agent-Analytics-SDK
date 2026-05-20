@@ -79,15 +79,20 @@ class ResolvedRelationship:
 
   ``from_column_mapping`` / ``to_column_mapping`` (new in #179) carry
   the canonical ``(edge_column, target_property)`` form. They're the
-  source of truth when a caller needs to know which property on the
-  endpoint entity each edge column references — required for
+  source of truth when a caller needs to know which PK property on
+  the endpoint entity each edge column references — required for
   self-edge support where the same entity sits at both ends and the
   bare list of column names is ambiguous about which side a column
-  belongs to. ``None`` (the default) means the legacy shape was used
-  and the caller should fall back to "Nth edge column maps to the
-  endpoint's Nth PK property in declaration order." Surfaces that
-  predate #179 and don't yet consume the mapping fall back to that
-  legacy convention silently.
+  belongs to. ``resolve()`` populates these fields for BOTH the
+  legacy ``list[str]`` shape (the str entry resolves to the
+  endpoint's Nth effective PK property by position) AND the explicit
+  ``list[dict[str, str]]`` shape (the dict's value is used directly,
+  after the loader validates it names a real effective PK property).
+  ``None`` (the default) means the ``ResolvedRelationship`` was
+  manually constructed without going through ``resolve()`` or
+  predates this field — newer callers should not rely on the
+  list-view alone in that case and instead derive the mapping
+  themselves from the endpoint's effective PK.
 
   ``from_session_column`` / ``to_session_column`` are the
   SDK-specific lineage session overrides (None if not configured).

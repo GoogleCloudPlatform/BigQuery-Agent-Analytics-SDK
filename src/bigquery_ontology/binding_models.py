@@ -133,8 +133,11 @@ class EntityBinding(BaseModel):
 # Both shapes resolve to a canonical (edge_column, target_property)
 # tuple stream in the binding loader. The validator below enforces
 # the structural shape only (single-key + str→str). The loader
-# enforces the semantic check that target_property names a real
-# property on the endpoint entity.
+# enforces the semantic check that target_property names an
+# *effective primary-key property* on the endpoint entity
+# (honoring inherited PKs). This is FK→PK mapping, not FK→any-
+# column: only a PK target uniquely identifies the row the edge
+# endpoint points at.
 ColumnRef = Union[str, dict[str, str]]
 
 
