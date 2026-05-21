@@ -172,7 +172,7 @@ C2 (`feat/relationship-canonical-column-mapping`) wires the canonical FK→PK ma
 
 ### 10. Inheritance stripped from entities
 
-The MAKO TTL declares `mako:Candidate rdfs:subClassOf mako:RoleTrait`; the OWL importer surfaces this as `Candidate.extends: RoleTrait`. `gm compile` v0 doesn't support inheritance and rejects the binding (`compile-validation — Entity 'Candidate' uses 'extends'`), which blocks Section 4's `--emit-concept-index` step. The pipeline drops `extends` from the post-import YAML and audit-trails the discard under the config's `annotation_prefix` (`mako_demo:stripped_inheritance` for MAKO). `RoleTrait` is a marker class in MAKO (REQ-ONT-022) with no properties beyond the `id` PK every other entity already has, so the discard has no semantic effect on the demo's six-entity scope. **General behavior**: applies to any TTL with `extends:` clauses.
+The MAKO TTL declares `mako:Candidate rdfs:subClassOf mako:RoleTrait`; the OWL importer surfaces this as `Candidate.extends: RoleTrait`. `gm compile` v0 doesn't support inheritance and rejects the binding (`compile-validation — Entity 'Candidate' uses 'extends'`), which blocks Section 4's `--emit-concept-index` step. The pipeline drops `extends` from the post-import YAML and audit-trails the discard under the config's `annotation_prefix` (`mako_demo:stripped_inheritance` for MAKO). `RoleTrait` is a marker class in MAKO (REQ-ONT-022) with no properties beyond the `id` PK every other entity already has, so the discard has no semantic effect on the demo's 11-entity scope. **General behavior**: applies to any TTL with `extends:` clauses.
 
 ## Validation commands run (all pass)
 

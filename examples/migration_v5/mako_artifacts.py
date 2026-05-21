@@ -162,7 +162,9 @@ def make_binding(
 
   Thin wrapper around :func:`ontology_artifacts.make_binding`
   with :data:`MAKO_CONFIG`. ``entity_filter`` defaults to
-  :data:`DEMO_ENTITIES` (MAKO's six-entity demo scope).
+  :data:`DEMO_ENTITIES` (MAKO's 11-entity demo scope — six
+  Beat 1–4 hub entities plus five Beat 5 feedback / reward
+  loop entities).
   """
   return _make_binding(
       ontology,
