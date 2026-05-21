@@ -85,12 +85,31 @@ _MAKO_NAMESPACE = "https://ontology.yahoo.com/mako/"
 # decision-flow story doesn't hold together without
 # ``DecisionExecution`` in the binding.
 DEMO_ENTITIES: tuple[str, ...] = (
+    # Beats 1–4: the decision-flow hub + its six immediate
+    # neighbors. ``DecisionExecution`` is the central hub the
+    # rest hangs off of.
     "AgentSession",
     "DecisionExecution",
     "DecisionPoint",
     "Candidate",
     "SelectionOutcome",
     "ContextSnapshot",
+    # Beat 5: feedback / reward loop. ``BusinessConstraint`` +
+    # ``ConstraintApplication`` capture the "why did this
+    # candidate get filtered?" audit trail;
+    # ``RejectionReason`` records the "why did this candidate
+    # lose?" explanation; ``OutcomeSignal`` carries observed
+    # real-world results (click / conversion / viewability)
+    # linked back to a DecisionExecution via
+    # ``producedOutcome``; ``RewardComputation`` aggregates
+    # OutcomeSignals into a scalar reward for RL training and
+    # links back to the contributing signals via
+    # ``derivedReward``.
+    "BusinessConstraint",
+    "ConstraintApplication",
+    "RejectionReason",
+    "OutcomeSignal",
+    "RewardComputation",
 )
 
 

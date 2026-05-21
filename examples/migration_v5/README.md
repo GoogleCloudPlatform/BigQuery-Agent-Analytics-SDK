@@ -85,7 +85,12 @@ The decisions below are documented in MAKO terms because MAKO is the load-bearin
 
 The MAKO demo entity allowlist (`DEMO_ENTITIES` in `mako_artifacts.py`) is six entities: `AgentSession`, `DecisionExecution`, `DecisionPoint`, `Candidate`, `SelectionOutcome`, `ContextSnapshot`. `DecisionExecution` is non-obvious but load-bearing — per MAKO's TTL, it's the entity that's `partOfSession` an `AgentSession`, `atContextSnapshot` a `ContextSnapshot`, `executedAtDecisionPoint` a `DecisionPoint`, `hasSelectionOutcome` a `SelectionOutcome`. The decision-flow story doesn't hold together without it.
 
-The edge set is **TTL-driven with one filter**: `make_binding` walks `ontology.relationships` and picks every relationship whose endpoints both fall within the entity allowlist. The current MAKO binding has **nine** relationships — seven heterogeneous (`atContextSnapshot`, `evaluatesCandidate`, `executedAtDecisionPoint`, `hasSelectionOutcome`, `partOfSession`, `rejectedCandidate`, `selectedCandidate`) plus two `DecisionExecution → DecisionExecution` self-edges (`evolvedFrom`, `supersededBy`). The self-edges use the explicit dict-shape `from_columns` introduced in #179 and consumed by C2; see design decision 9 below for the column convention.
+The edge set is **TTL-driven with one filter**: `make_binding` walks `ontology.relationships` and picks every relationship whose endpoints both fall within the entity allowlist. The current MAKO binding has **fourteen** relationships covering eleven entities:
+
+* **Beats 1–4 hub** (7 edges + 2 self-edges, 6 entities): `atContextSnapshot`, `evaluatesCandidate`, `executedAtDecisionPoint`, `hasSelectionOutcome`, `partOfSession`, `rejectedCandidate`, `selectedCandidate`, plus the two `DecisionExecution → DecisionExecution` self-edges (`evolvedFrom`, `supersededBy`).
+* **Beat 5 feedback / reward loop** (5 edges, 5 entities): `hasRejectionReason` (Candidate → RejectionReason), `appliedConstraint` (ConstraintApplication → BusinessConstraint), `filteredByConstraint` (Candidate → ConstraintApplication), `producedOutcome` (DecisionExecution → OutcomeSignal), `derivedReward` (RewardComputation → OutcomeSignal).
+
+The self-edges use the explicit dict-shape `from_columns` introduced in #179 and consumed by C2; see design decision 9 below for the column convention.
 
 ### 2. FILL_IN resolution: synthesize `id: string`
 
@@ -199,7 +204,7 @@ import mako_demo_agent
 print(type(mako_demo_agent.root_agent).__name__,
       len(mako_demo_agent.root_agent.tools),
       type(mako_demo_agent.bq_logging_plugin).__name__)"
-# → LlmAgent 5 BigQueryAgentAnalyticsPlugin
+# → LlmAgent 9 BigQueryAgentAnalyticsPlugin
 
 # Driver --help works without live BQ / Vertex.
 PYTHONPATH=src python examples/migration_v5/run_agent.py --help
@@ -214,6 +219,7 @@ A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells a
 - **Beat 2**: `binding-validate` exits 1 with a `missing_column` failure after column rename; restore + re-validate exits 0; combined `ontology-build --skip-property-graph --validate-binding` matches Beat 1's status + non-zero `rows_materialized`.
 - **Beat 3.6**: synthetic `ExtractedGraph` triggers all three `FallbackScope` failures (`NODE + FIELD + EDGE`).
 - **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns at least one row per current session — the compiled extractor wired in Beat 3.5 synthesizes the envelope-side `AgentSession` + `partOfSession`.
+- **Beat 5**: feedback / reward loop closes the demo arc. The agent emits four additional tool calls per decision — `record_rejection` (one per losing candidate), optional `apply_constraint` (when a candidate is filtered by policy), `record_outcome_signal` (one to three per execution; observed real-world result), `compute_reward` (one per execution; aggregates the signals into a scalar RL reward). The reference extractor at `examples/migration_v5/reference_extractor.py` covers all four, emitting `RejectionReason`, `BusinessConstraint` + `ConstraintApplication`, `OutcomeSignal`, and `RewardComputation` nodes plus the edges (`hasRejectionReason`, `appliedConstraint`, `filteredByConstraint`, `producedOutcome`, `derivedReward`) that wire them back into the Beat 1–4 hub. The Beat 5 narrative GQL traverses the full chain — `(DecisionExecution)-[producedOutcome]->(OutcomeSignal)<-[derivedReward]-(RewardComputation)` answers "which signals fed which reward?", and `(Candidate)-[hasRejectionReason]->(RejectionReason)` answers "why did this candidate lose?". The binding scope grows from 6 to **11** entities; 7 to **14** relationships (including the two `DecisionExecution` self-edges).
 
 ## Run this every N hours in production
 

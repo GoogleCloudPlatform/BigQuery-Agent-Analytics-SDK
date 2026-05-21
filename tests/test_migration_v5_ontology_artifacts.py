@@ -125,16 +125,34 @@ def test_mako_shim_regenerate_still_works():
       ontology, project="any-proj", dataset="any_ds"
   )
   assert len(ontology.entities) == 18
-  assert len(binding.entities) == 6
-  # Seven heterogeneous + two ``DecisionExecution`` self-edges
-  # (``evolvedFrom``, ``supersededBy``) — the latter re-added in C2
-  # via the dict-shape ``from_columns: [{src_<col>: <pk>}]`` syntax.
-  assert len(binding.relationships) == 9
+  # Beat 5 expansion: the demo binding now covers 11 of the 18
+  # MAKO entities — the six-entity Beat 1–4 hub plus five
+  # feedback/reward loop entities (BusinessConstraint,
+  # ConstraintApplication, RejectionReason, OutcomeSignal,
+  # RewardComputation).
+  assert len(binding.entities) == 11
+  # Twelve heterogeneous + two ``DecisionExecution`` self-edges
+  # (``evolvedFrom``, ``supersededBy``). The Beat 5 entities add
+  # five new edges (appliedConstraint, derivedReward,
+  # filteredByConstraint, hasRejectionReason, producedOutcome) on
+  # top of the seven Beat 1–4 edges.
+  assert len(binding.relationships) == 14
   rel_by_name = {r.name: r for r in binding.relationships}
   for self_edge in ("evolvedFrom", "supersededBy"):
     rb = rel_by_name[self_edge]
     assert rb.from_columns == [{"src_decision_execution_id": "id"}]
     assert rb.to_columns == [{"dst_decision_execution_id": "id"}]
+  # Beat 5 edges present in the regenerated binding.
+  for beat5_edge in (
+      "appliedConstraint",
+      "derivedReward",
+      "filteredByConstraint",
+      "hasRejectionReason",
+      "producedOutcome",
+  ):
+    assert (
+        beat5_edge in rel_by_name
+    ), f"Beat 5 edge {beat5_edge!r} missing from regenerated binding"
 
 
 # ------------------------------------------------------------------ #
