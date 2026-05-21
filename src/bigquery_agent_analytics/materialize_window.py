@@ -597,10 +597,13 @@ def append_state_row(
     the right "scan ran, no orphans" semantic anyway: the
     ``mode='orphan_scan'`` row's other fields already convey the
     "scan ran" signal.
-  * **NULL TIMESTAMP fields are safe to send as ``None``** —
-    ``insert_rows_json`` translates that into a NULL cell. But
-    we already special-case via ``_iso_optional`` to keep the
-    omitted-field pattern consistent across both column kinds.
+  * **Nullable TIMESTAMP / STRING fields are also omitted when
+    ``None``.** ``insert_rows_json`` does accept explicit
+    ``None`` for nullable scalars, but applying the same omit-
+    when-empty pattern across every nullable column keeps the
+    payload shape internally consistent and avoids future
+    regressions if other column types pick up the same
+    empty-value rejection that ``ARRAY<STRING>`` already has.
   """
   payload: dict[str, Any] = {
       "state_key": row.state_key,
