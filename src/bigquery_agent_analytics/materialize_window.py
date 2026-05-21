@@ -584,32 +584,52 @@ def append_state_row(
     bq_client: Any, state_table_ref: str, row: StateRow
 ) -> None:
   """Append a state row. Uses ``insert_rows_json`` (streaming
-  insert) — cheaper than an INSERT job for tiny single-row writes."""
-  payload = {
+  insert) — cheaper than an INSERT job for tiny single-row writes.
+
+  Two BigQuery streaming-insert quirks shape the payload assembly:
+
+  * **Empty ARRAY columns must be omitted, not sent as ``[]``.**
+    Sending ``{"flagged_session_ids": []}`` triggers BigQuery's
+    "Field value of flagged_session_ids cannot be empty" rejection
+    (surfaced as the very first failure when the orphan-watchdog
+    PR #224 went live — every scan with zero new/cumulative
+    orphans crashed). Omitting the field stores NULL, which is
+    the right "scan ran, no orphans" semantic anyway: the
+    ``mode='orphan_scan'`` row's other fields already convey the
+    "scan ran" signal.
+  * **NULL TIMESTAMP fields are safe to send as ``None``** —
+    ``insert_rows_json`` translates that into a NULL cell. But
+    we already special-case via ``_iso_optional`` to keep the
+    omitted-field pattern consistent across both column kinds.
+  """
+  payload: dict[str, Any] = {
       "state_key": row.state_key,
       "run_id": row.run_id,
       "run_started_at": _iso(row.run_started_at),
       "scan_start": _iso(row.scan_start),
       "scan_end": _iso(row.scan_end),
-      "last_completion_at": _iso_optional(row.last_completion_at),
       "sessions_discovered": row.sessions_discovered,
       "sessions_materialized": row.sessions_materialized,
       "sessions_failed": row.sessions_failed,
       "ok": row.ok,
-      "error_detail": row.error_detail,
-      "report_json": row.report_json,
       "mode": row.mode,
-      "orphan_watermark": _iso_optional(row.orphan_watermark),
-      # ``insert_rows_json`` accepts a list of strings for an
-      # ARRAY<STRING> column. ``None`` is encoded as a NULL ARRAY
-      # at the column level — distinct from the empty array which
-      # signals "scan ran, zero unresolved orphans".
-      "flagged_session_ids": (
-          list(row.flagged_session_ids)
-          if row.flagged_session_ids is not None
-          else None
-      ),
   }
+  if row.last_completion_at is not None:
+    payload["last_completion_at"] = _iso(row.last_completion_at)
+  if row.error_detail is not None:
+    payload["error_detail"] = row.error_detail
+  if row.report_json is not None:
+    payload["report_json"] = row.report_json
+  if row.orphan_watermark is not None:
+    payload["orphan_watermark"] = _iso(row.orphan_watermark)
+  # Omit the ARRAY field entirely when there's nothing to write —
+  # see the empty-array quirk in the docstring above. The truthy
+  # check folds ``None`` and ``()`` into the same omit branch;
+  # both store as NULL in BQ, and the distinction between "field
+  # didn't apply on this row kind" and "scan ran with zero" is
+  # carried by the ``mode`` column.
+  if row.flagged_session_ids:
+    payload["flagged_session_ids"] = list(row.flagged_session_ids)
   errors = bq_client.insert_rows_json(state_table_ref, [payload])
   if errors:
     raise RuntimeError(f"insert into {state_table_ref} failed: {errors!r}")

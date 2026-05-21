@@ -2543,6 +2543,91 @@ class TestStateRowModeColumn:
     assert payload["mode"] == "backfill"
 
 
+class TestAppendStateRowOmitsEmptyArrays:
+  """BigQuery's streaming-insert API rejects empty-array values
+  for ARRAY<STRING> columns with "Field value of
+  flagged_session_ids cannot be empty." Live verification of PR
+  #224 surfaced this on the very first cron pass when the
+  watchdog wrote an ``orphan_scan`` row with zero new orphans.
+  The fix omits ``flagged_session_ids`` from the payload when
+  there's nothing to write (storing NULL); BigQuery accepts
+  that and operators can still distinguish row kinds via the
+  ``mode`` column."""
+
+  def _state_row(self, **overrides):
+    base = dict(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+    )
+    base.update(overrides)
+    return mw.StateRow(**base)
+
+  def test_steady_row_omits_array_field_when_none(self):
+    """Default StateRow (steady-mode caller) leaves
+    ``flagged_session_ids=None``. The serialized payload must
+    omit the field entirely so BigQuery stores NULL — the
+    pre-#224 row shape."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    mw.append_state_row(client, "p.d.t", self._state_row())
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert "flagged_session_ids" not in payload
+    # Same omit-when-None rule for the other nullable columns.
+    assert "orphan_watermark" not in payload
+    assert "last_completion_at" not in payload
+
+  def test_orphan_scan_with_zero_orphans_omits_array(self):
+    """The crash reproducer: ``run_orphan_watchdog`` builds an
+    ``orphan_scan`` row with ``flagged_session_ids=()`` on a
+    zero-orphan scan. Sending ``[]`` as the JSON value crashed
+    BigQuery; omitting the field stores NULL and the row writes
+    cleanly."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    cutoff = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    mw.append_state_row(
+        client,
+        "p.d.t",
+        self._state_row(
+            mode=mw.STATE_MODE_ORPHAN_SCAN,
+            orphan_watermark=cutoff,
+            flagged_session_ids=(),  # the crash trigger
+        ),
+    )
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert "flagged_session_ids" not in payload
+    # Watermark IS populated on orphan rows and must be sent.
+    assert payload["orphan_watermark"] == cutoff.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert payload["mode"] == mw.STATE_MODE_ORPHAN_SCAN
+
+  def test_orphan_row_with_flagged_sessions_sends_array(self):
+    """The non-empty path stays unchanged: a populated
+    ``flagged_session_ids`` tuple serializes as a list."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    mw.append_state_row(
+        client,
+        "p.d.t",
+        self._state_row(
+            mode=mw.STATE_MODE_ORPHAN_LEDGER,
+            orphan_watermark=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+            flagged_session_ids=("orphan-A", "orphan-B"),
+        ),
+    )
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+
+
 class TestEnsureStateTableMigration:
   """``ensure_state_table`` runs the schema-evolution ALTERs every call.
   ``ADD COLUMN IF NOT EXISTS`` is idempotent in BigQuery; the test
