@@ -735,11 +735,16 @@ def extract_mako_decision_event(
 ) -> StructuredExtractionResult:
   """Reference extractor for MAKO ``TOOL_COMPLETED`` events.
 
-  The MAKO agent emits five tool-call types; this function
-  dispatches on ``content.tool`` and delegates to the
-  per-tool helper. Non-tool events (LLM_REQUEST,
-  USER_MESSAGE_RECEIVED, etc.) return an empty result —
-  the AI fallback handles them.
+  The MAKO agent emits nine tool-call types — five for the
+  Beat 1–4 decision flow (``capture_context``,
+  ``propose_decision_point``, ``evaluate_candidate``,
+  ``commit_outcome``, ``complete_execution``) and four for
+  the Beat 5 feedback / reward loop (``apply_constraint``,
+  ``record_rejection``, ``record_outcome_signal``,
+  ``compute_reward``). This function dispatches on
+  ``content.tool`` and delegates to the per-tool helper.
+  Non-tool events (LLM_REQUEST, USER_MESSAGE_RECEIVED, etc.)
+  return an empty result — the AI fallback handles them.
 
   Args:
     event: Plugin event row (dict-shaped, matches
@@ -800,9 +805,10 @@ def _load_resolved_graph():
 
 # The revalidation CLI keys this dict on the
 # ``event_type`` column. MAKO's structured payloads all
-# land in ``TOOL_COMPLETED`` events (one per tool call;
-# the agent emits five per decision flow). Other event
-# types (``LLM_RESPONSE`` reasoning text,
+# land in ``TOOL_COMPLETED`` events — one per tool call,
+# nine per decision-and-feedback-loop cycle (five Beat 1–4
+# tools + four Beat 5 tools). Other event types
+# (``LLM_RESPONSE`` reasoning text,
 # ``USER_MESSAGE_RECEIVED`` raw prompt, etc.) are left to
 # the AI fallback.
 EXTRACTORS = {
