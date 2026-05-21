@@ -43,6 +43,7 @@ Usage:
     python quality_report.py --output-json r.json # write structured JSON output
     python quality_report.py --config config.json # use scope definitions from config
     python quality_report.py --env path/to/.env   # load a specific .env file
+    python quality_report.py --conversations-file results.json  # score local JSON
 """
 import warnings
 
@@ -840,6 +841,78 @@ def resolve_trace_responses(traces):
 
 
 # ---------------------------------------------------------------------------
+# Local conversation support (no BigQuery required)
+# ---------------------------------------------------------------------------
+
+
+def _format_conversation_transcript(conv):
+  """Convert a traffic-generator conversation dict to SDK transcript format.
+
+  Produces the same ``user_input / agent_response`` lines as the
+  ``CATEGORICAL_TRANSCRIPT_QUERY`` so that the categorical evaluator
+  can process local conversations identically to BigQuery traces.
+  """
+  turns = conv.get("conversation", [])
+  if turns:
+    parts = []
+    for turn in turns:
+      role = turn.get("role", "user")
+      text = turn.get("text", "")
+      tag = turn.get("tag", "")
+      if role == "user":
+        tag_str = f" [{tag}]" if tag else ""
+        parts.append(f"user_input{tag_str}: {text}")
+      else:
+        agent = conv.get("answered_by", "agent")
+        parts.append(f"agent_response [{agent}]: {text}")
+    return "\n".join(parts)
+
+  # Fallback: single-turn
+  q = conv.get("question", "")
+  r = conv.get("final_response", conv.get("response", ""))
+  agent = conv.get("answered_by", "agent")
+  return f"user_input: {q}\nagent_response [{agent}]: {r}"
+
+
+def _build_resolved_map_from_conversations(conversations, model):
+  """Build a resolved_map from local conversation dicts.
+
+  Returns the same ``{session_id: {...}}`` structure as
+  ``resolve_trace_responses`` so downstream code (``_build_json_output``,
+  ``_write_md_report``, ``_print_eval_results``) works unchanged.
+  """
+  resolved = {}
+  for conv in conversations:
+    sid = conv.get("session_id", f"local_{id(conv)}")
+    turns = conv.get("conversation", [])
+    user_turns = (
+        sum(1 for t in turns if t.get("role") == "user") if turns else 1
+    )
+    tool_calls = conv.get("tool_calls", 0)
+
+    corrections = conv.get("corrections", 0)
+    verifications = conv.get("verifications", 0)
+
+    if turns and user_turns > 1 and corrections == 0 and verifications == 0:
+      corrections, verifications = _infer_corrections(turns, model)
+
+    resolved[sid] = {
+        "session_id": sid,
+        "question": conv.get("question", ""),
+        "response": conv.get("final_response", conv.get("response", "")),
+        "answered_by": conv.get("answered_by", "policy_agent"),
+        "is_a2a": False,
+        "latency_s": conv.get("latency_s"),
+        "user_turns": user_turns,
+        "tool_calls": tool_calls,
+        "corrections": corrections,
+        "verifications": verifications,
+        "conversation": turns,
+    }
+  return resolved
+
+
+# ---------------------------------------------------------------------------
 # Run evaluation
 # ---------------------------------------------------------------------------
 
@@ -955,6 +1028,100 @@ def generate_quality_report(
   t0 = time.time()
   result = run_evaluation(
       session_ids=session_ids, model=model, config_path=config_path,
+  )
+  elapsed = time.time() - t0
+
+  output = _build_json_output(result["report"], result["resolved_map"])
+  output["summary"]["elapsed_seconds"] = round(elapsed, 1)
+  return output
+
+
+def run_evaluation_from_conversations(
+    conversations,
+    model=None,
+    config_path=None,
+):
+  """Evaluate local conversations without BigQuery.
+
+  Converts traffic-generator conversation dicts to transcripts, classifies
+  them via the Gemini API, and returns the same ``{"report", "resolved_map"}``
+  structure as ``run_evaluation`` so all downstream output functions work
+  unchanged.
+
+  Args:
+      conversations: List of conversation dicts (traffic generator format).
+      model: Eval model override.
+      config_path: Path to agent context JSON for scope-aware scoring.
+
+  Returns:
+      Dict with ``report`` (CategoricalEvaluationReport) and
+      ``resolved_map`` keys.
+  """
+  import asyncio
+
+  from bigquery_agent_analytics import CategoricalEvaluationConfig
+  from bigquery_agent_analytics.categorical_evaluator import (
+      build_categorical_report,
+      classify_sessions_via_api,
+  )
+
+  model = model or EVAL_MODEL_ID or os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
+  metrics = get_eval_metrics(config_path=config_path)
+  cat_config = CategoricalEvaluationConfig(
+      metrics=metrics,
+      endpoint=model,
+      temperature=0.0,
+      include_justification=True,
+  )
+
+  transcripts = {}
+  for conv in conversations:
+    sid = conv.get("session_id", f"local_{id(conv)}")
+    transcripts[sid] = _format_conversation_transcript(conv)
+
+  logger.info(
+      "Classifying %d local conversations (model=%s)...",
+      len(transcripts), model,
+  )
+  session_results = asyncio.run(
+      classify_sessions_via_api(transcripts, cat_config, model)
+  )
+
+  report = build_categorical_report(
+      dataset="local_conversations",
+      session_results=session_results,
+      config=cat_config,
+  )
+
+  resolved_map = _build_resolved_map_from_conversations(conversations, model)
+
+  return {"report": report, "resolved_map": resolved_map}
+
+
+def generate_quality_report_from_conversations(
+    conversations,
+    model=None,
+    config_path=None,
+) -> dict:
+  """Evaluate local conversations and return a structured quality report.
+
+  This is the public API for scoring conversations from a traffic generator
+  or any local JSON file, without requiring BigQuery.  Returns the same
+  dict structure as ``generate_quality_report``.
+
+  Args:
+      conversations: List of conversation dicts.
+      model: Eval model override.
+      config_path: Path to agent context JSON for scope-aware scoring.
+
+  Returns:
+      Dict with ``summary`` and ``sessions`` keys.
+  """
+  if PROJECT_ID is None:
+    _load_config()
+  t0 = time.time()
+  result = run_evaluation_from_conversations(
+      conversations, model=model, config_path=config_path,
   )
   elapsed = time.time() - t0
 
@@ -1141,73 +1308,103 @@ def run_browse(args):
 
 def run_eval(args):
   model = args.model or EVAL_MODEL_ID
-  logger.info(
-      "Project: %s, Dataset: %s, Table: %s", PROJECT_ID, DATASET_ID, TABLE_ID
-  )
-  logger.info("Location: %s", DATASET_LOCATION)
-  logger.info("Evaluation model: %s", model)
-  logger.info(
-      "Parameters: time_period=%s, limit=%d, persist=%s, report=%s, samples=%s",
-      args.time_period or "all",
-      args.limit,
-      args.persist,
-      args.report,
-      args.samples or "default (10/5/3)",
-  )
 
-  # Load session IDs from file if provided
-  session_ids = None
-  if args.session_ids_file:
-    with open(args.session_ids_file) as _f:
-      _data = json.load(_f)
-    # Accepts either a list of objects with "session_id" keys
-    # (e.g. output of examples/agent_improvement_cycle/eval/run_eval.py)
-    # or a plain list of strings.
-    if _data and isinstance(_data[0], dict):
-      session_ids = [r["session_id"] for r in _data if r.get("session_id")]
-    else:
-      session_ids = [s for s in _data if s]
-    if not session_ids:
-      logger.error(
-          "No session IDs found in %s — file may be empty or missing "
-          "'session_id' fields.",
-          args.session_ids_file,
-      )
-      sys.exit(1)
-    logger.info(
-        "Filtering to %d session IDs from %s",
-        len(session_ids),
-        args.session_ids_file,
-    )
+  conversations_file = getattr(args, "conversations_file", None)
 
   t0 = time.time()
-  try:
-    config_path = getattr(args, "config", None)
-    if config_path:
-      logger.info("Scope config: %s", config_path)
-    result = run_evaluation(
-        time_range=args.time_period,
-        limit=args.limit,
-        model=model,
-        persist=args.persist,
-        app_name=args.app_name,
-        config_path=config_path,
-        session_id=args.session,
-        session_ids=session_ids,
+  config_path = getattr(args, "config", None)
+
+  if conversations_file:
+    # --- Local conversations path (no BigQuery) ---
+    logger.info("Source: local conversations file %s", conversations_file)
+    logger.info("Evaluation model: %s", model)
+    with open(conversations_file) as _f:
+      data = json.load(_f)
+    conversations = (
+        data.get("conversations", []) if isinstance(data, dict) else data
     )
-  except Exception:
-    logger.exception("Evaluation failed")
-    sys.exit(1)
+    if not conversations:
+      logger.error("No conversations found in %s", conversations_file)
+      sys.exit(1)
+    logger.info("Loaded %d conversations", len(conversations))
+
+    try:
+      if config_path:
+        logger.info("Scope config: %s", config_path)
+      result = run_evaluation_from_conversations(
+          conversations, model=model, config_path=config_path,
+      )
+    except Exception:
+      logger.exception("Evaluation failed")
+      sys.exit(1)
+  else:
+    # --- BigQuery path (existing) ---
+    logger.info(
+        "Project: %s, Dataset: %s, Table: %s",
+        PROJECT_ID, DATASET_ID, TABLE_ID,
+    )
+    logger.info("Location: %s", DATASET_LOCATION)
+    logger.info("Evaluation model: %s", model)
+    logger.info(
+        "Parameters: time_period=%s, limit=%d, persist=%s, report=%s, "
+        "samples=%s",
+        args.time_period or "all",
+        args.limit,
+        args.persist,
+        args.report,
+        args.samples or "default (10/5/3)",
+    )
+
+    session_ids = None
+    if args.session_ids_file:
+      with open(args.session_ids_file) as _f:
+        _data = json.load(_f)
+      if _data and isinstance(_data[0], dict):
+        session_ids = [r["session_id"] for r in _data if r.get("session_id")]
+      else:
+        session_ids = [s for s in _data if s]
+      if not session_ids:
+        logger.error(
+            "No session IDs found in %s — file may be empty or missing "
+            "'session_id' fields.",
+            args.session_ids_file,
+        )
+        sys.exit(1)
+      logger.info(
+          "Filtering to %d session IDs from %s",
+          len(session_ids),
+          args.session_ids_file,
+      )
+
+    try:
+      if config_path:
+        logger.info("Scope config: %s", config_path)
+      result = run_evaluation(
+          time_range=args.time_period,
+          limit=args.limit,
+          model=model,
+          persist=args.persist,
+          app_name=args.app_name,
+          config_path=config_path,
+          session_id=args.session,
+          session_ids=session_ids,
+      )
+    except Exception:
+      logger.exception("Evaluation failed")
+      sys.exit(1)
+
   elapsed = time.time() - t0
 
+  # --- Shared post-processing ---
   result["report"].details["elapsed_seconds"] = round(elapsed, 1)
   result["report"].details["project"] = PROJECT_ID
   result["report"].details["dataset"] = f"{DATASET_ID}.{TABLE_ID}"
   result["report"].details["location"] = DATASET_LOCATION
   result["report"].details["eval_model"] = model
-  result["report"].details["time_period"] = args.time_period or "all"
-  result["report"].details["limit"] = args.limit
-  result["report"].details["persist"] = args.persist
+  if not conversations_file:
+    result["report"].details["time_period"] = args.time_period or "all"
+    result["report"].details["limit"] = args.limit
+    result["report"].details["persist"] = args.persist
   result["report"].details["samples"] = args.samples or None
   _print_eval_results(
       result["report"],
@@ -1217,9 +1414,12 @@ def run_eval(args):
   )
 
   report_path = None
+  md_dir = None
+  if args.output_json and args.output_json != "-":
+    md_dir = os.path.dirname(os.path.abspath(args.output_json))
   if args.report:
     report_path = _write_md_report(
-        result["report"], result["resolved_map"], args
+        result["report"], result["resolved_map"], args, report_dir=md_dir,
     )
 
   if report_path:
@@ -1721,7 +1921,7 @@ def _md_write_session_section(
     w("")
 
 
-def _write_md_report(report, resolved_map, args):
+def _write_md_report(report, resolved_map, args, report_dir=None):
   lines = []
   w = lines.append
 
@@ -1730,8 +1930,9 @@ def _write_md_report(report, resolved_map, args):
   w("")
   w(f"**Generated:** {timestamp}  ")
   w(f"**Project:** {PROJECT_ID}  ")
-  w(f"**Dataset:** {DATASET_ID}.{TABLE_ID}  ")
-  w(f"**Location:** {DATASET_LOCATION}  ")
+  if DATASET_ID != "local":
+    w(f"**Dataset:** {DATASET_ID}.{TABLE_ID}  ")
+    w(f"**Location:** {DATASET_LOCATION}  ")
   model = args.model or EVAL_MODEL_ID
   w(f"**Eval model:** {model}  ")
   w(f"**Sessions:** {report.total_sessions}  ")
@@ -1750,8 +1951,39 @@ def _write_md_report(report, resolved_map, args):
   total = report.total_sessions
   fp_rate = (fp_count / total * 100) if total > 0 else 0.0
 
+  # --- Table of Contents ---
+  w("## Table of Contents")
+  w("")
+  w("- [Summary](#summary)")
+  dim_avgs = _compute_dimension_averages(report)
+  if any(v > 0 for v in dim_avgs.values()):
+    w("- [Quality Dimensions](#quality-dimensions)")
+  mt_stats = _compute_multiturn_stats(resolved_map)
+  if mt_stats:
+    w("- [Multi-Turn Efficiency](#multi-turn-efficiency)")
+  w("- [Category Distributions](#category-distributions)")
+  agent_stats = _build_agent_stats(report, resolved_map)
+  if agent_stats:
+    w("- [Per-Agent Quality](#per-agent-quality)")
+  if by_category.get("unhelpful"):
+    w("- [Unhelpful Sessions](#unhelpful-sessions)")
+  if by_category.get("declined"):
+    w("- [Declined Sessions](#declined-sessions)")
+  if by_category.get("partial"):
+    w("- [Partial Sessions](#partial-sessions)")
+  w("- [Execution Details](#execution-details)")
+  w("")
+
   # --- Summary ---
   w("## Summary")
+  w("")
+  w(
+      "Overall classification of agent sessions by an LLM judge. "
+      "Each session is classified as meaningful (agent answered correctly), "
+      "declined (agent correctly refused an out-of-scope question), "
+      "partial (answer was incomplete or required corrections), "
+      "or unhelpful (agent failed to answer or gave wrong information)."
+  )
   w("")
   w("| Metric | Value |")
   w("|--------|-------|")
@@ -1772,13 +2004,14 @@ def _write_md_report(report, resolved_map, args):
   w("")
 
   # --- Quality Dimensions (0-2 scale) ---
-  dim_avgs = _compute_dimension_averages(report)
   if any(v > 0 for v in dim_avgs.values()):
     w("## Quality Dimensions")
     w("")
     w(
-        "Each session is scored 0-2 on five dimensions. "
-        "Scores are averaged across all sessions."
+        "Each session is scored 0-2 on five dimensions by an LLM judge. "
+        "Scores are averaged across all sessions. These dimensions measure "
+        "different aspects of response quality independently of the overall "
+        "usefulness classification above."
     )
     w("")
     w("| Dimension | Avg Score | Rating | What it measures |")
@@ -1802,24 +2035,54 @@ def _write_md_report(report, resolved_map, args):
     w("")
 
   # --- Multi-Turn Efficiency ---
-  mt_stats = _compute_multiturn_stats(resolved_map)
   if mt_stats:
     w("## Multi-Turn Efficiency")
     w("")
-    w("| Metric | Value |")
-    w("|--------|-------|")
-    w(f"| Avg user turns | {mt_stats['avg_user_turns']} |")
-    w(f"| Avg tool calls | {mt_stats['avg_tool_calls']} |")
+    w(
+        "Measures how efficiently the agent resolves questions in "
+        "multi-turn conversations. Lower correction rates and fewer "
+        "turns indicate the agent gets answers right the first time."
+    )
+    w("")
+    w("| Metric | Description | Value |")
+    w("|--------|-------------|-------|")
+    w(
+        f"| Avg user turns | Average number of user messages per session "
+        f"| {mt_stats['avg_user_turns']} |"
+    )
+    w(
+        f"| Avg tool calls | Average number of tool/API calls per session "
+        f"| {mt_stats['avg_tool_calls']} |"
+    )
     if mt_stats["multi_turn_sessions"] > 0:
-      w(f"| Multi-turn sessions | {mt_stats['multi_turn_sessions']} |")
+      w(
+          f"| Multi-turn sessions | Sessions with more than one user message "
+          f"| {mt_stats['multi_turn_sessions']} |"
+      )
     if "correction_rate" in mt_stats:
-      w(f"| Correction rate | {mt_stats['correction_rate']}% |")
-      w(f"| Verification rate | {mt_stats['verification_rate']}% |")
+      w(
+          f"| Correction rate | % of sessions where user had to "
+          f"dispute or correct the agent's answer "
+          f"| {mt_stats['correction_rate']}% |"
+      )
+      w(
+          f"| Verification rate | % of sessions where user asked the agent "
+          f"to double-check or verify its response "
+          f"| {mt_stats['verification_rate']}% |"
+      )
     w("")
 
   # --- Category Distributions (primary metrics only) ---
   _PRIMARY_METRICS = {"response_usefulness", "task_grounding"}
   w("## Category Distributions")
+  w("")
+  w(
+      "Breakdown of the two primary evaluation metrics. "
+      "**Response usefulness** measures whether the agent's answer "
+      "was helpful to the user. "
+      "**Task grounding** measures whether the agent used its tools "
+      "to look up facts rather than relying on its own knowledge."
+  )
   w("")
   for metric_name, dist in report.category_distributions.items():
     if metric_name not in _PRIMARY_METRICS:
@@ -1836,9 +2099,15 @@ def _write_md_report(report, resolved_map, args):
     w("")
 
   # --- Per-Agent Quality ---
-  agent_stats = _build_agent_stats(report, resolved_map)
   if agent_stats:
     w("## Per-Agent Quality")
+    w("")
+    w(
+        "Quality breakdown by responding agent. Helpful = meaningful + "
+        "declined (both are correct agent behavior). "
+        "Status: \U0001f7e2 >= 80% helpful, "
+        "\U0001f7e1 >= 60%, \U0001f534 < 60%."
+    )
     w("")
     w(
         "| Agent | Sessions | Helpful | Declined | Unhelpful | Partial | Status |"
@@ -1925,7 +2194,8 @@ def _write_md_report(report, resolved_map, args):
   w("")
 
   # Write file
-  report_dir = os.path.join(_script_dir, "reports")
+  if report_dir is None:
+    report_dir = os.path.join(_script_dir, "reports")
   os.makedirs(report_dir, exist_ok=True)
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
   report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
@@ -2137,6 +2407,16 @@ Examples:
       "--time-period are ignored.",
   )
   parser.add_argument(
+      "--conversations-file",
+      type=str,
+      default=None,
+      metavar="PATH",
+      help="JSON file with local conversations to evaluate (no BigQuery "
+      "required). Expects {\"conversations\": [...]} or a plain list of "
+      "conversation dicts. When set, traces are scored locally via the "
+      "Gemini API instead of being fetched from BigQuery.",
+  )
+  parser.add_argument(
       "--env",
       type=str,
       default=None,
@@ -2150,6 +2430,16 @@ Examples:
 
   _configure_logging()
   _load_dotenv(env_file=args.env)
+
+  if args.conversations_file:
+    for var, default in [
+        ("PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "local")),
+        ("DATASET_ID", "local"),
+        ("TABLE_ID", "conversations"),
+        ("DATASET_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "local")),
+    ]:
+      os.environ.setdefault(var, default)
+
   _load_config()
 
   if args.eval:
