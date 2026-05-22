@@ -1602,6 +1602,11 @@ _DIMENSION_SCORES = {
 
 _DIMENSION_NAMES = list(_DIMENSION_SCORES.keys())
 
+_DIMENSION_LOW_CATEGORIES = {
+    dim: next(cat for cat, score in cats.items() if score == 0)
+    for dim, cats in _DIMENSION_SCORES.items()
+}
+
 # Short descriptions for the markdown report's Quality Dimensions table.
 _DIMENSION_DESCRIPTIONS = {
     "correctness": "Are the facts in the response accurate?",
@@ -1992,6 +1997,57 @@ def _md_write_session_section(
     w("")
 
 
+def _md_find_low_dimension_sessions(report, dimension, low_category):
+  """Return session results that scored lowest on a quality dimension."""
+  results = []
+  for sr in report.session_results:
+    for mr in sr.metrics:
+      if mr.metric_name == dimension and mr.category == low_category:
+        results.append((sr, mr))
+        break
+  return results
+
+
+def _md_write_low_dimension_section(
+    w, title, dimension_label, report, dimension, low_category,
+    md_samples, resolved_map,
+):
+  """Write a Low X Sessions section in the markdown report."""
+  low_sessions = _md_find_low_dimension_sessions(
+      report, dimension, low_category,
+  )
+  if not low_sessions:
+    return
+  shown = low_sessions if md_samples is None else low_sessions[:md_samples]
+  w(f"## {title}")
+  w("")
+  if len(shown) < len(low_sessions):
+    w(f"*Showing {len(shown)} of {len(low_sessions)}*")
+    w("")
+  for sr, mr in shown:
+    sid = sr.session_id
+    ctx = resolved_map.get(sid, {})
+    question = ctx.get("question", "")
+    response = ctx.get("response", "")
+    answered_by = ctx.get("answered_by", "")
+    q = " ".join(question.split()) if question else "(none)"
+    r = " ".join(response.split()) if response else "(none)"
+
+    w(f"### `{sid}` → {answered_by}")
+    w("")
+    w(f"- **Question:** {q}")
+    r_display = (r[:500] + "…") if len(r) > 500 else r
+    w(f"- **Response:** {r_display}")
+    w(f"- **{dimension_label}:** {_category_label(mr.category)}")
+    if mr.justification:
+      w(f"  - *{mr.justification}*")
+
+    scorecard = _md_dimension_scorecard(sr)
+    if scorecard:
+      w(f"- **Dimensions:** {scorecard}")
+    w("")
+
+
 def _write_md_report(report, resolved_map, args, report_dir=None):
   lines = []
   w = lines.append
@@ -2022,39 +2078,74 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
   total = report.total_sessions
   fp_rate = (fp_count / total * 100) if total > 0 else 0.0
 
-  # --- Table of Contents ---
-  w("## Table of Contents")
-  w("")
-  w("- [Summary](#summary)")
   dim_avgs = _compute_dimension_averages(report)
-  if any(v > 0 for v in dim_avgs.values()):
-    w("- [Quality Dimensions](#quality-dimensions)")
+  has_dims = any(v > 0 for v in dim_avgs.values())
   mt_stats = _compute_multiturn_stats(resolved_map)
-  if mt_stats:
-    w("- [Multi-Turn Efficiency](#multi-turn-efficiency)")
-  w("- [Category Distributions](#category-distributions)")
   agent_stats = _build_agent_stats(report, resolved_map)
+  _samples_dict = _parse_samples(args.samples)
+
+  low_dims = {}
+  for dim, low_cat in _DIMENSION_LOW_CATEGORIES.items():
+    sessions = _md_find_low_dimension_sessions(report, dim, low_cat)
+    if sessions:
+      low_dims[dim] = sessions
+
+  # --- Table of Contents ---
+  w("<!-- TOC -->")
+  w("")
+  toc = []
+  toc.append("  * [Summary](#summary)")
+  if has_dims:
+    toc.append("  * [Quality Dimensions](#quality-dimensions)")
+  if mt_stats:
+    toc.append("  * [Multi-Turn Efficiency](#multi-turn-efficiency)")
+  toc.append("  * [Category Distributions](#category-distributions)")
   if agent_stats:
-    w("- [Per-Agent Quality](#per-agent-quality)")
+    toc.append("  * [Per-Agent Quality](#per-agent-quality)")
   if by_category.get("unhelpful"):
-    w("- [Unhelpful Sessions](#unhelpful-sessions)")
+    toc.append("  * [Unhelpful Sessions](#unhelpful-sessions)")
   if by_category.get("declined"):
-    w("- [Declined Sessions](#declined-sessions)")
+    toc.append("  * [Declined Sessions](#declined-sessions)")
+  for dim in low_dims:
+    label = _METRIC_LABELS.get(dim, dim)
+    title = f"Low {label} Sessions"
+    anchor = title.lower().replace(" ", "-")
+    toc.append(f"  * [{title}](#{anchor})")
   if by_category.get("partial"):
-    w("- [Partial Sessions](#partial-sessions)")
-  w("- [Execution Details](#execution-details)")
+    toc.append("  * [Partial Sessions](#partial-sessions)")
+  toc.append("  * [Execution Details](#execution-details)")
+  w("\n".join(toc))
+  w("")
+  w("<!-- /TOC -->")
   w("")
 
   # --- Summary ---
   w("## Summary")
   w("")
-  w(
-      "Overall classification of agent sessions by an LLM judge. "
-      "Each session is classified as meaningful (agent answered correctly), "
-      "declined (agent correctly refused an out-of-scope question), "
-      "partial (answer was incomplete or required corrections), "
-      "or unhelpful (agent failed to answer or gave wrong information)."
-  )
+
+  cmd_parts = ["./scripts/quality_report.sh", "--report"]
+  if args.limit and args.limit != 100:
+    cmd_parts.append(f"--limit {args.limit}")
+  tp = getattr(args, "time_period", None)
+  if tp:
+    cmd_parts.append(f"--time-period {tp}")
+  samples_val = getattr(args, "samples", None)
+  if samples_val:
+    cmd_parts.append(f"--samples {samples_val}")
+  config_val = getattr(args, "config", None)
+  if config_val:
+    cmd_parts.append(f"--config {config_val}")
+  if getattr(args, "app_name", None):
+    cmd_parts.append(f"--app-name {args.app_name}")
+  if getattr(args, "conversations_file", None):
+    cmd_parts.append(f"--conversations-file {args.conversations_file}")
+  if getattr(args, "env", None):
+    cmd_parts.append(f"--env {args.env}")
+  w(f"Markdown report generated by `{' '.join(cmd_parts)}`.")
+  w("")
+
+  w(f"**Eval model:** {model}  ")
+  w(f"**Sessions:** {total}  ")
   w("")
   w("| Metric | Value |")
   w("|--------|-------|")
@@ -2075,7 +2166,7 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
   w("")
 
   # --- Quality Dimensions (0-2 scale) ---
-  if any(v > 0 for v in dim_avgs.values()):
+  if has_dims:
     w("## Quality Dimensions")
     w("")
     w(
@@ -2213,7 +2304,6 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
     w("")
 
   # --- Unhelpful Sessions ---
-  _samples_dict = _parse_samples(args.samples)
   unhelpful_sessions = by_category.get("unhelpful", [])
   if unhelpful_sessions:
     _md_write_session_section(
@@ -2235,6 +2325,18 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
         _get_sample_limit(_samples_dict, "declined"),
         resolved_map,
         a2a_session_ids,
+    )
+
+  # --- Low Dimension Sessions ---
+  for dim, low_cat in _DIMENSION_LOW_CATEGORIES.items():
+    if dim not in low_dims:
+      continue
+    label = _METRIC_LABELS.get(dim, dim)
+    _md_write_low_dimension_section(
+        w, f"Low {label} Sessions", label,
+        report, dim, low_cat,
+        _get_sample_limit(_samples_dict, "low"),
+        resolved_map,
     )
 
   # --- Partial Sessions ---
