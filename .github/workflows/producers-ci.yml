@@ -19,11 +19,13 @@ on:
     branches: [main]
     paths:
       - 'producers/**'
+      - 'plugins/claude_code/**'
       - '.github/workflows/producers-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'producers/**'
+      - 'plugins/claude_code/**'
       - '.github/workflows/producers-ci.yml'
 
 concurrency:
@@ -91,7 +93,19 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      - name: List artifacts
+      - name: List wheel/sdist
+        run: ls -la dist/
+
+      - name: Install built wheel for plugin build
+        # Make `importlib.metadata.version` resolve correctly so the
+        # plugin manifest gets a real version stamped in, not the
+        # pyproject fallback.
+        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+
+      - name: Build Claude Code plugin artifact
+        run: python scripts/build_claude_plugin.py
+
+      - name: List plugin artifact
         run: ls -la dist/
 
       - uses: actions/upload-artifact@v4
