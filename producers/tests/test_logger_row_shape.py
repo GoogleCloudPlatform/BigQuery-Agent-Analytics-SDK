@@ -87,7 +87,15 @@ def test_writer_attribution_stamped_on_every_row(dry_run_config):
   assert "version" in writer
 
 
-def test_writer_mode_reflects_routing(tmp_path):
+def test_writer_mode_reflects_routing(tmp_path, monkeypatch):
+  # writer.mode is derived inside log_event before _emit_row runs, so
+  # stubbing _emit_row to a no-op lets us assert all three modes without
+  # hitting BigQuery for the direct/spool cases.
+  monkeypatch.setattr(
+      BigQueryAgentAnalyticsLogger,
+      "_emit_row",
+      lambda self, row: None,
+  )
   for kwargs, expected_mode in [
       ({"dry_run": True, "direct_write": False}, "dry_run"),
       ({"dry_run": False, "direct_write": True}, "direct"),
@@ -101,13 +109,12 @@ def test_writer_mode_reflects_routing(tmp_path):
         state_dir=str(tmp_path / f"state-{expected_mode}"),
         **kwargs,
     )
-    # Direct-write would hit BigQuery; force dry_run for the mode check.
-    config.dry_run = True
     logger = BigQueryAgentAnalyticsLogger(config)
     row = logger.log_event(event_type="STATE_DELTA")
-    # When dry_run is on, the mode is always "dry_run" — the writer block
-    # reflects the actual sink, not the configured intent.
-    assert row["attributes"]["writer"]["mode"] == "dry_run"
+    assert row["attributes"]["writer"]["mode"] == expected_mode, (
+        f"expected mode={expected_mode!r} for kwargs={kwargs!r}, got"
+        f" {row['attributes']['writer']['mode']!r}"
+    )
 
 
 def test_explicit_agent_override_propagates_to_row_and_writer(dry_run_config):
