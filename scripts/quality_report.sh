@@ -47,6 +47,14 @@ elif [ -f "${SCRIPT_DIR}/../.env" ]; then
     set +a
 fi
 
+# Short-circuit: pass --help / -h straight to Python (no env needed)
+for arg in "$@"; do
+    if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        python3 "${SCRIPT_DIR}/quality_report.py" "$@"
+        exit $?
+    fi
+done
+
 # Validate required env vars
 for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
     if [ -z "${!var}" ]; then
