@@ -3966,3 +3966,637 @@ class TestOrphanWatchdogOrchestratorIntegration:
             bq_client=_stub_bq_client([]),
             max_session_age_hours=bad,
         )
+
+
+# ====================================================================== #
+# Deploy-script boundary (issues #182 + #183 — split SAs + max-retries)   #
+# ====================================================================== #
+
+
+class TestDeployScriptHardening:
+  """Static checks on ``deploy_cloud_run_job.sh`` for the
+  production-posture defaults introduced by issues #182 + #183:
+  split runtime + scheduler-caller SAs by default with
+  ``--single-sa`` as the escape hatch, and ``--max-retries`` as
+  a CLI-tunable knob (default 2) that propagates both into the
+  ``gcloud run jobs deploy`` command and the runtime env."""
+
+  def _deploy_script_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "deploy_cloud_run_job.sh"
+    )
+
+  def _script_body(self) -> str:
+    return self._deploy_script_path().read_text()
+
+  def test_deploy_script_shell_syntax_clean_after_hardening(self):
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_split_sa_is_default_runtime_and_scheduler_distinct(self):
+    """The script must define the two SA names so the runtime
+    holds BigQuery/Vertex roles and the scheduler-caller holds
+    only ``roles/run.invoker`` — the least-privilege story
+    issue #182 wants as the default."""
+    body = self._script_body()
+    assert (
+        "bqaa-periodic-runtime-sa" in body
+    ), "default deploy must create a dedicated runtime SA"
+    assert (
+        "bqaa-periodic-scheduler-sa" in body
+    ), "default deploy must create a dedicated scheduler-caller SA"
+    # Both SAs created via ``_ensure_sa`` calls.
+    assert (
+        '_ensure_sa "$RUNTIME_SA_NAME"' in body
+        and '_ensure_sa "$SCHEDULER_SA_NAME"' in body
+    ), "deploy script must create runtime + scheduler SAs"
+
+  def test_single_sa_flag_falls_back_to_combined_identity(self):
+    """``--single-sa`` flips back to the pre-#182 combined SA so
+    customers who want the simpler identity model still have an
+    explicit opt-in."""
+    body = self._script_body()
+    assert "--single-sa" in body
+    assert (
+        "SINGLE_SA=false" in body
+    ), "the production default must be SINGLE_SA=false"
+    # The combined-identity branch sets both names to the legacy
+    # ``bqaa-periodic-sa`` so re-running with ``--single-sa``
+    # on an existing combined deploy doesn't strand the old SA.
+    assert (
+        'if [[ "$SINGLE_SA" == "true" ]]; then' in body
+        and 'RUNTIME_SA_NAME="bqaa-periodic-sa"' in body
+        and 'SCHEDULER_SA_NAME="bqaa-periodic-sa"' in body
+    )
+
+  def test_cloud_run_uses_runtime_sa_scheduler_uses_scheduler_sa(self):
+    """The two SAs must be wired to the right gcloud commands:
+    ``--service-account`` on the Cloud Run Job points at the
+    runtime SA (its BigQuery work needs the BQ roles); the
+    scheduler's ``--oauth-service-account-email`` points at the
+    scheduler-caller SA (only needs ``roles/run.invoker``)."""
+    body = self._script_body()
+    assert '--service-account "$RUNTIME_SA_EMAIL"' in body
+    assert (
+        '--oauth-service-account-email "$SCHEDULER_SA_EMAIL"' in body
+    ), "scheduler must use scheduler-caller SA, not runtime SA"
+    # Scheduler invoker grant lands on the scheduler-caller SA.
+    assert '--member "serviceAccount:${SCHEDULER_SA_EMAIL}"' in body, (
+        "roles/run.invoker on the Cloud Run Job must be granted "
+        "to the scheduler-caller SA, not the runtime SA"
+    )
+
+  def test_scheduler_invoker_grant_uses_retry_iam(self):
+    """PR #230 review P1: the same IAM-propagation race that
+    ``_retry_iam`` defends against on the project-level grants
+    also bites on the job-level ``roles/run.invoker`` grant —
+    the scheduler-caller SA was created seconds earlier in the
+    script's section 2, and ``gcloud run jobs add-iam-policy-
+    binding`` can read from a different replica that hasn't
+    seen it yet. Pre-fix the script ran the bare ``gcloud``
+    invocation; first-time split-SA deploys could fail here
+    after the Cloud Run Job was already deployed but before
+    the scheduler trigger was wired."""
+    body = self._script_body()
+    # The invoker grant must be wrapped in ``_retry_iam`` (just
+    # like the project-level grants), not run bare.
+    assert "_retry_iam gcloud run jobs add-iam-policy-binding" in body, (
+        "the scheduler-caller invoker grant must use _retry_iam to "
+        "tolerate the IAM-propagation race on fresh split-SA deploys"
+    )
+    # And it must NOT keep the pre-fix bare invocation around
+    # (defensive — a future refactor that re-introduces a
+    # second un-wrapped grant would slip through otherwise).
+    assert "\ngcloud run jobs add-iam-policy-binding" not in body, (
+        "no bare ``gcloud run jobs add-iam-policy-binding`` left "
+        "in the script — every invoker grant must route through "
+        "_retry_iam"
+    )
+
+  def test_max_retries_flag_default_two_and_propagates(self):
+    """``--max-retries`` defaults to 2 (issue #183 — was hard-
+    coded 1) and propagates both into ``gcloud run jobs deploy``
+    and the Cloud Run Job's env so the runtime's startup log
+    surfaces it."""
+    body = self._script_body()
+    assert (
+        'MAX_RETRIES="2"' in body
+    ), "deploy script must default --max-retries to 2"
+    assert (
+        "--max-retries) " in body or "--max-retries)" in body
+    ), "deploy script must accept --max-retries as a CLI flag"
+    # The gcloud invocation must use the variable, not a literal.
+    assert '--max-retries "$MAX_RETRIES"' in body, (
+        "gcloud run jobs deploy must pass the configured retry "
+        "count via the $MAX_RETRIES variable (was hard-coded 1)"
+    )
+    # And the runtime env must carry it for Cloud Logging
+    # correlation.
+    assert "BQAA_MAX_RETRIES=${MAX_RETRIES}" in body, (
+        "deploy script must surface BQAA_MAX_RETRIES in the env "
+        "var array so the runtime startup log can echo it"
+    )
+
+  def test_max_retries_rejects_non_integer(self):
+    """Operator typo: ``--max-retries abc`` must fail at the
+    deploy boundary, not surface as a less-obvious gcloud error
+    after the build."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--max-retries",
+            "abc",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "non-negative integer" in (result.stdout + result.stderr)
+
+  def test_run_job_reads_bqaa_max_retries_into_startup_log(self):
+    """The runtime entrypoint must read ``BQAA_MAX_RETRIES``
+    and include it in the structured startup log so operators
+    correlating Cloud Monitoring alert noise with retry behaviour
+    see the retry policy without ``gcloud run jobs describe``
+    (issue #183)."""
+    run_job = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "run_job.py"
+    )
+    if not run_job.exists():
+      pytest.skip("run_job.py not present in this checkout")
+    body = run_job.read_text()
+    assert "BQAA_MAX_RETRIES" in body
+    # The startup log must thread the value through so it lands
+    # in jsonPayload.
+    assert "max_retries=" in body, (
+        "run_job.py must pass max_retries into the _emit() call so "
+        "the Cloud Logging payload carries it"
+    )
+
+
+# ====================================================================== #
+# Terraform module surface (#186)                                         #
+# ====================================================================== #
+
+
+class TestTerraformModuleSurface:
+  """Static checks on the Terraform module that mirrors
+  ``deploy_cloud_run_job.sh`` (issue #186). Defaults must match
+  the post-#230 deploy surface: split runtime + scheduler-caller
+  SAs, ``max_retries = 2``, ``extraction_mode = 'ai-fallback'``.
+  Image build is intentionally outside the module — Terraform
+  takes the published container image URI as ``image_uri``.
+
+  These are file-content checks rather than ``terraform validate``
+  runs because the test environment doesn't ship the Terraform
+  binary. The checks pin the contract a customer reads from the
+  module files; a future maintainer who renames a variable / drops
+  a resource / changes a default fails these tests rather than
+  shipping a silently-broken module."""
+
+  def _tf_dir(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "terraform"
+    )
+
+  def _read(self, name: str) -> str:
+    return (self._tf_dir() / name).read_text()
+
+  def test_module_files_present(self):
+    tf = self._tf_dir()
+    if not tf.exists():
+      pytest.skip("terraform module not present in this checkout")
+    for filename in (
+        "versions.tf",
+        "variables.tf",
+        "main.tf",
+        "outputs.tf",
+        "README.md",
+        "terraform.tfvars.example",
+    ):
+      assert (tf / filename).is_file(), f"missing {filename}"
+
+  def test_required_variables_have_no_defaults(self):
+    """The six required inputs must have no ``default`` so a
+    ``terraform apply`` without them errors loud at the boundary
+    (same operator-typo defense the bash deploy's ``required``
+    block provides)."""
+    body = self._read("variables.tf")
+    required = (
+        "project_id",
+        "region",
+        "events_dataset_id",
+        "graph_dataset_id",
+        "schedule",
+        "image_uri",
+    )
+    for name in required:
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing from variables.tf"
+      assert (
+          "default" not in block
+      ), f"variable {name!r} must not have a default — it's required input"
+
+  def test_optional_variable_defaults_match_deploy_script(self):
+    """Optional vars' defaults must match the bash deploy's
+    post-#230 production posture so Terraform users get the same
+    behavior the README documents."""
+    body = self._read("variables.tf")
+    expected_defaults = {
+        "location": '"US"',
+        "job_name": '"bqaa-periodic-materialization"',
+        "extraction_mode": '"ai-fallback"',
+        "max_retries": "2",
+        "max_session_age_hours": "null",
+        "single_sa": "false",
+        "max_sessions": "null",
+        "lookback_hours": "6",
+        "overlap_minutes": "15",
+        "task_timeout_seconds": "1800",
+        # PR #231 review P2: a clean GCP project needs the
+        # BigQuery / Cloud Run / Cloud Scheduler / IAM APIs
+        # enabled before ``terraform apply`` will work. The
+        # module manages them by default; ``false`` is the
+        # opt-out for customers whose central infra repo
+        # manages project services elsewhere.
+        "manage_apis": "true",
+        # PR #231 live-E2E surface: Cloud Run v2 added a
+        # ``deletion_protection`` default of ``true`` in newer
+        # provider releases. The module defaults to ``false`` so
+        # ``terraform destroy`` works without a separate
+        # ``terraform apply`` to clear the flag — matches the
+        # bash deploy's ``gcloud run jobs delete`` lifecycle.
+        # Production deploys that want the safety net opt in via
+        # ``deletion_protection = true``.
+        "deletion_protection": "false",
+    }
+    for name, want in expected_defaults.items():
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing"
+      assert f"default     = {want}" in block or f"default = {want}" in block, (
+          f"variable {name!r} default must be {want!r}; " f"block:\n{block}"
+      )
+
+  def test_extraction_mode_validation_matches_bash(self):
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert 'contains(["ai-fallback", "compiled-only"]' in block, (
+        "extraction_mode validation must reject typos at the "
+        "Terraform boundary — same protection the bash deploy "
+        "provides via its case statement"
+    )
+
+  def test_outputs_cover_downstream_wiring(self):
+    body = self._read("outputs.tf")
+    for name in (
+        "runtime_sa_email",
+        "scheduler_sa_email",
+        "cloud_run_job_name",
+        "scheduler_name",
+        "graph_dataset_id",
+    ):
+      assert f'output "{name}"' in body, f"output {name!r} missing"
+
+  def test_split_sa_is_default_in_main(self):
+    """Two ``google_service_account`` resources by default; the
+    scheduler-caller SA gated on ``count = var.single_sa ? 0 : 1``
+    so ``--single-sa`` mode collapses to the runtime SA without
+    a duplicate-account-id conflict."""
+    body = self._read("main.tf")
+    assert 'resource "google_service_account" "runtime"' in body
+    assert 'resource "google_service_account" "scheduler"' in body
+    # The scheduler SA must be gated on single_sa.
+    scheduler_block = self._extract_resource_block(
+        body, "google_service_account", "scheduler"
+    )
+    assert scheduler_block is not None
+    assert "count" in scheduler_block, (
+        "scheduler SA resource must use ``count`` to collapse "
+        "to zero instances when ``var.single_sa`` is true"
+    )
+    assert "var.single_sa" in scheduler_block
+
+  def test_aiplatform_user_grant_conditional_on_extraction_mode(self):
+    """The Vertex AI grant must be conditional — granted in
+    ``ai-fallback`` (the default) so ``AI.GENERATE`` works, NOT
+    granted in ``compiled-only`` mode (matches the bash deploy's
+    conditional grant + #166's verification)."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_iam_member", "runtime_aiplatform_user"
+    )
+    assert block is not None, (
+        "runtime_aiplatform_user resource missing — needed for "
+        "the conditional Vertex AI grant"
+    )
+    assert "count" in block
+    assert 'var.extraction_mode == "ai-fallback"' in block
+
+  def test_cloud_run_job_uses_runtime_sa_and_max_retries(self):
+    """The Cloud Run v2 Job must point at the runtime SA + propagate
+    the ``var.max_retries`` value — the two flagship #230
+    contract points."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job", "periodic"
+    )
+    assert block is not None
+    assert "service_account = google_service_account.runtime.email" in block
+    assert "max_retries     = var.max_retries" in block, (
+        "Cloud Run Job must wire var.max_retries (not a literal) "
+        "so the issue #183 tunable applies"
+    )
+    assert "image = var.image_uri" in block, (
+        "Cloud Run Job's container image must come from "
+        "``var.image_uri`` — image build is outside the module"
+    )
+
+  def test_scheduler_invoker_grant_lands_on_scheduler_sa(self):
+    """The ``roles/run.invoker`` grant on the Cloud Run Job must
+    land on the scheduler-caller SA (the SA the scheduler
+    trigger's OAuth identity uses), not the runtime SA — the
+    least-privilege contract from issue #182."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job_iam_member", "scheduler_invoker"
+    )
+    assert block is not None
+    assert "serviceAccount:${local.scheduler_sa_email}" in block, (
+        "scheduler_invoker grant must use local.scheduler_sa_email "
+        "(NOT runtime SA) so the least-privilege contract holds"
+    )
+
+  def test_scheduler_uses_scheduler_sa_for_oauth(self):
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_scheduler_job", "periodic_cron"
+    )
+    assert block is not None
+    assert "service_account_email = local.scheduler_sa_email" in block, (
+        "Cloud Scheduler OAuth identity must be the scheduler-caller "
+        "SA, mirroring the bash deploy's "
+        '``--oauth-service-account-email "$SCHEDULER_SA_EMAIL"``'
+    )
+
+  def test_env_vars_match_deploy_script_surface(self):
+    """The Cloud Run Job env-var set must mirror the bash deploy's
+    ENV_VARS array (issue #186 wants Terraform to land the same
+    runtime config the bash deploy ships)."""
+    body = self._read("main.tf")
+    # Every env var the bash deploy sets must appear in the
+    # locals block's env_vars map.
+    for env_name in (
+        "BQAA_PROJECT_ID",
+        "BQAA_EVENTS_DATASET_ID",
+        "BQAA_GRAPH_DATASET_ID",
+        "BQAA_LOCATION",
+        "BQAA_LOOKBACK_HOURS",
+        "BQAA_OVERLAP_MINUTES",
+        "BQAA_EXTRACTION_MODE",
+        "BQAA_MAX_RETRIES",
+        "BQAA_MAX_SESSIONS",
+        "BQAA_MAX_SESSION_AGE_HOURS",
+        "BQAA_REFERENCE_EXTRACTORS_MODULE",
+    ):
+      assert env_name in body, (
+          f"env var {env_name!r} missing from the Cloud Run Job "
+          f"config — Terraform must wire the same env surface as "
+          f"the bash deploy"
+      )
+
+  def test_image_build_documented_as_outside_module(self):
+    """README must spell out that the container image build /
+    publish is outside the module so customers don't expect the
+    Cloud Buildpacks ``--source`` flow the bash deploy uses."""
+    readme = self._read("README.md")
+    # The README must spell out the out-of-scope decision in plain
+    # text so a customer reading top-to-bottom hits it before they
+    # try to ``terraform apply`` without a published image.
+    assert "image build" in readme.lower()
+    assert (
+        "outside the module" in readme.lower()
+        or "outside this module" in readme.lower()
+    )
+    assert "image_uri" in readme
+
+  def test_readme_points_at_build_image_helper(self):
+    """PR #231 review P1: the README's recommended image-build
+    command must point at ``build_image.sh`` (which assembles the
+    staging layout the runtime expects). Pointing
+    ``gcloud builds submit`` at the bare ``periodic_materialization``
+    dir would produce an image missing the SDK vendor, Procfile,
+    and demo artifacts."""
+    readme = self._read("README.md")
+    assert "build_image.sh" in readme, (
+        "Terraform README must point at the build_image.sh staging "
+        "helper rather than a direct ``gcloud builds submit`` "
+        "against the periodic_materialization directory (which "
+        "lacks the staging layout the runtime needs)"
+    )
+    # The bash deploy's staging layout is documented in
+    # ``build_image.sh``; here we just sanity-check the helper
+    # exists.
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    assert helper.exists(), (
+        f"build_image.sh missing at {helper} — the Terraform README "
+        f"points at it"
+    )
+    # The script must be executable so customers can call it
+    # directly (no ``bash build_image.sh ...`` workaround).
+    assert (
+        helper.stat().st_mode & 0o111
+    ), "build_image.sh must be marked executable"
+
+  def test_build_image_stages_full_layout(self):
+    """The staging helper must produce the same on-disk layout
+    the bash deploy assembles in its temp dir (Procfile + run_job
+    + reference_extractor + demo artifacts + vendored SDK source
+    + requirements.txt). Any drift would make Terraform-built
+    images behave differently from bash-built ones."""
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    if not helper.exists():
+      pytest.skip("build_image.sh not present")
+    body = helper.read_text()
+    # Every file the bash deploy stages must be cp'd by the
+    # helper.
+    for needed in (
+        '"${SCRIPT_DIR}/run_job.py"',
+        '"${ARTIFACTS_DIR}/ontology.yaml"',
+        '"${ARTIFACTS_DIR}/binding.yaml"',
+        '"${ARTIFACTS_DIR}/table_ddl.sql"',
+        '"${ARTIFACTS_DIR}/reference_extractor.py"',
+        '"$REPO_ROOT/src/bigquery_agent_analytics"',
+        '"$REPO_ROOT/src/bigquery_ontology"',
+        '"$REPO_ROOT/pyproject.toml"',
+    ):
+      assert needed in body, f"build_image.sh missing staging copy for {needed}"
+    # Procfile + requirements.txt must be emitted, not copied
+    # (the bash deploy generates them inline; this helper
+    # generates the same content).
+    assert "Procfile" in body and "web: python run_job.py" in body
+    assert "./sdk_src" in body, (
+        "requirements.txt must install the SDK from the vendored "
+        "./sdk_src path (same as the bash deploy)"
+    )
+
+  def test_manage_apis_resource_present_with_disable_on_destroy_false(self):
+    """PR #231 review P2: a clean GCP project needs the required
+    APIs enabled. The module manages them via
+    ``google_project_service`` with
+    ``disable_on_destroy = false`` so a ``terraform destroy`` of
+    this module doesn't disable APIs other workloads might use."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_service", "required"
+    )
+    assert block is not None, (
+        "main.tf must declare google_project_service.required so "
+        "the apis the bash deploy expects manually-enabled are "
+        "managed by terraform"
+    )
+    # ``disable_on_destroy = false`` protects shared-API workloads.
+    assert "disable_on_destroy         = false" in block or (
+        "disable_on_destroy = false" in block
+    ), (
+        "google_project_service must set disable_on_destroy = false "
+        "so terraform destroy of this module doesn't disable shared "
+        "APIs other workloads on the project depend on"
+    )
+    # Each required API must be in the for_each locals block.
+    for api in (
+        "bigquery.googleapis.com",
+        "run.googleapis.com",
+        "cloudscheduler.googleapis.com",
+        "iam.googleapis.com",
+    ):
+      assert api in body, (
+          f"required API {api!r} must be in the project-service "
+          f"set so clean-project terraform apply doesn't fail with "
+          f"'API not enabled'"
+      )
+    # Vertex AI is conditional on extraction_mode.
+    assert (
+        'var.extraction_mode == "ai-fallback" ? ["aiplatform.googleapis.com"]'
+        in body
+    ), (
+        "aiplatform.googleapis.com must be enabled only in "
+        "ai-fallback mode — compiled-only doesn't call AI.GENERATE"
+    )
+
+  def test_extraction_mode_description_names_correct_failure_code(self):
+    """PR #231 review P3: the operator-facing variable description
+    must name the right failure code. Compiled-only extraction
+    gaps surface as ``empty_extraction`` (from B1's
+    structured-extraction harness). ``session_orphaned`` is a
+    different code emitted by the orphan watchdog
+    (``max_session_age_hours``)."""
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert "empty_extraction" in block, (
+        "extraction_mode description must name 'empty_extraction' "
+        "as the failure code for compiled-only extraction gaps"
+    )
+    # Defensive: if a future edit re-introduces the wrong code,
+    # we want it to fail loud. Allow ``session_orphaned`` to
+    # appear ONLY in a context that explicitly contrasts the two
+    # codes (the post-fix wording does this).
+    if "session_orphaned" in block:
+      assert "separate code" in block or "different" in block.lower(), (
+          "if session_orphaned is mentioned in the extraction_mode "
+          "description, it must be in a contrastive context "
+          "(explaining it's a separate watchdog code), not as the "
+          "failure code for compiled-only"
+      )
+
+  @staticmethod
+  def _extract_variable_block(body: str, name: str) -> str | None:
+    """Slice out one ``variable "name" { ... }`` block.
+
+    Brace-counting parser — Terraform syntax allows nested ``{``
+    in ``validation`` / ``description`` heredocs (we don't use
+    heredocs in this module, but the parser handles them
+    anyway). Returns None when the variable doesn't exist.
+    """
+    needle = f'variable "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None
+
+  @staticmethod
+  def _extract_resource_block(
+      body: str, resource_type: str, name: str
+  ) -> str | None:
+    needle = f'resource "{resource_type}" "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None

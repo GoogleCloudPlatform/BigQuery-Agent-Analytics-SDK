@@ -55,6 +55,13 @@ Env vars (all set by the deploy script via
   events table sometimes lags ingestion by tens of minutes.
 * ``BQAA_MAX_SESSIONS`` (default unset/unlimited) — cost
   guardrail.
+* ``BQAA_MAX_RETRIES`` (default unset) — informational only.
+  The deploy script (issue #183) sets this to the
+  ``gcloud run jobs deploy --max-retries`` value so the
+  runtime's startup log can surface it in Cloud Logging;
+  operators correlating alerts with retry behaviour see the
+  policy without ``gcloud run jobs describe``. The job itself
+  doesn't act on this value — Cloud Run owns the retry policy.
 * ``BQAA_BACKFILL`` (default ``false``) — set ``true`` to run a
   one-shot backfill of a fixed historical window instead of the
   steady-state cron. When set, ``BQAA_FROM`` and ``BQAA_TO`` are
@@ -428,6 +435,12 @@ def main() -> int:
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
       max_session_age_hours=max_session_age_hours,
+      # Informational only — surfaces the Cloud Run Job's
+      # ``--max-retries`` setting so operators reading Cloud
+      # Logging see the retry policy alongside the run's other
+      # config (issue #183). Cloud Run owns the actual retry
+      # behaviour; the runtime doesn't act on this value.
+      max_retries=os.environ.get("BQAA_MAX_RETRIES") or None,
   )
 
   try:
