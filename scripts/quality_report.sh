@@ -14,7 +14,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Parse --env flag before other processing
+# Parse --env flag before other processing (supports --env PATH and --env=PATH)
 ENV_FILE=""
 PASSTHROUGH_ARGS=()
 for arg in "$@"; do
@@ -25,6 +25,10 @@ for arg in "$@"; do
     fi
     if [ "$arg" = "--env" ]; then
         _NEXT_IS_ENV=1
+        continue
+    fi
+    if [[ "$arg" == --env=* ]]; then
+        ENV_FILE="${arg#--env=}"
         continue
     fi
     PASSTHROUGH_ARGS+=("$arg")
@@ -59,7 +63,7 @@ done
 for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
     if [ -z "${!var}" ]; then
         echo "ERROR: Required environment variable ${var} is not set."
-        echo "Set it in your shell or create a .env file. See scripts/README.md."
+        echo "Use --env /path/to/.env, or 'export ${var}=...' in your shell."
         exit 1
     fi
 done
