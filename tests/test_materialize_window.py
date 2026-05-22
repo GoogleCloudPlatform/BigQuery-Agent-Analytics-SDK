@@ -4057,6 +4057,33 @@ class TestDeployScriptHardening:
         "to the scheduler-caller SA, not the runtime SA"
     )
 
+  def test_scheduler_invoker_grant_uses_retry_iam(self):
+    """PR #230 review P1: the same IAM-propagation race that
+    ``_retry_iam`` defends against on the project-level grants
+    also bites on the job-level ``roles/run.invoker`` grant —
+    the scheduler-caller SA was created seconds earlier in the
+    script's section 2, and ``gcloud run jobs add-iam-policy-
+    binding`` can read from a different replica that hasn't
+    seen it yet. Pre-fix the script ran the bare ``gcloud``
+    invocation; first-time split-SA deploys could fail here
+    after the Cloud Run Job was already deployed but before
+    the scheduler trigger was wired."""
+    body = self._script_body()
+    # The invoker grant must be wrapped in ``_retry_iam`` (just
+    # like the project-level grants), not run bare.
+    assert "_retry_iam gcloud run jobs add-iam-policy-binding" in body, (
+        "the scheduler-caller invoker grant must use _retry_iam to "
+        "tolerate the IAM-propagation race on fresh split-SA deploys"
+    )
+    # And it must NOT keep the pre-fix bare invocation around
+    # (defensive — a future refactor that re-introduces a
+    # second un-wrapped grant would slip through otherwise).
+    assert "\ngcloud run jobs add-iam-policy-binding" not in body, (
+        "no bare ``gcloud run jobs add-iam-policy-binding`` left "
+        "in the script — every invoker grant must route through "
+        "_retry_iam"
+    )
+
   def test_max_retries_flag_default_two_and_propagates(self):
     """``--max-retries`` defaults to 2 (issue #183 — was hard-
     coded 1) and propagates both into ``gcloud run jobs deploy``

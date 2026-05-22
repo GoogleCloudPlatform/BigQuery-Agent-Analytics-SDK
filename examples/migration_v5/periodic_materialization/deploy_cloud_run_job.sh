@@ -64,11 +64,14 @@
 #    ``--set-env-vars``.
 #
 # 5. Enables the Cloud Scheduler API if it isn't already, and
-#    grants the same SA ``roles/run.invoker`` on the job so
-#    the scheduler trigger can actually invoke it.
+#    grants the scheduler-caller SA ``roles/run.invoker`` on
+#    the job so the scheduler trigger can actually invoke it.
+#    Default: ``bqaa-periodic-scheduler-sa``. Under
+#    ``--single-sa``: ``bqaa-periodic-sa`` (same as runtime).
 #
 # 6. Creates / updates the Cloud Scheduler job pointing at the
-#    Cloud Run Jobs ``:run`` endpoint, authenticated as the SA.
+#    Cloud Run Jobs ``:run`` endpoint, authenticated as the
+#    scheduler-caller SA.
 #
 # 7. If ``--smoke`` is passed, executes the job once via
 #    ``gcloud run jobs execute --wait`` and tails the logs —
@@ -708,13 +711,25 @@ gcloud services enable cloudscheduler.googleapis.com \
 # the ONLY role the scheduler-caller SA holds — least-privilege.
 # In ``--single-sa`` mode, ``$SCHEDULER_SA_EMAIL == $RUNTIME_SA_EMAIL``
 # so the grant lands on the same SA the runtime uses.
+#
+# Wrapped in ``_retry_iam`` because the same IAM-propagation race
+# the project-level grants above defend against also bites here
+# on a fresh split-SA deploy: ``bqaa-periodic-scheduler-sa`` was
+# created a few seconds earlier in section 2, but
+# ``gcloud run jobs add-iam-policy-binding`` can read from a
+# different IAM replica that hasn't seen the new SA yet and
+# returns ``INVALID_ARGUMENT: Service account ... does not exist``.
+# Before this wrapper landed, fresh split-SA deploys could fail
+# at this step after the Cloud Run Job was already deployed but
+# before the scheduler trigger was wired — leaving the deploy
+# half-done with no scheduler invoker grant.
 echo "==> granting roles/run.invoker on $JOB_NAME to $SCHEDULER_SA_EMAIL"
-gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
+_retry_iam gcloud run jobs add-iam-policy-binding "$JOB_NAME" \
   --project "$PROJECT" \
   --region "$REGION" \
   --member "serviceAccount:${SCHEDULER_SA_EMAIL}" \
   --role roles/run.invoker \
-  --quiet >/dev/null
+  --quiet
 
 # ----------------------------------------------------------- #
 # 6. Create / update the Cloud Scheduler trigger               #

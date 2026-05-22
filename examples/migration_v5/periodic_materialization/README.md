@@ -309,11 +309,12 @@ The script:
    identity is the SA, **not** the Compute Engine default
    service account — important, since the default SA may lack
    the dataset-level perms above.
-6. **Grants `roles/run.invoker`** on the job to the same SA
-   (the scheduler-caller side of the cross-product).
+6. **Grants `roles/run.invoker`** on the job to the
+   scheduler-caller SA (`bqaa-periodic-scheduler-sa` by default;
+   the same SA as the runtime under `--single-sa`).
 7. **Creates / updates a Cloud Scheduler HTTP job** that POSTs
-   to the Cloud Run Jobs `:run` endpoint with the SA's OAuth
-   identity.
+   to the Cloud Run Jobs `:run` endpoint with the
+   scheduler-caller SA's OAuth identity.
 
 ## Inspecting results
 
@@ -601,8 +602,15 @@ schedule: 0 */6 * * *
 state: ENABLED
 ```
 
-The OAuth identity matches the runtime SA — same SA serves
-both runtime and scheduler-caller as designed.
+**This evidence was captured pre-#182**, before the split-SA
+default. The OAuth identity here matches the runtime SA because
+the deploy at the time used the single combined
+``bqaa-periodic-sa``. New default deploys (post-#182) wire the
+scheduler trigger to a separate ``bqaa-periodic-scheduler-sa``
+that holds only ``roles/run.invoker`` on the job — the OAuth
+identity above would now read ``bqaa-periodic-scheduler-sa@…``
+instead. Pass ``--single-sa`` to restore the pre-#182 combined
+identity shown here.
 
 **IAM contract** verified post-deploy via the BigQuery client:
 
