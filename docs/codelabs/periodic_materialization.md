@@ -19,14 +19,18 @@ The codelab is self-contained from scratch. You will create the BigQuery dataset
 
 - A BigQuery property graph that describes a generic agent decision flow (Decision Request → Decision Option → Decision Outcome).
 - A populated `agent_events` table with a small synthetic event corpus you can re-generate.
-- A working `bqaa-materialize-window` run that fills the graph from those events. Cron this command from your scheduler of choice (Cloud Build, Workflows, external cron) to keep the graph fresh.
-- A Cloud Run Job + Cloud Scheduler trigger walked end-to-end against the SDK's bundled migration v5 demo artifacts as the deployment-pattern reference. (The deploy script doesn't yet accept arbitrary artifact paths; the codelab's custom graph runs through `materialize-window` directly.)
+- A working `bqaa-materialize-window` run — both in the default `AI.GENERATE` mode and in zero-LLM `--extraction-mode=compiled-only` mode. Cron this command from your scheduler of choice (Cloud Build, Workflows, external cron) to keep the graph fresh.
+- A one-shot backfill against a historical window using `--backfill --from / --to --state-key-suffix` — the same code path the cron uses, isolated from the live high-water mark.
+- A Cloud Run Job + Cloud Scheduler trigger walked end-to-end against the SDK's bundled migration v5 demo artifacts, deployed with the production-shape defaults shipped in 0.3.2: **split runtime + scheduler-caller service accounts, tunable `--max-retries`, and an opt-in orphan-session watchdog**. (The deploy script bundles the migration v5 artifacts today; for the codelab's custom graph you'll cron `materialize-window` directly. Adapting the deploy script to accept arbitrary artifact paths is tracked as an open follow-up.)
+- The same deploy as a Terraform module — the IaC mirror of the bash deploy, same six resources, behind `terraform plan` / drift detection.
 - An audit-style GQL query that traces a single decision end-to-end.
 
 ### What you'll learn
 
 - How the BigQuery Agent Analytics Plugin writes to `agent_events`.
-- How to deploy `bqaa-materialize-window` as a Cloud Run Job with a Cloud Scheduler trigger.
+- How to deploy `bqaa-materialize-window` as a Cloud Run Job with a Cloud Scheduler trigger — bash today, or Terraform if your team operates IaC.
+- The 0.3.2 production-shape deploy surface: split SAs, retries, orphan watchdog, compiled-only extraction.
+- How to backfill a historical window without disturbing the live cron.
 - How to apply a property-graph schema you authored to a BigQuery dataset.
 - How to query the resulting graph in GQL.
 
@@ -89,7 +93,7 @@ Duration: 0:03
 
 ### Clone the SDK repository
 
-The deploy script and the demo agent script live in the SDK repository:
+The deploy script, the Terraform module, and the demo agent script live in the SDK repository:
 
 ```bash
 git clone https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK.git
@@ -98,6 +102,10 @@ cd BigQuery-Agent-Analytics-SDK
 
 ### Set up a Python virtual environment
 
+Pick one of the two install paths. The codelab works either way.
+
+**Option A: editable from the clone** (recommended if you want to read the source or iterate on the SDK while you go):
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -105,15 +113,28 @@ pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-The `[dev]` extra brings the test toolchain. Install takes about a minute.
-
-Verify:
+**Option B: pinned from PyPI** (recommended if you're treating the SDK as a black box):
 
 ```bash
-PYTHONPATH=src python -m bigquery_agent_analytics.cli --help | head -8
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install 'bigquery-agent-analytics>=0.3.2'
 ```
 
-You should see the CLI banner with subcommands including `materialize-window`.
+0.3.2 is the release that closes the migration v5 production track (issue [#187](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/187)) and lands every flag this codelab uses. The single-quotes around the pin are required so the shell doesn't interpret `>=` as a redirection operator. Install takes about a minute either way.
+
+Verify (use the first form if you took Option A, the second if you took Option B):
+
+```bash
+# Option A — editable install
+PYTHONPATH=src python -m bigquery_agent_analytics.cli --help | head -8
+
+# Option B — PyPI install (no PYTHONPATH needed)
+bqaa-materialize-window --help | head -8
+```
+
+You should see the CLI banner. The rest of the codelab uses the Option A invocation (`PYTHONPATH=src python -m bigquery_agent_analytics.cli materialize-window ...`); if you took Option B, substitute `bqaa-materialize-window` for that whole prefix.
 
 ### Authenticate
 
@@ -279,6 +300,15 @@ relationships:
     from_columns: [request_id]
     to_columns:   [outcome_id]
 ```
+
+`from_columns` accepts two shapes. The list shape above (`[request_id]`) works when the foreign-key column on the edge has the same name as the primary-key column on the source entity. When the FK column has a different name — or when the edge is a self-edge (a relationship from an entity type back to itself) — use the dict shape so the materializer can disambiguate:
+
+```yaml
+# Dict shape — FK column on the edge -> PK column on the source entity:
+from_columns: {parent_request_id: request_id}
+```
+
+The dict shape is required for self-edges and recommended whenever the FK column doesn't share the source PK's name. For this codelab's binding both columns are called `request_id`, so the list shape works.
 
 ### Render the placeholders in binding.yaml
 
@@ -529,10 +559,63 @@ bq query --use_legacy_sql=false \
 
 You should see five rows. If you see zero, check that the local run reported `sessions_materialized > 0`.
 
-## Run the deploy as a worked example
-Duration: 0:10
+### A note on the zero-LLM extraction path
 
-The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It runs `bqaa-materialize-window` as a Cloud Run Job, creates a runtime service account with the narrow IAM the job needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end. The script today bundles its own demo artifacts (the migration v5 ontology, binding, and property-graph DDL); the artifacts the codelab walked you through are not yet pluggable into this script. Adapting the script to accept arbitrary artifact paths is an open follow-up; file an issue or PR against the SDK repository if your team needs it.
+The local run above uses the default extractor, which calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The SDK also ships a `--extraction-mode=compiled-only` flag that swaps in a **compiled reference extractor** — deterministic Python, no Vertex AI dependency, the audited code path. Production deployments that need to certify their data path to a regulator typically run `--extraction-mode=compiled-only` and remove `roles/aiplatform.user` from the runtime service account entirely.
+
+Running compiled-only mode requires a `reference_extractor.py` keyed to your ontology. The SDK's migration v5 example ships a reference extractor — that's what the live notebook smoke tests run against. For your own graph you author one extractor module that maps event-content shape to entity-and-relationship dicts; the materializer wires the rest. The codelab's custom DecisionRequest graph doesn't ship a reference extractor, so the codelab stays on the `AI.GENERATE` default. When you're ready, the migration v5 reference extractor at [`examples/migration_v5/reference_extractor.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/reference_extractor.py) is the template to copy from.
+
+### Backfill a historical window
+
+The same code path the cron uses can also be pointed at a fixed historical window — useful when events arrived during an outage, when a binding change requires a one-shot re-extraction, or when an audit committee asks for a specific quarter. Backfill mode writes its high-water mark to an **isolated** state-table namespace (controlled by `--state-key-suffix`) so it never disturbs the live cron's checkpoint.
+
+Re-seed a few events with a backdated timestamp to give the backfill something to find:
+
+```bash
+python seed_events.py \
+    --project-id "$PROJECT_ID" \
+    --dataset-id "$EVENTS_DATASET" \
+    --sessions 3
+```
+
+Then run a backfill against the last 48 hours, into an isolated state-table namespace:
+
+```bash
+FROM=$(date -u -d "48 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+       || date -u -v-48H +"%Y-%m-%dT%H:%M:%SZ")
+TO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+PYTHONPATH=$HOME/BigQuery-Agent-Analytics-SDK/src \
+python -m bigquery_agent_analytics.cli materialize-window \
+    --project-id "$PROJECT_ID" \
+    --dataset-id "$EVENTS_DATASET" \
+    --ontology ~/bqaa-codelab/ontology.yaml \
+    --binding ~/bqaa-codelab/binding.yaml \
+    --lookback-hours 1 \
+    --backfill --from "$FROM" --to "$TO" \
+    --state-key-suffix codelab_backfill_demo \
+    --format json
+```
+
+(The `date -u -d ...` form is GNU `date` on Linux / Cloud Shell; the `date -u -v-48H` form is BSD `date` on macOS. The `||` falls back to the macOS form if the GNU form fails.)
+
+You should see a JSON report with the backfill window's `sessions_materialized` count, and the state table will have a new row whose `state_key` is hashed from the suffix you passed:
+
+```bash
+bq query --use_legacy_sql=false \
+    "SELECT mode, scan_start, scan_end, sessions_materialized, ok \
+     FROM \`$PROJECT_ID.$GRAPH_DATASET._bqaa_materialization_state\` \
+     ORDER BY run_started_at DESC LIMIT 5"
+```
+
+You should see at least two rows: one from the cron-style local run earlier in this section (a `mode` row corresponding to the standard scan), and one from the backfill (with a different `state_key` because the suffix changes the hash input). The live cron's high-water mark — sitting under its own `state_key` — is untouched. That's the property that lets backfill run concurrently with production cron.
+
+## Run the deploy as a worked example
+Duration: 0:12
+
+The SDK ships `deploy_cloud_run_job.sh` under the migration v5 example directory. It runs `bqaa-materialize-window` as a Cloud Run Job, creates the service accounts with the narrow IAM the deploy needs, wires a Cloud Scheduler trigger, and — with the `--smoke` flag — runs the job once after deploy to verify end-to-end. The 0.3.2 release of the script lands every resource with **production-shape defaults**: split runtime + scheduler-caller service accounts, `--max-retries=2`, a structured JSON log on every run, and an optional `--max-session-age-hours` orphan watchdog.
+
+The script bundles the migration v5 example's artifacts (the ontology, binding, property-graph DDL, and reference extractor); the artifacts the codelab walked you through are not yet pluggable into this script. Adapting the script to accept arbitrary artifact paths is an open follow-up — file an issue against the SDK repository if your team needs it. For the codelab graph, the recommended pattern today is to cron the local `materialize-window` command from Cloud Build or Cloud Workflows; see the [customer playbook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/periodic_materialization/README.md) for both shapes.
 
 For this codelab, the cleanest way to see the full Cloud Run + Cloud Scheduler shape end-to-end is to run the deploy as-is. It deploys the migration v5 example into your project — separate datasets from the ones you've been using — so you can observe a real `bqaa-periodic-materialization` job firing on cron, the JSON-log output, and the IAM grants the deploy expects. Once you've seen the moving parts you can fork the script to bundle your own artifacts.
 
@@ -557,19 +640,27 @@ bq --location=US mk --dataset "$PROJECT_ID:bqaa_demo_graph"  || true
 
 The first deploy takes about three minutes. You should see, in order:
 
-1. Creating the runtime service account `bqaa-periodic-sa`.
-2. Granting IAM: `dataViewer` on the events dataset, `dataEditor` on the graph dataset, `bigquery.jobUser` and `aiplatform.user` at the project, `run.invoker` on the Cloud Run Job for the scheduler service account.
+1. Creating the **runtime** service account `bqaa-periodic-runtime-sa` and the **scheduler-caller** service account `bqaa-periodic-scheduler-sa`. Two SAs by default — the runtime SA holds the BigQuery + Vertex AI permissions the Cloud Run Job needs at execution time, the scheduler SA holds only `roles/run.invoker` on the job. This is the least-privilege posture; if you want the old single-SA shape (one identity for both roles), pass `--single-sa` and the script creates a combined `bqaa-periodic-sa` instead.
+2. Granting IAM: `dataViewer` on the events dataset and `dataEditor` on the graph dataset for the runtime SA; `bigquery.jobUser` and (in default `ai-fallback` extraction mode) `aiplatform.user` at the project; `run.invoker` on the Cloud Run Job for the scheduler SA.
 3. Building the container via Cloud Build.
-4. Deploying the Cloud Run Job `bqaa-periodic-materialization`.
-5. Creating the Cloud Scheduler trigger `bqaa-periodic-materialization-cron` (cron `0 */6 * * *` — every six hours on the hour).
+4. Deploying the Cloud Run Job `bqaa-periodic-materialization` with environment variables for `--max-retries`, `--lookback-hours`, `--overlap-minutes`, and the extraction mode.
+5. Creating the Cloud Scheduler trigger `bqaa-periodic-materialization-cron` (cron `0 */6 * * *` — every six hours on the hour) authenticated as the scheduler SA.
 6. Running the smoke check.
 7. A structured JSON report.
 
 If the smoke check reports `ok: true`, the production-shape deploy is complete. The job will fire again at the top of the next six-hour window.
 
-### Until the deploy script accepts your artifacts: cron the local command
+### Optional flags worth knowing
 
-For the codelab graph you authored, the simplest "every six hours" cadence today is to run the same `bqaa-materialize-window` command from a Cloud Build trigger (or Cloud Workflows, or any external scheduler) on a cron. The local command from the previous section is what fires; the artifacts live in your git repository or a Cloud Storage bucket the scheduler reads from. The migration v5 deploy script is the worked example of how to package the same command into a Cloud Run Job once you're ready.
+The deploy script accepts a handful of optional flags that map to operational knobs:
+
+- `--extraction-mode compiled-only` — the zero-LLM audited path. Requires a reference extractor keyed to your ontology (the bundled migration v5 example ships one; the codelab's custom graph does not). Removes the `roles/aiplatform.user` grant from the runtime SA automatically.
+- `--max-retries N` — in-window retry budget for transient failures (default `2`). Surfaces as the `BQAA_MAX_RETRIES` env var inside the Cloud Run Job.
+- `--max-session-age-hours N` — opt-in orphan watchdog. Sessions older than `N` hours that haven't terminated are flagged as orphaned and written to the state table with `mode = 'orphan_scan'`, so an operator can drain stale state without the cron silently re-pulling broken sessions forever.
+- `--max-sessions N` — cap the per-window batch size (default unlimited). Useful for hostile event spikes.
+- `--single-sa` — collapse the two SAs into one combined `bqaa-periodic-sa`. The split is recommended; this flag exists for migration ergonomics from earlier versions.
+
+The deploy as written above takes none of these — it uses the production defaults. Re-running with any of them is idempotent (the script skips resources that already exist and updates only what changed).
 
 ### Read the JSON log
 
@@ -589,6 +680,46 @@ The fields to know:
 - `jsonPayload.failures[].error_code` — `empty_extraction` (AI/IAM issue) or `materialization_failed` (schema/write-perm issue).
 
 A single Cloud Monitoring alert on `jsonPayload.ok = false` is the recommended posture. The `error_code` field tells the operator which Google Cloud configuration to inspect without log digging.
+
+### The same deploy as Terraform (alternative path)
+
+Teams that operate infrastructure-as-code can land the same six resources through a Terraform module instead of the bash script. The module lives at [`examples/migration_v5/periodic_materialization/terraform/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization/terraform) and mirrors the bash deploy exactly: same SA names, same IAM grants, same Cloud Run Job env vars, same scheduler trigger. The bash deploy is lighter-weight onboarding; the Terraform module is the same six resources behind `terraform plan`, drift detection, and multi-environment promotion.
+
+The Terraform module takes the **container image URI as a required input** — it doesn't build the image inline the way the bash deploy does. The SDK bundles a `build_image.sh` helper that stages the exact layout the bash deploy assembles (run script, reference extractor, demo artifacts, vendored SDK source, `Procfile`, `requirements.txt`) and runs `gcloud builds submit` against the staging dir. Same image contents either way; Terraform just consumes the publish artifact instead of doing the build inline.
+
+If you've already run the bash deploy in this codelab and want to see the Terraform path, skip ahead to the cleanup section first to free the resource names. Then:
+
+```bash
+# Build and publish the container image.
+cd $HOME/BigQuery-Agent-Analytics-SDK
+IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
+    --project "$PROJECT_ID" \
+    --repo bqaa \
+    --region "$REGION" \
+    --create-repo)"
+echo "$IMAGE_URI"
+# → us-central1-docker.pkg.dev/your-project/bqaa/periodic-materialization:<tag>
+
+# Configure Terraform variables.
+cd examples/migration_v5/periodic_materialization/terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars: set project_id, region, image_uri, etc.
+
+# Plan and apply.
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+
+# Smoke the deployed job.
+gcloud run jobs execute "$(terraform output -raw cloud_run_job_name)" \
+    --project "$PROJECT_ID" \
+    --region "$REGION" \
+    --wait
+```
+
+`terraform output` then prints the runtime SA email, scheduler SA email, the Cloud Run Job name, and the scheduler trigger name as machine-readable values your downstream wiring can consume. Tear down with `terraform destroy` instead of the per-resource `gcloud ... delete` commands.
+
+See [`terraform/README.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/periodic_materialization/terraform/README.md) for the full variable reference, the recommended GCS-backend state-file block, and the bash-vs-Terraform comparison matrix.
 
 ## Query the graph
 Duration: 0:05
@@ -638,7 +769,14 @@ Conversational Analytics resolves the question against the graph and returns a s
 ## Clean up
 Duration: 0:03
 
-Tear down what you created so you don't get billed for an idle Cloud Run Job. The resource names below match the defaults the deploy script uses (`bqaa-periodic-materialization` for the job, `bqaa-periodic-materialization-cron` for the scheduler, `bqaa-periodic-sa` for the service account). If you customized any of them with `--job-name`, substitute accordingly.
+Tear down what you created so you don't get billed for an idle Cloud Run Job. If you used the **Terraform path**, the cleanest teardown is one command:
+
+```bash
+cd $HOME/BigQuery-Agent-Analytics-SDK/examples/migration_v5/periodic_materialization/terraform
+terraform destroy
+```
+
+If you used the **bash deploy path**, the per-resource teardown follows. The resource names below match the deploy script's defaults: `bqaa-periodic-materialization` for the job, `bqaa-periodic-materialization-cron` for the scheduler, `bqaa-periodic-runtime-sa` + `bqaa-periodic-scheduler-sa` for the two service accounts (split SAs are the 0.3.2 default; if you passed `--single-sa`, delete `bqaa-periodic-sa` instead). If you customized the job name with `--job-name`, substitute accordingly.
 
 ```bash
 # Cloud Scheduler trigger
@@ -659,10 +797,18 @@ bq rm -r -f --dataset "$PROJECT_ID:$GRAPH_DATASET"
 bq rm -r -f --dataset "$PROJECT_ID:bqaa_demo_events" 2>/dev/null || true
 bq rm -r -f --dataset "$PROJECT_ID:bqaa_demo_graph"  2>/dev/null || true
 
-# Runtime service account (optional)
+# Service accounts (split-SA default — delete both)
+gcloud iam service-accounts delete \
+    "bqaa-periodic-runtime-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+    --project="$PROJECT_ID" --quiet 2>/dev/null || true
+gcloud iam service-accounts delete \
+    "bqaa-periodic-scheduler-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+    --project="$PROJECT_ID" --quiet 2>/dev/null || true
+
+# If you deployed with --single-sa, this is the one to delete instead:
 gcloud iam service-accounts delete \
     "bqaa-periodic-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-    --project="$PROJECT_ID" --quiet
+    --project="$PROJECT_ID" --quiet 2>/dev/null || true
 ```
 
 ## Congratulations
@@ -673,7 +819,9 @@ You have:
 - Provided a BigQuery property graph for your agent's decision domain.
 - Populated `agent_events` with a synthetic event corpus.
 - Run `bqaa-materialize-window` locally to fill the graph from those events.
-- Deployed a Cloud Run Job + Cloud Scheduler trigger that keeps the graph fresh every six hours.
+- Backfilled a historical window into an isolated state-table namespace without disturbing the live cron's checkpoint.
+- Deployed a Cloud Run Job + Cloud Scheduler trigger that keeps the graph fresh every six hours, with the 0.3.2 production defaults: split runtime + scheduler-caller service accounts, tunable retries, structured JSON logs, and the option to enable an orphan-session watchdog or swap to the zero-LLM compiled-only extraction path.
+- Seen the same deploy expressed as a Terraform module that drops into an existing IaC pipeline.
 - Queried the graph in GQL and seen the audit-style answer.
 
 The pattern works wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, internal IT. Swap the demo graph for the one your team designs for your domain, point the deploy at your `agent_events` table, and the audit answer is one query away.
@@ -682,7 +830,11 @@ The pattern works wherever an agent makes consequential decisions: credit underw
 
 - [BigQuery Agent Analytics SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
 - [Customer playbook for periodic materialization](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/periodic_materialization/README.md) — required APIs, IAM matrix, recommended schedules, Cloud Monitoring alert queries, troubleshooting.
+- [Terraform module for periodic materialization](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization/terraform) — IaC mirror of the bash deploy: same six resources, variable reference, GCS state-backend block, bash-vs-Terraform comparison.
+- [Migration v5 demo notebook (Beats 1–5)](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5_demo_notebook.ipynb) — the end-to-end walk through the SDK's four decision-lineage guarantees plus the outcome-signal feedback / reward loop, run against a live BigQuery project.
+- [Reference extractor pattern](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/reference_extractor.py) — template for the compiled-only extraction path your team would author for a regulated deployment.
+- [CHANGELOG `[0.3.2]` block](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/CHANGELOG.md) — the full Added + Fixed surface from the migration v5 production track release, with PR references for every flag mentioned in this codelab.
 - [BigQuery property graphs documentation](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
 - [BigQuery Conversational Analytics documentation](https://docs.cloud.google.com/bigquery/docs/conversational-analytics) (Preview).
 
-The hard part of agent governance was never the events. It was the join, the traversal, and the cadence. With `bqaa-materialize-window` on whatever cron your team already runs, all three are one query away.
+The hard part of agent governance was never the events. It was the join, the traversal, and the cadence. With `bqaa-materialize-window` on whatever cron your team already runs, all three are one query away — and with the 0.3.2 production-shape defaults (split SAs, retries, orphan watchdog, optional Terraform), the cron is one your auditor can sign off on.

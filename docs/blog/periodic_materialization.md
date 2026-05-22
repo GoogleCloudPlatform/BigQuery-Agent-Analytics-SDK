@@ -98,6 +98,19 @@ The same graph supports SQL aggregations for portfolio questions ("how many decl
 
 No new database to stand up. No separate operational stack. The graph, the events, the IAM, the billing — all stay in BigQuery.
 
+## Production-shape defaults
+
+Periodic materialization shipped this surface as a single coordinated release because audit-grade deployments need more than a working cron. The 0.3.2 release closes the design-partner asks from issue [#187](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/187) and lands the deploy with production-hardened defaults out of the box.
+
+- **Least-privilege by default.** The deploy creates two service accounts — `bqaa-periodic-runtime-sa` (the identity the Cloud Run Job runs as, granted only the BigQuery + Vertex AI roles it needs) and `bqaa-periodic-scheduler-sa` (the identity Cloud Scheduler uses to invoke the job, granted only `run.invoker`). One-SA simplicity is available behind a `--single-sa` flag for development; the production posture is split.
+- **Tunable retries and a hard ceiling on stuck sessions.** `--max-retries` (default 2) governs in-window retry budget; `--max-session-age-hours` is an opt-in orphan watchdog that flags sessions older than the bound as orphaned and writes the diagnosis to the state table so an operator can drain stale state without the cron silently pulling the same broken sessions for days.
+- **A zero-LLM extraction path for regulated audits.** `--extraction-mode=compiled-only` swaps the default `AI.GENERATE` extractor for the SDK's compiled reference extractor — deterministic, audited, no Vertex AI dependency. Production deployments that need to certify their data path to a regulator can run compiled-only and remove `roles/aiplatform.user` from the runtime SA entirely.
+- **Backfill mode for incident response.** When events arrived during an outage, when a binding change requires a one-shot re-extraction, or when an audit committee asks for a historical window, `--backfill --from $TS --to $TS --state-key-suffix backfill_2026q1` extracts the fixed window into an isolated state-table namespace without disturbing the live cron's high-water mark.
+- **A Terraform module that mirrors the bash deploy.** Infrastructure-as-code teams point their Terraform pipelines at the [periodic-materialization module](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization/terraform); a `build_image.sh` helper packages the same image the bash deploy builds. The bash deploy is the lighter-weight onboarding; the Terraform module is the same six resources behind `terraform plan`, drift detection, and multi-environment promotion.
+- **An outcome-signal feedback loop.** The same property graph carries `OutcomeSignal`, `RewardComputation`, and `RejectionReason` nodes that close the loop on agent quality — reward-shaping, rejection-cause analysis, and constraint-violation alerts — without a second data store. Walked end-to-end in the [migration v5 demo notebook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5_demo_notebook.ipynb).
+
+Each flag has a default that matches the production posture, so a customer who runs `deploy_cloud_run_job.sh` with the four required arguments lands the audited shape — split SAs, retry budget, structured JSON logs, state-table audit trail — on the first deploy.
+
 ## Trusted by industry leaders
 
 > *[Customer quote from Yahoo to be inserted here once approved.]*
@@ -122,12 +135,19 @@ Each one has the same three ingredients: an event stream the plugin captures aut
 
 ## Get started today
 
-The SDK repository ships a worked end-to-end example, including the property-graph schema, a runnable agent, the Cloud Run Job deploy, and a customer playbook covering required APIs, the IAM matrix, recommended schedules per latency target, the JSON-log schema, Cloud Monitoring alert queries, the state-table audit log, troubleshooting, and live-deployment evidence captured against a real Google Cloud project.
+The SDK ships a worked end-to-end example, including the property-graph schema, a runnable agent, both deploy paths (bash and Terraform), and a customer playbook covering required APIs, the IAM matrix, recommended schedules per latency target, the JSON-log schema, Cloud Monitoring alert queries, the state-table audit log, troubleshooting, and live-deployment evidence captured against a real Google Cloud project.
+
+```bash
+pip install 'bigquery-agent-analytics>=0.3.2'
+```
 
 - Repository → [BigQuery-Agent-Analytics-SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
 - Customer playbook → [`examples/migration_v5/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization)
+- Terraform module → [`examples/migration_v5/periodic_materialization/terraform/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization/terraform) — IaC mirror of the bash deploy, same six resources
+- Feedback / reward loop walkthrough → [migration v5 demo notebook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5_demo_notebook.ipynb) — Beats 1 through 5, end-to-end against a live BigQuery project
 - Codelab → *Periodic materialization for BigQuery Agent Analytics* (45-minute hands-on, self-contained from scratch)
+- Changelog → [`CHANGELOG.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/CHANGELOG.md) `[0.3.2]` block
 
-BigQuery property graphs / GQL and BigQuery Conversational Analytics are in Preview on Google Cloud — check the Preview documentation for your region. The BigQuery Agent Analytics Plugin and SDK are generally available and ship with this release.
+BigQuery property graphs / GQL and BigQuery Conversational Analytics are in Preview on Google Cloud — check the Preview documentation for your region. The BigQuery Agent Analytics Plugin and SDK are generally available; 0.3.2 is the release that closes the migration v5 production track.
 
-One command on the cron of your choice, the audit answer waiting before the meeting starts. That is the operational change worth making this week.
+One command on the cron of your choice, audited extraction, retries with a budget, an orphan watchdog catching what cron missed, and the audit answer waiting before the meeting starts. That is the operational change worth making this week.
