@@ -265,6 +265,11 @@ def _row_to_arrow_dict(row: dict[str, Any]) -> dict[str, Any]:
       if details is not None and not isinstance(details, str):
         ref = dict(ref)
         ref["details"] = json.dumps(details, sort_keys=True)
+    # part_attributes is declared as pa.string() in the Arrow schema;
+    # match the insert_rows_json path by serializing structured values.
+    part_attrs = part.get("part_attributes")
+    if part_attrs is not None and not isinstance(part_attrs, str):
+      part_attrs = json.dumps(part_attrs, sort_keys=True)
     parts.append(
         {
             "mime_type": part.get("mime_type"),
@@ -272,7 +277,7 @@ def _row_to_arrow_dict(row: dict[str, Any]) -> dict[str, Any]:
             "object_ref": ref,
             "text": part.get("text"),
             "part_index": part.get("part_index"),
-            "part_attributes": part.get("part_attributes"),
+            "part_attributes": part_attrs,
             "storage_mode": part.get("storage_mode"),
         }
     )

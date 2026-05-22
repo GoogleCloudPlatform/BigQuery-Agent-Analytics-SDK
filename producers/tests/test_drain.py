@@ -238,6 +238,46 @@ def test_pythonpath_invocation_works_for_vendored_plugin(tmp_path):
   ), f"stdout={result.stdout!r} stderr={result.stderr!r}"
 
 
+def test_row_to_arrow_dict_serializes_structured_part_attributes():
+  """part_attributes is pa.string() in the Arrow schema. Structured values
+  must be JSON-serialized so PyArrow can pack the batch."""
+  from bigquery_agent_analytics_tracing.drain import _row_to_arrow_dict
+
+  row = {
+      "timestamp": "2026-05-22T00:00:00.000000Z",
+      "event_type": "STATE_DELTA",
+      "content_parts": [
+          {
+              "mime_type": "text/plain",
+              "uri": None,
+              "object_ref": None,
+              "text": "hi",
+              "part_index": 0,
+              "part_attributes": {"lang": "en", "confidence": 0.9},
+              "storage_mode": "INLINE",
+          },
+          {
+              "mime_type": "text/plain",
+              "uri": None,
+              "object_ref": None,
+              "text": "raw",
+              "part_index": 1,
+              "part_attributes": "already-string",
+              "storage_mode": "INLINE",
+          },
+      ],
+  }
+
+  arrow = _row_to_arrow_dict(row)
+
+  assert isinstance(arrow["content_parts"][0]["part_attributes"], str)
+  assert json.loads(arrow["content_parts"][0]["part_attributes"]) == {
+      "confidence": 0.9,
+      "lang": "en",
+  }
+  assert arrow["content_parts"][1]["part_attributes"] == "already-string"
+
+
 @pytest.mark.skipif(
     not Path("/tmp").exists(), reason="POSIX-only spool path test"
 )

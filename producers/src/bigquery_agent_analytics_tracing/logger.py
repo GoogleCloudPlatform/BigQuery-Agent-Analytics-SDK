@@ -81,6 +81,11 @@ def _serialize_bq_json_fields(row: dict[str, Any]) -> dict[str, Any]:
         next_object_ref = dict(object_ref)
         next_object_ref["details"] = json.dumps(details, sort_keys=True)
         next_part["object_ref"] = next_object_ref
+    # part_attributes is STRING in the schema; serialize structured values
+    # so callers passing dicts/lists don't break the insert_rows_json path.
+    part_attrs = next_part.get("part_attributes")
+    if part_attrs is not None and not isinstance(part_attrs, str):
+      next_part["part_attributes"] = json.dumps(part_attrs, sort_keys=True)
     parts.append(next_part)
   bq_row["content_parts"] = parts
   return bq_row
@@ -169,21 +174,25 @@ class BigQueryAgentAnalyticsLogger:
     clipped_content, content_truncated = truncate(
         content or {}, self.config.max_content_length
     )
+    # attributes.writer is reserved for package attribution so adoption
+    # queries on attributes.writer.{plugin,version,label,agent,mode} have a
+    # stable contract. A caller-supplied "writer" key is moved to
+    # attributes.writer_caller rather than silently dropping their data.
     merged_attributes = dict(attributes or {})
-    merged_attributes.setdefault(
-        "writer",
-        {
-            "plugin": WRITER_PLUGIN_NAME,
-            "version": WRITER_VERSION,
-            "label": self.config.writer_label,
-            "agent": agent or self.config.agent_name,
-            "mode": (
-                "dry_run"
-                if self.config.dry_run
-                else ("direct" if self.config.direct_write else "spool")
-            ),
-        },
-    )
+    caller_writer = merged_attributes.pop("writer", None)
+    merged_attributes["writer"] = {
+        "plugin": WRITER_PLUGIN_NAME,
+        "version": WRITER_VERSION,
+        "label": self.config.writer_label,
+        "agent": agent or self.config.agent_name,
+        "mode": (
+            "dry_run"
+            if self.config.dry_run
+            else ("direct" if self.config.direct_write else "spool")
+        ),
+    }
+    if caller_writer is not None:
+      merged_attributes["writer_caller"] = caller_writer
     clipped_attributes, attr_truncated = truncate(
         merged_attributes, self.config.max_content_length
     )

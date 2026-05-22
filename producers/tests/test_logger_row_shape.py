@@ -165,6 +165,76 @@ def test_sensitive_keys_are_redacted(dry_run_config):
   assert row["content"]["nested"]["ok_field"] == "fine"
 
 
+def test_caller_writer_attribute_does_not_suppress_package_attribution(
+    dry_run_config,
+):
+  """attributes.writer is reserved — a caller-supplied writer must not
+  win, or adoption queries on attributes.writer.plugin/version/label/mode
+  silently break the moment a producer passes its own writer-like data.
+  """
+  logger = BigQueryAgentAnalyticsLogger(dry_run_config)
+  caller_writer = {"plugin": "spoofed", "version": "99.99", "extra": "x"}
+  row = logger.log_event(
+      event_type="STATE_DELTA",
+      attributes={"writer": caller_writer, "session_metadata": {"k": "v"}},
+  )
+
+  writer = row["attributes"]["writer"]
+  assert writer["plugin"] == WRITER_PLUGIN_NAME
+  assert writer["plugin"] != "spoofed"
+  assert writer["label"] == "bigquery-agent-analytics-tracing/test"
+
+  # Caller's value preserved under a separate key, not silently dropped.
+  assert row["attributes"]["writer_caller"] == caller_writer
+  # Unrelated attributes pass through untouched.
+  assert row["attributes"]["session_metadata"] == {"k": "v"}
+
+
+def test_part_attributes_dict_is_json_serialized_for_bigquery(dry_run_config):
+  """part_attributes is declared as STRING in the schema; structured values
+  must be JSON-serialized so the insert_rows_json path doesn't reject the
+  row and the Storage Write API path doesn't see a non-string."""
+  logger = BigQueryAgentAnalyticsLogger(dry_run_config)
+  logger.log_event(
+      event_type="STATE_DELTA",
+      content_parts=[
+          {
+              "mime_type": "text/plain",
+              "uri": None,
+              "object_ref": None,
+              "text": "hi",
+              "part_index": 0,
+              "part_attributes": {"lang": "en", "confidence": 0.9},
+              "storage_mode": "INLINE",
+          },
+          {
+              "mime_type": "text/plain",
+              "uri": None,
+              "object_ref": None,
+              "text": "already-string",
+              "part_index": 1,
+              "part_attributes": "raw-string",
+              "storage_mode": "INLINE",
+          },
+      ],
+  )
+
+  # The dry-run log line carries the BigQuery-shape row (post-serialize).
+  log_text = __import__("pathlib").Path(dry_run_config.log_file).read_text()
+  payload = log_text.split("DRY_RUN ", 1)[1].splitlines()[0]
+  emitted = json.loads(payload)
+  parts = emitted["content_parts"]
+
+  # Dict → JSON string with sorted keys (matches object_ref.details).
+  assert isinstance(parts[0]["part_attributes"], str)
+  assert json.loads(parts[0]["part_attributes"]) == {
+      "confidence": 0.9,
+      "lang": "en",
+  }
+  # Already-string values pass through unchanged.
+  assert parts[1]["part_attributes"] == "raw-string"
+
+
 def test_dry_run_writes_to_log_file_and_not_bigquery(tmp_path, dry_run_config):
   logger = BigQueryAgentAnalyticsLogger(dry_run_config)
   logger.log_event(event_type="STATE_DELTA", content={"smoke": True})
