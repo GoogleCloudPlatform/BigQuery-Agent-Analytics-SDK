@@ -823,6 +823,8 @@ inserts fail. The deploy script grants `roles/bigquery.user` +
 `roles/bigquery.dataEditor` to cover this.
 
 **Scheduler fires but the job doesn't run** — IAM. Confirm the
-scheduler's service account (`bqaa-periodic-sa@…`) has
+scheduler's service account
+(`bqaa-periodic-scheduler-sa@…` by default, or
+`bqaa-periodic-sa@…` under `--single-sa`) has
 `roles/run.invoker` on the job. The deploy script grants this;
 if you renamed the SA or job, regrant manually.

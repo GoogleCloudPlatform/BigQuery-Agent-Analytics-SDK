@@ -32,8 +32,14 @@
 #    ``bigquery.datasets.create`` — narrows the runtime IAM
 #    surface to dataset-level grants.
 #
-# 2. Creates the runtime + scheduler service account
-#    (``bqaa-periodic-sa``) if absent, and grants:
+# 2. Creates the runtime + scheduler-caller service accounts
+#    if absent. Default: two SAs — ``bqaa-periodic-runtime-sa``
+#    (holds the BigQuery + Vertex AI roles below) and
+#    ``bqaa-periodic-scheduler-sa`` (holds only
+#    ``roles/run.invoker`` on the job, wired in section 5).
+#    Under ``--single-sa``: a single ``bqaa-periodic-sa`` that
+#    serves both paths (the pre-#182 default). The runtime SA
+#    is granted:
 #      * project-level ``roles/bigquery.jobUser`` (jobs.create).
 #      * project-level ``roles/aiplatform.user`` (the MAKO
 #        demo's extraction path calls ``AI.GENERATE``, which
