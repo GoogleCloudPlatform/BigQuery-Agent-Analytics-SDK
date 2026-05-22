@@ -68,10 +68,76 @@ def _positive_int(value):
 def _samples_arg(value):
   if value == "all":
     return "all"
+  if "=" in value:
+    return value
   n = int(value)
   if n < 1:
     raise argparse.ArgumentTypeError("--samples must be 'all' or >= 1")
   return str(n)
+
+
+_SAMPLES_DEFAULTS = {
+    "unhelpful": 10,
+    "partial": 5,
+    "meaningful": 3,
+    "declined": 3,
+    "low": 3,
+    "unknown": 3,
+}
+
+
+def _parse_samples(samples_str):
+  """Parse --samples value into a resolved dict.
+
+  Accepts:
+    "all"                              → show everything
+    "5"                                → cap all sections at 5
+    "unhelpful=10,partial=5,low=3"     → per-category overrides
+
+  Returns a dict mapping category names to int limits, or None for "all".
+  The "low" key applies to all Low-dimension sections.
+  """
+  if samples_str is None:
+    return dict(_SAMPLES_DEFAULTS)
+  if samples_str == "all":
+    return None
+  if "=" in samples_str:
+    result = dict(_SAMPLES_DEFAULTS)
+    for pair in samples_str.split(","):
+      pair = pair.strip()
+      if "=" not in pair:
+        raise argparse.ArgumentTypeError(
+            f"Invalid samples pair: {pair!r}. Use key=value format."
+        )
+      key, val = pair.split("=", 1)
+      key = key.strip().lower()
+      val = val.strip()
+      if val == "all":
+        result[key] = None
+      else:
+        n = int(val)
+        if n < 1:
+          raise argparse.ArgumentTypeError(
+              f"--samples value for {key!r} must be >= 1, got {n}"
+          )
+        result[key] = n
+    return result
+  n = int(samples_str)
+  return {k: n for k in _SAMPLES_DEFAULTS}
+
+
+def _get_sample_limit(samples_dict, category):
+  """Get the sample limit for a category from parsed samples dict.
+
+  Returns None to show all, or an int limit.
+  """
+  if samples_dict is None:
+    return None
+  if category in samples_dict:
+    return samples_dict[category]
+  if category.startswith("low_") or category.startswith("low "):
+    return samples_dict.get("low")
+  return samples_dict.get("_default", 5)
 
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -1585,13 +1651,7 @@ def _print_eval_results(
   }
 
   # --- Per-session details ---
-  _default_samples = {
-      "unhelpful": 10,
-      "partial": 5,
-      "meaningful": 3,
-      "declined": 3,
-      "unknown": 3,
-  }
+  samples_dict = _parse_samples(samples)
   for cat, cat_label in [
       ("unhelpful", "UNHELPFUL"),
       ("partial", "PARTIAL"),
@@ -1599,11 +1659,8 @@ def _print_eval_results(
       ("meaningful", "MEANINGFUL"),
       ("unknown", "UNCLASSIFIED (parse errors)"),
   ]:
-    limit = (
-        len(by_category.get(cat, []))
-        if samples == "all"
-        else (int(samples) if samples else _default_samples.get(cat, 5))
-    )
+    cat_limit = _get_sample_limit(samples_dict, cat)
+    limit = len(by_category.get(cat, [])) if cat_limit is None else cat_limit
     sessions = by_category.get(cat, [])
     if not sessions:
       continue
@@ -2142,18 +2199,14 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
     w("")
 
   # --- Unhelpful Sessions ---
+  _samples_dict = _parse_samples(args.samples)
   unhelpful_sessions = by_category.get("unhelpful", [])
-  _md_samples = (
-      None
-      if args.samples == "all"
-      else (int(args.samples) if args.samples else None)
-  )
   if unhelpful_sessions:
     _md_write_session_section(
         w,
         "Unhelpful Sessions",
         unhelpful_sessions,
-        _md_samples,
+        _get_sample_limit(_samples_dict, "unhelpful"),
         resolved_map,
         a2a_session_ids,
     )
@@ -2165,7 +2218,7 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
         w,
         "Declined Sessions",
         declined_sessions,
-        _md_samples,
+        _get_sample_limit(_samples_dict, "declined"),
         resolved_map,
         a2a_session_ids,
     )
@@ -2177,7 +2230,7 @@ def _write_md_report(report, resolved_map, args, report_dir=None):
         w,
         "Partial Sessions",
         partial_sessions,
-        _md_samples,
+        _get_sample_limit(_samples_dict, "partial"),
         resolved_map,
         a2a_session_ids,
     )
@@ -2301,11 +2354,22 @@ Examples:
   %(prog)s --report                  Also generate a Markdown report
   %(prog)s --persist                 Evaluate and persist results to BQ
   %(prog)s --time-period 7d          Evaluate last 7 days
-  %(prog)s --samples 20              Show up to 20 sessions per category
-  %(prog)s --samples all             Show all sessions per category
   %(prog)s --app-name my_agent       Filter to a specific agent app
   %(prog)s --output-json report.json Write structured JSON output
   %(prog)s --config config.json      Use scope definitions from config
+  %(prog)s --env path/to/.env        Load env vars from a specific .env file
+
+Samples (controls how many sessions appear in each report section):
+  %(prog)s --samples 5               Cap all sections at 5 sessions
+  %(prog)s --samples all             Show every session (no limit)
+  %(prog)s --samples unhelpful=10,partial=5,low=3
+                                     Per-category: 10 unhelpful, 5 partial,
+                                     3 for each Low-dimension section
+  %(prog)s --samples unhelpful=all,declined=1
+                                     All unhelpful, 1 declined, defaults for rest
+  (without --samples)                Defaults: unhelpful=10, partial=5, others=3
+
+  Categories: unhelpful, declined, partial, meaningful, low (all Low-* sections)
       """,
   )
   parser.add_argument(
@@ -2352,7 +2416,12 @@ Examples:
       "--samples",
       type=_samples_arg,
       default=None,
-      help="Max sample sessions to display per category, or 'all' (default: 10/5/3)",
+      help="Max sessions to show per report section. Accepts a single "
+      "number (caps all sections equally), 'all' (no limit), or "
+      "comma-separated key=value pairs for per-category control. "
+      "Categories: unhelpful, declined, partial, meaningful, low "
+      "(all Low-dimension sections). "
+      "Defaults: unhelpful=10, partial=5, all others=3",
   )
   parser.add_argument(
       "--session",
