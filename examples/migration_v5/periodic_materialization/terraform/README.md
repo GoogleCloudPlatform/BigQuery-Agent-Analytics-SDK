@@ -116,11 +116,16 @@ terraform output
 ### 4. Optional smoke
 
 ```bash
+PROJECT=my-project   # or whatever you set ``project_id`` to in tfvars
+REGION=us-central1   # or your ``region`` tfvars value
+
 gcloud run jobs execute "$(terraform output -raw cloud_run_job_name)" \
-  --project "$(terraform output -raw project_id 2>/dev/null || echo my-project)" \
-  --region us-central1 \
+  --project "$PROJECT" \
+  --region "$REGION" \
   --wait
 ```
+
+`project_id` and `region` aren't exported as Terraform outputs — they're inputs the caller already knows. Either inline them as shown above or, if you'd rather not retype, define them as outputs in your wrapper module that calls this one.
 
 ### 5. Tear down
 
@@ -166,6 +171,8 @@ Optional (defaults match `deploy_cloud_run_job.sh`):
 * `lookback_hours` — `6`
 * `overlap_minutes` — `15`
 * `task_timeout_seconds` — `1800`
+* `manage_apis` — `true` (enables BigQuery / Cloud Run / Cloud Scheduler / IAM / (conditionally) Vertex AI APIs via `google_project_service`; set `false` if your central infra repo manages project services elsewhere)
+* `deletion_protection` — `false` (Cloud Run v2 Job deletion-protection. Default matches the bash deploy's `gcloud run jobs delete` lifecycle — `terraform destroy` works without a separate apply. Production deploys that want the safety net opt in with `true`)
 
 ## Outputs
 

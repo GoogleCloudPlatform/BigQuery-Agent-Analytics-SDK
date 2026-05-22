@@ -23,3 +23,5 @@ image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-mater
 # lookback_hours        = 6
 # overlap_minutes       = 15
 # task_timeout_seconds  = 1800
+# manage_apis           = true            # false → caller's central infra repo manages project services
+# deletion_protection   = false           # true → Cloud Run v2 deletion protection on the Job (two-step destroy required)
