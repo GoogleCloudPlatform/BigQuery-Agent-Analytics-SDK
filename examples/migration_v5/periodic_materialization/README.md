@@ -182,22 +182,25 @@ no Cloud Run required. Useful for shaking out the env-var setup
 before paying for a deploy:
 
 ```bash
-# Two equivalent install paths:
+# Choose ONE install path (they're mutually exclusive — running
+# both leaves you on the published wheel, not your local edits):
 #
-# (a) Editable from the repo root — picks up any in-flight SDK
+# (a) Editable from the repo root — picks up in-flight SDK
 #     changes you're iterating on locally. The deploy script's
 #     vendored-SDK staging uses the same source tree, so a
 #     local dry-run and a Cloud Run deploy execute the same
-#     code.
+#     code. Use this when you're modifying the SDK and want to
+#     test before publishing.
 pip install -e .
+#
+# (b) Pinned from PyPI — once you're on a stable SDK version.
+#     0.3.2 is the migration-v5 production-track release
+#     (compiled-only deploy, backfill, orphan watchdog,
+#     Terraform module, split SAs, ``--max-retries``). Use this
+#     for unmodified production use.
+pip install 'bigquery-agent-analytics>=0.3.2'
 
-# (b) Pinned from PyPI — once your in-flight changes are
-#     published. ``bigquery-agent-analytics.materialize_window``
-#     has been on PyPI since 0.3.1, so a published install
-#     works for any cron path this README documents.
-pip install 'bigquery-agent-analytics>=0.3.1'
-
-# Then install the example's ancillary deps:
+# Either way, install the example's ancillary deps:
 pip install -r examples/migration_v5/periodic_materialization/requirements.txt
 
 BQAA_PROJECT_ID=your-project \

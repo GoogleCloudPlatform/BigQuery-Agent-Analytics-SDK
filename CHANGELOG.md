@@ -18,8 +18,8 @@ guarantee), explicit FK→PK mapping that re-enables MAKO self-edges,
 an opt-in orphan-session watchdog, the Beat 5 feedback / reward
 loop in both the demo and the live notebook, hardened deploy
 defaults (split SAs + tunable retries), and a Terraform module
-mirroring the bash deploy. The 0.3.1 cron path is now complete
-for audit-critical production deployments.
+mirroring the bash deploy. The migration-v5 cron path is now
+complete for audit-critical production deployments.
 
 ### Added
 
