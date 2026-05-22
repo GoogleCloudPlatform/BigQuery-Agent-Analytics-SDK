@@ -4247,6 +4247,22 @@ class TestTerraformModuleSurface:
         "lookback_hours": "6",
         "overlap_minutes": "15",
         "task_timeout_seconds": "1800",
+        # PR #231 review P2: a clean GCP project needs the
+        # BigQuery / Cloud Run / Cloud Scheduler / IAM APIs
+        # enabled before ``terraform apply`` will work. The
+        # module manages them by default; ``false`` is the
+        # opt-out for customers whose central infra repo
+        # manages project services elsewhere.
+        "manage_apis": "true",
+        # PR #231 live-E2E surface: Cloud Run v2 added a
+        # ``deletion_protection`` default of ``true`` in newer
+        # provider releases. The module defaults to ``false`` so
+        # ``terraform destroy`` works without a separate
+        # ``terraform apply`` to clear the flag — matches the
+        # bash deploy's ``gcloud run jobs delete`` lifecycle.
+        # Production deploys that want the safety net opt in via
+        # ``deletion_protection = true``.
+        "deletion_protection": "false",
     }
     for name, want in expected_defaults.items():
       block = self._extract_variable_block(body, name)
@@ -4397,6 +4413,148 @@ class TestTerraformModuleSurface:
         or "outside this module" in readme.lower()
     )
     assert "image_uri" in readme
+
+  def test_readme_points_at_build_image_helper(self):
+    """PR #231 review P1: the README's recommended image-build
+    command must point at ``build_image.sh`` (which assembles the
+    staging layout the runtime expects). Pointing
+    ``gcloud builds submit`` at the bare ``periodic_materialization``
+    dir would produce an image missing the SDK vendor, Procfile,
+    and demo artifacts."""
+    readme = self._read("README.md")
+    assert "build_image.sh" in readme, (
+        "Terraform README must point at the build_image.sh staging "
+        "helper rather than a direct ``gcloud builds submit`` "
+        "against the periodic_materialization directory (which "
+        "lacks the staging layout the runtime needs)"
+    )
+    # The bash deploy's staging layout is documented in
+    # ``build_image.sh``; here we just sanity-check the helper
+    # exists.
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    assert helper.exists(), (
+        f"build_image.sh missing at {helper} — the Terraform README "
+        f"points at it"
+    )
+    # The script must be executable so customers can call it
+    # directly (no ``bash build_image.sh ...`` workaround).
+    assert (
+        helper.stat().st_mode & 0o111
+    ), "build_image.sh must be marked executable"
+
+  def test_build_image_stages_full_layout(self):
+    """The staging helper must produce the same on-disk layout
+    the bash deploy assembles in its temp dir (Procfile + run_job
+    + reference_extractor + demo artifacts + vendored SDK source
+    + requirements.txt). Any drift would make Terraform-built
+    images behave differently from bash-built ones."""
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    if not helper.exists():
+      pytest.skip("build_image.sh not present")
+    body = helper.read_text()
+    # Every file the bash deploy stages must be cp'd by the
+    # helper.
+    for needed in (
+        '"${SCRIPT_DIR}/run_job.py"',
+        '"${ARTIFACTS_DIR}/ontology.yaml"',
+        '"${ARTIFACTS_DIR}/binding.yaml"',
+        '"${ARTIFACTS_DIR}/table_ddl.sql"',
+        '"${ARTIFACTS_DIR}/reference_extractor.py"',
+        '"$REPO_ROOT/src/bigquery_agent_analytics"',
+        '"$REPO_ROOT/src/bigquery_ontology"',
+        '"$REPO_ROOT/pyproject.toml"',
+    ):
+      assert needed in body, f"build_image.sh missing staging copy for {needed}"
+    # Procfile + requirements.txt must be emitted, not copied
+    # (the bash deploy generates them inline; this helper
+    # generates the same content).
+    assert "Procfile" in body and "web: python run_job.py" in body
+    assert "./sdk_src" in body, (
+        "requirements.txt must install the SDK from the vendored "
+        "./sdk_src path (same as the bash deploy)"
+    )
+
+  def test_manage_apis_resource_present_with_disable_on_destroy_false(self):
+    """PR #231 review P2: a clean GCP project needs the required
+    APIs enabled. The module manages them via
+    ``google_project_service`` with
+    ``disable_on_destroy = false`` so a ``terraform destroy`` of
+    this module doesn't disable APIs other workloads might use."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_service", "required"
+    )
+    assert block is not None, (
+        "main.tf must declare google_project_service.required so "
+        "the apis the bash deploy expects manually-enabled are "
+        "managed by terraform"
+    )
+    # ``disable_on_destroy = false`` protects shared-API workloads.
+    assert "disable_on_destroy         = false" in block or (
+        "disable_on_destroy = false" in block
+    ), (
+        "google_project_service must set disable_on_destroy = false "
+        "so terraform destroy of this module doesn't disable shared "
+        "APIs other workloads on the project depend on"
+    )
+    # Each required API must be in the for_each locals block.
+    for api in (
+        "bigquery.googleapis.com",
+        "run.googleapis.com",
+        "cloudscheduler.googleapis.com",
+        "iam.googleapis.com",
+    ):
+      assert api in body, (
+          f"required API {api!r} must be in the project-service "
+          f"set so clean-project terraform apply doesn't fail with "
+          f"'API not enabled'"
+      )
+    # Vertex AI is conditional on extraction_mode.
+    assert (
+        'var.extraction_mode == "ai-fallback" ? ["aiplatform.googleapis.com"]'
+        in body
+    ), (
+        "aiplatform.googleapis.com must be enabled only in "
+        "ai-fallback mode — compiled-only doesn't call AI.GENERATE"
+    )
+
+  def test_extraction_mode_description_names_correct_failure_code(self):
+    """PR #231 review P3: the operator-facing variable description
+    must name the right failure code. Compiled-only extraction
+    gaps surface as ``empty_extraction`` (from B1's
+    structured-extraction harness). ``session_orphaned`` is a
+    different code emitted by the orphan watchdog
+    (``max_session_age_hours``)."""
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert "empty_extraction" in block, (
+        "extraction_mode description must name 'empty_extraction' "
+        "as the failure code for compiled-only extraction gaps"
+    )
+    # Defensive: if a future edit re-introduces the wrong code,
+    # we want it to fail loud. Allow ``session_orphaned`` to
+    # appear ONLY in a context that explicitly contrasts the two
+    # codes (the post-fix wording does this).
+    if "session_orphaned" in block:
+      assert "separate code" in block or "different" in block.lower(), (
+          "if session_orphaned is mentioned in the extraction_mode "
+          "description, it must be in a contrastive context "
+          "(explaining it's a separate watchdog code), not as the "
+          "failure code for compiled-only"
+      )
 
   @staticmethod
   def _extract_variable_block(body: str, name: str) -> str | None:

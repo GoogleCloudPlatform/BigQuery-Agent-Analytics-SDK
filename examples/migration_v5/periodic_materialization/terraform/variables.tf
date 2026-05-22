@@ -65,7 +65,7 @@ variable "job_name" {
 }
 
 variable "extraction_mode" {
-  description = "Extraction path: ``ai-fallback`` (structured extractors + AI.GENERATE for any uncovered span) or ``compiled-only`` (structured extractors only; no LLM calls; uncovered spans surface as typed ``session_orphaned`` failures). The module grants ``roles/aiplatform.user`` to the runtime SA only in ai-fallback mode."
+  description = "Extraction path: ``ai-fallback`` (structured extractors + AI.GENERATE for any uncovered span) or ``compiled-only`` (structured extractors only; no LLM calls; uncovered spans surface as typed ``empty_extraction`` failures with sample diagnostics). The module grants ``roles/aiplatform.user`` to the runtime SA only in ai-fallback mode. Note: ``empty_extraction`` is the failure code for compiled-only extraction gaps; ``session_orphaned`` is a *separate* code emitted by the orphan watchdog (``var.max_session_age_hours``) — they live on different cron paths."
   type        = string
   default     = "ai-fallback"
   validation {
@@ -118,4 +118,16 @@ variable "task_timeout_seconds" {
   description = "Per-task Cloud Run timeout in seconds. Matches the bash deploy script's ``--task-timeout 30m`` (= 1800s). Bump higher if your average session has very long event histories or if AI.GENERATE responses are slow."
   type        = number
   default     = 1800
+}
+
+variable "manage_apis" {
+  description = "If ``true`` (default), the module enables the BigQuery, Cloud Run, Cloud Scheduler, IAM, and (in ai-fallback mode) Vertex AI APIs on the project via ``google_project_service`` with ``disable_on_destroy = false``. Set ``false`` if the operator's central infra repo manages project services elsewhere and granting service-management perms to the deploy SA is undesired."
+  type        = bool
+  default     = true
+}
+
+variable "deletion_protection" {
+  description = "Cloud Run v2 Job deletion-protection setting. Default ``false`` so ``terraform destroy`` works without a separate ``terraform apply`` to clear the flag (matches the bash deploy's ``gcloud run jobs delete`` lifecycle). Production deploys that want the extra safety net can set ``true`` — at the cost of needing a two-step destroy (apply with ``false``, then destroy)."
+  type        = bool
+  default     = false
 }

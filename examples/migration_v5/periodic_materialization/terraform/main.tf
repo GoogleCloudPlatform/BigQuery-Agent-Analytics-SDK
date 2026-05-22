@@ -43,14 +43,14 @@ locals {
   # comparing the two side-by-side sees the same env surface.
   env_vars = merge(
     {
-      BQAA_PROJECT_ID         = var.project_id
-      BQAA_EVENTS_DATASET_ID  = var.events_dataset_id
-      BQAA_GRAPH_DATASET_ID   = var.graph_dataset_id
-      BQAA_LOCATION           = var.location
-      BQAA_LOOKBACK_HOURS     = tostring(var.lookback_hours)
-      BQAA_OVERLAP_MINUTES    = tostring(var.overlap_minutes)
-      BQAA_EXTRACTION_MODE    = var.extraction_mode
-      BQAA_MAX_RETRIES        = tostring(var.max_retries)
+      BQAA_PROJECT_ID        = var.project_id
+      BQAA_EVENTS_DATASET_ID = var.events_dataset_id
+      BQAA_GRAPH_DATASET_ID  = var.graph_dataset_id
+      BQAA_LOCATION          = var.location
+      BQAA_LOOKBACK_HOURS    = tostring(var.lookback_hours)
+      BQAA_OVERLAP_MINUTES   = tostring(var.overlap_minutes)
+      BQAA_EXTRACTION_MODE   = var.extraction_mode
+      BQAA_MAX_RETRIES       = tostring(var.max_retries)
     },
     var.max_sessions == null ? {} : {
       BQAA_MAX_SESSIONS = tostring(var.max_sessions)
@@ -69,6 +69,49 @@ locals {
   )
 }
 
+# ---- 0. Project services (clean-project bootstrap) ---- #
+
+# A fresh GCP project doesn't have the BigQuery / Cloud Run /
+# Cloud Scheduler / IAM APIs enabled by default. Without these,
+# ``terraform apply`` fails part-way through with confusing
+# "API not enabled" errors per-resource. Enabling them up front
+# matches what the bash deploy's "General prerequisites"
+# section asks customers to do manually.
+#
+# ``disable_on_destroy = false`` is deliberate: another workload
+# on the same project might depend on these APIs, and a
+# ``terraform destroy`` of THIS module shouldn't disable them
+# project-wide.
+#
+# Vertex AI (``aiplatform.googleapis.com``) is conditional on
+# ``extraction_mode`` — only ai-fallback mode calls
+# ``AI.GENERATE``. Mirrors the conditional IAM grant below.
+#
+# Customers whose central infra repo manages project services
+# elsewhere can set ``var.manage_apis = false`` to skip these
+# resources entirely.
+
+locals {
+  required_apis = var.manage_apis ? toset(concat(
+    [
+      "bigquery.googleapis.com",
+      "run.googleapis.com",
+      "cloudscheduler.googleapis.com",
+      "iam.googleapis.com",
+    ],
+    var.extraction_mode == "ai-fallback" ? ["aiplatform.googleapis.com"] : [],
+  )) : toset([])
+}
+
+resource "google_project_service" "required" {
+  for_each = local.required_apis
+
+  project                    = var.project_id
+  service                    = each.value
+  disable_on_destroy         = false
+  disable_dependent_services = false
+}
+
 # ---- 1. Graph dataset ---- #
 
 # Pre-creating the dataset (instead of letting ``run_job.py``'s
@@ -77,9 +120,9 @@ locals {
 # ``bigquery.datasets.create``. Matches the bash deploy's
 # ``bq mk`` step.
 resource "google_bigquery_dataset" "graph" {
-  project    = var.project_id
-  dataset_id = var.graph_dataset_id
-  location   = var.location
+  project     = var.project_id
+  dataset_id  = var.graph_dataset_id
+  location    = var.location
   description = "BQAA periodic-materialization graph dataset (created by Terraform module)."
 
   # Deliberately no ``default_table_expiration_ms`` — the
@@ -87,6 +130,11 @@ resource "google_bigquery_dataset" "graph" {
   # cron runs and accumulate history. The bash deploy's
   # ``1h TTL`` is for the notebook's *throwaway scratch*
   # dataset, not production graph data.
+
+  # Wait for the BigQuery API to be enabled before trying to
+  # create the dataset; otherwise a clean-project ``terraform
+  # apply`` errors here with "BigQuery API has not been used".
+  depends_on = [google_project_service.required]
 }
 
 # ---- 2. Service accounts ---- #
@@ -97,6 +145,8 @@ resource "google_service_account" "runtime" {
   project      = var.project_id
   account_id   = local.runtime_sa_account_id
   display_name = local.runtime_sa_display
+
+  depends_on = [google_project_service.required]
 }
 
 # Scheduler-caller SA: identity for the Cloud Scheduler HTTP
@@ -111,6 +161,8 @@ resource "google_service_account" "scheduler" {
   project      = var.project_id
   account_id   = local.scheduler_sa_account_id
   display_name = local.scheduler_sa_display
+
+  depends_on = [google_project_service.required]
 }
 
 # ---- 3. IAM grants on the runtime SA ---- #
@@ -170,6 +222,17 @@ resource "google_cloud_run_v2_job" "periodic" {
   # explicitly so plan diffs against the bash deploy's
   # post-state stay clean.
   launch_stage = "GA"
+
+  # Cloud Run v2 added a ``deletion_protection`` default of
+  # ``true`` in newer provider releases. Leaving it on would
+  # make ``terraform destroy`` fail with "cannot destroy job
+  # without setting deletion_protection=false and running
+  # ``terraform apply``". The bash deploy has no analogous
+  # block — its ``gcloud run jobs delete`` cleanup just works.
+  # We surface the setting as ``var.deletion_protection`` so
+  # production deploys can opt back in, but the module
+  # default is ``false`` to match the bash deploy's lifecycle.
+  deletion_protection = var.deletion_protection
 
   template {
     # Cloud Run owns the retry policy here. Matches the bash

@@ -17,38 +17,25 @@ Resolves [#186](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-
 
 ## What's intentionally outside the module
 
-**Container image build + publish.** The bash deploy builds the image from local sources via Cloud Buildpacks (`gcloud run jobs deploy --source $STAGING`), vendoring the SDK in and producing an image inline. That flow doesn't slot into IaC — Terraform deploys *configured* infrastructure, not source builds.
+**Container image build + publish.** The bash deploy builds the image from local sources via Cloud Buildpacks (`gcloud run jobs deploy --source $STAGING`), assembling a staging directory with `run_job.py` + `reference_extractor.py` + the demo artifacts + the vendored SDK source + `Procfile` + `requirements.txt` before invoking the build. That staging step is non-trivial — pointing `gcloud builds submit` directly at the `periodic_materialization/` directory would build an image that's missing the SDK source, the demo artifacts, and the Procfile.
 
-The module takes the **published** container image URI as the required `image_uri` variable. The expected pipeline:
-
-```text
-CI (or operator) → docker build → push to Artifact Registry → terraform apply
-```
-
-A minimal local build/publish for the recommended image layout (mirrors what the bash deploy stages):
+The module takes the **published** image URI as the required `image_uri` variable. To produce a Terraform-compatible image, use the bundled [`../build_image.sh`](../build_image.sh) helper — it stages the exact layout `deploy_cloud_run_job.sh` produces in its temp dir, then runs `gcloud builds submit` against that staging dir. Same image contents either way; Terraform just consumes the publish artifact instead of doing the build inline.
 
 ```bash
-# Build context = the periodic_materialization directory, with the SDK
-# source vendored into ``sdk_src/`` and ``reference_extractor.py`` next
-# to ``run_job.py``. The bash deploy does this in a tmp dir;
-# replicate the staging layout in your build context however your
-# CI prefers.
-
-REGION=us-central1
-PROJECT=my-project
-REPO=bqaa
-IMAGE=periodic-materialization
-TAG=$(git rev-parse --short HEAD)
-gcloud builds submit \
-  --tag "${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${IMAGE}:${TAG}" \
-  examples/migration_v5/periodic_materialization
+# From the repo root.
+IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
+  --project my-project \
+  --repo bqaa \
+  --region us-central1 \
+  --create-repo)"
+echo "$IMAGE_URI"
+# → us-central1-docker.pkg.dev/my-project/bqaa/periodic-materialization:<tag>
 
 # Then point Terraform at the published image:
-terraform apply \
-  -var "project_id=${PROJECT}" \
-  -var "image_uri=${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${IMAGE}:${TAG}" \
-  ...
+terraform apply -var "image_uri=$IMAGE_URI" -var "project_id=my-project" ...
 ```
+
+CI pipelines should call `build_image.sh` (or replicate the staging layout themselves) on every commit that touches `run_job.py`, the demo artifacts, or the vendored SDK source.
 
 ## Bash deploy vs Terraform module
 
@@ -67,6 +54,26 @@ terraform apply \
 Both tools land **the same six resources with the same flag surface**. If the bash deploy works for your operations model, this Terraform module is not a forced upgrade — it's a parallel option for customers whose infra teams already operate IaC.
 
 ## Quickstart
+
+### 0. Project APIs
+
+A clean GCP project doesn't have the BigQuery / Cloud Run / Cloud Scheduler / IAM APIs enabled by default. The module enables them on `terraform apply` via `google_project_service` resources (with `disable_on_destroy = false`, so a `terraform destroy` of this module doesn't disable APIs other workloads might depend on). Customers whose central infra repo manages project services elsewhere can set `manage_apis = false`.
+
+If `manage_apis = false`, enable the APIs manually before `terraform apply`:
+
+```bash
+gcloud services enable \
+  bigquery.googleapis.com \
+  run.googleapis.com \
+  cloudscheduler.googleapis.com \
+  iam.googleapis.com \
+  --project=my-project
+
+# Only needed in ai-fallback mode (the default):
+gcloud services enable aiplatform.googleapis.com --project=my-project
+```
+
+For the image-build step (Cloud Buildpacks via `gcloud builds submit`), also enable `cloudbuild.googleapis.com` and `artifactregistry.googleapis.com` — `build_image.sh` invokes those but doesn't auto-enable them.
 
 ### 1. Configure your inputs
 
