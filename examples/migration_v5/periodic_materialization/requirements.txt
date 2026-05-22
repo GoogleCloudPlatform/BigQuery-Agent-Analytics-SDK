@@ -23,7 +23,9 @@
 #
 # Pinning a PyPI version (alternative to editable-mode install):
 # replace the ``pip install -e .`` step with
-# ``pip install bigquery-agent-analytics>=0.3.1``.
+# ``pip install 'bigquery-agent-analytics>=0.3.1'`` — the quotes
+# are required so the shell doesn't interpret ``>=`` as a
+# redirection operator.
 
 google-cloud-bigquery>=3.0.0
 pyyaml>=6.0

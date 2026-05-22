@@ -182,11 +182,20 @@ no Cloud Run required. Useful for shaking out the env-var setup
 before paying for a deploy:
 
 ```bash
-# From the repo root, install the SDK in editable mode. The
-# example uses bigquery_agent_analytics.materialize_window
-# (added in PR #162); this isn't in the 0.3.0 PyPI release
-# yet, so install from local until 0.4.0 ships.
+# Two equivalent install paths:
+#
+# (a) Editable from the repo root — picks up any in-flight SDK
+#     changes you're iterating on locally. The deploy script's
+#     vendored-SDK staging uses the same source tree, so a
+#     local dry-run and a Cloud Run deploy execute the same
+#     code.
 pip install -e .
+
+# (b) Pinned from PyPI — once your in-flight changes are
+#     published. ``bigquery-agent-analytics.materialize_window``
+#     has been on PyPI since 0.3.1, so a published install
+#     works for any cron path this README documents.
+pip install 'bigquery-agent-analytics>=0.3.1'
 
 # Then install the example's ancillary deps:
 pip install -r examples/migration_v5/periodic_materialization/requirements.txt
