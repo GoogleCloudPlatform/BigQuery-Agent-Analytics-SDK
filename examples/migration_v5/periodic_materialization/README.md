@@ -301,8 +301,10 @@ The script:
    under `sdk_src/`. The deploy-time `requirements.txt`
    installs the SDK from `./sdk_src` (not PyPI) so the
    deployed image uses the same code as the local dry-run.
-   This avoids depending on a PyPI release that may not yet
-   contain `materialize_window` (added in PR #162).
+   This keeps the deploy in lockstep with any in-flight SDK
+   changes the customer is iterating on locally; once the SDK
+   features they depend on have all shipped to PyPI they can
+   swap the vendored install for a pinned PyPI version.
 5. **Deploys the Cloud Run Job** via `gcloud run jobs deploy
    --source <staging>` (Buildpacks autodetects Python) with
    `--service-account` pointing at the SA. The job's runtime
@@ -803,13 +805,13 @@ gcloud iam service-accounts delete \
 
 * **Pulumi.** A Pulumi equivalent of the Terraform module would
   be a straightforward port and is open for contribution.
-* **Compiled-bundle materialization.** This example uses the
-  plain `from_ontology_binding` extraction path (Gemini-backed).
-  For compiled extractors (`--bundles-root`), see
-  `docs/extractor_compilation/` and PR #152.
-* **Backfill mode.** A separate `--backfill --from / --to`
-  CLI mode is on the roadmap (per #161); for now, run the
-  CLI manually with a wider `--lookback-hours` to catch up.
+* **Compiled-bundle materialization with fingerprint-stable
+  pre-built bundles.** The deploy script supports compiled-only
+  extraction via the runtime reference extractor
+  (`--extraction-mode=compiled-only`, see the IAM matrix above —
+  this drops `roles/aiplatform.user` entirely). For
+  fingerprint-stable *compiled bundles* (the `--bundles-root`
+  path), see `docs/extractor_compilation/` and PR #152.
 
 ## Troubleshooting
 
