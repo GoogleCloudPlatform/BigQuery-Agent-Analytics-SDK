@@ -4162,3 +4162,283 @@ class TestDeployScriptHardening:
         "run_job.py must pass max_retries into the _emit() call so "
         "the Cloud Logging payload carries it"
     )
+
+
+# ====================================================================== #
+# Terraform module surface (#186)                                         #
+# ====================================================================== #
+
+
+class TestTerraformModuleSurface:
+  """Static checks on the Terraform module that mirrors
+  ``deploy_cloud_run_job.sh`` (issue #186). Defaults must match
+  the post-#230 deploy surface: split runtime + scheduler-caller
+  SAs, ``max_retries = 2``, ``extraction_mode = 'ai-fallback'``.
+  Image build is intentionally outside the module — Terraform
+  takes the published container image URI as ``image_uri``.
+
+  These are file-content checks rather than ``terraform validate``
+  runs because the test environment doesn't ship the Terraform
+  binary. The checks pin the contract a customer reads from the
+  module files; a future maintainer who renames a variable / drops
+  a resource / changes a default fails these tests rather than
+  shipping a silently-broken module."""
+
+  def _tf_dir(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "terraform"
+    )
+
+  def _read(self, name: str) -> str:
+    return (self._tf_dir() / name).read_text()
+
+  def test_module_files_present(self):
+    tf = self._tf_dir()
+    if not tf.exists():
+      pytest.skip("terraform module not present in this checkout")
+    for filename in (
+        "versions.tf",
+        "variables.tf",
+        "main.tf",
+        "outputs.tf",
+        "README.md",
+        "terraform.tfvars.example",
+    ):
+      assert (tf / filename).is_file(), f"missing {filename}"
+
+  def test_required_variables_have_no_defaults(self):
+    """The six required inputs must have no ``default`` so a
+    ``terraform apply`` without them errors loud at the boundary
+    (same operator-typo defense the bash deploy's ``required``
+    block provides)."""
+    body = self._read("variables.tf")
+    required = (
+        "project_id",
+        "region",
+        "events_dataset_id",
+        "graph_dataset_id",
+        "schedule",
+        "image_uri",
+    )
+    for name in required:
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing from variables.tf"
+      assert (
+          "default" not in block
+      ), f"variable {name!r} must not have a default — it's required input"
+
+  def test_optional_variable_defaults_match_deploy_script(self):
+    """Optional vars' defaults must match the bash deploy's
+    post-#230 production posture so Terraform users get the same
+    behavior the README documents."""
+    body = self._read("variables.tf")
+    expected_defaults = {
+        "location": '"US"',
+        "job_name": '"bqaa-periodic-materialization"',
+        "extraction_mode": '"ai-fallback"',
+        "max_retries": "2",
+        "max_session_age_hours": "null",
+        "single_sa": "false",
+        "max_sessions": "null",
+        "lookback_hours": "6",
+        "overlap_minutes": "15",
+        "task_timeout_seconds": "1800",
+    }
+    for name, want in expected_defaults.items():
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing"
+      assert f"default     = {want}" in block or f"default = {want}" in block, (
+          f"variable {name!r} default must be {want!r}; " f"block:\n{block}"
+      )
+
+  def test_extraction_mode_validation_matches_bash(self):
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert 'contains(["ai-fallback", "compiled-only"]' in block, (
+        "extraction_mode validation must reject typos at the "
+        "Terraform boundary — same protection the bash deploy "
+        "provides via its case statement"
+    )
+
+  def test_outputs_cover_downstream_wiring(self):
+    body = self._read("outputs.tf")
+    for name in (
+        "runtime_sa_email",
+        "scheduler_sa_email",
+        "cloud_run_job_name",
+        "scheduler_name",
+        "graph_dataset_id",
+    ):
+      assert f'output "{name}"' in body, f"output {name!r} missing"
+
+  def test_split_sa_is_default_in_main(self):
+    """Two ``google_service_account`` resources by default; the
+    scheduler-caller SA gated on ``count = var.single_sa ? 0 : 1``
+    so ``--single-sa`` mode collapses to the runtime SA without
+    a duplicate-account-id conflict."""
+    body = self._read("main.tf")
+    assert 'resource "google_service_account" "runtime"' in body
+    assert 'resource "google_service_account" "scheduler"' in body
+    # The scheduler SA must be gated on single_sa.
+    scheduler_block = self._extract_resource_block(
+        body, "google_service_account", "scheduler"
+    )
+    assert scheduler_block is not None
+    assert "count" in scheduler_block, (
+        "scheduler SA resource must use ``count`` to collapse "
+        "to zero instances when ``var.single_sa`` is true"
+    )
+    assert "var.single_sa" in scheduler_block
+
+  def test_aiplatform_user_grant_conditional_on_extraction_mode(self):
+    """The Vertex AI grant must be conditional — granted in
+    ``ai-fallback`` (the default) so ``AI.GENERATE`` works, NOT
+    granted in ``compiled-only`` mode (matches the bash deploy's
+    conditional grant + #166's verification)."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_iam_member", "runtime_aiplatform_user"
+    )
+    assert block is not None, (
+        "runtime_aiplatform_user resource missing — needed for "
+        "the conditional Vertex AI grant"
+    )
+    assert "count" in block
+    assert 'var.extraction_mode == "ai-fallback"' in block
+
+  def test_cloud_run_job_uses_runtime_sa_and_max_retries(self):
+    """The Cloud Run v2 Job must point at the runtime SA + propagate
+    the ``var.max_retries`` value — the two flagship #230
+    contract points."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job", "periodic"
+    )
+    assert block is not None
+    assert "service_account = google_service_account.runtime.email" in block
+    assert "max_retries     = var.max_retries" in block, (
+        "Cloud Run Job must wire var.max_retries (not a literal) "
+        "so the issue #183 tunable applies"
+    )
+    assert "image = var.image_uri" in block, (
+        "Cloud Run Job's container image must come from "
+        "``var.image_uri`` — image build is outside the module"
+    )
+
+  def test_scheduler_invoker_grant_lands_on_scheduler_sa(self):
+    """The ``roles/run.invoker`` grant on the Cloud Run Job must
+    land on the scheduler-caller SA (the SA the scheduler
+    trigger's OAuth identity uses), not the runtime SA — the
+    least-privilege contract from issue #182."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job_iam_member", "scheduler_invoker"
+    )
+    assert block is not None
+    assert "serviceAccount:${local.scheduler_sa_email}" in block, (
+        "scheduler_invoker grant must use local.scheduler_sa_email "
+        "(NOT runtime SA) so the least-privilege contract holds"
+    )
+
+  def test_scheduler_uses_scheduler_sa_for_oauth(self):
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_scheduler_job", "periodic_cron"
+    )
+    assert block is not None
+    assert "service_account_email = local.scheduler_sa_email" in block, (
+        "Cloud Scheduler OAuth identity must be the scheduler-caller "
+        "SA, mirroring the bash deploy's "
+        '``--oauth-service-account-email "$SCHEDULER_SA_EMAIL"``'
+    )
+
+  def test_env_vars_match_deploy_script_surface(self):
+    """The Cloud Run Job env-var set must mirror the bash deploy's
+    ENV_VARS array (issue #186 wants Terraform to land the same
+    runtime config the bash deploy ships)."""
+    body = self._read("main.tf")
+    # Every env var the bash deploy sets must appear in the
+    # locals block's env_vars map.
+    for env_name in (
+        "BQAA_PROJECT_ID",
+        "BQAA_EVENTS_DATASET_ID",
+        "BQAA_GRAPH_DATASET_ID",
+        "BQAA_LOCATION",
+        "BQAA_LOOKBACK_HOURS",
+        "BQAA_OVERLAP_MINUTES",
+        "BQAA_EXTRACTION_MODE",
+        "BQAA_MAX_RETRIES",
+        "BQAA_MAX_SESSIONS",
+        "BQAA_MAX_SESSION_AGE_HOURS",
+        "BQAA_REFERENCE_EXTRACTORS_MODULE",
+    ):
+      assert env_name in body, (
+          f"env var {env_name!r} missing from the Cloud Run Job "
+          f"config — Terraform must wire the same env surface as "
+          f"the bash deploy"
+      )
+
+  def test_image_build_documented_as_outside_module(self):
+    """README must spell out that the container image build /
+    publish is outside the module so customers don't expect the
+    Cloud Buildpacks ``--source`` flow the bash deploy uses."""
+    readme = self._read("README.md")
+    # The README must spell out the out-of-scope decision in plain
+    # text so a customer reading top-to-bottom hits it before they
+    # try to ``terraform apply`` without a published image.
+    assert "image build" in readme.lower()
+    assert (
+        "outside the module" in readme.lower()
+        or "outside this module" in readme.lower()
+    )
+    assert "image_uri" in readme
+
+  @staticmethod
+  def _extract_variable_block(body: str, name: str) -> str | None:
+    """Slice out one ``variable "name" { ... }`` block.
+
+    Brace-counting parser — Terraform syntax allows nested ``{``
+    in ``validation`` / ``description`` heredocs (we don't use
+    heredocs in this module, but the parser handles them
+    anyway). Returns None when the variable doesn't exist.
+    """
+    needle = f'variable "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None
+
+  @staticmethod
+  def _extract_resource_block(
+      body: str, resource_type: str, name: str
+  ) -> str | None:
+    needle = f'resource "{resource_type}" "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None

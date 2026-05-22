@@ -784,11 +784,25 @@ gcloud iam service-accounts delete \
   --project=your-project --quiet
 ```
 
+## Infrastructure-as-Code option
+
+* **Terraform module.** [`terraform/`](./terraform/) ships an
+  IaC mirror of this bash deploy (resolves #186, defaults
+  match the post-#230 surface: split SAs, `max_retries = 2`,
+  `extraction_mode = "ai-fallback"`). The module deploys
+  *configured* infrastructure — graph dataset, both SAs, IAM
+  bindings, Cloud Run Job, Scheduler trigger — and takes the
+  published container image URI as input. Container image
+  build is intentionally outside the module (the bash deploy's
+  Cloud Buildpacks `--source` flow doesn't slot into IaC); the
+  expected pipeline is CI builds → Artifact Registry push →
+  `terraform apply`. See [`terraform/README.md`](./terraform/README.md)
+  for the bash-vs-Terraform comparison and the quickstart.
+
 ## Not in scope here
 
-* **Terraform / Pulumi.** A scripted deploy is easier to read
-  and easier to copy than IaC. IaC can come once the command
-  shape stabilizes.
+* **Pulumi.** A Pulumi equivalent of the Terraform module would
+  be a straightforward port and is open for contribution.
 * **Compiled-bundle materialization.** This example uses the
   plain `from_ontology_binding` extraction path (Gemini-backed).
   For compiled extractors (`--bundles-root`), see
