@@ -134,7 +134,9 @@ def _resolve(ontology: Ontology, binding: Binding) -> ResolvedGraph:
   edge_tables = tuple(
       sorted(
           (
-              _resolve_edge_table(rel_map[rb.name], rb, node_by_alias)
+              _resolve_edge_table(
+                  rel_map[rb.name], rb, node_by_alias, entity_map
+              )
               for rb in binding.relationships
           ),
           key=lambda et: et.alias,
@@ -224,6 +226,7 @@ def _resolve_edge_table(
     rel: Relationship,
     rb: RelationshipBinding,
     node_by_alias: dict[str, ResolvedNodeTable],
+    entity_map: dict[str, Entity],
 ) -> ResolvedEdgeTable:
   """Build one ``ResolvedEdgeTable`` from a relationship + its binding.
 
@@ -231,6 +234,17 @@ def _resolve_edge_table(
   we turn those into the endpoint *node tables'* aliases and key
   columns so the emitter can render ``REFERENCES alias (cols)``
   without further lookup.
+
+  For the FK column lists emitted into ``SOURCE KEY (...)`` /
+  ``DESTINATION KEY (...)``, we go through the canonical FK→PK
+  mapping from #179 (``normalize_relationship_columns``) so dict-
+  shape bindings work — required for self-edges where the edge
+  column names must differ from the endpoint's PK column names
+  (e.g. ``[{src_decision_execution_id: id}, ...]``). The list is
+  emitted in the endpoint's declared PK-property order so the
+  i-th edge column references the i-th
+  ``from_node_key_columns`` / ``to_node_key_columns`` entry — the
+  positional contract the BigQuery PG DDL requires.
   """
   from_node = node_by_alias[rel.from_]
   to_node = node_by_alias[rel.to]
@@ -242,19 +256,34 @@ def _resolve_edge_table(
       owner=f"relationship {rel.name!r}",
   )
 
+  from_columns_legacy = _ordered_edge_columns(
+      rb=rb,
+      side="from",
+      endpoint_entity=rel.from_,
+      entity_map=entity_map,
+  )
+  to_columns_legacy = _ordered_edge_columns(
+      rb=rb,
+      side="to",
+      endpoint_entity=rel.to,
+      entity_map=entity_map,
+  )
+
   return ResolvedEdgeTable(
       # Same rationale as ResolvedNodeTable.alias: use the relationship name
       # so the DDL reads by logical name rather than physical table
       # basename.
       alias=rel.name,
       source=rb.source,
-      from_columns=tuple(rb.from_columns),
+      from_columns=from_columns_legacy,
       from_node_alias=from_node.alias,
       from_node_key_columns=from_node.key_columns,
-      to_columns=tuple(rb.to_columns),
+      to_columns=to_columns_legacy,
       to_node_alias=to_node.alias,
       to_node_key_columns=to_node.key_columns,
-      key_columns=_resolve_edge_key_columns(rel, rb, column_by_property),
+      key_columns=_resolve_edge_key_columns(
+          rel, rb, column_by_property, entity_map
+      ),
       # v0 emits one label per edge — the relationship name — bundled
       # with the relationship's full property set.
       label_and_properties=(
@@ -263,10 +292,65 @@ def _resolve_edge_table(
   )
 
 
+def _ordered_edge_columns(
+    *,
+    rb: RelationshipBinding,
+    side: str,
+    endpoint_entity: str,
+    entity_map: dict[str, Entity],
+) -> tuple[str, ...]:
+  """Return the edge column tuple, ordered to match the endpoint's
+  PK-property declaration order.
+
+  Walks the canonical FK→PK mapping produced by
+  :func:`normalize_relationship_columns`, then re-projects the
+  ``(edge_column, target_property)`` pairs into the same order as
+  ``entity.keys.primary``. The i-th element of the returned tuple
+  references the i-th element of the endpoint's
+  ``ResolvedNodeTable.key_columns`` — the positional contract the
+  ``SOURCE KEY (...) REFERENCES NodeAlias (...)`` DDL requires.
+
+  Both the legacy ``list[str]`` and the new ``list[dict[str,str]]``
+  binding shapes route through ``normalize_relationship_columns``,
+  so this function works uniformly for both — and the C1 raw-
+  binding guard (``require_legacy_column_shape``) is no longer
+  needed here.
+  """
+  from .binding_loader import normalize_relationship_columns
+
+  column_entries = (
+      list(rb.from_columns) if side == "from" else list(rb.to_columns)
+  )
+  mapping = normalize_relationship_columns(
+      column_entries,
+      endpoint_entity,
+      entity_map,
+      side=side,
+      relationship_name=rb.name,
+  )
+
+  # Build {target_property: edge_column} so we can look up by PK
+  # property name. ``normalize_relationship_columns`` already enforces
+  # the permutation invariant (each PK property covered exactly once),
+  # so this dict is well-formed.
+  by_target_prop = {target_prop: edge_col for edge_col, target_prop in mapping}
+
+  # Walk the endpoint's PK properties in declared order and project
+  # the edge columns into that same order.
+  endpoint = entity_map[endpoint_entity]
+  # The ontology loader guarantees ``keys.primary`` is non-empty for
+  # any entity used as a relationship endpoint. ``_effective_keys``
+  # would also walk inheritance, but v0 rejects ``extends``
+  # (``_reject_extends``) so a flat lookup is correct here.
+  assert endpoint.keys is not None and endpoint.keys.primary is not None
+  return tuple(by_target_prop[p] for p in endpoint.keys.primary)
+
+
 def _resolve_edge_key_columns(
     rel: Relationship,
     rb: RelationshipBinding,
     column_by_property: dict[str, str],
+    entity_map: dict[str, Entity],
 ) -> tuple[str, ...]:
   """Compute the edge's ``KEY (...)`` columns.
 
@@ -298,7 +382,23 @@ def _resolve_edge_key_columns(
   enforced by the ontology loader, so at most one of the first two
   branches can fire.
   """
-  from_to_columns = tuple(rb.from_columns) + tuple(rb.to_columns)
+  # Goes through the canonical FK→PK mapping (issue #179) so dict-
+  # shape bindings work and self-edges can reuse the same edge-
+  # column projection ``_resolve_edge_table`` used for the
+  # ``SOURCE KEY`` / ``DESTINATION KEY`` clauses. The C1 raw-
+  # binding guard (``require_legacy_column_shape``) is lifted —
+  # this helper now handles both legacy and dict-shape bindings.
+  from_to_columns = _ordered_edge_columns(
+      rb=rb,
+      side="from",
+      endpoint_entity=rel.from_,
+      entity_map=entity_map,
+  ) + _ordered_edge_columns(
+      rb=rb,
+      side="to",
+      endpoint_entity=rel.to,
+      entity_map=entity_map,
+  )
   if rel.keys is None:
     return from_to_columns
   if rel.keys.primary:

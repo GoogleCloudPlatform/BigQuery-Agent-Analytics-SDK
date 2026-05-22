@@ -93,10 +93,10 @@ APP_NAME = "migration_v5_demo"
 
 SYSTEM_PROMPT = """You are a MAKO decision agent for an
 ads-monetization platform. For each user message, walk
-through the MAKO decision flow ONCE end-to-end using the
-five tools provided.
+through the full MAKO decision flow ONCE end-to-end using
+the nine tools provided.
 
-The flow, in order, per decision:
+The decision flow (Beats 1–4), in order:
 
 1. Call ``capture_context`` with the current audience size
    and remaining budget. This records a ``ContextSnapshot``.
@@ -120,6 +120,36 @@ The flow, in order, per decision:
    central hub) and wires the edges to ``AgentSession``,
    ``DecisionPoint``, ``ContextSnapshot``, and
    ``SelectionOutcome``.
+
+Then the feedback / reward loop (Beat 5), still within the
+same decision:
+
+6. For EACH candidate that lost (every ``evaluate_candidate``
+   call whose ID is NOT ``selected_candidate_id``), call
+   ``record_rejection`` with the candidate's ID, a
+   ``rejection_category`` (``rule_based`` | ``model_based`` |
+   ``constraint_filtered`` | ``timeout``), and a one-line
+   ``rejection_text``. This records a ``RejectionReason``
+   and the ``hasRejectionReason`` edge.
+7. (Optional, only when a candidate was filtered by policy.)
+   Call ``apply_constraint`` with the decision point ID, the
+   filtered candidate's ID, a ``constraint_type``
+   (``budget_cap`` | ``frequency_limit`` | ``brand_safety``),
+   and a ``constraint_result`` (``pass`` | ``fail``). This
+   records a ``BusinessConstraint`` + ``ConstraintApplication``
+   pair and the constraint-evaluation edges.
+8. Call ``record_outcome_signal`` ONE TO THREE times with
+   the execution ID returned by ``complete_execution`` and
+   a ``signal_type`` (``click`` | ``conversion`` |
+   ``viewability``). This records the observed real-world
+   ``OutcomeSignal`` and the ``producedOutcome`` edge from
+   the DecisionExecution.
+9. Call ``compute_reward`` once with the execution ID, the
+   list of ``signal_id`` values returned by
+   ``record_outcome_signal``, and a synthetic
+   ``reward_value`` between 0.0 and 1.0. This closes the
+   loop with a ``RewardComputation`` and the
+   ``derivedReward`` edges back to the OutcomeSignals.
 
 Always enumerate the candidates and reasoning in your text
 before calling each tool. The reasoning trace is what
@@ -267,12 +297,151 @@ def complete_execution(
   }
 
 
+def apply_constraint(
+    decision_point_id: str,
+    candidate_id: str,
+    constraint_type: str,
+    constraint_result: str,
+) -> dict[str, Any]:
+  """Record a ``BusinessConstraint`` evaluation at the current
+  decision point (Beat 5 — feedback loop).
+
+  Emits the BusinessConstraint + ConstraintApplication pair plus
+  the ``appliedConstraint`` edge (CA → BC) and, when the result
+  is ``fail``, the ``filteredByConstraint`` edge linking the
+  rejected Candidate to the ConstraintApplication that filtered
+  it. Used by the agent during the candidate-evaluation loop
+  whenever a candidate is screened against a policy (budget cap,
+  frequency limit, brand safety).
+
+  Args:
+    decision_point_id: ID from ``propose_decision_point``.
+    candidate_id: ID of the candidate being screened.
+    constraint_type: One of ``budget_cap`` | ``frequency_limit``
+      | ``brand_safety`` (BusinessConstraint.constraintType).
+    constraint_result: ``pass`` | ``fail``
+      (ConstraintApplication.constraintResult).
+  """
+  constraint_id = "bc-" + _short_hash(constraint_type)
+  application_id = "ca-" + _short_hash(
+      decision_point_id, candidate_id, constraint_type
+  )
+  return {
+      "status": "ok",
+      "constraint_id": constraint_id,
+      "application_id": application_id,
+      "decision_point_id": decision_point_id,
+      "candidate_id": candidate_id,
+      "constraint_type": constraint_type,
+      "constraint_result": constraint_result,
+  }
+
+
+def record_rejection(
+    candidate_id: str,
+    rejection_category: str,
+    rejection_text: str,
+) -> dict[str, Any]:
+  """Record a ``RejectionReason`` for a Candidate that wasn't
+  selected (Beat 5 — feedback loop).
+
+  Emits the RejectionReason node plus the ``hasRejectionReason``
+  edge (Candidate → RejectionReason). Called by the agent for
+  every evaluated-but-not-selected candidate so the audit trail
+  carries WHY each candidate lost.
+
+  Args:
+    candidate_id: ID returned by ``evaluate_candidate``.
+    rejection_category: One of ``rule_based`` | ``model_based``
+      | ``constraint_filtered`` | ``timeout``
+      (RejectionReason.rejectionCategory).
+    rejection_text: One-line explanation
+      (RejectionReason.rejectionText).
+  """
+  rejection_id = "rej-" + _short_hash(candidate_id, rejection_category)
+  return {
+      "status": "ok",
+      "rejection_id": rejection_id,
+      "candidate_id": candidate_id,
+      "rejection_category": rejection_category,
+      "rejection_text": rejection_text,
+  }
+
+
+def record_outcome_signal(
+    execution_id: str,
+    signal_type: str,
+) -> dict[str, Any]:
+  """Record an observed real-world outcome linked to a completed
+  decision (Beat 5 — feedback loop).
+
+  Emits the OutcomeSignal node plus the ``producedOutcome`` edge
+  (DecisionExecution → OutcomeSignal). Called after a decision
+  completes when production telemetry observes the consequence
+  (a click, a conversion, a viewability event). One execution
+  can produce multiple OutcomeSignals over time.
+
+  Args:
+    execution_id: ID returned by ``complete_execution``.
+    signal_type: ``click`` | ``conversion`` | ``viewability``
+      (free-form for the demo).
+  """
+  signal_id = "out-sig-" + _short_hash(execution_id, signal_type)
+  return {
+      "status": "ok",
+      "signal_id": signal_id,
+      "execution_id": execution_id,
+      "signal_type": signal_type,
+  }
+
+
+def compute_reward(
+    execution_id: str,
+    outcome_signal_ids: list[str],
+    reward_value: float,
+) -> dict[str, Any]:
+  """Aggregate OutcomeSignals into a ``RewardComputation``
+  (Beat 5 — feedback loop, RL training signal).
+
+  Emits the RewardComputation node plus a ``derivedReward`` edge
+  per OutcomeSignal (RewardComputation → OutcomeSignal). Called
+  by an offline batch process that turns observed signals into
+  the scalar reward an RL model trains on. In the synthetic
+  demo, the agent invokes this immediately after recording the
+  outcome signals so the feedback loop closes within the same
+  session trace.
+
+  Args:
+    execution_id: ID returned by ``complete_execution``.
+    outcome_signal_ids: IDs returned by ``record_outcome_signal``
+      calls that contribute to this reward.
+    reward_value: Aggregated scalar reward
+      (RewardComputation.rewardValue).
+  """
+  reward_id = "rew-" + _short_hash(execution_id, *outcome_signal_ids)
+  return {
+      "status": "ok",
+      "reward_id": reward_id,
+      "execution_id": execution_id,
+      "outcome_signal_ids": list(outcome_signal_ids),
+      "reward_value": float(reward_value),
+  }
+
+
 MAKO_TOOLS = (
     capture_context,
     propose_decision_point,
     evaluate_candidate,
     commit_outcome,
     complete_execution,
+    # Beat 5 — feedback / reward loop. The agent calls these
+    # after ``complete_execution`` to record constraint
+    # evaluations, candidate rejections, observed outcomes, and
+    # the aggregated RL reward signal.
+    apply_constraint,
+    record_rejection,
+    record_outcome_signal,
+    compute_reward,
 )
 
 

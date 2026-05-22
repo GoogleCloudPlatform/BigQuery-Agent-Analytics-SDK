@@ -486,3 +486,167 @@ def test_complete_execution_omits_span_trace_when_missing():
   prop_names = {p.name for p in exec_node.properties}
   assert "span_id" not in prop_names
   assert "trace_id" not in prop_names
+
+
+# ====================================================================== #
+# Beat 5 — feedback / reward loop                                        #
+# ====================================================================== #
+
+
+def test_apply_constraint_emits_both_nodes_and_applied_edge():
+  event = _tool_event(
+      "apply_constraint",
+      {
+          "constraint_id": "bc-budget",
+          "application_id": "ca-1",
+          "candidate_id": "cand-1",
+          "constraint_type": "budget_cap",
+          "constraint_result": "pass",
+      },
+      span_id="s-bc",
+  )
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  node_kinds = {n.entity_name for n in result.nodes}
+  assert node_kinds == {"BusinessConstraint", "ConstraintApplication"}
+  # Pass case: no filteredByConstraint edge — that's reserved for
+  # the actual filtering action.
+  edge_kinds = {e.relationship_name for e in result.edges}
+  assert edge_kinds == {"appliedConstraint"}
+  # Span fully covered (every tool result field maps to a declared
+  # MAKO property).
+  assert result.fully_handled_span_ids == {"s-bc"}
+
+
+def test_apply_constraint_emits_filtered_edge_on_fail():
+  """``constraint_result='fail'`` records the candidate-side
+  evidence: a ``filteredByConstraint`` edge from the rejected
+  Candidate back to the ConstraintApplication that filtered it.
+  Operators querying "why was this candidate dropped?" traverse
+  this edge."""
+  event = _tool_event(
+      "apply_constraint",
+      {
+          "constraint_id": "bc-brand-safety",
+          "application_id": "ca-2",
+          "candidate_id": "cand-2",
+          "constraint_type": "brand_safety",
+          "constraint_result": "fail",
+      },
+  )
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  edge_kinds = {e.relationship_name for e in result.edges}
+  assert edge_kinds == {"appliedConstraint", "filteredByConstraint"}
+
+
+def test_record_rejection_emits_node_and_has_rejection_reason_edge():
+  event = _tool_event(
+      "record_rejection",
+      {
+          "rejection_id": "rej-1",
+          "candidate_id": "cand-3",
+          "rejection_category": "model_based",
+          "rejection_text": "score below threshold",
+      },
+      span_id="s-rej",
+  )
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  assert [n.entity_name for n in result.nodes] == ["RejectionReason"]
+  assert [e.relationship_name for e in result.edges] == ["hasRejectionReason"]
+  edge = result.edges[0]
+  # The edge MUST point at the Candidate's session-scoped node_id —
+  # that's how the materializer's _route_edge resolves the FK lookup
+  # against the existing Candidate node.
+  assert "Candidate:candidate_id=sess-A:cand-3" in edge.from_node_id
+  assert "RejectionReason:rejection_reason_id=sess-A:rej-1" in edge.to_node_id
+
+
+def test_record_outcome_signal_emits_produced_outcome_edge():
+  event = _tool_event(
+      "record_outcome_signal",
+      {
+          "signal_id": "out-sig-1",
+          "execution_id": "exec-1",
+          "signal_type": "conversion",
+      },
+      span_id="s-out",
+  )
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  assert [n.entity_name for n in result.nodes] == ["OutcomeSignal"]
+  assert [e.relationship_name for e in result.edges] == ["producedOutcome"]
+  # ``signal_type`` isn't declared on MAKO's OutcomeSignal → span
+  # is partially_handled (the same pattern commit_outcome uses for
+  # the free-text rationale field).
+  assert result.partially_handled_span_ids == {"s-out"}
+  assert result.fully_handled_span_ids == set()
+
+
+def test_compute_reward_emits_node_and_derived_reward_per_signal():
+  event = _tool_event(
+      "compute_reward",
+      {
+          "reward_id": "rew-1",
+          "execution_id": "exec-1",
+          "outcome_signal_ids": ["out-sig-1", "out-sig-2"],
+          "reward_value": 0.85,
+      },
+      span_id="s-rew",
+  )
+  result = reference_extractor.extract_mako_decision_event(event, None)
+  assert [n.entity_name for n in result.nodes] == ["RewardComputation"]
+  # One derivedReward edge per contributing OutcomeSignal.
+  edges = [e for e in result.edges if e.relationship_name == "derivedReward"]
+  assert len(edges) == 2
+  assert all(
+      "OutcomeSignal:outcome_signal_id=sess-A:" in e.to_node_id for e in edges
+  )
+  # ``reward_value`` MUST appear on the node so the demo can show
+  # the actual scalar in its Beat 5 GQL.
+  reward_node = result.nodes[0]
+  prop_map = {p.name: p.value for p in reward_node.properties}
+  assert prop_map["reward_value"] == 0.85
+
+
+def test_beat5_handlers_session_scope_node_ids():
+  """All four Beat 5 handlers must session-scope their IDs the
+  same way Beat 1–4 handlers do — otherwise two sessions producing
+  the same tool output collide on the node table's PK column.
+  This is the same invariant pinned for the Beat 1–4 handlers by
+  ``test_two_sessions_have_unique_node_pk_values_and_edge_ids``."""
+  events = [
+      _tool_event(
+          "record_rejection",
+          {
+              "rejection_id": "rej-x",
+              "candidate_id": "cand-x",
+              "rejection_category": "rule_based",
+              "rejection_text": "duplicate ad creative",
+          },
+          session_id=sid,
+      )
+      for sid in ("sess-A", "sess-B")
+  ]
+  ids = []
+  for ev in events:
+    result = reference_extractor.extract_mako_decision_event(ev, None)
+    ids.append(result.nodes[0].node_id)
+  # Same raw rejection_id, distinct sessions → distinct node_ids.
+  assert ids[0] != ids[1]
+  assert "sess-A:rej-x" in ids[0]
+  assert "sess-B:rej-x" in ids[1]
+
+
+def test_beat5_dispatch_table_includes_all_four_tools():
+  """The reference extractor's dispatch table must claim every
+  Beat 5 tool — otherwise the structured-extraction harness would
+  fall through to the empty-result branch and the watchdog /
+  compiled-only mode would surface false ``empty_extraction``
+  failures the next time the agent emits these tool calls."""
+  for tool in (
+      "apply_constraint",
+      "record_rejection",
+      "record_outcome_signal",
+      "compute_reward",
+  ):
+    assert (
+        tool in reference_extractor._KNOWN_TOOLS
+    ), f"Beat 5 tool {tool!r} missing from dispatch table"

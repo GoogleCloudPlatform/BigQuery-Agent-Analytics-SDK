@@ -168,21 +168,52 @@ def _relationship_columns(
     rel: ResolvedRelationship,
     spec: ResolvedGraph,
 ) -> dict[str, str]:
-  """Return ordered ``{col_name: DDL_TYPE}`` for a relationship spec."""
+  """Return ordered ``{col_name: DDL_TYPE}`` for a relationship spec.
+
+  Edge FK columns are typed off the **endpoint property** they
+  reference, not the edge-column name itself. For self-edges and
+  any other binding whose edge-column name differs from the
+  endpoint's PK column name (e.g.
+  ``[{src_decision_execution_id: id}]``), the canonical
+  ``from_column_mapping`` / ``to_column_mapping`` from #179
+  pairs each edge column with its target PK property; we look up
+  the SDK type by the target property and key the result dict by
+  the edge column. The legacy list-only path still works for the
+  common case where edge_col == prop_name.
+  """
   entity_map = {e.name: e for e in spec.entities}
   src = entity_map[rel.from_entity]
   tgt = entity_map[rel.to_entity]
-  src_prop_map = {p.column: p for p in src.properties}
-  tgt_prop_map = {p.column: p for p in tgt.properties}
+  # Two indexes per endpoint: one keyed by physical column name
+  # (legacy ``rel.from_columns`` is a tuple of those), one keyed by
+  # logical/ontology property name (canonical
+  # ``rel.from_column_mapping`` pairs ``(edge_column,
+  # target_property)`` where ``target_property`` is the property's
+  # ``logical_name``). Property renames in the binding mean
+  # ``logical_name != column`` is legitimate, so the two indexes
+  # are not interchangeable.
+  src_prop_by_column = {p.column: p for p in src.properties}
+  src_prop_by_logical = {p.logical_name: p for p in src.properties}
+  tgt_prop_by_column = {p.column: p for p in tgt.properties}
+  tgt_prop_by_logical = {p.logical_name: p for p in tgt.properties}
 
   cols: dict[str, str] = {}
-  from_cols = rel.from_columns or src.key_columns
-  for col in from_cols:
-    cols[col] = _ddl_type(src_prop_map[col].sdk_type)
-  to_cols = rel.to_columns or tgt.key_columns
-  for col in to_cols:
-    if col not in cols:
-      cols[col] = _ddl_type(tgt_prop_map[col].sdk_type)
+  if rel.from_column_mapping is not None:
+    for edge_col, target_prop in rel.from_column_mapping:
+      cols[edge_col] = _ddl_type(src_prop_by_logical[target_prop].sdk_type)
+  else:
+    from_cols = rel.from_columns or src.key_columns
+    for col in from_cols:
+      cols[col] = _ddl_type(src_prop_by_column[col].sdk_type)
+  if rel.to_column_mapping is not None:
+    for edge_col, target_prop in rel.to_column_mapping:
+      if edge_col not in cols:
+        cols[edge_col] = _ddl_type(tgt_prop_by_logical[target_prop].sdk_type)
+  else:
+    to_cols = rel.to_columns or tgt.key_columns
+    for col in to_cols:
+      if col not in cols:
+        cols[col] = _ddl_type(tgt_prop_by_column[col].sdk_type)
   for prop in rel.properties:
     if prop.column not in cols:
       cols[prop.column] = _ddl_type(prop.sdk_type)
@@ -321,23 +352,52 @@ def _route_edge(
 
   Foreign key columns are populated from the edge's ``from_node_id``
   and ``to_node_id`` key segments, mapped through the relationship's
-  ``from_columns``/``to_columns`` binding.
+  canonical ``from_column_mapping``/``to_column_mapping`` from #179.
+  Each mapping pair is ``(edge_column, target_property)``: the
+  parsed segment is keyed by the endpoint's PK *physical column*
+  (``_build_node_id`` writes that), and the canonical mapping
+  names target properties by their *logical* (ontology) name —
+  identical to the column for unrenamed bindings, but distinct
+  when the binding renames (e.g. ``id`` → ``decision_execution_id``).
+  We bridge by walking the endpoint's ``ResolvedProperty`` list and
+  building a ``logical_name → column`` map per side. Without this
+  indirection, every FK column for a renamed PK would resolve to
+  the empty string at INSERT time, and self-edges (where the
+  edge-column intentionally differs from the PK column to
+  disambiguate src/dst) would never populate.
+
+  When the mapping is unavailable (older callers that bypass
+  ``resolve()`` and construct ``ResolvedRelationship`` directly),
+  fall back to the legacy positional shape where edge_col ==
+  prop_name == column.
   """
+  entity_map = {e.name: e for e in spec.entities}
+  src_logical_to_col = {
+      p.logical_name: p.column for p in entity_map[rel.from_entity].properties
+  }
+  tgt_logical_to_col = {
+      p.logical_name: p.column for p in entity_map[rel.to_entity].properties
+  }
+
   row: dict = {}
 
-  # Map from-entity keys.  from_columns are a subset of the source
-  # entity's primary keys, so the column names match the key names
-  # in the parsed node ID segment.
   from_keys = parse_key_segment(edge.from_node_id)
-  if rel.from_columns:
+  if rel.from_column_mapping is not None:
+    for edge_col, target_prop in rel.from_column_mapping:
+      physical = src_logical_to_col.get(target_prop, target_prop)
+      row[edge_col] = from_keys.get(physical, "")
+  elif rel.from_columns:
     for col in rel.from_columns:
       row[col] = from_keys.get(col, "")
   else:
     row.update(from_keys)
 
-  # Map to-entity keys (same logic).
   to_keys = parse_key_segment(edge.to_node_id)
-  if rel.to_columns:
+  if rel.to_column_mapping is not None:
+    for edge_col, target_prop in rel.to_column_mapping:
+      physical = tgt_logical_to_col.get(target_prop, target_prop)
+      row[edge_col] = to_keys.get(physical, "")
+  elif rel.to_columns:
     for col in rel.to_columns:
       row[col] = to_keys.get(col, "")
   else:

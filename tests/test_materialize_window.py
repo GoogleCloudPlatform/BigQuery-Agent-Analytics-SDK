@@ -25,11 +25,34 @@ Live BigQuery integration is covered separately (a follow-up).
 from __future__ import annotations
 
 import datetime as _dt
+import pathlib
+import subprocess
 from unittest import mock
 
 import pytest
 
 from bigquery_agent_analytics import materialize_window as mw
+
+# Stub reference-extractor module for tests that pass
+# ``extraction_mode="compiled-only"``. The orchestrator's boundary
+# check now requires ``reference_extractors_module`` (or
+# ``bundles_root``) when compiled-only is set, so any test that
+# would otherwise omit both has to pass this stub's dotted path.
+# Tests using ``_patch_orchestrator_for_extraction`` never trigger
+# the actual import (``_build_manager`` is mocked), but registering
+# the module in ``sys.modules`` makes the test suite robust against
+# any future refactor that lets the import path run.
+_TEST_REF_MODULE = "bqaa_test_compiled_only_stub_ref"
+_TEST_REF_DUMMY_EXTRACTOR = lambda event, spec: None  # noqa: E731
+
+import sys as _sys
+import types as _types
+
+if _TEST_REF_MODULE not in _sys.modules:
+  _stub_ref_mod = _types.ModuleType(_TEST_REF_MODULE)
+  _stub_ref_mod.EXTRACTORS = {"TOOL_COMPLETED": _TEST_REF_DUMMY_EXTRACTOR}
+  _sys.modules[_TEST_REF_MODULE] = _stub_ref_mod
+
 
 # ------------------------------------------------------------------ #
 # compute_state_key                                                    #
@@ -460,7 +483,10 @@ def fixture_paths(tmp_path):
 
 def _stub_bq_client(discovered_rows):
   """A BigQuery client whose ``.query()`` returns:
-  - the DDL response (anything; we just check it was called)
+  - the CREATE TABLE response (anything; we just check it was called)
+  - one response per additive schema-migration ALTER
+    (currently three: ``mode``, ``orphan_watermark``,
+    ``flagged_session_ids``)
   - the state-table read (empty → bootstrap)
   - the discovery query (returns ``discovered_rows``)
   ``.insert_rows_json`` returns [] (no errors).
@@ -468,9 +494,15 @@ def _stub_bq_client(discovered_rows):
   client = mock.Mock()
 
   # Each .query() call's .result() yields a different row set.
-  # We sequence them via side_effect on the query() Mock.
+  # We sequence them via side_effect on the query() Mock. Keep the
+  # ALTER-TABLE response count in sync with
+  # ``_STATE_TABLE_MODE_MIGRATIONS`` in
+  # ``src/bigquery_agent_analytics/materialize_window.py``.
   results = [
       mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER orphan_watermark
+      mock.Mock(result=mock.Mock(return_value=[])),  # ALTER flagged_session_ids
       mock.Mock(result=mock.Mock(return_value=[])),  # state read
       mock.Mock(result=mock.Mock(return_value=discovered_rows)),  # discovery
   ]
@@ -788,6 +820,13 @@ class TestCheckpointCarryForward:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER ADD mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1498,6 +1537,13 @@ class TestCheckpointNeverRegresses:
     client.query = mock.Mock(
         side_effect=[
             mock.Mock(result=mock.Mock(return_value=[])),  # DDL
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),  # state read
             mock.Mock(result=mock.Mock(return_value=discovered)),  # discovery
         ]
@@ -1558,7 +1604,14 @@ class TestCheckpointNeverRegresses:
     ]
     client.query = mock.Mock(
         side_effect=[
-            mock.Mock(result=mock.Mock(return_value=[])),
+            mock.Mock(result=mock.Mock(return_value=[])),  # CREATE TABLE
+            mock.Mock(result=mock.Mock(return_value=[])),  # ALTER mode
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER orphan_watermark
+            mock.Mock(
+                result=mock.Mock(return_value=[])
+            ),  # ALTER flagged_session_ids
             mock.Mock(result=mock.Mock(return_value=[state_row])),
             mock.Mock(result=mock.Mock(return_value=discovered)),
         ]
@@ -2201,3 +2254,2349 @@ class TestEmptyExtractionNotOk:
     assert result.sessions_materialized == 0
     assert result.sessions_failed == 0
     assert result.failures == []
+
+
+# ====================================================================== #
+# Backfill mode + state-key suffix + ``mode`` column (PR A, issue #177)   #
+# ====================================================================== #
+
+
+class TestStateKeySuffixIsolation:
+  """``state_key_suffix`` folds into the SHA so backfill / re-extraction
+  runs occupy a distinct state-key namespace from the steady-state cron.
+  Without the suffix the hash is byte-identical to the prior (suffix-less)
+  computation, so existing checkpoints don't drift after the SDK upgrade.
+  """
+
+  _BASE = dict(
+      project_id="proj",
+      dataset_id="ds",
+      graph_name="g",
+      events_table="agent_events",
+      ontology_fingerprint="ofp",
+      binding_fingerprint="bfp",
+      discovery_mode="terminal:AGENT_COMPLETED",
+  )
+
+  def test_suffix_unset_is_byte_identical_to_legacy_hash(self):
+    legacy = mw.compute_state_key(**self._BASE)
+    with_none = mw.compute_state_key(state_key_suffix=None, **self._BASE)
+    with_empty = mw.compute_state_key(state_key_suffix="", **self._BASE)
+    assert legacy == with_none, "suffix=None must not drift the hash"
+    assert legacy == with_empty, (
+        "suffix='' must not drift the hash either — env-var pass-through "
+        "delivers empty strings for unset values; flipping the hash on "
+        "those would silently invalidate every existing checkpoint"
+    )
+
+  def test_different_suffixes_produce_different_state_keys(self):
+    week1 = mw.compute_state_key(
+        state_key_suffix="backfill-may-w1", **self._BASE
+    )
+    week2 = mw.compute_state_key(
+        state_key_suffix="backfill-may-w2", **self._BASE
+    )
+    steady = mw.compute_state_key(**self._BASE)
+    assert week1 != week2
+    assert week1 != steady
+    assert week2 != steady
+
+
+class TestBackfillValidation:
+  """The orchestrator rejects misconfigurations at the boundary so an
+  operator typo doesn't silently degrade to a no-op or, worse, pollute
+  the steady-state checkpoint stream."""
+
+  def test_backfill_requires_both_from_and_to(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match="--backfill requires both --from"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=None,
+      )
+
+  def test_backfill_requires_from_less_than_to(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match="requires --from < --to"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          # Pass a suffix so this test reaches the from<to check
+          # instead of being short-circuited by the
+          # suffix-required check.
+          state_key_suffix="reversed-window",
+          from_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+      )
+
+  def test_backfill_requires_state_key_suffix(self, fixture_paths):
+    """Regression for PR #188 review (P1): backfill without
+    ``--state-key-suffix`` would write a state row under the
+    steady-state ``state_key`` and silently rewind the next
+    steady-state cron's high-water mark. ``read_last_checkpoint``
+    filters only by ``state_key``, so ``mode='backfill'`` on the
+    row is an audit signal that does NOT protect the checkpoint
+    stream — the suffix is what carves out a distinct namespace.
+
+    Asserted before any BigQuery client interaction: the
+    validation runs at the boundary so the failure mode is loud,
+    fast, and cheap. The fake client's ``query`` raises on call
+    so the test fails if anything tries to hit BigQuery before
+    the suffix check fires."""
+    ontology_yaml, binding_yaml = fixture_paths
+    bq_client = mock.Mock()
+    bq_client.query = mock.Mock(
+        side_effect=AssertionError(
+            "BigQuery work must NOT start before the suffix check fires"
+        )
+    )
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix=None,
+          bq_client=bq_client,
+      )
+    # Empty string is treated as unset too, matching the env-var
+    # pass-through semantics in ``_parse_backfill_timestamp`` and
+    # the env-var reader in ``run_job.py``.
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix="",
+          bq_client=bq_client,
+      )
+    # Whitespace-only suffix is treated as unset too. Without the
+    # boundary strip, ``"   "`` is truthy in Python and would slip
+    # past the missing-suffix check, then become an opaque
+    # whitespace token in the state-key hash — an unreadable
+    # namespace that's nearly impossible to debug. The boundary
+    # normalization in ``run_materialize_window`` makes the
+    # behavior here identical to the empty-string case.
+    with pytest.raises(
+        ValueError, match="--backfill requires --state-key-suffix"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=True,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+          state_key_suffix="   ",
+          bq_client=bq_client,
+      )
+
+  def test_from_to_without_backfill_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError, match="--from and --to are only valid with --backfill"
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          backfill=False,
+          from_time=_dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc),
+          to_time=_dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc),
+      )
+
+
+class TestBackfillTimestampParser:
+  """``_parse_backfill_timestamp`` handles the formats env-var
+  pass-through actually delivers."""
+
+  def test_accepts_z_suffix_iso8601(self):
+    parsed = mw._parse_backfill_timestamp("--from", "2026-05-01T00:00:00Z")
+    assert parsed == _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+
+  def test_accepts_explicit_utc_offset(self):
+    parsed = mw._parse_backfill_timestamp("--from", "2026-05-01T00:00:00+00:00")
+    assert parsed == _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+
+  def test_none_and_empty_string_are_unset(self):
+    assert mw._parse_backfill_timestamp("--from", None) is None
+    assert mw._parse_backfill_timestamp("--from", "") is None
+    assert mw._parse_backfill_timestamp("--from", "   ") is None
+
+  def test_invalid_input_raises_with_flag_name(self):
+    with pytest.raises(ValueError, match="--from must be a UTC ISO 8601"):
+      mw._parse_backfill_timestamp("--from", "not-a-date")
+
+
+class TestBackfillScanWindow:
+  """The backfill scan window is the operator-supplied [from, to)
+  range, not the lookback-derived window. The lookback cap does NOT
+  clip the backfill — an operator backfilling six weeks of history
+  must not have their window silently truncated to ``lookback_hours``."""
+
+  def test_backfill_window_uses_from_to_directly(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    # ``run_started_at`` is fixed in 2026-05-20; the backfill window
+    # is one full week earlier (May 1 → May 8). A lookback-derived
+    # window would scan May 19 → May 20; backfill must scan the
+    # explicit range instead.
+    now = _dt.datetime(2026, 5, 20, 12, tzinfo=_dt.timezone.utc)
+    from_ts = _dt.datetime(2026, 5, 1, tzinfo=_dt.timezone.utc)
+    to_ts = _dt.datetime(2026, 5, 8, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    with (
+        mock.patch.object(mw, "_build_manager", return_value=mock.Mock()),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      result = mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=24.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+          backfill=True,
+          from_time=from_ts,
+          to_time=to_ts,
+          state_key_suffix="backfill-may-w1",
+      )
+    assert result.window_start == from_ts, (
+        "backfill scan_start must be the supplied --from, not "
+        "lookback-derived from run_started_at"
+    )
+    assert (
+        result.window_end == to_ts
+    ), "backfill scan_end must be the supplied --to, not run_started_at"
+
+
+class TestStateRowModeColumn:
+  """``mode`` round-trips through ``append_state_row`` and identifies
+  whether a state row was written by a steady-state or backfill run.
+  Default is ``'steady'`` so pre-existing callers continue to write
+  the expected value."""
+
+  def test_state_row_defaults_to_steady_mode(self):
+    row = mw.StateRow(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+    )
+    assert row.mode == mw.STATE_MODE_STEADY
+
+  def test_append_state_row_includes_mode_in_payload(self):
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    row = mw.StateRow(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+        mode=mw.STATE_MODE_BACKFILL,
+    )
+    mw.append_state_row(client, "p.d.t", row)
+    call_args = client.insert_rows_json.call_args
+    payload = call_args[0][1][0]
+    assert payload["mode"] == "backfill"
+
+
+class TestAppendStateRowOmitsEmptyArrays:
+  """BigQuery's streaming-insert API rejects empty-array values
+  for ARRAY<STRING> columns with "Field value of
+  flagged_session_ids cannot be empty." Live verification of PR
+  #224 surfaced this on the very first cron pass when the
+  watchdog wrote an ``orphan_scan`` row with zero new orphans.
+  The fix omits ``flagged_session_ids`` from the payload when
+  there's nothing to write (storing NULL); BigQuery accepts
+  that and operators can still distinguish row kinds via the
+  ``mode`` column."""
+
+  def _state_row(self, **overrides):
+    base = dict(
+        state_key="sk",
+        run_id="rid",
+        run_started_at=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_start=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        scan_end=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+        last_completion_at=None,
+        sessions_discovered=0,
+        sessions_materialized=0,
+        sessions_failed=0,
+        ok=True,
+    )
+    base.update(overrides)
+    return mw.StateRow(**base)
+
+  def test_steady_row_omits_array_field_when_none(self):
+    """Default StateRow (steady-mode caller) leaves
+    ``flagged_session_ids=None``. The serialized payload must
+    omit the field entirely so BigQuery stores NULL — the
+    pre-#224 row shape."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    mw.append_state_row(client, "p.d.t", self._state_row())
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert "flagged_session_ids" not in payload
+    # Same omit-when-None rule for the other nullable columns.
+    assert "orphan_watermark" not in payload
+    assert "last_completion_at" not in payload
+
+  def test_orphan_scan_with_zero_orphans_omits_array(self):
+    """The crash reproducer: ``run_orphan_watchdog`` builds an
+    ``orphan_scan`` row with ``flagged_session_ids=()`` on a
+    zero-orphan scan. Sending ``[]`` as the JSON value crashed
+    BigQuery; omitting the field stores NULL and the row writes
+    cleanly."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    cutoff = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    mw.append_state_row(
+        client,
+        "p.d.t",
+        self._state_row(
+            mode=mw.STATE_MODE_ORPHAN_SCAN,
+            orphan_watermark=cutoff,
+            flagged_session_ids=(),  # the crash trigger
+        ),
+    )
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert "flagged_session_ids" not in payload
+    # Watermark IS populated on orphan rows and must be sent.
+    assert payload["orphan_watermark"] == cutoff.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert payload["mode"] == mw.STATE_MODE_ORPHAN_SCAN
+
+  def test_orphan_row_with_flagged_sessions_sends_array(self):
+    """The non-empty path stays unchanged: a populated
+    ``flagged_session_ids`` tuple serializes as a list."""
+    client = mock.Mock()
+    client.insert_rows_json = mock.Mock(return_value=[])
+    mw.append_state_row(
+        client,
+        "p.d.t",
+        self._state_row(
+            mode=mw.STATE_MODE_ORPHAN_LEDGER,
+            orphan_watermark=_dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc),
+            flagged_session_ids=("orphan-A", "orphan-B"),
+        ),
+    )
+    payload = client.insert_rows_json.call_args[0][1][0]
+    assert payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+
+
+class TestEnsureStateTableMigration:
+  """``ensure_state_table`` runs the schema-evolution ALTERs every call.
+  ``ADD COLUMN IF NOT EXISTS`` is idempotent in BigQuery; the test
+  asserts the calls are issued, not their side effect."""
+
+  def test_ensure_state_table_runs_create_and_alter(self):
+    client = mock.Mock()
+    client.query = mock.Mock(
+        return_value=mock.Mock(result=mock.Mock(return_value=[]))
+    )
+    mw.ensure_state_table(client, "p.d._bqaa_materialization_state")
+    queries = [args[0][0] for args in client.query.call_args_list]
+    create = next(q for q in queries if q.startswith("CREATE TABLE"))
+    # Fresh tables include every current column in the initial DDL —
+    # ``mode`` (issue #177) plus the orphan-watchdog columns
+    # (issue #180: ``orphan_watermark``, ``flagged_session_ids``).
+    assert "mode STRING" in create
+    assert "orphan_watermark TIMESTAMP" in create
+    assert "flagged_session_ids ARRAY<STRING>" in create
+    alters = [q for q in queries if q.startswith("ALTER TABLE")]
+    # Every additive column has an idempotent ADD COLUMN IF NOT
+    # EXISTS so pre-migration tables get patched up without a
+    # destructive migration.
+    assert any("ADD COLUMN IF NOT EXISTS mode STRING" in q for q in alters)
+    assert any(
+        "ADD COLUMN IF NOT EXISTS orphan_watermark TIMESTAMP" in q
+        for q in alters
+    )
+    assert any(
+        "ADD COLUMN IF NOT EXISTS" in q
+        and "flagged_session_ids ARRAY<STRING>" in q
+        for q in alters
+    )
+
+
+# ====================================================================== #
+# Extraction mode (PR B2, issue #178 follow-up)                            #
+# ====================================================================== #
+
+
+def _diag(code, **kwargs):
+  """Build an ExtractionDiagnostic from kwargs without a Pydantic import
+  chain in every test (keeps the dict-construction explicit and lets
+  tests pass plain values regardless of the Pydantic version's
+  ``model_construct`` quirks)."""
+  from bigquery_agent_analytics.extracted_models import ExtractionDiagnostic
+
+  return ExtractionDiagnostic(diagnostic_code=code, **kwargs)
+
+
+def _patch_orchestrator_for_extraction(
+    monkeypatch,
+    *,
+    diagnostics_per_session=None,
+    nodes_per_session=None,
+):
+  """Patch ``_build_manager`` and ``OntologyMaterializer`` so the
+  orchestrator runs end-to-end without BQ. Returns a tracker dict
+  with the call counts the tests assert on.
+  """
+  from bigquery_agent_analytics import materialize_window as mw_mod
+  from bigquery_agent_analytics.extracted_models import ExtractedGraph
+  from bigquery_agent_analytics.extracted_models import ExtractedNode
+
+  diagnostics_per_session = diagnostics_per_session or {}
+  nodes_per_session = nodes_per_session or {}
+
+  tracker = {
+      "extract_calls": [],  # list of (session_id, kwargs) tuples
+  }
+
+  class _FakeManager:
+
+    def __init__(self):
+      self.spec = mock.Mock()
+      self.extractors = {"E": lambda *_args, **_kw: None}
+
+    def extract_graph(self, session_ids, *args, **kwargs):
+      tracker["extract_calls"].append((tuple(session_ids), dict(kwargs)))
+      sid = session_ids[0]
+      return ExtractedGraph(
+          name="g",
+          nodes=[
+              ExtractedNode(node_id=f"n-{sid}", entity_name="E")
+              for _ in range(nodes_per_session.get(sid, 0))
+          ],
+          diagnostics=diagnostics_per_session.get(sid, []),
+      )
+
+  class _FakeMaterializeStatus:
+
+    def __init__(self, row_counts, table_statuses):
+      self.row_counts = row_counts
+      self.table_statuses = table_statuses
+
+  class _FakeMaterializer:
+
+    def __init__(self, *_args, **_kwargs):
+      pass
+
+    def materialize_with_status(self, graph, session_ids):
+      # Mirror what the real materializer would return: one row per
+      # node, status entries with rows_attempted = rows_inserted.
+      n = len(graph.nodes)
+      table_statuses = {}
+      if n:
+        table_statuses["E"] = mock.Mock(
+            table_ref="t",
+            rows_attempted=n,
+            rows_inserted=n,
+            cleanup_status="deleted",
+            insert_status="inserted",
+            idempotent=True,
+        )
+      return _FakeMaterializeStatus(
+          row_counts={"E": n} if n else {},
+          table_statuses=table_statuses,
+      )
+
+  monkeypatch.setattr(mw_mod, "_build_manager", lambda **_kw: _FakeManager())
+  monkeypatch.setattr(
+      "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer",
+      _FakeMaterializer,
+  )
+  return tracker
+
+
+class TestExtractionModeFlag:
+  """Boundary contract for the new ``--extraction-mode`` flag."""
+
+  def test_unknown_extraction_mode_rejected(self, fixture_paths):
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(ValueError, match=r"--extraction-mode must be one of"):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          extraction_mode="LLM_ONLY",
+      )
+
+  def test_compiled_only_without_extractor_source_rejected(self, fixture_paths):
+    """``compiled-only`` without ``bundles_root`` or
+    ``reference_extractors_module`` must raise at the boundary.
+
+    Without an extractor source, ``_build_manager`` takes the
+    legacy no-extractors path and ``extract_graph(...,
+    run_structured=True, use_ai_generate=False,
+    on_unhandled_span='fail')`` silently emits an empty graph
+    with no diagnostics — defeating the typed
+    ``empty_extraction`` failure surface compiled-only mode is
+    supposed to guarantee. The boundary check makes the
+    misconfiguration loud instead of silent."""
+    ontology_yaml, binding_yaml = fixture_paths
+    with pytest.raises(
+        ValueError,
+        match=r"--extraction-mode=compiled-only requires either",
+    ):
+      mw.run_materialize_window(
+          project_id="p",
+          dataset_id="d",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          extraction_mode="compiled-only",
+          # No bundles_root, no reference_extractors_module —
+          # the misconfiguration this guard protects against.
+      )
+
+  def test_compiled_only_with_reference_module_accepted(
+      self, fixture_paths, monkeypatch
+  ):
+    """The mirror case: compiled-only is fine when at least one of
+    ``bundles_root`` or ``reference_extractors_module`` is set. The
+    boundary check only rejects the both-missing combination."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])  # zero discovered sessions; fast path
+    # Should NOT raise — reference_extractors_module satisfies the
+    # boundary check. ``_TEST_REF_MODULE`` is the stub registered
+    # at module load time.
+    mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    # No sessions discovered ⇒ no extract calls; the test just
+    # asserts the boundary check let the call through.
+    assert tracker["extract_calls"] == []
+
+  def test_default_is_ai_fallback(self, fixture_paths, monkeypatch):
+    """``extraction_mode`` defaults to ``ai-fallback`` — existing
+    callers see the legacy ``extract_graph(..., use_ai_generate=True)``
+    path with no behavior change."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client(
+        [
+            _FakeBQRow(
+                session_id="s1",
+                completion_timestamp=_dt.datetime.now(_dt.timezone.utc),
+            )
+        ]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+    )
+    assert len(tracker["extract_calls"]) == 1
+    _, kwargs = tracker["extract_calls"][0]
+    assert kwargs == {"use_ai_generate": True}, (
+        "default path must use the legacy bool surface so existing "
+        "callers see byte-identical extraction behavior"
+    )
+
+
+class TestCompiledOnlyMode:
+  """``extraction_mode='compiled-only'`` routes through B1's
+  orthogonal-flag surface AND translates diagnostics into typed
+  ``empty_extraction`` failures."""
+
+  def test_compiled_only_uses_orthogonal_flags(
+      self, fixture_paths, monkeypatch
+  ):
+    """The actual ``extract_graph`` invocation in compiled-only
+    mode uses ``run_structured=True, use_ai_generate=False,
+    on_unhandled_span='fail'`` — the B1 contract."""
+    ontology_yaml, binding_yaml = fixture_paths
+    # Empty diagnostics → clean session.
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        nodes_per_session={
+            "s1": 3
+        },  # at least one row so empty-extraction guard doesn't trip
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    assert len(tracker["extract_calls"]) == 1
+    _, kwargs = tracker["extract_calls"][0]
+    assert kwargs == {
+        "use_ai_generate": False,
+        "run_structured": True,
+        "on_unhandled_span": "fail",
+    }, "compiled-only must opt into B1's orthogonal-flag surface"
+
+  def test_unhandled_diagnostic_surfaces_empty_extraction(
+      self, fixture_paths, monkeypatch
+  ):
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag(
+                    "structured_unhandled",
+                    span_id="span-x",
+                    event_type="UNKNOWN",
+                ),
+            ],
+        },
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    assert result.ok is False, (
+        "an unhandled diagnostic in compiled-only mode must flip "
+        "the session result to ok=False"
+    )
+    assert result.failures, "failures[] must surface the diagnostic"
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    detail = result.failures[0]["error_detail"]
+    assert "span-x" in detail and "UNKNOWN" in detail, (
+        "error_detail must name the offending span_id + event_type so "
+        "operators can grep Cloud Logging for the failing event shape"
+    )
+
+  def test_extractor_exception_diagnostic_surfaces_empty_extraction(
+      self, fixture_paths, monkeypatch
+  ):
+    """``extractor_exception`` diagnostics (extractor raised, B1's
+    ``capture_extractor_exceptions=True`` path) are also fatal in
+    compiled-only mode."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag(
+                    "extractor_exception",
+                    span_id="span-boom",
+                    event_type="E",
+                    detail="RuntimeError: extractor crashed",
+                ),
+            ],
+        },
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    assert result.ok is False
+    assert result.failures[0]["error_code"] == "empty_extraction"
+    detail = result.failures[0]["error_detail"]
+    assert "span-boom" in detail
+    assert "extractor crashed" in detail, (
+        "the captured exception detail must surface in error_detail "
+        "so operators can pinpoint the extractor bug"
+    )
+
+  def test_compiled_only_clean_session_passes(self, fixture_paths, monkeypatch):
+    """When the diagnostic stream has only handled codes (no
+    unhandled, no exception), compiled-only mode passes
+    materialization normally."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        diagnostics_per_session={
+            "s1": [
+                _diag("structured_fully_handled", span_id="span-1"),
+                _diag("structured_partially_handled", span_id="span-2"),
+            ],
+        },
+        nodes_per_session={"s1": 5},
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    assert result.ok is True
+    assert not result.failures
+    assert result.sessions_materialized == 1
+
+  def test_diagnostic_samples_capped_at_ten(self, fixture_paths, monkeypatch):
+    """The error_detail caps diagnostic samples at 10 + says how
+    many more exist — keeps Cloud Logging payloads readable when a
+    customer's session has dozens of unhandled spans."""
+    ontology_yaml, binding_yaml = fixture_paths
+    many = [
+        _diag(
+            "structured_unhandled",
+            span_id=f"span-{i}",
+            event_type=f"TYPE_{i}",
+        )
+        for i in range(25)
+    ]
+    _patch_orchestrator_for_extraction(
+        monkeypatch, diagnostics_per_session={"s1": many}
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    result = mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    detail = result.failures[0]["error_detail"]
+    # Counts surface in the prose: "25 structured_unhandled" total.
+    assert "25 structured_unhandled" in detail
+    # The "(+N more not shown)" note appears (15 more = 25 - 10 cap).
+    assert "+15 more" in detail
+
+
+class TestCompiledOnlyMakesZeroLLMCalls:
+  """The SDK contract that justifies dropping
+  ``roles/aiplatform.user`` from the runtime SA's IAM in
+  ``--extraction-mode=compiled-only`` mode. Asserts at the
+  orchestrator boundary that compiled-only mode passes
+  ``use_ai_generate=False`` to ``extract_graph`` and that the
+  manager's ``_extract_via_ai_generate`` is never called. B1
+  already pins that ``on_unhandled_span='fail'`` skips the AI
+  branch; this test pins the materialize_window contract that
+  routes through B1 correctly so a future regression is caught
+  here before a customer's runtime SA starts billing Vertex AI.
+
+  The deploy script (``deploy_cloud_run_job.sh``) uses this same
+  contract: in compiled-only mode it skips the
+  ``roles/aiplatform.user`` grant and idempotently removes any
+  pre-existing grant on the same SA — see
+  ``TestDeployScriptExtractionModeBoundary`` for the shell-side
+  verification.
+  """
+
+  def test_compiled_only_extract_graph_use_ai_generate_is_false(
+      self, fixture_paths, monkeypatch
+  ):
+    """The ``extract_graph`` kwargs in compiled-only mode include
+    ``use_ai_generate=False``. Any future regression that flips
+    this to True trips the test before a customer's runtime SA
+    starts charging Vertex AI for calls it shouldn't be making."""
+    ontology_yaml, binding_yaml = fixture_paths
+    tracker = _patch_orchestrator_for_extraction(
+        monkeypatch,
+        nodes_per_session={"s1": 1},
+    )
+    now = _dt.datetime(2026, 5, 20, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client(
+        [_FakeBQRow(session_id="s1", completion_timestamp=now)]
+    )
+    mw.run_materialize_window(
+        project_id="test-proj",
+        dataset_id="test_ds",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=now,
+        extraction_mode="compiled-only",
+        reference_extractors_module=_TEST_REF_MODULE,
+    )
+    for _, kwargs in tracker["extract_calls"]:
+      assert kwargs.get("use_ai_generate") is False, (
+          "compiled-only must NOT pass use_ai_generate=True; that "
+          "would route through _extract_via_ai_generate and bill "
+          "Vertex AI on a deploy where roles/aiplatform.user has "
+          "intentionally been dropped"
+      )
+      assert kwargs.get("on_unhandled_span") == "fail", (
+          "compiled-only must pass on_unhandled_span='fail' so B1's "
+          "_extract_graph_impl skips the AI branch (and the stub "
+          "branch); any other value risks an LLM call"
+      )
+
+  def test_compiled_only_does_not_call_extract_via_ai_generate(self):
+    """Inline B1-style integration: build a real
+    ``OntologyGraphManager``-shaped object whose
+    ``_extract_via_ai_generate`` raises if called, and verify
+    that ``on_unhandled_span='fail'`` never reaches it. Belt-
+    and-braces for the materializer→extract_graph contract."""
+    from bigquery_agent_analytics.extracted_models import ExtractedGraph
+    from bigquery_agent_analytics.ontology_graph import OntologyGraphManager
+
+    mgr = OntologyGraphManager.__new__(OntologyGraphManager)
+    mgr.extractors = {}
+    mgr.spec = mock.Mock()
+    mgr.spec.name = "g"
+    mgr._fetch_raw_events = mock.Mock(return_value=[])
+    mgr._extract_via_ai_generate = mock.Mock(
+        side_effect=AssertionError(
+            "_extract_via_ai_generate must NOT be called in compiled-only mode"
+        )
+    )
+    mgr._extract_payloads = mock.Mock(
+        side_effect=AssertionError(
+            "_extract_payloads must NOT be called in compiled-only mode"
+        )
+    )
+    result = mgr.extract_graph(
+        ["s1"],
+        use_ai_generate=False,
+        run_structured=True,
+        on_unhandled_span="fail",
+    )
+    # No assertion error fired — neither branch was called.
+    assert isinstance(result, ExtractedGraph)
+    assert mgr._extract_via_ai_generate.called is False
+    assert mgr._extract_payloads.called is False
+
+
+# ====================================================================== #
+# _build_manager reference-only path                                      #
+# ====================================================================== #
+
+
+class TestBuildManagerReferenceOnly:
+  """The deploy-path follow-up adds a third sub-path to
+  ``_build_manager``: ``bundles_root=None`` AND
+  ``reference_extractors_module=<dotted-path>``. The reference
+  module's ``EXTRACTORS`` dict registers structured extractors on
+  the manager directly — no compiled bundles, no AI.GENERATE.
+
+  This is the compiled-only deploy story for customers who
+  don't pre-compile fingerprint-stable bundles: ship the
+  reference module, set ``BQAA_REFERENCE_EXTRACTORS_MODULE``,
+  drop ``roles/aiplatform.user``. Customers who want compiled
+  bundles still get the bundles path by additionally setting
+  ``BQAA_BUNDLES_ROOT`` — the existing
+  ``bundles_root is not None`` branch handles that case."""
+
+  def test_reference_only_mode_loads_extractors_from_module(self, monkeypatch):
+    """``_build_manager(bundles_root=None,
+    reference_extractors_module='X')`` imports ``X`` and threads
+    its ``EXTRACTORS`` dict into the manager via the
+    ``extractors=`` kwarg on ``from_ontology_binding``."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("bqaa_test_ref_extractors")
+    fake_mod.EXTRACTORS = {"TOOL_COMPLETED": lambda event, spec: None}
+    monkeypatch.setitem(sys.modules, "bqaa_test_ref_extractors", fake_mod)
+
+    captured = {}
+
+    class _FakeManager:
+      pass
+
+    def _fake_from_ontology_binding(**kwargs):
+      captured.update(kwargs)
+      return _FakeManager()
+
+    monkeypatch.setattr(
+        "bigquery_agent_analytics.ontology_graph.OntologyGraphManager"
+        ".from_ontology_binding",
+        classmethod(lambda cls, **kw: _fake_from_ontology_binding(**kw)),
+    )
+
+    result = mw._build_manager(
+        project_id="p",
+        dataset_id="d",
+        ontology=mock.Mock(),
+        binding=mock.Mock(),
+        location="US",
+        bq_client=mock.Mock(),
+        bundles_root=None,
+        reference_extractors_module="bqaa_test_ref_extractors",
+        outcome_callback=lambda *_a, **_k: None,
+        table_id="agent_events",
+    )
+    assert isinstance(result, _FakeManager)
+    assert captured["extractors"] is fake_mod.EXTRACTORS
+
+  def test_reference_only_mode_rejects_empty_extractors(self, monkeypatch):
+    """The ``EXTRACTORS`` dict must be a non-empty dict; the
+    validator catches a stale / partially-wired reference module
+    at the boundary rather than producing an empty-extractor
+    manager that silently fails every span under
+    ``on_unhandled_span='fail'``."""
+    import sys
+    import types
+
+    fake_mod = types.ModuleType("bqaa_test_empty_ref")
+    fake_mod.EXTRACTORS = {}
+    monkeypatch.setitem(sys.modules, "bqaa_test_empty_ref", fake_mod)
+
+    with pytest.raises(ValueError, match="non-empty EXTRACTORS dict"):
+      mw._build_manager(
+          project_id="p",
+          dataset_id="d",
+          ontology=mock.Mock(),
+          binding=mock.Mock(),
+          location="US",
+          bq_client=mock.Mock(),
+          bundles_root=None,
+          reference_extractors_module="bqaa_test_empty_ref",
+          outcome_callback=lambda *_a, **_k: None,
+          table_id="agent_events",
+      )
+
+  def test_legacy_no_extractors_path_still_works(self, monkeypatch):
+    """``bundles_root=None`` AND
+    ``reference_extractors_module=None`` keeps the existing
+    AI-only path: manager is constructed without extractors so
+    ``extract_graph(..., use_ai_generate=True)`` falls through to
+    ``AI.GENERATE``."""
+    captured = {}
+
+    class _FakeManager:
+      pass
+
+    def _fake_from_ontology_binding(**kwargs):
+      captured.update(kwargs)
+      return _FakeManager()
+
+    monkeypatch.setattr(
+        "bigquery_agent_analytics.ontology_graph.OntologyGraphManager"
+        ".from_ontology_binding",
+        classmethod(lambda cls, **kw: _fake_from_ontology_binding(**kw)),
+    )
+
+    mw._build_manager(
+        project_id="p",
+        dataset_id="d",
+        ontology=mock.Mock(),
+        binding=mock.Mock(),
+        location="US",
+        bq_client=mock.Mock(),
+        bundles_root=None,
+        reference_extractors_module=None,
+        outcome_callback=lambda *_a, **_k: None,
+        table_id="agent_events",
+    )
+    # ``extractors`` defaults to ``None`` (NOT an empty dict) so
+    # ``from_ontology_binding`` doesn't register any structured
+    # extractors and ``extract_graph`` routes through the
+    # AI.GENERATE path.
+    assert captured.get("extractors") is None
+
+
+# ====================================================================== #
+# Deploy-script boundary (PR B2 review P1)                                 #
+# ====================================================================== #
+
+
+class TestDeployScriptExtractionModeBoundary:
+  """Mechanically verifies the deploy-script's ``--extraction-mode``
+  contract. The contract is in shell, not Python, so each case
+  shells out — but the contract still belongs in the test suite
+  because the PR body advertises both modes as supported deploy
+  paths and the conditional IAM grant as the user-visible behavior
+  delta."""
+
+  def _deploy_script_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "deploy_cloud_run_job.sh"
+    )
+
+  def _reference_extractor_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "reference_extractor.py"
+    )
+
+  def test_deploy_script_shell_syntax_clean(self):
+    """``bash -n`` confirms the validator block + the conditional
+    IAM grant parse cleanly."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_compiled_only_now_accepted_by_validator(self):
+    """``--extraction-mode=compiled-only`` must pass the
+    validator block (i.e., reach gcloud / actual deploy work
+    before failing). The earlier ``B2``-era reject ("compiled-only
+    is not yet supported") is gone — this test would have failed
+    before the deploy-path follow-up, so it pins the lift."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    # We don't have gcloud / a real GCP project in the test env,
+    # so the script will fail later — but it must NOT fail with
+    # the validator's compiled-only reject message.
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--extraction-mode",
+            "compiled-only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    msg = result.stdout + result.stderr
+    assert "is not yet supported" not in msg, (
+        "deploy script still rejects compiled-only at the validator"
+        f" block; full output:\n{msg}"
+    )
+    assert (
+        "--extraction-mode must be 'ai-fallback' or 'compiled-only'" not in msg
+    )
+
+  def test_invalid_extraction_mode_value_rejected(self):
+    """Operator typo path (``compiled_only`` with underscore, etc.)
+    — the catch-all branch must reject with a clear error naming
+    both supported modes."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--extraction-mode",
+            "compiled_only",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    msg = result.stdout + result.stderr
+    assert "ai-fallback" in msg
+    assert "compiled-only" in msg
+
+  def test_reference_extractor_present_for_compiled_only_staging(self):
+    """Compiled-only mode imports
+    ``BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor`` at
+    runtime; the module must exist next to the deploy artifact so
+    the staging block can copy it into the Cloud Run image."""
+    ref = self._reference_extractor_path()
+    assert (
+        ref.is_file()
+    ), f"reference_extractor.py missing at {ref}; compiled-only deploy can't stage it"
+    body = ref.read_text()
+    assert (
+        "EXTRACTORS = {" in body or "EXTRACTORS=" in body
+    ), "reference_extractor.py must expose an EXTRACTORS dict"
+
+  def test_compiled_only_wires_reference_extractor_env_var(self):
+    """The deploy script's ENV_VARS array must set
+    ``BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor`` in
+    compiled-only mode. Without this env var, ``_build_manager``
+    would construct a manager with an empty extractor registry and
+    ``on_unhandled_span='fail'`` would fail every session."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    # Static check: the env var is wired inside an
+    # ``if [[ "$EXTRACTION_MODE" == "compiled-only" ]]`` block.
+    # We assert both the env var line and the guard appear in the
+    # same script — a missing guard would set the env var
+    # unconditionally, which is harmless but defeats the test of
+    # the conditional path.
+    assert "BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor" in body
+    assert '"$EXTRACTION_MODE" == "compiled-only"' in body
+
+  def test_compiled_only_skips_aiplatform_user_grant(self):
+    """The deploy script must guard the
+    ``roles/aiplatform.user`` ``add-iam-policy-binding`` behind
+    the ``ai-fallback`` branch, and idempotently remove the role
+    on the ``compiled-only`` branch. Without the conditional, the
+    "compiled-only ⇒ no Vertex AI dependency" story silently
+    breaks for any customer who flips an existing ai-fallback
+    deploy to compiled-only."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    # Conditional gate present.
+    assert '"$EXTRACTION_MODE" == "ai-fallback"' in body, (
+        "deploy script must gate the aiplatform.user grant on"
+        " --extraction-mode=ai-fallback"
+    )
+    # Idempotent remove on the compiled-only branch.
+    assert "remove-iam-policy-binding" in body, (
+        "deploy script must idempotently remove a pre-existing"
+        " aiplatform.user grant when switching to compiled-only"
+    )
+
+  def test_compiled_only_iam_remove_distinguishes_absent_from_failure(self):
+    """The compiled-only ``remove-iam-policy-binding`` must
+    treat "binding doesn't exist" as success (idempotent first-
+    deploy case) but surface every other failure
+    (``PERMISSION_DENIED``, transient gcloud errors, org-policy
+    rejects). The previous ``2>/dev/null || true`` swallowed all
+    of them, so a real removal failure would print "Done." while
+    the role silently stayed attached — contradicting the
+    compiled-only "no Vertex AI IAM" guarantee.
+
+    Static check: the remove block must capture stderr to a temp
+    file, capture ``REMOVE_RC``, match on the
+    "Policy binding not found" stderr signature for the
+    absent-binding case, and ``exit "$REMOVE_RC"`` for every
+    other non-zero exit."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    assert "REMOVE_RC=" in body, (
+        "deploy script must capture the remove-iam-policy-binding exit"
+        " code instead of swallowing it"
+    )
+    assert "Policy binding not found" in body, (
+        "deploy script must match gcloud's stable absent-binding"
+        " stderr signature so other failures surface"
+    )
+    assert 'exit "$REMOVE_RC"' in body, (
+        "deploy script must propagate a non-zero remove exit code"
+        " for any failure other than the absent-binding case"
+    )
+    # The legacy "swallow everything" idiom must be gone from the
+    # remove block. We allow ``|| true`` to appear elsewhere in
+    # the script (the logging-tail block uses it for the harmless
+    # "no logs yet" case), but we negatively assert against the
+    # specific swallow shape the reviewer flagged.
+    assert "--quiet 2>/dev/null || true" not in body, (
+        "deploy script must not swallow remove-iam-policy-binding"
+        " errors with `--quiet 2>/dev/null || true`; that hides"
+        " PERMISSION_DENIED and transient gcloud failures behind"
+        " a 'Done.' message"
+    )
+
+  def test_compiled_only_iam_remove_is_deferred_until_after_deploy(self):
+    """The compiled-only ``remove-iam-policy-binding`` for
+    ``roles/aiplatform.user`` must run AFTER ``gcloud run jobs
+    deploy`` succeeds (and, if ``--smoke``, after the smoke
+    execution). If we removed the role at the same point we
+    grant the ai-fallback role, an early failure in the new
+    deploy (buildpack failure, image registry hiccup, quota)
+    would strip the existing schedule's Vertex AI access while
+    the previous ai-fallback container is still scheduled —
+    breaking the cron during a botched transition.
+
+    This is the source-order check: the line offset of the
+    compiled-only ``remove-iam-policy-binding`` must come AFTER
+    ``gcloud run jobs deploy``. Without this assertion, a future
+    refactor that moves the remove back next to the grant block
+    would silently re-introduce the regression."""
+    script = self._deploy_script_path()
+    lines = script.read_text().splitlines()
+    deploy_line = None
+    remove_line = None
+    for i, line in enumerate(lines):
+      if deploy_line is None and "gcloud run jobs deploy" in line:
+        deploy_line = i
+      if "remove-iam-policy-binding" in line and remove_line is None:
+        remove_line = i
+    assert (
+        deploy_line is not None
+    ), "deploy script must contain a 'gcloud run jobs deploy' line"
+    assert (
+        remove_line is not None
+    ), "deploy script must contain a 'remove-iam-policy-binding' line"
+    assert remove_line > deploy_line, (
+        "compiled-only remove-iam-policy-binding must come AFTER"
+        " 'gcloud run jobs deploy' so a failed deploy doesn't strip"
+        f" the existing schedule's IAM (remove at line {remove_line + 1},"
+        f" deploy at line {deploy_line + 1})"
+    )
+
+  def test_smoke_failure_propagates_before_iam_remove(self):
+    """If ``--smoke`` is requested and the smoke execution fails,
+    the deploy script must exit BEFORE the compiled-only remove
+    runs. Otherwise a smoke failure (new revision crashes on its
+    first invocation) would still strip the existing schedule's
+    Vertex AI access, leaving the customer with neither a working
+    new deploy nor a recoverable old one.
+
+    Static checks: the script must capture the smoke exit status
+    and propagate a non-zero exit before the compiled-only remove
+    block."""
+    script = self._deploy_script_path()
+    body = script.read_text()
+    assert (
+        "SMOKE_RC=" in body
+    ), "deploy script must capture the smoke execution exit code"
+    assert 'exit "$SMOKE_RC"' in body, (
+        "deploy script must propagate a non-zero smoke exit code"
+        " before the compiled-only IAM remove runs"
+    )
+
+
+# ====================================================================== #
+# Orphan-session watchdog (PR D, issue #180)                              #
+# ====================================================================== #
+
+
+def _orphan_state_row(mode, *, flagged=(), watermark=None, run_started_at=None):
+  """Build a fake BQ row matching the ``orphan_ledger`` /
+  ``orphan_scan`` read shape."""
+  row = mock.Mock()
+  row.state_key = "sk"
+  row.run_started_at = run_started_at or _dt.datetime(
+      2026, 5, 20, tzinfo=_dt.timezone.utc
+  )
+  row.orphan_watermark = watermark
+  row.flagged_session_ids = list(flagged)
+  row.mode = mode
+  return row
+
+
+class TestOrphanWatchdogBuilders:
+  """Pin the SQL shape the watchdog emits. Two reasons: (1) the
+  discovery query has to use strict ``>`` on the watermark so the
+  boundary session from the previous scan isn't reconsidered;
+  (2) the cumulative ledger's running-set exclusion must be in
+  the WHERE clause, not a post-filter, so BigQuery doesn't scan
+  already-flagged sessions on every pass."""
+
+  def test_orphan_select_uses_strict_gt_on_watermark(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    assert "timestamp > COALESCE(@orphan_watermark" in sql, (
+        "discovery must use strict `>` on the watermark so the "
+        "boundary session isn't reconsidered on the next scan"
+    )
+
+  def test_orphan_select_filters_terminal_event_count_zero(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    # ``completion_event_type`` must be parameter-bound, not a
+    # literal — operators using ``--completion-event-type=MY_TERMINAL``
+    # would otherwise see the watchdog flag sessions the steady
+    # cron just successfully materialized (PR #224 P1).
+    assert "event_type = @completion_event_type" in sql
+    assert "'AGENT_COMPLETED'" not in sql
+    assert "terminal_event_count = 0" in sql
+
+  def test_orphan_select_excludes_already_flagged(self):
+    sql = mw.build_orphan_select_sql("p.d.agent_events")
+    assert "NOT IN UNNEST(@already_flagged)" in sql
+
+  def test_orphan_ledger_select_filters_on_ledger_mode_only(self):
+    sql = mw.build_orphan_ledger_select_sql("p.d._bqaa_materialization_state")
+    # State table is shared across mode kinds; the ledger read
+    # must filter on mode='orphan_ledger' so a fresh steady row
+    # doesn't shadow the most recent ledger.
+    assert "mode = 'orphan_ledger'" in sql
+
+  def test_resolved_orphan_sql_bounded_to_flagged_set(self):
+    sql = mw.build_resolved_orphan_sql("p.d.agent_events")
+    # The probe must be parameterized on the previously-flagged set
+    # rather than scanning the full events table.
+    assert "IN UNNEST(@previously_flagged)" in sql
+    # Completion event type is parameter-bound (PR #224 P1).
+    assert "event_type = @completion_event_type" in sql
+    assert "'AGENT_COMPLETED'" not in sql
+
+  def test_resolved_orphan_sql_has_timestamp_partition_predicate(self):
+    """PR #224 P2: without a timestamp predicate, the resolve probe
+    can't prune partitions on the plugin's timestamp-partitioned
+    events table — turning the watchdog into a query-byte
+    regression as event history grows. Pin both bounds."""
+    sql = mw.build_resolved_orphan_sql("p.d.agent_events")
+    assert "timestamp > @resolve_lower_bound" in sql
+    assert "timestamp <= @resolve_upper_bound" in sql
+
+
+class TestOrphanWatchdogScan:
+  """End-to-end scan via a stub BigQuery client. Covers the
+  read-ledger / discover / probe-resolved / write-rows flow."""
+
+  def _stub(self, *, ledger_rows, discovery_rows, resolved_rows):
+    """Sequence: ledger select → discovery → resolved probe.
+    ``ensure_state_table`` is NOT called by ``run_orphan_watchdog``
+    itself (the caller handles that)."""
+    client = mock.Mock()
+    client.query = mock.Mock(
+        side_effect=[
+            mock.Mock(result=mock.Mock(return_value=ledger_rows)),
+            mock.Mock(result=mock.Mock(return_value=discovery_rows)),
+            mock.Mock(result=mock.Mock(return_value=resolved_rows)),
+        ]
+    )
+    client.insert_rows_json = mock.Mock(return_value=[])
+    return client
+
+  def test_first_scan_flags_new_orphans_and_writes_both_rows(self):
+    """Fresh state_key, no ledger row yet. Discovery returns two
+    in-flight sessions. Both audit + ledger rows must be written
+    with the new orphans + the cutoff watermark."""
+    now = _dt.datetime(2026, 5, 20, 12, 0, tzinfo=_dt.timezone.utc)
+    client = self._stub(
+        ledger_rows=[],
+        discovery_rows=[
+            mock.Mock(
+                session_id="orphan-A",
+                first_event_at=now - _dt.timedelta(hours=12),
+            ),
+            mock.Mock(
+                session_id="orphan-B",
+                first_event_at=now - _dt.timedelta(hours=18),
+            ),
+        ],
+        resolved_rows=[],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-1",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ("orphan-A", "orphan-B")
+    assert result.cumulative_flagged == ("orphan-A", "orphan-B")
+    assert result.resolved_orphans == ()
+    assert result.previous_watermark is None
+    assert result.cutoff_at == now - _dt.timedelta(hours=6)
+
+    # Two state rows written (audit + ledger).
+    assert client.insert_rows_json.call_count == 2
+    audit_payload = client.insert_rows_json.call_args_list[0][0][1][0]
+    ledger_payload = client.insert_rows_json.call_args_list[1][0][1][0]
+    assert audit_payload["mode"] == mw.STATE_MODE_ORPHAN_SCAN
+    assert audit_payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+    assert ledger_payload["mode"] == mw.STATE_MODE_ORPHAN_LEDGER
+    assert ledger_payload["flagged_session_ids"] == ["orphan-A", "orphan-B"]
+
+  def test_carries_forward_previously_flagged_unless_resolved(self):
+    """Second scan with previously-flagged sessions. One resolved
+    (late terminal event arrived), one new orphan discovered.
+    Cumulative ledger = (prior - resolved) ∪ new."""
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A", "orphan-B", "orphan-C"),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[
+            mock.Mock(
+                session_id="orphan-D",
+                first_event_at=now - _dt.timedelta(hours=10),
+            )
+        ],
+        # Late terminal event for orphan-B → drop from ledger.
+        resolved_rows=[mock.Mock(session_id="orphan-B")],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-2",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ("orphan-D",)
+    assert result.resolved_orphans == ("orphan-B",)
+    # Order: carry-forward (in original ledger order, minus
+    # resolved) + newly discovered. The append order matters for
+    # operators reading the ledger as a stable diff target.
+    assert result.cumulative_flagged == (
+        "orphan-A",
+        "orphan-C",
+        "orphan-D",
+    )
+    assert result.previous_watermark == prior_watermark
+
+  def test_empty_scan_still_writes_ledger_so_running_set_persists(self):
+    """No new orphans this scan, but the ledger row must still be
+    written so the cumulative set survives. Without this, a quiet
+    scan would drop the running set and next scan would re-flag
+    everything."""
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    result = mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-3",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    assert result.new_orphans == ()
+    assert result.resolved_orphans == ()
+    # Running set persists.
+    assert result.cumulative_flagged == ("orphan-A",)
+    # Ledger row written with the carry-forward set so next scan
+    # reads the same running set even on a no-op scan.
+    assert client.insert_rows_json.call_count == 2
+    ledger_payload = client.insert_rows_json.call_args_list[1][0][1][0]
+    assert ledger_payload["flagged_session_ids"] == ["orphan-A"]
+    # Watermark advances every scan, regardless of outcome —
+    # next scan's `>` boundary moves forward so cost stays bounded.
+    # ``_iso`` shortens ``+00:00`` to ``Z`` in the serialized form.
+    expected_cutoff = now - _dt.timedelta(hours=6)
+    assert ledger_payload["orphan_watermark"] == (
+        expected_cutoff.isoformat().replace("+00:00", "Z")
+    )
+
+  def test_rejects_non_positive_max_session_age_hours(self):
+    with pytest.raises(ValueError, match="must be > 0"):
+      mw.run_orphan_watchdog(
+          mock.Mock(),
+          events_table_ref="p.d.agent_events",
+          state_table_ref="p.d._bqaa_materialization_state",
+          state_key="sk",
+          run_id="r",
+          run_started_at=_dt.datetime.now(_dt.timezone.utc),
+          max_session_age_hours=0,
+      )
+
+  def test_custom_completion_event_type_is_query_bound(self):
+    """PR #224 P1: the watchdog must use the configured
+    ``completion_event_type`` (matching the steady cron's
+    ``--completion-event-type``) as a parameter binding, not the
+    hardcoded ``'AGENT_COMPLETED'`` literal. Without this, deploys
+    with a custom terminal event would see the watchdog falsely
+    flag sessions that the steady cron just materialized."""
+    from google.cloud.bigquery import ArrayQueryParameter
+    from google.cloud.bigquery import ScalarQueryParameter
+
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=now - _dt.timedelta(hours=7),
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-custom",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+        completion_event_type="MY_TERMINAL",
+    )
+    # Extract every ScalarQueryParameter named completion_event_type
+    # across the discovery + resolve calls and assert they all
+    # carry the custom event name. Both queries must respect it.
+    completion_params = []
+    for call in client.query.call_args_list:
+      job_config = call.kwargs.get("job_config")
+      if job_config is None:
+        continue
+      for param in job_config.query_parameters:
+        if (
+            isinstance(param, ScalarQueryParameter)
+            and param.name == "completion_event_type"
+        ):
+          completion_params.append(param.value)
+    assert (
+        len(completion_params) >= 2
+    ), "completion_event_type must be bound on both discovery and resolve probes"
+    assert all(
+        v == "MY_TERMINAL" for v in completion_params
+    ), f"watchdog must forward the configured event_type; saw {completion_params!r}"
+
+  def test_resolved_probe_passes_timestamp_partition_bounds(self):
+    """PR #224 P2: the resolve probe must carry
+    ``resolve_lower_bound`` and ``resolve_upper_bound`` so BigQuery
+    can prune partitions. Lower bound = previous ledger watermark,
+    upper bound = run_started_at."""
+    from google.cloud.bigquery import ScalarQueryParameter
+
+    now = _dt.datetime(2026, 5, 20, 18, 0, tzinfo=_dt.timezone.utc)
+    prior_watermark = now - _dt.timedelta(hours=6, minutes=30)
+    client = self._stub(
+        ledger_rows=[
+            _orphan_state_row(
+                "orphan_ledger",
+                flagged=("orphan-A",),
+                watermark=prior_watermark,
+            )
+        ],
+        discovery_rows=[],
+        resolved_rows=[],
+    )
+    mw.run_orphan_watchdog(
+        client,
+        events_table_ref="p.d.agent_events",
+        state_table_ref="p.d._bqaa_materialization_state",
+        state_key="sk",
+        run_id="run-bounds",
+        run_started_at=now,
+        max_session_age_hours=6.0,
+    )
+    # The third query call is the resolve probe (ledger read,
+    # discovery, resolve — in that order).
+    resolve_call = client.query.call_args_list[2]
+    params = {
+        p.name: p
+        for p in resolve_call.kwargs["job_config"].query_parameters
+        if isinstance(p, ScalarQueryParameter)
+    }
+    assert "resolve_lower_bound" in params
+    assert "resolve_upper_bound" in params
+    assert params["resolve_lower_bound"].value == prior_watermark
+    assert params["resolve_upper_bound"].value == now
+
+
+class TestOrphanWatchdogOrchestratorIntegration:
+  """The orchestrator threads orphan_result through
+  MaterializeWindowResult and surfaces typed
+  ``session_orphaned`` failures so existing #167 alerting fires."""
+
+  def test_max_session_age_hours_none_skips_watchdog(
+      self, fixture_paths, monkeypatch
+  ):
+    """Default off: no orphan-related queries, no `orphan` key in
+    the JSON payload, ok stays True."""
+    ontology_yaml, binding_yaml = fixture_paths
+    _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])
+    result = mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+    )
+    assert result.orphan_result is None
+    assert "orphan" not in result.to_json()
+    assert result.ok is True
+
+  def test_max_session_age_hours_skipped_in_backfill_mode(
+      self, fixture_paths, monkeypatch
+  ):
+    """Backfill scans a fixed historical window where the
+    ``what's still in-flight?`` question is undefined. The
+    watchdog must skip even if the flag is set on a backfill run."""
+    ontology_yaml, binding_yaml = fixture_paths
+    _patch_orchestrator_for_extraction(monkeypatch)
+    client = _stub_bq_client([])
+    result = mw.run_materialize_window(
+        project_id="p",
+        dataset_id="d",
+        ontology_path=str(ontology_yaml),
+        binding_path=str(binding_yaml),
+        lookback_hours=6.0,
+        validate_binding=False,
+        bq_client=client,
+        run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        backfill=True,
+        from_time=_dt.datetime(2026, 4, 1, tzinfo=_dt.timezone.utc),
+        to_time=_dt.datetime(2026, 4, 8, tzinfo=_dt.timezone.utc),
+        state_key_suffix="backfill-april",
+        max_session_age_hours=6.0,
+    )
+    assert result.orphan_result is None
+
+  def test_invalid_max_session_age_hours_rejected_at_boundary(
+      self, fixture_paths
+  ):
+    """Negative / zero values are operator typos — fail fast at
+    the boundary rather than producing a degenerate cutoff."""
+    ontology_yaml, binding_yaml = fixture_paths
+    for bad in (0, -1, -0.5):
+      with pytest.raises(
+          ValueError, match=r"--max-session-age-hours must be > 0"
+      ):
+        mw.run_materialize_window(
+            project_id="p",
+            dataset_id="d",
+            ontology_path=str(ontology_yaml),
+            binding_path=str(binding_yaml),
+            lookback_hours=6.0,
+            validate_binding=False,
+            bq_client=_stub_bq_client([]),
+            max_session_age_hours=bad,
+        )
+
+
+# ====================================================================== #
+# Deploy-script boundary (issues #182 + #183 — split SAs + max-retries)   #
+# ====================================================================== #
+
+
+class TestDeployScriptHardening:
+  """Static checks on ``deploy_cloud_run_job.sh`` for the
+  production-posture defaults introduced by issues #182 + #183:
+  split runtime + scheduler-caller SAs by default with
+  ``--single-sa`` as the escape hatch, and ``--max-retries`` as
+  a CLI-tunable knob (default 2) that propagates both into the
+  ``gcloud run jobs deploy`` command and the runtime env."""
+
+  def _deploy_script_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "deploy_cloud_run_job.sh"
+    )
+
+  def _script_body(self) -> str:
+    return self._deploy_script_path().read_text()
+
+  def test_deploy_script_shell_syntax_clean_after_hardening(self):
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_split_sa_is_default_runtime_and_scheduler_distinct(self):
+    """The script must define the two SA names so the runtime
+    holds BigQuery/Vertex roles and the scheduler-caller holds
+    only ``roles/run.invoker`` — the least-privilege story
+    issue #182 wants as the default."""
+    body = self._script_body()
+    assert (
+        "bqaa-periodic-runtime-sa" in body
+    ), "default deploy must create a dedicated runtime SA"
+    assert (
+        "bqaa-periodic-scheduler-sa" in body
+    ), "default deploy must create a dedicated scheduler-caller SA"
+    # Both SAs created via ``_ensure_sa`` calls.
+    assert (
+        '_ensure_sa "$RUNTIME_SA_NAME"' in body
+        and '_ensure_sa "$SCHEDULER_SA_NAME"' in body
+    ), "deploy script must create runtime + scheduler SAs"
+
+  def test_single_sa_flag_falls_back_to_combined_identity(self):
+    """``--single-sa`` flips back to the pre-#182 combined SA so
+    customers who want the simpler identity model still have an
+    explicit opt-in."""
+    body = self._script_body()
+    assert "--single-sa" in body
+    assert (
+        "SINGLE_SA=false" in body
+    ), "the production default must be SINGLE_SA=false"
+    # The combined-identity branch sets both names to the legacy
+    # ``bqaa-periodic-sa`` so re-running with ``--single-sa``
+    # on an existing combined deploy doesn't strand the old SA.
+    assert (
+        'if [[ "$SINGLE_SA" == "true" ]]; then' in body
+        and 'RUNTIME_SA_NAME="bqaa-periodic-sa"' in body
+        and 'SCHEDULER_SA_NAME="bqaa-periodic-sa"' in body
+    )
+
+  def test_cloud_run_uses_runtime_sa_scheduler_uses_scheduler_sa(self):
+    """The two SAs must be wired to the right gcloud commands:
+    ``--service-account`` on the Cloud Run Job points at the
+    runtime SA (its BigQuery work needs the BQ roles); the
+    scheduler's ``--oauth-service-account-email`` points at the
+    scheduler-caller SA (only needs ``roles/run.invoker``)."""
+    body = self._script_body()
+    assert '--service-account "$RUNTIME_SA_EMAIL"' in body
+    assert (
+        '--oauth-service-account-email "$SCHEDULER_SA_EMAIL"' in body
+    ), "scheduler must use scheduler-caller SA, not runtime SA"
+    # Scheduler invoker grant lands on the scheduler-caller SA.
+    assert '--member "serviceAccount:${SCHEDULER_SA_EMAIL}"' in body, (
+        "roles/run.invoker on the Cloud Run Job must be granted "
+        "to the scheduler-caller SA, not the runtime SA"
+    )
+
+  def test_scheduler_invoker_grant_uses_retry_iam(self):
+    """PR #230 review P1: the same IAM-propagation race that
+    ``_retry_iam`` defends against on the project-level grants
+    also bites on the job-level ``roles/run.invoker`` grant —
+    the scheduler-caller SA was created seconds earlier in the
+    script's section 2, and ``gcloud run jobs add-iam-policy-
+    binding`` can read from a different replica that hasn't
+    seen it yet. Pre-fix the script ran the bare ``gcloud``
+    invocation; first-time split-SA deploys could fail here
+    after the Cloud Run Job was already deployed but before
+    the scheduler trigger was wired."""
+    body = self._script_body()
+    # The invoker grant must be wrapped in ``_retry_iam`` (just
+    # like the project-level grants), not run bare.
+    assert "_retry_iam gcloud run jobs add-iam-policy-binding" in body, (
+        "the scheduler-caller invoker grant must use _retry_iam to "
+        "tolerate the IAM-propagation race on fresh split-SA deploys"
+    )
+    # And it must NOT keep the pre-fix bare invocation around
+    # (defensive — a future refactor that re-introduces a
+    # second un-wrapped grant would slip through otherwise).
+    assert "\ngcloud run jobs add-iam-policy-binding" not in body, (
+        "no bare ``gcloud run jobs add-iam-policy-binding`` left "
+        "in the script — every invoker grant must route through "
+        "_retry_iam"
+    )
+
+  def test_max_retries_flag_default_two_and_propagates(self):
+    """``--max-retries`` defaults to 2 (issue #183 — was hard-
+    coded 1) and propagates both into ``gcloud run jobs deploy``
+    and the Cloud Run Job's env so the runtime's startup log
+    surfaces it."""
+    body = self._script_body()
+    assert (
+        'MAX_RETRIES="2"' in body
+    ), "deploy script must default --max-retries to 2"
+    assert (
+        "--max-retries) " in body or "--max-retries)" in body
+    ), "deploy script must accept --max-retries as a CLI flag"
+    # The gcloud invocation must use the variable, not a literal.
+    assert '--max-retries "$MAX_RETRIES"' in body, (
+        "gcloud run jobs deploy must pass the configured retry "
+        "count via the $MAX_RETRIES variable (was hard-coded 1)"
+    )
+    # And the runtime env must carry it for Cloud Logging
+    # correlation.
+    assert "BQAA_MAX_RETRIES=${MAX_RETRIES}" in body, (
+        "deploy script must surface BQAA_MAX_RETRIES in the env "
+        "var array so the runtime startup log can echo it"
+    )
+
+  def test_max_retries_rejects_non_integer(self):
+    """Operator typo: ``--max-retries abc`` must fail at the
+    deploy boundary, not surface as a less-obvious gcloud error
+    after the build."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--max-retries",
+            "abc",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "non-negative integer" in (result.stdout + result.stderr)
+
+  def test_run_job_reads_bqaa_max_retries_into_startup_log(self):
+    """The runtime entrypoint must read ``BQAA_MAX_RETRIES``
+    and include it in the structured startup log so operators
+    correlating Cloud Monitoring alert noise with retry behaviour
+    see the retry policy without ``gcloud run jobs describe``
+    (issue #183)."""
+    run_job = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "run_job.py"
+    )
+    if not run_job.exists():
+      pytest.skip("run_job.py not present in this checkout")
+    body = run_job.read_text()
+    assert "BQAA_MAX_RETRIES" in body
+    # The startup log must thread the value through so it lands
+    # in jsonPayload.
+    assert "max_retries=" in body, (
+        "run_job.py must pass max_retries into the _emit() call so "
+        "the Cloud Logging payload carries it"
+    )
+
+
+# ====================================================================== #
+# Terraform module surface (#186)                                         #
+# ====================================================================== #
+
+
+class TestTerraformModuleSurface:
+  """Static checks on the Terraform module that mirrors
+  ``deploy_cloud_run_job.sh`` (issue #186). Defaults must match
+  the post-#230 deploy surface: split runtime + scheduler-caller
+  SAs, ``max_retries = 2``, ``extraction_mode = 'ai-fallback'``.
+  Image build is intentionally outside the module — Terraform
+  takes the published container image URI as ``image_uri``.
+
+  These are file-content checks rather than ``terraform validate``
+  runs because the test environment doesn't ship the Terraform
+  binary. The checks pin the contract a customer reads from the
+  module files; a future maintainer who renames a variable / drops
+  a resource / changes a default fails these tests rather than
+  shipping a silently-broken module."""
+
+  def _tf_dir(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "terraform"
+    )
+
+  def _read(self, name: str) -> str:
+    return (self._tf_dir() / name).read_text()
+
+  def test_module_files_present(self):
+    tf = self._tf_dir()
+    if not tf.exists():
+      pytest.skip("terraform module not present in this checkout")
+    for filename in (
+        "versions.tf",
+        "variables.tf",
+        "main.tf",
+        "outputs.tf",
+        "README.md",
+        "terraform.tfvars.example",
+    ):
+      assert (tf / filename).is_file(), f"missing {filename}"
+
+  def test_required_variables_have_no_defaults(self):
+    """The six required inputs must have no ``default`` so a
+    ``terraform apply`` without them errors loud at the boundary
+    (same operator-typo defense the bash deploy's ``required``
+    block provides)."""
+    body = self._read("variables.tf")
+    required = (
+        "project_id",
+        "region",
+        "events_dataset_id",
+        "graph_dataset_id",
+        "schedule",
+        "image_uri",
+    )
+    for name in required:
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing from variables.tf"
+      assert (
+          "default" not in block
+      ), f"variable {name!r} must not have a default — it's required input"
+
+  def test_optional_variable_defaults_match_deploy_script(self):
+    """Optional vars' defaults must match the bash deploy's
+    post-#230 production posture so Terraform users get the same
+    behavior the README documents."""
+    body = self._read("variables.tf")
+    expected_defaults = {
+        "location": '"US"',
+        "job_name": '"bqaa-periodic-materialization"',
+        "extraction_mode": '"ai-fallback"',
+        "max_retries": "2",
+        "max_session_age_hours": "null",
+        "single_sa": "false",
+        "max_sessions": "null",
+        "lookback_hours": "6",
+        "overlap_minutes": "15",
+        "task_timeout_seconds": "1800",
+        # PR #231 review P2: a clean GCP project needs the
+        # BigQuery / Cloud Run / Cloud Scheduler / IAM APIs
+        # enabled before ``terraform apply`` will work. The
+        # module manages them by default; ``false`` is the
+        # opt-out for customers whose central infra repo
+        # manages project services elsewhere.
+        "manage_apis": "true",
+        # PR #231 live-E2E surface: Cloud Run v2 added a
+        # ``deletion_protection`` default of ``true`` in newer
+        # provider releases. The module defaults to ``false`` so
+        # ``terraform destroy`` works without a separate
+        # ``terraform apply`` to clear the flag — matches the
+        # bash deploy's ``gcloud run jobs delete`` lifecycle.
+        # Production deploys that want the safety net opt in via
+        # ``deletion_protection = true``.
+        "deletion_protection": "false",
+    }
+    for name, want in expected_defaults.items():
+      block = self._extract_variable_block(body, name)
+      assert block is not None, f"variable {name!r} missing"
+      assert f"default     = {want}" in block or f"default = {want}" in block, (
+          f"variable {name!r} default must be {want!r}; " f"block:\n{block}"
+      )
+
+  def test_extraction_mode_validation_matches_bash(self):
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert 'contains(["ai-fallback", "compiled-only"]' in block, (
+        "extraction_mode validation must reject typos at the "
+        "Terraform boundary — same protection the bash deploy "
+        "provides via its case statement"
+    )
+
+  def test_outputs_cover_downstream_wiring(self):
+    body = self._read("outputs.tf")
+    for name in (
+        "runtime_sa_email",
+        "scheduler_sa_email",
+        "cloud_run_job_name",
+        "scheduler_name",
+        "graph_dataset_id",
+    ):
+      assert f'output "{name}"' in body, f"output {name!r} missing"
+
+  def test_split_sa_is_default_in_main(self):
+    """Two ``google_service_account`` resources by default; the
+    scheduler-caller SA gated on ``count = var.single_sa ? 0 : 1``
+    so ``--single-sa`` mode collapses to the runtime SA without
+    a duplicate-account-id conflict."""
+    body = self._read("main.tf")
+    assert 'resource "google_service_account" "runtime"' in body
+    assert 'resource "google_service_account" "scheduler"' in body
+    # The scheduler SA must be gated on single_sa.
+    scheduler_block = self._extract_resource_block(
+        body, "google_service_account", "scheduler"
+    )
+    assert scheduler_block is not None
+    assert "count" in scheduler_block, (
+        "scheduler SA resource must use ``count`` to collapse "
+        "to zero instances when ``var.single_sa`` is true"
+    )
+    assert "var.single_sa" in scheduler_block
+
+  def test_aiplatform_user_grant_conditional_on_extraction_mode(self):
+    """The Vertex AI grant must be conditional — granted in
+    ``ai-fallback`` (the default) so ``AI.GENERATE`` works, NOT
+    granted in ``compiled-only`` mode (matches the bash deploy's
+    conditional grant + #166's verification)."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_iam_member", "runtime_aiplatform_user"
+    )
+    assert block is not None, (
+        "runtime_aiplatform_user resource missing — needed for "
+        "the conditional Vertex AI grant"
+    )
+    assert "count" in block
+    assert 'var.extraction_mode == "ai-fallback"' in block
+
+  def test_cloud_run_job_uses_runtime_sa_and_max_retries(self):
+    """The Cloud Run v2 Job must point at the runtime SA + propagate
+    the ``var.max_retries`` value — the two flagship #230
+    contract points."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job", "periodic"
+    )
+    assert block is not None
+    assert "service_account = google_service_account.runtime.email" in block
+    assert "max_retries     = var.max_retries" in block, (
+        "Cloud Run Job must wire var.max_retries (not a literal) "
+        "so the issue #183 tunable applies"
+    )
+    assert "image = var.image_uri" in block, (
+        "Cloud Run Job's container image must come from "
+        "``var.image_uri`` — image build is outside the module"
+    )
+
+  def test_scheduler_invoker_grant_lands_on_scheduler_sa(self):
+    """The ``roles/run.invoker`` grant on the Cloud Run Job must
+    land on the scheduler-caller SA (the SA the scheduler
+    trigger's OAuth identity uses), not the runtime SA — the
+    least-privilege contract from issue #182."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_run_v2_job_iam_member", "scheduler_invoker"
+    )
+    assert block is not None
+    assert "serviceAccount:${local.scheduler_sa_email}" in block, (
+        "scheduler_invoker grant must use local.scheduler_sa_email "
+        "(NOT runtime SA) so the least-privilege contract holds"
+    )
+
+  def test_scheduler_uses_scheduler_sa_for_oauth(self):
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_cloud_scheduler_job", "periodic_cron"
+    )
+    assert block is not None
+    assert "service_account_email = local.scheduler_sa_email" in block, (
+        "Cloud Scheduler OAuth identity must be the scheduler-caller "
+        "SA, mirroring the bash deploy's "
+        '``--oauth-service-account-email "$SCHEDULER_SA_EMAIL"``'
+    )
+
+  def test_env_vars_match_deploy_script_surface(self):
+    """The Cloud Run Job env-var set must mirror the bash deploy's
+    ENV_VARS array (issue #186 wants Terraform to land the same
+    runtime config the bash deploy ships)."""
+    body = self._read("main.tf")
+    # Every env var the bash deploy sets must appear in the
+    # locals block's env_vars map.
+    for env_name in (
+        "BQAA_PROJECT_ID",
+        "BQAA_EVENTS_DATASET_ID",
+        "BQAA_GRAPH_DATASET_ID",
+        "BQAA_LOCATION",
+        "BQAA_LOOKBACK_HOURS",
+        "BQAA_OVERLAP_MINUTES",
+        "BQAA_EXTRACTION_MODE",
+        "BQAA_MAX_RETRIES",
+        "BQAA_MAX_SESSIONS",
+        "BQAA_MAX_SESSION_AGE_HOURS",
+        "BQAA_REFERENCE_EXTRACTORS_MODULE",
+    ):
+      assert env_name in body, (
+          f"env var {env_name!r} missing from the Cloud Run Job "
+          f"config — Terraform must wire the same env surface as "
+          f"the bash deploy"
+      )
+
+  def test_image_build_documented_as_outside_module(self):
+    """README must spell out that the container image build /
+    publish is outside the module so customers don't expect the
+    Cloud Buildpacks ``--source`` flow the bash deploy uses."""
+    readme = self._read("README.md")
+    # The README must spell out the out-of-scope decision in plain
+    # text so a customer reading top-to-bottom hits it before they
+    # try to ``terraform apply`` without a published image.
+    assert "image build" in readme.lower()
+    assert (
+        "outside the module" in readme.lower()
+        or "outside this module" in readme.lower()
+    )
+    assert "image_uri" in readme
+
+  def test_readme_points_at_build_image_helper(self):
+    """PR #231 review P1: the README's recommended image-build
+    command must point at ``build_image.sh`` (which assembles the
+    staging layout the runtime expects). Pointing
+    ``gcloud builds submit`` at the bare ``periodic_materialization``
+    dir would produce an image missing the SDK vendor, Procfile,
+    and demo artifacts."""
+    readme = self._read("README.md")
+    assert "build_image.sh" in readme, (
+        "Terraform README must point at the build_image.sh staging "
+        "helper rather than a direct ``gcloud builds submit`` "
+        "against the periodic_materialization directory (which "
+        "lacks the staging layout the runtime needs)"
+    )
+    # The bash deploy's staging layout is documented in
+    # ``build_image.sh``; here we just sanity-check the helper
+    # exists.
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    assert helper.exists(), (
+        f"build_image.sh missing at {helper} — the Terraform README "
+        f"points at it"
+    )
+    # The script must be executable so customers can call it
+    # directly (no ``bash build_image.sh ...`` workaround).
+    assert (
+        helper.stat().st_mode & 0o111
+    ), "build_image.sh must be marked executable"
+
+  def test_build_image_stages_full_layout(self):
+    """The staging helper must produce the same on-disk layout
+    the bash deploy assembles in its temp dir (Procfile + run_job
+    + reference_extractor + demo artifacts + vendored SDK source
+    + requirements.txt). Any drift would make Terraform-built
+    images behave differently from bash-built ones."""
+    helper = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "build_image.sh"
+    )
+    if not helper.exists():
+      pytest.skip("build_image.sh not present")
+    body = helper.read_text()
+    # Every file the bash deploy stages must be cp'd by the
+    # helper.
+    for needed in (
+        '"${SCRIPT_DIR}/run_job.py"',
+        '"${ARTIFACTS_DIR}/ontology.yaml"',
+        '"${ARTIFACTS_DIR}/binding.yaml"',
+        '"${ARTIFACTS_DIR}/table_ddl.sql"',
+        '"${ARTIFACTS_DIR}/reference_extractor.py"',
+        '"$REPO_ROOT/src/bigquery_agent_analytics"',
+        '"$REPO_ROOT/src/bigquery_ontology"',
+        '"$REPO_ROOT/pyproject.toml"',
+    ):
+      assert needed in body, f"build_image.sh missing staging copy for {needed}"
+    # Procfile + requirements.txt must be emitted, not copied
+    # (the bash deploy generates them inline; this helper
+    # generates the same content).
+    assert "Procfile" in body and "web: python run_job.py" in body
+    assert "./sdk_src" in body, (
+        "requirements.txt must install the SDK from the vendored "
+        "./sdk_src path (same as the bash deploy)"
+    )
+
+  def test_manage_apis_resource_present_with_disable_on_destroy_false(self):
+    """PR #231 review P2: a clean GCP project needs the required
+    APIs enabled. The module manages them via
+    ``google_project_service`` with
+    ``disable_on_destroy = false`` so a ``terraform destroy`` of
+    this module doesn't disable APIs other workloads might use."""
+    body = self._read("main.tf")
+    block = self._extract_resource_block(
+        body, "google_project_service", "required"
+    )
+    assert block is not None, (
+        "main.tf must declare google_project_service.required so "
+        "the apis the bash deploy expects manually-enabled are "
+        "managed by terraform"
+    )
+    # ``disable_on_destroy = false`` protects shared-API workloads.
+    assert "disable_on_destroy         = false" in block or (
+        "disable_on_destroy = false" in block
+    ), (
+        "google_project_service must set disable_on_destroy = false "
+        "so terraform destroy of this module doesn't disable shared "
+        "APIs other workloads on the project depend on"
+    )
+    # Each required API must be in the for_each locals block.
+    for api in (
+        "bigquery.googleapis.com",
+        "run.googleapis.com",
+        "cloudscheduler.googleapis.com",
+        "iam.googleapis.com",
+    ):
+      assert api in body, (
+          f"required API {api!r} must be in the project-service "
+          f"set so clean-project terraform apply doesn't fail with "
+          f"'API not enabled'"
+      )
+    # Vertex AI is conditional on extraction_mode.
+    assert (
+        'var.extraction_mode == "ai-fallback" ? ["aiplatform.googleapis.com"]'
+        in body
+    ), (
+        "aiplatform.googleapis.com must be enabled only in "
+        "ai-fallback mode — compiled-only doesn't call AI.GENERATE"
+    )
+
+  def test_extraction_mode_description_names_correct_failure_code(self):
+    """PR #231 review P3: the operator-facing variable description
+    must name the right failure code. Compiled-only extraction
+    gaps surface as ``empty_extraction`` (from B1's
+    structured-extraction harness). ``session_orphaned`` is a
+    different code emitted by the orphan watchdog
+    (``max_session_age_hours``)."""
+    body = self._read("variables.tf")
+    block = self._extract_variable_block(body, "extraction_mode")
+    assert block is not None
+    assert "empty_extraction" in block, (
+        "extraction_mode description must name 'empty_extraction' "
+        "as the failure code for compiled-only extraction gaps"
+    )
+    # Defensive: if a future edit re-introduces the wrong code,
+    # we want it to fail loud. Allow ``session_orphaned`` to
+    # appear ONLY in a context that explicitly contrasts the two
+    # codes (the post-fix wording does this).
+    if "session_orphaned" in block:
+      assert "separate code" in block or "different" in block.lower(), (
+          "if session_orphaned is mentioned in the extraction_mode "
+          "description, it must be in a contrastive context "
+          "(explaining it's a separate watchdog code), not as the "
+          "failure code for compiled-only"
+      )
+
+  @staticmethod
+  def _extract_variable_block(body: str, name: str) -> str | None:
+    """Slice out one ``variable "name" { ... }`` block.
+
+    Brace-counting parser — Terraform syntax allows nested ``{``
+    in ``validation`` / ``description`` heredocs (we don't use
+    heredocs in this module, but the parser handles them
+    anyway). Returns None when the variable doesn't exist.
+    """
+    needle = f'variable "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None
+
+  @staticmethod
+  def _extract_resource_block(
+      body: str, resource_type: str, name: str
+  ) -> str | None:
+    needle = f'resource "{resource_type}" "{name}" {{'
+    start = body.find(needle)
+    if start == -1:
+      return None
+    depth = 0
+    i = start
+    while i < len(body):
+      if body[i] == "{":
+        depth += 1
+      elif body[i] == "}":
+        depth -= 1
+        if depth == 0:
+          return body[start : i + 1]
+      i += 1
+    return None

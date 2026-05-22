@@ -49,6 +49,7 @@ from bigquery_agent_analytics.ontology_models import GraphSpec
 from bigquery_agent_analytics.ontology_models import KeySpec
 from bigquery_agent_analytics.ontology_models import PropertySpec
 from bigquery_agent_analytics.ontology_models import RelationshipSpec
+from bigquery_ontology.binding_loader import require_legacy_column_shape
 from bigquery_ontology.binding_models import Backend
 from bigquery_ontology.binding_models import BigQueryTarget
 from bigquery_ontology.binding_models import Binding
@@ -329,8 +330,29 @@ def graph_spec_from_ontology_binding(
             to_entity=ont_rel.to,
             binding=BindingSpec(
                 source=_resolve_source(rb.source, target),
-                from_columns=list(rb.from_columns),
-                to_columns=list(rb.to_columns),
+                # ``graph_spec_from_ontology_binding`` is a legacy
+                # converter that targets ``BindingSpec.from_columns:
+                # list[str]``. Like ``compile_graph``, it predates
+                # #179's canonical mapping and would pydantic-error
+                # at this BindingSpec construction site when handed
+                # a dict-shape binding. Guard at the boundary with
+                # a precise error pointing at the migration path.
+                from_columns=list(
+                    require_legacy_column_shape(
+                        list(rb.from_columns),
+                        consumer_name='graph_spec_from_ontology_binding',
+                        side='from',
+                        relationship_name=rb.name,
+                    )
+                ),
+                to_columns=list(
+                    require_legacy_column_shape(
+                        list(rb.to_columns),
+                        consumer_name='graph_spec_from_ontology_binding',
+                        side='to',
+                        relationship_name=rb.name,
+                    )
+                ),
                 from_session_column=from_session_col,
                 to_session_column=to_session_col,
             ),

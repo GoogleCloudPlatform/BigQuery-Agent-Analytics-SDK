@@ -37,9 +37,12 @@ Both consumers expect the same module-level surface:
 
 Coverage:
 
-The MAKO agent emits ``TOOL_COMPLETED`` events for five
-decision-flow tools. The extractor switches on the tool
-name and produces the per-tool slice of the MAKO graph:
+The MAKO agent emits ``TOOL_COMPLETED`` events for nine
+decision-flow tools (Beats 1–5). The extractor switches on
+the tool name and produces the per-tool slice of the MAKO
+graph:
+
+Beats 1–4 (decision hub):
 
 | Tool                       | Node                   | Edges                                                                                                            |
 |----------------------------|------------------------|------------------------------------------------------------------------------------------------------------------|
@@ -48,6 +51,15 @@ name and produces the per-tool slice of the MAKO graph:
 | ``evaluate_candidate``     | ``Candidate``          | ``evaluatesCandidate`` (DecisionPoint → Candidate)                                                              |
 | ``commit_outcome``         | ``SelectionOutcome``   | ``selectedCandidate`` (SelectionOutcome → Candidate)                                                            |
 | ``complete_execution``     | ``DecisionExecution``  | ``executedAtDecisionPoint``, ``atContextSnapshot``, ``hasSelectionOutcome``, plus ``AgentSession`` + ``partOfSession`` |
+
+Beat 5 (feedback / reward loop):
+
+| Tool                        | Node                                          | Edges                                                                       |
+|-----------------------------|-----------------------------------------------|-----------------------------------------------------------------------------|
+| ``apply_constraint``        | ``BusinessConstraint`` + ``ConstraintApplication`` | ``appliedConstraint``, ``filteredByConstraint`` (only on ``constraint_result=fail``) |
+| ``record_rejection``        | ``RejectionReason``                           | ``hasRejectionReason`` (Candidate → RejectionReason)                       |
+| ``record_outcome_signal``   | ``OutcomeSignal``                             | ``producedOutcome`` (DecisionExecution → OutcomeSignal)                    |
+| ``compute_reward``          | ``RewardComputation``                         | one ``derivedReward`` (RewardComputation → OutcomeSignal) per contributing signal |
 
 ``AgentSession`` is synthesized from the plugin
 envelope's ``session_id`` because the agent's tools don't
@@ -437,6 +449,263 @@ def _extract_complete_execution(
 
 
 # ------------------------------------------------------------------ #
+# Beat 5 — feedback / reward loop                                    #
+# ------------------------------------------------------------------ #
+#
+# Each handler below extracts one of MAKO's feedback-loop entities
+# (BusinessConstraint, ConstraintApplication, RejectionReason,
+# OutcomeSignal, RewardComputation) from the matching tool call in
+# ``mako_demo_agent.py``. The contract mirrors Beat 1–4 handlers:
+# session-scoped IDs, ``fully_handled_span_ids`` populated when the
+# tool result fully covers a declared MAKO entity, deterministic
+# row identity so re-extraction is idempotent for the materializer's
+# delete-then-insert dedup.
+
+
+def _extract_apply_constraint(
+    session_id: str, span_id: str, result: dict
+) -> StructuredExtractionResult:
+  """``apply_constraint`` → ``BusinessConstraint`` +
+  ``ConstraintApplication`` nodes, with ``appliedConstraint``
+  (CA → BC) and (when ``constraint_result='fail'``)
+  ``filteredByConstraint`` (Candidate → CA) edges."""
+  raw_constraint_id = result.get("constraint_id")
+  raw_application_id = result.get("application_id")
+  raw_candidate_id = result.get("candidate_id")
+  if not raw_constraint_id or not raw_application_id or not raw_candidate_id:
+    return StructuredExtractionResult()
+  constraint_id = _scoped_id(session_id, raw_constraint_id)
+  application_id = _scoped_id(session_id, raw_application_id)
+  candidate_id = _scoped_id(session_id, raw_candidate_id)
+
+  constraint_node_id = (
+      f"{session_id}:BusinessConstraint:business_constraint_id={constraint_id}"
+  )
+  application_node_id = (
+      f"{session_id}:ConstraintApplication:"
+      f"constraint_application_id={application_id}"
+  )
+  candidate_node_id = f"{session_id}:Candidate:candidate_id={candidate_id}"
+
+  constraint_props = [
+      ExtractedProperty(name="business_constraint_id", value=constraint_id),
+  ]
+  if "constraint_type" in result:
+    constraint_props.append(
+        ExtractedProperty(
+            name="constraint_type", value=result["constraint_type"]
+        )
+    )
+  application_props = [
+      ExtractedProperty(name="constraint_application_id", value=application_id),
+  ]
+  if "constraint_result" in result:
+    application_props.append(
+        ExtractedProperty(
+            name="constraint_result", value=result["constraint_result"]
+        )
+    )
+
+  nodes = [
+      ExtractedNode(
+          node_id=constraint_node_id,
+          entity_name="BusinessConstraint",
+          labels=["BusinessConstraint"],
+          properties=constraint_props,
+      ),
+      ExtractedNode(
+          node_id=application_node_id,
+          entity_name="ConstraintApplication",
+          labels=["ConstraintApplication"],
+          properties=application_props,
+      ),
+  ]
+  edges = [
+      ExtractedEdge(
+          edge_id=(
+              f"{session_id}:appliedConstraint:"
+              f"{raw_application_id}:{raw_constraint_id}"
+          ),
+          relationship_name="appliedConstraint",
+          from_node_id=application_node_id,
+          to_node_id=constraint_node_id,
+      ),
+  ]
+  # ``filteredByConstraint`` only fires when the constraint actually
+  # filtered the candidate. Pass cases record the audit trail
+  # (BusinessConstraint + ConstraintApplication exist, the
+  # appliedConstraint edge wires them together) but no candidate-
+  # side edge.
+  if result.get("constraint_result") == "fail":
+    edges.append(
+        ExtractedEdge(
+            edge_id=(
+                f"{session_id}:filteredByConstraint:"
+                f"{raw_candidate_id}:{raw_application_id}"
+            ),
+            relationship_name="filteredByConstraint",
+            from_node_id=candidate_node_id,
+            to_node_id=application_node_id,
+        )
+    )
+  return StructuredExtractionResult(
+      nodes=nodes,
+      edges=edges,
+      fully_handled_span_ids={span_id} if span_id else set(),
+  )
+
+
+def _extract_record_rejection(
+    session_id: str, span_id: str, result: dict
+) -> StructuredExtractionResult:
+  """``record_rejection`` → ``RejectionReason`` node +
+  ``hasRejectionReason`` edge (Candidate → RejectionReason)."""
+  raw_rejection_id = result.get("rejection_id")
+  raw_candidate_id = result.get("candidate_id")
+  if not raw_rejection_id or not raw_candidate_id:
+    return StructuredExtractionResult()
+  rejection_id = _scoped_id(session_id, raw_rejection_id)
+  candidate_id = _scoped_id(session_id, raw_candidate_id)
+
+  rejection_node_id = (
+      f"{session_id}:RejectionReason:rejection_reason_id={rejection_id}"
+  )
+  candidate_node_id = f"{session_id}:Candidate:candidate_id={candidate_id}"
+
+  properties = [
+      ExtractedProperty(name="rejection_reason_id", value=rejection_id),
+  ]
+  if "rejection_category" in result:
+    properties.append(
+        ExtractedProperty(
+            name="rejection_category", value=result["rejection_category"]
+        )
+    )
+  if "rejection_text" in result:
+    properties.append(
+        ExtractedProperty(name="rejection_text", value=result["rejection_text"])
+    )
+  node = ExtractedNode(
+      node_id=rejection_node_id,
+      entity_name="RejectionReason",
+      labels=["RejectionReason"],
+      properties=properties,
+  )
+  edge = ExtractedEdge(
+      edge_id=(
+          f"{session_id}:hasRejectionReason:"
+          f"{raw_candidate_id}:{raw_rejection_id}"
+      ),
+      relationship_name="hasRejectionReason",
+      from_node_id=candidate_node_id,
+      to_node_id=rejection_node_id,
+  )
+  return StructuredExtractionResult(
+      nodes=[node],
+      edges=[edge],
+      fully_handled_span_ids={span_id} if span_id else set(),
+  )
+
+
+def _extract_record_outcome_signal(
+    session_id: str, span_id: str, result: dict
+) -> StructuredExtractionResult:
+  """``record_outcome_signal`` → ``OutcomeSignal`` node +
+  ``producedOutcome`` edge (DecisionExecution → OutcomeSignal)."""
+  raw_signal_id = result.get("signal_id")
+  raw_execution_id = result.get("execution_id")
+  if not raw_signal_id or not raw_execution_id:
+    return StructuredExtractionResult()
+  signal_id = _scoped_id(session_id, raw_signal_id)
+  execution_id = _scoped_id(session_id, raw_execution_id)
+
+  signal_node_id = f"{session_id}:OutcomeSignal:outcome_signal_id={signal_id}"
+  execution_node_id = (
+      f"{session_id}:DecisionExecution:decision_execution_id={execution_id}"
+  )
+
+  node = ExtractedNode(
+      node_id=signal_node_id,
+      entity_name="OutcomeSignal",
+      labels=["OutcomeSignal"],
+      properties=[
+          ExtractedProperty(name="outcome_signal_id", value=signal_id),
+      ],
+  )
+  edge = ExtractedEdge(
+      edge_id=(
+          f"{session_id}:producedOutcome:" f"{raw_execution_id}:{raw_signal_id}"
+      ),
+      relationship_name="producedOutcome",
+      from_node_id=execution_node_id,
+      to_node_id=signal_node_id,
+  )
+  # ``signal_type`` is the demo tool's free-form classification —
+  # MAKO doesn't declare it on ``OutcomeSignal``, so the span is
+  # marked ``partially_handled`` to surface the gap the same way
+  # ``commit_outcome``'s rationale field does.
+  partial = {span_id} if span_id and "signal_type" in result else set()
+  full = {span_id} if span_id and "signal_type" not in result else set()
+  return StructuredExtractionResult(
+      nodes=[node],
+      edges=[edge],
+      fully_handled_span_ids=full,
+      partially_handled_span_ids=partial,
+  )
+
+
+def _extract_compute_reward(
+    session_id: str, span_id: str, result: dict
+) -> StructuredExtractionResult:
+  """``compute_reward`` → ``RewardComputation`` node + one
+  ``derivedReward`` edge per OutcomeSignal that contributed."""
+  raw_reward_id = result.get("reward_id")
+  raw_signal_ids = result.get("outcome_signal_ids")
+  if not raw_reward_id or not raw_signal_ids:
+    return StructuredExtractionResult()
+  reward_id = _scoped_id(session_id, raw_reward_id)
+
+  reward_node_id = (
+      f"{session_id}:RewardComputation:reward_computation_id={reward_id}"
+  )
+
+  properties = [
+      ExtractedProperty(name="reward_computation_id", value=reward_id),
+  ]
+  if "reward_value" in result:
+    properties.append(
+        ExtractedProperty(name="reward_value", value=result["reward_value"])
+    )
+
+  node = ExtractedNode(
+      node_id=reward_node_id,
+      entity_name="RewardComputation",
+      labels=["RewardComputation"],
+      properties=properties,
+  )
+  edges = []
+  for raw_signal_id in raw_signal_ids:
+    signal_id = _scoped_id(session_id, raw_signal_id)
+    signal_node_id = f"{session_id}:OutcomeSignal:outcome_signal_id={signal_id}"
+    edges.append(
+        ExtractedEdge(
+            edge_id=(
+                f"{session_id}:derivedReward:"
+                f"{raw_reward_id}:{raw_signal_id}"
+            ),
+            relationship_name="derivedReward",
+            from_node_id=reward_node_id,
+            to_node_id=signal_node_id,
+        )
+    )
+  return StructuredExtractionResult(
+      nodes=[node],
+      edges=edges,
+      fully_handled_span_ids={span_id} if span_id else set(),
+  )
+
+
+# ------------------------------------------------------------------ #
 # Top-level extractor (event_type-keyed dispatch)                    #
 # ------------------------------------------------------------------ #
 
@@ -450,6 +719,13 @@ _TOOL_HANDLERS = {
     "propose_decision_point": _extract_propose_decision_point,
     "evaluate_candidate": _extract_evaluate_candidate,
     "commit_outcome": _extract_commit_outcome,
+    # Beat 5 — feedback / reward loop. Each handler emits the
+    # node(s) declared on the MAKO entity plus the edges back to
+    # whatever Beat 1–4 entity it hangs off of.
+    "apply_constraint": _extract_apply_constraint,
+    "record_rejection": _extract_record_rejection,
+    "record_outcome_signal": _extract_record_outcome_signal,
+    "compute_reward": _extract_compute_reward,
 }
 _KNOWN_TOOLS = set(_TOOL_HANDLERS) | {"complete_execution"}
 
@@ -459,11 +735,16 @@ def extract_mako_decision_event(
 ) -> StructuredExtractionResult:
   """Reference extractor for MAKO ``TOOL_COMPLETED`` events.
 
-  The MAKO agent emits five tool-call types; this function
-  dispatches on ``content.tool`` and delegates to the
-  per-tool helper. Non-tool events (LLM_REQUEST,
-  USER_MESSAGE_RECEIVED, etc.) return an empty result —
-  the AI fallback handles them.
+  The MAKO agent emits nine tool-call types — five for the
+  Beat 1–4 decision flow (``capture_context``,
+  ``propose_decision_point``, ``evaluate_candidate``,
+  ``commit_outcome``, ``complete_execution``) and four for
+  the Beat 5 feedback / reward loop (``apply_constraint``,
+  ``record_rejection``, ``record_outcome_signal``,
+  ``compute_reward``). This function dispatches on
+  ``content.tool`` and delegates to the per-tool helper.
+  Non-tool events (LLM_REQUEST, USER_MESSAGE_RECEIVED, etc.)
+  return an empty result — the AI fallback handles them.
 
   Args:
     event: Plugin event row (dict-shaped, matches
@@ -524,9 +805,10 @@ def _load_resolved_graph():
 
 # The revalidation CLI keys this dict on the
 # ``event_type`` column. MAKO's structured payloads all
-# land in ``TOOL_COMPLETED`` events (one per tool call;
-# the agent emits five per decision flow). Other event
-# types (``LLM_RESPONSE`` reasoning text,
+# land in ``TOOL_COMPLETED`` events — one per tool call,
+# nine per decision-and-feedback-loop cycle (five Beat 1–4
+# tools + four Beat 5 tools). Other event types
+# (``LLM_RESPONSE`` reasoning text,
 # ``USER_MESSAGE_RECEIVED`` raw prompt, etc.) are left to
 # the AI fallback.
 EXTRACTORS = {

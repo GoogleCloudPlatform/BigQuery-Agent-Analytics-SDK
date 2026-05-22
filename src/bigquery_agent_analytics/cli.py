@@ -1854,6 +1854,78 @@ def materialize_window(
             "materialize. Writes no state-table row."
         ),
     ),
+    backfill: bool = typer.Option(
+        False,
+        "--backfill",
+        help=(
+            "Backfill mode: re-materialize a fixed historical window "
+            "given by --from / --to without reading or advancing the "
+            "steady-state checkpoint. REQUIRES --state-key-suffix so "
+            "the backfill's state rows occupy a distinct state_key "
+            "namespace from the steady-state cron — without a suffix "
+            "the backfill row would later be read as the cron's "
+            "checkpoint and silently rewind the high-water mark."
+        ),
+    ),
+    from_time: Optional[str] = typer.Option(
+        None,
+        "--from",
+        help=(
+            "Backfill window lower bound, inclusive. UTC ISO 8601 "
+            "(e.g. 2026-05-01T00:00:00Z). Required when --backfill."
+        ),
+    ),
+    to_time: Optional[str] = typer.Option(
+        None,
+        "--to",
+        help=(
+            "Backfill window upper bound, exclusive. UTC ISO 8601 "
+            "(e.g. 2026-05-08T00:00:00Z). Required when --backfill."
+        ),
+    ),
+    state_key_suffix: Optional[str] = typer.Option(
+        None,
+        "--state-key-suffix",
+        help=(
+            "Optional suffix folded into the state-key SHA. Use to "
+            "isolate backfill / re-extraction runs from the steady-"
+            "state cron so their state rows never advance the live "
+            "checkpoint. Treat as a stable name (e.g. "
+            "'backfill-may-w1') — changing it produces a new "
+            "state_key and a fresh checkpoint stream."
+        ),
+    ),
+    extraction_mode: str = typer.Option(
+        "ai-fallback",
+        "--extraction-mode",
+        help=(
+            "Extraction path for each session's events. "
+            "'ai-fallback' (default) — structured extractors run "
+            "and AI.GENERATE fills any gaps; existing behavior. "
+            "'compiled-only' — structured extractors only; no AI "
+            "call; unhandled spans surface as typed "
+            "'empty_extraction' failures with sample diagnostics. "
+            "Pick 'compiled-only' to drop roles/aiplatform.user "
+            "from the runtime SA (no LLM calls under this mode, "
+            "asserted by SDK tests)."
+        ),
+    ),
+    max_session_age_hours: Optional[float] = typer.Option(
+        None,
+        "--max-session-age-hours",
+        help=(
+            "Enable the orphan-session watchdog (issue #180). When "
+            "set, the orchestrator additionally scans for sessions "
+            "whose first event is older than N hours but which "
+            "never emitted the completion event. Each new orphan "
+            "surfaces as a typed 'session_orphaned' failure in the "
+            "JSON report; the state table records per-scan "
+            "(mode='orphan_scan') and cumulative "
+            "(mode='orphan_ledger') audit rows under the same "
+            "state_key. Disabled by default; skipped in --backfill "
+            "mode."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1879,7 +1951,16 @@ def materialize_window(
           programming bug).
   """
   try:
+    from .materialize_window import _parse_backfill_timestamp
     from .materialize_window import run_materialize_window
+
+    # Parse --from / --to at the CLI boundary. Empty strings are
+    # treated as "unset" so an env-var pass-through that passes
+    # the empty default through doesn't accidentally flip the
+    # backfill validator. The materializer's own validator then
+    # enforces the required-when-backfill contract.
+    parsed_from = _parse_backfill_timestamp("--from", from_time)
+    parsed_to = _parse_backfill_timestamp("--to", to_time)
 
     result = run_materialize_window(
         project_id=project_id,
@@ -1899,6 +1980,12 @@ def materialize_window(
         location=location,
         validate_binding=validate_binding,
         dry_run=dry_run,
+        backfill=backfill,
+        from_time=parsed_from,
+        to_time=parsed_to,
+        extraction_mode=extraction_mode,
+        state_key_suffix=state_key_suffix,
+        max_session_age_hours=max_session_age_hours,
     )
     typer.echo(format_output(result.to_json(), fmt))
     if not result.ok:

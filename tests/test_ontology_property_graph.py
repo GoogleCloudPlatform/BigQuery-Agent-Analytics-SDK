@@ -524,6 +524,127 @@ class TestCompilePropertyGraphDdl:
 
 
 # ------------------------------------------------------------------ #
+# Canonical FK→PK mapping (C2 / PR #222 review P1)                     #
+# ------------------------------------------------------------------ #
+
+
+class TestCompilePropertyGraphSelfEdge:
+  """The public PG compiler must accept dict-shape bindings so
+  self-edges (and any other binding where the FK column differs
+  from the endpoint's PK column) emit valid DDL. PR #222 wired
+  the canonical mapping through the materializer +
+  ``bigquery_ontology.graph_ddl_compiler`` but missed this
+  public compiler; the reviewer surfaced the gap against the
+  migration v5 self-edge binding."""
+
+  def test_self_edge_dict_shape_compiles(self):
+    """A self-edge with disambiguated ``src_*`` / ``dst_*`` FK
+    columns emits a valid edge-table clause: the LHS of
+    SOURCE/DESTINATION KEY is the edge FK column, the RHS of
+    REFERENCES is the endpoint's PK column."""
+    from bigquery_agent_analytics.resolved_spec import ResolvedRelationship
+
+    decision = ResolvedEntity(
+        name="DecisionExecution",
+        source="p.d.decision_execution",
+        key_columns=("decision_execution_id",),
+        labels=("DecisionExecution",),
+        properties=(
+            ResolvedProperty(
+                column="decision_execution_id",
+                logical_name="id",
+                sdk_type="string",
+            ),
+        ),
+    )
+    rel = ResolvedRelationship(
+        name="evolvedFrom",
+        source="p.d.evolved_from",
+        from_entity="DecisionExecution",
+        to_entity="DecisionExecution",
+        from_columns=("src_decision_execution_id",),
+        to_columns=("dst_decision_execution_id",),
+        from_column_mapping=(("src_decision_execution_id", "id"),),
+        to_column_mapping=(("dst_decision_execution_id", "id"),),
+        properties=(),
+    )
+    spec = ResolvedGraph(name="g", entities=(decision,), relationships=(rel,))
+    clause = compile_edge_table_clause(rel, spec, "proj", "ds")
+    # Edge FK column on LHS; endpoint PK column on RHS.
+    assert (
+        "SOURCE KEY (src_decision_execution_id, session_id) "
+        "REFERENCES DecisionExecution (decision_execution_id, session_id)"
+    ) in clause
+    assert (
+        "DESTINATION KEY (dst_decision_execution_id, session_id) "
+        "REFERENCES DecisionExecution (decision_execution_id, session_id)"
+    ) in clause
+
+  def test_migration_v5_binding_compiles_end_to_end(self):
+    """Pin the reviewer's exact reproducer: load the committed
+    migration v5 ontology + binding (which now includes self-edges
+    in dict-shape) and emit the public PG DDL. Before the fix this
+    raised ``ValueError`` at
+    ``ontology_property_graph._compile_edge_table_clause``."""
+    import pathlib
+
+    from bigquery_agent_analytics.resolved_spec import resolve
+    from bigquery_ontology import load_binding
+    from bigquery_ontology import load_ontology
+
+    base = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+    )
+    if not (base / "ontology.yaml").exists():
+      pytest.skip("migration_v5 snapshots not checked in")
+    ont = load_ontology(str(base / "ontology.yaml"))
+    binding = load_binding(str(base / "binding.yaml"), ontology=ont)
+    spec = resolve(ont, binding)
+    ddl = compile_property_graph_ddl(
+        spec, "test-project-0728-467323", "migration_v5_demo"
+    )
+    # Both self-edges emitted with correct positional pairing.
+    for self_edge in ("evolved_from", "superseded_by"):
+      assert f"`test-project-0728-467323.migration_v5_demo.{self_edge}`" in ddl
+    assert (
+        "SOURCE KEY (src_decision_execution_id, session_id) "
+        "REFERENCES DecisionExecution (decision_execution_id, session_id)"
+    ) in ddl
+    assert (
+        "DESTINATION KEY (dst_decision_execution_id, session_id) "
+        "REFERENCES DecisionExecution (decision_execution_id, session_id)"
+    ) in ddl
+
+  def test_legacy_mismatch_still_raises(self):
+    """The pre-canonical-mapping safeguard against accidental
+    edge-col-vs-PK-col mismatches stays in place for legacy callers
+    that construct ``ResolvedRelationship`` manually without
+    ``from_column_mapping``."""
+    from bigquery_agent_analytics.resolved_spec import ResolvedRelationship
+
+    src_entity = _make_entity("Src", keys=("eid",), source="p.d.src")
+    tgt_entity = _make_entity("Tgt", keys=("eid",), source="p.d.tgt")
+    bad_rel = ResolvedRelationship(
+        name="Bad",
+        source="p.d.bad",
+        from_entity="Src",
+        to_entity="Tgt",
+        from_columns=("not_a_pk",),  # legacy shape, mismatched
+        to_columns=("eid",),
+        properties=(),
+    )
+    # No canonical mapping → falls through to the strict check.
+    assert bad_rel.from_column_mapping is None
+    spec = ResolvedGraph(
+        name="g", entities=(src_entity, tgt_entity), relationships=(bad_rel,)
+    )
+    with pytest.raises(ValueError, match="do not match Src primary key"):
+      compile_edge_table_clause(bad_rel, spec, "proj", "ds")
+
+
+# ------------------------------------------------------------------ #
 # OntologyPropertyGraphCompiler                                        #
 # ------------------------------------------------------------------ #
 

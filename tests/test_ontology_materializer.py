@@ -474,6 +474,176 @@ class TestRouteEdge:
 
 
 # ------------------------------------------------------------------ #
+# Canonical FK→PK mapping (C2 / #179)                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestCanonicalMappingSelfEdge:
+  """Self-edges materialize correctly when the binding declares
+  the dict-shape ``from_columns: [{src_<col>: <pk_prop>}]``. The
+  materializer's ``_route_edge`` uses
+  ``ResolvedRelationship.from_column_mapping`` to translate the
+  parsed segment (keyed by endpoint *physical column*) into the
+  edge-table FK column (which differs from the PK column —
+  ``src_decision_execution_id`` vs ``decision_execution_id``)."""
+
+  def _self_edge_spec(self):
+    decision = _make_entity(
+        "DecisionExecution",
+        props=(
+            ResolvedProperty(
+                column="decision_execution_id",
+                logical_name="id",
+                sdk_type="string",
+            ),
+            ResolvedProperty(
+                column="latency_ms", logical_name="latencyMs", sdk_type="int64"
+            ),
+        ),
+        keys=("decision_execution_id",),
+        source="p.d.decision_execution",
+    )
+    rel = ResolvedRelationship(
+        name="evolvedFrom",
+        source="p.d.evolved_from",
+        from_entity="DecisionExecution",
+        to_entity="DecisionExecution",
+        # List-view edge column names — disambiguated.
+        from_columns=("src_decision_execution_id",),
+        to_columns=("dst_decision_execution_id",),
+        # Canonical mapping pairs the edge column to the endpoint's
+        # PK property (logical name ``id``).
+        from_column_mapping=(("src_decision_execution_id", "id"),),
+        to_column_mapping=(("dst_decision_execution_id", "id"),),
+        properties=(),
+    )
+    spec = ResolvedGraph(name="g", entities=(decision,), relationships=(rel,))
+    return spec, rel
+
+  def test_route_edge_self_edge_populates_distinct_src_and_dst(self):
+    """Both edge FK columns must end up with the right values
+    from the parsed segment. Before C2, ``_route_edge`` would have
+    looked up ``from_keys.get("src_decision_execution_id", "")``
+    against a segment keyed by ``decision_execution_id`` and
+    written ``""`` for every row."""
+    spec, rel = self._self_edge_spec()
+    edge = ExtractedEdge(
+        edge_id="sess1:evolvedFrom:0",
+        relationship_name="evolvedFrom",
+        from_node_id=("sess1:DecisionExecution:decision_execution_id=de-newer"),
+        to_node_id=("sess1:DecisionExecution:decision_execution_id=de-older"),
+        properties=[],
+    )
+    row = _route_edge(edge, rel, spec, "sess1")
+    assert row["src_decision_execution_id"] == "de-newer"
+    assert row["dst_decision_execution_id"] == "de-older"
+    # The original PK-column key MUST NOT appear in the row —
+    # otherwise the materializer would write a column the edge
+    # table doesn't have.
+    assert "decision_execution_id" not in row
+
+  def test_relationship_columns_self_edge_types_off_endpoint_property(self):
+    """The DDL columns for the self-edge use the SDK type of the
+    endpoint's PK *property* (``id`` → STRING), keyed by the
+    edge-table FK column name."""
+    spec, rel = self._self_edge_spec()
+    from bigquery_agent_analytics.ontology_materializer import _relationship_columns
+
+    cols = _relationship_columns(rel, spec)
+    assert cols["src_decision_execution_id"] == "STRING"
+    assert cols["dst_decision_execution_id"] == "STRING"
+    # The original PK column is not on the edge table.
+    assert "decision_execution_id" not in cols
+
+
+class TestCanonicalMappingRenamedPK:
+  """When the binding renames the PK property column (e.g.
+  property ``customer_id`` bound to physical column ``cust_id``),
+  the canonical mapping's ``target_property`` is the *logical*
+  name (``customer_id``) but the parsed segment is keyed by the
+  *physical column* (``cust_id``). The materializer must bridge
+  via ``ResolvedProperty.logical_name`` → ``column``."""
+
+  def test_route_edge_translates_logical_target_to_physical_column(self):
+    customer = _make_entity(
+        "Customer",
+        props=(
+            ResolvedProperty(
+                column="cust_id",
+                logical_name="customer_id",
+                sdk_type="string",
+            ),
+        ),
+        keys=("cust_id",),
+        source="p.d.customers",
+    )
+    order = _make_entity(
+        "Order",
+        props=(
+            ResolvedProperty(
+                column="order_id",
+                logical_name="order_id",
+                sdk_type="string",
+            ),
+        ),
+        keys=("order_id",),
+        source="p.d.orders",
+    )
+    rel = ResolvedRelationship(
+        name="HasOrder",
+        source="p.d.has_order",
+        from_entity="Customer",
+        to_entity="Order",
+        from_columns=("cust_id",),
+        to_columns=("order_id",),
+        # Legacy ``[cust_id]`` binding resolves to target_property
+        # ``customer_id`` (the endpoint's logical PK name).
+        from_column_mapping=(("cust_id", "customer_id"),),
+        to_column_mapping=(("order_id", "order_id"),),
+        properties=(),
+    )
+    spec = ResolvedGraph(
+        name="g", entities=(customer, order), relationships=(rel,)
+    )
+    edge = ExtractedEdge(
+        edge_id="sess1:HasOrder:0",
+        relationship_name="HasOrder",
+        # ``_build_node_id`` writes the segment keyed by physical
+        # column (``cust_id``), not logical name.
+        from_node_id="sess1:Customer:cust_id=c-42",
+        to_node_id="sess1:Order:order_id=o-9",
+        properties=[],
+    )
+    row = _route_edge(edge, rel, spec, "sess1")
+    assert row["cust_id"] == "c-42"
+    assert row["order_id"] == "o-9"
+
+
+class TestLegacyListBindingStillWorks:
+  """The legacy ``from_columns=(<col>,)`` / ``to_columns=(<col>,)``
+  shape with ``from_column_mapping=None`` (older callers that
+  bypass ``resolve()``) keeps the same behavior as before C2."""
+
+  def test_legacy_list_route_edge_matches_pre_c2_behavior(self):
+    spec = _simple_spec()
+    rel = spec.relationships[0]
+    # The canonical mapping is intentionally None for this case —
+    # pinning the fallback path's behavior.
+    assert rel.from_column_mapping is None
+    assert rel.to_column_mapping is None
+    edge = ExtractedEdge(
+        edge_id="sess1:AlphaToBeta:0",
+        relationship_name="AlphaToBeta",
+        from_node_id="sess1:Alpha:alpha_id=a1",
+        to_node_id="sess1:Beta:beta_id=b1",
+        properties=[],
+    )
+    row = _route_edge(edge, rel, spec, "sess1")
+    assert row["alpha_id"] == "a1"
+    assert row["beta_id"] == "b1"
+
+
+# ------------------------------------------------------------------ #
 # OntologyMaterializer                                                 #
 # ------------------------------------------------------------------ #
 

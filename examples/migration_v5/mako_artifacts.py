@@ -73,24 +73,52 @@ _MAKO_NAMESPACE = "https://ontology.yahoo.com/mako/"
 
 # Demo-focused entity allowlist. The full imported
 # ``ontology.yaml`` contains the 18 MAKO-namespace entities;
-# the binding scope is narrower so the notebook's
-# four-guarantee narrative stays focused.
+# the binding scope is narrower so the notebook's narrative
+# arc stays focused.
 #
-# Why these six: in MAKO, ``DecisionExecution`` is the
-# central hub that ties everything together (per the TTL,
-# it's ``partOfSession`` an AgentSession,
-# ``atContextSnapshot`` a ContextSnapshot,
-# ``executedAtDecisionPoint`` a DecisionPoint,
-# ``hasSelectionOutcome`` a SelectionOutcome). The
-# decision-flow story doesn't hold together without
-# ``DecisionExecution`` in the binding.
+# Why these eleven, in two groups:
+#
+# * **Beats 1–4 hub** (six entities). ``DecisionExecution``
+#   is the central node that ties everything together — per
+#   MAKO's TTL, it's ``partOfSession`` an AgentSession,
+#   ``atContextSnapshot`` a ContextSnapshot,
+#   ``executedAtDecisionPoint`` a DecisionPoint, and
+#   ``hasSelectionOutcome`` a SelectionOutcome. Drop any
+#   one and the decision-flow story doesn't hold together.
+# * **Beat 5 feedback / reward loop** (five entities). What
+#   happened *after* the decision: ``BusinessConstraint`` +
+#   ``ConstraintApplication`` capture policy evaluations,
+#   ``RejectionReason`` records why each losing candidate
+#   lost, ``OutcomeSignal`` carries observed real-world
+#   results (clicks / conversions / viewability),
+#   ``RewardComputation`` aggregates those signals into the
+#   scalar RL reward via ``derivedReward`` edges.
 DEMO_ENTITIES: tuple[str, ...] = (
+    # Beats 1–4: the decision-flow hub + its six immediate
+    # neighbors. ``DecisionExecution`` is the central hub the
+    # rest hangs off of.
     "AgentSession",
     "DecisionExecution",
     "DecisionPoint",
     "Candidate",
     "SelectionOutcome",
     "ContextSnapshot",
+    # Beat 5: feedback / reward loop. ``BusinessConstraint`` +
+    # ``ConstraintApplication`` capture the "why did this
+    # candidate get filtered?" audit trail;
+    # ``RejectionReason`` records the "why did this candidate
+    # lose?" explanation; ``OutcomeSignal`` carries observed
+    # real-world results (click / conversion / viewability)
+    # linked back to a DecisionExecution via
+    # ``producedOutcome``; ``RewardComputation`` aggregates
+    # OutcomeSignals into a scalar reward for RL training and
+    # links back to the contributing signals via
+    # ``derivedReward``.
+    "BusinessConstraint",
+    "ConstraintApplication",
+    "RejectionReason",
+    "OutcomeSignal",
+    "RewardComputation",
 )
 
 
@@ -134,7 +162,9 @@ def make_binding(
 
   Thin wrapper around :func:`ontology_artifacts.make_binding`
   with :data:`MAKO_CONFIG`. ``entity_filter`` defaults to
-  :data:`DEMO_ENTITIES` (MAKO's six-entity demo scope).
+  :data:`DEMO_ENTITIES` (MAKO's 11-entity demo scope — six
+  Beat 1–4 hub entities plus five Beat 5 feedback / reward
+  loop entities).
   """
   return _make_binding(
       ontology,

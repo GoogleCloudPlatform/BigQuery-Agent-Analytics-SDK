@@ -55,6 +55,54 @@ Env vars (all set by the deploy script via
   events table sometimes lags ingestion by tens of minutes.
 * ``BQAA_MAX_SESSIONS`` (default unset/unlimited) — cost
   guardrail.
+* ``BQAA_MAX_RETRIES`` (default unset) — informational only.
+  The deploy script (issue #183) sets this to the
+  ``gcloud run jobs deploy --max-retries`` value so the
+  runtime's startup log can surface it in Cloud Logging;
+  operators correlating alerts with retry behaviour see the
+  policy without ``gcloud run jobs describe``. The job itself
+  doesn't act on this value — Cloud Run owns the retry policy.
+* ``BQAA_BACKFILL`` (default ``false``) — set ``true`` to run a
+  one-shot backfill of a fixed historical window instead of the
+  steady-state cron. When set, ``BQAA_FROM`` and ``BQAA_TO`` are
+  required. Steady-state cron jobs leave this unset.
+* ``BQAA_FROM`` (required when ``BQAA_BACKFILL=true``) — UTC ISO
+  8601 lower bound, inclusive (e.g. ``2026-05-01T00:00:00Z``).
+* ``BQAA_TO`` (required when ``BQAA_BACKFILL=true``) — UTC ISO
+  8601 upper bound, exclusive (e.g. ``2026-05-08T00:00:00Z``).
+* ``BQAA_STATE_KEY_SUFFIX`` (default unset) — optional suffix
+  folded into the state-key SHA so a backfill / re-extraction
+  run writes its state rows in a distinct namespace from the
+  steady-state cron. Recommended whenever ``BQAA_BACKFILL=true``.
+* ``BQAA_EXTRACTION_MODE`` (default ``ai-fallback``) — one of
+  ``ai-fallback`` or ``compiled-only``. ``ai-fallback`` keeps the
+  existing behavior (structured extractors + AI.GENERATE for
+  gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
+  span the compiled extractors don't cover surfaces as a typed
+  ``empty_extraction`` failure with sample diagnostics.
+* ``BQAA_REFERENCE_EXTRACTORS_MODULE`` (default unset, set to
+  ``reference_extractor`` by the deploy script in
+  compiled-only mode) — dotted module path whose ``EXTRACTORS``
+  dict registers structured extractors on the manager.
+  Required for ``compiled-only`` to produce non-empty graphs;
+  the deploy script stages ``reference_extractor.py`` into the
+  container and sets this automatically. Customers who want a
+  different extractor module can override.
+* ``BQAA_BUNDLES_ROOT`` (default unset) — absolute path to a
+  directory of pre-compiled extractor bundles. When set, the
+  manager loads those bundles with
+  ``BQAA_REFERENCE_EXTRACTORS_MODULE`` as the fallback path.
+  When unset, the reference module's ``EXTRACTORS`` registry
+  is used directly — the simpler compiled-only path that
+  needs no offline bundle-build step.
+* ``BQAA_MAX_SESSION_AGE_HOURS`` (default unset) — enables the
+  orphan-session watchdog (issue #180). When set to a positive
+  number, the orchestrator additionally scans for sessions
+  whose first event is older than N hours but which never
+  emitted ``AGENT_COMPLETED``. Each new orphan surfaces as a
+  typed ``session_orphaned`` failure in the JSON report; the
+  state table records per-scan + cumulative audit rows. Skipped
+  automatically in ``BQAA_BACKFILL=true`` mode.
 
 Exit codes mirror the CLI:
 
@@ -326,6 +374,49 @@ def main() -> int:
   overlap_minutes = _optional_env_float("BQAA_OVERLAP_MINUTES", 15.0)
   max_sessions = _optional_env_int("BQAA_MAX_SESSIONS")
 
+  # Backfill plumbing. ``BQAA_BACKFILL`` is a string env var; the
+  # canonical truthy values are ``"true"`` / ``"1"`` (case-insensitive).
+  # Everything else (including unset and the empty string) is false
+  # so a defaulted env var doesn't accidentally flip the mode.
+  backfill_raw = os.environ.get("BQAA_BACKFILL", "").strip().lower()
+  backfill = backfill_raw in ("true", "1", "yes")
+  from_time_raw = os.environ.get("BQAA_FROM") or None
+  to_time_raw = os.environ.get("BQAA_TO") or None
+  state_key_suffix = os.environ.get("BQAA_STATE_KEY_SUFFIX") or None
+  # Default ``ai-fallback`` keeps the legacy extract_graph(...,
+  # use_ai_generate=True) path; ``compiled-only`` opts into B1's
+  # diagnostics-emitting path with no AI calls. The materializer's
+  # own validator rejects any other value at the boundary.
+  extraction_mode = (
+      os.environ.get("BQAA_EXTRACTION_MODE") or "ai-fallback"
+  ).strip()
+  # Reference module + bundles root. Both default to None;
+  # ``compiled-only`` mode requires at least one of them to be set
+  # at the SDK boundary (else the manager has no structured
+  # extractors and every span fails ``on_unhandled_span='fail'``).
+  # The deploy script sets ``BQAA_REFERENCE_EXTRACTORS_MODULE`` to
+  # ``reference_extractor`` in compiled-only mode; ``BQAA_BUNDLES_ROOT``
+  # is left unset by default (operators who pre-compile bundles
+  # set it themselves).
+  reference_extractors_module = (
+      os.environ.get("BQAA_REFERENCE_EXTRACTORS_MODULE") or None
+  )
+  bundles_root = os.environ.get("BQAA_BUNDLES_ROOT") or None
+  # Orphan-session watchdog (issue #180). Unset means disabled —
+  # mirrors the CLI flag. ``_optional_env_float`` raises ``exit 2``
+  # on a non-numeric value at the boundary, and the materializer's
+  # own validator rejects ``<= 0`` so a deployed
+  # ``BQAA_MAX_SESSION_AGE_HOURS=-1`` typo fails fast instead of
+  # producing a degenerate cutoff.
+  max_session_age_hours_raw = os.environ.get("BQAA_MAX_SESSION_AGE_HOURS")
+  max_session_age_hours: Optional[float]
+  if max_session_age_hours_raw is None or not max_session_age_hours_raw.strip():
+    max_session_age_hours = None
+  else:
+    max_session_age_hours = _optional_env_float(
+        "BQAA_MAX_SESSION_AGE_HOURS", 0.0
+    )
+
   _emit(
       "INFO",
       message="periodic materialization starting",
@@ -336,6 +427,20 @@ def main() -> int:
       lookback_hours=lookback_hours,
       overlap_minutes=overlap_minutes,
       max_sessions=max_sessions,
+      backfill=backfill,
+      from_time=from_time_raw,
+      to_time=to_time_raw,
+      state_key_suffix=state_key_suffix,
+      extraction_mode=extraction_mode,
+      bundles_root=bundles_root,
+      reference_extractors_module=reference_extractors_module,
+      max_session_age_hours=max_session_age_hours,
+      # Informational only — surfaces the Cloud Run Job's
+      # ``--max-retries`` setting so operators reading Cloud
+      # Logging see the retry policy alongside the run's other
+      # config (issue #183). Cloud Run owns the actual retry
+      # behaviour; the runtime doesn't act on this value.
+      max_retries=os.environ.get("BQAA_MAX_RETRIES") or None,
   )
 
   try:
@@ -385,6 +490,12 @@ def main() -> int:
     state_table_ref = (
         f"{project_id}.{graph_dataset_id}._bqaa_materialization_state"
     )
+    # Parse backfill window bounds at the boundary. Empty / unset
+    # env vars become ``None``; the materializer's own validator
+    # then enforces "both required when backfill=True".
+    parsed_from = mw._parse_backfill_timestamp("BQAA_FROM", from_time_raw)
+    parsed_to = mw._parse_backfill_timestamp("BQAA_TO", to_time_raw)
+
     result = mw.run_materialize_window(
         project_id=project_id,
         dataset_id=events_dataset_id,
@@ -398,6 +509,14 @@ def main() -> int:
         validate_binding=True,
         bq_client=bq_client,
         run_started_at=_dt.datetime.now(_dt.timezone.utc),
+        backfill=backfill,
+        from_time=parsed_from,
+        to_time=parsed_to,
+        state_key_suffix=state_key_suffix,
+        extraction_mode=extraction_mode,
+        bundles_root=bundles_root,
+        reference_extractors_module=reference_extractors_module,
+        max_session_age_hours=max_session_age_hours,
     )
 
     # Structured JSON report for Cloud Logging. Cloud Logging

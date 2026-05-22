@@ -323,16 +323,18 @@ def make_binding(
   )
 
   # Each entity's PK column is named ``{entity_short}_id``
-  # rather than a bare ``id``. The materializer
-  # (``_relationship_columns`` in ``ontology_materializer.py``)
-  # populates an edge's FK column type from the source
-  # entity's ``src_prop_map[col].sdk_type`` — that lookup
-  # requires the FK column name to exactly match a property
-  # column on the source entity. Using a bare ``id`` would
-  # work for one entity per edge but collide when both
-  # endpoints share the same PK column name (``id, id`` —
-  # duplicate column). Per-entity PK names give every edge a
-  # clean ``{src_entity}_id, {dst_entity}_id`` shape.
+  # rather than a bare ``id``. Heterogeneous edges still keep the
+  # legacy ``list[str]`` binding shape (``from_columns:
+  # [<src_entity>_id]``), so the PK column name has to be unique
+  # per entity — otherwise ``from_columns + to_columns`` would
+  # land ``id, id`` on the edge table (duplicate column).
+  # Self-edges go through the dict-shape ``[{src_<col>_id:
+  # <pk_prop>}]`` (C2 / #179 follow-up) so they can disambiguate
+  # by naming explicit ``src_/dst_`` prefixed FK columns; the
+  # canonical FK→PK mapping resolves those into the endpoint's
+  # PK property type at materialization time. Per-entity PK names
+  # give every heterogeneous edge a clean
+  # ``{src_entity}_id, {dst_entity}_id`` shape.
   entities_block: list[dict] = []
   for entity in ontology.entities:
     if entity.name not in scope:
@@ -366,30 +368,42 @@ def make_binding(
 
   # Edge set is derived from the ontology's declared
   # relationships — pick relationships whose endpoints are
-  # both in scope. Two filters:
+  # both in scope. Two emission paths, no relationships dropped:
   #
-  # 1. ``rel.from_ != rel.to`` — self-edges are dropped. The
-  #    materializer's ``_relationship_columns`` requires the
-  #    edge's ``from_columns`` to name a property column on
-  #    the source entity. For a self-edge that would mean two
-  #    identical PK column names on the edge table
-  #    (duplicate-column error), and the workarounds
-  #    (``src_/dst_`` prefixes) miss the property lookup. A
-  #    future SDK change that accepts FK-to-PK column mapping
-  #    could re-add self-edges; for now the binding scope
-  #    drops them.
-  # 2. Heterogeneous edges use ``{entity_short}_id`` as both
-  #    source and destination FK columns — the same name as
-  #    the source/destination entity's PK column. The
-  #    materializer can then resolve ``src_prop_map[col]``
-  #    cleanly.
+  # 1. **Heterogeneous edges** (``rel.from_ != rel.to``) use
+  #    ``{entity_short}_id`` as the FK column on both sides —
+  #    same name as the source/destination entity's PK column.
+  #    The materializer resolves the type via ``src_prop_map[col]``
+  #    on a property whose ``column == col``. Legacy
+  #    ``list[str]`` binding shape.
+  # 2. **Self-edges** (``rel.from_ == rel.to``) use
+  #    ``src_<entity_short>_id`` / ``dst_<entity_short>_id`` as
+  #    disambiguated edge-table FK columns. The dict-shape
+  #    binding ``[{src_<col>: <pk_prop>}]`` introduced in #179
+  #    (with C2 wiring it through the materializer + DDL
+  #    compiler) tells the SDK that ``src_<col>`` references
+  #    the endpoint's ``<pk_prop>`` PK property. Without the
+  #    canonical mapping the materializer would look up
+  #    ``src_prop_map[src_<col>]`` and ``KeyError``; with it,
+  #    self-edges materialize correctly.
   relationships_block: list[dict] = []
-  dropped_self_edges: list[str] = []
   for rel in ontology.relationships:
     if rel.from_ not in scope or rel.to not in scope:
       continue
     if rel.from_ == rel.to:
-      dropped_self_edges.append(rel.name)
+      entity_short = _entity_id_column(rel.from_)
+      endpoint_entity = next(
+          e for e in ontology.entities if e.name == rel.from_
+      )
+      pk_prop = _primary_key_property_name(endpoint_entity)
+      relationships_block.append(
+          {
+              "name": rel.name,
+              "source": f"{project}.{dataset}.{_edge_table_name(rel.name)}",
+              "from_columns": [{f"src_{entity_short}_id": pk_prop}],
+              "to_columns": [{f"dst_{entity_short}_id": pk_prop}],
+          }
+      )
       continue
     src_col = f"{_entity_id_column(rel.from_)}_id"
     dst_col = f"{_entity_id_column(rel.to)}_id"
@@ -453,8 +467,19 @@ def make_table_ddl(binding: Binding, *, ontology: Ontology) -> str:
         f"CREATE TABLE IF NOT EXISTS `{ebind.source}` ({', '.join(cols)});"
     )
 
+  # ``from_columns`` / ``to_columns`` accept both ``list[str]``
+  # (legacy heterogeneous edges) and ``list[dict[str, str]]`` (the
+  # dict-shape introduced in #179 — used here for self-edges where
+  # the FK column name must differ from the endpoint's PK column).
+  # ``edge_column_names`` normalizes either shape to the list of
+  # edge-column names.
+  from bigquery_ontology.binding_loader import edge_column_names
+
   for rbind in binding.relationships:
-    src_col, dst_col = rbind.from_columns[0], rbind.to_columns[0]
+    src_names = edge_column_names(list(rbind.from_columns))
+    dst_names = edge_column_names(list(rbind.to_columns))
+    src_col = src_names[0]
+    dst_col = dst_names[0]
     edge_cols = [f"{src_col} STRING", f"{dst_col} STRING"]
     edge_cols.extend(_sdk_metadata_columns({src_col, dst_col}))
     lines.append(
@@ -546,6 +571,8 @@ def make_property_graph_sql(
 
   rel_map = {r.name: r for r in ontology.relationships}
 
+  from bigquery_ontology.binding_loader import edge_column_names
+
   edge_tables: list[str] = []
   for rbind in binding.relationships:
     rel = rel_map.get(rbind.name)
@@ -553,8 +580,12 @@ def make_property_graph_sql(
       # Defensive — should never happen given the binding
       # passed validation.
       continue
-    src_col = rbind.from_columns[0]
-    dst_col = rbind.to_columns[0]
+    # ``edge_column_names`` accepts both the legacy ``list[str]``
+    # and the new dict-shape ``list[dict[str, str]]`` (#179).
+    # Self-edges use the dict shape so the src/dst FK columns can
+    # be disambiguated.
+    src_col = edge_column_names(list(rbind.from_columns))[0]
+    dst_col = edge_column_names(list(rbind.to_columns))[0]
     qualified_edge_source = rbind.source
     short = _table_ref_short(qualified_edge_source)
     # ``SOURCE KEY ... REFERENCES`` and ``DESTINATION KEY ...

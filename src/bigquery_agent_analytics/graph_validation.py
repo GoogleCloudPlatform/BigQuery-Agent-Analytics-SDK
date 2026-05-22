@@ -646,43 +646,82 @@ def _validate_edge(
           )
       )
 
-    # Endpoint-key presence. The relationship's from_columns /
-    # to_columns must be readable from the edge's node-id segment
-    # via the same parser the materializer uses
-    # (``parse_key_segment`` in ``_ontology_routing``, shared by
-    # both modules). The materializer builds FK column values from
-    # the node-id segment, not from the endpoint node's
-    # properties — so a node-id like 'd1' that parses to {}
-    # silently produces empty FK columns at INSERT time.
-    # Validating against the parsed segment closes that silent-
-    # corruption gap.
-    cols = (
-        spec_relationship.from_columns
+    # Endpoint-key presence. The relationship's edge columns must
+    # be readable from the edge's node-id segment via the same
+    # parser the materializer uses (``parse_key_segment`` in
+    # ``_ontology_routing``, shared by both modules). The
+    # materializer builds FK column values from the node-id
+    # segment, not from the endpoint node's properties — so a
+    # node-id like 'd1' that parses to {} silently produces empty
+    # FK columns at INSERT time. Validating against the parsed
+    # segment closes that silent-corruption gap.
+    #
+    # The segment is keyed by the endpoint's PK *property* name
+    # (e.g. ``id``), not the edge-table column name (which may be
+    # ``src_decision_execution_id`` for a self-edge). The canonical
+    # ``from_column_mapping`` / ``to_column_mapping`` from #179
+    # pairs each edge column with its target property; we look up
+    # the parsed segment by the target property and report
+    # missing-key failures naming the edge column the materializer
+    # would write. The legacy single-list path still works when
+    # edge_col == prop_name.
+    mapping = (
+        spec_relationship.from_column_mapping
         if direction == "from_node_id"
-        else spec_relationship.to_columns
+        else spec_relationship.to_column_mapping
     )
+    # ``parse_key_segment`` returns the parsed segment keyed by
+    # the endpoint entity's *physical column* names — that's what
+    # ``_build_node_id`` writes (it walks ``entity_spec.key_columns``,
+    # which are physical columns). The canonical mapping names
+    # target properties by their *logical* (ontology) names, so we
+    # translate via the endpoint's ``ResolvedProperty`` list.
+    endpoint_entity = entity_by_name.get(expected_entity)
+    logical_to_column = (
+        {p.logical_name: p.column for p in endpoint_entity.properties}
+        if endpoint_entity is not None
+        else {}
+    )
+    if mapping is not None:
+      keys_to_check = [
+          (
+              edge_col,
+              target_prop,
+              logical_to_column.get(target_prop, target_prop),
+          )
+          for edge_col, target_prop in mapping
+      ]
+    else:
+      cols = (
+          spec_relationship.from_columns
+          if direction == "from_node_id"
+          else spec_relationship.to_columns
+      )
+      keys_to_check = [(col, col, col) for col in cols]
     parsed_keys = parse_key_segment(edge_node_id)
-    for key_col in cols:
-      value = parsed_keys.get(key_col, "")
+    for edge_col, target_prop, physical_col in keys_to_check:
+      value = parsed_keys.get(physical_col, "")
       if not value:
         failures.append(
             ValidationFailure(
                 scope=FallbackScope.EDGE,
                 code="missing_endpoint_key",
-                path=f"{base_path}.{direction}.<key:{key_col}>",
+                path=f"{base_path}.{direction}.<key:{edge_col}>",
                 node_id=edge_node_id,
                 edge_id=edge.edge_id or None,
                 event_id=event_id,
-                expected=key_col,
+                expected=edge_col,
                 observed=edge_node_id,
                 detail=(
-                    f"endpoint key column {key_col!r} on relationship "
+                    f"endpoint key column {edge_col!r} on relationship "
                     f"{spec_relationship.name!r} cannot be read from "
                     f"node_id {edge_node_id!r}: the materializer "
                     f"parses keys from the format "
-                    f"'{{session}}:{{entity}}:k1=v1,k2=v2'; this "
-                    f"node_id does not match that shape (or the "
-                    f"required column is missing from the segment)"
+                    f"'{{session}}:{{entity}}:k1=v1,k2=v2' (keyed by "
+                    f"endpoint property name, expected "
+                    f"{target_prop!r}); this node_id does not match "
+                    f"that shape (or the required property is missing "
+                    f"from the segment)"
                 ),
             )
         )

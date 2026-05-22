@@ -71,7 +71,30 @@ class ResolvedRelationship:
   """One relationship in the resolved runtime view.
 
   ``from_columns`` / ``to_columns`` are the binding's endpoint join
-  columns. ``from_session_column`` / ``to_session_column`` are the
+  columns as a list-view (just the edge column names). They remain
+  ``tuple[str, ...]`` so the many downstream surfaces that read them
+  as names (the SQL compiler, the validators, the scaffolders, the
+  TTL importer, the materializer's column-set assembly) keep working
+  unchanged after #179's binding-model evolution.
+
+  ``from_column_mapping`` / ``to_column_mapping`` (new in #179) carry
+  the canonical ``(edge_column, target_property)`` form. They're the
+  source of truth when a caller needs to know which PK property on
+  the endpoint entity each edge column references — required for
+  self-edge support where the same entity sits at both ends and the
+  bare list of column names is ambiguous about which side a column
+  belongs to. ``resolve()`` populates these fields for BOTH the
+  legacy ``list[str]`` shape (the str entry resolves to the
+  endpoint's Nth effective PK property by position) AND the explicit
+  ``list[dict[str, str]]`` shape (the dict's value is used directly,
+  after the loader validates it names a real effective PK property).
+  ``None`` (the default) means the ``ResolvedRelationship`` was
+  manually constructed without going through ``resolve()`` or
+  predates this field — newer callers should not rely on the
+  list-view alone in that case and instead derive the mapping
+  themselves from the endpoint's effective PK.
+
+  ``from_session_column`` / ``to_session_column`` are the
   SDK-specific lineage session overrides (None if not configured).
   ``properties`` are in ontology declaration order.
 
@@ -94,6 +117,8 @@ class ResolvedRelationship:
   metadata_columns: tuple[str, ...] = ("session_id", "extracted_at")
   ontology_key_primary: Optional[tuple[str, ...]] = None
   ontology_key_additional: Optional[tuple[str, ...]] = None
+  from_column_mapping: Optional[tuple[tuple[str, str], ...]] = None
+  to_column_mapping: Optional[tuple[tuple[str, str], ...]] = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -380,20 +405,46 @@ def resolve(
       if ont_rel.keys.additional:
         ont_key_additional = tuple(ont_rel.keys.additional)
 
+    # Canonical FK→PK mapping (issue #179): resolves both legacy
+    # ``list[str]`` and the new ``list[dict[str, str]]`` shape into a
+    # tuple of ``(edge_column, target_property)`` pairs. The
+    # list-view ``from_columns`` / ``to_columns`` below is derived
+    # from the mapping so downstream surfaces that only need names
+    # don't have to change.
+    from bigquery_ontology.binding_loader import edge_column_names  # local: avoid cycle
+    from bigquery_ontology.binding_loader import normalize_relationship_columns
+
+    from_mapping = normalize_relationship_columns(
+        list(rb.from_columns),
+        ont_rel.from_,
+        ont_entity_map,
+        side="from",
+        relationship_name=rb.name,
+    )
+    to_mapping = normalize_relationship_columns(
+        list(rb.to_columns),
+        ont_rel.to,
+        ont_entity_map,
+        side="to",
+        relationship_name=rb.name,
+    )
+
     resolved_rels.append(
         ResolvedRelationship(
             name=ont_rel.name,
             source=_qualify_source(rb.source, project, dataset),
             from_entity=ont_rel.from_,
             to_entity=ont_rel.to,
-            from_columns=tuple(rb.from_columns),
-            to_columns=tuple(rb.to_columns),
+            from_columns=edge_column_names(list(rb.from_columns)),
+            to_columns=edge_column_names(list(rb.to_columns)),
             properties=tuple(properties),
             description=ont_rel.description or "",
             from_session_column=from_session,
             to_session_column=to_session,
             ontology_key_primary=ont_key_primary,
             ontology_key_additional=ont_key_additional,
+            from_column_mapping=from_mapping,
+            to_column_mapping=to_mapping,
         )
     )
 
