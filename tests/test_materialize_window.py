@@ -3966,3 +3966,172 @@ class TestOrphanWatchdogOrchestratorIntegration:
             bq_client=_stub_bq_client([]),
             max_session_age_hours=bad,
         )
+
+
+# ====================================================================== #
+# Deploy-script boundary (issues #182 + #183 — split SAs + max-retries)   #
+# ====================================================================== #
+
+
+class TestDeployScriptHardening:
+  """Static checks on ``deploy_cloud_run_job.sh`` for the
+  production-posture defaults introduced by issues #182 + #183:
+  split runtime + scheduler-caller SAs by default with
+  ``--single-sa`` as the escape hatch, and ``--max-retries`` as
+  a CLI-tunable knob (default 2) that propagates both into the
+  ``gcloud run jobs deploy`` command and the runtime env."""
+
+  def _deploy_script_path(self) -> pathlib.Path:
+    return (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "deploy_cloud_run_job.sh"
+    )
+
+  def _script_body(self) -> str:
+    return self._deploy_script_path().read_text()
+
+  def test_deploy_script_shell_syntax_clean_after_hardening(self):
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        ["bash", "-n", str(script)], capture_output=True, text=True
+    )
+    assert (
+        result.returncode == 0
+    ), f"deploy script has a shell syntax error: {result.stderr}"
+
+  def test_split_sa_is_default_runtime_and_scheduler_distinct(self):
+    """The script must define the two SA names so the runtime
+    holds BigQuery/Vertex roles and the scheduler-caller holds
+    only ``roles/run.invoker`` — the least-privilege story
+    issue #182 wants as the default."""
+    body = self._script_body()
+    assert (
+        "bqaa-periodic-runtime-sa" in body
+    ), "default deploy must create a dedicated runtime SA"
+    assert (
+        "bqaa-periodic-scheduler-sa" in body
+    ), "default deploy must create a dedicated scheduler-caller SA"
+    # Both SAs created via ``_ensure_sa`` calls.
+    assert (
+        '_ensure_sa "$RUNTIME_SA_NAME"' in body
+        and '_ensure_sa "$SCHEDULER_SA_NAME"' in body
+    ), "deploy script must create runtime + scheduler SAs"
+
+  def test_single_sa_flag_falls_back_to_combined_identity(self):
+    """``--single-sa`` flips back to the pre-#182 combined SA so
+    customers who want the simpler identity model still have an
+    explicit opt-in."""
+    body = self._script_body()
+    assert "--single-sa" in body
+    assert (
+        "SINGLE_SA=false" in body
+    ), "the production default must be SINGLE_SA=false"
+    # The combined-identity branch sets both names to the legacy
+    # ``bqaa-periodic-sa`` so re-running with ``--single-sa``
+    # on an existing combined deploy doesn't strand the old SA.
+    assert (
+        'if [[ "$SINGLE_SA" == "true" ]]; then' in body
+        and 'RUNTIME_SA_NAME="bqaa-periodic-sa"' in body
+        and 'SCHEDULER_SA_NAME="bqaa-periodic-sa"' in body
+    )
+
+  def test_cloud_run_uses_runtime_sa_scheduler_uses_scheduler_sa(self):
+    """The two SAs must be wired to the right gcloud commands:
+    ``--service-account`` on the Cloud Run Job points at the
+    runtime SA (its BigQuery work needs the BQ roles); the
+    scheduler's ``--oauth-service-account-email`` points at the
+    scheduler-caller SA (only needs ``roles/run.invoker``)."""
+    body = self._script_body()
+    assert '--service-account "$RUNTIME_SA_EMAIL"' in body
+    assert (
+        '--oauth-service-account-email "$SCHEDULER_SA_EMAIL"' in body
+    ), "scheduler must use scheduler-caller SA, not runtime SA"
+    # Scheduler invoker grant lands on the scheduler-caller SA.
+    assert '--member "serviceAccount:${SCHEDULER_SA_EMAIL}"' in body, (
+        "roles/run.invoker on the Cloud Run Job must be granted "
+        "to the scheduler-caller SA, not the runtime SA"
+    )
+
+  def test_max_retries_flag_default_two_and_propagates(self):
+    """``--max-retries`` defaults to 2 (issue #183 — was hard-
+    coded 1) and propagates both into ``gcloud run jobs deploy``
+    and the Cloud Run Job's env so the runtime's startup log
+    surfaces it."""
+    body = self._script_body()
+    assert (
+        'MAX_RETRIES="2"' in body
+    ), "deploy script must default --max-retries to 2"
+    assert (
+        "--max-retries) " in body or "--max-retries)" in body
+    ), "deploy script must accept --max-retries as a CLI flag"
+    # The gcloud invocation must use the variable, not a literal.
+    assert '--max-retries "$MAX_RETRIES"' in body, (
+        "gcloud run jobs deploy must pass the configured retry "
+        "count via the $MAX_RETRIES variable (was hard-coded 1)"
+    )
+    # And the runtime env must carry it for Cloud Logging
+    # correlation.
+    assert "BQAA_MAX_RETRIES=${MAX_RETRIES}" in body, (
+        "deploy script must surface BQAA_MAX_RETRIES in the env "
+        "var array so the runtime startup log can echo it"
+    )
+
+  def test_max_retries_rejects_non_integer(self):
+    """Operator typo: ``--max-retries abc`` must fail at the
+    deploy boundary, not surface as a less-obvious gcloud error
+    after the build."""
+    script = self._deploy_script_path()
+    if not script.exists():
+      pytest.skip("deploy script not present in this checkout")
+    result = subprocess.run(
+        [
+            "bash",
+            str(script),
+            "--project",
+            "p",
+            "--region",
+            "us-central1",
+            "--events-dataset",
+            "e",
+            "--graph-dataset",
+            "g",
+            "--schedule",
+            "0 */6 * * *",
+            "--max-retries",
+            "abc",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0
+    assert "non-negative integer" in (result.stdout + result.stderr)
+
+  def test_run_job_reads_bqaa_max_retries_into_startup_log(self):
+    """The runtime entrypoint must read ``BQAA_MAX_RETRIES``
+    and include it in the structured startup log so operators
+    correlating Cloud Monitoring alert noise with retry behaviour
+    see the retry policy without ``gcloud run jobs describe``
+    (issue #183)."""
+    run_job = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "examples"
+        / "migration_v5"
+        / "periodic_materialization"
+        / "run_job.py"
+    )
+    if not run_job.exists():
+      pytest.skip("run_job.py not present in this checkout")
+    body = run_job.read_text()
+    assert "BQAA_MAX_RETRIES" in body
+    # The startup log must thread the value through so it lands
+    # in jsonPayload.
+    assert "max_retries=" in body, (
+        "run_job.py must pass max_retries into the _emit() call so "
+        "the Cloud Logging payload carries it"
+    )

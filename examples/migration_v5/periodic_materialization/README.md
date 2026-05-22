@@ -92,23 +92,36 @@ hard `ok=false` since PR #167).
 
 ### Required IAM
 
-The deploy script creates a single runtime service account
-(`bqaa-periodic-sa@PROJECT.iam.gserviceaccount.com`) and grants
-the minimum set of roles. Operators with appropriate write
-permissions can override or split the SAs later — the structure
-makes it a small edit.
+The deploy script creates **two** service accounts by default
+(production posture, per issue #182):
 
-| Scope | Role | Why |
-|---|---|---|
-| Project | `roles/bigquery.jobUser` | Run BQ jobs (DDL, discovery, state writes) |
-| Project | `roles/aiplatform.user` | Call `AI.GENERATE` for entity extraction. Granted in `--extraction-mode=ai-fallback` (default); skipped (and idempotently removed if pre-existing) in `--extraction-mode=compiled-only` |
-| Cloud Run Job | `roles/run.invoker` | Cloud Scheduler invokes the job. Granted on the specific job resource, not project-wide |
-| Events DS | `roles/bigquery.dataViewer` | Read `agent_events`; events stay read-only |
-| Graph DS | `roles/bigquery.dataEditor` | Write entity/relationship tables + `_bqaa_materialization_state` |
+* `bqaa-periodic-runtime-sa@PROJECT.iam.gserviceaccount.com`
+  — the Cloud Run Job's runtime identity. Holds the BigQuery +
+  (conditionally) Vertex AI roles below.
+* `bqaa-periodic-scheduler-sa@PROJECT.iam.gserviceaccount.com`
+  — the Cloud Scheduler trigger's OAuth identity. Holds only
+  `roles/run.invoker` on the specific Cloud Run Job. No
+  BigQuery, no Vertex AI, no project-wide perms.
 
-The deploy script handles every grant. For production
-hardening, split the runtime SA from the scheduler-caller SA;
-the script's structure makes that a small edit.
+Pass `--single-sa` to fall back to the pre-#182 combined
+identity (`bqaa-periodic-sa@PROJECT.iam.gserviceaccount.com`)
+when the two-SA model isn't worth the operational overhead.
+
+| Scope | Role | Granted to | Why |
+|---|---|---|---|
+| Project | `roles/bigquery.jobUser` | runtime SA | Run BQ jobs (DDL, discovery, state writes) |
+| Project | `roles/aiplatform.user` | runtime SA | Call `AI.GENERATE` for entity extraction. Granted in `--extraction-mode=ai-fallback` (default); skipped (and idempotently removed if pre-existing) in `--extraction-mode=compiled-only` |
+| Cloud Run Job | `roles/run.invoker` | **scheduler-caller SA** | Cloud Scheduler invokes the job. Granted on the specific job resource, not project-wide. With `--single-sa` this lands on the same SA as the runtime |
+| Events DS | `roles/bigquery.dataViewer` | runtime SA | Read `agent_events`; events stay read-only |
+| Graph DS | `roles/bigquery.dataEditor` | runtime SA | Write entity/relationship tables + `_bqaa_materialization_state` |
+
+The split keeps the scheduler-caller narrow: it can fire the
+job and nothing else. Combining the two paths (`--single-sa`)
+gives the scheduler caller broader permissions than it ever
+exercises — least-privilege violation that matters in
+regulated industries (advertising, financial services,
+healthcare). The deploy script handles every grant for both
+modes.
 
 ### General prerequisites
 
@@ -251,13 +264,15 @@ The script:
 
 1. **Pre-creates the graph dataset** (`bq mk`, idempotent) so
    the runtime SA never needs `bigquery.datasets.create`.
-2. **Creates a service account** (`bqaa-periodic-sa@…`) if
-   absent. This SA serves two roles: **runtime identity** for
-   the Cloud Run Job (does the BigQuery work) and **scheduler
-   caller** for the Cloud Scheduler HTTP trigger. For
-   production, splitting these into separate SAs is reasonable
-   hardening; the script's structure makes that a small edit.
-3. **Grants narrow IAM** to the SA:
+2. **Creates two service accounts** by default (issue #182):
+   `bqaa-periodic-runtime-sa@…` (runtime identity — does the
+   BigQuery work) and `bqaa-periodic-scheduler-sa@…`
+   (scheduler caller — fires the Cloud Run Job's HTTP
+   trigger). Pass `--single-sa` to fall back to the combined
+   `bqaa-periodic-sa@…` identity for both paths.
+3. **Grants narrow IAM** to the runtime SA (the
+   scheduler-caller SA only gets `roles/run.invoker` on the
+   job in section 5 below):
    * Project-level `roles/bigquery.jobUser` —
      `bigquery.jobs.create` only.
    * Project-level `roles/aiplatform.user` — required in the
@@ -518,13 +533,30 @@ failed, the insert still happens, producing duplicates that the
 *next* successful delete cleans up.
 
 **Idempotent retries.** Cloud Run Job retry policy: this script
-sets `--max-retries 1`. If a transient BQ error fails a run,
-Cloud Run retries once; the orchestrator's checkpoint plus
-session-level idempotency ensure no double-counting. For
-sustained failure (e.g., binding drift), the second retry will
-also fail and the scheduled fire will be reported as failed in
-Cloud Monitoring. Set up an alert on
-`logging.googleapis.com/log_entry_count` with severity `ERROR`.
+sets `--max-retries 2` by default (issue #183), tunable via
+the `--max-retries N` flag. The orchestrator's checkpoint +
+session-level idempotency mean additional retries are safe —
+each retry resumes from the last successful session, no
+double-counting. For transient BigQuery slot pressure or
+short-lived rate-limiting events, two retries silently
+absorb the noise; the on-call doesn't get paged for a
+condition the next scheduled fire would have recovered from
+anyway. For sustained failure (e.g., binding drift) all
+retries also fail and the scheduled fire shows up as a failed
+execution in Cloud Monitoring.
+
+The retry count surfaces in every run's startup log payload
+(`jsonPayload.max_retries`) via the `BQAA_MAX_RETRIES` env
+var the deploy script sets — operators correlating alert noise
+with retry behaviour see it in Cloud Logging without
+`gcloud run jobs describe`. Cost-minimizing deployments can
+pass `--max-retries 1` (or `0` to disable); production
+deployments running every few hours benefit from the
+`2` default.
+
+Set up an alert on `logging.googleapis.com/log_entry_count`
+with severity `ERROR` — that fires only after all retries
+have exhausted.
 
 ## Verified Cloud Run deployment evidence
 
@@ -695,8 +727,10 @@ unresolved" without having to diff across runs.
 ### Redeploy (no resource churn)
 
 Re-running the deploy script with the same flags is fully
-idempotent — same service account (`bqaa-periodic-sa`), same
-job name, same Scheduler trigger name, same graph dataset. The
+idempotent — same service account(s)
+(`bqaa-periodic-runtime-sa` + `bqaa-periodic-scheduler-sa` by
+default; `bqaa-periodic-sa` under `--single-sa`), same job
+name, same Scheduler trigger name, same graph dataset. The
 existing IAM bindings are detected and skipped (`already
 granted (READER)` etc.); only the container image gets rebuilt
 to reflect any source changes. Run after any code change to
@@ -723,11 +757,20 @@ bq --project_id=your-project rm -r -f your_graph_dataset
 ```
 
 The events dataset is never modified by the deploy and stays
-untouched. The runtime service account (`bqaa-periodic-sa`)
-persists across teardowns — drop it manually if you're
-permanently retiring the deployment:
+untouched. The service accounts persist across teardowns —
+drop them manually if you're permanently retiring the
+deployment (omit either delete if you used `--single-sa`):
 
 ```bash
+# Default (split-SA) deploys:
+gcloud iam service-accounts delete \
+  bqaa-periodic-runtime-sa@your-project.iam.gserviceaccount.com \
+  --project=your-project --quiet
+gcloud iam service-accounts delete \
+  bqaa-periodic-scheduler-sa@your-project.iam.gserviceaccount.com \
+  --project=your-project --quiet
+
+# Single-SA deploys (--single-sa):
 gcloud iam service-accounts delete \
   bqaa-periodic-sa@your-project.iam.gserviceaccount.com \
   --project=your-project --quiet
