@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-22
+
+### Release highlights
+
+The migration-v5 production track lands the design-partner asks from
+[#187](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/187)
+end-to-end: backfill mode, compiled-only extraction (with zero-LLM
+guarantee), explicit FK→PK mapping that re-enables MAKO self-edges,
+an opt-in orphan-session watchdog, the Beat 5 feedback / reward
+loop in both the demo and the live notebook, hardened deploy
+defaults (split SAs + tunable retries), and a Terraform module
+mirroring the bash deploy. The migration-v5 cron path is now
+complete for audit-critical production deployments.
+
+### Added
+
+- **Backfill mode for `materialize_window`** ([#188](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/188),
+  closes [#177](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/177))
+  — `bqaa-materialize-window --backfill --from / --to --state-key-suffix`
+  runs a one-shot historical window with isolated state-table
+  rows (the suffix folds into the `state_key` hash, so backfill
+  rows can't advance the steady-state cron checkpoint).
+- **Compiled-only extraction mode + deploy path** ([#192](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/192),
+  [#193](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/193),
+  closes [#178](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/178))
+  — `--extraction-mode=compiled-only` routes the orchestrator
+  through structured extractors only, never calls `AI.GENERATE`,
+  surfaces uncovered spans as typed `empty_extraction` failures
+  with sample diagnostics. The deploy script (`#193`) stages
+  `reference_extractor.py` into the container, wires
+  `BQAA_REFERENCE_EXTRACTORS_MODULE`, and makes
+  `roles/aiplatform.user` conditional (idempotently removes the
+  grant when transitioning an existing ai-fallback deploy to
+  compiled-only). `TestCompiledOnlyMakesZeroLLMCalls` proves the
+  zero-LLM contract.
+- **Explicit FK→PK mapping for binding columns** ([#191](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/191),
+  [#222](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/222),
+  closes [#179](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/179))
+  — `from_columns` / `to_columns` accept `list[dict[str, str]]`
+  shape (`[{src_decision_execution_id: id}]`) in addition to the
+  legacy `list[str]`. Materializer, validators, and the PG DDL
+  compiler consume the canonical
+  `ResolvedRelationship.from_column_mapping`. MAKO's
+  `evolvedFrom` / `supersededBy` self-edges are re-added to the
+  migration v5 binding.
+- **Orphan-session watchdog** ([#224](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/224),
+  closes [#180](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/180))
+  — opt-in via `--max-session-age-hours N`. Each cron pass scans
+  for sessions whose first event is older than the cutoff but
+  which never emitted `AGENT_COMPLETED`; flags them as
+  `session_orphaned` failures and records the running set in the
+  state table (`mode='orphan_scan'` + `mode='orphan_ledger'`
+  rows). Strict `>` watermark, explicit timestamp-bound partition
+  pruning on the resolved-orphan probe.
+- **Migration v5 Beat 5 — feedback / reward loop** ([#227](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/227),
+  [#228](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/228),
+  closes [#181](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/181),
+  [#184](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/184),
+  [#185](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/185))
+  — demo scope grows from 6 → 11 entities and 9 → 14
+  relationships. Adds `BusinessConstraint`,
+  `ConstraintApplication`, `RejectionReason`, `OutcomeSignal`,
+  `RewardComputation` + their edges. The demo agent emits four
+  new tools (`apply_constraint`, `record_rejection`,
+  `record_outcome_signal`, `compute_reward`); the reference
+  extractor covers all four; the notebook's new Beat 5 cells run
+  the two payoff GQL traversals end-to-end against a live
+  BigQuery scratch dataset (29 / 29 cells executed, counts 1–29,
+  6 unique reward rows + 8 unique rejection rows verified live).
+- **Split runtime + scheduler-caller SAs by default** ([#230](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/230),
+  closes [#182](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/182))
+  — `deploy_cloud_run_job.sh` creates two SAs by default:
+  `bqaa-periodic-runtime-sa` (BigQuery + Vertex AI roles) and
+  `bqaa-periodic-scheduler-sa` (only `roles/run.invoker` on the
+  job). `--single-sa` is the escape hatch for the pre-#182
+  combined identity. Least-privilege: scheduler-caller never
+  needs BigQuery permissions.
+- **Tunable `--max-retries` on Cloud Run Job** ([#230](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/230),
+  closes [#183](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/183))
+  — default 2 (was hard-coded 1). The orchestrator's session-
+  level idempotency + append-only state table make additional
+  retries safe. The retry count flows into `BQAA_MAX_RETRIES` on
+  the job's env so the runtime's startup log surfaces it in
+  `jsonPayload.max_retries` — operators correlating Cloud
+  Monitoring alert noise with retry behaviour see the policy
+  without `gcloud run jobs describe`.
+- **Terraform module for periodic materialization** ([#231](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/231),
+  closes [#186](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/186))
+  — `examples/migration_v5/periodic_materialization/terraform/`
+  mirrors the bash deploy's resources (graph dataset, both SAs,
+  IAM bindings, Cloud Run v2 Job, Scheduler trigger) with
+  defaults matching `deploy_cloud_run_job.sh`'s post-#230
+  surface. New `build_image.sh` helper produces the staging
+  layout the runtime needs. Image build/publish are intentionally
+  outside the module — `var.image_uri` takes the published
+  container image. `var.manage_apis` enables the required APIs
+  on a clean project; `var.deletion_protection` matches the bash
+  deploy's lifecycle. Live-verified end-to-end against
+  `test-project-0728-467323`.
+
+### Fixed
+
+- **Orphan-watchdog empty-array streaming-insert crash hotfix** ([#225](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/225))
+  — BigQuery's streaming-insert API rejects empty
+  `ARRAY<STRING>` values with `Field value of
+  flagged_session_ids cannot be empty.`. Pre-fix, every cron
+  pass after [#224](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/224)
+  crashed at insert time. Fix: omit nullable columns from the
+  `insert_rows_json` payload when their value is `None` or
+  empty.
+
 ## [0.3.1] - 2026-05-18
 
 ### Release highlights
