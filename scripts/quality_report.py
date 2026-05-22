@@ -1044,19 +1044,33 @@ def run_evaluation(
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
-  # Infer corrections/verifications for multi-turn sessions.
-  mt_sessions = [r for r in resolved if r.get("user_turns", 0) > 1]
+  # Infer corrections/verifications for multi-turn sessions (concurrent).
+  mt_sessions = [
+      r for r in resolved
+      if r.get("user_turns", 0) > 1 and r.get("conversation")
+  ]
   if mt_sessions:
+    import asyncio
+
     logger.info(
         "Inferring corrections for %d multi-turn sessions...",
         len(mt_sessions),
     )
-    for r in mt_sessions:
-      conv = r.get("conversation", [])
-      if conv:
-        corrections, verifications = _infer_corrections(conv, model)
-        r["corrections"] = corrections
-        r["verifications"] = verifications
+    semaphore = asyncio.Semaphore(10)
+
+    async def _infer_one(conv):
+      async with semaphore:
+        return await asyncio.to_thread(_infer_corrections, conv, model)
+
+    async def _infer_all():
+      return await asyncio.gather(
+          *[_infer_one(r["conversation"]) for r in mt_sessions]
+      )
+
+    results = asyncio.run(_infer_all())
+    for r, (corrections, verifications) in zip(mt_sessions, results):
+      r["corrections"] = corrections
+      r["verifications"] = verifications
 
   return {
       "report": report,
