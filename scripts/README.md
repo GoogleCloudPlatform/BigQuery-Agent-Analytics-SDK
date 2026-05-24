@@ -61,7 +61,7 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --session-ids-file ids.json  # evaluate specific sessions
 ./scripts/quality_report.sh --output-json report.json    # write structured JSON output
 ./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
-./scripts/quality_report.sh --config config.json    # scope-aware eval with config
+./scripts/quality_report.sh --agent-context agent_context.json  # scope-aware eval
 ./scripts/quality_report.sh --session <session_id>  # evaluate single session (verbose)
 ```
 
@@ -124,7 +124,7 @@ The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
 | `task_grounding` | `grounded`, `ungrounded`, `no_tool_needed` | Whether the response is based on tool-retrieved data or fabricated |
 
 The **`declined`** category is only included when scope context is provided
-(via `--config` or auto-discovered `agent_context.json`). Without scope
+(via `--agent-context` or auto-discovered `agent_context.json`). Without scope
 context, the judge has no basis for distinguishing intentional declines
 from failures, so only `meaningful`, `unhelpful`, and `partial` are used.
 
@@ -172,18 +172,18 @@ Evaluate a single session and see all 7 metrics with full justifications:
 This is useful for verifying whether the LLM judge scored a specific
 session correctly, or for debugging individual conversations.
 
-### Scope-Aware Evaluation (`--config`)
+### Scope-Aware Evaluation (`--agent-context`)
 
-For more accurate scope evaluation, provide a config file that tells the
+For more accurate scope evaluation, provide a context file that tells the
 LLM judge exactly which topics your agent intentionally does not handle:
 
 ```bash
-./scripts/quality_report.sh --config agent_context.json --report
+./scripts/quality_report.sh --agent-context agent_context.json --report
 ```
 
 The script also auto-discovers `eval/data/agent_context.json` relative to
-the repo root or script directory, so `--config` is only needed to point
-at a non-default location.
+the repo root or script directory, so `--agent-context` is only needed to
+point at a non-default location.
 
 A sample config is provided at `scripts/eval/data/agent_context.example.json`.
 Copy it and customize for your agent:
@@ -222,6 +222,31 @@ Without a config, the LLM judge can still classify obvious declines as
 the config, the judge is told exactly which topics are out of scope, so it
 can correctly classify polite refusals as `declined` (correct behavior)
 rather than `unhelpful` (a bug).
+
+### Custom Metrics (`--eval-config`)
+
+Override the built-in metric definitions with your own:
+
+```bash
+./scripts/quality_report.sh --eval-config scripts/eval/eval_config.json --report
+```
+
+The eval config file is a JSON file with a `metrics` key — a list of metric
+definitions that replace the built-in 7 dimensions. Each metric has a `name`,
+`definition`, and a list of `categories` with scoring criteria. Metrics with
+`scope_aware: true` are automatically enriched with scope context when
+`--agent-context` is provided.
+
+A complete example is provided at `scripts/eval/eval_config.json`. Copy it
+and customize for your evaluation needs:
+
+```bash
+cp scripts/eval/eval_config.json my_eval_config.json
+# Edit metric definitions, add/remove dimensions, adjust categories
+./scripts/quality_report.sh --eval-config my_eval_config.json
+```
+
+When `--eval-config` is not specified, the built-in metrics are used.
 
 ### A2A Support
 

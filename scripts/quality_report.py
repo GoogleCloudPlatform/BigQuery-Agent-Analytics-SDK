@@ -41,9 +41,10 @@ Usage:
     python quality_report.py --samples all        # show all sessions
     python quality_report.py --app-name my_agent  # filter to a specific agent
     python quality_report.py --output-json r.json # write structured JSON output
-    python quality_report.py --config config.json # use scope definitions from config
+    python quality_report.py --agent-context agent_context.json # use Agent scope definitions for eval
     python quality_report.py --env path/to/.env   # load a specific .env file
     python quality_report.py --conversations-file results.json  # score local JSON
+    python quality_report.py --eval-config eval/eval_config.json  # custom metrics
 """
 import warnings
 
@@ -246,7 +247,7 @@ _AGENT_CONFIG_CACHE: dict[str, dict] = {}
 def _load_agent_config(config_path=None):
   """Load agent config (scope decisions, etc.) from a JSON file.
 
-  When --config is provided, loads from that path.  Otherwise checks
+  When --agent-context is provided, loads from that path.  Otherwise checks
   for eval/data/agent_context.json relative to the repo root or script dir.
   Returns None if no config is found (scope-aware eval is disabled).
 
@@ -324,28 +325,57 @@ def _build_scope_context(config=None):
 
 
 # ---------------------------------------------------------------------------
+# Eval config (prompts + metrics from external file)
+# ---------------------------------------------------------------------------
+
+_EVAL_CONFIG_CACHE: dict[str, dict] = {}
+
+
+def _load_eval_config(eval_config_path=None):
+  """Load evaluation config (prompts + metrics) from a JSON file.
+
+  Returns the parsed dict, or None if no config is specified / found.
+  The file is expected to contain:
+    - ``prompts``: dict of prompt templates keyed by name
+    - ``metrics``: list of metric definitions (see eval/eval_config.json)
+
+  Results are cached so the file is read only once.
+  """
+  if not eval_config_path:
+    return None
+
+  if eval_config_path in _EVAL_CONFIG_CACHE:
+    return _EVAL_CONFIG_CACHE[eval_config_path]
+
+  if not os.path.isfile(eval_config_path):
+    raise FileNotFoundError(f"Eval config file not found: {eval_config_path}")
+
+  with open(eval_config_path) as f:
+    result = json.load(f)
+
+  _EVAL_CONFIG_CACHE[eval_config_path] = result
+  logger.info("Loaded eval config from %s", eval_config_path)
+  return result
+
+
+# ---------------------------------------------------------------------------
 # Metric definitions
 # ---------------------------------------------------------------------------
 
 
-def get_eval_metrics(config_path=None):
+def get_eval_metrics(config_path=None, eval_config=None):
   """Return the list of categorical metric definitions for quality evaluation.
 
-  Metrics returned:
-    - ``response_usefulness`` — helpful, unhelpful, partial, or declined.
-    - ``task_grounding`` — grounded in tool data vs fabricated.
-    - ``correctness`` — factual accuracy of the response.
-    - ``tool_usage`` — whether the agent used its tools correctly.
-    - ``specificity`` — concrete details vs vague answer.
-    - ``scope_compliance`` — stayed within defined scope.
-    - ``first_time_right`` — correct on first attempt without corrections.
+  When *eval_config* is provided (parsed dict from ``--eval-config``), metrics
+  are loaded from its ``metrics`` list.  Otherwise falls back to the built-in
+  definitions.  In both cases, scope-aware metrics are dynamically enriched
+  when *config_path* points at an agent context with out-of-scope decisions.
   """
   from bigquery_agent_analytics import CategoricalMetricCategory
   from bigquery_agent_analytics import CategoricalMetricDefinition
 
   config = _load_agent_config(config_path)
   scope_context = _build_scope_context(config)
-  # Only enable "declined" category when actual scope decisions exist
   has_scope = bool(
       config
       and any(
@@ -353,6 +383,41 @@ def get_eval_metrics(config_path=None):
           for d in config.get("scope_decisions", [])
       )
   )
+
+  # --- Load from eval_config if available ---
+  ext_metrics = (eval_config or {}).get("metrics")
+  if ext_metrics:
+    result = []
+    for m in ext_metrics:
+      cats = [
+          CategoricalMetricCategory(name=c["name"], definition=c["definition"])
+          for c in m["categories"]
+      ]
+      defn = m["definition"]
+      if m.get("scope_aware") and scope_context:
+        defn += scope_context
+      if has_scope and m.get("declined_category"):
+        dc = m["declined_category"]
+        declined_cat = CategoricalMetricCategory(
+            name=dc["name"], definition=dc["definition"]
+        )
+        insert_after = dc.get("insert_after")
+        if insert_after:
+          idx = next(
+              (i for i, c in enumerate(cats) if c.name == insert_after), -1
+          )
+          cats.insert(idx + 1, declined_cat)
+        else:
+          cats.append(declined_cat)
+        if m.get("scope_suffix"):
+          defn += m["scope_suffix"]
+      result.append(
+          CategoricalMetricDefinition(
+              name=m["name"], definition=defn, categories=cats
+          )
+      )
+    logger.info("Loaded %d metrics from eval config", len(result))
+    return result
 
   # Build usefulness categories — only include "declined" when scope
   # context is provided, otherwise the judge has no basis for it.
@@ -801,11 +866,7 @@ def _extract_conversation(trace):
 
 
 def _infer_corrections(conversation, model):
-  """Use LLM to count corrections and verifications in a conversation.
-
-  Classifies each user follow-up message (after the first) as a correction,
-  verification request, or normal follow-up.  Returns (corrections, verifications).
-  """
+  """Use LLM to count corrections and verifications in a conversation."""
   user_turns = [t for t in conversation if t["role"] == "user"]
   if len(user_turns) <= 1:
     return 0, 0
@@ -879,14 +940,18 @@ For each USER turn, assign exactly one tag:
 - END: User is satisfied, conversation closing.
 
 Also identify CORRECTION BOUNDARIES — the turn index where the user corrects
-the agent. Everything before that boundary is the "wrong sub-trajectory"
-(agent gave wrong answer), everything after is the "recovery sub-trajectory"
-(agent corrected itself or user moved on).
+the agent. The pre-correction sub-trajectory ends ONE TURN BEFORE the
+correction (i.e. the agent's wrong answer). The post-correction sub-trajectory
+starts AT the correction turn and includes everything after.
 
 For each correction boundary, extract:
 - wrong_claim: what the agent said that was wrong (quote it)
 - correct_fact: what the user said is right (quote it)
-- agent_recovered: did the agent accept the correction in its next response?
+- agent_recovered: did the agent GENUINELY recover? Set to true ONLY if the
+  agent looked up or verified the information (e.g. called a tool, cited a
+  source, provided new details not in the user's correction). Set to false if
+  the agent merely repeated or paraphrased the user's correction without
+  independent verification — that is parroting, not recovery.
 
 Return ONLY a JSON object:
 {{"turn_tags": [
@@ -898,10 +963,15 @@ Return ONLY a JSON object:
     ...
   ],
   "sub_trajectories": [
-    {{"label": "pre_correction_1", "start_turn": 0, "end_turn": N, "outcome": "wrong"}},
+    {{"label": "pre_correction_1", "start_turn": 0, "end_turn": N-1, "outcome": "wrong"}},
     {{"label": "post_correction_1", "start_turn": N, "end_turn": M, "outcome": "recovered"}}
   ]
 }}
+
+For sub_trajectory outcome after a correction, use:
+- "recovered" — agent genuinely recovered (used tools, cited sources, added new info)
+- "parroted" — agent just repeated the user's fact without verification
+- "not_recovered" — agent did not accept the correction or continued with wrong info
 
 Only tag USER turns (skip agent turns). If there are no corrections, return
 empty correction_boundaries and a single sub_trajectory covering the whole
@@ -910,11 +980,7 @@ conversation.
 
 
 def _tag_conversation_turns(conversation, model, scope_context=""):
-  """Classify each user turn and identify correction boundaries.
-
-  Returns a dict with turn_tags, correction_boundaries, and sub_trajectories,
-  or None for single-turn or very short conversations.
-  """
+  """Classify each user turn and identify correction boundaries."""
   if not isinstance(conversation, list) or len(conversation) < 3:
     return None
 
@@ -1088,9 +1154,9 @@ async def _build_resolved_map_from_conversations(
     tool_calls = conv.get("tool_calls", 0)
     corrections = conv.get("corrections", 0)
     verifications = conv.get("verifications", 0)
+    needs_tagging = turns and user_turn_count > 1
     needs_inference = (
-        turns and user_turn_count > 1
-        and corrections == 0 and verifications == 0
+        needs_tagging and corrections == 0 and verifications == 0
     )
     entries.append({
         "sid": sid,
@@ -1101,7 +1167,9 @@ async def _build_resolved_map_from_conversations(
         "corrections": corrections,
         "verifications": verifications,
     })
-    if needs_inference:
+    if tag_turns and needs_tagging:
+      to_infer.append((len(entries) - 1, turns))
+    elif needs_inference:
       to_infer.append((len(entries) - 1, turns))
 
   # Concurrent inference
@@ -1146,7 +1214,7 @@ async def _build_resolved_map_from_conversations(
         "session_id": entry["sid"],
         "question": conv.get("question", ""),
         "response": conv.get("final_response", conv.get("response", "")),
-        "answered_by": conv.get("answered_by", "policy_agent"),
+        "answered_by": conv.get("answered_by", "unknown"),
         "is_a2a": False,
         "latency_s": conv.get("latency_s"),
         "user_turns": entry["user_turns"],
@@ -1179,6 +1247,7 @@ def run_evaluation(
     session_id=None,
     session_ids=None,
     tag_turns=False,
+    eval_config=None,
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig
   from bigquery_agent_analytics import TraceFilter
@@ -1186,7 +1255,7 @@ def run_evaluation(
   model = model or EVAL_MODEL_ID
   client = get_client()
 
-  metrics = get_eval_metrics(config_path=config_path)
+  metrics = get_eval_metrics(config_path=config_path, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
       endpoint=model,
@@ -1341,6 +1410,7 @@ def run_evaluation_from_conversations(
     config_path=None,
     concurrency=10,
     tag_turns=False,
+    eval_config=None,
 ):
   """Evaluate local conversations without BigQuery.
 
@@ -1370,7 +1440,7 @@ def run_evaluation_from_conversations(
   )
 
   model = model or EVAL_MODEL_ID or os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
-  metrics = get_eval_metrics(config_path=config_path)
+  metrics = get_eval_metrics(config_path=config_path, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
       endpoint=model,
@@ -1395,7 +1465,7 @@ def run_evaluation_from_conversations(
 
   async def _run_all():
     classify_task = classify_sessions_via_api(
-        transcripts, cat_config, model, concurrency=concurrency,
+        transcripts, cat_config, model,
     )
     resolve_task = _build_resolved_map_from_conversations(
         conversations, model, concurrency=concurrency,
@@ -1646,6 +1716,7 @@ def run_eval(args):
 
   t0 = time.time()
   config_path = getattr(args, "config", None)
+  eval_config = _load_eval_config(getattr(args, "eval_config", None))
 
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
@@ -1659,7 +1730,12 @@ def run_eval(args):
     if not conversations:
       logger.error("No conversations found in %s", conversations_file)
       sys.exit(1)
-    logger.info("Loaded %d conversations", len(conversations))
+    total = len(conversations)
+    if args.limit and args.limit < total:
+      conversations = conversations[:args.limit]
+      logger.info("Using %d of %d conversations (--limit)", args.limit, total)
+    else:
+      logger.info("Loaded %d conversations", total)
 
     try:
       if config_path:
@@ -1669,6 +1745,7 @@ def run_eval(args):
       result = run_evaluation_from_conversations(
           conversations, model=model, config_path=config_path,
           concurrency=concurrency, tag_turns=tag_turns,
+          eval_config=eval_config,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -1726,6 +1803,7 @@ def run_eval(args):
           session_id=args.session,
           session_ids=session_ids,
           tag_turns=tag_turns,
+          eval_config=eval_config,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -1754,15 +1832,29 @@ def run_eval(args):
   # --- Trajectory fetching ---
   trajectories = {}
   trajectory_samples = getattr(args, "trajectory_samples", 0)
+  tag_turns = getattr(args, "tag_turns", False)
   if trajectory_samples and trajectory_samples > 0:
-    logger.info("Fetching %d execution trajectories from BigQuery...",
-                trajectory_samples)
     traj_sids = _select_trajectory_sessions(
         result["report"], result["resolved_map"], trajectory_samples,
     )
-    trajectories = _fetch_session_traces(traj_sids, trajectory_samples)
+    # Also fetch trajectories for all correction sessions (for inline display)
+    if tag_turns:
+      correction_sids = [
+          sid for sid, ctx in result["resolved_map"].items()
+          if ctx.get("correction_boundaries")
+      ]
+      for sid in correction_sids:
+        if sid not in traj_sids:
+          traj_sids.append(sid)
+    logger.info("Fetching %d execution trajectories from BigQuery...",
+                len(traj_sids))
+    trajectories = _fetch_session_traces(traj_sids, len(traj_sids))
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
+      for sid, trace_obj in trajectories.items():
+        ctx = result["resolved_map"].get(sid)
+        if ctx and ctx.get("answered_by") == "unknown":
+          ctx["answered_by"] = get_responding_agent(trace_obj)
     else:
       logger.warning("No trajectories fetched (BQ may not be configured)")
 
@@ -2275,6 +2367,16 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
   for st in sub_trajectories:
     start_turn = st.get("start_turn", 0)
     end_turn = st.get("end_turn", len(conversation) - 1)
+    outcome = st.get("outcome", "")
+
+    if outcome == "wrong" and end_turn > start_turn:
+      next_st = next(
+          (s for s in sub_trajectories
+           if s.get("start_turn", 0) > start_turn),
+          None,
+      )
+      if next_st:
+        end_turn = min(end_turn, next_st.get("start_turn", end_turn) - 1)
 
     start_user_indices = [
         ci for ci in user_turn_indices if start_turn <= ci <= end_turn
@@ -2432,6 +2534,9 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
 
   for sid, trace_obj in trajectories.items():
     ctx = resolved_map.get(sid, {})
+    # Skip correction sessions — their traces are shown in Correction Analysis
+    if ctx.get("correction_boundaries"):
+      continue
     question = ctx.get("question", "")
     answered_by = ctx.get("answered_by", "")
     q = " ".join(question.split()) if question else "(none)"
@@ -2526,11 +2631,14 @@ def _md_write_conversation(w, conversation, show_tags=False, turn_tags=None):
 
 
 def _md_write_session_section(
-    w, title, sessions, md_samples, resolved_map, a2a_session_ids
+    w, title, sessions, md_samples, resolved_map, a2a_session_ids,
+    heading_level=2,
 ):
   """Write a section of per-session details to the markdown report."""
+  h = "#" * heading_level
+  sh = "#" * (heading_level + 1)
   shown = sessions if md_samples is None else sessions[:md_samples]
-  w(f"## {title}")
+  w(f"{h} {title}")
   if len(shown) < len(sessions):
     w(f"\n*Showing {len(shown)} of {len(sessions)}*")
   w("")
@@ -2545,7 +2653,7 @@ def _md_write_session_section(
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"### `{sid}`{a2a_tag} \u2192 {answered_by}")
+    w(f"{sh} `{sid}`{a2a_tag} \u2192 {answered_by}")
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "\u2026") if len(r) > 500 else r
@@ -2582,16 +2690,18 @@ def _md_find_low_dimension_sessions(report, dimension, low_category):
 
 def _md_write_low_dimension_section(
     w, title, dimension_label, report, dimension, low_category,
-    md_samples, resolved_map,
+    md_samples, resolved_map, heading_level=2,
 ):
   """Write a Low X Sessions section in the markdown report."""
+  h = "#" * heading_level
+  sh = "#" * (heading_level + 1)
   low_sessions = _md_find_low_dimension_sessions(
       report, dimension, low_category,
   )
   if not low_sessions:
     return
   shown = low_sessions if md_samples is None else low_sessions[:md_samples]
-  w(f"## {title}")
+  w(f"{h} {title}")
   w("")
   if len(shown) < len(low_sessions):
     w(f"*Showing {len(shown)} of {len(low_sessions)}*")
@@ -2606,7 +2716,7 @@ def _md_write_low_dimension_section(
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"### `{sid}` → {answered_by}")
+    w(f"{sh} `{sid}` → {answered_by}")
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "…") if len(r) > 500 else r
@@ -2639,7 +2749,44 @@ _TAG_ICONS = {
 }
 
 
-def _md_write_correction_analysis(w, resolved_map, md_samples):
+def _diagnose_correction_trace(trace_obj):
+  """Analyze a correction session trace and return a diagnosis string.
+
+  Returns (diagnosis_text, failure_type) where failure_type is one of:
+  'routing_failure', 'tool_failure', 'other', or None if no trace.
+  """
+  if not trace_obj or not hasattr(trace_obj, "spans") or not trace_obj.spans:
+    return None, None
+
+  tool_names = set()
+  for s in trace_obj.spans:
+    tn = getattr(s, "tool_name", None)
+    if tn:
+      tool_names.add(tn)
+
+  routing_tools = {t for t in tool_names if "transfer" in t.lower()}
+  domain_tools = tool_names - routing_tools
+  agents = {
+      s.agent for s in trace_obj.spans
+      if s.agent and s.event_type == "LLM_RESPONSE"
+  }
+
+  if not tool_names and len(agents) <= 1:
+    return (
+        "Agent never routed to a specialist or called any tool — "
+        "answered from general LLM knowledge only."
+    ), "routing_failure"
+
+  if routing_tools and not domain_tools and len(agents) > 1:
+    routed_to = ", ".join(sorted(agents - {min(agents)}))
+    return (
+        f"Agent routed to {routed_to} but no domain tool was called."
+    ), "tool_failure"
+
+  return None, None
+
+
+def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None, heading_level=2):
   """Write the Correction Analysis section."""
   sessions_with_tags = []
   sessions_with_corrections = []
@@ -2659,7 +2806,10 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
   if not sessions_with_tags:
     return
 
-  w("## Correction Analysis")
+  h = "#" * heading_level
+  h1 = "#" * (heading_level + 1)
+  h2 = "#" * (heading_level + 2)
+  w(f"{h} Correction Analysis")
   w("")
   w(
       "Turn-level classification of user behavior across multi-turn "
@@ -2669,7 +2819,7 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
   w("")
 
   # --- Tag Distribution ---
-  w("### Turn Tag Distribution")
+  w(f"{h1} Turn Tag Distribution")
   w("")
   w("| Tag | Count | Icon | Meaning |")
   w("|-----|------:|------|---------|")
@@ -2696,7 +2846,7 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
 
   # --- Correction Boundaries ---
   if sessions_with_corrections:
-    w("### Correction Boundaries")
+    w(f"{h1} Corrections")
     w("")
     w(
         "Conversations where the user corrected the agent. Shows what "
@@ -2714,11 +2864,16 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
       w(f"*Showing {len(shown)} of {len(sessions_with_corrections)}*")
       w("")
 
+    if not trajectories:
+      trajectories = {}
+
+    routing_failures = []
+
     for sid, ctx in shown:
       question = ctx.get("question", "")
       answered_by = ctx.get("answered_by", "")
       q = " ".join(question.split()) if question else "(none)"
-      w(f"#### `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}` → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
 
@@ -2733,8 +2888,56 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
         w(f"  - User corrected: *\"{correct[:200]}\"*")
         w(f"  - Agent recovered: {recovered_icon}")
 
+      trace_obj = trajectories.get(sid)
+      diagnosis, failure_type = _diagnose_correction_trace(trace_obj)
+      if diagnosis:
+        w(f"- **Diagnosis:** {diagnosis}")
+        if failure_type == "routing_failure":
+          routing_failures.append((sid, answered_by, q))
+
+      # Render sub-trajectories with inline execution traces
       sub_trajs = ctx.get("sub_trajectories", [])
-      if sub_trajs:
+      trace_obj = trajectories.get(sid)
+      conversation = ctx.get("conversation", [])
+
+      if sub_trajs and trace_obj and hasattr(trace_obj, "spans"):
+        segments = _segment_trace_by_turns(
+            trace_obj, conversation, sub_trajs,
+        )
+        if segments:
+          w("")
+          for seg in segments:
+            outcome = seg.get("outcome", "?")
+            if outcome == "wrong":
+              heading = "Before correction"
+              outcome_suffix = "agent got it wrong"
+              outcome_icon = "❌"
+            elif outcome == "recovered":
+              heading = "After correction"
+              outcome_suffix = "agent recovered"
+              outcome_icon = "✅"
+            elif outcome == "parroted":
+              heading = "After correction"
+              outcome_suffix = "agent parroted user's fact without verification"
+              outcome_icon = "🔁"
+            elif outcome == "not_recovered":
+              heading = "After correction"
+              outcome_suffix = "agent did not recover"
+              outcome_icon = "❌"
+            else:
+              heading = seg.get("label", "Segment")
+              outcome_suffix = outcome
+              outcome_icon = "➖"
+            w(
+                f"**{heading}** (turns {seg['start_turn']}–"
+                f"{seg['end_turn']}) — {outcome_suffix} {outcome_icon}"
+            )
+            w("")
+            w("```")
+            w(seg["trace"])
+            w("```")
+            w("")
+      elif sub_trajs:
         w("- **Sub-trajectories:**")
         for st in sub_trajs:
           label = st.get("label", "")
@@ -2742,17 +2945,35 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
           end = st.get("end_turn", "?")
           outcome = st.get("outcome", "?")
           outcome_icon = (
-              "❌" if outcome == "wrong"
+              "❌" if outcome in ("wrong", "not_recovered")
               else "✅" if outcome == "recovered"
+              else "🔁" if outcome == "parroted"
               else "➖"
           )
           w(f"  - `{label}`: turns {start}–{end} → {outcome_icon} {outcome}")
 
-      conversation = ctx.get("conversation", [])
       _md_write_conversation(
           w, conversation, show_tags=True,
           turn_tags=ctx.get("turn_tags", []),
       )
+      w("")
+
+    if routing_failures:
+      w(f"{h1} Routing Failures")
+      w("")
+      w(
+          "Sessions where the supervisor agent answered from general LLM "
+          "knowledge without routing to a specialist agent or calling any "
+          "tool. These are prime candidates for improving the supervisor's "
+          "routing prompt."
+      )
+      w("")
+      w(f"**{len(routing_failures)}** of "
+        f"{len(sessions_with_corrections)} correction sessions "
+        f"had no tool or agent routing:")
+      w("")
+      for sid, agent, question in routing_failures:
+        w(f"- `{sid}` → {agent}: {question}")
       w("")
 
   # --- Tagged Conversations (no corrections) ---
@@ -2769,7 +2990,7 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
       for _, ctx in tagged_no_correction
   )
   if has_interesting:
-    w("### Other Flagged Interactions")
+    w(f"{h1} Other Flagged Interactions")
     w("")
     w(
         "Sessions without corrections but with verification requests, "
@@ -2801,7 +3022,7 @@ def _md_write_correction_analysis(w, resolved_map, md_samples):
           t for t in tags if t.get("tag") in ("VERIFY", "SPECIFICS", "SCOPE")
       ]
 
-      w(f"#### `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}` → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
       for ft in flag_tags:
@@ -2859,38 +3080,54 @@ def _write_md_report(
   toc.append("  * [Summary](#summary)")
   if has_dims:
     toc.append("  * [Quality Dimensions](#quality-dimensions)")
-  if mt_stats:
-    toc.append("  * [Multi-Turn Efficiency](#multi-turn-efficiency)")
-  has_tags = _md_has_turn_tags(resolved_map)
-  if has_tags:
-    toc.append("  * [Correction Analysis](#correction-analysis)")
-    toc.append("    * [Turn Tag Distribution](#turn-tag-distribution)")
-    correction_sessions = [
-        sid for sid, ctx in resolved_map.items()
-        if ctx.get("correction_boundaries")
-    ]
-    if correction_sessions:
-      toc.append("    * [Correction Boundaries](#correction-boundaries)")
   toc.append("  * [Category Distributions](#category-distributions)")
   for metric_name in report.category_distributions:
     if metric_name in _PRIMARY_METRICS:
       toc.append(f"    * [{metric_name}](#{metric_name})")
   if agent_stats:
     toc.append("  * [Per-Agent Quality](#per-agent-quality)")
-  if by_category.get("unhelpful"):
-    toc.append("  * [Unhelpful Sessions](#unhelpful-sessions)")
-  if by_category.get("declined"):
-    toc.append("  * [Declined Sessions](#declined-sessions)")
-  for dim in low_dims:
-    label = _METRIC_LABELS.get(dim, dim)
-    title = f"Low {label} Sessions"
-    anchor = title.lower().replace(" ", "-")
-    toc.append(f"  * [{title}](#{anchor})")
-  if by_category.get("partial"):
-    toc.append("  * [Partial Sessions](#partial-sessions)")
+  if mt_stats:
+    toc.append("  * [Multi-Turn Efficiency](#multi-turn-efficiency)")
+  has_tags = _md_has_turn_tags(resolved_map)
+  has_sample_sessions = (
+      by_category.get("unhelpful")
+      or by_category.get("declined")
+      or low_dims
+      or by_category.get("partial")
+      or has_tags
+  )
+  if has_sample_sessions:
+    toc.append("  * [Sample Sessions](#sample-sessions)")
+    if by_category.get("unhelpful"):
+      toc.append("    * [Unhelpful Sessions](#unhelpful-sessions)")
+    if by_category.get("declined"):
+      toc.append("    * [Declined Sessions](#declined-sessions)")
+    for dim in low_dims:
+      label = _METRIC_LABELS.get(dim, dim)
+      title = f"Low {label} Sessions"
+      anchor = title.lower().replace(" ", "-")
+      toc.append(f"    * [{title}](#{anchor})")
+    if by_category.get("partial"):
+      toc.append("    * [Partial Sessions](#partial-sessions)")
+    if has_tags:
+      toc.append("    * [Correction Analysis](#correction-analysis)")
+      toc.append("      * [Turn Tag Distribution](#turn-tag-distribution)")
+      correction_sessions = [
+          sid for sid, ctx in resolved_map.items()
+          if ctx.get("correction_boundaries")
+      ]
+      if correction_sessions:
+        toc.append("      * [Corrections](#corrections)")
+        has_routing_failures = any(
+            _diagnose_correction_trace(trajectories.get(sid))[1]
+            == "routing_failure"
+            for sid in correction_sessions
+        )
+        if has_routing_failures:
+          toc.append("      * [Routing Failures](#routing-failures)")
   if trajectories:
     toc.append(
-        "  * [Sample Execution Trajectories]"
+        "  * [Sample Trajectories]"
         "(#sample-execution-trajectories)"
     )
   toc.append("  * [Execution Details](#execution-details)")
@@ -2905,27 +3142,9 @@ def _write_md_report(
   w("")
 
   model = args.model or EVAL_MODEL_ID
-  cmd_parts = ["./scripts/quality_report.sh --report"]
-  limit_val = getattr(args, "limit", 100)
-  if limit_val != 100:
-    cmd_parts.append(f"--limit {limit_val}")
-  samples_val = getattr(args, "samples", None)
-  if samples_val:
-    cmd_parts.append(f"--samples {samples_val}")
-  if getattr(args, "tag_turns", False):
-    cmd_parts.append("--tag-turns")
-  traj_val = getattr(args, "trajectory_samples", None)
-  if traj_val:
-    cmd_parts.append(f"--trajectory-samples {traj_val}")
-  config_val = getattr(args, "config", None)
-  if config_val:
-    cmd_parts.append(f"--config {config_val}")
-  if getattr(args, "app_name", None):
-    cmd_parts.append(f"--app-name {args.app_name}")
-  if getattr(args, "conversations_file", None):
-    cmd_parts.append(f"--conversations-file {args.conversations_file}")
-  if getattr(args, "env", None):
-    cmd_parts.append(f"--env {args.env}")
+  cmd_parts = ["./scripts/quality_report.sh"] + sys.argv[1:]
+  if "--report" not in cmd_parts:
+    cmd_parts.insert(1, "--report")
   w(f"Markdown report generated by `{' '.join(cmd_parts)}`.")
   w("")
 
@@ -2987,24 +3206,6 @@ def _write_md_report(
     )
     w("")
 
-  # --- Multi-Turn Efficiency ---
-  if mt_stats:
-    w("## Multi-Turn Efficiency")
-    w("")
-    w("| Metric | Value |")
-    w("|--------|-------|")
-    w(f"| Avg user turns | {mt_stats['avg_user_turns']} |")
-    w(f"| Avg tool calls | {mt_stats['avg_tool_calls']} |")
-    if mt_stats["multi_turn_sessions"] > 0:
-      w(f"| Multi-turn sessions | {mt_stats['multi_turn_sessions']} |")
-    w("")
-
-  # --- Correction Analysis (turn tagging) ---
-  if has_tags:
-    _md_write_correction_analysis(
-        w, resolved_map, _get_sample_limit(_samples_dict, "corrections"),
-    )
-
   # --- Category Distributions (primary metrics only) ---
   w("## Category Distributions")
   w("")
@@ -3058,7 +3259,30 @@ def _write_md_report(
       )
     w("")
 
-  # --- Unhelpful Sessions ---
+  # --- Multi-Turn Efficiency ---
+  if mt_stats:
+    w("## Multi-Turn Efficiency")
+    w("")
+    w("| Metric | Value |")
+    w("|--------|-------|")
+    w(f"| Avg user turns | {mt_stats['avg_user_turns']} |")
+    w(f"| Avg tool calls | {mt_stats['avg_tool_calls']} |")
+    if mt_stats["multi_turn_sessions"] > 0:
+      w(f"| Multi-turn sessions | {mt_stats['multi_turn_sessions']} |")
+    w("")
+
+  # --- Sample Sessions ---
+  has_sample_sessions = (
+      by_category.get("unhelpful")
+      or by_category.get("declined")
+      or low_dims
+      or by_category.get("partial")
+      or has_tags
+  )
+  if has_sample_sessions:
+    w("## Sample Sessions")
+    w("")
+
   unhelpful_sessions = by_category.get("unhelpful", [])
   if unhelpful_sessions:
     _md_write_session_section(
@@ -3068,9 +3292,9 @@ def _write_md_report(
         _get_sample_limit(_samples_dict, "unhelpful"),
         resolved_map,
         a2a_session_ids,
+        heading_level=3,
     )
 
-  # --- Declined Sessions ---
   declined_sessions = by_category.get("declined", [])
   if declined_sessions:
     _md_write_session_section(
@@ -3080,9 +3304,9 @@ def _write_md_report(
         _get_sample_limit(_samples_dict, "declined"),
         resolved_map,
         a2a_session_ids,
+        heading_level=3,
     )
 
-  # --- Low Dimension Sessions ---
   for dim, low_cat in _DIMENSION_LOW_CATEGORIES.items():
     if dim not in low_dims:
       continue
@@ -3092,9 +3316,9 @@ def _write_md_report(
         report, dim, low_cat,
         _get_sample_limit(_samples_dict, "low"),
         resolved_map,
+        heading_level=3,
     )
 
-  # --- Partial Sessions ---
   partial_sessions = by_category.get("partial", [])
   if partial_sessions:
     _md_write_session_section(
@@ -3104,6 +3328,15 @@ def _write_md_report(
         _get_sample_limit(_samples_dict, "partial"),
         resolved_map,
         a2a_session_ids,
+        heading_level=3,
+    )
+
+  # --- Correction Analysis (turn tagging) ---
+  if has_tags:
+    _md_write_correction_analysis(
+        w, resolved_map, _get_sample_limit(_samples_dict, "corrections"),
+        trajectories=trajectories,
+        heading_level=3,
     )
 
   # --- Sample Execution Trajectories ---
@@ -3262,7 +3495,7 @@ Examples:
   %(prog)s --time-period 7d          Evaluate last 7 days
   %(prog)s --app-name my_agent       Filter to a specific agent app
   %(prog)s --output-json report.json Write structured JSON output
-  %(prog)s --config config.json      Use scope definitions from config
+  %(prog)s --agent-context agent_context.json      Use Agent scope definitions for eval
   %(prog)s --env path/to/.env        Load env vars from a specific .env file
   %(prog)s --tag-turns               Classify each user turn and find corrections
   %(prog)s --trajectory-samples 5    Include 5 execution traces in the report
@@ -3281,7 +3514,10 @@ Samples (controls how many sessions appear in each report section):
 
 Full report:
   %(prog)s --report --limit 20 --samples 3 --tag-turns --trajectory-samples 3 \\
-    --config config.json --env path/to/.env
+    --agent-context agent_context.json --env path/to/.env
+
+Custom metrics:
+  %(prog)s --eval-config scripts/eval/eval_config.json
       """,
   )
   parser.add_argument(
@@ -3364,17 +3600,28 @@ Full report:
       help="Unhelpful rate warning threshold in %% (default: 10)",
   )
   parser.add_argument(
-      "--config",
+      "--agent-context",
       type=str,
       default=None,
       metavar="PATH",
-      help="Path to a JSON config file with scope definitions, or 'none' "
+      dest="config",
+      help="Path to a JSON file describing the agent's scope, or 'none' "
       "to disable scope context (skip auto-discovery). "
       "When a path is provided, adds a 'declined' category for correctly "
       "refused out-of-scope questions. Expected format: "
       '{"scope_decisions": [{"topic": "...", "decision": "out_of_scope", '
       '"reason": "..."}]}. '
       "Only 'topic' and 'decision' are used; 'reason' is documentation-only.",
+  )
+  parser.add_argument(
+      "--eval-config",
+      type=str,
+      default=None,
+      metavar="PATH",
+      help="Path to a JSON file with custom metric definitions. Overrides "
+      "the built-in metrics so you can fine-tune evaluation criteria, "
+      "add/remove dimensions, or adjust category labels. "
+      "See scripts/eval/eval_config.json for the expected format.",
   )
   parser.add_argument(
       "--session-ids-file",

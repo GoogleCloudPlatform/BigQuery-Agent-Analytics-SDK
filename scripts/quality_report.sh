@@ -14,9 +14,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Parse --env flag before other processing (supports --env PATH and --env=PATH)
+# Parse --env flag before other processing (supports --env PATH and --env=PATH).
+# The flag is NOT stripped — Python also accepts --env for report metadata.
 ENV_FILE=""
-PASSTHROUGH_ARGS=()
 for arg in "$@"; do
     if [ "$_NEXT_IS_ENV" = "1" ]; then
         ENV_FILE="$arg"
@@ -31,10 +31,8 @@ for arg in "$@"; do
         ENV_FILE="${arg#--env=}"
         continue
     fi
-    PASSTHROUGH_ARGS+=("$arg")
 done
 unset _NEXT_IS_ENV
-set -- "${PASSTHROUGH_ARGS[@]}"
 
 # Load .env: explicit --env wins, then repo root default
 if [ -n "$ENV_FILE" ]; then
@@ -59,14 +57,23 @@ for arg in "$@"; do
     fi
 done
 
-# Validate required env vars
-for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
-    if [ -z "${!var}" ]; then
-        echo "ERROR: Required environment variable ${var} is not set."
-        echo "Use --env /path/to/.env, or 'export ${var}=...' in your shell."
-        exit 1
+# Validate required env vars (skip for --conversations-file mode)
+HAS_CONVERSATIONS_FILE=false
+for arg in "$@"; do
+    if [[ "$arg" == "--conversations-file" || "$arg" == --conversations-file=* ]]; then
+        HAS_CONVERSATIONS_FILE=true
+        break
     fi
 done
+if ! $HAS_CONVERSATIONS_FILE; then
+    for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
+        if [ -z "${!var}" ]; then
+            echo "ERROR: Required environment variable ${var} is not set."
+            echo "Use --env /path/to/.env, or 'export ${var}=...' in your shell."
+            exit 1
+        fi
+    done
+fi
 
 # Log eval runs (skip logging for --no-eval)
 if [[ " $* " != *" --no-eval "* ]]; then
