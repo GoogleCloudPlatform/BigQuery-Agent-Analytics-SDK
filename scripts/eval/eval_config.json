@@ -2,7 +2,7 @@
   "metrics": [
     {
       "name": "response_usefulness",
-      "definition": "Whether the agent final response provides a genuinely useful, substantive answer to the user question. A response that apologizes, says it cannot help, returns no data, provides only generic filler, or loops without resolving the question is NOT useful.",
+      "definition": "Whether the agent final response provides a genuinely useful, substantive answer to the user question. A response that apologizes, says it cannot help, returns no data, provides only generic filler, or loops without resolving the question is NOT useful. If the conversation contains a user correction and the agent merely repeated or acknowledged the correction without independently verifying it (e.g. re-querying a tool, citing a new source), the response is NOT useful — the user did the agent's work.",
       "categories": [
         {
           "name": "meaningful",
@@ -10,7 +10,7 @@
         },
         {
           "name": "unhelpful",
-          "definition": "The response does NOT meaningfully answer the user question. This includes: (1) The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools. (2) The agent apologized without answering. (3) Empty data results or generic filler text. (4) The agent looped without resolution."
+          "definition": "The response does NOT meaningfully answer the user question. This includes: (1) The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools. (2) The agent apologized without answering. (3) Empty data results or generic filler text. (4) The agent looped without resolution. (5) The agent only became correct after the user provided the right answer and the agent repeated it without independent verification (e.g. re-querying a tool)."
         },
         {
           "name": "partial",

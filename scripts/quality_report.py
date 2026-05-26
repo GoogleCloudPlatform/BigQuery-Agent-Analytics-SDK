@@ -44,7 +44,7 @@ Usage:
     python quality_report.py --agent-context agent_context.json # use Agent scope definitions for eval
     python quality_report.py --env path/to/.env   # load a specific .env file
     python quality_report.py --conversations-file results.json  # score local JSON
-    python quality_report.py --eval-config eval/eval_config.json  # custom metrics
+    python quality_report.py --eval-config path/to/custom.json  # override metric definitions
 """
 import warnings
 
@@ -334,28 +334,45 @@ _EVAL_CONFIG_CACHE: dict[str, dict] = {}
 def _load_eval_config(eval_config_path=None):
   """Load evaluation config (prompts + metrics) from a JSON file.
 
-  Returns the parsed dict, or None if no config is specified / found.
+  When *eval_config_path* is provided, loads from that path.  Otherwise
+  auto-discovers ``eval/eval_config.json`` relative to the repo root or
+  script directory (same pattern as agent-context auto-discovery).
+
   The file is expected to contain:
-    - ``prompts``: dict of prompt templates keyed by name
     - ``metrics``: list of metric definitions (see eval/eval_config.json)
 
   Results are cached so the file is read only once.
   """
-  if not eval_config_path:
-    return None
+  cache_key = eval_config_path or "_AUTO_"
+  if cache_key in _EVAL_CONFIG_CACHE:
+    return _EVAL_CONFIG_CACHE[cache_key]
 
-  if eval_config_path in _EVAL_CONFIG_CACHE:
-    return _EVAL_CONFIG_CACHE[eval_config_path]
+  if eval_config_path:
+    if not os.path.isfile(eval_config_path):
+      raise FileNotFoundError(
+          f"Eval config file not found: {eval_config_path}"
+      )
+    with open(eval_config_path) as f:
+      result = json.load(f)
+    _EVAL_CONFIG_CACHE[cache_key] = result
+    logger.info("Loaded eval config from %s", eval_config_path)
+    return result
 
-  if not os.path.isfile(eval_config_path):
-    raise FileNotFoundError(f"Eval config file not found: {eval_config_path}")
+  # Auto-discover eval_config.json from known locations
+  for base in [_repo_root, _script_dir]:
+    candidate = os.path.join(base, "eval", "eval_config.json")
+    if os.path.isfile(candidate):
+      logger.info("Auto-discovered eval config: %s", candidate)
+      with open(candidate) as f:
+        result = json.load(f)
+      _EVAL_CONFIG_CACHE[cache_key] = result
+      return result
 
-  with open(eval_config_path) as f:
-    result = json.load(f)
-
-  _EVAL_CONFIG_CACHE[eval_config_path] = result
-  logger.info("Loaded eval config from %s", eval_config_path)
-  return result
+  raise FileNotFoundError(
+      "No eval_config.json found. Expected at eval/eval_config.json "
+      "relative to the repo root or script directory, or pass "
+      "--eval-config <path> explicitly."
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -366,9 +383,8 @@ def _load_eval_config(eval_config_path=None):
 def get_eval_metrics(config_path=None, eval_config=None):
   """Return the list of categorical metric definitions for quality evaluation.
 
-  When *eval_config* is provided (parsed dict from ``--eval-config``), metrics
-  are loaded from its ``metrics`` list.  Otherwise falls back to the built-in
-  definitions.  In both cases, scope-aware metrics are dynamically enriched
+  Metrics are loaded from *eval_config* (parsed dict, typically from
+  ``eval/eval_config.json``).  Scope-aware metrics are dynamically enriched
   when *config_path* points at an agent context with out-of-scope decisions.
   """
   from bigquery_agent_analytics import CategoricalMetricCategory
@@ -384,309 +400,40 @@ def get_eval_metrics(config_path=None, eval_config=None):
       )
   )
 
-  # --- Load from eval_config if available ---
-  ext_metrics = (eval_config or {}).get("metrics")
-  if ext_metrics:
-    result = []
-    for m in ext_metrics:
-      cats = [
-          CategoricalMetricCategory(name=c["name"], definition=c["definition"])
-          for c in m["categories"]
-      ]
-      defn = m["definition"]
-      if m.get("scope_aware") and scope_context:
-        defn += scope_context
-      if has_scope and m.get("declined_category"):
-        dc = m["declined_category"]
-        declined_cat = CategoricalMetricCategory(
-            name=dc["name"], definition=dc["definition"]
-        )
-        insert_after = dc.get("insert_after")
-        if insert_after:
-          idx = next(
-              (i for i, c in enumerate(cats) if c.name == insert_after), -1
-          )
-          cats.insert(idx + 1, declined_cat)
-        else:
-          cats.append(declined_cat)
-        if m.get("scope_suffix"):
-          defn += m["scope_suffix"]
-      result.append(
-          CategoricalMetricDefinition(
-              name=m["name"], definition=defn, categories=cats
-          )
+  if eval_config is None:
+    eval_config = _load_eval_config()
+  ext_metrics = eval_config.get("metrics", [])
+  result = []
+  for m in ext_metrics:
+    cats = [
+        CategoricalMetricCategory(name=c["name"], definition=c["definition"])
+        for c in m["categories"]
+    ]
+    defn = m["definition"]
+    if m.get("scope_aware") and scope_context:
+      defn += scope_context
+    if has_scope and m.get("declined_category"):
+      dc = m["declined_category"]
+      declined_cat = CategoricalMetricCategory(
+          name=dc["name"], definition=dc["definition"]
       )
-    logger.info("Loaded %d metrics from eval config", len(result))
-    return result
-
-  # Build usefulness categories — only include "declined" when scope
-  # context is provided, otherwise the judge has no basis for it.
-  usefulness_categories = [
-      CategoricalMetricCategory(
-          name="meaningful",
-          definition=(
-              "The response directly and substantively addresses the user "
-              "question with specific, actionable information."
-          ),
-      ),
-  ]
-  if has_scope:
-    usefulness_categories.append(
-        CategoricalMetricCategory(
-            name="declined",
-            definition=(
-                "The TOPIC of the question is explicitly listed as out of "
-                "scope (see AGENT SCOPE CONTEXT above) and the agent "
-                "correctly declined. Use this ONLY when the topic itself "
-                "is out of scope -- NOT when the agent simply failed to "
-                "find an answer for an in-scope topic."
-            ),
-        ),
+      insert_after = dc.get("insert_after")
+      if insert_after:
+        idx = next(
+            (i for i, c in enumerate(cats) if c.name == insert_after), -1
+        )
+        cats.insert(idx + 1, declined_cat)
+      else:
+        cats.append(declined_cat)
+      if m.get("scope_suffix"):
+        defn += m["scope_suffix"]
+    result.append(
+        CategoricalMetricDefinition(
+            name=m["name"], definition=defn, categories=cats
+        )
     )
-  usefulness_categories.extend([
-      CategoricalMetricCategory(
-          name="unhelpful",
-          definition=(
-              "The response does NOT meaningfully answer the user question. "
-              "This includes: (1) The agent said 'I don't have that "
-              "information', gave generic advice, or directed the user "
-              "elsewhere instead of using its tools. (2) The agent "
-              "apologized without answering. (3) Empty data results or "
-              "generic filler text. (4) The agent looped without resolution."
-          ),
-      ),
-      CategoricalMetricCategory(
-          name="partial",
-          definition=(
-              "The response partially addresses the question but is "
-              "incomplete, missing key details, or only tangentially relevant."
-          ),
-      ),
-  ])
-
-  usefulness_definition = (
-      "Whether the agent final response provides a genuinely useful, "
-      "substantive answer to the user question. A response that apologizes, "
-      "says it cannot help, returns no data, provides only generic filler, "
-      "or loops without resolving the question is NOT useful."
-  )
-  if has_scope:
-    usefulness_definition += (
-        " UNLESS the question is outside the agent's defined scope, "
-        "in which case a polite decline IS a correct and meaningful "
-        "response." + scope_context
-    )
-
-  response_usefulness = CategoricalMetricDefinition(
-      name="response_usefulness",
-      definition=usefulness_definition,
-      categories=usefulness_categories,
-  )
-
-  task_grounding = CategoricalMetricDefinition(
-      name="task_grounding",
-      definition=(
-          "Whether the agent response is grounded in actual data retrieved "
-          "from its tools, or is fabricated / hallucinated general knowledge."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="grounded",
-              definition=(
-                  "The response is clearly based on data retrieved from the "
-                  "agent tools (search results, database lookups, API calls)."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="ungrounded",
-              definition=(
-                  "The response appears to be fabricated or based on the LLM "
-                  "general knowledge rather than actual tool results. The tool "
-                  "may have returned empty data and the agent filled in anyway."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="no_tool_needed",
-              definition=(
-                  "The question did not require tool usage and a direct LLM "
-                  "response was appropriate."
-              ),
-          ),
-      ],
-  )
-
-  correctness = CategoricalMetricDefinition(
-      name="correctness",
-      definition=(
-          "Whether the facts stated in the agent response are accurate. "
-          "Evaluate based on the information the agent retrieved from its "
-          "tools and whether it was conveyed faithfully."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="correct",
-              definition=(
-                  "All facts stated by the agent are accurate and consistent "
-                  "with the tool results retrieved."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="mostly_correct",
-              definition=(
-                  "The response is mostly correct but contains a minor "
-                  "inaccuracy, omission, or imprecise wording."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="incorrect",
-              definition=(
-                  "The response contains wrong facts, hallucinated information, "
-                  "or claims contradicted by the tool results."
-              ),
-          ),
-      ],
-  )
-
-  tool_usage = CategoricalMetricDefinition(
-      name="tool_usage",
-      definition=(
-          "Whether the agent used its available tools correctly to answer "
-          "the question, rather than relying on general knowledge."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="proper",
-              definition=(
-                  "The agent used its tools and based the answer on the "
-                  "tool results. Tools were called with appropriate parameters."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="partial",
-              definition=(
-                  "The agent partially used tools, or tool usage was unclear "
-                  "or incomplete. Some information may not be tool-derived."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="none",
-              definition=(
-                  "The agent answered from general knowledge without looking "
-                  "up information via tools, even though tools were available "
-                  "and the question warranted their use."
-              ),
-          ),
-      ],
-  )
-
-  specificity = CategoricalMetricDefinition(
-      name="specificity",
-      definition=(
-          "Whether the agent response provides specific, concrete details "
-          "(numbers, dates, dollar amounts, limits) rather than vague or "
-          "generic statements."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="specific",
-              definition=(
-                  "The response includes specific and complete details: exact "
-                  "numbers, percentages, dollar amounts, dates, or limits."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="somewhat_specific",
-              definition=(
-                  "The response is somewhat specific but missing some key "
-                  "details that would make it fully actionable."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="vague",
-              definition=(
-                  "The response is vague, generic, or missing key specifics "
-                  "that the user needs to act on the information."
-              ),
-          ),
-      ],
-  )
-
-  scope_compliance = CategoricalMetricDefinition(
-      name="scope_compliance",
-      definition=(
-          "Whether the agent correctly handled the scope of the question. "
-          "An agent should answer in-scope questions and politely decline "
-          "out-of-scope ones." + scope_context
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="compliant",
-              definition=(
-                  "The agent correctly answered an in-scope question OR "
-                  "correctly declined an out-of-scope question."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="partially_compliant",
-              definition=(
-                  "The agent answered but with unnecessary caveats, excessive "
-                  "hedging, or was partially out of scope."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="non_compliant",
-              definition=(
-                  "The agent tried to answer an out-of-scope question it "
-                  "should have declined, OR refused to answer an in-scope "
-                  "question it should have handled."
-              ),
-          ),
-      ],
-  )
-
-  first_time_right = CategoricalMetricDefinition(
-      name="first_time_right",
-      definition=(
-          "Whether the agent's FIRST response in the conversation was "
-          "satisfactory, without needing user corrections or follow-ups "
-          "to fix errors. For single-turn conversations, evaluate the "
-          "only response. For multi-turn, focus on whether the first "
-          "substantive answer was correct."
-      ),
-      categories=[
-          CategoricalMetricCategory(
-              name="correct",
-              definition=(
-                  "The first response was correct and complete. No correction "
-                  "or significant clarification was needed from the user."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="clarification_needed",
-              definition=(
-                  "The first response was mostly right but needed minor "
-                  "clarification or a follow-up to be fully useful."
-              ),
-          ),
-          CategoricalMetricCategory(
-              name="correction_needed",
-              definition=(
-                  "The first response was wrong, vague, or incomplete enough "
-                  "that the user had to push back or correct the agent."
-              ),
-          ),
-      ],
-  )
-
-  return [
-      response_usefulness,
-      task_grounding,
-      correctness,
-      tool_usage,
-      specificity,
-      scope_compliance,
-      first_time_right,
-  ]
+  logger.info("Loaded %d metrics from eval config", len(result))
+  return result
 
 
 # ---------------------------------------------------------------------------
@@ -3516,8 +3263,8 @@ Full report:
   %(prog)s --report --limit 20 --samples 3 --tag-turns --trajectory-samples 3 \\
     --agent-context agent_context.json --env path/to/.env
 
-Custom metrics:
-  %(prog)s --eval-config scripts/eval/eval_config.json
+Custom metrics (overrides auto-discovered eval/eval_config.json):
+  %(prog)s --eval-config path/to/custom_eval_config.json
       """,
   )
   parser.add_argument(
@@ -3618,9 +3365,9 @@ Custom metrics:
       type=str,
       default=None,
       metavar="PATH",
-      help="Path to a JSON file with custom metric definitions. Overrides "
-      "the built-in metrics so you can fine-tune evaluation criteria, "
-      "add/remove dimensions, or adjust category labels. "
+      help="Path to a JSON file with metric definitions. By default, "
+      "eval/eval_config.json is auto-discovered from the repo root or "
+      "script directory. Use this flag to override with a custom file. "
       "See scripts/eval/eval_config.json for the expected format.",
   )
   parser.add_argument(
