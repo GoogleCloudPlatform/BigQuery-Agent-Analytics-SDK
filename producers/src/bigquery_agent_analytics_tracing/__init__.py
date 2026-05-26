@@ -23,8 +23,12 @@ Public API:
   * ``bq_schema`` — the canonical schema, used by both the auto-create
     path and the drainer's ``insert_rows_json`` fallback.
 
-Producer-specific adapters (OpenAI Agents SDK, Codex CLI wrapper, Claude
-Code plugin) land in follow-up PRs.
+Producer modules:
+
+  * ``claude_code`` — Claude Code hook adapter + ``main()`` entry.
+    Console script: ``bqaa-claude-hook``.
+
+OpenAI Agents SDK and Codex CLI adapters land in follow-up PRs.
 """
 
 from ._writer_identity import __version__
