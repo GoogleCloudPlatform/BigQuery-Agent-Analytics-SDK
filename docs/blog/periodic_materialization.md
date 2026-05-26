@@ -6,7 +6,15 @@ Today we are making it dramatically easier to keep a BigQuery property graph of 
 
 This is the small operational change that converts agent observability from "engineering will dig through logs" into "the audit team asks the question and gets an answer in seconds."
 
-And it ships production-shaped on day one. The 0.3.2 release of the SDK lands the deploy with **least-privilege split service accounts, a tunable retry budget, an opt-in orphan-session watchdog, a zero-LLM audited extraction path for regulated workloads, backfill mode for incident response, and a Terraform module that mirrors the bash deploy** — every one of them a default the customer would otherwise have to design, build, and review. The story below walks the audit answer first; the production surface, the customer-playbook README, the codelab, and the Terraform module follow once you've seen what the answer looks like.
+And it ships production-shaped on day one. The 0.3.2 release of the SDK lands a deploy whose **default** posture is **least-privilege split service accounts, a tunable retry budget, structured JSON logs on every run, and a state-table audit trail** — every customer who runs the deploy with the four required arguments gets that shape on the first try. Regulated and operations teams can then **opt into** a zero-LLM extraction path, an orphan-session watchdog, a backfill mode for incident response, and a Terraform module that mirrors the bash deploy. The story below walks the audit answer first; the production surface, the customer-playbook README, the codelab, and the Terraform module follow once you've seen what the answer looks like.
+
+## Why this is different
+
+Three properties separate this from "stand up a graph database next to BigQuery and ETL into it":
+
+- **BigQuery-native.** No new graph database to operate. No separate pipeline to maintain. The events, the graph, the IAM, the billing, the query language — all stay in BigQuery. The only thing the deploy creates outside BigQuery is a Cloud Run Job (the materializer) and a Cloud Scheduler trigger (the cron). Both retire when you stop paying for them; neither holds state.
+- **Governed by design.** The events dataset is read-only to the materializer; the graph dataset is the only write target; the runtime service account holds exactly the BigQuery and (optionally) Vertex AI roles it needs, and the scheduler-caller service account holds only `roles/run.invoker` on the job. Every run lands a row in the state table — window scanned, sessions discovered, sessions materialized, sessions failed, mode (cron / backfill / orphan-scan), JSON report — giving the audit team a queryable history of what the materializer did and when, without log digging.
+- **Audit-grade extraction.** Production deployments choose between two extractors at deploy time. The default uses BigQuery's `AI.GENERATE` for fast onboarding against any new event shape. Regulated paths flip to `--extraction-mode=compiled-only`, which swaps in a deterministic reference-extractor module the customer authors against their ontology — no Vertex AI dependency, Python the auditor can read. Same materializer, same graph, two extraction policies — pick the one that fits the workload.
 
 ## The business case for an answer on the same day
 
@@ -112,14 +120,6 @@ Periodic materialization shipped this surface as a single coordinated release be
 - **An outcome-signal feedback loop.** The same property graph carries `OutcomeSignal`, `RewardComputation`, and `RejectionReason` nodes that close the loop on agent quality — reward-shaping, rejection-cause analysis, and constraint-violation alerts — without a second data store. Walked end-to-end in the [migration v5 demo notebook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5_demo_notebook.ipynb).
 
 Each flag has a default that matches the production posture, so a customer who runs `deploy_cloud_run_job.sh` with the four required arguments lands the audited shape — split SAs, retry budget, structured JSON logs, state-table audit trail — on the first deploy.
-
-## Trusted by industry leaders
-
-> *[Customer quote from Yahoo to be inserted here once approved.]*
->
-> — *[Title, Name], Yahoo*
-
-*(Additional customer voices welcome. Reach out to the BigQuery Agent Analytics team via the [SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK) to share your deployment story.)*
 
 ## Where this fits
 

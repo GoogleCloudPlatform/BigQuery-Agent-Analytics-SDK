@@ -1,4 +1,4 @@
-summary: Keep a BigQuery property graph of your AI agent's decisions fresh from agent_events on a six-hour schedule. Capture events with the BigQuery Agent Analytics Plugin, deploy a Cloud Run Job + Cloud Scheduler that materializes them into your provided property graph, and answer audit-style questions in GQL.
+summary: Keep a BigQuery property graph of your AI agent's decisions fresh from agent_events on a six-hour schedule. You will materialize a custom property graph locally with bqaa-materialize-window (cron from Cloud Build / Workflows / external scheduler), then see the same code path run as a production-shape Cloud Run Job + Cloud Scheduler deploy demonstrated against the SDK's bundled migration v5 artifacts. End with an audit-style GQL traversal.
 id: bqaa-periodic-materialization
 categories: bigquery,adk,agents
 tags: bigquery,adk,bigquery-agent-analytics,cloud-run,cloud-scheduler,property-graph,gql
@@ -11,9 +11,14 @@ feedback link: https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-S
 ## Introduction
 Duration: 0:03
 
-If your AI agent makes decisions that someone will eventually want explained — a credit decline, a marketing reallocation, a procurement pick, an access grant — the gap between "events captured in BigQuery" and "auditable explanation on demand" is usually filled by an engineer with a SQL editor. In this codelab you will close that gap by deploying a Cloud Run Job + Cloud Scheduler that materializes your agent's events into a BigQuery property graph every six hours, and then querying the graph in GQL.
+If your AI agent makes decisions that someone will eventually want explained — a credit decline, a marketing reallocation, a procurement pick, an access grant — the gap between "events captured in BigQuery" and "auditable explanation on demand" is usually filled by an engineer with a SQL editor. In this codelab you will close that gap by running `bqaa-materialize-window` against a property graph you provide, then seeing the same command wrapped in a production-shape Cloud Run Job + Cloud Scheduler deploy, and finally querying the resulting graph in GQL.
 
-The codelab is self-contained from scratch. You will create the BigQuery datasets, the property graph, the demo events, the materialization deploy, and the query — all in one Google Cloud project. At the end you tear it all down with three commands.
+This codelab walks **two paths** side by side so the boundary is clear before you copy anything to production:
+
+- **Custom graph path** (most of the codelab) — you author the graph contract (table DDL, property-graph DDL, ontology, binding) for a small DecisionRequest decision flow, seed events, and run `bqaa-materialize-window` directly. Cron this same command from Cloud Build, Cloud Workflows, or any external scheduler to keep your own graph fresh.
+- **Production-deploy shape** (one section near the end) — the SDK's `deploy_cloud_run_job.sh` is demonstrated against the **bundled migration v5 demo artifacts** (not the codelab's custom graph; the deploy script doesn't yet accept arbitrary artifact paths, tracked as an open follow-up). The point of running the deploy is to observe the production shape end-to-end: split service accounts, retries, structured JSON logs, the state-table audit trail.
+
+The codelab is self-contained from scratch. You will create the BigQuery datasets, the property graph, the demo events, run materialization (custom graph) and the production deploy (bundled artifacts), and the query — all in one Google Cloud project. At the end you tear it all down with three commands.
 
 ### What you'll build
 
@@ -817,17 +822,21 @@ gcloud iam service-accounts delete \
 ## Congratulations
 Duration: 0:02
 
-You have:
+You have, for the **custom graph**:
 
-- Provided a BigQuery property graph for your agent's decision domain.
+- Authored a BigQuery property graph contract (table DDL + property-graph DDL + ontology + binding) for a generic agent decision domain.
 - Populated `agent_events` with a synthetic event corpus.
-- Run `bqaa-materialize-window` locally to fill the graph from those events.
+- Run `bqaa-materialize-window` locally against that custom graph, in the default `AI.GENERATE` extraction mode.
 - Backfilled a historical window into an isolated state-table namespace without disturbing the live cron's checkpoint.
-- Deployed a Cloud Run Job + Cloud Scheduler trigger that keeps the graph fresh every six hours, with the 0.3.2 production defaults: split runtime + scheduler-caller service accounts, tunable retries, structured JSON logs, and the option to enable an orphan-session watchdog or swap to the zero-LLM compiled-only extraction path.
-- Seen the same deploy expressed as a Terraform module that drops into an existing IaC pipeline.
-- Queried the graph in GQL and seen the audit-style answer.
+- Queried the resulting graph in GQL and seen the audit-style answer.
 
-The pattern works wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, internal IT. Swap the demo graph for the one your team designs for your domain, point the deploy at your `agent_events` table, and the audit answer is one query away.
+And for the **production-deploy shape** (demonstrated against the bundled migration v5 artifacts):
+
+- Deployed a Cloud Run Job + Cloud Scheduler trigger that runs every six hours with the 0.3.2 defaults: split runtime + scheduler-caller service accounts, retry budget, structured JSON logs, state-table audit trail.
+- Seen which knobs are opt-in: `--max-session-age-hours` orphan watchdog, `--extraction-mode=compiled-only` zero-LLM path, `--single-sa` for the legacy single-SA shape.
+- Seen the same deploy expressed as a Terraform module that drops into an existing IaC pipeline.
+
+The pattern works wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, internal IT. For your own graph today: author the contract (using the codelab's DecisionRequest example or the migration v5 demo as a starting point), then cron `bqaa-materialize-window` from Cloud Build / Cloud Workflows / an external scheduler. The deploy script's wrapper shape — the SAs, the scheduler trigger, the JSON logs — is the same one to adopt once your team is ready to package the command as a Cloud Run Job; adapting the deploy to accept arbitrary artifact paths is an open follow-up tracked against the SDK repository.
 
 ### Further reading
 
