@@ -83,9 +83,19 @@ class _SetupReport:
   project_id: str | None
   dataset: str | None
   trace_enabled: bool
+  # Non-None when the configured interpreter cannot be executed
+  # (FileNotFoundError, permission denied, timeout, non-zero exit on a
+  # trivial command). Surfacing this separately tells the user "fix
+  # BQAA_PYTHON" instead of N misleading "import failed" lines that
+  # all stem from the same root cause.
+  interpreter_error: str | None = None
   package_imports: list[_ImportProbe] = field(default_factory=list)
   required_imports: list[_ImportProbe] = field(default_factory=list)
   storage_write_imports: list[_ImportProbe] = field(default_factory=list)
+
+  @property
+  def python_ok(self) -> bool:
+    return self.interpreter_error is None
 
   @property
   def env_ok(self) -> bool:
@@ -93,19 +103,26 @@ class _SetupReport:
 
   @property
   def package_ok(self) -> bool:
-    return all(p.ok for p in self.package_imports)
+    # Empty list when interpreter is broken — explicitly gate on
+    # python_ok so vacuous all([]) doesn't report True.
+    return self.python_ok and all(p.ok for p in self.package_imports)
 
   @property
   def required_deps_ok(self) -> bool:
-    return all(p.ok for p in self.required_imports)
+    return self.python_ok and all(p.ok for p in self.required_imports)
 
   @property
   def storage_write_ok(self) -> bool:
-    return all(p.ok for p in self.storage_write_imports)
+    return self.python_ok and all(p.ok for p in self.storage_write_imports)
 
   @property
   def all_ok(self) -> bool:
-    return self.env_ok and self.package_ok and self.required_deps_ok
+    return (
+        self.python_ok
+        and self.env_ok
+        and self.package_ok
+        and self.required_deps_ok
+    )
 
 
 def _resolve_python_bin() -> str:
@@ -118,17 +135,71 @@ def _resolve_python_bin() -> str:
   return os.environ.get("BQAA_PYTHON") or sys.executable
 
 
+def _probe_interpreter(python_bin: str) -> str | None:
+  """Verify ``python_bin`` can be executed. Returns None on success or
+  a one-line error string. Catches the common
+  misconfigurations (path doesn't exist, not executable, hangs)
+  before the import probes shell out N times and trip on the same
+  root cause.
+  """
+  try:
+    proc = subprocess.run(
+        [python_bin, "-c", "pass"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+  except FileNotFoundError:
+    return f"interpreter not found: {python_bin}"
+  except PermissionError:
+    return f"interpreter not executable: {python_bin}"
+  except OSError as exc:
+    return f"interpreter exec error: {python_bin} ({exc})"
+  except subprocess.TimeoutExpired:
+    return f"interpreter timed out: {python_bin}"
+  if proc.returncode != 0:
+    err = (proc.stderr or proc.stdout or "non-zero exit").strip()
+    err = err.splitlines()[-1] if err.splitlines() else err
+    return f"interpreter exited non-zero: {err}"
+  return None
+
+
 def _probe_imports(
     python_bin: str, modules: Iterable[tuple[str, str]]
 ) -> list[_ImportProbe]:
   results: list[_ImportProbe] = []
   for module, install_name in modules:
-    proc = subprocess.run(
-        [python_bin, "-c", f"import {module}"],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    # Defensive catches for the same conditions ``_probe_interpreter``
+    # handles. ``collect_report`` skips this loop entirely when the
+    # interpreter is broken, but keep the catches so a direct caller
+    # never sees a raw OSError from a misconfigured python_bin.
+    try:
+      proc = subprocess.run(
+          [python_bin, "-c", f"import {module}"],
+          capture_output=True,
+          text=True,
+          timeout=15,
+      )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+      results.append(
+          _ImportProbe(
+              module=module,
+              install_name=install_name,
+              ok=False,
+              error=f"interpreter unavailable: {exc}",
+          )
+      )
+      continue
+    except subprocess.TimeoutExpired:
+      results.append(
+          _ImportProbe(
+              module=module,
+              install_name=install_name,
+              ok=False,
+              error=f"interpreter timed out: {python_bin}",
+          )
+      )
+      continue
     if proc.returncode == 0:
       results.append(
           _ImportProbe(module=module, install_name=install_name, ok=True)
@@ -151,10 +222,26 @@ def _probe_imports(
 
 def collect_report(python_bin: str | None = None) -> _SetupReport:
   """Run the full set of checks against ``python_bin`` (or BQAA_PYTHON
-  fallback) and return a structured report."""
+  fallback) and return a structured report.
+
+  If the interpreter can't be executed (bad ``BQAA_PYTHON`` is the most
+  common case), skip the import probes — they'd all fail with the same
+  underlying error — and surface the interpreter problem directly
+  via ``_SetupReport.interpreter_error``.
+  """
   resolved = python_bin or _resolve_python_bin()
+  interpreter_error = _probe_interpreter(resolved)
+  if interpreter_error is not None:
+    package_imports: list[_ImportProbe] = []
+    required_imports: list[_ImportProbe] = []
+    storage_write_imports: list[_ImportProbe] = []
+  else:
+    package_imports = _probe_imports(resolved, _PACKAGE_IMPORTS)
+    required_imports = _probe_imports(resolved, _REQUIRED_IMPORTS)
+    storage_write_imports = _probe_imports(resolved, _STORAGE_WRITE_IMPORTS)
   return _SetupReport(
       python_bin=resolved,
+      interpreter_error=interpreter_error,
       project_id=(
           os.environ.get("BQAA_PROJECT_ID")
           or os.environ.get("GCP_PROJECT_ID")
@@ -167,9 +254,9 @@ def collect_report(python_bin: str | None = None) -> _SetupReport:
       trace_enabled=(
           os.environ.get("BQAA_TRACE_ENABLED", "true").lower() == "true"
       ),
-      package_imports=_probe_imports(resolved, _PACKAGE_IMPORTS),
-      required_imports=_probe_imports(resolved, _REQUIRED_IMPORTS),
-      storage_write_imports=_probe_imports(resolved, _STORAGE_WRITE_IMPORTS),
+      package_imports=package_imports,
+      required_imports=required_imports,
+      storage_write_imports=storage_write_imports,
   )
 
 
@@ -182,6 +269,12 @@ def _format_report(report: _SetupReport) -> str:
   lines.append("BQAA tracing setup check")
   lines.append("=" * 32)
   lines.append(f"Python interpreter: {report.python_bin}")
+  if report.interpreter_error:
+    lines.append(f"  [{miss_mark}] {report.interpreter_error}")
+    lines.append(
+        "  Fix: point BQAA_PYTHON at a working python3 interpreter,"
+        " or unset it to use the default."
+    )
   lines.append(f"BQAA_TRACE_ENABLED: {'on' if report.trace_enabled else 'off'}")
   if not report.trace_enabled:
     lines.append(
@@ -189,6 +282,14 @@ def _format_report(report: _SetupReport) -> str:
         " (or unset it) to enable."
     )
   lines.append("")
+
+  if report.interpreter_error:
+    # Skip the per-import sections — they're all empty when the
+    # interpreter is broken, and printing empty checklists is noise.
+    lines.append("Import + env checks skipped: interpreter unavailable.")
+    lines.append("")
+    lines.append("Status: ACTION NEEDED")
+    return "\n".join(lines) + "\n"
 
   lines.append("Required env vars:")
   lines.append(
@@ -264,6 +365,7 @@ def _report_to_json(report: _SetupReport) -> str:
   return json.dumps(
       {
           **asdict(report),
+          "python_ok": report.python_ok,
           "env_ok": report.env_ok,
           "package_ok": report.package_ok,
           "required_deps_ok": report.required_deps_ok,

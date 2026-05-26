@@ -50,9 +50,15 @@ def _isolate_env(monkeypatch):
 
 @pytest.fixture
 def fake_probes(monkeypatch):
-  """Replace the subprocess-driven probe with an in-memory mapping so
-  tests don't shell out to python."""
-  state: dict[str, dict[str, str | None]] = {"missing": {}, "extras": {}}
+  """Replace the subprocess-driven probes with in-memory mappings so
+  tests don't shell out to python. Interpreter probe defaults to
+  success (None); set ``state["interpreter_error"]`` to simulate a
+  bad BQAA_PYTHON."""
+  state: dict[str, object] = {
+      "missing": {},
+      "extras": {},
+      "interpreter_error": None,
+  }
 
   def _fake_probe(python_bin, modules):
     results = []
@@ -70,7 +76,11 @@ def fake_probes(monkeypatch):
       )
     return results
 
+  def _fake_interpreter(_python_bin):
+    return state["interpreter_error"]
+
   monkeypatch.setattr(setup_check, "_probe_imports", _fake_probe)
+  monkeypatch.setattr(setup_check, "_probe_interpreter", _fake_interpreter)
   return state
 
 
@@ -89,7 +99,59 @@ def test_resolve_python_bin_falls_back_to_sys_executable():
 
 
 # ---------------------------------------------------------------------------
-# collect_report
+# Interpreter probe (real subprocess, no fake)
+# ---------------------------------------------------------------------------
+
+
+def test_probe_interpreter_succeeds_on_current_python():
+  assert setup_check._probe_interpreter(sys.executable) is None
+
+
+def test_probe_interpreter_reports_missing_binary():
+  err = setup_check._probe_interpreter("/nonexistent/python-binary-xyz")
+  assert err is not None
+  assert "not found" in err.lower() or "no such file" in err.lower()
+
+
+def test_probe_imports_handles_missing_binary_without_raising():
+  """Defensive catch — even if collect_report's interpreter probe is
+  bypassed, a direct call to _probe_imports with a bad python must
+  not raise. The /bqaa-setup UX is "always produce an actionable
+  report"; a raw OSError defeats that."""
+  probes = setup_check._probe_imports(
+      "/nonexistent/python-binary-xyz",
+      [("anything", "anything")],
+  )
+  assert len(probes) == 1
+  assert probes[0].ok is False
+  assert probes[0].error and "interpreter" in probes[0].error.lower()
+
+
+def test_collect_report_surfaces_interpreter_error_from_real_bad_path(
+    monkeypatch,
+):
+  """End-to-end (real subprocess): a bad BQAA_PYTHON must produce a
+  report with interpreter_error set, all_ok=False, and no traceback."""
+  monkeypatch.setenv("BQAA_PYTHON", "/nonexistent/python-binary-xyz")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  report = collect_report()
+
+  assert report.interpreter_error is not None
+  assert report.python_ok is False
+  assert report.all_ok is False
+  # Per-import sections are skipped (empty) — printing N copies of
+  # the same root cause is noise.
+  assert report.package_imports == []
+  assert report.required_imports == []
+  assert report.storage_write_imports == []
+  # env_ok is still True (vars are set); python_ok is what fails.
+  assert report.env_ok is True
+
+
+# ---------------------------------------------------------------------------
+# collect_report (with fake probes)
 # ---------------------------------------------------------------------------
 
 
@@ -184,6 +246,28 @@ def test_report_trace_disabled_via_env(monkeypatch, fake_probes):
   assert report.all_ok
 
 
+def test_report_interpreter_error_breaks_all_ok(monkeypatch, fake_probes):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  fake_probes["interpreter_error"] = "interpreter not found: /bad/path"
+
+  report = collect_report()
+
+  assert report.python_ok is False
+  assert report.interpreter_error == "interpreter not found: /bad/path"
+  assert report.all_ok is False
+  # When interpreter is broken, import probes are skipped — empty
+  # lists rather than N misleading per-module failures.
+  assert report.package_imports == []
+  assert report.required_imports == []
+  assert report.storage_write_imports == []
+  # Even though the lists are empty, the *_ok properties are False
+  # (gated on python_ok), not vacuously True.
+  assert report.package_ok is False
+  assert report.required_deps_ok is False
+  assert report.storage_write_ok is False
+
+
 # ---------------------------------------------------------------------------
 # _format_report / main output
 # ---------------------------------------------------------------------------
@@ -229,6 +313,26 @@ def test_format_report_warns_when_trace_disabled(monkeypatch, fake_probes):
 
   assert "BQAA_TRACE_ENABLED" in text
   assert "off" in text.lower()
+
+
+def test_format_report_surfaces_interpreter_error_actionably(
+    monkeypatch, fake_probes
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  fake_probes["interpreter_error"] = "interpreter not found: /bad/path"
+
+  text = _format_report(collect_report())
+
+  assert "interpreter not found: /bad/path" in text
+  assert "BQAA_PYTHON" in text
+  assert "ACTION NEEDED" in text
+  # The "Required env vars" / "Required runtime deps" / "Storage
+  # Write" checklists are skipped — they'd be empty anyway and
+  # printing them adds noise. The "skipped" line tells the user
+  # why.
+  assert "skipped" in text.lower()
+  assert "Required env vars:" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +392,37 @@ def test_main_json_mode_exit_one_with_actionable_payload(
   assert parsed["all_ok"] is False
   missing = [p for p in parsed["required_imports"] if not p["ok"]]
   assert any(p["install_name"] == "google-cloud-bigquery" for p in missing)
+
+
+def test_main_json_mode_interpreter_error_payload(
+    monkeypatch, fake_probes, capsys
+):
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+  fake_probes["interpreter_error"] = "interpreter not found: /bad/path"
+
+  rc = main(argv=["--json"])
+
+  assert rc == 1
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["interpreter_error"] == "interpreter not found: /bad/path"
+  assert parsed["python_ok"] is False
+  assert parsed["all_ok"] is False
+
+
+def test_main_bad_bqaa_python_does_not_crash(monkeypatch, capsys):
+  """Regression: a misconfigured BQAA_PYTHON used to bubble a raw
+  FileNotFoundError out of subprocess.run, defeating the /bqaa-setup
+  UX. Real subprocess this time — no fake_probes fixture — to prove
+  the production path doesn't crash."""
+  monkeypatch.setenv("BQAA_PYTHON", "/nonexistent/python-binary-xyz")
+  monkeypatch.setenv("BQAA_PROJECT_ID", "p")
+  monkeypatch.setenv("BQAA_DATASET", "d")
+
+  rc = main(argv=["--json"])
+
+  assert rc == 1
+  parsed = json.loads(capsys.readouterr().out)
+  assert parsed["python_ok"] is False
+  assert parsed["interpreter_error"] is not None
+  assert "/nonexistent/python-binary-xyz" in parsed["interpreter_error"]
