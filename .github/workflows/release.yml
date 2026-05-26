@@ -18,9 +18,19 @@ on:
   release:
     types: [published]
 
+# The release event has no tag-pattern filter, so any published
+# release fires this workflow. The producer pipeline publishes
+# `tracing-vX.Y.Z` releases (release-tracing.yml); without this
+# guard, every producer release would also trigger root SDK
+# publishing and fail version verification.
+#
+# Root SDK tags use the plain `vX.Y.Z` pattern; producer tags use
+# `tracing-vX.Y.Z`. Only the root pattern starts with literal `v`,
+# so this is an unambiguous boundary.
 jobs:
   build:
     name: Build package
+    if: startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

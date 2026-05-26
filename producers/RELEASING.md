@@ -81,7 +81,8 @@ tar -tzf /tmp/plugin.tar.gz | head
 ## If something goes wrong
 
 - **`verify` fails on version mismatch** — the tag must equal
-  `tracing-v$(jq -r .version pyproject.toml)`. Re-tag and re-push.
+  `tracing-v$(python -c "import tomllib; print(tomllib.load(open('producers/pyproject.toml','rb'))['project']['version'])")`.
+  Re-tag and re-push.
 - **`build` fails on missing plugin tarball** — the build script's
   `importlib.metadata.version` lookup probably hit
   `PackageNotFoundError`; the `Install built wheel` step should have
@@ -92,7 +93,10 @@ tar -tzf /tmp/plugin.tar.gz | head
 - **`publish-pypi` fails the same way** — same fix on the PyPI side.
 
 If a release ships a broken artifact, do **not** delete the tag.
-Yank the PyPI release and ship a `tracing-vX.Y.Z+1` patch.
+Yank the PyPI release and ship the next patch version
+(e.g. `tracing-v0.1.0` → `tracing-v0.1.1`). Avoid PEP 440 local
+version identifiers (the `+local` suffix) — PyPI rejects them on
+upload.
 
 ## PyPI Trusted Publishing setup (one-time)
 
