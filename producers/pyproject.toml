@@ -58,6 +58,7 @@ dev = [
   "pytest-asyncio>=0.21",
   "pyink>=24.3.0",
   "isort>=5.0",
+  "tomli>=1.1; python_version < '3.11'",
 ]
 
 [project.scripts]

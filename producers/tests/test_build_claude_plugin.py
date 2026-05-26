@@ -90,7 +90,10 @@ def test_resolve_version_matches_pyproject_when_package_uninstalled(
 
   monkeypatch.setattr(build_claude_plugin.metadata, "version", _raise)
 
-  import tomllib
+  try:
+    import tomllib
+  except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
   pyproject = _PRODUCERS_DIR / "pyproject.toml"
   with pyproject.open("rb") as fh:
@@ -295,6 +298,113 @@ def test_vendored_plugin_can_run_user_prompt_submit_and_emit_row(
   assert any(
       r["event_type"] == "LLM_REQUEST" for r in rows
   ), f"no LLM_REQUEST in vendored-plugin log: {text}"
+
+
+def test_vendored_plugin_spools_and_spawns_drainer_with_inherited_pythonpath(
+    tmp_path, restore_manifest, cleanup_vendor
+):
+  """The full vendored runtime model: hook process imports from
+  ``PYTHONPATH=vendor`` (no wheel install), the logger writes a real
+  spool envelope (not dry-run), and the drainer subprocess is spawned
+  with ``PYTHONPATH`` inherited via ``os.environ.copy()`` — so it can
+  import the vendored package on its own.
+
+  Uses a fake recorder as ``BQAA_PYTHON`` so the drainer spawn never
+  has to talk to BigQuery. The recorder logs its argv + the inherited
+  ``PYTHONPATH`` and exits 0; the test asserts both.
+  """
+  import time as _time
+
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  spool_dir = tmp_path / "spool"
+  state_dir = tmp_path / "state"
+  vendor_root = PLUGIN_DIR / "vendor"
+  log_file = tmp_path / "bqaa.log"
+  recorder_log = tmp_path / "drainer-recorder.log"
+  recorder = tmp_path / "fake_drainer.sh"
+  recorder.write_text(
+      "#!/bin/bash\n"
+      f"printf 'ARGS=%s\\n' \"$*\" >> {recorder_log}\n"
+      f"printf 'PYTHONPATH=%s\\n' \"$PYTHONPATH\" >> {recorder_log}\n"
+      "exit 0\n"
+  )
+  recorder.chmod(0o755)
+
+  env = {
+      "PYTHONPATH": str(vendor_root),
+      # Real routing (not dry-run); project/dataset must be set so the
+      # logger does not raise. The recorder catches the drainer spawn
+      # before any BigQuery client is built.
+      "BQAA_PROJECT_ID": "fake-project",
+      "BQAA_DATASET": "fake_dataset",
+      "BQAA_DRY_RUN": "false",
+      "BQAA_DIRECT_WRITE": "false",
+      "BQAA_SPOOL_DIR": str(spool_dir),
+      "BQAA_STATE_DIR": str(state_dir),
+      "BQAA_LOG_FILE": str(log_file),
+      "BQAA_PYTHON": str(recorder),
+      "PATH": "/usr/bin:/bin",
+  }
+
+  def _fire(hook, payload):
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "bigquery_agent_analytics_tracing.claude_code",
+            hook,
+        ],
+        env=env,
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+  ss = _fire("SessionStart", {"session_id": "vp-d", "cwd": str(tmp_path)})
+  assert ss.returncode == 0, ss.stderr
+  ups = _fire(
+      "UserPromptSubmit",
+      {"session_id": "vp-d", "prompt": "hi", "transcript_path": ""},
+  )
+  assert ups.returncode == 0, ups.stderr
+
+  # The hook is detached from the drainer spawn — give the recorder a
+  # short window to flush its log line. ~3s ceiling so this never
+  # silently hangs CI.
+  deadline = _time.time() + 3.0
+  while _time.time() < deadline:
+    if recorder_log.exists() and recorder_log.read_text().strip():
+      break
+    _time.sleep(0.05)
+
+  # 1. Real spool envelope was written (not dry-run path).
+  spool_files = list(spool_dir.glob("event-*.json"))
+  assert spool_files, (
+      "hook should have written a spool envelope under non-dry-run routing;"
+      f" log={log_file.read_text() if log_file.exists() else '(none)'}"
+  )
+  envelope = json.loads(spool_files[0].read_text())
+  assert envelope["row"]["event_type"] == "LLM_REQUEST"
+  assert envelope["config"]["project_id"] == "fake-project"
+
+  # 2. Drainer subprocess was actually spawned with the right -m args.
+  assert (
+      recorder_log.exists()
+  ), "drainer spawn never fired the recorder — vendored runtime is broken"
+  log_text = recorder_log.read_text()
+  assert (
+      "-m bigquery_agent_analytics_tracing.drain" in log_text
+  ), f"drainer argv missing -m invocation: {log_text!r}"
+
+  # 3. PYTHONPATH was inherited so the drainer can import the vendored
+  # package without a wheel install — the exact runtime contract for
+  # the marketplace path.
+  assert f"PYTHONPATH={vendor_root}" in log_text, (
+      f"drainer did not inherit PYTHONPATH={vendor_root!r};"
+      f" got: {log_text!r}"
+  )
 
 
 def test_vendored_plugin_respects_trace_enabled_kill_switch_via_shell(

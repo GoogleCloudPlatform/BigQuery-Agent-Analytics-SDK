@@ -37,7 +37,13 @@ from pathlib import Path
 import shutil
 import sys
 import tarfile
-import tomllib
+
+# tomllib is stdlib on Python 3.11+; fall back to the `tomli`
+# backport on 3.10 (declared as a conditional dev dependency).
+try:
+  import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on 3.10.
+  import tomli as tomllib
 
 PACKAGE_DIST_NAME = "bigquery-agent-analytics-tracing"
 PACKAGE_IMPORT_NAME = "bigquery_agent_analytics_tracing"

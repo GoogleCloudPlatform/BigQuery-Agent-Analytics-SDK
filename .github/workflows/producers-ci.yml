@@ -51,10 +51,10 @@ jobs:
         run: pip install "pyink>=24.3.0" "isort>=5.0"
 
       - name: isort --check
-        run: isort --check-only src/ tests/
+        run: isort --check-only src/ tests/ scripts/
 
       - name: pyink --check
-        run: pyink --check src/ tests/
+        run: pyink --check src/ tests/ scripts/
 
   test:
     name: Producers test (Python ${{ matrix.python-version }})
