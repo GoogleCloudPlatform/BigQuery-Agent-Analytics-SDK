@@ -842,6 +842,7 @@ async def classify_sessions_via_api(
     transcripts: dict[str, str],
     config: CategoricalEvaluationConfig,
     endpoint: str = DEFAULT_ENDPOINT,
+    per_session_context: dict[str, str] | None = None,
 ) -> list[CategoricalSessionResult]:
   """Classifies sessions using the Gemini API (fallback).
 
@@ -863,6 +864,8 @@ async def classify_sessions_via_api(
       transcripts: Maps ``session_id`` to transcript text.
       config: Categorical evaluation configuration.
       endpoint: Model endpoint name.
+      per_session_context: Optional per-session context to inject into the
+          judge prompt (e.g. matched golden eval expected answers).
 
   Returns:
       One ``CategoricalSessionResult`` per session, in input order.
@@ -887,7 +890,10 @@ async def classify_sessions_via_api(
       if len(text) > 25000:
         text = text[:25000] + "\n... [truncated]"
 
-      full_prompt = prompt_prefix + "\n\nTranscript:\n" + text
+      session_ctx = ""
+      if per_session_context and sid in per_session_context:
+        session_ctx = "\n\n" + per_session_context[sid]
+      full_prompt = prompt_prefix + session_ctx + "\n\nTranscript:\n" + text
 
       try:
         response = await client.aio.models.generate_content(

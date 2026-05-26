@@ -1158,6 +1158,7 @@ def run_evaluation_from_conversations(
     concurrency=10,
     tag_turns=False,
     eval_config=None,
+    per_session_context=None,
 ):
   """Evaluate local conversations without BigQuery.
 
@@ -1173,6 +1174,8 @@ def run_evaluation_from_conversations(
       concurrency: Max parallel API calls (default 10).
       tag_turns: When True, run the full turn tagger to classify each user
           turn and identify correction boundaries / sub-trajectories.
+      per_session_context: Optional dict mapping session_id to additional
+          context string for the judge prompt (e.g. matched golden eval).
 
   Returns:
       Dict with ``report`` (CategoricalEvaluationReport) and
@@ -1213,6 +1216,7 @@ def run_evaluation_from_conversations(
   async def _run_all():
     classify_task = classify_sessions_via_api(
         transcripts, cat_config, model,
+        per_session_context=per_session_context,
     )
     resolve_task = _build_resolved_map_from_conversations(
         conversations, model, concurrency=concurrency,
@@ -1238,6 +1242,7 @@ def generate_quality_report_from_conversations(
     concurrency=10,
     tag_turns=False,
     trajectory_samples=0,
+    per_session_context=None,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1253,6 +1258,8 @@ def generate_quality_report_from_conversations(
       tag_turns: When True, run the full turn tagger to add per-turn tags,
           correction boundaries, and sub-trajectories to the output.
       trajectory_samples: Number of execution traces to fetch from BigQuery.
+      per_session_context: Optional dict mapping session_id to additional
+          context string for the judge prompt (e.g. matched golden eval).
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys.
@@ -1263,6 +1270,7 @@ def generate_quality_report_from_conversations(
   result = run_evaluation_from_conversations(
       conversations, model=model, config_path=config_path,
       concurrency=concurrency, tag_turns=tag_turns,
+      per_session_context=per_session_context,
   )
   elapsed = time.time() - t0
 
