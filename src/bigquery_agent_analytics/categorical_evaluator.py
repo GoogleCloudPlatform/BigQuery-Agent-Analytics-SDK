@@ -56,6 +56,7 @@ Example usage::
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import datetime
 from datetime import timezone
@@ -134,6 +135,15 @@ class CategoricalEvaluationConfig(BaseModel):
       ge=1,
       le=65536,
       description="Max output tokens for classification response.",
+  )
+  api_concurrency: int = Field(
+      default=5,
+      ge=1,
+      description=(
+          "Max concurrent Gemini API calls when the API fallback path runs "
+          "(used by classify_sessions_via_api). Matches the convention in "
+          "trace_evaluator.py and multi_trial.py."
+      ),
   )
   prompt_version: Optional[str] = Field(
       default=None,
@@ -839,24 +849,40 @@ async def classify_sessions_via_api(
   BigQuery-native ``AI.GENERATE`` path so that results are
   shape-compatible regardless of execution mode.
 
+  Per-session work runs concurrently under a semaphore sized by
+  ``config.api_concurrency`` (default 5, matching the convention in
+  ``trace_evaluator.py`` and ``multi_trial.py``). Output order matches
+  ``transcripts.items()`` insertion order.
+
+  Per-session ``Exception`` is caught inside the worker and converted to
+  a parse-error ``CategoricalSessionResult`` so one bad session does not
+  abort the batch. ``BaseException`` subclasses (``CancelledError``,
+  ``KeyboardInterrupt``, ``SystemExit``) deliberately propagate.
+
   Args:
       transcripts: Maps ``session_id`` to transcript text.
       config: Categorical evaluation configuration.
       endpoint: Model endpoint name.
 
   Returns:
-      One ``CategoricalSessionResult`` per session.
+      One ``CategoricalSessionResult`` per session, in input order.
   """
   prompt_prefix = build_categorical_prompt(config)
-  results: list[CategoricalSessionResult] = []
 
   try:
     from google import genai
     from google.genai import types
+  except ImportError:
+    logger.warning("google-genai not installed; cannot run API fallback.")
+    raise
 
-    client = genai.Client()
+  client = genai.Client()
+  semaphore = asyncio.Semaphore(config.api_concurrency)
 
-    for sid, transcript in transcripts.items():
+  async def _classify_one(
+      sid: str, transcript: str
+  ) -> CategoricalSessionResult:
+    async with semaphore:
       text = transcript
       if len(text) > 25000:
         text = text[:25000] + "\n... [truncated]"
@@ -887,11 +913,9 @@ async def classify_sessions_via_api(
               len(raw_text),
               repr(raw_text[:500]),
           )
-        results.append(
-            CategoricalSessionResult(
-                session_id=sid,
-                metrics=metrics,
-            )
+        return CategoricalSessionResult(
+            session_id=sid,
+            metrics=metrics,
         )
       except Exception as e:
         logger.warning(
@@ -900,25 +924,22 @@ async def classify_sessions_via_api(
             e,
             type(e).__name__,
         )
-        results.append(
-            CategoricalSessionResult(
-                session_id=sid,
-                metrics=[
-                    CategoricalMetricResult(
-                        metric_name=m.name,
-                        parse_error=True,
-                        passed_validation=False,
-                        raw_response=str(e),
-                    )
-                    for m in config.metrics
-                ],
-            )
+        return CategoricalSessionResult(
+            session_id=sid,
+            metrics=[
+                CategoricalMetricResult(
+                    metric_name=m.name,
+                    parse_error=True,
+                    passed_validation=False,
+                    raw_response=str(e),
+                )
+                for m in config.metrics
+            ],
         )
-  except ImportError:
-    logger.warning("google-genai not installed; cannot run API fallback.")
-    raise
 
-  return results
+  tasks = [_classify_one(sid, t) for sid, t in transcripts.items()]
+  results = await asyncio.gather(*tasks)
+  return list(results)
 
 
 # ------------------------------------------------------------------ #
