@@ -1,0 +1,49 @@
+# Binding for the BQAA codelab.
+#
+# Maps the ontology's entities and relationships to physical
+# BigQuery tables and columns. Paired with ontology.yaml
+# and property_graph.sql.
+#
+# Before passing this file to bqaa-materialize-window, render
+# the shell placeholders with envsubst:
+#   envsubst < binding.yaml > binding.yaml.tmp && mv binding.yaml.tmp binding.yaml
+#
+# Required shell variables:
+#   PROJECT_ID  : your GCP project ID
+#   DATASET     : the BigQuery dataset that holds both raw agent_events
+#                 and the materialized graph tables
+binding: agent_decisions_binding
+ontology: agent_decision_flow
+target:
+  backend: bigquery
+  project: ${PROJECT_ID}
+  dataset: ${DATASET}
+entities:
+  - name: DecisionRequest
+    source: ${PROJECT_ID}.${DATASET}.decision_request
+    properties:
+      - {name: requestId,    column: request_id}
+      - {name: requestText,  column: request_text}
+      - {name: requestedAt,  column: requested_at}
+  - name: DecisionOption
+    source: ${PROJECT_ID}.${DATASET}.decision_option
+    properties:
+      - {name: optionId,     column: option_id}
+      - {name: optionLabel,  column: option_label}
+      - {name: confidence,   column: confidence}
+  - name: DecisionOutcome
+    source: ${PROJECT_ID}.${DATASET}.decision_outcome
+    properties:
+      - {name: outcomeId,    column: outcome_id}
+      - {name: status,       column: status}
+      - {name: rationale,    column: rationale}
+      - {name: decidedAt,    column: decided_at}
+relationships:
+  - name: evaluatesOption
+    source: ${PROJECT_ID}.${DATASET}.evaluates_option
+    from_columns: [request_id]
+    to_columns:   [option_id]
+  - name: resultedIn
+    source: ${PROJECT_ID}.${DATASET}.resulted_in
+    from_columns: [request_id]
+    to_columns:   [outcome_id]
