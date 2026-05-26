@@ -142,6 +142,44 @@ def test_vendor_package_ignores_pycache(cleanup_vendor, tmp_path):
     build_claude_plugin.PACKAGE_SRC = src_backup
 
 
+def test_write_vendor_dist_info_creates_pep_376_metadata(cleanup_vendor):
+  # The METADATA file is what importlib.metadata.version() reads to
+  # resolve a vendored install. Generate one alongside the vendored
+  # package and verify shape.
+  build_claude_plugin.vendor_package()
+  dist_info = build_claude_plugin.write_vendor_dist_info("9.9.9-test")
+
+  assert dist_info.name == (
+      f"{build_claude_plugin.PACKAGE_IMPORT_NAME}-9.9.9-test.dist-info"
+  )
+  metadata_text = (dist_info / "METADATA").read_text(encoding="utf-8")
+  assert "Metadata-Version: 2.1" in metadata_text
+  assert f"Name: {build_claude_plugin.PACKAGE_DIST_NAME}" in metadata_text
+  assert "Version: 9.9.9-test" in metadata_text
+
+
+def test_vendor_package_wipes_stale_dist_info(cleanup_vendor):
+  # Drop a stale dist-info to simulate an older build's leftovers,
+  # then re-vendor and confirm only the fresh tree is present.
+  build_claude_plugin.vendor_package()
+  stale = (
+      build_claude_plugin.PLUGIN_DIR
+      / "vendor"
+      / f"{build_claude_plugin.PACKAGE_IMPORT_NAME}-0.0.1-old.dist-info"
+  )
+  stale.mkdir()
+  (stale / "METADATA").write_text(
+      "Metadata-Version: 2.1\nName: x\nVersion: 0.0.1-old\n"
+  )
+
+  build_claude_plugin.vendor_package()
+
+  assert not stale.exists(), (
+      "stale dist-info from an older build must be cleared so"
+      " importlib.metadata.version() does not see two distributions"
+  )
+
+
 def test_stamp_manifest_version_writes_resolved_version(restore_manifest):
   build_claude_plugin.stamp_manifest_version("9.9.9-test")
 
@@ -182,6 +220,13 @@ def test_build_produces_vendor_tree_and_tarball(
       n.endswith("vendor/bigquery_agent_analytics_tracing/claude_code.py")
       for n in names
   )
+  # PEP 376 .dist-info/METADATA must ride along so importlib.metadata
+  # can resolve the vendored install's version at runtime.
+  assert any(
+      n.endswith(".dist-info/METADATA")
+      and f"{build_claude_plugin.PACKAGE_IMPORT_NAME}-{summary['version']}" in n
+      for n in names
+  ), f"vendored .dist-info missing from tarball; names={names!r}"
   # __pycache__ excluded.
   assert not any("__pycache__" in n for n in names)
   # .gitignore excluded so marketplace users don't see internal-only files.
@@ -388,6 +433,24 @@ def test_vendored_plugin_spools_and_spawns_drainer_with_inherited_pythonpath(
   envelope = json.loads(spool_files[0].read_text())
   assert envelope["row"]["event_type"] == "LLM_REQUEST"
   assert envelope["config"]["project_id"] == "fake-project"
+
+  # 1a. attributes.writer.version must reflect the resolved package
+  # version, NOT the "0.0.0+local" fallback. This is the
+  # adoption-query contract for marketplace installs: every row from
+  # the vendored plugin reports the same version that the artifact
+  # was built from.
+  resolved_version = build_claude_plugin.resolve_version()
+  writer = json.loads(envelope["row"]["attributes"])["writer"]
+  assert writer["version"] == resolved_version, (
+      f"vendored runtime stamped writer.version={writer['version']!r};"
+      f" expected {resolved_version!r}. Likely the .dist-info under"
+      " vendor/ is missing or stale."
+  )
+  assert writer["version"] != "0.0.0+local", (
+      "writer.version fell back to local sentinel — vendored .dist-info"
+      " resolution is broken"
+  )
+  assert writer["label"].endswith(f"/{resolved_version}")
 
   # 2. Drainer subprocess was actually spawned with the right -m args.
   assert (

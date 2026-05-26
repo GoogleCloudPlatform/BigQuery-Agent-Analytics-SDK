@@ -75,7 +75,12 @@ def resolve_version() -> str:
 
 
 def vendor_package(*, dry_run: bool = False) -> Path:
-  """Copy the producer package source into the plugin's vendor/ tree."""
+  """Copy the producer package source into the plugin's vendor/ tree.
+
+  Wipes ``vendor/`` first so stale ``.dist-info`` directories from an
+  older version do not accumulate (``importlib.metadata.version()``
+  would otherwise see two distributions and pick one nondeterministically).
+  """
   vendor_root = PLUGIN_DIR / "vendor"
   target = vendor_root / PACKAGE_IMPORT_NAME
   if dry_run:
@@ -85,8 +90,8 @@ def vendor_package(*, dry_run: bool = False) -> Path:
         f"Package source not found at {PACKAGE_SRC}; "
         "run from a checkout of the producers/ tree."
     )
-  if target.exists():
-    shutil.rmtree(target)
+  if vendor_root.exists():
+    shutil.rmtree(vendor_root)
   vendor_root.mkdir(parents=True, exist_ok=True)
   shutil.copytree(
       PACKAGE_SRC,
@@ -96,6 +101,33 @@ def vendor_package(*, dry_run: bool = False) -> Path:
       ),
   )
   return target
+
+
+def write_vendor_dist_info(version: str) -> Path:
+  """Write a minimal PEP 376 ``.dist-info/METADATA`` alongside the
+  vendored package so ``importlib.metadata.version()`` resolves.
+
+  Without this, a vendored-plugin runtime (no wheel install on
+  ``BQAA_PYTHON``) leaves ``__version__`` at the ``"0.0.0+local"``
+  fallback and every emitted row's ``attributes.writer.version`` is
+  ``"0.0.0+local"`` — silently undermining the adoption-query
+  contract for marketplace installs.
+
+  Wheel-installed runtimes (when someone pip-installs
+  ``bigquery-agent-analytics-tracing``) keep their own metadata; this
+  file only matters when the package is on ``PYTHONPATH`` without
+  pip's site-packages alongside.
+  """
+  vendor_root = PLUGIN_DIR / "vendor"
+  dist_info = vendor_root / f"{PACKAGE_IMPORT_NAME}-{version}.dist-info"
+  dist_info.mkdir(parents=True, exist_ok=True)
+  (dist_info / "METADATA").write_text(
+      f"Metadata-Version: 2.1\n"
+      f"Name: {PACKAGE_DIST_NAME}\n"
+      f"Version: {version}\n",
+      encoding="utf-8",
+  )
+  return dist_info
 
 
 def stamp_manifest_version(version: str, *, dry_run: bool = False) -> dict:
@@ -144,6 +176,7 @@ def build(
   """Vendor + stamp + (optionally) tar. Returns a summary dict."""
   version = resolve_version()
   vendor_target = vendor_package()
+  dist_info = write_vendor_dist_info(version)
   manifest = stamp_manifest_version(version)
   tar_path: Path | None = None
   if not skip_tar:
@@ -151,6 +184,7 @@ def build(
   return {
       "version": version,
       "vendor_target": str(vendor_target),
+      "vendor_dist_info": str(dist_info),
       "manifest_version": manifest["version"],
       "tar_path": str(tar_path) if tar_path else None,
   }
