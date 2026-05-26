@@ -551,6 +551,47 @@ def test_vendored_plugin_run_setup_check_succeeds_when_env_set(
   assert report["dataset"] == "ok-ds"
 
 
+def test_run_setup_check_wrapper_falls_back_when_bqaa_python_unrunnable(
+    tmp_path, restore_manifest, cleanup_vendor
+):
+  """Regression: if BQAA_PYTHON points at a path that doesn't exist,
+  the wrapper's `exec "$BQAA_PYTHON"` would fail at the shell layer
+  before setup_check.py ever runs — defeating the whole point of
+  /bqaa-setup. The wrapper must fall back to python3 as the runner
+  so the diagnostic itself survives; setup_check.py then reports
+  the broken BQAA_PYTHON via interpreter_error."""
+  build_claude_plugin.build(dist_dir=tmp_path / "dist", skip_tar=True)
+
+  wrapper = PLUGIN_DIR / "scripts" / "run_setup_check.sh"
+  env = {
+      "PATH": "/usr/bin:/bin:/usr/local/bin",
+      "BQAA_PYTHON": "/nonexistent/python-binary-xyz",
+      "BQAA_PROJECT_ID": "p",
+      "BQAA_DATASET": "d",
+  }
+  result = subprocess.run(
+      ["bash", str(wrapper), "--json"],
+      env=env,
+      capture_output=True,
+      text=True,
+      timeout=15,
+  )
+  # Exit 1 because the report flags interpreter_error — but the
+  # process completes cleanly with a structured JSON payload, not a
+  # bash exec failure.
+  assert result.returncode == 1, (
+      f"wrapper should fall back to python3 and exit 1 via setup_check;"
+      f" stdout={result.stdout!r} stderr={result.stderr!r}"
+  )
+  # The shell-layer failure mode prints to stderr without producing
+  # JSON. If we see JSON, the fallback worked.
+  payload = json.loads(result.stdout)
+  assert payload["python_ok"] is False
+  assert payload["all_ok"] is False
+  assert payload["interpreter_error"]
+  assert "/nonexistent/python-binary-xyz" in payload["interpreter_error"]
+
+
 def test_vendored_plugin_respects_trace_enabled_kill_switch_via_shell(
     tmp_path, restore_manifest, cleanup_vendor
 ):
