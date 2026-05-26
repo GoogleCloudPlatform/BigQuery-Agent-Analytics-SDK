@@ -71,7 +71,7 @@ from a GitHub release tarball:
 ```bash
 # Pick a released version from
 # https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases
-VERSION=0.1.0.dev0
+VERSION=0.1.0
 
 mkdir -p ~/.claude/plugins
 curl -L \
