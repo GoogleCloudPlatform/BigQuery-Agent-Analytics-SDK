@@ -1,0 +1,220 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Release the `bigquery-agent-analytics-tracing` package and the
+# Claude Code plugin tarball.
+#
+# Trigger: push a `tracing-vX.Y.Z` tag whose version matches
+# `producers/pyproject.toml`'s `[project].version`. The tag namespace
+# is distinct from the root `vX.Y.Z` tags used by the consumption SDK
+# so the two release pipelines never collide.
+#
+# Pipeline:
+#   verify          - tag matches pyproject; run producer tests on 3.12
+#   build           - wheel + sdist + Claude Code plugin tarball
+#   github-release  - attach all artifacts to the GitHub release for
+#                     this tag, with auto-generated release notes
+#   publish-testpypi - upload wheel + sdist to TestPyPI via Trusted
+#                      Publishing (no secrets)
+#   publish-pypi    - same, to PyPI (gated by the `pypi` environment
+#                     so maintainers can require manual approval)
+#
+# Trusted Publishing setup (one-time, on the PyPI side):
+#   - https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+#   - Project: bigquery-agent-analytics-tracing
+#   - Owner:   GoogleCloudPlatform
+#   - Repo:    BigQuery-Agent-Analytics-SDK
+#   - Workflow: release-tracing.yml
+#   - Environment: testpypi / pypi (match the `environment:` blocks
+#     below). Until the project + trusted publisher are configured on
+#     TestPyPI/PyPI, the publish jobs will fail with a clear error —
+#     `build` and `github-release` still produce + attach artifacts so
+#     the release tag is not blocked.
+
+name: Release tracing
+
+on:
+  push:
+    tags:
+      - 'tracing-v*'
+
+concurrency:
+  group: release-tracing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify version + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: producers
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify tag matches pyproject version
+        id: version
+        run: |
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          TAG="${GITHUB_REF_NAME#tracing-v}"
+          echo "Package version: ${PKG_VERSION}"
+          echo "Release tag:     ${GITHUB_REF_NAME} (extracted: ${TAG})"
+          if [ "${PKG_VERSION}" != "${TAG}" ]; then
+            echo "::error::Version mismatch: producers/pyproject.toml has ${PKG_VERSION} but tag is ${GITHUB_REF_NAME} (expected tracing-v${PKG_VERSION})"
+            exit 1
+          fi
+          echo "version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Install producers with dev deps
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest --tb=short -q
+
+  build:
+    name: Build wheel + plugin tarball
+    runs-on: ubuntu-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: producers
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Install built wheel
+        # importlib.metadata.version() needs to see the dist-info so
+        # build_claude_plugin.py stamps the real version (not the
+        # pyproject fallback). Installing the wheel mirrors the
+        # producers-ci build path exactly.
+        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+
+      - name: Build Claude Code plugin tarball
+        run: python scripts/build_claude_plugin.py
+
+      - name: Verify all expected artifacts are present
+        run: |
+          ls -la dist/
+          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
+            || (echo "::error::missing sdist" && exit 1)
+          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl \
+            || (echo "::error::missing wheel" && exit 1)
+          test -f dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz \
+            || (echo "::error::missing plugin tarball" && exit 1)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-tracing-dist
+          path: producers/dist/
+          if-no-files-found: error
+
+  github-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: [verify, build]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tracing-dist
+          path: dist/
+
+      - name: List downloaded artifacts
+        run: ls -la dist/
+
+      - name: Create release with artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Tracing ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl
+            dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz
+            dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    runs-on: ubuntu-latest
+    # Depend on github-release too: the plugin tarball ships ONLY as a
+    # GitHub release asset, so if that step fails we must not let the
+    # wheel/sdist reach PyPI. Otherwise the "wheel and plugin always
+    # go together" invariant from RELEASING.md breaks silently.
+    # publish-pypi inherits the guard transitively via needs: publish-testpypi.
+    needs: [verify, build, github-release]
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/bigquery-agent-analytics-tracing
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tracing-dist
+          path: dist/
+
+      - name: Strip non-PyPI artifacts
+        # The plugin tarball is a release artifact, not a PyPI
+        # distribution. Filename uses hyphens in
+        # 'bigquery-agent-analytics-tracing-claude-code-*' so it's
+        # distinguishable from the underscore-named sdist.
+        run: |
+          rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          ls -la dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    needs: [verify, publish-testpypi]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/bigquery-agent-analytics-tracing
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-tracing-dist
+          path: dist/
+
+      - name: Strip non-PyPI artifacts
+        run: |
+          rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          ls -la dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

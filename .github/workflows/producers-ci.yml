@@ -19,11 +19,13 @@ on:
     branches: [main]
     paths:
       - 'producers/**'
+      - 'plugins/claude_code/**'
       - '.github/workflows/producers-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'producers/**'
+      - 'plugins/claude_code/**'
       - '.github/workflows/producers-ci.yml'
 
 concurrency:
@@ -49,10 +51,10 @@ jobs:
         run: pip install "pyink>=24.3.0" "isort>=5.0"
 
       - name: isort --check
-        run: isort --check-only src/ tests/
+        run: isort --check-only src/ tests/ scripts/
 
       - name: pyink --check
-        run: pyink --check src/ tests/
+        run: pyink --check src/ tests/ scripts/
 
   test:
     name: Producers test (Python ${{ matrix.python-version }})
@@ -91,7 +93,19 @@ jobs:
       - name: Build sdist and wheel
         run: python -m build
 
-      - name: List artifacts
+      - name: List wheel/sdist
+        run: ls -la dist/
+
+      - name: Install built wheel for plugin build
+        # Make `importlib.metadata.version` resolve correctly so the
+        # plugin manifest gets a real version stamped in, not the
+        # pyproject fallback.
+        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+
+      - name: Build Claude Code plugin artifact
+        run: python scripts/build_claude_plugin.py
+
+      - name: List plugin artifact
         run: ls -la dist/
 
       - uses: actions/upload-artifact@v4
