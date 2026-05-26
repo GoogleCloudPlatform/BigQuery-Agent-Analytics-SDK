@@ -47,8 +47,14 @@ from bigquery_agent_analytics.categorical_evaluator import parse_classify_row
 # ------------------------------------------------------------------ #
 
 
-def _make_config(include_justification=True):
-  """Builds a two-metric config for testing."""
+def _make_config(include_justification=True, **overrides):
+  """Builds a two-metric config for testing.
+
+  Forwards arbitrary keyword overrides to ``CategoricalEvaluationConfig``
+  so individual tests can set fields like ``api_concurrency``,
+  ``temperature``, or ``max_output_tokens`` without redefining the
+  metric list.
+  """
   return CategoricalEvaluationConfig(
       metrics=[
           CategoricalMetricDefinition(
@@ -85,6 +91,7 @@ def _make_config(include_justification=True):
           ),
       ],
       include_justification=include_justification,
+      **overrides,
   )
 
 
@@ -893,6 +900,69 @@ class TestClassifySessionsViaApi:
     call_args = mock_aio_models.generate_content.call_args
     prompt_sent = call_args[1]["contents"]
     assert "[truncated]" in prompt_sent
+
+  def test_runs_concurrently(self):
+    """Verify multiple sessions can be in-flight simultaneously rather than
+    running strictly one-at-a-time. Asserts max_in_flight > 1 — a direct
+    invariant that doesn't depend on wall-clock timing (which would flake
+    under CI load).
+    """
+    config = _make_config(api_concurrency=5)
+    transcripts = {f"s{i}": f"transcript_{i}" for i in range(10)}
+
+    in_flight = 0
+    max_in_flight = 0
+
+    raw_response = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+
+    async def fake_generate(*args, **kwargs):
+      nonlocal in_flight, max_in_flight
+      in_flight += 1
+      max_in_flight = max(max_in_flight, in_flight)
+      # Yield so other tasks waiting on the semaphore can enter.
+      await asyncio.sleep(0)
+      in_flight -= 1
+      resp = MagicMock()
+      resp.text = raw_response
+      return resp
+
+    # Build the client directly: _make_genai_client wraps in AsyncMock with
+    # side_effect/return_value, which doesn't compose with a custom async
+    # body needed for in-flight tracking.
+    mock_aio_models = MagicMock()
+    mock_aio_models.generate_content = fake_generate
+    mock_aio = MagicMock()
+    mock_aio.models = mock_aio_models
+    mock_client = MagicMock()
+    mock_client.aio = mock_aio
+
+    with _mock_genai_modules(mock_client):
+      results = _run(classify_sessions_via_api(transcripts, config))
+
+    assert len(results) == 10
+    # Output order matches input dict insertion order.
+    assert [r.session_id for r in results] == [f"s{i}" for i in range(10)]
+    assert max_in_flight > 1, (
+        f"Expected concurrent execution under api_concurrency=5, "
+        f"observed max_in_flight={max_in_flight}"
+    )
+
+  def test_api_concurrency_default(self):
+    """Default api_concurrency is 5, matching trace_evaluator / multi_trial."""
+    config = _make_config()
+    assert config.api_concurrency == 5
+
+  def test_api_concurrency_rejects_zero(self):
+    """api_concurrency=0 is rejected at config construction (Pydantic ge=1)
+    rather than at runtime — asyncio.Semaphore(0) would hang every task.
+    """
+    with pytest.raises(ValueError):
+      _make_config(api_concurrency=0)
 
 
 # ------------------------------------------------------------------ #
