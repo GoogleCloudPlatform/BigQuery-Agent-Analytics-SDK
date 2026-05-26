@@ -27,6 +27,9 @@ Producer modules:
 
   * ``claude_code`` — Claude Code hook adapter + ``main()`` entry.
     Console script: ``bqaa-claude-hook``.
+  * ``setup_check`` — advisory check for env vars + runtime deps.
+    Console script: ``bqaa-check-setup``. Used by the ``/bqaa-setup``
+    Claude Code slash command.
 
 OpenAI Agents SDK and Codex CLI adapters land in follow-up PRs.
 """

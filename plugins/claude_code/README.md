@@ -12,10 +12,18 @@ plugins/claude_code/
 ├── hooks/
 │   ├── common.sh            # shared hook entry (PYTHONPATH + python -m)
 │   └── <hook>.sh            # one per Claude Code hook
+├── commands/
+│   └── bqaa-setup.md        # /bqaa-setup slash command
+├── scripts/
+│   └── run_setup_check.sh   # /bqaa-setup wrapper (PYTHONPATH + python -m)
+├── MARKETPLACE.md           # submission checklist + IAM + verification
 └── vendor/                  # generated at build time (git-ignored)
-    └── bigquery_agent_analytics_tracing/
-                             # vendored package source — copied from
-                             # producers/src/ by build_claude_plugin.py
+    ├── bigquery_agent_analytics_tracing/
+    │                          # vendored package source — copied from
+    │                          # producers/src/ by build_claude_plugin.py
+    └── bigquery_agent_analytics_tracing-<version>.dist-info/
+                               # PEP 376 metadata so importlib.metadata
+                               # resolves the right version at runtime
 ```
 
 `vendor/` is never source-controlled. The build script
@@ -46,8 +54,14 @@ itself, but the Python under `BQAA_PYTHON` still needs:
   Storage Write API path; the drainer falls back to `insert_rows_json`
   when these are unavailable.
 
-A future `/bqaa-setup` slash command (planned in #234 step 5) will
-surface a single `pip install ...` line for missing deps.
+Run the `/bqaa-setup` slash command inside Claude Code to check env
+vars + runtime deps and get a copy-pasteable `pip install …` line for
+anything missing. The command is advisory only — it never mutates
+shell rc files or installs packages on your behalf. See
+[`commands/bqaa-setup.md`](commands/bqaa-setup.md).
+
+BigQuery IAM requirements and submission checklist live in
+[`MARKETPLACE.md`](MARKETPLACE.md).
 
 ## Installing the plugin
 
