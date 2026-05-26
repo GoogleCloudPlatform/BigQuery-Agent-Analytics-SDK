@@ -49,6 +49,34 @@ itself, but the Python under `BQAA_PYTHON` still needs:
 A future `/bqaa-setup` slash command (planned in #234 step 5) will
 surface a single `pip install ...` line for missing deps.
 
+## Installing the plugin
+
+Until the plugin is submitted to the Claude Code marketplace, install
+from a GitHub release tarball:
+
+```bash
+# Pick a released version from
+# https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases
+VERSION=0.1.0.dev0
+
+mkdir -p ~/.claude/plugins
+curl -L \
+  "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases/download/tracing-v${VERSION}/bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz" \
+  | tar -xz -C ~/.claude/plugins
+
+# Configure BigQuery destination + runtime deps (one-time).
+export BQAA_PROJECT_ID=your-gcp-project
+export BQAA_DATASET=agent_analytics
+pip install google-cloud-bigquery               # always
+pip install google-cloud-bigquery-storage pyarrow  # Storage Write path
+```
+
+Then point Claude Code at the unpacked plugin directory per the
+[Claude Code plugins docs](https://docs.claude.com/en/docs/claude-code/plugins).
+
+Marketplace submission is tracked in
+[#234 step 5](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/234).
+
 ## Building the artifact
 
 ```bash
@@ -58,4 +86,7 @@ python scripts/build_claude_plugin.py
 # → producers/dist/bigquery-agent-analytics-tracing-claude-code-X.Y.Z.tar.gz
 ```
 
-CI runs the same script and uploads the tarball as a workflow artifact.
+CI builds the same tarball on every release tag (see
+[producers/RELEASING.md](../../producers/RELEASING.md)). On regular PRs
+the plugin tarball is uploaded as a workflow artifact via the
+`producers-ci.yml` `build` job.
