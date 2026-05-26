@@ -19,7 +19,7 @@ The codelab is self-contained from scratch. You will create the BigQuery dataset
 
 - A BigQuery property graph that describes a generic agent decision flow (Decision Request → Decision Option → Decision Outcome).
 - A populated `agent_events` table with a small synthetic event corpus you can re-generate.
-- A working `bqaa-materialize-window` run — both in the default `AI.GENERATE` mode and in zero-LLM `--extraction-mode=compiled-only` mode. Cron this command from your scheduler of choice (Cloud Build, Workflows, external cron) to keep the graph fresh.
+- A working `bqaa-materialize-window` run that fills the graph from those events in the default `AI.GENERATE` extraction mode, plus a tour of the zero-LLM `--extraction-mode=compiled-only` audited path (which the migration v5 demo exercises end-to-end against a real reference-extractor module). Cron this command from your scheduler of choice (Cloud Build, Workflows, external cron) to keep the graph fresh.
 - A one-shot backfill against a historical window using `--backfill --from / --to --state-key-suffix` — the same code path the cron uses, isolated from the live high-water mark.
 - A Cloud Run Job + Cloud Scheduler trigger walked end-to-end against the SDK's bundled migration v5 demo artifacts, deployed with the production-shape defaults shipped in 0.3.2: **split runtime + scheduler-caller service accounts, tunable `--max-retries`, and an opt-in orphan-session watchdog**. (The deploy script bundles the migration v5 artifacts today; for the codelab's custom graph you'll cron `materialize-window` directly. Adapting the deploy script to accept arbitrary artifact paths is tracked as an open follow-up.)
 - The same deploy as a Terraform module — the IaC mirror of the bash deploy, same six resources, behind `terraform plan` / drift detection.
@@ -75,7 +75,7 @@ gcloud services enable \
     --project="$PROJECT_ID"
 ```
 
-`aiplatform.googleapis.com` is required because the SDK's default extraction path calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The compiled-extractor path that ships with the SDK skips this dependency for known event shapes, but the demo here uses the AI.GENERATE fallback so the codelab works without any custom extractor code.
+`aiplatform.googleapis.com` is required because the SDK's default extraction path calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The reference-extractor path that ships with the SDK skips this dependency for known event shapes, but the demo here uses the `AI.GENERATE` fallback so the codelab works without any custom extractor code.
 
 ### Create two BigQuery datasets
 
@@ -301,14 +301,17 @@ relationships:
     to_columns:   [outcome_id]
 ```
 
-`from_columns` accepts two shapes. The list shape above (`[request_id]`) works when the foreign-key column on the edge has the same name as the primary-key column on the source entity. When the FK column has a different name — or when the edge is a self-edge (a relationship from an entity type back to itself) — use the dict shape so the materializer can disambiguate:
+`from_columns` (and `to_columns`) accept two entry shapes inside the list. The list-of-strings shape above (`[request_id]`) works when the foreign-key column on the edge has the same name as the primary-key property on the source entity. When the FK column has a different name — or when the edge is a self-edge (a relationship from an entity type back to itself, so both endpoints would otherwise collide on the same column name) — use the list-of-single-key-dicts shape so the materializer can disambiguate:
 
 ```yaml
-# Dict shape — FK column on the edge -> PK column on the source entity:
-from_columns: {parent_request_id: request_id}
+# List of {edge_column: target_PK_property} single-key dicts.
+# Use this when the edge column name differs from the source
+# entity's PK property, or for any self-edge.
+from_columns: [{parent_request_id: request_id}]
+to_columns:   [{child_request_id:  request_id}]
 ```
 
-The dict shape is required for self-edges and recommended whenever the FK column doesn't share the source PK's name. For this codelab's binding both columns are called `request_id`, so the list shape works.
+The outer list is required (`from_columns` is always a list, even for a single key). For composite primary keys, give one single-key dict entry per key column. The dict shape is required for self-edges and recommended whenever the FK column doesn't share the source PK property's name. For this codelab's binding both edge columns share the source PK's name, so the list-of-strings shape works as-is.
 
 ### Render the placeholders in binding.yaml
 
@@ -561,7 +564,7 @@ You should see five rows. If you see zero, check that the local run reported `se
 
 ### A note on the zero-LLM extraction path
 
-The local run above uses the default extractor, which calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The SDK also ships a `--extraction-mode=compiled-only` flag that swaps in a **compiled reference extractor** — deterministic Python, no Vertex AI dependency, the audited code path. Production deployments that need to certify their data path to a regulator typically run `--extraction-mode=compiled-only` and remove `roles/aiplatform.user` from the runtime service account entirely.
+The local run above uses the default extractor, which calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The SDK also ships a `--extraction-mode=compiled-only` flag that swaps in a **reference-extractor module** — deterministic Python keyed to your ontology, no Vertex AI dependency, the audited code path. Production deployments that need to certify their data path to a regulator typically run `--extraction-mode=compiled-only` and remove `roles/aiplatform.user` from the runtime service account entirely. ("Compiled" here describes the extraction *mode*; it does not mean fingerprint-stable compiled bundles — the `--bundles-root` path for compiled bundles is a separate, orthogonal surface.)
 
 Running compiled-only mode requires a `reference_extractor.py` keyed to your ontology. The SDK's migration v5 example ships a reference extractor — that's what the live notebook smoke tests run against. For your own graph you author one extractor module that maps event-content shape to entity-and-relationship dicts; the materializer wires the rest. The codelab's custom DecisionRequest graph doesn't ship a reference extractor, so the codelab stays on the `AI.GENERATE` default. When you're ready, the migration v5 reference extractor at [`examples/migration_v5/reference_extractor.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/migration_v5/reference_extractor.py) is the template to copy from.
 
