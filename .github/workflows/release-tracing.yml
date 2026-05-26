@@ -166,7 +166,12 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
-    needs: [verify, build]
+    # Depend on github-release too: the plugin tarball ships ONLY as a
+    # GitHub release asset, so if that step fails we must not let the
+    # wheel/sdist reach PyPI. Otherwise the "wheel and plugin always
+    # go together" invariant from RELEASING.md breaks silently.
+    # publish-pypi inherits the guard transitively via needs: publish-testpypi.
+    needs: [verify, build, github-release]
     environment:
       name: testpypi
       url: https://test.pypi.org/p/bigquery-agent-analytics-tracing
