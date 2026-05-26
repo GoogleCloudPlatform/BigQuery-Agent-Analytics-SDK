@@ -18,7 +18,7 @@ This codelab walks **two paths** side by side so the boundary is clear before yo
 - **Custom graph path** (most of the codelab) — you author the graph contract (table DDL, property-graph DDL, ontology, binding) for a small DecisionRequest decision flow, seed events, and run `bqaa-materialize-window` directly. Cron this same command from Cloud Build, Cloud Workflows, or any external scheduler to keep your own graph fresh.
 - **Production-deploy shape** (one section near the end) — the SDK's `deploy_cloud_run_job.sh` is demonstrated against the **bundled migration v5 demo artifacts** (not the codelab's custom graph; the deploy script doesn't yet accept arbitrary artifact paths, tracked as an open follow-up). The point of running the deploy is to observe the production shape end-to-end: split service accounts, retries, structured JSON logs, the state-table audit trail.
 
-The codelab is self-contained from scratch. You will create the BigQuery datasets, the property graph, the demo events, run materialization (custom graph) and the production deploy (bundled artifacts), and the query — all in one Google Cloud project. At the end you tear it all down with three commands.
+The codelab is self-contained from scratch. You will create the BigQuery datasets, the property graph, the demo events, run materialization (custom graph) and the production deploy (bundled artifacts), and the query — all in one Google Cloud project. At the end the cleanup section tears down both paths (the bash deploy uses several `gcloud`/`bq` commands; the Terraform path uses one `terraform destroy`).
 
 ### What you'll build
 
@@ -685,7 +685,7 @@ The fields to know:
 - `jsonPayload.ok` — `true` on success, `false` on any failure mode.
 - `jsonPayload.sessions_materialized` — how many sessions wrote rows this window.
 - `jsonPayload.rows_materialized` — per-table row counts.
-- `jsonPayload.failures[].error_code` — `empty_extraction` (AI/IAM issue) or `materialization_failed` (schema/write-perm issue).
+- `jsonPayload.failures[].error_code` — `empty_extraction` (AI/IAM issue), `materialization_failed` (schema/write-perm issue), or — when `--max-session-age-hours` is enabled — `session_orphaned` (session exceeded the watchdog age cap; emitted only when the watchdog is on).
 
 A single Cloud Monitoring alert on `jsonPayload.ok = false` is the recommended posture. The `error_code` field tells the operator which Google Cloud configuration to inspect without log digging.
 
