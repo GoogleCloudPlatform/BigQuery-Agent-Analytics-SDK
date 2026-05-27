@@ -256,46 +256,6 @@ The local run above uses the default extractor, which calls BigQuery's `AI.GENER
 
 Production deployments that need to certify their data path to a regulator typically run `--extraction-mode=compiled-only` and remove `roles/aiplatform.user` from the runtime service account entirely. The reference extractor is a small Python module that maps event-content shape to entity-and-relationship dicts; the materializer wires the rest. The codelab stays on the `AI.GENERATE` default.
 
-### Backfill a Historical Window
-
-The same code path the cron uses can also be pointed at a fixed historical window: useful when events arrived during an outage, when a binding change requires a one-shot re-extraction, or when an audit team asks for a specific quarter. Backfill mode writes its high-water mark to an isolated state-table namespace (controlled by `--state-key-suffix`) so it never disturbs the live cron's checkpoint.
-
-Re-seed a few events to give the backfill something to find, then run a backfill against the last 48 hours:
-
-```bash
-python seed_events.py \
-    --project-id "$PROJECT_ID" \
-    --dataset-id "$DATASET" \
-    --sessions 3
-
-FROM=$(date -u -d "48 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
-       || date -u -v-48H +"%Y-%m-%dT%H:%M:%SZ")
-TO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-bqaa-materialize-window \
-    --project-id "$PROJECT_ID" \
-    --dataset-id "$DATASET" \
-    --ontology ~/bqaa-codelab/ontology.yaml \
-    --binding ~/bqaa-codelab/binding.rendered.yaml \
-    --lookback-hours 1 \
-    --backfill --from "$FROM" --to "$TO" \
-    --state-key-suffix codelab_backfill_demo \
-    --format json
-```
-
-(The `date -u -d ...` form is GNU `date` on Linux and Cloud Shell; the `date -u -v-48H` form is BSD `date` on macOS. The `||` falls back to the macOS form if the GNU form fails.)
-
-You should see a JSON report with the backfill window's `sessions_materialized` count. Inspect the state table to confirm the backfill row landed under its own `state_key`:
-
-```bash
-bq query --use_legacy_sql=false \
-    "SELECT mode, scan_start, scan_end, sessions_materialized, ok \
-     FROM \`$PROJECT_ID.$DATASET._bqaa_materialization_state\` \
-     ORDER BY run_started_at DESC LIMIT 5"
-```
-
-You should see at least two rows: a `mode = 'steady'` row from the earlier scan and a `mode = 'backfill'` row from this run. The live cron's high-water mark sits under its own `state_key` and is untouched. That property lets backfill run concurrently with the production cron.
-
 ## Phase 4: Query the Decision Trace
 Duration: 0:05
 
@@ -337,6 +297,45 @@ Once your project is on the BigQuery Conversational Analytics Preview, you can r
 
 Conversational Analytics resolves the question against the graph and returns a structured answer card. See the [Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) for setup.
 
+## Advanced: Backfill a Historical Window
+Duration: 0:04
+
+Backfill mode is the operations workflow you reach for when events arrived during an outage, when a binding change requires a one-shot re-extraction, or when an audit team asks for a specific historical quarter. The same code path the scheduled cron uses can be pointed at any fixed `[from, to)` window, and the run writes its high-water mark to an isolated state-table namespace (controlled by `--state-key-suffix`) so it never disturbs the live cron's checkpoint.
+
+For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The backfill discovers zero sessions to materialize, which lets you demonstrate the state-table isolation property without re-processing the sessions you already materialized in Phase 3. Production backfills target windows where new events actually arrived; the empty-window run shows the audit-trail behavior in a single command.
+
+```bash
+FROM=$(date -u -d "9 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+       || date -u -v-9H +"%Y-%m-%dT%H:%M:%SZ")
+TO=$(date -u -d "8 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+     || date -u -v-8H +"%Y-%m-%dT%H:%M:%SZ")
+
+bqaa-materialize-window \
+    --project-id "$PROJECT_ID" \
+    --dataset-id "$DATASET" \
+    --ontology ~/bqaa-codelab/ontology.yaml \
+    --binding ~/bqaa-codelab/binding.rendered.yaml \
+    --lookback-hours 1 \
+    --backfill --from "$FROM" --to "$TO" \
+    --state-key-suffix codelab_backfill_demo \
+    --format json
+```
+
+(The `date -u -d ...` form is GNU `date` on Linux and Cloud Shell; the `date -u -v-9H` form is BSD `date` on macOS. The `||` falls back to the macOS form if the GNU form fails.)
+
+You should see a JSON report with `"sessions_materialized": 0` (because the backfill window does not contain any of the synthetic events you seeded in Phase 2). The interesting result is the new row in the state table:
+
+```bash
+bq query --use_legacy_sql=false \
+    "SELECT mode, scan_start, scan_end, sessions_materialized, ok \
+     FROM \`$PROJECT_ID.$DATASET._bqaa_materialization_state\` \
+     ORDER BY run_started_at DESC LIMIT 5"
+```
+
+You should see at least two rows: a `mode = 'steady'` row from the Phase 3 materialization and a `mode = 'backfill'` row from this run. The two rows have different `state_key` values (the `--state-key-suffix` you passed changes the hash input), so the backfill checkpoint sits in its own namespace and the live cron's high-water mark in `state_key = 'steady'` stays untouched. That isolation property is what lets a backfill run concurrently with the production cron without interference.
+
+In a real outage-recovery scenario you would point `--from` and `--to` at the window where the missed events actually landed, and the backfill would materialize those sessions. The state-table behavior you just observed is the audit trail an operator follows to confirm the catch-up ran.
+
 ## Production-Grade Capabilities
 Duration: 0:03
 
@@ -353,7 +352,7 @@ The BigQuery Agent Analytics SDK includes several features designed to support e
 
 * **Deterministic parsing** (`--extraction-mode compiled-only`). Disables LLM calls entirely and runs a reference-extractor module. Required by audits that must certify the data path; removes the Vertex AI dependency.
 * **Orphan-session watchdog** (`--max-session-age-hours`). Sessions older than the cap that have not terminated are flagged as orphaned and written to the state table with `mode = 'orphan_scan'`, so an operator can drain stale state without the cron silently re-pulling broken sessions.
-* **Backfill mode** (`--backfill --from / --to --state-key-suffix`). Re-materializes a fixed historical window without affecting the active schedule's progress markers. You exercised this in Phase 3.
+* **Backfill mode** (`--backfill --from / --to --state-key-suffix`). Re-materializes a fixed historical window without affecting the active schedule's progress markers. You exercised the audit-trail behavior in the *Advanced: Backfill a Historical Window* section above.
 * **Per-window batch cap** (`--max-sessions`). Caps the number of sessions processed per scan to handle hostile event spikes.
 
 For scheduled execution, the SDK ships a deploy script and a Terraform module that wrap `bqaa-materialize-window` as a Cloud Run Job triggered by Cloud Scheduler. Both create the same six resources (graph dataset, runtime service account, scheduler-caller service account, IAM bindings, Cloud Run Job, Cloud Scheduler trigger) with least-privilege defaults. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, the recommended schedules, and the Cloud Monitoring alert queries.

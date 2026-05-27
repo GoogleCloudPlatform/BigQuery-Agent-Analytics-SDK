@@ -18,10 +18,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 import json
 import random
 import uuid
-from datetime import datetime, timedelta, timezone
 
 from google.cloud import bigquery
 
@@ -76,39 +78,74 @@ def _decision_session(now: datetime) -> list[dict]:
   topic = random.choice(topics)
   rows: list[dict] = []
 
-  rows.append(_row("TOOL_COMPLETED", session_id,
-                   {"tool": "submit_request",
-                    "result": {"request_id": request_id,
-                               "request_text": f"Should we {topic}?"}},
-                   now))
+  rows.append(
+      _row(
+          "TOOL_COMPLETED",
+          session_id,
+          {
+              "tool": "submit_request",
+              "result": {
+                  "request_id": request_id,
+                  "request_text": f"Should we {topic}?",
+              },
+          },
+          now,
+      )
+  )
 
   options = [
-      {"option_id": f"opt-{uuid.uuid4().hex[:5]}",
-       "option_label": label,
-       "confidence": round(random.uniform(0.1, 0.95), 2)}
+      {
+          "option_id": f"opt-{uuid.uuid4().hex[:5]}",
+          "option_label": label,
+          "confidence": round(random.uniform(0.1, 0.95), 2),
+      }
       for label in ("yes", "no", "defer")
   ]
   for i, opt in enumerate(options):
-    rows.append(_row("TOOL_COMPLETED", session_id,
-                     {"tool": "evaluate_option",
-                      "result": {"request_id": request_id, **opt}},
-                     now + timedelta(seconds=i + 1)))
+    rows.append(
+        _row(
+            "TOOL_COMPLETED",
+            session_id,
+            {
+                "tool": "evaluate_option",
+                "result": {"request_id": request_id, **opt},
+            },
+            now + timedelta(seconds=i + 1),
+        )
+    )
 
   selected = max(options, key=lambda o: o["confidence"])
   outcome_id = f"out-{uuid.uuid4().hex[:6]}"
-  rationale = (f"Picked '{selected['option_label']}' "
-               f"(confidence {selected['confidence']:.2f}) over "
-               f"the {len(options)-1} alternatives.")
-  rows.append(_row("TOOL_COMPLETED", session_id,
-                   {"tool": "commit_outcome",
-                    "result": {"request_id": request_id,
-                               "outcome_id": outcome_id,
-                               "status": "committed",
-                               "rationale": rationale}},
-                   now + timedelta(seconds=5)))
+  rationale = (
+      f"Picked '{selected['option_label']}' "
+      f"(confidence {selected['confidence']:.2f}) over "
+      f"the {len(options)-1} alternatives."
+  )
+  rows.append(
+      _row(
+          "TOOL_COMPLETED",
+          session_id,
+          {
+              "tool": "commit_outcome",
+              "result": {
+                  "request_id": request_id,
+                  "outcome_id": outcome_id,
+                  "status": "committed",
+                  "rationale": rationale,
+              },
+          },
+          now + timedelta(seconds=5),
+      )
+  )
 
-  rows.append(_row("AGENT_COMPLETED", session_id, {"final": True},
-                   now + timedelta(seconds=6)))
+  rows.append(
+      _row(
+          "AGENT_COMPLETED",
+          session_id,
+          {"final": True},
+          now + timedelta(seconds=6),
+      )
+  )
   return rows
 
 
@@ -134,8 +171,10 @@ def main() -> None:
   errors = client.insert_rows_json(table_ref, rows)
   if errors:
     raise RuntimeError(f"Insert errors: {errors}")
-  print(f"Inserted {len(rows)} events across {args.sessions} sessions "
-        f"into {table_ref}")
+  print(
+      f"Inserted {len(rows)} events across {args.sessions} sessions "
+      f"into {table_ref}"
+  )
 
 
 if __name__ == "__main__":
