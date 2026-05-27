@@ -1613,6 +1613,49 @@ def run_eval(args):
     else:
       logger.warning("No trajectories fetched (BQ may not be configured)")
 
+  # Single-session mode: always fetch trajectory from BQ
+  if args.session and not trajectories and not conversations_file:
+    trajectories = _fetch_session_traces([args.session], max_sessions=1)
+    if trajectories:
+      for sid, trace_obj in trajectories.items():
+        ctx = result["resolved_map"].get(sid)
+        if ctx and ctx.get("answered_by") == "unknown":
+          ctx["answered_by"] = get_responding_agent(trace_obj)
+
+  # Print execution trace to console for single-session mode
+  if args.session and trajectories:
+    trace_obj = trajectories.get(args.session)
+    if trace_obj:
+      hr = "─" * 70
+      print(f"\n{'=' * 70}")
+      print("EXECUTION TRACE")
+      print(f"{'=' * 70}")
+      print(_render_trace(trace_obj))
+      ctx = result["resolved_map"].get(args.session, {})
+      sub_trajs = ctx.get("sub_trajectories", [])
+      conversation = ctx.get("conversation", [])
+      if sub_trajs and conversation:
+        segments = _segment_trace_by_turns(
+            trace_obj, conversation, sub_trajs,
+        )
+        if segments:
+          print(f"\n{hr}")
+          print("  SUB-TRAJECTORY SEGMENTATION")
+          print(hr)
+          for seg in segments:
+            icon = (
+                "✅" if seg["outcome"] in ("correct", "recovered")
+                else "❌"
+            )
+            print(
+                f"\n  {icon} {seg['label']} "
+                f"(turns {seg['start_turn']}-{seg['end_turn']}) "
+                f"→ {seg['outcome']}"
+            )
+            for line in seg["trace"].split("\n"):
+              print(f"  {line}")
+      print(f"{'=' * 70}\n")
+
   report_path = None
   md_dir = None
   if args.output_json and args.output_json != "-":
