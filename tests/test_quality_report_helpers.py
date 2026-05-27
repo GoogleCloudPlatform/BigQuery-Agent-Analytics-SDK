@@ -62,9 +62,10 @@ class _FakeTrace:
 
 class _FakeMetric:
 
-  def __init__(self, metric_name, category):
+  def __init__(self, metric_name, category, parse_error=False):
     self.metric_name = metric_name
     self.category = category
+    self.parse_error = parse_error
 
 
 class _FakeSession:
@@ -655,6 +656,18 @@ class TestCountTraceMetrics:
     _, tool_calls = _count_trace_metrics(trace)
     assert tool_calls == 1
 
+  def test_tool_error_counted(self):
+    trace = _FakeTrace(
+        [
+            _FakeSpan("TOOL_STARTING", {"tool": "search"}),
+            _FakeSpan("TOOL_ERROR", {"error": "timeout"}),
+            _FakeSpan("TOOL_STARTING", {"tool": "lookup"}),
+            _FakeSpan("TOOL_COMPLETED", {"tool": "lookup"}),
+        ]
+    )
+    _, tool_calls = _count_trace_metrics(trace)
+    assert tool_calls == 2
+
 
 # ================================================================== #
 # _compute_dimension_averages                                         #
@@ -726,6 +739,34 @@ class TestComputeDimensionAverages:
     # Non-dimension metrics should not contribute
     assert avgs["correctness"] == 0
 
+  def test_parse_error_skipped(self):
+    sessions = [
+        _FakeSession(
+            "s1",
+            [
+                _FakeMetric("correctness", "correct"),
+                _FakeMetric("correctness", "incorrect", parse_error=True),
+            ],
+        ),
+    ]
+    report = _FakeReport(sessions)
+    avgs = _compute_dimension_averages(report)
+    assert avgs["correctness"] == 2.0
+
+  def test_unknown_category_skipped(self):
+    sessions = [
+        _FakeSession(
+            "s1",
+            [
+                _FakeMetric("correctness", "correct"),
+                _FakeMetric("correctness", "bogus_value"),
+            ],
+        ),
+    ]
+    report = _FakeReport(sessions)
+    avgs = _compute_dimension_averages(report)
+    assert avgs["correctness"] == 2.0
+
 
 # ================================================================== #
 # _compute_multiturn_stats                                            #
@@ -745,7 +786,12 @@ class TestComputeMultiturnStats:
     assert stats["multi_turn_sessions"] == 1
 
   def test_empty_map(self):
-    assert _compute_multiturn_stats({}) == {}
+    result = _compute_multiturn_stats({})
+    assert result == {
+        "avg_user_turns": 0,
+        "avg_tool_calls": 0,
+        "multi_turn_sessions": 0,
+    }
 
   def test_all_single_turn(self):
     resolved = {

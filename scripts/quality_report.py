@@ -552,7 +552,7 @@ def _count_trace_metrics(trace):
   for span in trace.spans:
     if span.event_type == "USER_MESSAGE_RECEIVED":
       user_turns += 1
-    elif span.event_type == "TOOL_COMPLETED":
+    elif span.event_type in ("TOOL_COMPLETED", "TOOL_ERROR"):
       tool_calls += 1
   return user_turns, tool_calls
 
@@ -1767,7 +1767,26 @@ _DIMENSION_SCORES = {
     },
 }
 
-_DIMENSION_NAMES = list(_DIMENSION_SCORES.keys())
+_DIMENSION_NAMES = list(_DIMENSION_SCORES.keys())  # order matters for rendering
+
+_PRIMARY_METRICS = {"response_usefulness", "task_grounding"}
+
+_SCORECARD_ICONS = {
+    "correct": "✅",
+    "mostly_correct": "⚠️",
+    "incorrect": "❌",
+    "proper": "✅",
+    "partial": "⚠️",
+    "none": "❌",
+    "specific": "✅",
+    "somewhat_specific": "⚠️",
+    "vague": "❌",
+    "compliant": "✅",
+    "partially_compliant": "⚠️",
+    "non_compliant": "❌",
+    "clarification_needed": "⚠️",
+    "correction_needed": "❌",
+}
 
 # Maps dimension → (lowest category, section title) for "Low X" report sections.
 _DIMENSION_LOW_CATEGORIES = {
@@ -1792,8 +1811,9 @@ def _compute_dimension_averages(report):
     for mr in sr.metrics:
       if mr.metric_name in _DIMENSION_SCORES:
         score_map = _DIMENSION_SCORES[mr.metric_name]
-        score = score_map.get(mr.category, 0)
-        dim_totals[mr.metric_name].append(score)
+        if mr.parse_error or mr.category not in score_map:
+          continue
+        dim_totals[mr.metric_name].append(score_map[mr.category])
   return {
       d: round(sum(scores) / len(scores), 2) if scores else 0
       for d, scores in dim_totals.items()
@@ -1808,7 +1828,11 @@ def _compute_multiturn_stats(resolved_map):
   verifications = [r.get("verifications", 0) for r in resolved_map.values()]
   total = len(user_turns)
   if not total:
-    return {}
+    return {
+        "avg_user_turns": 0,
+        "avg_tool_calls": 0,
+        "multi_turn_sessions": 0,
+    }
   mt_count = sum(1 for t in user_turns if t > 1)
   stats = {
       "avg_user_turns": round(sum(user_turns) / total, 1),
@@ -1876,7 +1900,7 @@ def _print_eval_results(
 
       # Primary metrics with justifications
       for mr in sr.metrics:
-        if mr.metric_name not in ("response_usefulness", "task_grounding"):
+        if mr.metric_name not in _PRIMARY_METRICS:
           continue
         mr_label = _category_label(mr.category)
         if mr.parse_error:
@@ -1892,7 +1916,7 @@ def _print_eval_results(
       # Compact scorecard for quality dimensions
       dim_parts = []
       for mr in sr.metrics:
-        if mr.metric_name in ("response_usefulness", "task_grounding"):
+        if mr.metric_name in _PRIMARY_METRICS:
           continue
         display_name = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
         mr_label = _category_label(mr.category)
@@ -2055,7 +2079,7 @@ def _print_eval_results(
 
   print("\n  Category Distributions:")
   for metric_name, dist in report.category_distributions.items():
-    if metric_name not in ("response_usefulness", "task_grounding"):
+    if metric_name not in _PRIMARY_METRICS:
       continue
     print(f"\n  [{metric_name}]")
     dist_total = sum(dist.values())
@@ -2378,28 +2402,12 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
 
 def _md_dimension_scorecard(sr):
   """Build a compact one-line scorecard for the 5 quality dimensions."""
-  _SCORECARD_ICONS = {
-      "correct": "\u2705",
-      "mostly_correct": "\u26a0\ufe0f",
-      "incorrect": "\u274c",
-      "proper": "\u2705",
-      "partial": "\u26a0\ufe0f",
-      "none": "\u274c",
-      "specific": "\u2705",
-      "somewhat_specific": "\u26a0\ufe0f",
-      "vague": "\u274c",
-      "compliant": "\u2705",
-      "partially_compliant": "\u26a0\ufe0f",
-      "non_compliant": "\u274c",
-      "clarification_needed": "\u26a0\ufe0f",
-      "correction_needed": "\u274c",
-  }
   parts = []
   for mr in sr.metrics:
-    if mr.metric_name in ("response_usefulness", "task_grounding"):
+    if mr.metric_name in _PRIMARY_METRICS:
       continue
     label = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
-    icon = _SCORECARD_ICONS.get(mr.category, "\u2705")
+    icon = _SCORECARD_ICONS.get(mr.category, "\u2753")
     parts.append(f"{label} {icon}")
   return " | ".join(parts)
 
@@ -2458,7 +2466,7 @@ def _md_write_session_section(
     w(f"- **Response:** {r_display}")
 
     for mr in sr.metrics:
-      if mr.metric_name not in ("response_usefulness", "task_grounding"):
+      if mr.metric_name not in _PRIMARY_METRICS:
         continue
       label = _category_label(mr.category)
       display = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
@@ -2868,7 +2876,6 @@ def _write_md_report(
     sessions = _md_find_low_dimension_sessions(report, dim, low_cat)
     if sessions:
       low_dims[dim] = sessions
-  _PRIMARY_METRICS = {"response_usefulness", "task_grounding"}
 
   # --- TOC ---
   w("# Quality Evaluation Report")
