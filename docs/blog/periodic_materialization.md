@@ -9,7 +9,7 @@ As autonomous AI agents take on more operational responsibilities—such as eval
 
 While capturing raw agent event logs is a straightforward first step, querying those logs to reconstruct a complex decision path can be difficult and time-consuming. Traditionally, analyzing these relationships required exporting log data into external, specialized graph databases via complex ETL pipelines.
 
-To simplify this process, we are introducing scheduled, native graph materialization in BigQuery. Using the new `bqaa-materialize-window` command in the BigQuery Agent Analytics SDK, you can continuously convert agent event logs into an active [BigQuery property graph](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-query-language)—without setting up a separate database or leaving your BigQuery environment.
+To simplify this process, we are introducing scheduled, native graph materialization in BigQuery. Using the new `bqaa context-graph` command in the BigQuery Agent Analytics SDK, you can continuously convert agent event logs into an active [BigQuery property graph](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-query-language)—without setting up a separate database or leaving your BigQuery environment.
 
 ---
 
@@ -63,7 +63,7 @@ EDGE TABLES (
 
 ### 3\. Executing the Materializer
 
-To keep the graph updated, you run the `bqaa-materialize-window` CLI command on a schedule (e.g., every few hours). The SDK provides a deployment script to set this up as a Cloud Run Job triggered by Cloud Scheduler.
+To keep the graph updated, you run the `bqaa context-graph` CLI command on a schedule (e.g., every few hours). The SDK provides a deployment script to set this up as a Cloud Run Job triggered by Cloud Scheduler.
 
 During each run, the materializer:
 

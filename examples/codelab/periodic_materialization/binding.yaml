@@ -4,7 +4,7 @@
 # BigQuery tables and columns. Paired with ontology.yaml
 # and property_graph.sql.
 #
-# Before passing this file to bqaa-materialize-window, render
+# Before passing this file to bqaa context-graph, render
 # the shell placeholders with envsubst:
 #   envsubst < binding.yaml > binding.yaml.tmp && mv binding.yaml.tmp binding.yaml
 #

@@ -51,6 +51,33 @@ app = typer.Typer(
     add_completion=False,
 )
 
+# Product-facing CLI surface. Wraps the same handlers that ``bq-agent-sdk``
+# exposes under their implementation-shaped names, but presents them with
+# product-aligned vocabulary (``context-graph`` for the materialization
+# pass, etc.). New customer-facing commands should be added here.
+bqaa_app = typer.Typer(
+    name="bqaa",
+    help=(
+        "BigQuery Agent Analytics — product-facing CLI surface for building"
+        " and refreshing the BigQuery context graph that traces your AI"
+        " agent's decisions."
+    ),
+    add_completion=False,
+    no_args_is_help=True,
+)
+
+
+@bqaa_app.callback()
+def _bqaa_callback() -> None:
+  """BigQuery Agent Analytics — product-facing CLI.
+
+  The ``@callback`` keeps Typer from auto-promoting a single
+  subcommand's options to the top level. Without it, ``bqaa --help``
+  would show the ``context-graph`` flags directly instead of the
+  subcommand list.
+  """
+  return None
+
 
 # ------------------------------------------------------------------ #
 # Shared options                                                       #
@@ -1997,29 +2024,66 @@ def materialize_window(
     raise typer.Exit(code=2)
 
 
+# Register the same ``materialize_window`` callback as the
+# ``context-graph`` subcommand on the product-facing ``bqaa`` app.
+# Both ``bq-agent-sdk materialize-window`` and ``bqaa context-graph``
+# now reach the identical implementation. The latter is the
+# product-facing name; the former is preserved for backward
+# compatibility with the internal developer workflow.
+bqaa_app.command(
+    "context-graph",
+    help=(
+        "Build or refresh the BigQuery context graph from agent events."
+        " Scans the configured event window, extracts entities and"
+        " relationships per session, and materializes the graph tables."
+    ),
+)(materialize_window)
+
+
 def main() -> None:
   """Entry point for ``bq-agent-sdk``."""
   app()
 
 
+def bqaa_main() -> None:
+  """Entry point for the product-facing ``bqaa`` console script."""
+  bqaa_app()
+
+
+_DEPRECATION_NOTICE = (
+    "DeprecationWarning: 'bqaa-materialize-window' is deprecated and will"
+    " be removed in a future release. Use 'bqaa context-graph' with the"
+    " same flags instead."
+)
+
+
+def _print_deprecation_warning() -> None:
+  """Print the ``bqaa-materialize-window`` deprecation notice to stderr.
+
+  Extracted from ``_materialize_window_entry`` for testability.
+  """
+  print(_DEPRECATION_NOTICE, file=sys.stderr)
+
+
 def _materialize_window_entry() -> None:
-  """Entry point for the standalone ``bqaa-materialize-window``
+  """Deprecated entry point for the standalone ``bqaa-materialize-window``
   console script.
+
+  Prints a one-line deprecation notice to stderr, then invokes the same
+  handler the ``bqaa context-graph`` subcommand uses. Behavior is
+  otherwise unchanged so existing deploy scripts, Terraform modules,
+  and CI pipelines that already shell out to ``bqaa-materialize-window``
+  keep working through the deprecation window.
 
   Builds a Click command directly from the ``materialize_window``
   callback so ``--help`` renders as
   ``Usage: bqaa-materialize-window [OPTIONS]`` — collapsed, no
-  nested subcommand. ``typer.run`` would re-register the function
-  as a subcommand named ``materialize-window``, producing the
-  confusing
-  ``Usage: bqaa-materialize-window materialize-window [OPTIONS]``.
-  The function body is the same one registered on the main ``app``
-  as the ``materialize-window`` subcommand; both call paths share
-  the implementation.
+  nested subcommand.
   """
   from typer.main import get_command_from_info
   from typer.models import CommandInfo
 
+  _print_deprecation_warning()
   info = CommandInfo(name=None, callback=materialize_window)
   click_cmd = get_command_from_info(
       info, pretty_exceptions_short=True, rich_markup_mode=None

@@ -1,4 +1,4 @@
-summary: Build a queryable BigQuery property graph of your AI agent's decisions. You will apply a graph schema to a BigQuery dataset, seed it with sample agent events, run the bqaa-materialize-window CLI to extract a decision graph from those events, and query the result with Graph Query Language (GQL) to trace any decision end-to-end.
+summary: Build a queryable BigQuery property graph of your AI agent's decisions. You will apply a graph schema to a BigQuery dataset, seed it with sample agent events, run the bqaa context-graph CLI to extract a decision graph from those events, and query the result with Graph Query Language (GQL) to trace any decision end-to-end.
 id: bqaa-periodic-materialization
 categories: bigquery,adk,agents
 tags: bigquery,adk,bigquery-agent-analytics,cloud-run,cloud-scheduler,property-graph,gql
@@ -21,7 +21,7 @@ This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event 
 
 * A BigQuery property graph that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
 * A populated `agent_events` table with a synthetic event corpus.
-* A working `bqaa-materialize-window` run that fills the graph from those events.
+* A working `bqaa context-graph` run that fills the graph from those events.
 * A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
 * An audit-style GQL query that traces a single decision end-to-end.
 
@@ -29,7 +29,7 @@ This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event 
 
 * How the BigQuery Agent Analytics Plugin writes to `agent_events`.
 * How a property graph is composed from a small set of declarative artifacts (table DDL, property-graph DDL, ontology, binding).
-* How to run `bqaa-materialize-window` against a property graph.
+* How to run `bqaa context-graph` against a property graph.
 * How to query a BigQuery property graph in GQL.
 * The production-grade capabilities the SDK supports for enterprise deployments.
 
@@ -142,10 +142,12 @@ Verify the install:
 
 <!-- colab:code bash -->
 ```bash
-bqaa-materialize-window --help | head -8
+bqaa context-graph --help | head -8
 ```
 
 You should see the CLI banner.
+
+> 💡 **Migrating from `bqaa-materialize-window`?** The old standalone command still works and accepts the same flags — it now prints a one-line deprecation notice on stderr and forwards to the same handler. Existing scripts and Cloud Run Jobs keep running while you migrate.
 
 ### Authenticate
 
@@ -236,7 +238,7 @@ cd ~/bqaa-codelab
 envsubst < binding.yaml > binding.rendered.yaml
 ```
 
-After this, `binding.rendered.yaml` contains your real project ID and dataset name instead of the `${...}` markers. If you skip this step, `bqaa-materialize-window` validates against literal `${PROJECT_ID}` text and fails closed.
+After this, `binding.rendered.yaml` contains your real project ID and dataset name instead of the `${...}` markers. If you skip this step, `bqaa context-graph` validates against literal `${PROJECT_ID}` text and fails closed.
 
 ## Phase 2: Generate Sample Agent Events
 Duration: 0:04
@@ -284,7 +286,7 @@ Run the materializer locally:
 
 <!-- colab:code bash -->
 ```bash
-bqaa-materialize-window \
+bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
     --ontology ~/bqaa-codelab/ontology.yaml \
@@ -429,7 +431,7 @@ FROM=$(date -u -d "9 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
 TO=$(date -u -d "8 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
      || date -u -v-8H +"%Y-%m-%dT%H:%M:%SZ")
 
-bqaa-materialize-window \
+bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
     --ontology ~/bqaa-codelab/ontology.yaml \
@@ -448,7 +450,7 @@ os.environ["TO"]   = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%dT%H:%
 print(f"Backfill window FROM = {os.environ['FROM']}")
 print(f"Backfill window TO   = {os.environ['TO']}")
 
-!cd ~/bqaa-codelab && bqaa-materialize-window \
+!cd ~/bqaa-codelab && bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
     --ontology ontology.yaml \
@@ -493,7 +495,7 @@ The local run you completed in Phase 3 uses default behavior. Real deployments c
 * **Replay a past window** (`--backfill --from / --to`). You exercised this in *Advanced: Replay a Past Window* above. The replay is tracked separately from the regular schedule so it cannot interfere with the live refresh.
 * **Bound the per-run batch size** (`--max-sessions`). Useful when an upstream event spike threatens to overwhelm a single scan.
 
-> 💡 **From "run this once" to "run this every six hours."** The SDK ships a deploy script and a Terraform module that wrap `bqaa-materialize-window` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, and the recommended schedules.
+> 💡 **From "run this once" to "run this every six hours."** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, and the recommended schedules.
 
 ## Clean Up
 Duration: 0:03
@@ -521,7 +523,7 @@ You have:
 
 * Created a BigQuery dataset and applied a property-graph schema describing an agent decision domain.
 * Populated `agent_events` with a synthetic event corpus.
-* Run `bqaa-materialize-window` to extract a decision graph from those events.
+* Run `bqaa context-graph` to extract a decision graph from those events.
 * Replayed a past time window with backfill mode, separately from the regular refresh schedule.
 * Queried the resulting graph in GQL and seen the audit-style answer.
 

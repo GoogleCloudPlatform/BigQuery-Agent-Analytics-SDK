@@ -19,7 +19,7 @@ These are the artifacts the *Trace AI Agent Decisions with BigQuery Property Gra
 3. `envsubst < property_graph.sql | bq query --use_legacy_sql=false` creates the property graph.
 4. `envsubst < binding.yaml > binding.rendered.yaml` renders the binding once before the materializer reads it.
 5. `python seed_events.py --project-id "$PROJECT_ID" --dataset-id "$DATASET" --sessions 5` populates `agent_events`.
-6. `bqaa-materialize-window --project-id "$PROJECT_ID" --dataset-id "$DATASET" --ontology ontology.yaml --binding binding.rendered.yaml --lookback-hours 24` materializes the graph.
+6. `bqaa context-graph --project-id "$PROJECT_ID" --dataset-id "$DATASET" --ontology ontology.yaml --binding binding.rendered.yaml --lookback-hours 24` materializes the graph.
 
 ## Domain model
 
