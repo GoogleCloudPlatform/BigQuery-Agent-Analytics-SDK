@@ -65,48 +65,31 @@ BigQuery IAM requirements and submission checklist live in
 
 ## Installing the plugin
 
-This repo serves a Claude Code marketplace catalog at
-[`/.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json).
-From a Claude Code session:
-
-```
-/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
-/plugin install bigquery-agent-analytics-tracing@bqaa-tracing
-```
-
-Then configure BigQuery destination + runtime deps (one-time):
+Until the plugin is submitted to the Claude Code marketplace, install
+from a GitHub release tarball:
 
 ```bash
-export BQAA_PROJECT_ID=your-gcp-project
-export BQAA_DATASET=agent_analytics
-pip install google-cloud-bigquery                  # always
-pip install google-cloud-bigquery-storage pyarrow  # Storage Write path (optional)
-```
-
-Run `/bqaa-setup` inside Claude Code to verify the env vars and runtime
-deps are correctly configured before relying on tracing.
-
-### Submission to Anthropic's official marketplace
-
-Tracked in [#251](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/251)
-(track B5). Until then, the self-hosted catalog above is the canonical
-install path.
-
-### Manual install from the GitHub release (fallback)
-
-If you can't use the marketplace catalog, download the plugin tarball
-attached to the matching `tracing-vX.Y.Z` GitHub release:
-
-```bash
+# Pick a released version from
+# https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases
 VERSION=0.1.0
+
 mkdir -p ~/.claude/plugins
 curl -L \
   "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases/download/tracing-v${VERSION}/bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz" \
   | tar -xz -C ~/.claude/plugins
+
+# Configure BigQuery destination + runtime deps (one-time).
+export BQAA_PROJECT_ID=your-gcp-project
+export BQAA_DATASET=agent_analytics
+pip install google-cloud-bigquery               # always
+pip install google-cloud-bigquery-storage pyarrow  # Storage Write path
 ```
 
 Then point Claude Code at the unpacked plugin directory per the
 [Claude Code plugins docs](https://docs.claude.com/en/docs/claude-code/plugins).
+
+Marketplace submission is tracked in
+[#234 step 5](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/234).
 
 ## Building the artifact
 
