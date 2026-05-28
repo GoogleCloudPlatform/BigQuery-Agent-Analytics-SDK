@@ -1477,6 +1477,16 @@ def run_eval(args):
   config_path = getattr(args, "config", None)
   eval_config = _load_eval_config(getattr(args, "eval_config", None))
 
+  custom_labels = None
+  if getattr(args, "label", None):
+    custom_labels = {}
+    for item in args.label:
+      if "=" not in item:
+        logger.error("--label requires KEY=VALUE format, got: %s", item)
+        sys.exit(1)
+      k, v = item.split("=", 1)
+      custom_labels[k] = v
+
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
     logger.info("Source: local conversations file %s", conversations_file)
@@ -1563,6 +1573,7 @@ def run_eval(args):
           session_ids=session_ids,
           tag_turns=tag_turns,
           eval_config=eval_config,
+          custom_labels=custom_labels,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -1580,6 +1591,12 @@ def run_eval(args):
     result["report"].details["time_period"] = args.time_period or "all"
     result["report"].details["limit"] = args.limit
     result["report"].details["persist"] = args.persist
+    if args.app_name:
+      result["report"].details["app_name"] = args.app_name
+    if custom_labels:
+      result["report"].details["labels"] = ", ".join(
+          f"{k}={v}" for k, v in custom_labels.items()
+      )
   result["report"].details["samples"] = args.samples or None
   _print_eval_results(
       result["report"],
@@ -3302,12 +3319,42 @@ Examples:
   %(prog)s --report                  Also generate a Markdown report
   %(prog)s --persist                 Evaluate and persist results to BQ
   %(prog)s --time-period 7d          Evaluate last 7 days
-  %(prog)s --app-name my_agent       Filter to a specific agent app
   %(prog)s --output-json report.json Write structured JSON output
-  %(prog)s --agent-context agent_context.json      Use Agent scope definitions for eval
   %(prog)s --env path/to/.env        Load env vars from a specific .env file
   %(prog)s --tag-turns               Classify each user turn and find corrections
   %(prog)s --trajectory-samples 5    Include 5 execution traces in the report
+
+Filtering (all filters appear in the Execution Details section of the report):
+  %(prog)s --app-name my_agent       Filter to a specific agent app
+  %(prog)s --label version=v2.1      Filter by custom label
+  %(prog)s --label version=v2 --label env=prod  Multiple labels (AND)
+  %(prog)s --time-period 7d --app-name my_agent --label version=v2.1
+                                     Combine filters (time + app + label)
+
+  Labels match custom_tags set via BigQueryLoggerConfig.custom_tags when
+  initializing the ADK plugin. Common uses: version tagging, deployment
+  environment, experiment ID, A/B test variant.
+
+Scope-aware evaluation (--agent-context):
+  %(prog)s --agent-context agent_context.json --report
+
+  The agent context file describes which topics are out of scope for your
+  agent. This lets the judge classify polite refusals as "declined" (correct)
+  rather than "unhelpful" (a bug).
+
+  Example agent_context.json:
+    {
+      "scope_decisions": [
+        {"topic": "stock_options", "decision": "out_of_scope",
+         "reason": "No tool covers equity compensation"},
+        {"topic": "salary_bands", "decision": "out_of_scope",
+         "reason": "Confidential data"},
+        {"topic": "pto_policy", "decision": "in_scope",
+         "reason": "Covered by lookup_company_policy tool"}
+      ]
+    }
+
+  See scripts/eval/data/agent_context.example.json for a full example.
 
 Samples (controls how many sessions appear in each report section):
   %(prog)s --samples 5               Cap all sections at 5 sessions
@@ -3322,7 +3369,8 @@ Samples (controls how many sessions appear in each report section):
   Categories: unhelpful, declined, partial, meaningful, low (all Low-* sections)
 
 Full report:
-  %(prog)s --report --limit 20 --samples 3 --tag-turns --trajectory-samples 3 \\
+  %(prog)s --report --limit 20 --app-name my_agent --label version=v2.1 \\
+    --samples 3 --tag-turns --trajectory-samples 3 \\
     --agent-context agent_context.json --env path/to/.env
 
 Custom metrics (overrides auto-discovered eval/eval_config.json):
@@ -3395,6 +3443,16 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       "sessions from other sources may not populate this field",
   )
   parser.add_argument(
+      "--label",
+      type=str,
+      action="append",
+      default=None,
+      metavar="KEY=VALUE",
+      help="Filter by custom label (repeatable). Matches custom_tags set "
+      "via BigQueryLoggerConfig.custom_tags. "
+      "Example: --label version=v2.1 --label env=prod",
+  )
+  parser.add_argument(
       "--output-json",
       type=str,
       default=None,
@@ -3414,12 +3472,13 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       default=None,
       metavar="PATH",
       dest="config",
-      help="Path to a JSON file describing the agent's scope, or 'none' "
-      "to disable scope context (skip auto-discovery). "
-      "When a path is provided, adds a 'declined' category for correctly "
-      "refused out-of-scope questions. Expected format: "
-      '{"scope_decisions": [{"topic": "...", "decision": "out_of_scope", '
-      '"reason": "..."}]}. '
+      help="Path to a JSON file listing topics your agent handles or "
+      "declines. Enables the 'declined' category so the judge can "
+      "distinguish correct refusals from failures. Use 'none' to skip "
+      "auto-discovery. Format: "
+      '{"scope_decisions": [{"topic": "stock_options", '
+      '"decision": "out_of_scope", "reason": "..."}]}. '
+      "See scripts/eval/data/agent_context.example.json. "
       "Only 'topic' and 'decision' are used; 'reason' is documentation-only.",
   )
   parser.add_argument(

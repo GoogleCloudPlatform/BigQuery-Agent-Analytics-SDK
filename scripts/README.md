@@ -58,11 +58,20 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --samples 20            # show 20 sessions per category
 ./scripts/quality_report.sh --samples all           # show all sessions per category
 ./scripts/quality_report.sh --app-name my_agent     # filter to a specific agent app
+./scripts/quality_report.sh --label version=v2.1    # filter by custom label
+./scripts/quality_report.sh --label version=v2 --label env=prod  # multiple labels (AND)
 ./scripts/quality_report.sh --session-ids-file ids.json  # evaluate specific sessions
 ./scripts/quality_report.sh --output-json report.json    # write structured JSON output
 ./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
-./scripts/quality_report.sh --agent-context agent_context.json  # scope-aware eval
 ./scripts/quality_report.sh --session <session_id>  # evaluate single session (verbose)
+
+# Scope-aware evaluation (see --agent-context section below)
+./scripts/quality_report.sh --agent-context agent_context.json --report
+
+# Full report with all filters
+./scripts/quality_report.sh --report --limit 50 --app-name my_agent \
+  --label version=v2.1 --label env=prod --time-period 7d \
+  --tag-turns --trajectory-samples 5 --agent-context agent_context.json
 ```
 
 Or run the Python script directly:
@@ -80,7 +89,8 @@ python scripts/quality_report.py --limit 50 --report
 - Multi-turn efficiency metrics (corrections, verifications)
 - Unhelpful contribution ranking
 - Category distributions
-- Execution details (elapsed time, execution mode)
+- Execution details — all active filters (`app_name`, `labels`, `time_period`,
+  `limit`), plus project, dataset, location, eval model, and elapsed time
 
 When `--session` is used, the console shows **all 7 metrics with full
 justifications** for the single session (verbose mode). See
@@ -99,18 +109,32 @@ justifications** for the single session (verbose mode). See
 
 ### Filtering
 
-By default, the script evaluates the most recent sessions by time. Two
-additional filters are available for targeted evaluation:
+By default, the script evaluates the most recent sessions by time. Several
+filters are available for targeted evaluation:
 
 - **`--app-name`** filters to sessions from a specific agent. Matches the
   `root_agent_name` attribute set by `BigQueryAgentAnalyticsPlugin`.
+- **`--label KEY=VALUE`** filters by custom tags set via
+  `BigQueryLoggerConfig.custom_tags`. Repeatable — multiple labels are
+  combined with AND logic. Use this to filter by software version, deployment
+  environment, experiment ID, or any other custom tag your agent emits.
 - **`--session-ids-file`** evaluates only the sessions listed in a JSON file.
   Accepts either a list of `{"session_id": "..."}` objects (the output of
   `run_eval.py`) or a plain list of ID strings. When session IDs are provided,
   the script filters directly by ID instead of relying on time-based queries,
   which avoids picking up stale sessions from prior runs.
 
-These filters can be combined (e.g. `--app-name my_agent --session-ids-file ids.json`).
+These filters can be combined:
+
+```bash
+# Evaluate v2.1 sessions from my_agent in the last 7 days
+python scripts/quality_report.py --app-name my_agent --label version=v2.1 \
+  --time-period 7d --report
+```
+
+Active filters are displayed in the **Execution Details** section of both
+console and markdown report output, so you can always tell which filters
+produced a given report.
 
 ### Metrics
 
@@ -175,7 +199,9 @@ session correctly, or for debugging individual conversations.
 ### Scope-Aware Evaluation (`--agent-context`)
 
 For more accurate scope evaluation, provide a context file that tells the
-LLM judge exactly which topics your agent intentionally does not handle:
+LLM judge exactly which topics your agent intentionally does not handle.
+This is **not** a per-session dictionary — it's a static description of
+your agent's scope boundaries that applies to all sessions being evaluated.
 
 ```bash
 ./scripts/quality_report.sh --agent-context agent_context.json --report
@@ -185,15 +211,9 @@ The script also auto-discovers `eval/data/agent_context.json` relative to
 the repo root or script directory, so `--agent-context` is only needed to
 point at a non-default location.
 
-A sample config is provided at `scripts/eval/data/agent_context.example.json`.
-Copy it and customize for your agent:
-
-```bash
-cp scripts/eval/data/agent_context.example.json scripts/eval/data/agent_context.json
-# Edit with your agent's scope decisions
-```
-
-Create a JSON config file with `scope_decisions`:
+**Format:** A JSON file with a `scope_decisions` array. Each entry declares
+a topic and whether it is in or out of scope. Only `topic` and `decision`
+are used by the judge; `reason` is documentation-only.
 
 ```json
 {
@@ -209,19 +229,89 @@ Create a JSON config file with `scope_decisions`:
       "reason": "Confidential compensation data"
     },
     {
-      "topic": "promotions",
+      "topic": "it_support",
       "decision": "out_of_scope",
-      "reason": "No tool covers career progression"
+      "reason": "No tool covers IT support"
+    },
+    {
+      "topic": "pto_policy",
+      "decision": "in_scope",
+      "reason": "Covered by lookup_company_policy tool"
     }
   ]
 }
 ```
 
-Without a config, the LLM judge can still classify obvious declines as
-`declined`, but it won't know which specific topics are out of scope. With
-the config, the judge is told exactly which topics are out of scope, so it
-can correctly classify polite refusals as `declined` (correct behavior)
-rather than `unhelpful` (a bug).
+A sample config is provided at `scripts/eval/data/agent_context.example.json`:
+
+```bash
+cp scripts/eval/data/agent_context.example.json scripts/eval/data/agent_context.json
+# Edit with your agent's scope decisions
+```
+
+**Effect on evaluation:** Without scope context, the LLM judge cannot
+distinguish an intentional decline ("I can't help with stock options") from
+a failure. With the config:
+- A polite refusal on an out-of-scope topic is classified as `declined`
+  (correct behavior) rather than `unhelpful` (a bug)
+- The `scope_compliance` dimension can accurately score whether the agent
+  handled scope boundaries correctly
+
+### Custom Labels (`--label`)
+
+Custom labels let you filter quality reports by software version, deployment
+environment, experiment ID, or any other tag your agent emits at runtime.
+
+**How it works end-to-end:**
+
+**1. Agent emits labels** — Configure `BigQueryLoggerConfig.custom_tags` when
+initializing the ADK plugin. These tags are attached to every event the agent
+writes to BigQuery:
+
+```python
+from google.adk.plugins.bigquery_agent_analytics_plugin import (
+    BigQueryLoggerConfig,
+    BigQueryAgentAnalyticsPlugin,
+)
+
+bq_config = BigQueryLoggerConfig(
+    table_id="agent_events",
+    custom_tags={
+        "version": "v2.1",
+        "env": "prod",
+        "experiment_id": "baseline_june",
+    },
+)
+
+plugin = BigQueryAgentAnalyticsPlugin(
+    project_id=PROJECT_ID,
+    dataset_id=DATASET_ID,
+    config=bq_config,
+    location=LOCATION,
+)
+```
+
+**2. BigQuery stores labels** — The tags are stored in the
+`attributes.custom_tags` JSON field of each event row.
+
+**3. Quality report filters by labels** — Use `--label KEY=VALUE` to filter
+to sessions that have the matching tag. Multiple labels are combined with AND:
+
+```bash
+# Evaluate only v2.1 sessions
+./scripts/quality_report.sh --label version=v2.1 --report
+
+# Evaluate v2.1 production sessions from the last 7 days
+./scripts/quality_report.sh --label version=v2.1 --label env=prod \
+  --time-period 7d --report
+
+# Compare versions: run two reports and diff
+./scripts/quality_report.sh --label version=v2.0 --output-json v2.0.json
+./scripts/quality_report.sh --label version=v2.1 --output-json v2.1.json
+```
+
+Active labels appear in the **Execution Details** section of the output,
+so each report is self-documenting about which filters produced it.
 
 ### Custom Metrics (`--eval-config`)
 

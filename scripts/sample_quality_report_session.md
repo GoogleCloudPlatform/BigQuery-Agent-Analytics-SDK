@@ -67,7 +67,12 @@ QUALITY SUMMARY
   Execution Details:
     execution_mode: ai_generate
     elapsed_seconds: 23.4
+    project: my-gcp-project
+    dataset: agent_logs.agent_events
+    location: us-central1
     eval_model: gemini-2.5-flash
+    time_period: all
+    limit: 100
 
 ======================================================================
 
