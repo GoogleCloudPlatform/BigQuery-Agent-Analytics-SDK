@@ -22,7 +22,7 @@ This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event 
 * A BigQuery property graph that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
 * A populated `agent_events` table with a synthetic event corpus.
 * A working `bqaa-materialize-window` run that fills the graph from those events.
-* A one-shot backfill against a historical window without affecting the live cron's checkpoint.
+* A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
 * An audit-style GQL query that traces a single decision end-to-end.
 
 ### What You Will Learn
@@ -250,11 +250,14 @@ bq query --use_legacy_sql=false \
 
 You should see five rows.
 
-### The Zero-LLM Extraction Path
+### Two Ways to Extract Decisions From Events
 
-The local run above uses the default extractor, which calls BigQuery's `AI.GENERATE` to extract entities and relationships from event content. The SDK also supports a `--extraction-mode=compiled-only` flag that swaps in a reference-extractor module: deterministic Python keyed to your ontology, no Vertex AI dependency, the audited code path.
+The materializer offers two extraction paths. Pick the one that matches your workload:
 
-Production deployments that need to certify their data path to a regulator typically run `--extraction-mode=compiled-only` and remove `roles/aiplatform.user` from the runtime service account entirely. The reference extractor is a small Python module that maps event-content shape to entity-and-relationship dicts; the materializer wires the rest. The codelab stays on the `AI.GENERATE` default.
+* **Default extraction.** The easiest path. Uses BigQuery's `AI.GENERATE` to read event content and infer entities and relationships. Works against any event shape with no extra code. This is what the codelab uses.
+* **Deterministic extraction** (`--extraction-mode=compiled-only`). The lower-cost, audit-friendly path. Uses a small Python reference extractor you write once for your ontology. No Vertex AI calls, no per-token charges, fully reproducible output. Production deployments choose this when cost predictability or strict reproducibility matters.
+
+> 💡 **Tip.** Deterministic extraction is also the path for regulated workloads that need to remove the Vertex AI dependency from the runtime service account entirely. See the [production deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the IAM details.
 
 ## Phase 4: Query the Decision Trace
 Duration: 0:05
@@ -289,20 +292,20 @@ You should see fifteen rows: three options per request, five requests. Each row 
 
 For a single decision's full picture, filter by `request_id` to get the row set an audit team needs: the question that came in, the options that were weighed (with scores), and the rationale that was committed.
 
-### The Same Answer in Natural Language
+### Ask the Same Question in Plain English
 
-Once your project is on the BigQuery Conversational Analytics Preview, you can register the property graph as a knowledge source and ask the question in plain English:
+Not every audit reader writes GQL. With **BigQuery Conversational Analytics** (Preview), your compliance team can ask the same decision-trace question in natural language and get back a structured answer card — no query syntax, no joins to learn:
 
 > *"Why did the agent commit outcome X on request Y?"*
 
-Conversational Analytics resolves the question against the graph and returns a structured answer card. See the [Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) for setup.
+Register the property graph you built in this codelab as a Conversational Analytics knowledge source and the same data is reachable from a chat-style interface. See the [Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) for setup.
 
-## Advanced: Backfill a Historical Window
+## Advanced: Replay a Past Window
 Duration: 0:04
 
-Backfill mode is the operations workflow you reach for when events arrived during an outage, when a binding change requires a one-shot re-extraction, or when an audit team asks for a specific historical quarter. The same code path the scheduled cron uses can be pointed at any fixed `[from, to)` window, and the run writes its high-water mark to an isolated state-table namespace (controlled by `--state-key-suffix`) so it never disturbs the live cron's checkpoint.
+Sometimes you need to re-process a past time window: events arrived during an outage, a schema change requires re-extraction, or an audit team asks about a specific historical period. Backfill mode lets you do that **without disturbing the regular refresh schedule** — the replay runs against a fixed start-and-end window you choose, and its progress is tracked separately from the normal scheduled run.
 
-For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The backfill discovers zero sessions to materialize, which lets you demonstrate the state-table isolation property without re-processing the sessions you already materialized in Phase 3. Production backfills target windows where new events actually arrived; the empty-window run shows the audit-trail behavior in a single command.
+In a real recovery you would point the backfill at the window where the missed events actually arrived. For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The replay finishes immediately because there is nothing to materialize, which lets you see the audit trail it produces without re-touching the rows you already wrote in Phase 3.
 
 ```bash
 FROM=$(date -u -d "9 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
@@ -323,7 +326,7 @@ bqaa-materialize-window \
 
 (The `date -u -d ...` form is GNU `date` on Linux and Cloud Shell; the `date -u -v-9H` form is BSD `date` on macOS. The `||` falls back to the macOS form if the GNU form fails.)
 
-You should see a JSON report with `"sessions_materialized": 0` (because the backfill window does not contain any of the synthetic events you seeded in Phase 2). The interesting result is the new row in the state table:
+You should see a JSON report with `"sessions_materialized": 0` because the window you picked doesn't overlap with the events you seeded. Now inspect the audit trail this run wrote into the state table:
 
 ```bash
 bq query --use_legacy_sql=false \
@@ -332,30 +335,29 @@ bq query --use_legacy_sql=false \
      ORDER BY run_started_at DESC LIMIT 5"
 ```
 
-You should see at least two rows: a `mode = 'steady'` row from the Phase 3 materialization and a `mode = 'backfill'` row from this run. The two rows have different `state_key` values (the `--state-key-suffix` you passed changes the hash input), so the backfill checkpoint sits in its own namespace and the live cron's high-water mark in `state_key = 'steady'` stays untouched. That isolation property is what lets a backfill run concurrently with the production cron without interference.
+You should see at least two rows: one from the scheduled run in Phase 3 (`mode = 'steady'`) and one from this backfill (`mode = 'backfill'`). The two are independent — the backfill's progress is tracked separately, so it cannot disrupt the regular refresh.
 
-In a real outage-recovery scenario you would point `--from` and `--to` at the window where the missed events actually landed, and the backfill would materialize those sessions. The state-table behavior you just observed is the audit trail an operator follows to confirm the catch-up ran.
+> 💡 **Tip — how the isolation works (optional detail).** Each materializer run writes a row to the `_bqaa_materialization_state` table keyed by a `state_key` hash. Backfill mode mixes the `--state-key-suffix` you pass into that hash, so the backfill writes to a different `state_key` than the regular schedule. Same table, different rows, separate progress markers. Production operators query this table to confirm a catch-up actually ran.
 
 ## Production-Grade Capabilities
 Duration: 0:03
 
-The BigQuery Agent Analytics SDK includes several features designed to support enterprise-grade deployments. The local run you completed in Phase 3 uses default behavior; the optional flags below add stricter controls when your operating model needs them.
+The local run you completed in Phase 3 uses default behavior. Real deployments care about cost, reliability, and audit posture — the SDK supports each one out of the box.
 
-**Default behavior:**
+**What you get by default:**
 
-* **Structured JSON logs on every run** with `--format json`, including per-table row counts and per-session failure diagnostics for alerting and audit.
-* **State-table audit trail.** Every run lands a row in `_bqaa_materialization_state` recording the window scanned, sessions discovered, sessions materialized, mode (`steady`, `backfill`, `orphan_scan`, `orphan_ledger`), and a full JSON report.
-* **Tunable retry budget** (`--max-retries`, default 2) for transient failures.
-* **Exactly-once processing.** The state table's high-water mark advances only on successful sessions; replays after a partial failure pick up where the last run left off.
+* **Every run leaves a clear audit trail.** Structured JSON logs go to Cloud Logging, and a per-run row lands in a state table inside your dataset — useful for alerting, dashboards, and answering "did the refresh actually happen?"
+* **Transient failures retry automatically.** The materializer retries a small number of times (default two) before flagging a failure, so a slow query or a brief Vertex AI hiccup doesn't take down the run.
+* **No double-counting.** Progress only advances on sessions that fully succeeded, so retrying a partially-failed run picks up exactly where it left off.
 
-**Opt-in for stricter or incident-response workflows:**
+**What you opt into when you need it:**
 
-* **Deterministic parsing** (`--extraction-mode compiled-only`). Disables LLM calls entirely and runs a reference-extractor module. Required by audits that must certify the data path; removes the Vertex AI dependency.
-* **Orphan-session watchdog** (`--max-session-age-hours`). Sessions older than the cap that have not terminated are flagged as orphaned and written to the state table with `mode = 'orphan_scan'`, so an operator can drain stale state without the cron silently re-pulling broken sessions.
-* **Backfill mode** (`--backfill --from / --to --state-key-suffix`). Re-materializes a fixed historical window without affecting the active schedule's progress markers. You exercised the audit-trail behavior in the *Advanced: Backfill a Historical Window* section above.
-* **Per-window batch cap** (`--max-sessions`). Caps the number of sessions processed per scan to handle hostile event spikes.
+* **Lower-cost, deterministic extraction** (`--extraction-mode=compiled-only`). Swaps the LLM-based extractor for a small reference-extractor module you write once. Removes the Vertex AI dependency and the per-token cost. Recommended for steady-state production workloads and any audit that requires reproducibility.
+* **Catch stuck sessions** (`--max-session-age-hours`). If your agents sometimes fail to emit a terminal event, this flags long-running sessions as orphaned so operators can drain them — instead of the scheduled refresh silently retrying them forever.
+* **Replay a past window** (`--backfill --from / --to`). You exercised this in *Advanced: Replay a Past Window* above. The replay is tracked separately from the regular schedule so it cannot interfere with the live refresh.
+* **Bound the per-run batch size** (`--max-sessions`). Useful when an upstream event spike threatens to overwhelm a single scan.
 
-For scheduled execution, the SDK ships a deploy script and a Terraform module that wrap `bqaa-materialize-window` as a Cloud Run Job triggered by Cloud Scheduler. Both create the same six resources (graph dataset, runtime service account, scheduler-caller service account, IAM bindings, Cloud Run Job, Cloud Scheduler trigger) with least-privilege defaults. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, the recommended schedules, and the Cloud Monitoring alert queries.
+> 💡 **From "run this once" to "run this every six hours."** The SDK ships a deploy script and a Terraform module that wrap `bqaa-materialize-window` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, and the recommended schedules.
 
 ## Clean Up
 Duration: 0:03
@@ -376,7 +378,7 @@ You have:
 * Created a BigQuery dataset and applied a property-graph schema describing an agent decision domain.
 * Populated `agent_events` with a synthetic event corpus.
 * Run `bqaa-materialize-window` to extract a decision graph from those events.
-* Backfilled a historical window into an isolated state-table namespace without disturbing the live checkpoint.
+* Replayed a past time window with backfill mode, separately from the regular refresh schedule.
 * Queried the resulting graph in GQL and seen the audit-style answer.
 
 The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point and adapt the four declarative files (table DDL, property-graph DDL, ontology, binding) to your domain.
