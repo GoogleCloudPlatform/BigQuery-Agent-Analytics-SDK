@@ -1,0 +1,29 @@
+{
+  "name": "bqaa-tracing",
+  "description": "Claude Code tracing plugins for BigQuery Agent Analytics.",
+  "owner": {
+    "name": "Google LLC",
+    "url": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+  },
+  "plugins": [
+    {
+      "name": "bigquery-agent-analytics-tracing",
+      "description": "Stream Claude Code hook traces to Google BigQuery Agent Analytics agent_events.",
+      "version": "0.1.0",
+      "source": "./plugins/claude_code_dist/bigquery-agent-analytics-tracing",
+      "author": {
+        "name": "Google LLC"
+      },
+      "homepage": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code",
+      "repository": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK",
+      "license": "Apache-2.0",
+      "keywords": [
+        "bigquery",
+        "agent-analytics",
+        "observability",
+        "tracing",
+        "claude-code"
+      ]
+    }
+  ]
+}

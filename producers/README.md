@@ -42,25 +42,25 @@ logger.log_event(
 
 If you run Claude Code, the
 [Claude Code plugin artifact](../plugins/claude_code/) wires up all
-nine hooks for you. Until marketplace submission lands, install from
-a GitHub release tarball:
+nine hooks for you. Install via the marketplace catalog this repo
+serves at [`/.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.json):
 
-```bash
-# Pick the version that matches the wheel you have installed.
-VERSION=$(python -c "from bigquery_agent_analytics_tracing import __version__; print(__version__)")
-mkdir -p ~/.claude/plugins
-curl -L \
-  "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/releases/download/tracing-v${VERSION}/bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz" \
-  | tar -xz -C ~/.claude/plugins
+```
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
+/plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
-The plugin tarball vendors its own copy of the tracing package, so
-the `BQAA_PYTHON` interpreter does **not** need
+Add the marketplace by `<owner>/<repo>`, **not** by a direct URL to
+`marketplace.json` — the catalog's `source` is a relative path that
+Claude Code can only resolve from a Git checkout. See the
+[plugin README](../plugins/claude_code/README.md#installing-the-plugin)
+for the sparse-checkout variant and details.
+
+The plugin vendors its own copy of the tracing package, so the
+`BQAA_PYTHON` interpreter does **not** need
 `bigquery-agent-analytics-tracing` installed — only its runtime deps
 (`google-cloud-bigquery` always; `google-cloud-bigquery-storage` +
-`pyarrow` for the Storage Write path). See the
-[plugin README](../plugins/claude_code/README.md) for the full runtime
-model.
+`pyarrow` for the Storage Write path).
 
 ## Releases
 
