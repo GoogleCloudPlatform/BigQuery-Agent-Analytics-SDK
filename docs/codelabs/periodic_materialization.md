@@ -197,7 +197,7 @@ bq query --use_legacy_sql=false \
     "SELECT event_type, COUNT(*) AS n FROM \`$PROJECT_ID.$DATASET.agent_events\` GROUP BY event_type ORDER BY n DESC"
 ```
 
-You should see 15 `TOOL_COMPLETED` rows and 5 `AGENT_COMPLETED` rows. The `AGENT_COMPLETED` rows are the session terminators that the materializer keys on for terminal-event detection.
+You should see 25 `TOOL_COMPLETED` rows and 5 `AGENT_COMPLETED` rows (each session emits one `submit_request`, three `evaluate_option`, one `commit_outcome`, and one closing `AGENT_COMPLETED` — five tool events plus one agent terminator per session). The `AGENT_COMPLETED` rows are the session terminators that the materializer keys on for terminal-event detection.
 
 ## Phase 3: Materialize the Decision Graph
 Duration: 0:05
