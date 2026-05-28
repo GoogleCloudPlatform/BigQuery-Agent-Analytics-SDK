@@ -47,6 +47,12 @@ jobs:
             exit 1
           fi
 
+      - name: Check codelab notebook is in sync with markdown source
+        run: |
+          python scripts/generate_colab_from_codelab.py --check \
+            docs/codelabs/periodic_materialization.md \
+            examples/codelab/periodic_materialization/colab_notebook.ipynb
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

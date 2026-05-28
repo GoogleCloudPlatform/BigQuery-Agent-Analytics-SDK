@@ -50,6 +50,7 @@ Duration: 0:05
 
 Open Cloud Shell or a local terminal:
 
+<!-- colab:skip -->
 ```bash
 export PROJECT_ID="your-project-id"
 export REGION="us-central1"
@@ -57,10 +58,47 @@ export DATASET="agent_analytics_demo"
 gcloud config set project "$PROJECT_ID"
 ```
 
+<!-- colab:cell python
+import os
+
+# Change these three lines to match your GCP environment.
+PROJECT_ID = "your-project-id"
+REGION     = "us-central1"
+DATASET    = "agent_analytics_demo"
+
+# Export to the shell environment so the !-prefixed cells below see them.
+os.environ["PROJECT_ID"] = PROJECT_ID
+os.environ["REGION"]     = REGION
+os.environ["DATASET"]    = DATASET
+
+print(f"PROJECT_ID = {PROJECT_ID}")
+print(f"REGION     = {REGION}")
+print(f"DATASET    = {DATASET}")
+-->
+
+<!-- colab:cell python
+# Authenticate against your GCP project.
+# In colab.research.google.com this prompts for an account interactively.
+# In Vertex AI Colab Enterprise the project service account auth is used
+# automatically.
+try:
+    from google.colab import auth
+    auth.authenticate_user()
+    print("Authenticated via google.colab.auth.")
+except ImportError:
+    print(
+        "google.colab not available; assuming gcloud Application Default"
+        " Credentials are already configured."
+    )
+
+!gcloud config set project $PROJECT_ID
+-->
+
 The single `DATASET` variable holds both the raw `agent_events` table and the materialized graph tables. Using one dataset keeps the codelab simple. Production deployments often split events and graph into separate datasets so IAM can be granted narrowly per dataset.
 
 ### Enable the Required APIs
 
+<!-- colab:code bash -->
 ```bash
 gcloud services enable \
     bigquery.googleapis.com \
@@ -72,6 +110,7 @@ The `aiplatform.googleapis.com` API is required because the SDK's default extrac
 
 ### Create the BigQuery Dataset
 
+<!-- colab:code bash -->
 ```bash
 bq --location=US mk --dataset "$PROJECT_ID:$DATASET"
 ```
@@ -83,6 +122,7 @@ Duration: 0:02
 
 Set up a Python virtual environment and install the SDK from PyPI:
 
+<!-- colab:skip -->
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -90,8 +130,17 @@ pip install --upgrade pip
 pip install bigquery-agent-analytics
 ```
 
+<!-- colab:cell python
+# Install the SDK and the BigQuery client library directly into the
+# notebook runtime. The local-terminal codelab path creates a venv
+# first; in Colab the runtime is already isolated, so a plain pip
+# install is enough.
+!pip install --quiet --upgrade bigquery-agent-analytics google-cloud-bigquery
+-->
+
 Verify the install:
 
+<!-- colab:code bash -->
 ```bash
 bqaa-materialize-window --help | head -8
 ```
@@ -102,12 +151,13 @@ You should see the CLI banner.
 
 If you are on a workstation:
 
+<!-- colab:skip -->
 ```bash
 gcloud auth login
 gcloud auth application-default login
 ```
 
-Cloud Shell users can skip this step; credentials are already configured.
+Cloud Shell users can skip this step; credentials are already configured. (In Colab the configuration cell above already handled this via `google.colab.auth`.)
 
 ## Get the Codelab Artifacts
 Duration: 0:02
@@ -116,6 +166,7 @@ The codelab ships a set of ready-to-use artifacts: the property-graph schema, th
 
 Download the artifacts to a working directory:
 
+<!-- colab:skip -->
 ```bash
 mkdir -p ~/bqaa-codelab && cd ~/bqaa-codelab
 
@@ -125,6 +176,26 @@ for f in property_graph.sql table_ddl.sql ontology.yaml binding.yaml seed_events
 done
 ls
 ```
+
+<!-- colab:cell python
+# Source of the bundled codelab artifacts.
+#
+# By default, BASE points at the latest `main` branch. If you are running
+# this notebook against a feature branch under review, override BASE in
+# your shell before launching the notebook (or edit the line below).
+import os
+os.environ["BASE"] = os.environ.get(
+    "BASE",
+    "https://raw.githubusercontent.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/main/examples/codelab/periodic_materialization",
+)
+print(f"Downloading codelab artifacts from: {os.environ['BASE']}")
+
+!mkdir -p ~/bqaa-codelab && cd ~/bqaa-codelab && \
+  for f in property_graph.sql table_ddl.sql ontology.yaml binding.yaml seed_events.py; do \
+    curl -fsSL "$BASE/$f" -o "$f"; \
+  done && \
+  ls -la
+-->
 
 You should see five files:
 
@@ -146,7 +217,9 @@ Duration: 0:04
 
 The materializer writes into BigQuery tables, so they must exist before the first run. Apply the table DDL first, then the property-graph DDL (the property graph references those tables, and BigQuery rejects a `CREATE PROPERTY GRAPH` that points at tables that do not yet exist):
 
+<!-- colab:code bash -->
 ```bash
+cd ~/bqaa-codelab
 envsubst < table_ddl.sql      | bq query --use_legacy_sql=false
 envsubst < property_graph.sql | bq query --use_legacy_sql=false
 ```
@@ -157,7 +230,9 @@ You should see five `CREATE TABLE` results and one `CREATE PROPERTY GRAPH` resul
 
 The materializer reads `binding.yaml` directly. Substitute the shell variables once before any tool reads the file:
 
+<!-- colab:code bash -->
 ```bash
+cd ~/bqaa-codelab
 envsubst < binding.yaml > binding.rendered.yaml
 ```
 
@@ -180,8 +255,10 @@ runner = Runner(agent=root_agent, plugins=[plugin])
 
 For this codelab you use a small synthetic event generator that writes the same shape of rows directly to `agent_events`. Run it:
 
+<!-- colab:code bash -->
 ```bash
 pip install google-cloud-bigquery
+cd ~/bqaa-codelab
 python seed_events.py \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
@@ -192,6 +269,7 @@ You should see "Inserted 30 events across 5 sessions into ...".
 
 Verify the events landed:
 
+<!-- colab:code bash -->
 ```bash
 bq query --use_legacy_sql=false \
     "SELECT event_type, COUNT(*) AS n FROM \`$PROJECT_ID.$DATASET.agent_events\` GROUP BY event_type ORDER BY n DESC"
@@ -204,6 +282,7 @@ Duration: 0:05
 
 Run the materializer locally:
 
+<!-- colab:code bash -->
 ```bash
 bqaa-materialize-window \
     --project-id "$PROJECT_ID" \
@@ -235,6 +314,7 @@ You should see a structured JSON report:
 
 If you see `ok: false` with `error_code = "empty_extraction"`, the most common cause is that the `aiplatform.googleapis.com` API has not propagated yet, or your account is missing `roles/aiplatform.user`. Wait a minute and retry, or grant the role:
 
+<!-- colab:markdown -->
 ```bash
 USER_EMAIL=$(gcloud auth list --filter=status:ACTIVE --format="value(account)")
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -243,6 +323,7 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 
 Verify the graph has rows:
 
+<!-- colab:code bash -->
 ```bash
 bq query --use_legacy_sql=false \
     "SELECT COUNT(*) AS n FROM \`$PROJECT_ID.$DATASET.decision_request\`"
@@ -264,6 +345,7 @@ Duration: 0:05
 
 With the graph populated, the audit question is a single GQL traversal. Save the following as `traversal.sql`:
 
+<!-- colab:markdown -->
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
@@ -284,9 +366,42 @@ FROM GRAPH_TABLE (
 
 Run it:
 
+<!-- colab:skip -->
 ```bash
 envsubst < traversal.sql | bq query --use_legacy_sql=false --max_rows=20
 ```
+
+<!-- colab:cell python
+# Run the same GQL traversal from the notebook. We embed the SQL in a
+# Python f-string so the ${DATASET} placeholder is filled in by the
+# notebook's PROJECT_ID / DATASET variables, and we display the result
+# as a pandas DataFrame for in-cell readability.
+DATASET = os.environ["DATASET"]
+PROJECT_ID = os.environ["PROJECT_ID"]
+traversal_sql = f"""
+SELECT *
+FROM GRAPH_TABLE (
+  {DATASET}.agent_decisions_graph
+  MATCH
+    (req:DecisionRequest) -[eo:evaluatesOption]-> (opt:DecisionOption),
+    (req)                 -[ri:resultedIn]->      (out:DecisionOutcome)
+  COLUMNS (
+    req.request_id   AS request,
+    req.request_text AS question,
+    opt.option_label AS considered,
+    opt.confidence   AS score,
+    out.status       AS outcome,
+    out.rationale    AS rationale
+  )
+)
+ORDER BY request, score DESC;
+"""
+
+from google.cloud import bigquery
+client = bigquery.Client(project=PROJECT_ID)
+results_df = client.query(traversal_sql).to_dataframe()
+results_df
+-->
 
 You should see fifteen rows: three options per request, five requests. Each row shows the request, the option the agent considered, its confidence score, the final outcome, and the rationale.
 
@@ -307,6 +422,7 @@ Sometimes you need to re-process a past time window: events arrived during an ou
 
 In a real recovery you would point the backfill at the window where the missed events actually arrived. For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The replay finishes immediately because there is nothing to materialize, which lets you see the audit trail it produces without re-touching the rows you already wrote in Phase 3.
 
+<!-- colab:skip -->
 ```bash
 FROM=$(date -u -d "9 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
        || date -u -v-9H +"%Y-%m-%dT%H:%M:%SZ")
@@ -324,10 +440,30 @@ bqaa-materialize-window \
     --format json
 ```
 
+<!-- colab:cell python
+import datetime, os
+now = datetime.datetime.now(datetime.timezone.utc)
+os.environ["FROM"] = (now - datetime.timedelta(hours=9)).strftime("%Y-%m-%dT%H:%M:%SZ")
+os.environ["TO"]   = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+print(f"Backfill window FROM = {os.environ['FROM']}")
+print(f"Backfill window TO   = {os.environ['TO']}")
+
+!cd ~/bqaa-codelab && bqaa-materialize-window \
+    --project-id "$PROJECT_ID" \
+    --dataset-id "$DATASET" \
+    --ontology ontology.yaml \
+    --binding binding.rendered.yaml \
+    --lookback-hours 1 \
+    --backfill --from "$FROM" --to "$TO" \
+    --state-key-suffix codelab_backfill_demo \
+    --format json
+-->
+
 (The `date -u -d ...` form is GNU `date` on Linux and Cloud Shell; the `date -u -v-9H` form is BSD `date` on macOS. The `||` falls back to the macOS form if the GNU form fails.)
 
 You should see a JSON report with `"sessions_materialized": 0` because the window you picked doesn't overlap with the events you seeded. Now inspect the audit trail this run wrote into the state table:
 
+<!-- colab:code bash -->
 ```bash
 bq query --use_legacy_sql=false \
     "SELECT mode, scan_start, scan_end, sessions_materialized, ok \
@@ -364,9 +500,17 @@ Duration: 0:03
 
 Tear down what you created so you do not get billed for an idle dataset:
 
+<!-- colab:skip -->
 ```bash
 bq rm -r -f --dataset "$PROJECT_ID:$DATASET"
 ```
+
+<!-- colab:cell python
+# UNCOMMENT TO RUN. This permanently deletes the dataset and everything
+# in it (events, graph tables, state table). Left commented so a
+# "Run all" pass does not tear down your work.
+# !bq rm -r -f --dataset "$PROJECT_ID:$DATASET"
+-->
 
 That single command removes the dataset, the agent events, the graph tables, and the state table together.
 
