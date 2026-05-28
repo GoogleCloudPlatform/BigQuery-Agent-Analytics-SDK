@@ -101,6 +101,11 @@ FENCE_OPEN = re.compile(r"^```(\w*)\s*$")
 FENCE_CLOSE = re.compile(r"^```\s*$")
 EXPORT_LINE = re.compile(r"^\s*export\s+([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 
+# Claat-specific metadata lines that should not leak into the notebook
+# narrative. ``Duration: 0:03`` is the codelab renderer's per-section
+# time hint and reads like leaked publishing metadata in Colab.
+CLAAT_METADATA_LINE = re.compile(r"^Duration:\s+\d+:\d+\s*$")
+
 
 def _strip_frontmatter(lines: list[str]) -> list[str]:
   """Drop claat-style frontmatter (lines before the first ``#`` heading)."""
@@ -250,6 +255,12 @@ def parse_blocks(markdown: str) -> Iterator[dict]:
       md_buffer.extend(body)
       md_buffer.append("```")
       i = i_after
+      continue
+
+    # Skip claat-only metadata lines (Duration: 0:03 etc.) so they
+    # do not appear as visible prose in the generated notebook.
+    if CLAAT_METADATA_LINE.match(line):
+      i += 1
       continue
 
     # Regular narrative line
