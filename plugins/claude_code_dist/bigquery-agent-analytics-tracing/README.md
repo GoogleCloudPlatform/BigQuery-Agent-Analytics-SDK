@@ -65,6 +65,13 @@ BigQuery IAM requirements and submission checklist live in
 
 ## Installing the plugin
 
+> **If you previously installed an older BQAA Claude Code plugin from
+> another marketplace or local path, remove or disable it before
+> installing this version.** Running multiple BQAA tracing plugins at
+> once can duplicate hook events in BigQuery. Check existing installs
+> with `/plugin list` and uninstall any duplicates with
+> `/plugin uninstall <name>@<marketplace>` before continuing.
+
 Until the plugin is submitted to the Claude Code marketplace, install
 from a GitHub release tarball:
 

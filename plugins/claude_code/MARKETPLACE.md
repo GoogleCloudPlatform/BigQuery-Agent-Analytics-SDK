@@ -73,6 +73,12 @@ recipe. Until marketplace listing is live this is the official path.
 Run on a clean environment (no `bigquery-agent-analytics-tracing` wheel
 on `BQAA_PYTHON`):
 
+0. Make sure no prior BQAA Claude Code plugin is active in the test
+   session — `/plugin list` should show no `bigquery-agent-analytics-tracing`
+   entry from any marketplace. Disable/uninstall any duplicates before
+   proceeding, or you'll see doubled hook rows in `agent_events` and
+   not be able to attribute them cleanly. Running multiple BQAA
+   tracing plugins at once duplicates every hook write.
 1. Download the release tarball for the version you're submitting:
    ```bash
    VERSION=X.Y.Z
