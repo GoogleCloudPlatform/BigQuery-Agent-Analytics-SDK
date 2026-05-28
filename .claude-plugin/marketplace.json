@@ -1,5 +1,6 @@
 {
   "name": "bqaa-tracing",
+  "description": "Claude Code tracing plugins for BigQuery Agent Analytics.",
   "owner": {
     "name": "Google LLC",
     "url": "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
