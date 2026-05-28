@@ -449,6 +449,7 @@ class TraceFilter:
       session_id: str | None = None,
       user_id: str | None = None,
       has_error: bool | None = None,
+      custom_labels: dict[str, str] | None = None,
       limit: int = 100,
   ) -> "TraceFilter":
     """Build a ``TraceFilter`` from CLI-style arguments.
@@ -467,6 +468,8 @@ class TraceFilter:
         session_id: Filter to a single session.
         user_id: Filter to a specific user.
         has_error: If set, filter by error presence.
+        custom_labels: Filter by custom_tags key-value pairs
+            written via ``BigQueryLoggerConfig.custom_tags``.
         limit: Maximum number of traces to return.
 
     Returns:
@@ -485,6 +488,7 @@ class TraceFilter:
         user_id=user_id,
         session_ids=session_ids,
         has_error=has_error,
+        custom_labels=custom_labels,
         limit=limit,
     )
 
@@ -606,7 +610,7 @@ class TraceFilter:
         param_val = f"label_val_{i}"
         conditions.append(
             f"JSON_VALUE(attributes,"
-            f" CONCAT('$.labels.', @{param_key}))"
+            f" CONCAT('$.custom_tags.', @{param_key}))"
             f" = @{param_val}"
         )
         params.append(bigquery.ScalarQueryParameter(param_key, "STRING", key))

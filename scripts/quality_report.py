@@ -995,6 +995,7 @@ def run_evaluation(
     session_ids=None,
     tag_turns=False,
     eval_config=None,
+    custom_labels=None,
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig
   from bigquery_agent_analytics import TraceFilter
@@ -1013,11 +1014,13 @@ def run_evaluation(
   )
 
   if session_id:
-    trace_filter = TraceFilter(session_ids=[session_id])
+    trace_filter = TraceFilter(session_ids=[session_id],
+                               custom_labels=custom_labels)
   elif session_ids:
     trace_filter = TraceFilter(
         session_ids=session_ids,
         limit=len(session_ids),
+        custom_labels=custom_labels,
     )
     if app_name:
       trace_filter.root_agent_name = app_name
@@ -1027,9 +1030,10 @@ def run_evaluation(
       effective_time_range = None
 
     if effective_time_range:
-      trace_filter = TraceFilter.from_cli_args(last=effective_time_range)
+      trace_filter = TraceFilter.from_cli_args(
+          last=effective_time_range, custom_labels=custom_labels)
     else:
-      trace_filter = TraceFilter()
+      trace_filter = TraceFilter(custom_labels=custom_labels)
     trace_filter.limit = limit
     if app_name:
       trace_filter.root_agent_name = app_name
