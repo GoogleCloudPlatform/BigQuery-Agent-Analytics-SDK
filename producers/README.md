@@ -50,13 +50,17 @@ serves at [`/.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.jso
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
+Add the marketplace by `<owner>/<repo>`, **not** by a direct URL to
+`marketplace.json` — the catalog's `source` is a relative path that
+Claude Code can only resolve from a Git checkout. See the
+[plugin README](../plugins/claude_code/README.md#installing-the-plugin)
+for the sparse-checkout variant and details.
+
 The plugin vendors its own copy of the tracing package, so the
 `BQAA_PYTHON` interpreter does **not** need
 `bigquery-agent-analytics-tracing` installed — only its runtime deps
 (`google-cloud-bigquery` always; `google-cloud-bigquery-storage` +
-`pyarrow` for the Storage Write path). See the
-[plugin README](../plugins/claude_code/README.md) for the full runtime
-model and the manual-install fallback.
+`pyarrow` for the Storage Write path).
 
 ## Releases
 

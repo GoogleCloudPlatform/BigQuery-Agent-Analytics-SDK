@@ -74,6 +74,24 @@ From a Claude Code session:
 /plugin install bigquery-agent-analytics-tracing@bqaa-tracing
 ```
 
+> **Important: add the marketplace via the Git source form
+> (`<owner>/<repo>`), not via a direct URL to `marketplace.json`.**
+> The catalog uses a relative `source` path
+> (`./plugins/claude_code_dist/...`), which Claude Code can only
+> resolve when the marketplace was added as a Git checkout — that's
+> what provides the surrounding repo files the relative path points
+> into. A direct-URL `add` would fetch only the catalog JSON and the
+> plugin install would fail to resolve.
+
+For a faster clone — the SDK repo carries the consumption SDK + tests
+in addition to the plugin tree — use a sparse checkout if your Claude
+Code version supports it:
+
+```
+/plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK --sparse .claude-plugin plugins/claude_code_dist
+/plugin install bigquery-agent-analytics-tracing@bqaa-tracing
+```
+
 Then configure BigQuery destination + runtime deps (one-time):
 
 ```bash

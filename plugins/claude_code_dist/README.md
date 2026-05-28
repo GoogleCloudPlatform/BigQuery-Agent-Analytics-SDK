@@ -4,6 +4,13 @@ This directory holds the **built** plugin artifacts that the Claude Code
 marketplace catalog at [`/.claude-plugin/marketplace.json`](../../.claude-plugin/marketplace.json)
 serves to users.
 
+The catalog uses a **relative** plugin `source` pointing into this
+directory. That means users must add the marketplace via the Git
+source form (`/plugin marketplace add <owner>/<repo>`), **not** by
+passing a direct URL to `marketplace.json` — Claude Code can only
+resolve `./plugins/claude_code_dist/...` when the surrounding repo
+checkout is available locally.
+
 ## Why this exists
 
 The source of truth for the plugin lives at
