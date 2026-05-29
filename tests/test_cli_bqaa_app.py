@@ -26,6 +26,7 @@ Three things to prove:
 
 from __future__ import annotations
 
+import json
 import sys
 import textwrap
 
@@ -249,3 +250,78 @@ def test_pyproject_declares_bqaa_console_script() -> None:
       "Expected entry-point declaration missing from pyproject.toml; the"
       " 'bqaa' console script will not be installed"
   )
+
+
+# ---------------------------------------------------------------------------
+# bqaa seed-events
+# ---------------------------------------------------------------------------
+
+
+def test_bqaa_seed_events_exposes_expected_flags() -> None:
+  """Inspect Click params, not rendered help (rich wraps long flags under CI)."""
+  from typer.main import get_command
+
+  command = get_command(bqaa_app).get_command(None, "seed-events")  # type: ignore[arg-type]
+  assert command is not None, "bqaa app missing 'seed-events' subcommand"
+
+  declared_flags = set()
+  for param in command.params:
+    declared_flags.update(getattr(param, "opts", []))
+    declared_flags.update(getattr(param, "secondary_opts", []))
+
+  for flag in (
+      "--project-id",
+      "--dataset-id",
+      "--events-table",
+      "--sessions",
+      "--seed",
+      "--scenario",
+      "--dry-run",
+      "--format",
+  ):
+    assert (
+        flag in declared_flags
+    ), f"flag {flag!r} missing from `bqaa seed-events`"
+
+
+def test_bqaa_seed_events_dry_run_reports_without_bigquery() -> None:
+  """--dry-run runs end-to-end with no BigQuery client and exits 0."""
+  result = runner.invoke(
+      bqaa_app,
+      [
+          "seed-events",
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--sessions",
+          "2",
+          "--seed",
+          "1",
+          "--dry-run",
+          "--format",
+          "json",
+      ],
+  )
+  assert result.exit_code == 0, result.output
+  payload = json.loads(result.output)
+  assert payload["dry_run"] is True
+  assert payload["events_inserted"] == 0
+  assert payload["events_generated"] == 12
+
+
+def test_bqaa_seed_events_invalid_sessions_exits_2() -> None:
+  result = runner.invoke(
+      bqaa_app,
+      [
+          "seed-events",
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--sessions",
+          "0",
+          "--dry-run",
+      ],
+  )
+  assert result.exit_code == 2, result.output

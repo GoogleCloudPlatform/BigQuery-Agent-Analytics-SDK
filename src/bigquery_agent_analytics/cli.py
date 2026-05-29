@@ -2040,6 +2040,76 @@ bqaa_app.command(
 )(materialize_window)
 
 
+@bqaa_app.command("seed-events")
+def seed_events(
+    project_id: str = typer.Option(
+        ..., envvar="BQ_AGENT_PROJECT", help=_PROJECT_HELP
+    ),
+    dataset_id: str = typer.Option(
+        ..., envvar="BQ_AGENT_DATASET", help=_DATASET_HELP
+    ),
+    events_table: str = typer.Option(
+        "agent_events",
+        "--events-table",
+        help="Destination telemetry table name (in --dataset-id).",
+    ),
+    sessions: int = typer.Option(
+        5, "--sessions", help="Number of synthetic decision sessions (>= 1)."
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help=(
+            "Seed for deterministic IDs/content. Timestamps remain anchored to"
+            " run time unless using the SDK with an injected now."
+        ),
+    ),
+    scenario: str = typer.Option(
+        "decision",
+        "--scenario",
+        help="Synthetic scenario to generate. Currently: decision.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Generate and report events without creating the table or inserting.",
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """Seed a dataset with synthetic agent_events for the context graph.
+
+  Generates completed decision sessions (TOOL_COMPLETED + AGENT_COMPLETED)
+  so ``bqaa context-graph`` has terminal-event-closed sessions to process.
+
+  Exit codes:
+      0 — events generated (and inserted, unless --dry-run).
+      1 — BigQuery returned insert errors (reported in the JSON output).
+      2 — invalid input or unexpected internal error.
+  """
+  try:
+    from .seed_events import run_seed_events
+
+    result = run_seed_events(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        sessions=sessions,
+        seed=seed,
+        scenario=scenario,
+        events_table=events_table,
+        dry_run=dry_run,
+    )
+    typer.echo(format_output(result.to_json(), fmt))
+    if not result.ok:
+      raise typer.Exit(code=1)
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
 def main() -> None:
   """Entry point for ``bq-agent-sdk``."""
   app()
