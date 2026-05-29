@@ -219,6 +219,10 @@ def test_decision_corpus_is_byte_identical_after_refactor() -> None:
   assert rows[-1]["event_type"] == "AGENT_COMPLETED"
   # Same (seed, now) still byte-identical.
   assert generate_seed_events(sessions=3, seed=42, now=_FIXED_NOW) == rows
+  # Golden values pin the seeded RNG-consumption order: a change to
+  # _decision_session's draw sequence would break these immediately.
+  assert rows[0]["session_id"] == "sess-a3b1799d"
+  assert rows[0]["span_id"] == "bc8960a923b8c1e9"
 
 
 def test_decision_result_reports_success_outcome_counts() -> None:

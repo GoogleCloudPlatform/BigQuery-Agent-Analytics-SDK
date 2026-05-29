@@ -185,6 +185,8 @@ def _build_decision_corpus(
   Reproduces the exact pre-refactor loop (30s apart from ``now - 10min``,
   delegating to ``_decision_session``) so output stays byte-identical.
   """
+  if sessions < 1:
+    raise ValueError("sessions must be >= 1")
   rows: list[dict] = []
   cur = now - timedelta(minutes=10)
   for _ in range(sessions):
@@ -233,6 +235,7 @@ class SeedEventsResult:
   ok: bool
   event_type_counts: dict[str, int]
   errors: list[dict]
+  # {} when not populated (e.g. a SeedEventsResult constructed without it).
   session_outcome_counts: dict[str, int] = dataclasses.field(
       default_factory=dict
   )
