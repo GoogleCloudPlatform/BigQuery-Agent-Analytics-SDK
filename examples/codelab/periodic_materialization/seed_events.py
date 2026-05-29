@@ -41,6 +41,10 @@ def main() -> None:
       seed=args.seed,
   )
   print(format_output(result.to_json(), args.fmt))
+  # Mirror the CLI: BigQuery insert errors are reported (ok=False), not
+  # raised, so fail the shell exit explicitly for downloaded-kit users.
+  if not result.ok:
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ def test_wrapper_forwards_parsed_args_to_run_seed_events(
   captured: dict = {}
 
   class _Result:
+    ok = True
 
     def to_json(self) -> dict:
       return {"ok": True}
@@ -75,4 +76,36 @@ def test_wrapper_forwards_parsed_args_to_run_seed_events(
   assert captured["seed"] == 9
 
   # The full forward-and-print pipeline ran without error.
+  assert "ok" in capsys.readouterr().out
+
+
+def test_wrapper_exits_nonzero_on_insert_errors(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+  """ok=False (BigQuery insert errors) must produce a nonzero shell exit.
+
+  run_seed_events reports insert errors as ok=False rather than raising,
+  so the wrapper has to fail the exit explicitly -- otherwise downloaded-kit
+  users get a success exit on failed inserts (the old script raised).
+  """
+  module = _load_wrapper()
+
+  class _FailedResult:
+    ok = False
+
+    def to_json(self) -> dict:
+      return {"ok": False, "errors": [{"index": 0}]}
+
+  monkeypatch.setattr(
+      module, "run_seed_events", lambda **kwargs: _FailedResult()
+  )
+  monkeypatch.setattr(
+      "sys.argv",
+      ["seed_events.py", "--project-id", "p", "--dataset-id", "d"],
+  )
+
+  with pytest.raises(SystemExit) as excinfo:
+    module.main()
+  assert excinfo.value.code == 1
+  # The report is still printed before the nonzero exit.
   assert "ok" in capsys.readouterr().out
