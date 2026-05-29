@@ -26,7 +26,12 @@ def main() -> None:
   parser.add_argument("--dataset-id", required=True)
   parser.add_argument("--sessions", type=int, default=5)
   parser.add_argument("--seed", type=int, default=None)
-  parser.add_argument("--format", dest="fmt", default="json")
+  parser.add_argument(
+      "--format",
+      dest="fmt",
+      default="json",
+      help="Output format: json|text|table.",
+  )
   args = parser.parse_args()
 
   result = run_seed_events(

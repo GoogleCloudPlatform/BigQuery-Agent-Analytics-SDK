@@ -73,3 +73,6 @@ def test_wrapper_forwards_parsed_args_to_run_seed_events(
   assert captured["dataset_id"] == "d"
   assert captured["sessions"] == 4
   assert captured["seed"] == 9
+
+  # The full forward-and-print pipeline ran without error.
+  assert "ok" in capsys.readouterr().out
