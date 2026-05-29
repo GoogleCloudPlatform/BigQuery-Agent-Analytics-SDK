@@ -237,3 +237,52 @@ def test_decision_result_reports_success_outcome_counts() -> None:
   )
   assert result.session_outcome_counts == {"success": 4}
   assert result.to_json()["session_outcome_counts"] == {"success": 4}
+
+
+from bigquery_agent_analytics.seed_events import _outcome_allocation
+from bigquery_agent_analytics.seed_events import _shuffled_cycle
+
+
+def test_outcome_allocation_exact_at_100() -> None:
+  assert _outcome_allocation(100) == {
+      "success": 70,
+      "failed": 10,
+      "orphaned": 10,
+      "truncated": 10,
+  }
+
+
+def test_outcome_allocation_scales_and_keeps_min_one() -> None:
+  assert _outcome_allocation(10) == {
+      "success": 7,
+      "failed": 1,
+      "orphaned": 1,
+      "truncated": 1,
+  }
+  assert _outcome_allocation(4) == {
+      "success": 1,
+      "failed": 1,
+      "orphaned": 1,
+      "truncated": 1,
+  }
+
+
+def test_outcome_allocation_rejects_too_few_sessions() -> None:
+  for bad in (3, 1, 0):
+    with pytest.raises(
+        ValueError, match="decision-realistic requires sessions >= 4"
+    ):
+      _outcome_allocation(bad)
+
+
+def test_shuffled_cycle_covers_roster_and_is_deterministic() -> None:
+  import random as _random
+
+  roster = ("a", "b", "c", "d")
+  out1 = _shuffled_cycle(_random.Random(1), roster, 10)
+  out2 = _shuffled_cycle(_random.Random(1), roster, 10)
+  assert out1 == out2  # deterministic for a fixed rng seed
+  assert len(out1) == 10
+  assert set(out1) == set(roster)  # every roster member appears
+  # >=2 distinct even for small n
+  assert len(set(_shuffled_cycle(_random.Random(2), roster, 2))) >= 2

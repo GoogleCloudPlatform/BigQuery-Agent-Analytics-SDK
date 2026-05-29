@@ -32,6 +32,7 @@ from datetime import timedelta
 from datetime import timezone
 import enum
 import json
+import math
 import random
 from typing import Any, Optional
 
@@ -79,14 +80,17 @@ def _row(
     session_id: str,
     content: dict,
     ts: datetime,
+    *,
+    agent: str = "demo-agent",
+    user_id: str = "demo-user",
 ) -> dict:
   return {
       "timestamp": ts.isoformat(),
       "event_type": event_type,
-      "agent": "demo-agent",
+      "agent": agent,
       "session_id": session_id,
       "invocation_id": _hex(rng, 32),
-      "user_id": "demo-user",
+      "user_id": user_id,
       # One trace per session in the demo corpus; trace_id mirrors session_id.
       "trace_id": session_id,
       "span_id": _hex(rng, 16),
@@ -97,6 +101,40 @@ def _row(
       "content": json.dumps(content),
       "attributes": "{}",
       "latency_ms": "{}",
+  }
+
+
+def _shuffled_cycle(
+    rng: random.Random, roster: tuple[str, ...], n: int
+) -> list[str]:
+  """Return a length-``n`` assignment cycling ``roster``, shuffled in place.
+
+  Repeats the roster to length ``n`` then shuffles, so every member appears
+  (for ``n >= len(roster)``) and at least ``min(n, len(roster))`` distinct
+  values are present -- a true coverage guarantee, not a probabilistic one.
+  """
+  reps = -(-n // len(roster))  # ceil division
+  cycle = (list(roster) * reps)[:n]
+  rng.shuffle(cycle)
+  return cycle
+
+
+def _outcome_allocation(sessions: int) -> dict[str, int]:
+  """Exact, deterministic outcome-bucket counts for ``decision-realistic``.
+
+  Each edge bucket (failed/orphaned/truncated) gets ``round-half-up`` of 10%,
+  floored at 1; ``success`` takes the remainder. Exact 70/10/10/10 at 100.
+  Requires ``sessions >= 4`` (else ``success`` would be < 1).
+  """
+  edge = max(1, math.floor(0.10 * sessions + 0.5))
+  success = sessions - 3 * edge
+  if success < 1:
+    raise ValueError("decision-realistic requires sessions >= 4")
+  return {
+      "success": success,
+      "failed": edge,
+      "orphaned": edge,
+      "truncated": edge,
   }
 
 
