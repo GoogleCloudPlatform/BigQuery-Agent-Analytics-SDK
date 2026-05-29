@@ -63,7 +63,7 @@ if success < 1:
 
 Outcomes are assigned to the N session slots and **rng-shuffled** so failures are interleaved (not clustered), keeping exact bucket counts.
 
-**Time distribution.** Session start times are **distributed across** the 72h window ending at `now` (`[now − 72h, now]`) by even partitioning plus bounded `rng` jitter within each slot — not pure random draws — so the corpus span always covers the full multi-day range (the multi-day-span test is then exact, not probabilistic), with the earliest session pinned near `now − 72h` and the latest near `now`. Within a session, steps are offset by seconds from its start (as in `decision`). Older sessions deliberately fall outside a 24h `--lookback-hours`, which the codelab uses to demonstrate windowing.
+**Time distribution.** Session start times are **distributed across** the window `[now − 72h, now − _MAX_SESSION_SPAN]` by even partitioning plus bounded `rng` jitter within each slot — not pure random draws — so the corpus span always covers the full multi-day range (the multi-day-span test is then exact, not probabilistic), with the earliest session pinned near `now − 72h` and the latest near `now − _MAX_SESSION_SPAN`. The window's upper bound is held back by `_MAX_SESSION_SPAN` (a constant comfortably larger than any single session's per-step offsets, e.g. 60s) so that a session's tool/terminal rows (start + a few seconds) **never land after `now`** — no future timestamps. Within a session, steps are offset by seconds from its start (as in `decision`). Older sessions deliberately fall outside a 24h `--lookback-hours`, which the codelab uses to demonstrate windowing.
 
 **Per-outcome session shape** (built on the existing submit → evaluate×k → commit → terminal flow):
 - **success** — `AGENT_COMPLETED`, `status="ok"`. `k` = option count drawn uniformly from 2..6.
@@ -75,7 +75,8 @@ Outcomes are assigned to the N session slots and **rng-shuffled** so failures ar
 - ~4 named agents (e.g. `loan-advisor`, `ops-scheduler`, `access-broker`, `budget-allocator`), each aligned to a business topic family.
 - ~12 named users (e.g. `user-000`..`user-011`).
 - Business topics/entities cycled deterministically from an extended topic list.
-Agent/user/topic are chosen per session via `rng`, guaranteeing ≥2 distinct agents and ≥2 distinct users for any realistic N.
+
+Agents and users are assigned via a **shuffled cycle**, not independent `rng.choice` (which could pick the same value every time for small N): build a list by repeating the agent (resp. user) roster to length N, `rng.shuffle` it, then index by session slot. This guarantees near-even coverage and **≥2 distinct agents and ≥2 distinct users for any N ≥ 2** (deterministic given the seed), making the coverage test a true guarantee rather than a probabilistic one. Topic is assigned the same way.
 
 The row schema is unchanged (`_EVENT_SCHEMA_FIELDS`); only field *values* vary.
 
@@ -105,7 +106,9 @@ bqaa seed-events --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
     --scenario decision-realistic --sessions 100 --seed 42
 ```
 
-with two checks: (a) an event-type / outcome distribution query, and (b) orphan-watchdog behavior (`bqaa context-graph` skips the 10 orphaned sessions under the default filter; `--max-session-age-hours` flags them as `session_orphaned`). Regenerate `colab_notebook.ipynb` via `scripts/generate_colab_from_codelab.py`; the CI drift `--check` must pass.
+with two checks: (a) an outcome-distribution query, and (b) orphan-watchdog behavior (`bqaa context-graph` skips the 10 orphaned sessions under the default filter; `--max-session-age-hours` flags them as `session_orphaned`). Regenerate `colab_notebook.ipynb` via `scripts/generate_colab_from_codelab.py`; the CI drift `--check` must pass.
+
+The outcome-distribution check must be **concrete SQL**, not just an event-type tally — event-type counts don't reveal the outcome mix. The implementation plan provides the exact query that classifies each `session_id` by joining/aggregating over its rows: a session is *orphaned* if it has no `AGENT_COMPLETED` row, *failed* if its `AGENT_COMPLETED` has `status = 'error'`, *truncated* if any of its rows has `is_truncated = true`, else *success* — and counts sessions per class, so the reader sees roughly 70/10/10/10 at the default 100. (Classification precedence resolves any overlap; the generator assigns one outcome per session, so overlaps should not occur.)
 
 ### 6. Tests (`tests/test_seed_events.py`, `tests/test_cli_bqaa_app.py`)
 
