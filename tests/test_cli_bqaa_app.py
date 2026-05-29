@@ -329,3 +329,44 @@ def test_bqaa_seed_events_invalid_sessions_exits_2() -> None:
       ],
   )
   assert result.exit_code == 2, result.output
+
+
+def test_bqaa_seed_events_insert_errors_exit_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """BigQuery insert errors surface as ok=False and map to exit code 1."""
+  from bigquery_agent_analytics import seed_events as seed_events_module
+
+  def fake_run_seed_events(**kwargs: object) -> object:
+    return seed_events_module.SeedEventsResult(
+        table_ref="p.d.agent_events",
+        scenario="decision",
+        sessions=1,
+        events_generated=6,
+        events_inserted=0,
+        dry_run=False,
+        ok=False,
+        event_type_counts={"AGENT_COMPLETED": 1},
+        errors=[{"index": 0, "errors": [{"reason": "invalid"}]}],
+    )
+
+  # The command does a function-local ``from .seed_events import
+  # run_seed_events`` on each call, so patching the module attribute is
+  # picked up at invocation time.
+  monkeypatch.setattr(
+      seed_events_module, "run_seed_events", fake_run_seed_events
+  )
+  result = runner.invoke(
+      bqaa_app,
+      [
+          "seed-events",
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--sessions",
+          "1",
+      ],
+  )
+  assert result.exit_code == 1, result.output
+  assert json.loads(result.output)["ok"] is False
