@@ -107,6 +107,13 @@ def run_seed_events(
 ) -> SeedEventsResult:
 ```
 - `now` defaults to `datetime.now(timezone.utc)` when not injected.
+- **Input validation:** `sessions` must be `>= 1`. `run_seed_events` (and
+  `generate_seed_events`) raise `ValueError("sessions must be >= 1")` for `0` or
+  negative values **before** any BigQuery call. This is invalid input, not a
+  logical insert failure — it is an exception (CLI exit 2), distinct from the
+  `ok=False` insert-error path (exit 1). This prevents the bad codelab failure
+  mode where `--sessions 0` creates the table, inserts nothing, and the next
+  `bqaa context-graph` step finds no sessions and the reader is stuck.
 - Builds rows via `generate_seed_events`.
 - **`dry_run=True`**: no `create_table`, no insert. Returns
   `events_inserted=0`, `dry_run=True`, `ok=True`, with `events_generated` and
@@ -188,8 +195,11 @@ PR #260 — rich wraps long option names under CI's 80-col non-TTY rendering).
    - `dry_run=False`, insert returns errors: `ok is False`, `errors` populated,
      `events_inserted == 0` — no exception raised.
 5. **Wrapper** — example `seed_events.py` routes through `run_seed_events`.
+6. **Invalid `--sessions`** — `generate_seed_events` / `run_seed_events` raise
+   `ValueError` for `sessions=0` and `sessions=-5` before any BigQuery call;
+   the CLI surfaces invalid input as exit code 2.
 
-## Verification
+## Required Verification (acceptance checks — not yet performed)
 
 - Full test suite green across Python 3.10–3.14.
 - `bash autoformat.sh` reports no changes (pyink + isort).
