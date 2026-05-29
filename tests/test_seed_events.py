@@ -93,3 +93,107 @@ def test_scenario_enum_default_is_decision() -> None:
   rows = generate_seed_events(sessions=1, seed=1, now=_FIXED_NOW)
   assert len(rows) == _EVENTS_PER_SESSION
   assert Scenario.DECISION.value == "decision"
+
+
+from bigquery_agent_analytics.seed_events import run_seed_events
+from bigquery_agent_analytics.seed_events import SeedEventsResult
+
+
+class _FakeBQClient:
+  """Records create_table / insert_rows_json calls; returns canned errors."""
+
+  def __init__(self, insert_errors: list | None = None) -> None:
+    self.created: list = []
+    self.inserted: list = []
+    self._insert_errors = insert_errors or []
+
+  def create_table(self, table: object, exists_ok: bool = False) -> object:
+    self.created.append((table, exists_ok))
+    return table
+
+  def insert_rows_json(self, table_ref: str, rows: list) -> list:
+    self.inserted.append((table_ref, rows))
+    return self._insert_errors
+
+
+def test_dry_run_generates_without_touching_bigquery() -> None:
+  fake = _FakeBQClient()
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=2,
+      seed=1,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=fake,
+  )
+  assert fake.created == [] and fake.inserted == []
+  assert result.dry_run is True
+  assert result.ok is True
+  assert result.events_inserted == 0
+  assert result.events_generated == 2 * _EVENTS_PER_SESSION
+  assert result.event_type_counts["AGENT_COMPLETED"] == 2
+  assert result.table_ref == "p.d.agent_events"
+
+
+def test_insert_success_reports_inserted_count() -> None:
+  fake = _FakeBQClient()
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=3,
+      seed=1,
+      now=_FIXED_NOW,
+      bq_client=fake,
+  )
+  assert len(fake.created) == 1
+  table_ref, rows = fake.inserted[0]
+  assert table_ref == "p.d.agent_events"
+  assert len(rows) == 3 * _EVENTS_PER_SESSION
+  assert result.ok is True
+  assert result.events_inserted == 3 * _EVENTS_PER_SESSION
+  assert result.errors == []
+
+
+def test_insert_errors_are_explicit_not_exceptions() -> None:
+  bq_errors = [{"index": 0, "errors": [{"reason": "invalid"}]}]
+  fake = _FakeBQClient(insert_errors=bq_errors)
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=1,
+      seed=1,
+      now=_FIXED_NOW,
+      bq_client=fake,
+  )
+  assert result.ok is False
+  assert result.errors == bq_errors
+  assert result.events_inserted == 0
+
+
+def test_run_seed_events_rejects_bad_sessions() -> None:
+  with pytest.raises(ValueError, match="sessions must be >= 1"):
+    run_seed_events(
+        project_id="p",
+        dataset_id="d",
+        sessions=0,
+        seed=1,
+        now=_FIXED_NOW,
+        bq_client=_FakeBQClient(),
+    )
+
+
+def test_to_json_round_trips() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=1,
+      seed=1,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  payload = result.to_json()
+  assert json.loads(json.dumps(payload)) == payload
+  assert payload["ok"] is True
+  assert payload["events_inserted"] == 0

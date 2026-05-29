@@ -206,3 +206,119 @@ def generate_seed_events(
     rows.extend(builder(rng, cur))
     cur += timedelta(seconds=30)
   return rows
+
+
+@dataclasses.dataclass(frozen=True)
+class SeedEventsResult:
+  """Outcome of a seed-events run."""
+
+  table_ref: str
+  scenario: str
+  sessions: int
+  events_generated: int
+  events_inserted: int
+  dry_run: bool
+  ok: bool
+  event_type_counts: dict[str, int]
+  errors: list[dict]
+
+  def to_json(self) -> dict[str, Any]:
+    return {
+        "table_ref": self.table_ref,
+        "scenario": self.scenario,
+        "sessions": self.sessions,
+        "events_generated": self.events_generated,
+        "events_inserted": self.events_inserted,
+        "dry_run": self.dry_run,
+        "ok": self.ok,
+        "event_type_counts": dict(self.event_type_counts),
+        "errors": list(self.errors),
+    }
+
+
+def run_seed_events(
+    *,
+    project_id: str,
+    dataset_id: str,
+    sessions: int = 5,
+    seed: Optional[int] = None,
+    scenario: Scenario | str = Scenario.DECISION,
+    events_table: str = "agent_events",
+    dry_run: bool = False,
+    now: Optional[datetime] = None,
+    bq_client: Optional[Any] = None,
+) -> SeedEventsResult:
+  """Generate synthetic events and (unless ``dry_run``) insert them.
+
+  Invalid input (``sessions < 1``, unknown ``scenario``) raises; the CLI
+  maps that to exit 2. BigQuery insert errors are modeled as ``ok=False``
+  with ``errors`` populated -- not raised -- so the JSON report stays
+  authoritative (CLI exit 1).
+  """
+  if sessions < 1:
+    raise ValueError("sessions must be >= 1")
+  scenario = Scenario(scenario) if isinstance(scenario, str) else scenario
+  if now is None:
+    now = datetime.now(timezone.utc)
+
+  rows = generate_seed_events(
+      sessions=sessions, seed=seed, now=now, scenario=scenario
+  )
+  counts: dict[str, int] = {}
+  for row in rows:
+    counts[row["event_type"]] = counts.get(row["event_type"], 0) + 1
+  table_ref = f"{project_id}.{dataset_id}.{events_table}"
+
+  if dry_run:
+    return SeedEventsResult(
+        table_ref=table_ref,
+        scenario=scenario.value,
+        sessions=sessions,
+        events_generated=len(rows),
+        events_inserted=0,
+        dry_run=True,
+        ok=True,
+        event_type_counts=counts,
+        errors=[],
+    )
+
+  from google.cloud import bigquery
+
+  client = bq_client or bigquery.Client(project=project_id)
+  table = bigquery.Table(table_ref, schema=_event_schema())
+  table.time_partitioning = bigquery.TimePartitioning(field="timestamp")
+  client.create_table(table, exists_ok=True)
+  errors = client.insert_rows_json(table_ref, rows)
+  if errors:
+    return SeedEventsResult(
+        table_ref=table_ref,
+        scenario=scenario.value,
+        sessions=sessions,
+        events_generated=len(rows),
+        events_inserted=0,
+        dry_run=False,
+        ok=False,
+        event_type_counts=counts,
+        errors=list(errors),
+    )
+  return SeedEventsResult(
+      table_ref=table_ref,
+      scenario=scenario.value,
+      sessions=sessions,
+      events_generated=len(rows),
+      events_inserted=len(rows),
+      dry_run=False,
+      ok=True,
+      event_type_counts=counts,
+      errors=[],
+  )
+
+
+def _event_schema() -> list:
+  """Build the BigQuery schema lazily (keeps import-time deps minimal)."""
+  from google.cloud import bigquery
+
+  return [
+      bigquery.SchemaField(name, field_type, mode=mode)
+      for name, field_type, mode in _EVENT_SCHEMA_FIELDS
+  ]
