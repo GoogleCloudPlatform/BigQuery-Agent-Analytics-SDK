@@ -1477,6 +1477,23 @@ def run_eval(args):
   config_path = getattr(args, "config", None)
   eval_config = _load_eval_config(getattr(args, "eval_config", None))
 
+  # --dimensions primary: keep only the 2 primary metrics to cut LLM-judge
+  # cost ~3.5x. Build a filtered copy so the cached config is not mutated.
+  if getattr(args, "dimensions", "full") == "primary":
+    eval_config = {
+        **eval_config,
+        "metrics": [
+            m
+            for m in eval_config.get("metrics", [])
+            if m.get("name") in _PRIMARY_METRICS
+        ],
+    }
+    logger.info(
+        "Dimensions mode: primary — scoring only %s (skipping 5 quality "
+        "dimensions)",
+        ", ".join(sorted(_PRIMARY_METRICS)),
+    )
+
   custom_labels = None
   if getattr(args, "label", None):
     custom_labels = {}
@@ -1772,9 +1789,22 @@ _METRIC_LABELS = {
 }
 
 # Maps category → numeric score (0-2) for dimension averaging.
+#
+# The middle-category names deliberately differ per dimension
+# (``mostly_correct``, ``partial``, ``somewhat_specific``, ...): the LLM judge
+# is given the full per-dimension vocabulary, and a name that fits the
+# dimension produces better classifications than a generic ``medium``. Do not
+# "normalize" them to a single shared word.
+#
+# ``correct`` appears as a category in both ``correctness`` and
+# ``first_time_right``. That is fine — categories are always looked up keyed by
+# metric_name, so the two never collide. ``tool_usage.no_tool_needed`` scores 2
+# because not calling a tool is the *correct* outcome when none was needed
+# (e.g. a greeting or a correctly-declined out-of-scope question); without it,
+# those sessions would be penalised as a Tool Usage failure.
 _DIMENSION_SCORES = {
     "correctness": {"correct": 2, "mostly_correct": 1, "incorrect": 0},
-    "tool_usage": {"proper": 2, "partial": 1, "none": 0},
+    "tool_usage": {"proper": 2, "no_tool_needed": 2, "partial": 1, "none": 0},
     "specificity": {"specific": 2, "somewhat_specific": 1, "vague": 0},
     "scope_compliance": {
         "compliant": 2,
@@ -1797,6 +1827,7 @@ _SCORECARD_ICONS = {
     "mostly_correct": "⚠️",
     "incorrect": "❌",
     "proper": "✅",
+    "no_tool_needed": "➖",  # neutral: no tool was needed (a correct outcome)
     "partial": "⚠️",
     "none": "❌",
     "specific": "✅",
@@ -1809,10 +1840,13 @@ _SCORECARD_ICONS = {
     "correction_needed": "❌",
 }
 
-# Maps dimension → (lowest category, section title) for "Low X" report sections.
+# Maps dimension → its worst (score-0) category, used for "Low X" report
+# sections. A dimension with no score-0 category is omitted rather than raising
+# StopIteration at import time.
 _DIMENSION_LOW_CATEGORIES = {
-    dim: next(cat for cat, score in cats.items() if score == 0)
+    dim: low_cat
     for dim, cats in _DIMENSION_SCORES.items()
+    if (low_cat := next((c for c, s in cats.items() if s == 0), None))
 }
 
 # Short descriptions for the markdown report's Quality Dimensions table.
@@ -1839,6 +1873,17 @@ def _compute_dimension_averages(report):
       d: round(sum(scores) / len(scores), 2) if scores else 0
       for d, scores in dim_totals.items()
   }
+
+
+def _has_dimension_data(dim_avgs):
+  """True when the quality dimensions were actually scored.
+
+  A run with ``--dimensions primary`` (or any run that scored no dimension
+  metrics) yields all-zero averages. Treating that as real data would render a
+  misleading "every dimension is 0.0 / failing" report, so all three output
+  paths (console, markdown, JSON) gate the dimension block on this predicate.
+  """
+  return any(v > 0 for v in dim_avgs.values())
 
 
 def _compute_multiturn_stats(resolved_map):
@@ -2079,12 +2124,15 @@ def _print_eval_results(
 
   # --- Dimension averages (0-2 scale) ---
   dim_avgs = _compute_dimension_averages(report)
-  if any(v > 0 for v in dim_avgs.values()):
+  if _has_dimension_data(dim_avgs):
     print(f"\n  Quality Dimensions (0-2 scale):")
     for dim, avg in dim_avgs.items():
       bar = "#" * int(avg * 25)
       label = _METRIC_LABELS.get(dim, dim)
       print(f"    {label:<20s}: {avg:.2f} / 2.00  {bar}")
+      desc = _DIMENSION_DESCRIPTIONS.get(dim)
+      if desc:
+        print(f"    {'':<20s}  ↳ {desc}")
 
   # --- Multi-turn efficiency ---
   mt_stats = _compute_multiturn_stats(resolved_map)
@@ -2667,8 +2715,8 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
 
   total_tagged = len(sessions_with_tags)
   total_corrections = len(sessions_with_corrections)
-  w(f"**Sessions with turn tags:** {total_tagged}  ")
-  w(f"**Sessions with corrections:** {total_corrections}  ")
+  w(f"- **Sessions with turn tags:** {total_tagged}")
+  w(f"- **Sessions with corrections:** {total_corrections}")
   w("")
 
   # --- Correction Boundaries ---
@@ -2891,7 +2939,7 @@ def _write_md_report(
   mt_stats = _compute_multiturn_stats(resolved_map)
   agent_stats = _build_agent_stats(report, resolved_map)
 
-  has_dims = any(v > 0 for v in dim_avgs.values())
+  has_dims = _has_dimension_data(dim_avgs)
   low_dims = {}
   for dim, low_cat in _DIMENSION_LOW_CATEGORIES.items():
     sessions = _md_find_low_dimension_sessions(report, dim, low_cat)
@@ -2974,14 +3022,16 @@ def _write_md_report(
   w(f"Markdown report generated by `{' '.join(cmd_parts)}`.")
   w("")
 
+  # Render metadata as a bullet list rather than trailing-double-space GFM
+  # hard breaks — the latter trips `git diff --check` (PR #156/#174 L1).
   timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  w(f"**Generated:** {timestamp}  ")
-  w(f"**Project:** {PROJECT_ID}")
+  w(f"- **Generated:** {timestamp}")
+  w(f"- **Project:** {PROJECT_ID}")
   if DATASET_ID != "local":
-    w(f"**Dataset:** {DATASET_ID}.{TABLE_ID}")
-    w(f"**Location:** {DATASET_LOCATION}  ")
-  w(f"**Eval model:** {model}  ")
-  w(f"**Sessions:** {total}  ")
+    w(f"- **Dataset:** {DATASET_ID}.{TABLE_ID}")
+    w(f"- **Location:** {DATASET_LOCATION}")
+  w(f"- **Eval model:** {model}")
+  w(f"- **Sessions:** {total}")
   w("")
   w("| Metric | Value |")
   w("|--------|-------|")
@@ -3290,7 +3340,11 @@ def _build_json_output(report, resolved_map, trajectories=None):
           if total
           else 0,
           "unhelpful_rate": round(fp_count / total * 100, 1) if total else 0,
-          "dimension_averages": dim_avgs,
+          # Empty when dimensions were not scored (e.g. --dimensions primary),
+          # so consumers don't read unscored dimensions as 0.0 / failing.
+          "dimension_averages": (
+              dim_avgs if _has_dimension_data(dim_avgs) else {}
+          ),
           **mt_stats,
       },
       "category_distributions": {
@@ -3394,6 +3448,16 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       dest="eval",
       action="store_false",
       help="Browse Q&A pairs without evaluation",
+  )
+  parser.add_argument(
+      "--dimensions",
+      choices=["full", "primary"],
+      default="full",
+      help="Which LLM-judge metrics to run. 'full' (default) scores all 7 "
+      "metrics: 2 primary (response_usefulness, task_grounding) plus the 5 "
+      "quality dimensions. 'primary' scores only the 2 primary metrics — "
+      "about 3.5x cheaper (2 LLM calls/session instead of 7) but omits the "
+      "Quality Dimensions table. Use --no-eval to skip evaluation entirely.",
   )
   parser.add_argument(
       "--time-period",

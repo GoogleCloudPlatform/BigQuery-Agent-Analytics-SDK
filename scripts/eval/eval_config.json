@@ -78,7 +78,11 @@
         },
         {
           "name": "none",
-          "definition": "The agent answered from general knowledge without looking up information via tools, even though tools were available and the question warranted their use."
+          "definition": "The agent answered from general knowledge without looking up information via tools, even though tools were available and the question warranted their use. DECISIVE TEST: if the question was in-scope and a tool could have supplied the answer, but the trace shows no relevant tool call, this is `none` (a failure) -- do NOT use `no_tool_needed` to excuse a missing lookup."
+        },
+        {
+          "name": "no_tool_needed",
+          "definition": "The question genuinely required no tool lookup -- e.g. a greeting, a meta/clarification turn, or an out-of-scope topic the agent correctly declined. Not using a tool was the CORRECT behavior here, so this is a positive outcome, not a failure. Use this ONLY when no tool was needed; if the question was an in-scope data lookup the agent should have performed, use `none` instead."
         }
       ],
       "required": true

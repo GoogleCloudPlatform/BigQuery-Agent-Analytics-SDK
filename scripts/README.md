@@ -140,6 +140,13 @@ produced a given report.
 
 The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
 
+> **Cost:** the default `--dimensions full` makes **7 LLM-judge calls per
+> session** (2 primary + 5 quality dimensions). A 100-session run is ~700 calls;
+> a 1000-session bulk eval is ~7000. If you only need the pass/fail view, pass
+> `--dimensions primary` to score just the 2 primary metrics (~2 calls/session,
+> roughly **3.5x cheaper**) at the cost of the Quality Dimensions table. Use
+> `--no-eval` to skip LLM scoring entirely and only browse Q&A pairs.
+
 **Primary metrics** classify each session:
 
 | Metric | Categories | What it measures |
@@ -158,10 +165,20 @@ sessions to produce the Quality Dimensions table in the report:
 | Dimension | 2 (best) | 1 (middle) | 0 (worst) |
 |-----------|----------|------------|-----------|
 | `correctness` | All facts accurate | Minor inaccuracy | Wrong facts or hallucinations |
-| `tool_usage` | Tools used properly | Partial tool use | No tool use when needed |
+| `tool_usage` | Tools used properly, **or no tool was needed** | Partial tool use | No tool use when needed |
 | `specificity` | Specific numbers, dates, limits | Missing some details | Vague or generic |
 | `scope_compliance` | Correctly handled scope | Unnecessary caveats | Wrong scope decision |
 | `first_time_right` | Correct on first try | Needed clarification | User had to correct |
+
+`tool_usage` includes a `no_tool_needed` category that also scores 2 — a
+greeting, clarification, or a correctly-declined out-of-scope question did not
+require a tool, so it is not counted as a Tool Usage failure. In the per-session
+scorecard it renders as a neutral `➖` rather than `❌`.
+
+`first_time_right` is primarily a **multi-turn** signal: it measures whether the
+agent's first answer held up without the user correcting it. For single-turn
+sessions it has no follow-up to look at and effectively mirrors `correctness`,
+so read it alongside the multi-turn efficiency stats below.
 
 **Multi-turn efficiency** metrics are extracted from trace spans:
 

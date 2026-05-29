@@ -34,6 +34,7 @@ from quality_report import _count_trace_metrics
 from quality_report import _extract_a2a_text
 from quality_report import _extract_conversation
 from quality_report import _group_by_category
+from quality_report import _has_dimension_data
 from quality_report import _is_single_word_routing
 from quality_report import _load_agent_config
 from quality_report import generate_quality_report
@@ -766,6 +767,57 @@ class TestComputeDimensionAverages:
     report = _FakeReport(sessions)
     avgs = _compute_dimension_averages(report)
     assert avgs["correctness"] == 2.0
+
+  def test_tool_usage_no_tool_needed_scores_full(self):
+    # A correct decline / direct answer where no tool was needed must score 2
+    # on tool_usage, not be penalised as a Tool Usage failure (PR #174 P1).
+    sessions = [
+        _FakeSession("s1", [_FakeMetric("tool_usage", "no_tool_needed")]),
+    ]
+    avgs = _compute_dimension_averages(_FakeReport(sessions))
+    assert avgs["tool_usage"] == 2.0
+
+  def test_tool_usage_no_tool_needed_does_not_drag_average(self):
+    # Mixed batch: one proper tool use, one no-tool-needed decline. Both are
+    # correct outcomes, so the Tool Usage average must stay at 2.0.
+    sessions = [
+        _FakeSession("s1", [_FakeMetric("tool_usage", "proper")]),
+        _FakeSession("s2", [_FakeMetric("tool_usage", "no_tool_needed")]),
+    ]
+    avgs = _compute_dimension_averages(_FakeReport(sessions))
+    assert avgs["tool_usage"] == 2.0
+
+
+# ================================================================== #
+# _has_dimension_data                                                 #
+# ================================================================== #
+
+
+class TestHasDimensionData:
+
+  def test_unscored_dimensions_are_not_data(self):
+    # --dimensions primary scores no dimension metrics → all-zero averages.
+    # These must not be treated as real "everything failed" data.
+    avgs = _compute_dimension_averages(
+        _FakeReport(
+            [
+                _FakeSession(
+                    "s1", [_FakeMetric("response_usefulness", "meaningful")]
+                )
+            ]
+        )
+    )
+    assert avgs == {d: 0 for d in avgs}
+    assert _has_dimension_data(avgs) is False
+
+  def test_scored_dimensions_are_data(self):
+    avgs = _compute_dimension_averages(
+        _FakeReport([_FakeSession("s1", [_FakeMetric("tool_usage", "proper")])])
+    )
+    assert _has_dimension_data(avgs) is True
+
+  def test_empty_dict(self):
+    assert _has_dimension_data({}) is False
 
 
 # ================================================================== #
