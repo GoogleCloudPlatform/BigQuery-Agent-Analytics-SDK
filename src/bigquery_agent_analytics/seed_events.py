@@ -87,7 +87,8 @@ def _row(
       "session_id": session_id,
       "invocation_id": _hex(rng, 32),
       "user_id": "demo-user",
-      "trace_id": session_id[:16],
+      # One trace per session in the demo corpus; trace_id mirrors session_id.
+      "trace_id": session_id,
       "span_id": _hex(rng, 16),
       "parent_span_id": None,
       "status": "ok",
@@ -177,6 +178,10 @@ def _decision_session(rng: random.Random, now: datetime) -> list[dict]:
 
 
 _SCENARIO_BUILDERS = {Scenario.DECISION: _decision_session}
+assert set(_SCENARIO_BUILDERS) == set(Scenario), (
+    "every Scenario needs a builder; missing: "
+    f"{set(Scenario) - set(_SCENARIO_BUILDERS)}"
+)
 
 
 def generate_seed_events(

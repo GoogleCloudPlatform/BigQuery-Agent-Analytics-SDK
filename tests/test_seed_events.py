@@ -26,6 +26,23 @@ from bigquery_agent_analytics.seed_events import Scenario
 
 _FIXED_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 _EVENTS_PER_SESSION = 6  # submit(1) + evaluate(3) + commit(1) + completed(1)
+_EXPECTED_COLS = {
+    "timestamp",
+    "event_type",
+    "agent",
+    "session_id",
+    "invocation_id",
+    "user_id",
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "status",
+    "error_message",
+    "is_truncated",
+    "content",
+    "attributes",
+    "latency_ms",
+}
 
 
 def test_same_seed_and_now_is_byte_identical() -> None:
@@ -43,29 +60,14 @@ def test_different_seed_changes_content() -> None:
 def test_seed_none_still_produces_valid_rows() -> None:
   rows = generate_seed_events(sessions=2, seed=None, now=_FIXED_NOW)
   assert len(rows) == 2 * _EVENTS_PER_SESSION
+  assert all(set(row) == _EXPECTED_COLS for row in rows)
 
 
 def test_payload_shape_and_terminal_events() -> None:
   rows = generate_seed_events(sessions=4, seed=1, now=_FIXED_NOW)
   assert len(rows) == 4 * _EVENTS_PER_SESSION
 
-  expected_cols = {
-      "timestamp",
-      "event_type",
-      "agent",
-      "session_id",
-      "invocation_id",
-      "user_id",
-      "trace_id",
-      "span_id",
-      "parent_span_id",
-      "status",
-      "error_message",
-      "is_truncated",
-      "content",
-      "attributes",
-      "latency_ms",
-  }
+  expected_cols = _EXPECTED_COLS
   per_session_completed: dict[str, int] = {}
   for row in rows:
     assert set(row) == expected_cols
@@ -87,4 +89,7 @@ def test_sessions_must_be_at_least_one(bad: int) -> None:
 
 
 def test_scenario_enum_default_is_decision() -> None:
+  # Calling without scenario= must succeed using the DECISION default.
+  rows = generate_seed_events(sessions=1, seed=1, now=_FIXED_NOW)
+  assert len(rows) == _EVENTS_PER_SESSION
   assert Scenario.DECISION.value == "decision"
