@@ -22,7 +22,9 @@ import json
 import pytest
 
 from bigquery_agent_analytics.seed_events import generate_seed_events
+from bigquery_agent_analytics.seed_events import run_seed_events
 from bigquery_agent_analytics.seed_events import Scenario
+from bigquery_agent_analytics.seed_events import SeedEventsResult
 
 _FIXED_NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 _EVENTS_PER_SESSION = 6  # submit(1) + evaluate(3) + commit(1) + completed(1)
@@ -95,10 +97,6 @@ def test_scenario_enum_default_is_decision() -> None:
   assert Scenario.DECISION.value == "decision"
 
 
-from bigquery_agent_analytics.seed_events import run_seed_events
-from bigquery_agent_analytics.seed_events import SeedEventsResult
-
-
 class _FakeBQClient:
   """Records create_table / insert_rows_json calls; returns canned errors."""
 
@@ -146,6 +144,7 @@ def test_insert_success_reports_inserted_count() -> None:
       now=_FIXED_NOW,
       bq_client=fake,
   )
+  assert isinstance(result, SeedEventsResult)
   assert len(fake.created) == 1
   table_ref, rows = fake.inserted[0]
   assert table_ref == "p.d.agent_events"
@@ -178,6 +177,18 @@ def test_run_seed_events_rejects_bad_sessions() -> None:
         dataset_id="d",
         sessions=0,
         seed=1,
+        now=_FIXED_NOW,
+        bq_client=_FakeBQClient(),
+    )
+
+
+def test_run_seed_events_rejects_unknown_scenario() -> None:
+  with pytest.raises(ValueError):
+    run_seed_events(
+        project_id="p",
+        dataset_id="d",
+        sessions=1,
+        scenario="nonexistent",
         now=_FIXED_NOW,
         bq_client=_FakeBQClient(),
     )
