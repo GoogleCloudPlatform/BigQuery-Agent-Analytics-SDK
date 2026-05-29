@@ -177,7 +177,24 @@ def _decision_session(rng: random.Random, now: datetime) -> list[dict]:
   return rows
 
 
-_SCENARIO_BUILDERS = {Scenario.DECISION: _decision_session}
+def _build_decision_corpus(
+    rng: random.Random, now: datetime, sessions: int
+) -> tuple[list[dict], dict[str, int]]:
+  """Corpus builder for the small ``decision`` scenario.
+
+  Reproduces the exact pre-refactor loop (30s apart from ``now - 10min``,
+  delegating to ``_decision_session``) so output stays byte-identical.
+  """
+  rows: list[dict] = []
+  cur = now - timedelta(minutes=10)
+  for _ in range(sessions):
+    rows.extend(_decision_session(rng, cur))
+    cur += timedelta(seconds=30)
+  return rows, {"success": sessions}
+
+
+# scenario -> corpus builder ``(rng, now, sessions) -> (rows, outcome_counts)``
+_SCENARIO_BUILDERS = {Scenario.DECISION: _build_decision_corpus}
 assert set(_SCENARIO_BUILDERS) == set(Scenario), (
     "every Scenario needs a builder; missing: "
     f"{set(Scenario) - set(_SCENARIO_BUILDERS)}"
@@ -199,12 +216,7 @@ def generate_seed_events(
   if sessions < 1:
     raise ValueError("sessions must be >= 1")
   rng = random.Random(seed)
-  builder = _SCENARIO_BUILDERS[scenario]
-  rows: list[dict] = []
-  cur = now - timedelta(minutes=10)
-  for _ in range(sessions):
-    rows.extend(builder(rng, cur))
-    cur += timedelta(seconds=30)
+  rows, _counts = _SCENARIO_BUILDERS[scenario](rng, now, sessions)
   return rows
 
 
@@ -221,6 +233,9 @@ class SeedEventsResult:
   ok: bool
   event_type_counts: dict[str, int]
   errors: list[dict]
+  session_outcome_counts: dict[str, int] = dataclasses.field(
+      default_factory=dict
+  )
 
   def to_json(self) -> dict[str, Any]:
     return {
@@ -232,6 +247,7 @@ class SeedEventsResult:
         "dry_run": self.dry_run,
         "ok": self.ok,
         "event_type_counts": dict(self.event_type_counts),
+        "session_outcome_counts": dict(self.session_outcome_counts),
         "errors": list(self.errors),
     }
 
@@ -261,8 +277,9 @@ def run_seed_events(
   if now is None:
     now = datetime.now(timezone.utc)
 
-  rows = generate_seed_events(
-      sessions=sessions, seed=seed, now=now, scenario=scenario
+  rng = random.Random(seed)
+  rows, session_outcome_counts = _SCENARIO_BUILDERS[scenario](
+      rng, now, sessions
   )
   counts: dict[str, int] = {}
   for row in rows:
@@ -280,6 +297,7 @@ def run_seed_events(
         ok=True,
         event_type_counts=counts,
         errors=[],
+        session_outcome_counts=session_outcome_counts,
     )
 
   from google.cloud import bigquery
@@ -300,6 +318,7 @@ def run_seed_events(
         ok=False,
         event_type_counts=counts,
         errors=list(errors),
+        session_outcome_counts=session_outcome_counts,
     )
   return SeedEventsResult(
       table_ref=table_ref,
@@ -311,6 +330,7 @@ def run_seed_events(
       ok=True,
       event_type_counts=counts,
       errors=[],
+      session_outcome_counts=session_outcome_counts,
   )
 
 

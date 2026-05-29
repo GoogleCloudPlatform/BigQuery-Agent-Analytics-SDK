@@ -208,3 +208,28 @@ def test_to_json_round_trips() -> None:
   assert json.loads(json.dumps(payload)) == payload
   assert payload["ok"] is True
   assert payload["events_inserted"] == 0
+
+
+def test_decision_corpus_is_byte_identical_after_refactor() -> None:
+  # Pin decision output so the seam refactor cannot change it.
+  rows = generate_seed_events(sessions=3, seed=42, now=_FIXED_NOW)
+  assert len(rows) == 3 * _EVENTS_PER_SESSION
+  assert rows[0]["agent"] == "demo-agent"
+  assert rows[0]["user_id"] == "demo-user"
+  assert rows[-1]["event_type"] == "AGENT_COMPLETED"
+  # Same (seed, now) still byte-identical.
+  assert generate_seed_events(sessions=3, seed=42, now=_FIXED_NOW) == rows
+
+
+def test_decision_result_reports_success_outcome_counts() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=4,
+      seed=1,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert result.session_outcome_counts == {"success": 4}
+  assert result.to_json()["session_outcome_counts"] == {"success": 4}
