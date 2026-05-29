@@ -261,7 +261,7 @@ For this codelab you use a small synthetic event generator that writes the same 
 ```bash
 pip install google-cloud-bigquery
 cd ~/bqaa-codelab
-python seed_events.py \
+bqaa seed-events \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
     --sessions 5

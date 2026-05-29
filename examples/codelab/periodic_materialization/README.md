@@ -10,7 +10,7 @@ These are the artifacts the *Trace AI Agent Decisions with BigQuery Property Gra
 | `table_ddl.sql` | Node and edge table DDL. The materializer writes into these tables every run. |
 | `ontology.yaml` | Names the entities and relationships; used by the materializer to construct the `AI.GENERATE` extraction prompt. |
 | `binding.yaml` | Maps ontology entities to physical BigQuery tables and columns. Must be rendered with `envsubst` before use. |
-| `seed_events.py` | Synthetic `agent_events` generator. Writes a small corpus of completed decision sessions so the materializer has something to process. |
+| `seed_events.py` | Thin compatibility shim over the maintained `bqaa seed-events` command (SDK module `bigquery_agent_analytics.seed_events`). Writes a small corpus of completed decision sessions so the materializer has something to process. |
 
 ## How the codelab uses these
 
@@ -18,7 +18,7 @@ These are the artifacts the *Trace AI Agent Decisions with BigQuery Property Gra
 2. `envsubst < table_ddl.sql | bq query --use_legacy_sql=false` creates the node and edge tables.
 3. `envsubst < property_graph.sql | bq query --use_legacy_sql=false` creates the property graph.
 4. `envsubst < binding.yaml > binding.rendered.yaml` renders the binding once before the materializer reads it.
-5. `python seed_events.py --project-id "$PROJECT_ID" --dataset-id "$DATASET" --sessions 5` populates `agent_events`.
+5. `bqaa seed-events --project-id "$PROJECT_ID" --dataset-id "$DATASET" --sessions 5` populates `agent_events` (the bundled `seed_events.py` remains as a compatibility shim if you are running from the downloaded kit).
 6. `bqaa context-graph --project-id "$PROJECT_ID" --dataset-id "$DATASET" --ontology ontology.yaml --binding binding.rendered.yaml --lookback-hours 24` materializes the graph.
 
 ## Domain model
