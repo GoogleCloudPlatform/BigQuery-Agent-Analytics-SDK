@@ -267,6 +267,8 @@ def test_bqaa_seed_events_exposes_expected_flags() -> None:
   declared_flags = set()
   for param in command.params:
     declared_flags.update(getattr(param, "opts", []))
+    # secondary_opts carries auto-generated --no-* negations (empty for these
+    # options); included for parity with the context-graph flag test.
     declared_flags.update(getattr(param, "secondary_opts", []))
 
   for flag in (
@@ -307,10 +309,12 @@ def test_bqaa_seed_events_dry_run_reports_without_bigquery() -> None:
   payload = json.loads(result.output)
   assert payload["dry_run"] is True
   assert payload["events_inserted"] == 0
+  # 2 sessions x 6 rows each (1 submit + 3 evaluate + 1 commit + 1 completed).
   assert payload["events_generated"] == 12
 
 
 def test_bqaa_seed_events_invalid_sessions_exits_2() -> None:
+  """--sessions 0 raises ValueError in run_seed_events, mapped to exit 2."""
   result = runner.invoke(
       bqaa_app,
       [
