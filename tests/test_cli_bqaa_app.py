@@ -56,8 +56,8 @@ def test_bqaa_help_lists_context_graph() -> None:
   assert "context graph" in result.output.lower()
 
 
-def test_bqaa_context_graph_help_lists_expected_flags() -> None:
-  """``bqaa context-graph --help`` exposes the materialize-window flags.
+def test_bqaa_context_graph_exposes_expected_flags() -> None:
+  """``bqaa context-graph`` exposes the materialize-window flags.
 
   Flags chosen here are the ones the codelab and blog actually document
   to customers, so a rename that accidentally drops one breaks the
@@ -65,9 +65,24 @@ def test_bqaa_context_graph_help_lists_expected_flags() -> None:
   flags (``--dry-run``, ``--bundles-root``, internal opt-ins); those
   are not asserted here because they are dev-tooling and not part of
   the customer-facing surface that the rename has to preserve.
+
+  This inspects the Click command's declared parameters rather than the
+  rendered ``--help`` text. Rich wraps long option names to the
+  terminal width and emits ANSI/box-drawing characters, so under CI's
+  80-column non-TTY rendering a flag like ``--project-id`` is not a
+  contiguous substring of the help output — scraping the text is
+  brittle, inspecting params is deterministic.
   """
-  result = runner.invoke(bqaa_app, ["context-graph", "--help"])
-  assert result.exit_code == 0, result.output
+  from typer.main import get_command
+
+  command = get_command(bqaa_app).get_command(None, "context-graph")  # type: ignore[arg-type]
+  assert command is not None, "bqaa app missing 'context-graph' subcommand"
+
+  declared_flags = set()
+  for param in command.params:
+    declared_flags.update(getattr(param, "opts", []))
+    declared_flags.update(getattr(param, "secondary_opts", []))
+
   for flag in (
       "--project-id",
       "--dataset-id",
@@ -81,12 +96,12 @@ def test_bqaa_context_graph_help_lists_expected_flags() -> None:
       "--to",
       "--state-key-suffix",
       "--extraction-mode",
-      "--max-session-age",
+      "--max-session-age-hours",
       "--format",
   ):
     assert (
-        flag in result.output
-    ), f"flag {flag!r} missing from `bqaa context-graph --help`"
+        flag in declared_flags
+    ), f"flag {flag!r} missing from `bqaa context-graph` params"
 
 
 def test_bqaa_context_graph_uses_materialize_window_handler() -> None:
