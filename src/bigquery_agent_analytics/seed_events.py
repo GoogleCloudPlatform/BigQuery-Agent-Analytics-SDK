@@ -407,6 +407,10 @@ _SCENARIO_DEFAULT_SESSIONS = {
     Scenario.DECISION: 5,
     Scenario.DECISION_REALISTIC: 100,
 }
+assert set(_SCENARIO_DEFAULT_SESSIONS) == set(Scenario), (
+    "every Scenario needs a default session count; missing: "
+    f"{set(Scenario) - set(_SCENARIO_DEFAULT_SESSIONS)}"
+)
 
 
 def generate_seed_events(
