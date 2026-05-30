@@ -41,6 +41,7 @@ class Scenario(str, enum.Enum):
   """Synthetic event scenarios. Extensible seam for #247."""
 
   DECISION = "decision"
+  DECISION_REALISTIC = "decision-realistic"
 
 
 _EVENT_SCHEMA_FIELDS = (
@@ -67,6 +68,26 @@ _TOPICS = (
     "grant access",
     "release budget",
 )
+
+_REALISTIC_AGENTS = (
+    "loan-advisor",
+    "ops-scheduler",
+    "access-broker",
+    "budget-allocator",
+)
+_REALISTIC_USERS = tuple(f"user-{i:03d}" for i in range(12))
+_REALISTIC_OPTION_LABELS = (
+    "approve",
+    "reject",
+    "defer",
+    "escalate",
+    "delegate",
+    "hold",
+)
+_REALISTIC_WINDOW = timedelta(hours=72)
+# Held back from ``now`` so a session's per-step offsets never produce a
+# timestamp after ``now`` (a session spans at most ~8s; 60s is safe margin).
+_MAX_SESSION_SPAN = timedelta(seconds=60)
 
 
 def _hex(rng: random.Random, length: int) -> str:
@@ -233,8 +254,150 @@ def _build_decision_corpus(
   return rows, {"success": sessions}
 
 
+def _realistic_session(
+    rng: random.Random,
+    start: datetime,
+    outcome: str,
+    agent: str,
+    user: str,
+    topic: str,
+) -> list[dict]:
+  """One realistic decision session starting at ``start``.
+
+  ``outcome`` is one of success/failed/orphaned/truncated and shapes the
+  terminal event and truncation flag. Option count varies 2..6.
+  """
+  session_id = f"sess-{_hex(rng, 8)}"
+  request_id = f"req-{_hex(rng, 6)}"
+  rows: list[dict] = []
+
+  def add(
+      event_type,
+      content,
+      offset,
+      *,
+      status="ok",
+      error_message=None,
+      is_truncated=False,
+  ):
+    row = _row(
+        rng,
+        event_type,
+        session_id,
+        content,
+        start + timedelta(seconds=offset),
+        agent=agent,
+        user_id=user,
+    )
+    row["status"] = status
+    row["error_message"] = error_message
+    row["is_truncated"] = is_truncated
+    rows.append(row)
+
+  add(
+      "TOOL_COMPLETED",
+      {
+          "tool": "submit_request",
+          "result": {
+              "request_id": request_id,
+              "request_text": f"Should we {topic}?",
+          },
+      },
+      0,
+  )
+
+  k = rng.randint(2, 6)
+  options = [
+      {
+          "option_id": f"opt-{_hex(rng, 5)}",
+          "option_label": _REALISTIC_OPTION_LABELS[j],
+          "confidence": round(rng.uniform(0.1, 0.95), 2),
+      }
+      for j in range(k)
+  ]
+  for i, opt in enumerate(options):
+    content = {
+        "tool": "evaluate_option",
+        "result": {"request_id": request_id, **opt},
+    }
+    # Truncated sessions clip one evaluate row's payload.
+    clip = outcome == "truncated" and i == 0
+    if clip:
+      content["result"]["notes"] = "(payload truncated)"
+    add("TOOL_COMPLETED", content, i + 1, is_truncated=clip)
+
+  selected = max(options, key=lambda o: o["confidence"])
+  add(
+      "TOOL_COMPLETED",
+      {
+          "tool": "commit_outcome",
+          "result": {
+              "request_id": request_id,
+              "outcome_id": f"out-{_hex(rng, 6)}",
+              "status": "committed",
+              "selected": selected["option_label"],
+          },
+      },
+      k + 1,
+  )
+
+  if outcome == "orphaned":
+    return rows  # no terminal event -- exercises the orphan watchdog
+  if outcome == "failed":
+    add(
+        "AGENT_COMPLETED",
+        {"final": True},
+        k + 2,
+        status="error",
+        error_message="tool 'commit_outcome' failed: downstream timeout",
+    )
+  else:  # success or truncated
+    add("AGENT_COMPLETED", {"final": True}, k + 2)
+  return rows
+
+
+def build_realistic_corpus(
+    rng: random.Random, now: datetime, sessions: int
+) -> tuple[list[dict], dict[str, int]]:
+  """Corpus builder for ``decision-realistic`` (see spec #247).
+
+  Fixed deterministic mix (70/10/10/10 at 100, scaled otherwise), multi-day
+  spread over ``[now - 72h, now - _MAX_SESSION_SPAN]``, multiple
+  agents/users/topics. Returns ``(rows, session_outcome_counts)``.
+  """
+  counts = _outcome_allocation(sessions)  # raises if sessions < 4
+  outcomes: list[str] = []
+  for name in ("success", "failed", "orphaned", "truncated"):
+    outcomes.extend([name] * counts[name])
+  rng.shuffle(outcomes)
+
+  window_start = now - _REALISTIC_WINDOW
+  window_end = now - _MAX_SESSION_SPAN
+  slot = (window_end - window_start).total_seconds() / sessions
+  starts = [
+      window_start + timedelta(seconds=i * slot + rng.uniform(0, slot))
+      for i in range(sessions)
+  ]
+
+  agents = _shuffled_cycle(rng, _REALISTIC_AGENTS, sessions)
+  users = _shuffled_cycle(rng, _REALISTIC_USERS, sessions)
+  topics = _shuffled_cycle(rng, _TOPICS, sessions)
+
+  rows: list[dict] = []
+  for i in range(sessions):
+    rows.extend(
+        _realistic_session(
+            rng, starts[i], outcomes[i], agents[i], users[i], topics[i]
+        )
+    )
+  return rows, counts
+
+
 # scenario -> corpus builder ``(rng, now, sessions) -> (rows, outcome_counts)``
-_SCENARIO_BUILDERS = {Scenario.DECISION: _build_decision_corpus}
+_SCENARIO_BUILDERS = {
+    Scenario.DECISION: _build_decision_corpus,
+    Scenario.DECISION_REALISTIC: build_realistic_corpus,
+}
 assert set(_SCENARIO_BUILDERS) == set(Scenario), (
     "every Scenario needs a builder; missing: "
     f"{set(Scenario) - set(_SCENARIO_BUILDERS)}"

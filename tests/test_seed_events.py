@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 import json
 import random
@@ -24,6 +25,7 @@ import pytest
 
 from bigquery_agent_analytics.seed_events import _outcome_allocation
 from bigquery_agent_analytics.seed_events import _shuffled_cycle
+from bigquery_agent_analytics.seed_events import build_realistic_corpus
 from bigquery_agent_analytics.seed_events import generate_seed_events
 from bigquery_agent_analytics.seed_events import run_seed_events
 from bigquery_agent_analytics.seed_events import Scenario
@@ -283,3 +285,104 @@ def test_shuffled_cycle_covers_roster_and_is_deterministic() -> None:
   assert set(out1) == set(roster)  # every roster member appears
   # >=2 distinct even for small n
   assert len(set(_shuffled_cycle(random.Random(2), roster, 2))) >= 2
+
+
+def _by_session(rows: list[dict]) -> dict[str, list[dict]]:
+  grouped: dict[str, list[dict]] = {}
+  for row in rows:
+    grouped.setdefault(row["session_id"], []).append(row)
+  return grouped
+
+
+def test_realistic_outcome_mix_exact_at_100() -> None:
+  rows, counts = build_realistic_corpus(random.Random(42), _FIXED_NOW, 100)
+  assert counts == {
+      "success": 70,
+      "failed": 10,
+      "orphaned": 10,
+      "truncated": 10,
+  }
+
+  sessions = _by_session(rows)
+  assert len(sessions) == 100
+  orphaned = [
+      s
+      for s in sessions.values()
+      if not any(r["event_type"] == "AGENT_COMPLETED" for r in s)
+  ]
+  failed = [
+      s
+      for s in sessions.values()
+      if any(
+          r["event_type"] == "AGENT_COMPLETED" and r["status"] == "error"
+          for r in s
+      )
+  ]
+  truncated = [
+      s for s in sessions.values() if any(r["is_truncated"] for r in s)
+  ]
+  assert len(orphaned) == 10
+  assert len(failed) == 10
+  assert len(truncated) == 10
+
+
+def test_realistic_terminal_event_invariant() -> None:
+  rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
+  for session in _by_session(rows).values():
+    terminals = [r for r in session if r["event_type"] == "AGENT_COMPLETED"]
+    assert len(terminals) in (0, 1)  # orphaned -> 0, others -> exactly 1
+
+
+def test_realistic_failed_sessions_have_error_message() -> None:
+  rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
+  for session in _by_session(rows).values():
+    for row in session:
+      if row["event_type"] == "AGENT_COMPLETED" and row["status"] == "error":
+        assert row["error_message"]  # non-empty
+
+
+def test_realistic_variable_option_count_in_range() -> None:
+  rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
+  for session in _by_session(rows).values():
+    options = [
+        r for r in session if '"tool": "evaluate_option"' in r["content"]
+    ]
+    assert 2 <= len(options) <= 6
+
+
+def test_realistic_multi_day_span_and_no_future() -> None:
+  rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
+  ts = [datetime.fromisoformat(r["timestamp"]) for r in rows]
+  span = max(ts) - min(ts)
+  assert span > timedelta(hours=24)
+  assert span <= timedelta(hours=72)
+  assert max(ts) <= _FIXED_NOW  # no future timestamps
+
+
+def test_realistic_multiple_agents_and_users() -> None:
+  rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
+  assert len({r["agent"] for r in rows}) >= 2
+  assert len({r["user_id"] for r in rows}) >= 2
+
+
+def test_realistic_is_deterministic() -> None:
+  a, ca = build_realistic_corpus(random.Random(42), _FIXED_NOW, 100)
+  b, cb = build_realistic_corpus(random.Random(42), _FIXED_NOW, 100)
+  assert a == b and ca == cb
+
+
+def test_realistic_rejects_too_few_sessions() -> None:
+  with pytest.raises(
+      ValueError, match="decision-realistic requires sessions >= 4"
+  ):
+    build_realistic_corpus(random.Random(1), _FIXED_NOW, 3)
+
+
+def test_generate_seed_events_supports_realistic_scenario() -> None:
+  rows = generate_seed_events(
+      sessions=100,
+      seed=42,
+      now=_FIXED_NOW,
+      scenario=Scenario.DECISION_REALISTIC,
+  )
+  assert len(_by_session(rows)) == 100
