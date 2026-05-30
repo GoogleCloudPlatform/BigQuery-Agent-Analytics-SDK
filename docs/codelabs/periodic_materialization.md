@@ -316,9 +316,11 @@ bq query --use_legacy_sql=false \
      FROM per_session GROUP BY outcome ORDER BY outcome"
 ```
 
-You should see roughly 70 success, 10 failed, 10 orphaned, and 10 truncated.
+You should see roughly 70 success, 10 failed, 10 orphaned, and 10 truncated (plus the 5 successful sessions from the first-run corpus if you seeded that earlier in the same dataset).
 
 The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa context-graph` run skips them (it materializes only terminal-event-closed sessions). To surface them as `session_orphaned` instead of silently retrying forever, add `--max-session-age-hours` when you materialize — see the orphan-watchdog discussion later in this codelab.
+
+> **Note** — this scenario spreads its sessions across a 72-hour window on purpose. The Phase 3 walkthrough below uses `--lookback-hours 24` and is written for the small 5-session first-run corpus, so its exact counts assume you have *not* run this optional step. If you did, that is the intended lesson: a 24-hour materialization window picks up only the recent slice of a multi-day backlog — widen `--lookback-hours` (or backfill) to capture the older sessions.
 
 ## Phase 3: Materialize the Decision Graph
 Duration: 0:05

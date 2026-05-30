@@ -2072,7 +2072,10 @@ def seed_events(
     scenario: str = typer.Option(
         "decision",
         "--scenario",
-        help="Synthetic scenario to generate. Currently: decision.",
+        help=(
+            "Synthetic scenario: decision (small, default) or"
+            " decision-realistic (100-session, multi-day, mixed outcomes)."
+        ),
     ),
     dry_run: bool = typer.Option(
         False,
