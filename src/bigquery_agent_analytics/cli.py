@@ -2053,8 +2053,13 @@ def seed_events(
         "--events-table",
         help="Destination telemetry table name (in --dataset-id).",
     ),
-    sessions: int = typer.Option(
-        5, "--sessions", help="Number of synthetic decision sessions (>= 1)."
+    sessions: Optional[int] = typer.Option(
+        None,
+        "--sessions",
+        help=(
+            "Number of synthetic sessions (>= 1). Default depends on"
+            " --scenario: 5 for decision, 100 for decision-realistic."
+        ),
     ),
     seed: Optional[int] = typer.Option(
         None,

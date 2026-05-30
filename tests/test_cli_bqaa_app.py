@@ -370,3 +370,31 @@ def test_bqaa_seed_events_insert_errors_exit_1(
   )
   assert result.exit_code == 1, result.output
   assert json.loads(result.output)["ok"] is False
+
+
+def test_bqaa_seed_events_realistic_dry_run_reports_outcomes() -> None:
+  """--scenario decision-realistic defaults to 100 sessions and reports the mix."""
+  result = runner.invoke(
+      bqaa_app,
+      [
+          "seed-events",
+          "--project-id",
+          "p",
+          "--dataset-id",
+          "d",
+          "--scenario",
+          "decision-realistic",
+          "--seed",
+          "42",
+          "--dry-run",
+      ],
+  )
+  assert result.exit_code == 0, result.output
+  payload = json.loads(result.output)
+  assert payload["sessions"] == 100
+  assert payload["session_outcome_counts"] == {
+      "success": 70,
+      "failed": 10,
+      "orphaned": 10,
+      "truncated": 10,
+  }

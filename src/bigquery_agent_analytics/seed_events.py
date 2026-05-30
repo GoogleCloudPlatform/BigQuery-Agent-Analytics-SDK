@@ -403,6 +403,11 @@ assert set(_SCENARIO_BUILDERS) == set(Scenario), (
     f"{set(Scenario) - set(_SCENARIO_BUILDERS)}"
 )
 
+_SCENARIO_DEFAULT_SESSIONS = {
+    Scenario.DECISION: 5,
+    Scenario.DECISION_REALISTIC: 100,
+}
+
 
 def generate_seed_events(
     *,
@@ -460,7 +465,7 @@ def run_seed_events(
     *,
     project_id: str,
     dataset_id: str,
-    sessions: int = 5,
+    sessions: Optional[int] = None,
     seed: Optional[int] = None,
     scenario: Scenario | str = Scenario.DECISION,
     events_table: str = "agent_events",
@@ -470,14 +475,18 @@ def run_seed_events(
 ) -> SeedEventsResult:
   """Generate synthetic events and (unless ``dry_run``) insert them.
 
+  ``sessions`` defaults per scenario: 5 for ``decision``, 100 for
+  ``decision-realistic``. Pass an explicit value to override.
   Invalid input (``sessions < 1``, unknown ``scenario``) raises; the CLI
   maps that to exit 2. BigQuery insert errors are modeled as ``ok=False``
   with ``errors`` populated -- not raised -- so the JSON report stays
   authoritative (CLI exit 1).
   """
+  scenario = Scenario(scenario) if isinstance(scenario, str) else scenario
+  if sessions is None:
+    sessions = _SCENARIO_DEFAULT_SESSIONS[scenario]
   if sessions < 1:
     raise ValueError("sessions must be >= 1")
-  scenario = Scenario(scenario) if isinstance(scenario, str) else scenario
   if now is None:
     now = datetime.now(timezone.utc)
 

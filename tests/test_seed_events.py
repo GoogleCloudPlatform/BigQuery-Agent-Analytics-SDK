@@ -393,3 +393,47 @@ def test_generate_seed_events_supports_realistic_scenario() -> None:
       scenario=Scenario.DECISION_REALISTIC,
   )
   assert len(_by_session(rows)) == 100
+
+
+def test_default_sessions_per_scenario() -> None:
+  decision = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      seed=1,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert decision.sessions == 5
+
+  realistic = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      seed=1,
+      dry_run=True,
+      scenario="decision-realistic",
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert realistic.sessions == 100
+  assert realistic.session_outcome_counts == {
+      "success": 70,
+      "failed": 10,
+      "orphaned": 10,
+      "truncated": 10,
+  }
+
+
+def test_explicit_sessions_overrides_scenario_default() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      sessions=40,
+      seed=1,
+      dry_run=True,
+      scenario="decision-realistic",
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert result.sessions == 40
+  assert sum(result.session_outcome_counts.values()) == 40
