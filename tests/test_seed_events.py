@@ -18,9 +18,12 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import timezone
 import json
+import random
 
 import pytest
 
+from bigquery_agent_analytics.seed_events import _outcome_allocation
+from bigquery_agent_analytics.seed_events import _shuffled_cycle
 from bigquery_agent_analytics.seed_events import generate_seed_events
 from bigquery_agent_analytics.seed_events import run_seed_events
 from bigquery_agent_analytics.seed_events import Scenario
@@ -239,10 +242,6 @@ def test_decision_result_reports_success_outcome_counts() -> None:
   assert result.to_json()["session_outcome_counts"] == {"success": 4}
 
 
-from bigquery_agent_analytics.seed_events import _outcome_allocation
-from bigquery_agent_analytics.seed_events import _shuffled_cycle
-
-
 def test_outcome_allocation_exact_at_100() -> None:
   assert _outcome_allocation(100) == {
       "success": 70,
@@ -276,13 +275,11 @@ def test_outcome_allocation_rejects_too_few_sessions() -> None:
 
 
 def test_shuffled_cycle_covers_roster_and_is_deterministic() -> None:
-  import random as _random
-
   roster = ("a", "b", "c", "d")
-  out1 = _shuffled_cycle(_random.Random(1), roster, 10)
-  out2 = _shuffled_cycle(_random.Random(1), roster, 10)
+  out1 = _shuffled_cycle(random.Random(1), roster, 10)
+  out2 = _shuffled_cycle(random.Random(1), roster, 10)
   assert out1 == out2  # deterministic for a fixed rng seed
   assert len(out1) == 10
   assert set(out1) == set(roster)  # every roster member appears
   # >=2 distinct even for small n
-  assert len(set(_shuffled_cycle(_random.Random(2), roster, 2))) >= 2
+  assert len(set(_shuffled_cycle(random.Random(2), roster, 2))) >= 2
