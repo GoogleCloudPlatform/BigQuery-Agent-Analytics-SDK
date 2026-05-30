@@ -279,6 +279,47 @@ bq query --use_legacy_sql=false \
 
 You should see 25 `TOOL_COMPLETED` rows and 5 `AGENT_COMPLETED` rows (each session emits one `submit_request`, three `evaluate_option`, one `commit_outcome`, and one closing `AGENT_COMPLETED` — five tool events plus one agent terminator per session). The `AGENT_COMPLETED` rows are the session terminators that the materializer keys on for terminal-event detection.
 
+### Optional: Realistic-scale data
+
+The 5-session corpus above is intentionally tiny so the first run is fast. When you want production-shaped data — multiple agents and users spread over several days, with failed, orphaned, and truncated sessions — use the `decision-realistic` scenario. It defaults to 100 sessions over a 72-hour window; the first-run path above is unchanged.
+
+<!-- colab:code bash -->
+```bash
+bqaa seed-events \
+    --project-id "$PROJECT_ID" \
+    --dataset-id "$DATASET" \
+    --scenario decision-realistic \
+    --sessions 100 \
+    --seed 42
+```
+
+The JSON report's `session_outcome_counts` shows the mix — roughly `{"success": 70, "failed": 10, "orphaned": 10, "truncated": 10}`.
+
+Confirm the outcome distribution by classifying each session from its rows (orphaned = no `AGENT_COMPLETED`; failed = `AGENT_COMPLETED` with `status = 'error'`; truncated = any row with `is_truncated = true`; otherwise success). A first pass classifies each session, then a second aggregates per outcome:
+
+<!-- colab:code bash -->
+```bash
+bq query --use_legacy_sql=false \
+    "WITH per_session AS (
+       SELECT
+         session_id,
+         CASE
+           WHEN COUNTIF(event_type = 'AGENT_COMPLETED') = 0 THEN 'orphaned'
+           WHEN COUNTIF(event_type = 'AGENT_COMPLETED' AND status = 'error') > 0 THEN 'failed'
+           WHEN COUNTIF(is_truncated) > 0 THEN 'truncated'
+           ELSE 'success'
+         END AS outcome
+       FROM \`$PROJECT_ID.$DATASET.agent_events\`
+       GROUP BY session_id
+     )
+     SELECT outcome, COUNT(*) AS sessions
+     FROM per_session GROUP BY outcome ORDER BY outcome"
+```
+
+You should see roughly 70 success, 10 failed, 10 orphaned, and 10 truncated.
+
+The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa context-graph` run skips them (it materializes only terminal-event-closed sessions). To surface them as `session_orphaned` instead of silently retrying forever, add `--max-session-age-hours` when you materialize — see the orphan-watchdog discussion later in this codelab.
+
 ## Phase 3: Materialize the Decision Graph
 Duration: 0:05
 
