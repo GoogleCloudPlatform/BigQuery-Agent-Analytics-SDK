@@ -349,7 +349,7 @@ def _realistic_session(
         {"final": True},
         k + 2,
         status="error",
-        error_message="tool 'commit_outcome' failed: downstream timeout",
+        error_message="agent run failed: downstream timeout after commit",
     )
   else:  # success or truncated
     add("AGENT_COMPLETED", {"final": True}, k + 2)

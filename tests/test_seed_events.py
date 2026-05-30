@@ -324,6 +324,11 @@ def test_realistic_outcome_mix_exact_at_100() -> None:
   assert len(orphaned) == 10
   assert len(failed) == 10
   assert len(truncated) == 10
+  # Truncated is identified solely by is_truncated rows: it must still be a
+  # completed (not failed) session, so this stays distinct from `failed`.
+  for session in truncated:
+    terminals = [r for r in session if r["event_type"] == "AGENT_COMPLETED"]
+    assert len(terminals) == 1 and terminals[0]["status"] == "ok"
 
 
 def test_realistic_terminal_event_invariant() -> None:
@@ -345,7 +350,9 @@ def test_realistic_variable_option_count_in_range() -> None:
   rows, _ = build_realistic_corpus(random.Random(7), _FIXED_NOW, 100)
   for session in _by_session(rows).values():
     options = [
-        r for r in session if '"tool": "evaluate_option"' in r["content"]
+        r
+        for r in session
+        if json.loads(r["content"]).get("tool") == "evaluate_option"
     ]
     assert 2 <= len(options) <= 6
 
