@@ -25,18 +25,21 @@ import tempfile
 
 # Make scripts/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from quality_report import _AGENT_CONFIG_CACHE  # noqa: E402
 from quality_report import _build_agent_stats
 from quality_report import _build_scope_context
+from quality_report import _classify_failures
 from quality_report import _compute_dimension_averages
 from quality_report import _compute_multiturn_stats
 from quality_report import _count_trace_metrics
+from quality_report import _EVAL_SPEC_CACHE  # noqa: E402
 from quality_report import _extract_a2a_text
 from quality_report import _extract_conversation
+from quality_report import _failure_class
 from quality_report import _group_by_category
 from quality_report import _has_dimension_data
+from quality_report import _inject_golden_summary
 from quality_report import _is_single_word_routing
-from quality_report import _load_agent_config
+from quality_report import _load_eval_spec
 from quality_report import generate_quality_report
 from quality_report import get_a2a_response
 from quality_report import get_user_input
@@ -487,64 +490,219 @@ class TestGetA2AResponse:
 
 class TestBuildScopeContext:
 
-  def test_none_config(self):
+  def test_none_spec(self):
     assert _build_scope_context(None) == ""
 
-  def test_empty_config(self):
+  def test_empty_spec(self):
     assert _build_scope_context({}) == ""
 
-  def test_no_oos_topics(self):
-    config = {
-        "scope_decisions": [
-            {"topic": "billing", "decision": "in_scope"},
-        ]
-    }
-    assert _build_scope_context(config) == ""
-
-  def test_single_oos_topic(self):
-    config = {
-        "scope_decisions": [
-            {"topic": "weather", "decision": "out_of_scope"},
-        ]
-    }
-    result = _build_scope_context(config)
-    assert "weather" in result
+  def test_scope_free_text(self):
+    result = _build_scope_context({"scope": "Handles PTO and benefits only."})
+    assert "Handles PTO and benefits only." in result
     assert "OUT OF SCOPE" in result
+    assert "declined" in result
 
-  def test_multiple_oos_topics(self):
-    config = {
-        "scope_decisions": [
-            {"topic": "weather", "decision": "out_of_scope"},
-            {"topic": "sports", "decision": "out_of_scope"},
-            {"topic": "billing", "decision": "in_scope"},
-        ]
-    }
-    result = _build_scope_context(config)
-    assert "weather" in result
-    assert "sports" in result
-    assert "billing" not in result
+  def test_ground_truth_only(self):
+    result = _build_scope_context({"ground_truth": "PTO is 20 days/year."})
+    assert "GROUND TRUTH" in result
+    assert "20 days/year" in result
 
-  def test_missing_decision_field(self):
-    config = {
-        "scope_decisions": [
-            {"topic": "weather"},
-        ]
-    }
-    assert _build_scope_context(config) == ""
+  def test_scope_and_ground_truth(self):
+    result = _build_scope_context({
+        "scope": "HR policy questions.",
+        "ground_truth": "PTO is 20 days.",
+    })
+    assert "HR policy questions." in result
+    assert "PTO is 20 days." in result
+
+  def test_no_relevant_fields(self):
+    # A spec with only golden_qa contributes no scope/ground-truth context.
+    assert _build_scope_context({"golden_qa": [{"question": "q"}]}) == ""
 
 
 # ================================================================== #
-# _load_agent_config                                                  #
+# _inject_golden_summary                                              #
 # ================================================================== #
 
 
-class TestLoadAgentConfig:
+class TestInjectGoldenSummary:
+
+  def _report(self, sessions):
+    return {"summary": {}, "sessions": sessions}
+
+  def test_no_metadata_is_noop(self):
+    report = self._report([{"session_id": "s1"}])
+    _inject_golden_summary(report, None)
+    assert "golden_eval_summary" not in report["summary"]
+
+  def test_matched_meaningful_and_mismatch(self):
+    sessions = [
+        {"session_id": "s1", "question": "q1", "response": "good",
+         "metrics": {"response_usefulness": {"category": "meaningful"}}},
+        {"session_id": "s2", "question": "q2", "response": "bad",
+         "metrics": {"response_usefulness": {"category": "unhelpful"}}},
+        {"session_id": "s3", "question": "q3", "response": "x",
+         "metrics": {"response_usefulness": {"category": "meaningful"}}},
+    ]
+    meta = {
+        "s1": {"matched": True, "expected_answer": "a1", "topic": "pto",
+               "similarity": 0.99},
+        "s2": {"matched": True, "expected_answer": "a2", "topic": "benefits",
+               "similarity": 0.98},
+        "s3": {"matched": False, "similarity": 0.4},
+    }
+    report = self._report(sessions)
+    _inject_golden_summary(report, meta)
+    gs = report["summary"]["golden_eval_summary"]
+    assert gs["matched"] == 2
+    assert gs["matched_meaningful"] == 1
+    assert gs["matched_unhelpful"] == 1
+    assert gs["unmatched"] == 1
+    assert len(gs["mismatches"]) == 1
+    assert gs["mismatches"][0]["question"] == "q2"
+    # Per-session golden_eval is attached.
+    assert sessions[0]["golden_eval"]["matched"] is True
+    assert sessions[2]["golden_eval"]["matched"] is False
+
+  def test_declined_counts_as_meaningful(self):
+    sessions = [
+        {"session_id": "s1", "question": "q", "response": "decline",
+         "metrics": {"response_usefulness": {"category": "declined"}}},
+    ]
+    meta = {"s1": {"matched": True, "expected_answer": "", "topic":
+                   "out_of_scope", "similarity": 0.99}}
+    report = self._report(sessions)
+    _inject_golden_summary(report, meta)
+    gs = report["summary"]["golden_eval_summary"]
+    assert gs["matched_meaningful"] == 1
+    assert gs["matched_unhelpful"] == 0
+
+
+# ================================================================== #
+# _failure_class / _classify_failures                                 #
+# ================================================================== #
+
+
+class TestFailureClass:
+
+  def test_not_a_failure(self):
+    assert _failure_class("meaningful", "proper", "correct") is None
+    assert _failure_class("declined", "no_tool_needed", "correct") is None
+
+  def test_knowledge_gap(self):
+    # Looked it up, didn't fabricate, still couldn't answer -> missing fact.
+    assert _failure_class("unhelpful", "proper", "correct") == "knowledge_gap"
+    assert (
+        _failure_class("unhelpful", "proper", "mostly_correct")
+        == "knowledge_gap"
+    )
+
+  def test_skill_gap_no_tool(self):
+    # Didn't even look up -> skill-fixable.
+    assert _failure_class("unhelpful", "none", "correct") == "skill_gap"
+
+  def test_skill_gap_hallucinated(self):
+    # Used tool but fabricated -> skill-fixable (should have declined).
+    assert _failure_class("unhelpful", "proper", "incorrect") == "skill_gap"
+
+  def test_judge_attribution_wins(self):
+    # The judge's failure_attribution overrides the deterministic heuristic.
+    assert (
+        _failure_class("unhelpful", "proper", "correct", "tool_gap")
+        == "tool_gap"
+    )
+    assert (
+        _failure_class("unhelpful", "none", "correct", "knowledge_gap")
+        == "knowledge_gap"
+    )
+
+  def test_judge_not_a_failure_falls_back(self):
+    # An unexpected attribution falls back to the deterministic split.
+    assert (
+        _failure_class("unhelpful", "proper", "correct", "not_a_failure")
+        == "knowledge_gap"
+    )
+
+
+class TestClassifyFailures:
+
+  def _session(self, sid, use, tool, corr, question="q"):
+    return {
+        "session_id": sid,
+        "question": question,
+        "metrics": {
+            "response_usefulness": {"category": use},
+            "tool_usage": {"category": tool},
+            "correctness": {"category": corr},
+        },
+    }
+
+  def test_split_and_addressable_rate(self):
+    report = {
+        "summary": {"total_sessions": 4, "meaningful": 2, "declined": 0},
+        "sessions": [
+            self._session("s1", "meaningful", "proper", "correct"),
+            self._session("s2", "meaningful", "proper", "correct"),
+            self._session("s3", "unhelpful", "proper", "correct", "orthodontia?"),
+            self._session("s4", "unhelpful", "none", "correct"),
+        ],
+    }
+    _classify_failures(report)
+    s = report["summary"]
+    assert s["knowledge_gap"] == 1
+    assert s["skill_gap"] == 1
+    # 2 meaningful / (4 - 1 knowledge gap) = 66.7%
+    assert s["addressable_meaningful_rate"] == 66.7
+    assert s["knowledge_gap_questions"] == ["orthodontia?"]
+    # Per-session tags applied.
+    by_id = {x["session_id"]: x.get("failure_class") for x in report["sessions"]}
+    assert by_id["s3"] == "knowledge_gap"
+    assert by_id["s4"] == "skill_gap"
+    assert by_id["s1"] is None
+
+  def test_no_failures(self):
+    report = {
+        "summary": {"total_sessions": 1, "meaningful": 1, "declined": 0},
+        "sessions": [self._session("s1", "meaningful", "proper", "correct")],
+    }
+    _classify_failures(report)
+    assert report["summary"]["knowledge_gap"] == 0
+    assert report["summary"]["skill_gap"] == 0
+    assert report["summary"]["tool_gap"] == 0
+    assert report["summary"]["addressable_meaningful_rate"] == 100.0
+
+  def test_tool_gap_via_judge(self):
+    # With failure_attribution present, tool gaps are excluded from addressable.
+    sess = self._session("s1", "unhelpful", "none", "correct", "tuition?")
+    sess["metrics"]["failure_attribution"] = {"category": "tool_gap"}
+    report = {
+        "summary": {"total_sessions": 2, "meaningful": 1, "declined": 0},
+        "sessions": [
+            self._session("s0", "meaningful", "proper", "correct"),
+            sess,
+        ],
+    }
+    _classify_failures(report)
+    s = report["summary"]
+    assert s["tool_gap"] == 1
+    assert s["skill_gap"] == 0
+    assert s["tool_gap_questions"] == ["tuition?"]
+    # 1 meaningful / (2 - 1 tool gap) = 100%
+    assert s["addressable_meaningful_rate"] == 100.0
+
+
+# ================================================================== #
+# _load_eval_spec                                                     #
+# ================================================================== #
+
+
+class TestLoadEvalSpec:
 
   def setup_method(self):
-    _AGENT_CONFIG_CACHE.clear()
+    _EVAL_SPEC_CACHE.clear()
 
   def teardown_method(self):
-    _AGENT_CONFIG_CACHE.clear()
+    _EVAL_SPEC_CACHE.clear()
 
   def test_explicit_path(self):
     import json as _json
@@ -552,19 +710,22 @@ class TestLoadAgentConfig:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False
     ) as f:
-      _json.dump({"scope_decisions": [{"topic": "t1"}]}, f)
+      _json.dump({"scope": "HR only"}, f)
       path = f.name
     try:
-      result = _load_agent_config(path)
-      assert result == {"scope_decisions": [{"topic": "t1"}]}
+      result = _load_eval_spec(path)
+      assert result == {"scope": "HR only"}
     finally:
       os.unlink(path)
+
+  def test_none_string_disables(self):
+    assert _load_eval_spec("none") is None
 
   def test_missing_explicit_path_raises(self):
     import pytest
 
     with pytest.raises(FileNotFoundError):
-      _load_agent_config("/nonexistent/config.json")
+      _load_eval_spec("/nonexistent/eval_spec.json")
 
   def test_cache_hit(self):
     import json as _json
@@ -575,8 +736,8 @@ class TestLoadAgentConfig:
       _json.dump({"cached": True}, f)
       path = f.name
     try:
-      first = _load_agent_config(path)
-      second = _load_agent_config(path)
+      first = _load_eval_spec(path)
+      second = _load_eval_spec(path)
       assert first is second
     finally:
       os.unlink(path)
@@ -592,8 +753,8 @@ class TestLoadAgentConfig:
         _json.dump(content, f)
         paths.append(f.name)
     try:
-      c1 = _load_agent_config(paths[0])
-      c2 = _load_agent_config(paths[1])
+      c1 = _load_eval_spec(paths[0])
+      c2 = _load_eval_spec(paths[1])
       assert c1 != c2
       assert c1 == {"a": 1}
       assert c2 == {"b": 2}
@@ -601,11 +762,9 @@ class TestLoadAgentConfig:
       for p in paths:
         os.unlink(p)
 
-  def test_auto_discover_returns_none(self):
-    # With no config file in known locations, should return None
-    result = _load_agent_config(None)
-    # May return None or a config if one exists in the repo
-    # Just verify it doesn't raise
+  def test_auto_discover_returns_none_or_dict(self):
+    # With no eval_spec.json in known locations, returns None; otherwise dict.
+    result = _load_eval_spec(None)
     assert result is None or isinstance(result, dict)
 
 

@@ -144,6 +144,30 @@
         }
       ],
       "required": true
+    },
+    {
+      "name": "failure_attribution",
+      "definition": "ROOT CAUSE of a failure: when the agent did NOT give a useful answer, why? Use the AGENT TOOLS / CAPABILITIES context above to decide which fixer is responsible. If the response WAS useful (a substantive answer or a correct decline of an out-of-scope topic), return not_a_failure.",
+      "categories": [
+        {
+          "name": "not_a_failure",
+          "definition": "The response was useful -- a substantive answer, or a correct polite decline of a genuinely out-of-scope topic. No failure to attribute."
+        },
+        {
+          "name": "skill_gap",
+          "definition": "The agent HAD the means to answer but behaved wrong: it failed to route to the right sub-agent, did not call an available tool, echoed/parroted the user's correction without re-verifying, or stated facts that contradict its tools. The tool and data needed were available -- this is fixable by improving the agent's instructions (skill)."
+        },
+        {
+          "name": "knowledge_gap",
+          "definition": "The agent correctly used a tool that DOES cover this topic, but the SPECIFIC fact requested was not present in the data the tool returned (the data source is incomplete on this detail). Fixable by a human adding the missing fact to the existing data source -- not by changing instructions."
+        },
+        {
+          "name": "tool_gap",
+          "definition": "No tool or capability could even attempt this request. Either (a) the question is about a topic that NONE of the listed tools has any data source for, or (b) it needs the individual user's personal/account data (their actual balance, enrollment status) or an ACTION (submit, file, enroll) that no tool provides. Fixable only by an engineer building a new tool or data source -- not by skill evolution or by adding a fact."
+        }
+      ],
+      "required": true,
+      "scope_aware": true
     }
   ]
 }

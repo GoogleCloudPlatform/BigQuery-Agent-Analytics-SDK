@@ -41,7 +41,7 @@ Usage:
     python quality_report.py --samples all        # show all sessions
     python quality_report.py --app-name my_agent  # filter to a specific agent
     python quality_report.py --output-json r.json # write structured JSON output
-    python quality_report.py --agent-context agent_context.json # use Agent scope definitions for eval
+    python quality_report.py --eval-spec eval_spec.json # ground scoring with scope + golden Q&A
     python quality_report.py --env path/to/.env   # load a specific .env file
     python quality_report.py --conversations-file results.json  # score local JSON
     python quality_report.py --eval-config path/to/custom.json  # override metric definitions
@@ -55,6 +55,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -238,90 +239,309 @@ def get_client():
 
 
 # ---------------------------------------------------------------------------
-# Scope configuration
+# Eval spec — optional grounding for scoring (scope, ground truth, golden Q&A)
 # ---------------------------------------------------------------------------
+#
+# The eval spec is a single optional JSON file (``eval/data/eval_spec.json``,
+# auto-discovered, or ``--eval-spec <path>``) with three optional fields:
+#
+#   {
+#     "scope": "free-text description of what the agent handles",
+#     "ground_truth": "free-text authoritative facts for correctness",
+#     "golden_qa": [{"question", "expected_answer", "topic"?,
+#                    "expected_behavior"?}]
+#   }
+#
+# ``scope`` defines the boundary positively (out-of-scope is the complement —
+# no need to enumerate out-of-scope topics). ``golden_qa`` grounds correctness
+# per question via embedding similarity; entries with
+# ``expected_behavior: "decline"`` (or ``topic: "out_of_scope"``) also act as
+# scope-boundary examples.
 
-_AGENT_CONFIG_CACHE: dict[str, dict] = {}
+_EVAL_SPEC_CACHE: dict[str, dict] = {}
 
 
-def _load_agent_config(config_path=None):
-  """Load agent config (scope decisions, etc.) from a JSON file.
+def _load_eval_spec(spec_path=None):
+  """Load the eval spec ({scope, ground_truth, golden_qa}) from JSON.
 
-  When --agent-context is provided, loads from that path.  Otherwise checks
-  for eval/data/agent_context.json relative to the repo root or script dir.
-  Returns None if no config is found (scope-aware eval is disabled).
-
-  Pass ``config_path="none"`` to explicitly disable scope context
-  (no auto-discovery).
+  When *spec_path* is given, loads that file.  ``"none"`` disables the spec
+  (no auto-discovery).  Otherwise auto-discovers ``eval/data/eval_spec.json``
+  relative to the repo root or script dir.  Returns None when nothing is found.
 
   Raises:
-    FileNotFoundError: If an explicit config_path does not exist.
+    FileNotFoundError: If an explicit *spec_path* does not exist.
   """
-  # Explicit disable — skip auto-discovery
-  if config_path and config_path.lower() == "none":
+  if spec_path and spec_path.lower() == "none":
     return None
 
-  cache_key = config_path or "_AUTO_"
-  if cache_key in _AGENT_CONFIG_CACHE:
-    return _AGENT_CONFIG_CACHE[cache_key]
+  cache_key = spec_path or "_AUTO_"
+  if cache_key in _EVAL_SPEC_CACHE:
+    return _EVAL_SPEC_CACHE[cache_key]
 
-  if config_path:
-    if not os.path.isfile(config_path):
-      raise FileNotFoundError(f"Config file not found: {config_path}")
-    with open(config_path) as f:
+  if spec_path:
+    if not os.path.isfile(spec_path):
+      raise FileNotFoundError(f"Eval spec file not found: {spec_path}")
+    with open(spec_path) as f:
       result = json.load(f)
-    _AGENT_CONFIG_CACHE[cache_key] = result
+    _EVAL_SPEC_CACHE[cache_key] = result
     return result
 
-  # Auto-discover agent_context.json from known locations
   for base in [_repo_root, _script_dir]:
-    candidate = os.path.join(base, "eval", "data", "agent_context.json")
+    candidate = os.path.join(base, "eval", "data", "eval_spec.json")
     if os.path.isfile(candidate):
-      logger.info("Auto-discovered agent context: %s", candidate)
+      logger.info("Auto-discovered eval spec: %s", candidate)
       with open(candidate) as f:
         result = json.load(f)
-      _AGENT_CONFIG_CACHE[cache_key] = result
+      _EVAL_SPEC_CACHE[cache_key] = result
       return result
 
   return None
 
 
-def _build_scope_context(config=None):
-  """Build scope context string for the LLM judge from config."""
-  if not config:
+def _build_scope_context(spec=None):
+  """Build scope / ground-truth context for the LLM judge from the eval spec.
+
+  Reads two optional free-text fields:
+    - ``ground_truth``: authoritative facts the judge uses for correctness.
+    - ``scope``: what the agent is designed to handle. Anything outside it is
+      out of scope (a polite decline is then correct); anything inside it the
+      agent fails to answer is unhelpful, not declined.
+  """
+  if not spec:
     return ""
 
   parts = []
 
-  ground_truth = config.get("ground_truth", "")
+  ground_truth = spec.get("ground_truth", "")
   if ground_truth:
     parts.append(
         "\n\nGROUND TRUTH DATA (use this to judge factual correctness):"
     )
     parts.append(ground_truth)
 
-  scope_decisions = config.get("scope_decisions", [])
-  oos_topics = [
-      d["topic"] for d in scope_decisions if d.get("decision") == "out_of_scope"
-  ]
-  if oos_topics:
+  scope = spec.get("scope", "")
+  if scope:
     parts.append(
-        "\n\nAGENT SCOPE CONTEXT (use this to judge responses correctly):"
+        "\n\nAGENT SCOPE (use this to judge responses correctly):"
     )
+    parts.append(scope.strip())
     parts.append(
-        "ONLY the following topics are OUT OF SCOPE: "
-        + ", ".join(oos_topics)
-        + "."
-    )
-    parts.append(
-        "IMPORTANT: 'declined' means the TOPIC ITSELF is out of scope"
-        " (one of the topics listed above). If the question is about any"
-        " other topic but the agent failed to find the answer, that"
-        " is 'unhelpful', NOT 'declined'. An agent saying 'I don't have"
-        " that information' about a topic not listed above is UNHELPFUL."
+        "A question is OUT OF SCOPE only if it falls outside the agent scope"
+        " described above. When the agent politely declines a genuinely"
+        " out-of-scope question, that is CORRECT ('declined'). When the"
+        " question is in scope but the agent fails to answer it, that is"
+        " 'unhelpful', NOT 'declined'."
     )
 
+  tools = spec.get("tools", "")
+  if tools:
+    parts.append(
+        "\n\nAGENT TOOLS / CAPABILITIES (use this to attribute the cause of a"
+        " failure):"
+    )
+    parts.append(tools.strip())
+
   return " ".join(parts) if parts else ""
+
+
+# ---------------------------------------------------------------------------
+# Golden Q&A matching — optional correctness grounding + scope calibration
+# ---------------------------------------------------------------------------
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
+
+
+def _embed_texts(texts, model=None, batch_size=50):
+  """Embed *texts* for semantic similarity; returns L2-normalised vectors."""
+  from google import genai
+  from google.genai import types
+
+  model = model or EMBEDDING_MODEL
+  client = genai.Client()
+  vectors = []
+  for i in range(0, len(texts), batch_size):
+    batch = texts[i : i + batch_size]
+    resp = client.models.embed_content(
+        model=model,
+        contents=batch,
+        config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
+    )
+    for e in resp.embeddings:
+      v = list(e.values)
+      norm = math.sqrt(sum(x * x for x in v)) or 1.0
+      vectors.append([x / norm for x in v])
+  return vectors
+
+
+def match_golden_qa(question_by_sid, golden_qa, threshold=0.92):
+  """Match session questions to golden Q&A by embedding cosine similarity.
+
+  Args:
+    question_by_sid: dict mapping session_id -> user question text.
+    golden_qa: list of dicts with ``question`` and optional
+        ``expected_answer``, ``topic``, ``expected_behavior``.
+    threshold: minimum cosine similarity (0-1) for a match.
+
+  Returns:
+    (per_session_context, golden_metadata):
+      - per_session_context maps session_id -> a judge-context string
+        (expected answer and/or a "should decline" note).
+      - golden_metadata maps session_id -> match details (matched flag,
+        matched question, expected answer, topic, out_of_scope, similarity).
+  """
+  if not golden_qa or not question_by_sid:
+    return {}, {}
+
+  sids = [sid for sid, q in question_by_sid.items() if q]
+  conv_qs = [question_by_sid[sid] for sid in sids]
+  golden_qs = [g["question"] for g in golden_qa]
+  if not conv_qs or not golden_qs:
+    return {}, {}
+
+  logger.info(
+      "Golden matching: embedding %d golden + %d session questions...",
+      len(golden_qs), len(conv_qs),
+  )
+  golden_vecs = _embed_texts(golden_qs)
+  conv_vecs = _embed_texts(conv_qs)
+
+  per_session_context = {}
+  golden_metadata = {}
+  matched = 0
+  for sid, cvec in zip(sids, conv_vecs):
+    best_idx, best_score = -1, -1.0
+    for gi, gvec in enumerate(golden_vecs):
+      # Both vectors are L2-normalised, so the dot product is cosine.
+      score = sum(a * b for a, b in zip(cvec, gvec))
+      if score > best_score:
+        best_score, best_idx = score, gi
+
+    if best_score >= threshold:
+      g = golden_qa[best_idx]
+      is_oos = (
+          g.get("expected_behavior") == "decline"
+          or g.get("topic") == "out_of_scope"
+      )
+      ctx = [
+          "EXPECTED ANSWER FOR THIS QUESTION "
+          "(use to judge factual correctness):",
+          f"Q: {g['question']}",
+      ]
+      if g.get("expected_answer"):
+        ctx.append(f"A: {g['expected_answer']}")
+      if is_oos:
+        ctx.append(
+            "NOTE: This question is OUT OF SCOPE — the agent should decline."
+            " A polite decline is the correct ('declined') outcome."
+        )
+      per_session_context[sid] = "\n".join(ctx)
+      golden_metadata[sid] = {
+          "matched": True,
+          "golden_question": g["question"],
+          "expected_answer": g.get("expected_answer", ""),
+          "topic": g.get("topic", "unknown"),
+          "out_of_scope": is_oos,
+          "similarity": round(best_score, 4),
+      }
+      matched += 1
+    else:
+      golden_metadata[sid] = {
+          "matched": False,
+          "similarity": round(best_score, 4),
+      }
+
+  logger.info(
+      "Golden matching: %d/%d sessions matched (threshold=%.2f)",
+      matched, len(sids), threshold,
+  )
+  return per_session_context, golden_metadata
+
+
+def _inject_golden_summary(report, golden_metadata):
+  """Enrich a quality-report dict with golden-match data.
+
+  Adds ``golden_eval`` to each session and a ``golden_eval_summary`` block to
+  the report summary (matched/unmatched counts split by usefulness, plus the
+  list of golden-matched sessions the agent got wrong).
+  """
+  if not golden_metadata:
+    return
+
+  buckets = {
+      "matched_meaningful": 0,
+      "matched_unhelpful": 0,
+      "matched_partial": 0,
+      "unmatched_meaningful": 0,
+      "unmatched_unhelpful": 0,
+      "unmatched_partial": 0,
+  }
+  mismatches = []
+
+  for session in report.get("sessions", []):
+    sid = session.get("session_id", "")
+    meta = golden_metadata.get(sid)
+    if meta is None:
+      session["golden_eval"] = None
+      continue
+    session["golden_eval"] = meta
+
+    usefulness = (
+        session.get("metrics", {})
+        .get("response_usefulness", {})
+        .get("category", "")
+    )
+    prefix = "matched" if meta["matched"] else "unmatched"
+    # A correct decline counts as a positive outcome alongside meaningful.
+    if usefulness in ("meaningful", "declined"):
+      buckets[f"{prefix}_meaningful"] += 1
+    elif usefulness == "unhelpful":
+      buckets[f"{prefix}_unhelpful"] += 1
+      if meta["matched"]:
+        mismatches.append({
+            "question": session.get("question", ""),
+            "expected_answer": meta.get("expected_answer", ""),
+            "actual_response": (
+                session.get("response", session.get("final_response", ""))
+            )[:300],
+            "topic": meta.get("topic", ""),
+            "similarity": meta["similarity"],
+        })
+    else:
+      buckets[f"{prefix}_partial"] += 1
+
+  total_matched = (
+      buckets["matched_meaningful"]
+      + buckets["matched_unhelpful"]
+      + buckets["matched_partial"]
+  )
+  total_unmatched = (
+      buckets["unmatched_meaningful"]
+      + buckets["unmatched_unhelpful"]
+      + buckets["unmatched_partial"]
+  )
+
+  report["summary"]["golden_eval_summary"] = {
+      "total_sessions": total_matched + total_unmatched,
+      "matched": total_matched,
+      "matched_meaningful": buckets["matched_meaningful"],
+      "matched_unhelpful": buckets["matched_unhelpful"],
+      "matched_partial": buckets["matched_partial"],
+      "matched_meaningful_rate": (
+          round(buckets["matched_meaningful"] / total_matched * 100, 1)
+          if total_matched
+          else 0
+      ),
+      "unmatched": total_unmatched,
+      "unmatched_meaningful": buckets["unmatched_meaningful"],
+      "unmatched_unhelpful": buckets["unmatched_unhelpful"],
+      "unmatched_partial": buckets["unmatched_partial"],
+      "unmatched_meaningful_rate": (
+          round(buckets["unmatched_meaningful"] / total_unmatched * 100, 1)
+          if total_unmatched
+          else 0
+      ),
+      "mismatches": mismatches,
+  }
 
 
 # ---------------------------------------------------------------------------
@@ -380,25 +600,20 @@ def _load_eval_config(eval_config_path=None):
 # ---------------------------------------------------------------------------
 
 
-def get_eval_metrics(config_path=None, eval_config=None):
+def get_eval_metrics(eval_spec=None, eval_config=None):
   """Return the list of categorical metric definitions for quality evaluation.
 
   Metrics are loaded from *eval_config* (parsed dict, typically from
   ``eval/eval_config.json``).  Scope-aware metrics are dynamically enriched
-  when *config_path* points at an agent context with out-of-scope decisions.
+  when *eval_spec* provides a ``scope`` (and/or ``ground_truth``) field, which
+  also enables the ``declined`` category so the judge can credit correct
+  out-of-scope refusals.
   """
   from bigquery_agent_analytics import CategoricalMetricCategory
   from bigquery_agent_analytics import CategoricalMetricDefinition
 
-  config = _load_agent_config(config_path)
-  scope_context = _build_scope_context(config)
-  has_scope = bool(
-      config
-      and any(
-          d.get("decision") == "out_of_scope"
-          for d in config.get("scope_decisions", [])
-      )
-  )
+  scope_context = _build_scope_context(eval_spec)
+  has_scope = bool(eval_spec and eval_spec.get("scope"))
 
   if eval_config is None:
     eval_config = _load_eval_config()
@@ -990,7 +1205,7 @@ def run_evaluation(
     model=None,
     persist=False,
     app_name=None,
-    config_path=None,
+    eval_spec=None,
     session_id=None,
     session_ids=None,
     tag_turns=False,
@@ -1003,7 +1218,9 @@ def run_evaluation(
   model = model or EVAL_MODEL_ID
   client = get_client()
 
-  metrics = get_eval_metrics(config_path=config_path, eval_config=eval_config)
+  if eval_spec is None:
+    eval_spec = _load_eval_spec()
+  metrics = get_eval_metrics(eval_spec=eval_spec, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
       endpoint=model,
@@ -1060,10 +1277,7 @@ def run_evaluation(
     import asyncio
 
     if tag_turns:
-      scope_context = ""
-      if config_path:
-        config = _load_agent_config(config_path)
-        scope_context = _build_scope_context(config)
+      scope_context = _build_scope_context(eval_spec)
       logger.info(
           "Tagging turns for %d multi-turn sessions...",
           len(mt_sessions),
@@ -1120,7 +1334,7 @@ def run_evaluation(
 def generate_quality_report(
     session_ids: list[str],
     model: str | None = None,
-    config_path: str | None = None,
+    eval_spec: dict | None = None,
 ) -> dict:
   """Evaluate sessions and return a structured quality report dict.
 
@@ -1132,8 +1346,8 @@ def generate_quality_report(
       session_ids: BigQuery session IDs to evaluate.
       model: Eval model override (default: EVAL_MODEL_ID env or
           gemini-2.5-flash).
-      config_path: Path to agent context JSON for scope-aware scoring.
-          Pass ``"none"`` to disable scope context (no auto-discovery).
+      eval_spec: Optional eval spec dict ({scope, ground_truth, golden_qa}).
+          When None, ``eval/data/eval_spec.json`` is auto-discovered.
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys, compatible with
@@ -1146,7 +1360,7 @@ def generate_quality_report(
     model = os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
   t0 = time.time()
   result = run_evaluation(
-      session_ids=session_ids, model=model, config_path=config_path,
+      session_ids=session_ids, model=model, eval_spec=eval_spec,
   )
   elapsed = time.time() - t0
 
@@ -1158,11 +1372,12 @@ def generate_quality_report(
 def run_evaluation_from_conversations(
     conversations,
     model=None,
-    config_path=None,
+    eval_spec=None,
     concurrency=10,
     tag_turns=False,
     eval_config=None,
     per_session_context=None,
+    golden_threshold=0.92,
 ):
   """Evaluate local conversations without BigQuery.
 
@@ -1174,16 +1389,19 @@ def run_evaluation_from_conversations(
   Args:
       conversations: List of conversation dicts (traffic generator format).
       model: Eval model override.
-      config_path: Path to agent context JSON for scope-aware scoring.
+      eval_spec: Optional eval spec dict ({scope, ground_truth, golden_qa}).
+          When None, ``eval/data/eval_spec.json`` is auto-discovered. Provides
+          scope grounding and, when ``golden_qa`` is present, per-question
+          correctness grounding via embedding matching.
       concurrency: Max parallel API calls (default 10).
       tag_turns: When True, run the full turn tagger to classify each user
           turn and identify correction boundaries / sub-trajectories.
-      per_session_context: Optional dict mapping session_id to additional
-          context string for the judge prompt (e.g. matched golden eval).
+      per_session_context: Optional caller-supplied per-session judge context.
+          Merged with (and overridden by) any golden-Q&A matches.
+      golden_threshold: Cosine-similarity threshold for golden matching.
 
   Returns:
-      Dict with ``report`` (CategoricalEvaluationReport) and
-      ``resolved_map`` keys.
+      Dict with ``report``, ``resolved_map``, and ``golden_metadata`` keys.
   """
   import asyncio
 
@@ -1193,8 +1411,10 @@ def run_evaluation_from_conversations(
       classify_sessions_via_api,
   )
 
+  if eval_spec is None:
+    eval_spec = _load_eval_spec()
   model = model or EVAL_MODEL_ID or os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
-  metrics = get_eval_metrics(config_path=config_path, eval_config=eval_config)
+  metrics = get_eval_metrics(eval_spec=eval_spec, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
       endpoint=model,
@@ -1202,10 +1422,21 @@ def run_evaluation_from_conversations(
       include_justification=True,
   )
 
-  scope_context = ""
-  if config_path:
-    config = _load_agent_config(config_path)
-    scope_context = _build_scope_context(config)
+  scope_context = _build_scope_context(eval_spec)
+
+  # Golden Q&A matching: inject per-question expected answers / decline notes
+  # into the judge prompt for sessions whose question matches a golden entry.
+  golden_metadata = {}
+  golden_qa = (eval_spec or {}).get("golden_qa")
+  if golden_qa:
+    question_by_sid = {
+        conv.get("session_id", f"local_{id(conv)}"): conv.get("question", "")
+        for conv in conversations
+    }
+    golden_ctx, golden_metadata = match_golden_qa(
+        question_by_sid, golden_qa, threshold=golden_threshold
+    )
+    per_session_context = {**(per_session_context or {}), **golden_ctx}
 
   transcripts = {}
   for conv in conversations:
@@ -1236,17 +1467,22 @@ def run_evaluation_from_conversations(
       config=cat_config,
   )
 
-  return {"report": report, "resolved_map": resolved_map}
+  return {
+      "report": report,
+      "resolved_map": resolved_map,
+      "golden_metadata": golden_metadata,
+  }
 
 
 def generate_quality_report_from_conversations(
     conversations,
     model=None,
-    config_path=None,
+    eval_spec=None,
     concurrency=10,
     tag_turns=False,
     trajectory_samples=0,
     per_session_context=None,
+    golden_threshold=0.92,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1257,24 +1493,29 @@ def generate_quality_report_from_conversations(
   Args:
       conversations: List of conversation dicts.
       model: Eval model override.
-      config_path: Path to agent context JSON for scope-aware scoring.
+      eval_spec: Optional eval spec dict ({scope, ground_truth, golden_qa}).
+          When None, ``eval/data/eval_spec.json`` is auto-discovered.
       concurrency: Max parallel API calls (default 10).
       tag_turns: When True, run the full turn tagger to add per-turn tags,
           correction boundaries, and sub-trajectories to the output.
       trajectory_samples: Number of execution traces to fetch from BigQuery.
-      per_session_context: Optional dict mapping session_id to additional
-          context string for the judge prompt (e.g. matched golden eval).
+      per_session_context: Optional caller-supplied per-session judge context
+          (merged with golden-Q&A matches).
+      golden_threshold: Cosine-similarity threshold for golden matching.
 
   Returns:
-      Dict with ``summary`` and ``sessions`` keys.
+      Dict with ``summary`` and ``sessions`` keys. When the eval spec carries
+      ``golden_qa``, a ``golden_eval_summary`` block and per-session
+      ``golden_eval`` entries are included.
   """
   if PROJECT_ID is None:
     _load_config()
   t0 = time.time()
   result = run_evaluation_from_conversations(
-      conversations, model=model, config_path=config_path,
+      conversations, model=model, eval_spec=eval_spec,
       concurrency=concurrency, tag_turns=tag_turns,
       per_session_context=per_session_context,
+      golden_threshold=golden_threshold,
   )
   elapsed = time.time() - t0
 
@@ -1289,6 +1530,7 @@ def generate_quality_report_from_conversations(
       result["report"], result["resolved_map"], trajectories=trajectories,
   )
   output["summary"]["elapsed_seconds"] = round(elapsed, 1)
+  _inject_golden_summary(output, result.get("golden_metadata"))
   return output
 
 
@@ -1474,7 +1716,8 @@ def run_eval(args):
   conversations_file = getattr(args, "conversations_file", None)
 
   t0 = time.time()
-  config_path = getattr(args, "config", None)
+  eval_spec = _load_eval_spec(getattr(args, "eval_spec", None))
+  golden_threshold = getattr(args, "golden_threshold", 0.92)
   eval_config = _load_eval_config(getattr(args, "eval_config", None))
 
   # --dimensions primary: keep only the 2 primary metrics to cut LLM-judge
@@ -1524,14 +1767,18 @@ def run_eval(args):
       logger.info("Loaded %d conversations", total)
 
     try:
-      if config_path:
-        logger.info("Scope config: %s", config_path)
+      if eval_spec:
+        logger.info(
+            "Eval spec: scope=%s, golden_qa=%d",
+            bool(eval_spec.get("scope")),
+            len(eval_spec.get("golden_qa") or []),
+        )
       concurrency = getattr(args, "concurrency", 10)
       tag_turns = getattr(args, "tag_turns", False)
       result = run_evaluation_from_conversations(
-          conversations, model=model, config_path=config_path,
+          conversations, model=model, eval_spec=eval_spec,
           concurrency=concurrency, tag_turns=tag_turns,
-          eval_config=eval_config,
+          eval_config=eval_config, golden_threshold=golden_threshold,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -1576,8 +1823,8 @@ def run_eval(args):
       )
 
     try:
-      if config_path:
-        logger.info("Scope config: %s", config_path)
+      if eval_spec and eval_spec.get("scope"):
+        logger.info("Eval spec scope active")
       tag_turns = getattr(args, "tag_turns", False)
       result = run_evaluation(
           time_range=args.time_period,
@@ -1585,7 +1832,7 @@ def run_eval(args):
           model=model,
           persist=args.persist,
           app_name=args.app_name,
-          config_path=config_path,
+          eval_spec=eval_spec,
           session_id=args.session,
           session_ids=session_ids,
           tag_turns=tag_turns,
@@ -1712,6 +1959,7 @@ def run_eval(args):
         result["report"], result["resolved_map"],
         trajectories=trajectories,
     )
+    _inject_golden_summary(output, result.get("golden_metadata"))
     if args.output_json == "-":
       json.dump(output, sys.stdout, indent=2, default=str)
       sys.stdout.write("\n")
@@ -2122,6 +2370,31 @@ def _print_eval_results(
   if a2a_session_ids:
     print(f"  A2A sessions detected    : {len(a2a_session_ids)}")
 
+  # --- Failure breakdown: skill gap vs knowledge gap vs tool gap ---
+  counts, _ = _failure_breakdown_from_report(report)
+  total_sessions = report.total_sessions or 1
+  if any(counts.values()):
+    unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
+    addressable = total_sessions - unaddressable
+    good = sum(
+        1
+        for sr in report.session_results
+        for mr in sr.metrics
+        if mr.metric_name == "response_usefulness"
+        and mr.category in ("meaningful", "declined")
+    )
+    addr_rate = (good / addressable * 100) if addressable else 0.0
+    print(
+        f"  Failure causes           : "
+        f"skill={counts['skill_gap']} (evolution)  "
+        f"knowledge={counts['knowledge_gap']} (add data)  "
+        f"tool={counts['tool_gap']} (build tool)"
+    )
+    print(
+        f"  Addressable meaningful   : {addr_rate:.1f}%"
+        f"  (excludes {unaddressable} unaddressable gaps)"
+    )
+
   # --- Dimension averages (0-2 scale) ---
   dim_avgs = _compute_dimension_averages(report)
   if _has_dimension_data(dim_avgs):
@@ -2473,7 +2746,9 @@ def _md_dimension_scorecard(sr):
   """Build a compact one-line scorecard for the 5 quality dimensions."""
   parts = []
   for mr in sr.metrics:
-    if mr.metric_name in _PRIMARY_METRICS:
+    # Only the 0-2 quality dimensions belong in the scorecard \u2014 skip primary
+    # metrics and non-dimension categoricals (e.g. failure_attribution).
+    if mr.metric_name not in _DIMENSION_SCORES:
       continue
     label = _METRIC_LABELS.get(mr.metric_name, mr.metric_name)
     icon = _SCORECARD_ICONS.get(mr.category, "\u2753")
@@ -3041,6 +3316,20 @@ def _write_md_report(
   w(f"| Partial | {partial_count} |")
   w(f"| Unhelpful | {fp_count} |")
   w(f"| Unhelpful rate | {fp_rate:.1f}% |")
+  counts, gap_sids = _failure_breakdown_from_report(report)
+  unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
+  addressable = total - unaddressable
+  good = meaningful_count + declined_count
+  addr_rate = (good / addressable * 100) if addressable else 0.0
+  if any(counts.values()):
+    w(f"| &nbsp;&nbsp;↳ Skill gaps (evolution fixes) | {counts['skill_gap']} |")
+    w(f"| &nbsp;&nbsp;↳ Knowledge gaps (add a fact) "
+      f"| {counts['knowledge_gap']} |")
+    w(f"| &nbsp;&nbsp;↳ Tool gaps (build a tool) | {counts['tool_gap']} |")
+    w(
+        f"| **Addressable meaningful rate** "
+        f"(excl. knowledge + tool gaps) | **{addr_rate:.1f}%** |"
+    )
   if unknown_count:
     parse_error_metrics = report.details.get("parse_errors", "?")
     w(
@@ -3050,6 +3339,39 @@ def _write_md_report(
   if a2a_session_ids:
     w(f"| A2A sessions | {len(a2a_session_ids)} |")
   w("")
+
+  # --- Failure breakdown: which gaps evolution can vs cannot fix ---
+  def _gap_questions(sids):
+    out = []
+    sid_set = set(sids)
+    for sr in report.session_results:
+      if sr.session_id in sid_set:
+        q = resolved_map.get(sr.session_id, {}).get("question", "")
+        if q:
+          out.append(" ".join(q.split()))
+    return out
+
+  for gap_key, title, blurb in [
+      ("knowledge_gap", "Knowledge Gaps (add a fact to existing data)",
+       "In-scope questions the agent looked up correctly but its data source is"
+       " silent on. Evolution cannot invent these facts — a human adds them:"),
+      ("tool_gap", "Tool Gaps (build a new tool / data source)",
+       "Requests no tool can serve — a topic with no data source, or personal"
+       " data / actions the agent has no capability for. An engineer must add a"
+       " tool:"),
+  ]:
+    questions = _gap_questions(gap_sids[gap_key])
+    if not questions:
+      continue
+    w(f"### {title}")
+    w("")
+    w(blurb)
+    w("")
+    for q in questions[:15]:
+      w(f"- {q[:160]}")
+    if len(questions) > 15:
+      w(f"- …and {len(questions) - 15} more")
+    w("")
 
   # --- Quality Dimensions (0-2 scale) ---
   _samples_dict = _parse_samples(args.samples)
@@ -3243,6 +3565,121 @@ def _write_md_report(
 
 
 # ---------------------------------------------------------------------------
+# Failure attribution — skill gap vs knowledge gap vs tool gap
+# ---------------------------------------------------------------------------
+#
+# Every failure (response_usefulness == "unhelpful") has one root cause, and
+# each points to a DIFFERENT fixer:
+#   - skill_gap     -> the agent had the tool + data but misbehaved (routing,
+#                      tool-use, parroting, hallucination). Fixed by SKILL
+#                      EVOLUTION (automatic).
+#   - knowledge_gap -> a tool that covers the topic was used correctly, but the
+#                      specific fact is missing from its data. Fixed by a HUMAN
+#                      adding a fact to the existing data source.
+#   - tool_gap      -> no tool/capability can serve the request (a topic with no
+#                      data source, or personal-data / action needs). Fixed by
+#                      an ENGINEER building a new tool.
+#
+# The LLM judge's ``failure_attribution`` metric assigns the cause when present
+# (it sees the tool inventory). Without it we fall back to a 2-way deterministic
+# split (knowledge vs skill). Only skill gaps are addressable by evolution, so
+# ``addressable_meaningful_rate`` excludes both knowledge and tool gaps.
+_KNOWLEDGE_GAP_TOOL = {"proper"}
+_KNOWLEDGE_GAP_CORRECTNESS = {"correct", "mostly_correct"}
+_FAILURE_CLASSES = ("skill_gap", "knowledge_gap", "tool_gap")
+
+
+def _failure_class(usefulness, tool, correctness, attribution=None):
+  """Classify a single session's failure (or None if it is not a failure).
+
+  Prefers the LLM judge's ``failure_attribution`` (3-way: skill/knowledge/tool)
+  when available; otherwise falls back to a deterministic 2-way split — an
+  unhelpful session where the agent used its tools and did not fabricate is a
+  ``knowledge_gap``, anything else is a ``skill_gap``.
+  """
+  # Meaningful / correctly-declined responses are not failures, regardless of
+  # any stray attribution — never count them as a gap (keeps addressable rate
+  # <= 100%).
+  if usefulness in ("meaningful", "declined"):
+    return None
+  # For an actual failure (unhelpful / partial), trust the judge's attribution
+  # when it named a concrete gap; otherwise fall back to the deterministic
+  # 2-way split (which only fires for unhelpful).
+  if attribution in _FAILURE_CLASSES:
+    return attribution
+  if usefulness != "unhelpful":
+    return None
+  if tool in _KNOWLEDGE_GAP_TOOL and correctness in _KNOWLEDGE_GAP_CORRECTNESS:
+    return "knowledge_gap"
+  return "skill_gap"
+
+
+def _failure_breakdown_from_report(report):
+  """Return (counts_by_class, gap_session_ids_by_class) from a raw report."""
+  counts = {c: 0 for c in _FAILURE_CLASSES}
+  gap_sids = {c: [] for c in _FAILURE_CLASSES}
+  for sr in report.session_results:
+    cats = {mr.metric_name: mr.category for mr in sr.metrics}
+    fc = _failure_class(
+        cats.get("response_usefulness"),
+        cats.get("tool_usage"),
+        cats.get("correctness"),
+        cats.get("failure_attribution"),
+    )
+    if fc in counts:
+      counts[fc] += 1
+      gap_sids[fc].append(sr.session_id)
+  return counts, gap_sids
+
+
+def _classify_failures(report):
+  """Tag each ``unhelpful`` session with a ``failure_class`` and add the
+  skill/knowledge/tool-gap summary metrics in place."""
+  sessions = report.get("sessions", [])
+  summary = report.setdefault("summary", {})
+
+  counts = {c: 0 for c in _FAILURE_CLASSES}
+  gap_questions = {c: [] for c in _FAILURE_CLASSES}
+  for s in sessions:
+    metrics = s.get("metrics", {})
+    fc = _failure_class(
+        metrics.get("response_usefulness", {}).get("category"),
+        metrics.get("tool_usage", {}).get("category"),
+        metrics.get("correctness", {}).get("category"),
+        metrics.get("failure_attribution", {}).get("category"),
+    )
+    if fc in counts:
+      s["failure_class"] = fc
+      counts[fc] += 1
+      q = s.get("question", "")
+      if q:
+        gap_questions[fc].append(q)
+
+  total = summary.get("total_sessions") or len(sessions)
+  good = summary.get("meaningful", 0) + summary.get("declined", 0)
+  # Only skill gaps are addressable by evolution; knowledge + tool gaps need a
+  # human (add a fact) or an engineer (build a tool).
+  unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
+  addressable = total - unaddressable
+  summary["skill_gap"] = counts["skill_gap"]
+  summary["knowledge_gap"] = counts["knowledge_gap"]
+  summary["tool_gap"] = counts["tool_gap"]
+  summary["knowledge_gap_rate"] = (
+      round(counts["knowledge_gap"] / total * 100, 1) if total else 0
+  )
+  summary["tool_gap_rate"] = (
+      round(counts["tool_gap"] / total * 100, 1) if total else 0
+  )
+  # Quality on questions the agent *can* answer (knowledge + tool gaps excluded)
+  # — the ceiling skill evolution is actually working toward.
+  summary["addressable_meaningful_rate"] = (
+      round(good / addressable * 100, 1) if addressable else 0
+  )
+  summary["knowledge_gap_questions"] = gap_questions["knowledge_gap"][:50]
+  summary["tool_gap_questions"] = gap_questions["tool_gap"][:50]
+
+
+# ---------------------------------------------------------------------------
 # JSON report output
 # ---------------------------------------------------------------------------
 
@@ -3327,7 +3764,7 @@ def _build_json_output(report, resolved_map, trajectories=None):
   dim_avgs = _compute_dimension_averages(report)
   mt_stats = _compute_multiturn_stats(resolved_map)
 
-  return {
+  output = {
       "summary": {
           "total_sessions": total,
           "meaningful": meaningful_count,
@@ -3354,6 +3791,8 @@ def _build_json_output(report, resolved_map, trajectories=None):
       "sessions": sessions,
       "details": {k: str(v) for k, v in report.details.items()},
   }
+  _classify_failures(output)
+  return output
 
 
 # ---------------------------------------------------------------------------
@@ -3389,26 +3828,28 @@ Filtering (all filters appear in the Execution Details section of the report):
   initializing the ADK plugin. Common uses: version tagging, deployment
   environment, experiment ID, A/B test variant.
 
-Scope-aware evaluation (--agent-context):
-  %(prog)s --agent-context agent_context.json --report
+Scope + golden grounding (--eval-spec):
+  %(prog)s --eval-spec eval_spec.json --report
 
-  The agent context file describes which topics are out of scope for your
-  agent. This lets the judge classify polite refusals as "declined" (correct)
-  rather than "unhelpful" (a bug).
+  The eval spec grounds scoring. 'scope' (free text) defines what the agent
+  handles — anything outside it is out of scope, so a polite refusal is scored
+  "declined" (correct) rather than "unhelpful". 'golden_qa' supplies expected
+  answers matched per-question by embedding similarity to ground correctness.
 
-  Example agent_context.json:
+  Example eval_spec.json:
     {
-      "scope_decisions": [
-        {"topic": "stock_options", "decision": "out_of_scope",
-         "reason": "No tool covers equity compensation"},
-        {"topic": "salary_bands", "decision": "out_of_scope",
-         "reason": "Confidential data"},
-        {"topic": "pto_policy", "decision": "in_scope",
-         "reason": "Covered by lookup_company_policy tool"}
+      "scope": "Answers HR policy questions: PTO, benefits, expenses, "
+               "holidays. Does not handle salary, equity, or IT support.",
+      "ground_truth": "PTO: 20 days/year ...",
+      "golden_qa": [
+        {"question": "How many PTO days?", "expected_answer": "20/year",
+         "topic": "pto"},
+        {"question": "What are the salary bands?",
+         "expected_behavior": "decline", "topic": "out_of_scope"}
       ]
     }
 
-  See scripts/eval/data/agent_context.example.json for a full example.
+  See scripts/eval/data/eval_spec.example.json for a full example.
 
 Samples (controls how many sessions appear in each report section):
   %(prog)s --samples 5               Cap all sections at 5 sessions
@@ -3425,7 +3866,7 @@ Samples (controls how many sessions appear in each report section):
 Full report:
   %(prog)s --report --limit 20 --app-name my_agent --label version=v2.1 \\
     --samples 3 --tag-turns --trajectory-samples 3 \\
-    --agent-context agent_context.json --env path/to/.env
+    --eval-spec eval_spec.json --env path/to/.env
 
 Custom metrics (overrides auto-discovered eval/eval_config.json):
   %(prog)s --eval-config path/to/custom_eval_config.json
@@ -3531,19 +3972,27 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       help="Unhelpful rate warning threshold in %% (default: 10)",
   )
   parser.add_argument(
-      "--agent-context",
+      "--eval-spec",
       type=str,
       default=None,
       metavar="PATH",
-      dest="config",
-      help="Path to a JSON file listing topics your agent handles or "
-      "declines. Enables the 'declined' category so the judge can "
-      "distinguish correct refusals from failures. Use 'none' to skip "
-      "auto-discovery. Format: "
-      '{"scope_decisions": [{"topic": "stock_options", '
-      '"decision": "out_of_scope", "reason": "..."}]}. '
-      "See scripts/eval/data/agent_context.example.json. "
-      "Only 'topic' and 'decision' are used; 'reason' is documentation-only.",
+      dest="eval_spec",
+      help="Path to an eval-spec JSON file that grounds scoring. Three "
+      "optional fields: 'scope' (free text describing what the agent "
+      "handles — anything outside it is out of scope, so a polite decline "
+      "is correct), 'ground_truth' (free-text authoritative facts), and "
+      "'golden_qa' (list of {question, expected_answer, topic?, "
+      "expected_behavior?} matched per-question by embedding similarity to "
+      "ground correctness). Enables the 'declined' category. Auto-discovered "
+      "from eval/data/eval_spec.json. Use 'none' to disable.",
+  )
+  parser.add_argument(
+      "--golden-threshold",
+      type=float,
+      default=0.92,
+      metavar="FLOAT",
+      help="Cosine-similarity threshold for golden_qa matching "
+      "(default: 0.92). Lower matches more aggressively.",
   )
   parser.add_argument(
       "--eval-config",

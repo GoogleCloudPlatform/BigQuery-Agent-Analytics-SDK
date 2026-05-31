@@ -65,13 +65,13 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
 ./scripts/quality_report.sh --session <session_id>  # evaluate single session (verbose)
 
-# Scope-aware evaluation (see --agent-context section below)
-./scripts/quality_report.sh --agent-context agent_context.json --report
+# Grounded evaluation with scope + golden Q&A (see --eval-spec section below)
+./scripts/quality_report.sh --eval-spec eval_spec.json --report
 
 # Full report with all filters
 ./scripts/quality_report.sh --report --limit 50 --app-name my_agent \
   --label version=v2.1 --label env=prod --time-period 7d \
-  --tag-turns --trajectory-samples 5 --agent-context agent_context.json
+  --tag-turns --trajectory-samples 5 --eval-spec eval_spec.json
 ```
 
 Or run the Python script directly:
@@ -154,9 +154,9 @@ The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
 | `response_usefulness` | `meaningful`, `declined`, `unhelpful`, `partial` | Whether the response provides a genuinely useful answer |
 | `task_grounding` | `grounded`, `ungrounded`, `no_tool_needed` | Whether the response is based on tool-retrieved data or fabricated |
 
-The **`declined`** category is only included when scope context is provided
-(via `--agent-context` or auto-discovered `agent_context.json`). Without scope
-context, the judge has no basis for distinguishing intentional declines
+The **`declined`** category is only included when a `scope` is provided in the
+eval spec (via `--eval-spec` or auto-discovered `eval/data/eval_spec.json`).
+Without scope, the judge has no basis for distinguishing intentional declines
 from failures, so only `meaningful`, `unhelpful`, and `partial` are used.
 
 **Quality dimensions** score each session 0-2 and are averaged across all
@@ -213,66 +213,55 @@ Evaluate a single session and see all 7 metrics with full justifications:
 This is useful for verifying whether the LLM judge scored a specific
 session correctly, or for debugging individual conversations.
 
-### Scope-Aware Evaluation (`--agent-context`)
+### Grounding the judge (`--eval-spec`)
 
-For more accurate scope evaluation, provide a context file that tells the
-LLM judge exactly which topics your agent intentionally does not handle.
-This is **not** a per-session dictionary — it's a static description of
-your agent's scope boundaries that applies to all sessions being evaluated.
-
-```bash
-./scripts/quality_report.sh --agent-context agent_context.json --report
-```
-
-The script also auto-discovers `eval/data/agent_context.json` relative to
-the repo root or script directory, so `--agent-context` is only needed to
-point at a non-default location.
-
-**Format:** A JSON file with a `scope_decisions` array. Each entry declares
-a topic and whether it is in or out of scope. Only `topic` and `decision`
-are used by the judge; `reason` is documentation-only.
+For more accurate scoring, provide an **eval spec** — a single JSON file that
+grounds the LLM judge. All three fields are optional:
 
 ```json
 {
-  "scope_decisions": [
-    {
-      "topic": "stock_options",
-      "decision": "out_of_scope",
-      "reason": "No tool or data source covers equity compensation"
-    },
-    {
-      "topic": "salary_bands",
-      "decision": "out_of_scope",
-      "reason": "Confidential compensation data"
-    },
-    {
-      "topic": "it_support",
-      "decision": "out_of_scope",
-      "reason": "No tool covers IT support"
-    },
-    {
-      "topic": "pto_policy",
-      "decision": "in_scope",
-      "reason": "Covered by lookup_company_policy tool"
-    }
+  "scope": "Answers HR policy questions: PTO, benefits, expenses, holidays. Does not handle salary, equity, or IT support.",
+  "ground_truth": "PTO: 20 days/year. 401k match: 4%, vested after 1 year.",
+  "golden_qa": [
+    {"question": "How many PTO days?", "expected_answer": "20/year", "topic": "pto"},
+    {"question": "What are the salary bands?", "expected_behavior": "decline", "topic": "out_of_scope"}
   ]
 }
 ```
 
-A sample config is provided at `scripts/eval/data/agent_context.example.json`:
-
 ```bash
-cp scripts/eval/data/agent_context.example.json scripts/eval/data/agent_context.json
-# Edit with your agent's scope decisions
+./scripts/quality_report.sh --eval-spec eval_spec.json --report
 ```
 
-**Effect on evaluation:** Without scope context, the LLM judge cannot
-distinguish an intentional decline ("I can't help with stock options") from
-a failure. With the config:
-- A polite refusal on an out-of-scope topic is classified as `declined`
-  (correct behavior) rather than `unhelpful` (a bug)
-- The `scope_compliance` dimension can accurately score whether the agent
-  handled scope boundaries correctly
+The script auto-discovers `eval/data/eval_spec.json` relative to the repo root
+or script directory, so `--eval-spec` is only needed to point at a non-default
+location. Pass `--eval-spec none` to disable.
+
+**`scope`** — a free-text description of what the agent is designed to handle.
+Define scope *positively*; out-of-scope is the complement, so you do **not**
+enumerate out-of-scope topics. This lets the judge:
+- classify a polite refusal of an out-of-scope question as `declined` (correct)
+  rather than `unhelpful` (a bug), and
+- score the `scope_compliance` dimension accurately.
+
+**`ground_truth`** — authoritative facts injected into every judge prompt for
+correctness checking.
+
+**`golden_qa`** — a list of `{question, expected_answer, topic?,
+expected_behavior?}`. Each session's question is matched to the closest golden
+question by embedding similarity (cosine ≥ `--golden-threshold`, default 0.92);
+on a match, the expected answer is injected into the judge prompt to ground
+correctness, and the report gains a `golden_eval_summary` block. Entries with
+`expected_behavior: "decline"` (or `topic: "out_of_scope"`) double as
+scope-boundary examples. Golden Q&A is something teams usually already have;
+it is the most reliable correctness signal.
+
+A sample spec is provided at `scripts/eval/data/eval_spec.example.json`:
+
+```bash
+cp scripts/eval/data/eval_spec.example.json scripts/eval/data/eval_spec.json
+# Edit with your agent's scope, ground truth, and golden Q&A
+```
 
 ### Custom Labels (`--label`)
 
@@ -341,8 +330,8 @@ Override the built-in metric definitions with your own:
 The eval config file is a JSON file with a `metrics` key — a list of metric
 definitions that replace the built-in 7 dimensions. Each metric has a `name`,
 `definition`, and a list of `categories` with scoring criteria. Metrics with
-`scope_aware: true` are automatically enriched with scope context when
-`--agent-context` is provided.
+`scope_aware: true` are automatically enriched with scope context when an
+eval spec with a `scope` is provided (`--eval-spec`).
 
 A complete example is provided at `scripts/eval/eval_config.json`. Copy it
 and customize for your evaluation needs:
