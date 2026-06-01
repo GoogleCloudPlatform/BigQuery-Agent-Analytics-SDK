@@ -138,3 +138,4 @@ To begin building scheduled decision graphs for your agent workloads, check out 
 * **Code Repository**: Visit the [BigQuery Agent Analytics SDK on GitHub](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).  
 * **Setup Guide**: Review the [Periodic Materialization Guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) to configure IAM, jobs, and schedulers.  
 * **Hands-on Codelab**: Follow the step-by-step *Periodic Materialization for BigQuery Agent Analytics* codelab to deploy a local test environment from scratch.
+* **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL, then drop to GQL for exact lineage.
