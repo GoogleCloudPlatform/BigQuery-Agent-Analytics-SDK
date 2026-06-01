@@ -2088,8 +2088,10 @@ def seed_events(
 ) -> None:
   """Seed a dataset with synthetic agent_events for the context graph.
 
-  Generates completed decision sessions (TOOL_COMPLETED + AGENT_COMPLETED)
-  so ``bqaa context-graph`` has terminal-event-closed sessions to process.
+  Generates decision telemetry (TOOL_COMPLETED + AGENT_COMPLETED) so
+  ``bqaa context-graph`` has sessions to process. The ``decision`` scenario
+  emits only terminal-event-closed sessions; ``decision-realistic`` also
+  includes failed, truncated, and orphaned (no terminal event) sessions.
 
   Exit codes:
       0 — events generated (and inserted, unless --dry-run).

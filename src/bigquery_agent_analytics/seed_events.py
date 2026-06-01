@@ -13,10 +13,12 @@
 # limitations under the License.
 """Synthetic agent_events generator backing ``bqaa seed-events`` (#246).
 
-Writes a small corpus of TOOL_COMPLETED + AGENT_COMPLETED events to a
-configured ``agent_events`` table. Each session is a 3-step decision flow
-(submit_request -> evaluate_option x3 -> commit_outcome) closed by an
-AGENT_COMPLETED row, which is the terminal event the materializer keys on.
+Writes a corpus of TOOL_COMPLETED + AGENT_COMPLETED events to a configured
+``agent_events`` table. The base session is a decision flow (submit_request
+-> evaluate_option -> commit_outcome); the ``decision`` scenario closes every
+session with an AGENT_COMPLETED terminal row, while ``decision-realistic``
+mixes in failed, truncated, and orphaned (no terminal event) sessions. The
+materializer keys on the terminal AGENT_COMPLETED row.
 
 ``--seed`` freezes IDs and content (and event structure); timestamps stay
 anchored to run time so seeded events land inside the materializer's

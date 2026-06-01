@@ -300,20 +300,7 @@ Confirm the outcome distribution by classifying each session from its rows (orph
 <!-- colab:code bash -->
 ```bash
 bq query --use_legacy_sql=false \
-    "WITH per_session AS (
-       SELECT
-         session_id,
-         CASE
-           WHEN COUNTIF(event_type = 'AGENT_COMPLETED') = 0 THEN 'orphaned'
-           WHEN COUNTIF(event_type = 'AGENT_COMPLETED' AND status = 'error') > 0 THEN 'failed'
-           WHEN COUNTIF(is_truncated) > 0 THEN 'truncated'
-           ELSE 'success'
-         END AS outcome
-       FROM \`$PROJECT_ID.$DATASET.agent_events\`
-       GROUP BY session_id
-     )
-     SELECT outcome, COUNT(*) AS sessions
-     FROM per_session GROUP BY outcome ORDER BY outcome"
+    "WITH per_session AS (SELECT session_id, CASE WHEN COUNTIF(event_type = 'AGENT_COMPLETED') = 0 THEN 'orphaned' WHEN COUNTIF(event_type = 'AGENT_COMPLETED' AND status = 'error') > 0 THEN 'failed' WHEN COUNTIF(is_truncated) > 0 THEN 'truncated' ELSE 'success' END AS outcome FROM \`$PROJECT_ID.$DATASET.agent_events\` GROUP BY session_id) SELECT outcome, COUNT(*) AS sessions FROM per_session GROUP BY outcome ORDER BY outcome"
 ```
 
 You should see roughly 70 success, 10 failed, 10 orphaned, and 10 truncated (plus the 5 successful sessions from the first-run corpus if you seeded that earlier in the same dataset).
