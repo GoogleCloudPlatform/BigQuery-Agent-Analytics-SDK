@@ -41,8 +41,6 @@ plugin = BigQueryAgentAnalyticsPlugin(
 runner = Runner(agent=root_agent, plugins=[plugin])
 ```
 
-![The agent_events table and materialized decision-graph tables in BigQuery](./images/dataset.png)
-
 ### 2\. Defining the Property Graph
 
 Next, you define the property graph schema directly in BigQuery. This schema represents your domain-specific decision model: the agent's context, decision points, alternatives evaluated, and selected outcomes. You define this model once using standard SQL Data Definition Language (DDL).
@@ -120,6 +118,10 @@ The query returns a flat, queryable representation of the decision graph, detail
 
 By joining these relational and graph operations natively within BigQuery, audit teams can quickly pinpoint the exact factors that influenced any specific agent action.
 
+BigQuery Studio can also render the property graph visually. A `GRAPH … MATCH p = (a)-[e]->(b) RETURN TO_JSON(p)` query over the materialized graph draws the full decision web — here, 527 nodes and 438 edges across the seeded corpus:
+
+![The materialized decision graph (527 nodes, 438 edges) visualized in BigQuery Studio from a GQL query](./images/graph-visualization.png)
+
 ---
 
 ## Production-Grade Capabilities
@@ -142,4 +144,4 @@ To begin building scheduled decision graphs for your agent workloads, check out 
 * **Hands-on Codelab**: Follow the step-by-step *Periodic Materialization for BigQuery Agent Analytics* codelab to deploy a local test environment from scratch.
 * **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL, then drop to GQL for exact lineage.
 
-![Conversational Analytics answering a question about the decision graph in plain English](./images/ca-question-answer.png)
+![Conversational Analytics answering "Which requests never reached a committed outcome?" against the decision graph in plain English](./images/ca-conversation.png)
