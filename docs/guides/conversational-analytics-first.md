@@ -76,6 +76,10 @@ materialized into the graph (an agent that never finished has no committed
 outcome). That is intentional, and it is one of the things CA can surface for
 you below.
 
+> If a materialization run reports a transient BigQuery streaming-buffer insert
+> failure, re-run `bqaa context-graph`. The materializer is idempotent and
+> retries the same session window safely.
+
 ### Point Conversational Analytics at the graph
 
 In the Google Cloud console, open **Conversational Analytics**, create a data
