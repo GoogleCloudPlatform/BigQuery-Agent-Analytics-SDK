@@ -104,51 +104,33 @@ filter without anyone writing SQL.
 
 ## Part 1 — Ask in plain English
 
-These are the questions a business reader actually asks. Type each one into the
-Conversational Analytics chat over your data agent, capture the answer, and save
-the screenshot to the path shown. Keep the question visible in the shot so
-readers see the plain-English input and the answer together. (Filenames and
-questions are also listed in [`images/README.md`](./images/README.md).)
+Type a plain-English question into the Conversational Analytics chat over your
+data agent, and it answers from the graph — generating the SQL for you. Here is
+one example end to end.
 
-### 1. "How many decision sessions did each agent run, and how many errored?"
+### Example: "Which requests never reached a committed outcome?"
 
-The opening question for any operations review: volume and error rate per agent.
-CA reads `agent_events`, groups by `agent`, and counts sessions plus the ones
-whose terminal event reported an error, without anyone naming a column.
+Asked over the materialized graph, Conversational Analytics reasons about the
+decision tables and answers in plain English. The graph holds only committed
+decisions — orphaned sessions never become graph nodes — so it reports that
+every recorded request reached a committed outcome, and shows the counts and
+status breakdown it ran to get there.
 
-> 📷 **Screenshot to add:** Conversational Analytics answering *"How many decision sessions did each agent run, and how many errored?"* — save as `images/ca-01-sessions-per-agent.png` and replace this line with the image.
+![Conversational Analytics answering "Which requests never reached a committed outcome?" over the materialized decision graph: every recorded request reached a committed outcome](./images/ca-committed-outcomes.png)
 
-### 2. "Show me the requests that weighed an option below 0.5 confidence"
+To surface the abandoned sessions themselves, ask the same question against the
+raw `agent_events` table instead of the graph — that is where the orphaned
+sessions live.
 
-The risk-analyst question. Decisions where the agent considered a shaky option
-are worth a second look. CA filters `decision_option.confidence` and ties each
-back to its request.
+### More questions to try
 
-> 📷 **Screenshot to add:** Conversational Analytics answering *"Show me the requests that weighed an option below 0.5 confidence"* — save as `images/ca-02-low-confidence-options.png` and replace this line with the image.
+The same data agent answers questions like these, no SQL required:
 
-### 3. "What did the budget-allocator agent consider, and how confident was it?"
-
-Drill into one agent. CA joins `agent_events` (to find that agent's sessions) to
-the graph and returns the requests it handled, the options it weighed, and the
-confidence on each, so you can see how close the calls were.
-
-> 📷 **Screenshot to add:** Conversational Analytics answering *"What did the budget-allocator agent consider, and how confident was it?"* — save as `images/ca-03-budget-allocator-considered.png` and replace this line with the image.
-
-### 4. "Which requests never reached a committed outcome?"
-
-The abandoned-work question. These are the orphaned sessions: events arrived, but
-no terminal `AGENT_COMPLETED` was ever written, so nothing was committed. CA
-finds the sessions in `agent_events` with no matching `decision_outcome`.
-
-> 📷 **Screenshot to add:** Conversational Analytics answering *"Which requests never reached a committed outcome?"* — save as `images/ca-04-orphaned-requests.png` and replace this line with the image.
-
-### 5. "What's the spread of confidence across the options agents weighed?"
-
-The shape-of-the-business question. A distribution over `decision_option.confidence`
-tells you whether your agents mostly weigh strong options or hover near the
-coin-flip line.
-
-> 📷 **Screenshot to add:** Conversational Analytics answering *"What's the spread of confidence across the options agents weighed?"* — save as `images/ca-05-confidence-spread.png` and replace this line with the image.
+- *"How many decision sessions did each agent run, and how many errored?"* — per-agent volume and error rate from `agent_events`.
+- *"Show me the requests that weighed an option below 0.5 confidence."* — the shaky calls worth a second look.
+- *"What did the budget-allocator agent consider, and how confident was it?"* — drill into one agent's options and confidence.
+- *"Which decision sessions never reached a committed outcome?"* (asked against `agent_events`) — the abandoned/orphaned sessions.
+- *"What's the spread of confidence across the options agents weighed?"* — the distribution of `decision_option.confidence`.
 
 ## Part 2 — Inspect the GQL
 
