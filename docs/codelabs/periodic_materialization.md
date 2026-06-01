@@ -269,6 +269,16 @@ bqaa seed-events \
 
 The command prints a JSON report. For 5 sessions you should see `"events_generated": 30`, `"events_inserted": 30`, and `"ok": true`.
 
+Preview the corpus at a glance — how many sessions, how many events, and the time range they span — in one row:
+
+<!-- colab:code bash -->
+```bash
+bq query --use_legacy_sql=false \
+    "SELECT COUNT(DISTINCT session_id) AS sessions, COUNT(*) AS events, MIN(timestamp) AS earliest_event, MAX(timestamp) AS latest_event FROM \`$PROJECT_ID.$DATASET.agent_events\`"
+```
+
+For the default 5-session run this shows 5 sessions and 30 events spanning a few minutes. (Seed the realistic scenario below and the same query reports ~100 sessions across roughly three days.)
+
 Verify the events landed:
 
 <!-- colab:code bash -->
