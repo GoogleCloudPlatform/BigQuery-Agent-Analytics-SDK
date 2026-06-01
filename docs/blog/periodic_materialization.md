@@ -144,4 +144,4 @@ To begin building scheduled decision graphs for your agent workloads, check out 
 * **Hands-on Codelab**: Follow the step-by-step *Periodic Materialization for BigQuery Agent Analytics* codelab to deploy a local test environment from scratch.
 * **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL, then drop to GQL for exact lineage.
 
-![Conversational Analytics answering "Which requests never reached a committed outcome?" against the decision graph in plain English](./images/ca-conversation.png)
+![Conversational Analytics summarizing the materialized decision graph in plain English: every recorded decision request reached a committed outcome (orphaned sessions are not materialized as graph nodes)](./images/ca-conversation.png)
