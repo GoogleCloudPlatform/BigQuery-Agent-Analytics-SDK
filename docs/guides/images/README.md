@@ -8,11 +8,11 @@ CA's answer in the same frame, captured over a dataset seeded with
 
 | File | Ask Conversational Analytics |
 |------|------------------------------|
-| `ca-01-decisions-per-agent.png` | "How many decisions did each agent make, and how many failed?" |
-| `ca-02-low-confidence-approvals.png` | "Show me the approvals with confidence below 0.5" |
-| `ca-03-budget-allocator-confidence.png` | "What did the budget-allocator agent decide, and how confident was it?" |
-| `ca-04-orphaned-requests.png` | "Which requests never reached a decision?" |
-| `ca-05-outcome-distribution.png` | "What are the most common decision outcomes?" |
+| `ca-01-sessions-per-agent.png` | "How many decision sessions did each agent run, and how many errored?" |
+| `ca-02-low-confidence-options.png` | "Show me the requests that weighed an option below 0.5 confidence" |
+| `ca-03-budget-allocator-considered.png` | "What did the budget-allocator agent consider, and how confident was it?" |
+| `ca-04-orphaned-requests.png` | "Which requests never reached a committed outcome?" |
+| `ca-05-confidence-spread.png` | "What's the spread of confidence across the options agents weighed?" |
 
 Tips:
 - Keep the question text visible in the screenshot.
