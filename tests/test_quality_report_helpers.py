@@ -508,10 +508,12 @@ class TestBuildScopeContext:
     assert "20 days/year" in result
 
   def test_scope_and_ground_truth(self):
-    result = _build_scope_context({
-        "scope": "HR policy questions.",
-        "ground_truth": "PTO is 20 days.",
-    })
+    result = _build_scope_context(
+        {
+            "scope": "HR policy questions.",
+            "ground_truth": "PTO is 20 days.",
+        }
+    )
     assert "HR policy questions." in result
     assert "PTO is 20 days." in result
 
@@ -537,18 +539,38 @@ class TestInjectGoldenSummary:
 
   def test_matched_meaningful_and_mismatch(self):
     sessions = [
-        {"session_id": "s1", "question": "q1", "response": "good",
-         "metrics": {"response_usefulness": {"category": "meaningful"}}},
-        {"session_id": "s2", "question": "q2", "response": "bad",
-         "metrics": {"response_usefulness": {"category": "unhelpful"}}},
-        {"session_id": "s3", "question": "q3", "response": "x",
-         "metrics": {"response_usefulness": {"category": "meaningful"}}},
+        {
+            "session_id": "s1",
+            "question": "q1",
+            "response": "good",
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "s2",
+            "question": "q2",
+            "response": "bad",
+            "metrics": {"response_usefulness": {"category": "unhelpful"}},
+        },
+        {
+            "session_id": "s3",
+            "question": "q3",
+            "response": "x",
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
     ]
     meta = {
-        "s1": {"matched": True, "expected_answer": "a1", "topic": "pto",
-               "similarity": 0.99},
-        "s2": {"matched": True, "expected_answer": "a2", "topic": "benefits",
-               "similarity": 0.98},
+        "s1": {
+            "matched": True,
+            "expected_answer": "a1",
+            "topic": "pto",
+            "similarity": 0.99,
+        },
+        "s2": {
+            "matched": True,
+            "expected_answer": "a2",
+            "topic": "benefits",
+            "similarity": 0.98,
+        },
         "s3": {"matched": False, "similarity": 0.4},
     }
     report = self._report(sessions)
@@ -566,11 +588,21 @@ class TestInjectGoldenSummary:
 
   def test_declined_counts_as_meaningful(self):
     sessions = [
-        {"session_id": "s1", "question": "q", "response": "decline",
-         "metrics": {"response_usefulness": {"category": "declined"}}},
+        {
+            "session_id": "s1",
+            "question": "q",
+            "response": "decline",
+            "metrics": {"response_usefulness": {"category": "declined"}},
+        },
     ]
-    meta = {"s1": {"matched": True, "expected_answer": "", "topic":
-                   "out_of_scope", "similarity": 0.99}}
+    meta = {
+        "s1": {
+            "matched": True,
+            "expected_answer": "",
+            "topic": "out_of_scope",
+            "similarity": 0.99,
+        }
+    }
     report = self._report(sessions)
     _inject_golden_summary(report, meta)
     gs = report["summary"]["golden_eval_summary"]
@@ -643,7 +675,9 @@ class TestClassifyFailures:
         "sessions": [
             self._session("s1", "meaningful", "proper", "correct"),
             self._session("s2", "meaningful", "proper", "correct"),
-            self._session("s3", "unhelpful", "proper", "correct", "orthodontia?"),
+            self._session(
+                "s3", "unhelpful", "proper", "correct", "orthodontia?"
+            ),
             self._session("s4", "unhelpful", "none", "correct"),
         ],
     }
@@ -655,7 +689,9 @@ class TestClassifyFailures:
     assert s["addressable_meaningful_rate"] == 66.7
     assert s["knowledge_gap_questions"] == ["orthodontia?"]
     # Per-session tags applied.
-    by_id = {x["session_id"]: x.get("failure_class") for x in report["sessions"]}
+    by_id = {
+        x["session_id"]: x.get("failure_class") for x in report["sessions"]
+    }
     assert by_id["s3"] == "knowledge_gap"
     assert by_id["s4"] == "skill_gap"
     assert by_id["s1"] is None

@@ -321,9 +321,7 @@ def _build_scope_context(spec=None):
 
   scope = spec.get("scope", "")
   if scope:
-    parts.append(
-        "\n\nAGENT SCOPE (use this to judge responses correctly):"
-    )
+    parts.append("\n\nAGENT SCOPE (use this to judge responses correctly):")
     parts.append(scope.strip())
     parts.append(
         "A question is OUT OF SCOPE only if it falls outside the agent scope"
@@ -400,7 +398,8 @@ def match_golden_qa(question_by_sid, golden_qa, threshold=0.92):
 
   logger.info(
       "Golden matching: embedding %d golden + %d session questions...",
-      len(golden_qs), len(conv_qs),
+      len(golden_qs),
+      len(conv_qs),
   )
   golden_vecs = _embed_texts(golden_qs)
   conv_vecs = _embed_texts(conv_qs)
@@ -452,7 +451,9 @@ def match_golden_qa(question_by_sid, golden_qa, threshold=0.92):
 
   logger.info(
       "Golden matching: %d/%d sessions matched (threshold=%.2f)",
-      matched, len(sids), threshold,
+      matched,
+      len(sids),
+      threshold,
   )
   return per_session_context, golden_metadata
 
@@ -497,15 +498,17 @@ def _inject_golden_summary(report, golden_metadata):
     elif usefulness == "unhelpful":
       buckets[f"{prefix}_unhelpful"] += 1
       if meta["matched"]:
-        mismatches.append({
-            "question": session.get("question", ""),
-            "expected_answer": meta.get("expected_answer", ""),
-            "actual_response": (
-                session.get("response", session.get("final_response", ""))
-            )[:300],
-            "topic": meta.get("topic", ""),
-            "similarity": meta["similarity"],
-        })
+        mismatches.append(
+            {
+                "question": session.get("question", ""),
+                "expected_answer": meta.get("expected_answer", ""),
+                "actual_response": (
+                    session.get("response", session.get("final_response", ""))
+                )[:300],
+                "topic": meta.get("topic", ""),
+                "similarity": meta["similarity"],
+            }
+        )
     else:
       buckets[f"{prefix}_partial"] += 1
 
@@ -569,9 +572,7 @@ def _load_eval_config(eval_config_path=None):
 
   if eval_config_path:
     if not os.path.isfile(eval_config_path):
-      raise FileNotFoundError(
-          f"Eval config file not found: {eval_config_path}"
-      )
+      raise FileNotFoundError(f"Eval config file not found: {eval_config_path}")
     with open(eval_config_path) as f:
       result = json.load(f)
     _EVAL_CONFIG_CACHE[cache_key] = result
@@ -1089,7 +1090,11 @@ def _format_conversation_transcript(conv):
 
 
 async def _build_resolved_map_from_conversations(
-    conversations, model, concurrency=10, tag_turns=False, scope_context="",
+    conversations,
+    model,
+    concurrency=10,
+    tag_turns=False,
+    scope_context="",
 ):
   """Build a resolved_map from local conversation dicts.
 
@@ -1117,18 +1122,18 @@ async def _build_resolved_map_from_conversations(
     corrections = conv.get("corrections", 0)
     verifications = conv.get("verifications", 0)
     needs_tagging = turns and user_turn_count > 1
-    needs_inference = (
-        needs_tagging and corrections == 0 and verifications == 0
+    needs_inference = needs_tagging and corrections == 0 and verifications == 0
+    entries.append(
+        {
+            "sid": sid,
+            "conv": conv,
+            "turns": turns,
+            "user_turns": user_turn_count,
+            "tool_calls": tool_calls,
+            "corrections": corrections,
+            "verifications": verifications,
+        }
     )
-    entries.append({
-        "sid": sid,
-        "conv": conv,
-        "turns": turns,
-        "user_turns": user_turn_count,
-        "tool_calls": tool_calls,
-        "corrections": corrections,
-        "verifications": verifications,
-    })
     if tag_turns and needs_tagging:
       to_infer.append((len(entries) - 1, turns))
     elif needs_inference:
@@ -1139,10 +1144,14 @@ async def _build_resolved_map_from_conversations(
     semaphore = asyncio.Semaphore(concurrency)
 
     if tag_turns:
+
       async def _infer_one(turns):
         async with semaphore:
           return await asyncio.to_thread(
-              _tag_conversation_turns, turns, model, scope_context,
+              _tag_conversation_turns,
+              turns,
+              model,
+              scope_context,
           )
 
       tag_results = await asyncio.gather(
@@ -1154,10 +1163,13 @@ async def _build_resolved_map_from_conversations(
           entries[idx]["verifications"] = tag_data.get("verifications", 0)
           entries[idx]["turn_tags"] = tag_data.get("turn_tags", [])
           entries[idx]["correction_boundaries"] = tag_data.get(
-              "correction_boundaries", [])
+              "correction_boundaries", []
+          )
           entries[idx]["sub_trajectories"] = tag_data.get(
-              "sub_trajectories", [])
+              "sub_trajectories", []
+          )
     else:
+
       async def _infer_one(turns):
         async with semaphore:
           return await asyncio.to_thread(_infer_corrections, turns, model)
@@ -1188,7 +1200,8 @@ async def _build_resolved_map_from_conversations(
     if tag_turns:
       resolved_entry["turn_tags"] = entry.get("turn_tags", [])
       resolved_entry["correction_boundaries"] = entry.get(
-          "correction_boundaries", [])
+          "correction_boundaries", []
+      )
       resolved_entry["sub_trajectories"] = entry.get("sub_trajectories", [])
     resolved[entry["sid"]] = resolved_entry
   return resolved
@@ -1231,8 +1244,9 @@ def run_evaluation(
   )
 
   if session_id:
-    trace_filter = TraceFilter(session_ids=[session_id],
-                               custom_labels=custom_labels)
+    trace_filter = TraceFilter(
+        session_ids=[session_id], custom_labels=custom_labels
+    )
   elif session_ids:
     trace_filter = TraceFilter(
         session_ids=session_ids,
@@ -1248,7 +1262,8 @@ def run_evaluation(
 
     if effective_time_range:
       trace_filter = TraceFilter.from_cli_args(
-          last=effective_time_range, custom_labels=custom_labels)
+          last=effective_time_range, custom_labels=custom_labels
+      )
     else:
       trace_filter = TraceFilter(custom_labels=custom_labels)
     trace_filter.limit = limit
@@ -1270,7 +1285,8 @@ def run_evaluation(
 
   # Infer corrections/verifications for multi-turn sessions (concurrent).
   mt_sessions = [
-      r for r in resolved
+      r
+      for r in resolved
       if r.get("user_turns", 0) > 1 and r.get("conversation")
   ]
   if mt_sessions:
@@ -1287,7 +1303,10 @@ def run_evaluation(
       async def _tag_one(conv):
         async with semaphore:
           return await asyncio.to_thread(
-              _tag_conversation_turns, conv, model, scope_context,
+              _tag_conversation_turns,
+              conv,
+              model,
+              scope_context,
           )
 
       async def _tag_all():
@@ -1301,8 +1320,7 @@ def run_evaluation(
           r["corrections"] = tag_data.get("corrections", 0)
           r["verifications"] = tag_data.get("verifications", 0)
           r["turn_tags"] = tag_data.get("turn_tags", [])
-          r["correction_boundaries"] = tag_data.get(
-              "correction_boundaries", [])
+          r["correction_boundaries"] = tag_data.get("correction_boundaries", [])
           r["sub_trajectories"] = tag_data.get("sub_trajectories", [])
     else:
       logger.info(
@@ -1360,7 +1378,9 @@ def generate_quality_report(
     model = os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
   t0 = time.time()
   result = run_evaluation(
-      session_ids=session_ids, model=model, eval_spec=eval_spec,
+      session_ids=session_ids,
+      model=model,
+      eval_spec=eval_spec,
   )
   elapsed = time.time() - t0
 
@@ -1406,14 +1426,14 @@ def run_evaluation_from_conversations(
   import asyncio
 
   from bigquery_agent_analytics import CategoricalEvaluationConfig
-  from bigquery_agent_analytics.categorical_evaluator import (
-      build_categorical_report,
-      classify_sessions_via_api,
-  )
+  from bigquery_agent_analytics.categorical_evaluator import build_categorical_report
+  from bigquery_agent_analytics.categorical_evaluator import classify_sessions_via_api
 
   if eval_spec is None:
     eval_spec = _load_eval_spec()
-  model = model or EVAL_MODEL_ID or os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
+  model = (
+      model or EVAL_MODEL_ID or os.getenv("EVAL_MODEL_ID", "gemini-2.5-flash")
+  )
   metrics = get_eval_metrics(eval_spec=eval_spec, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
@@ -1445,17 +1465,25 @@ def run_evaluation_from_conversations(
 
   logger.info(
       "Classifying %d local conversations (model=%s, concurrency=%d, tag_turns=%s)...",
-      len(transcripts), model, concurrency, tag_turns,
+      len(transcripts),
+      model,
+      concurrency,
+      tag_turns,
   )
 
   async def _run_all():
     classify_task = classify_sessions_via_api(
-        transcripts, cat_config, model,
+        transcripts,
+        cat_config,
+        model,
         per_session_context=per_session_context,
     )
     resolve_task = _build_resolved_map_from_conversations(
-        conversations, model, concurrency=concurrency,
-        tag_turns=tag_turns, scope_context=scope_context,
+        conversations,
+        model,
+        concurrency=concurrency,
+        tag_turns=tag_turns,
+        scope_context=scope_context,
     )
     return await asyncio.gather(classify_task, resolve_task)
 
@@ -1512,8 +1540,11 @@ def generate_quality_report_from_conversations(
     _load_config()
   t0 = time.time()
   result = run_evaluation_from_conversations(
-      conversations, model=model, eval_spec=eval_spec,
-      concurrency=concurrency, tag_turns=tag_turns,
+      conversations,
+      model=model,
+      eval_spec=eval_spec,
+      concurrency=concurrency,
+      tag_turns=tag_turns,
       per_session_context=per_session_context,
       golden_threshold=golden_threshold,
   )
@@ -1522,12 +1553,16 @@ def generate_quality_report_from_conversations(
   trajectories = {}
   if trajectory_samples and trajectory_samples > 0:
     traj_sids = _select_trajectory_sessions(
-        result["report"], result["resolved_map"], trajectory_samples,
+        result["report"],
+        result["resolved_map"],
+        trajectory_samples,
     )
     trajectories = _fetch_session_traces(traj_sids, trajectory_samples)
 
   output = _build_json_output(
-      result["report"], result["resolved_map"], trajectories=trajectories,
+      result["report"],
+      result["resolved_map"],
+      trajectories=trajectories,
   )
   output["summary"]["elapsed_seconds"] = round(elapsed, 1)
   _inject_golden_summary(output, result.get("golden_metadata"))
@@ -1761,7 +1796,7 @@ def run_eval(args):
       sys.exit(1)
     total = len(conversations)
     if args.limit and args.limit < total:
-      conversations = conversations[:args.limit]
+      conversations = conversations[: args.limit]
       logger.info("Using %d of %d conversations (--limit)", args.limit, total)
     else:
       logger.info("Loaded %d conversations", total)
@@ -1776,9 +1811,13 @@ def run_eval(args):
       concurrency = getattr(args, "concurrency", 10)
       tag_turns = getattr(args, "tag_turns", False)
       result = run_evaluation_from_conversations(
-          conversations, model=model, eval_spec=eval_spec,
-          concurrency=concurrency, tag_turns=tag_turns,
-          eval_config=eval_config, golden_threshold=golden_threshold,
+          conversations,
+          model=model,
+          eval_spec=eval_spec,
+          concurrency=concurrency,
+          tag_turns=tag_turns,
+          eval_config=eval_config,
+          golden_threshold=golden_threshold,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -1787,7 +1826,9 @@ def run_eval(args):
     # --- BigQuery path (existing) ---
     logger.info(
         "Project: %s, Dataset: %s, Table: %s",
-        PROJECT_ID, DATASET_ID, TABLE_ID,
+        PROJECT_ID,
+        DATASET_ID,
+        TABLE_ID,
     )
     logger.info("Location: %s", DATASET_LOCATION)
     logger.info("Evaluation model: %s", model)
@@ -1875,19 +1916,23 @@ def run_eval(args):
   tag_turns = getattr(args, "tag_turns", False)
   if trajectory_samples and trajectory_samples > 0:
     traj_sids = _select_trajectory_sessions(
-        result["report"], result["resolved_map"], trajectory_samples,
+        result["report"],
+        result["resolved_map"],
+        trajectory_samples,
     )
     # Also fetch trajectories for all correction sessions (for inline display)
     if tag_turns:
       correction_sids = [
-          sid for sid, ctx in result["resolved_map"].items()
+          sid
+          for sid, ctx in result["resolved_map"].items()
           if ctx.get("correction_boundaries")
       ]
       for sid in correction_sids:
         if sid not in traj_sids:
           traj_sids.append(sid)
-    logger.info("Fetching %d execution trajectories from BigQuery...",
-                len(traj_sids))
+    logger.info(
+        "Fetching %d execution trajectories from BigQuery...", len(traj_sids)
+    )
     trajectories = _fetch_session_traces(traj_sids, len(traj_sids))
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
@@ -1921,17 +1966,16 @@ def run_eval(args):
       conversation = ctx.get("conversation", [])
       if sub_trajs and conversation:
         segments = _segment_trace_by_turns(
-            trace_obj, conversation, sub_trajs,
+            trace_obj,
+            conversation,
+            sub_trajs,
         )
         if segments:
           print(f"\n{hr}")
           print("  SUB-TRAJECTORY SEGMENTATION")
           print(hr)
           for seg in segments:
-            icon = (
-                "✅" if seg["outcome"] in ("correct", "recovered")
-                else "❌"
-            )
+            icon = "✅" if seg["outcome"] in ("correct", "recovered") else "❌"
             print(
                 f"\n  {icon} {seg['label']} "
                 f"(turns {seg['start_turn']}-{seg['end_turn']}) "
@@ -1947,7 +1991,10 @@ def run_eval(args):
     md_dir = os.path.dirname(os.path.abspath(args.output_json))
   if args.report:
     report_path = _write_md_report(
-        result["report"], result["resolved_map"], args, report_dir=md_dir,
+        result["report"],
+        result["resolved_map"],
+        args,
+        report_dir=md_dir,
         trajectories=trajectories,
     )
 
@@ -1956,7 +2003,8 @@ def run_eval(args):
 
   if args.output_json:
     output = _build_json_output(
-        result["report"], result["resolved_map"],
+        result["report"],
+        result["resolved_map"],
         trajectories=trajectories,
     )
     _inject_golden_summary(output, result.get("golden_metadata"))
@@ -2466,11 +2514,13 @@ def _import_render_timing_tree():
   """Import render_timing_tree from latency_report.py."""
   try:
     from latency_report import render_timing_tree
+
     return render_timing_tree
   except ImportError:
     pass
   try:
     import importlib.util
+
     _lr_path = os.path.join(_script_dir, "latency_report.py")
     spec = importlib.util.spec_from_file_location("latency_report", _lr_path)
     _lr = importlib.util.module_from_spec(spec)
@@ -2535,8 +2585,7 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
 
     if outcome == "wrong" and end_turn > start_turn:
       next_st = next(
-          (s for s in sub_trajectories
-           if s.get("start_turn", 0) > start_turn),
+          (s for s in sub_trajectories if s.get("start_turn", 0) > start_turn),
           None,
       )
       if next_st:
@@ -2567,9 +2616,12 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
       continue
 
     sub_spans = [
-        s for s in trace.spans
-        if s.timestamp >= window_start and (
-            s.timestamp <= window_end if is_last_segment
+        s
+        for s in trace.spans
+        if s.timestamp >= window_start
+        and (
+            s.timestamp <= window_end
+            if is_last_segment
             else s.timestamp < window_end
         )
     ]
@@ -2583,13 +2635,15 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
     )
     rendered = _render_trace(mini_trace, header=False)
     if rendered:
-      segments.append({
-          "label": st.get("label", ""),
-          "outcome": st.get("outcome", ""),
-          "start_turn": start_turn,
-          "end_turn": end_turn,
-          "trace": rendered,
-      })
+      segments.append(
+          {
+              "label": st.get("label", ""),
+              "outcome": st.get("outcome", ""),
+              "start_turn": start_turn,
+              "end_turn": end_turn,
+              "trace": rendered,
+          }
+      )
 
   return segments
 
@@ -2606,7 +2660,9 @@ def _fetch_session_traces(session_ids, max_sessions=3):
   try:
     from bigquery_agent_analytics import Client
   except ImportError:
-    logger.debug("Cannot import bigquery_agent_analytics, skipping trajectories")
+    logger.debug(
+        "Cannot import bigquery_agent_analytics, skipping trajectories"
+    )
     return {}
 
   if not _import_render_timing_tree():
@@ -2658,7 +2714,8 @@ def _select_trajectory_sessions(report, resolved_map, n):
   unhelpful_sids = {sr.session_id for sr in by_category.get("unhelpful", [])}
   partial_sids = {sr.session_id for sr in by_category.get("partial", [])}
   correction_sids = {
-      sid for sid, ctx in resolved_map.items()
+      sid
+      for sid, ctx in resolved_map.items()
       if ctx.get("correction_boundaries")
   }
 
@@ -2710,7 +2767,11 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
     w(f"**Question:** {q}")
     w("")
 
-    tree = _render_trace(trace_obj) if hasattr(trace_obj, "spans") else str(trace_obj)
+    tree = (
+        _render_trace(trace_obj)
+        if hasattr(trace_obj, "spans")
+        else str(trace_obj)
+    )
     w("```")
     w(tree)
     w("```")
@@ -2781,7 +2842,12 @@ def _md_write_conversation(w, conversation, show_tags=False, turn_tags=None):
 
 
 def _md_write_session_section(
-    w, title, sessions, md_samples, resolved_map, a2a_session_ids,
+    w,
+    title,
+    sessions,
+    md_samples,
+    resolved_map,
+    a2a_session_ids,
     heading_level=2,
 ):
   """Write a section of per-session details to the markdown report."""
@@ -2839,14 +2905,23 @@ def _md_find_low_dimension_sessions(report, dimension, low_category):
 
 
 def _md_write_low_dimension_section(
-    w, title, dimension_label, report, dimension, low_category,
-    md_samples, resolved_map, heading_level=2,
+    w,
+    title,
+    dimension_label,
+    report,
+    dimension,
+    low_category,
+    md_samples,
+    resolved_map,
+    heading_level=2,
 ):
   """Write a Low X Sessions section in the markdown report."""
   h = "#" * heading_level
   sh = "#" * (heading_level + 1)
   low_sessions = _md_find_low_dimension_sessions(
-      report, dimension, low_category,
+      report,
+      dimension,
+      low_category,
   )
   if not low_sessions:
     return
@@ -2917,7 +2992,8 @@ def _diagnose_correction_trace(trace_obj):
   routing_tools = {t for t in tool_names if "transfer" in t.lower()}
   domain_tools = tool_names - routing_tools
   agents = {
-      s.agent for s in trace_obj.spans
+      s.agent
+      for s in trace_obj.spans
       if s.agent and s.event_type == "LLM_RESPONSE"
   }
 
@@ -2936,7 +3012,9 @@ def _diagnose_correction_trace(trace_obj):
   return None, None
 
 
-def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None, heading_level=2):
+def _md_write_correction_analysis(
+    w, resolved_map, md_samples, trajectories=None, heading_level=2
+):
   """Write the Correction Analysis section."""
   sessions_with_tags = []
   sessions_with_corrections = []
@@ -3034,8 +3112,8 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
         recovered = b.get("agent_recovered", False)
         recovered_icon = "✅ Yes" if recovered else "❌ No"
         w(f"- **Correction at turn {turn_idx}:**")
-        w(f"  - Agent claimed: *\"{wrong[:200]}\"*")
-        w(f"  - User corrected: *\"{correct[:200]}\"*")
+        w(f'  - Agent claimed: *"{wrong[:200]}"*')
+        w(f'  - User corrected: *"{correct[:200]}"*')
         w(f"  - Agent recovered: {recovered_icon}")
 
       trace_obj = trajectories.get(sid)
@@ -3052,7 +3130,9 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
 
       if sub_trajs and trace_obj and hasattr(trace_obj, "spans"):
         segments = _segment_trace_by_turns(
-            trace_obj, conversation, sub_trajs,
+            trace_obj,
+            conversation,
+            sub_trajs,
         )
         if segments:
           w("")
@@ -3095,15 +3175,20 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
           end = st.get("end_turn", "?")
           outcome = st.get("outcome", "?")
           outcome_icon = (
-              "❌" if outcome in ("wrong", "not_recovered")
-              else "✅" if outcome == "recovered"
-              else "🔁" if outcome == "parroted"
+              "❌"
+              if outcome in ("wrong", "not_recovered")
+              else "✅"
+              if outcome == "recovered"
+              else "🔁"
+              if outcome == "parroted"
               else "➖"
           )
           w(f"  - `{label}`: turns {start}–{end} → {outcome_icon} {outcome}")
 
       _md_write_conversation(
-          w, conversation, show_tags=True,
+          w,
+          conversation,
+          show_tags=True,
           turn_tags=ctx.get("turn_tags", []),
       )
       w("")
@@ -3118,9 +3203,11 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
           "routing prompt."
       )
       w("")
-      w(f"**{len(routing_failures)}** of "
-        f"{len(sessions_with_corrections)} correction sessions "
-        f"had no tool or agent routing:")
+      w(
+          f"**{len(routing_failures)}** of "
+          f"{len(sessions_with_corrections)} correction sessions "
+          f"had no tool or agent routing:"
+      )
       w("")
       for sid, agent, question in routing_failures:
         w(f"- `{sid}` → {agent}: {question}")
@@ -3156,9 +3243,7 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
             for t in ctx.get("turn_tags", [])
         )
     ]
-    shown = (
-        interesting if md_samples is None else interesting[:md_samples]
-    )
+    shown = interesting if md_samples is None else interesting[:md_samples]
     if len(shown) < len(interesting):
       w(f"*Showing {len(shown)} of {len(interesting)}*")
       w("")
@@ -3179,18 +3264,26 @@ def _md_write_correction_analysis(w, resolved_map, md_samples, trajectories=None
         tag = ft.get("tag", "")
         icon = _TAG_ICONS.get(tag, "")
         evidence = ft.get("evidence", "")
-        w(f"- **Turn {ft.get('turn_index', '?')}:** {icon} `{tag}` — {evidence}")
+        w(
+            f"- **Turn {ft.get('turn_index', '?')}:** {icon} `{tag}` — {evidence}"
+        )
 
       conversation = ctx.get("conversation", [])
       _md_write_conversation(
-          w, conversation, show_tags=True,
+          w,
+          conversation,
+          show_tags=True,
           turn_tags=ctx.get("turn_tags", []),
       )
       w("")
 
 
 def _write_md_report(
-    report, resolved_map, args, report_dir=None, trajectories=None,
+    report,
+    resolved_map,
+    args,
+    report_dir=None,
+    trajectories=None,
 ):
   lines = []
   w = lines.append
@@ -3262,7 +3355,8 @@ def _write_md_report(
       toc.append("    * [Correction Analysis](#correction-analysis)")
       toc.append("      * [Turn Tag Distribution](#turn-tag-distribution)")
       correction_sessions = [
-          sid for sid, ctx in resolved_map.items()
+          sid
+          for sid, ctx in resolved_map.items()
           if ctx.get("correction_boundaries")
       ]
       if correction_sessions:
@@ -3275,10 +3369,7 @@ def _write_md_report(
         if has_routing_failures:
           toc.append("      * [Routing Failures](#routing-failures)")
   if trajectories:
-    toc.append(
-        "  * [Sample Trajectories]"
-        "(#sample-execution-trajectories)"
-    )
+    toc.append("  * [Sample Trajectories]" "(#sample-execution-trajectories)")
   toc.append("  * [Execution Details](#execution-details)")
   for line in toc:
     w(line)
@@ -3323,8 +3414,10 @@ def _write_md_report(
   addr_rate = (good / addressable * 100) if addressable else 0.0
   if any(counts.values()):
     w(f"| &nbsp;&nbsp;↳ Skill gaps (evolution fixes) | {counts['skill_gap']} |")
-    w(f"| &nbsp;&nbsp;↳ Knowledge gaps (add a fact) "
-      f"| {counts['knowledge_gap']} |")
+    w(
+        f"| &nbsp;&nbsp;↳ Knowledge gaps (add a fact) "
+        f"| {counts['knowledge_gap']} |"
+    )
     w(f"| &nbsp;&nbsp;↳ Tool gaps (build a tool) | {counts['tool_gap']} |")
     w(
         f"| **Addressable meaningful rate** "
@@ -3352,13 +3445,19 @@ def _write_md_report(
     return out
 
   for gap_key, title, blurb in [
-      ("knowledge_gap", "Knowledge Gaps (add a fact to existing data)",
-       "In-scope questions the agent looked up correctly but its data source is"
-       " silent on. Evolution cannot invent these facts — a human adds them:"),
-      ("tool_gap", "Tool Gaps (build a new tool / data source)",
-       "Requests no tool can serve — a topic with no data source, or personal"
-       " data / actions the agent has no capability for. An engineer must add a"
-       " tool:"),
+      (
+          "knowledge_gap",
+          "Knowledge Gaps (add a fact to existing data)",
+          "In-scope questions the agent looked up correctly but its data source is"
+          " silent on. Evolution cannot invent these facts — a human adds them:",
+      ),
+      (
+          "tool_gap",
+          "Tool Gaps (build a new tool / data source)",
+          "Requests no tool can serve — a topic with no data source, or personal"
+          " data / actions the agent has no capability for. An engineer must add a"
+          " tool:",
+      ),
   ]:
     questions = _gap_questions(gap_sids[gap_key])
     if not questions:
@@ -3510,8 +3609,12 @@ def _write_md_report(
       continue
     label = _METRIC_LABELS.get(dim, dim)
     _md_write_low_dimension_section(
-        w, f"Low {label} Sessions", label,
-        report, dim, low_cat,
+        w,
+        f"Low {label} Sessions",
+        label,
+        report,
+        dim,
+        low_cat,
         _get_sample_limit(_samples_dict, "low"),
         resolved_map,
         heading_level=3,
@@ -3532,7 +3635,9 @@ def _write_md_report(
   # --- Correction Analysis (turn tagging) ---
   if has_tags:
     _md_write_correction_analysis(
-        w, resolved_map, _get_sample_limit(_samples_dict, "corrections"),
+        w,
+        resolved_map,
+        _get_sample_limit(_samples_dict, "corrections"),
         trajectories=trajectories,
         heading_level=3,
     )
@@ -3747,7 +3852,9 @@ def _build_json_output(report, resolved_map, trajectories=None):
         session_dict["execution_trace"] = _render_trace(trace_obj)
         if sub_trajectories and conversation:
           segments = _segment_trace_by_turns(
-              trace_obj, conversation, sub_trajectories,
+              trace_obj,
+              conversation,
+              sub_trajectories,
           )
           if segments:
             session_dict["execution_sub_trajectories"] = segments
@@ -4021,7 +4128,7 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       default=None,
       metavar="PATH",
       help="JSON file with local conversations to evaluate (no BigQuery "
-      "required). Expects {\"conversations\": [...]} or a plain list of "
+      'required). Expects {"conversations": [...]} or a plain list of '
       "conversation dicts. When set, traces are scored locally via the "
       "Gemini API instead of being fetched from BigQuery.",
   )
