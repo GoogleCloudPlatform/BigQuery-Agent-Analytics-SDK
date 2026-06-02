@@ -82,6 +82,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import base64
 import difflib
 import json
 from pathlib import Path
@@ -383,12 +384,58 @@ def bash_to_notebook_code(body: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_notebook(markdown: str) -> dict:
-  """Return a notebook dict matching nbformat 4.5."""
+_IMAGE_MD = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+}
+
+
+def _embed_local_images(text: str, base_dir: Path) -> str:
+  """Rewrite repo-relative markdown image refs into base64 data URIs.
+
+  The codelab markdown references images by relative path (so claat copies
+  them into ``img/``), but Colab cannot resolve a repo path. Embedding the
+  image as a data URI makes the generated notebook render it inline. Remote
+  (``http(s)://``), ``data:``, and ``attachment:`` refs are left unchanged.
+  """
+
+  def _replace(match: "re.Match[str]") -> str:
+    alt, src = match.group(1), match.group(2).strip()
+    if src.startswith(("http://", "https://", "data:", "attachment:")):
+      return match.group(0)
+    img_path = (base_dir / src).resolve()
+    if not img_path.is_file():
+      raise FileNotFoundError(
+          f"Local image referenced in the codelab markdown was not found:"
+          f" {src!r} (resolved to {img_path}). Notebook images must resolve"
+          f" so the generated Colab cell is not broken."
+      )
+    mime = _IMAGE_MIME.get(img_path.suffix.lower())
+    if mime is None:
+      raise ValueError(
+          f"Unsupported image type for notebook embedding: {src!r}."
+      )
+    encoded = base64.b64encode(img_path.read_bytes()).decode("ascii")
+    return f"![{alt}](data:{mime};base64,{encoded})"
+
+  return _IMAGE_MD.sub(_replace, text)
+
+
+def build_notebook(markdown: str, base_dir: Path | None = None) -> dict:
+  """Return a notebook dict matching nbformat 4.5.
+
+  When ``base_dir`` is given, local markdown image references are embedded
+  as base64 data URIs (resolved relative to ``base_dir``) so the generated
+  notebook renders them in Colab, which cannot resolve repo-relative paths.
+  """
   cells: list[dict] = []
   for block in parse_blocks(markdown):
     if block["kind"] == "markdown":
-      cells.append(_markdown_cell(block["source"]))
+      cells.append(_markdown_cell(block["source"], base_dir))
     elif block["kind"] == "code_python":
       cells.append(_code_cell(block["source"]))
     elif block["kind"] == "code_bash":
@@ -418,7 +465,9 @@ def build_notebook(markdown: str) -> dict:
   }
 
 
-def _markdown_cell(source: str) -> dict:
+def _markdown_cell(source: str, base_dir: Path | None = None) -> dict:
+  if base_dir is not None:
+    source = _embed_local_images(source, base_dir)
   return {
       "cell_type": "markdown",
       "metadata": {},
@@ -482,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
   args = parser.parse_args(argv)
 
   markdown_text = args.markdown.read_text(encoding="utf-8")
-  generated = build_notebook(markdown_text)
+  generated = build_notebook(markdown_text, base_dir=args.markdown.parent)
   generated_text = _normalize_json(generated)
 
   if args.check:
