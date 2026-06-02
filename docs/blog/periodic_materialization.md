@@ -46,31 +46,31 @@ runner = Runner(agent=root_agent, plugins=[plugin])
 Next, you define the property graph schema directly in BigQuery. This schema represents your domain-specific decision model: the agent's context, decision points, alternatives evaluated, and selected outcomes. You define this model once using standard SQL Data Definition Language (DDL).
 
 ```sql
-CREATE OR REPLACE PROPERTY GRAPH graph_v5.agent_decisions_graph
+CREATE OR REPLACE PROPERTY GRAPH graph.agent_decisions_graph
 NODE TABLES (
-  graph_v5.DecisionExecution
+  graph.DecisionExecution
     KEY (decision_execution_id) LABEL DecisionExecution,
-  graph_v5.DecisionPoint
+  graph.DecisionPoint
     KEY (decision_point_id) LABEL DecisionPoint,
-  graph_v5.Candidate
+  graph.Candidate
     KEY (candidate_id) LABEL Candidate,
-  graph_v5.SelectionOutcome
+  graph.SelectionOutcome
     KEY (selection_outcome_id) LABEL SelectionOutcome
 )
 EDGE TABLES (
-  graph_v5.ExecutedAt
+  graph.ExecutedAt
     SOURCE KEY (decision_execution_id) REFERENCES DecisionExecution (decision_execution_id)
     DESTINATION KEY (decision_point_id) REFERENCES DecisionPoint (decision_point_id)
     LABEL executedAtDecisionPoint,
-  graph_v5.EvaluatesCandidate
+  graph.EvaluatesCandidate
     SOURCE KEY (decision_point_id) REFERENCES DecisionPoint (decision_point_id)
     DESTINATION KEY (candidate_id) REFERENCES Candidate (candidate_id)
     LABEL evaluatesCandidate,
-  graph_v5.HasSelectionOutcome
+  graph.HasSelectionOutcome
     SOURCE KEY (decision_execution_id) REFERENCES DecisionExecution (decision_execution_id)
     DESTINATION KEY (selection_outcome_id) REFERENCES SelectionOutcome (selection_outcome_id)
     LABEL hasSelectionOutcome,
-  graph_v5.SelectedCandidate
+  graph.SelectedCandidate
     SOURCE KEY (selection_outcome_id) REFERENCES SelectionOutcome (selection_outcome_id)
     DESTINATION KEY (candidate_id) REFERENCES Candidate (candidate_id)
     LABEL selectedCandidate
@@ -93,7 +93,7 @@ During each run, the materializer:
     --project your-project-id \
     --region us-central1 \
     --events-dataset agent_analytics \
-    --graph-dataset graph_v5 \
+    --graph-dataset graph \
     --schedule "0 */6 * * *"
 ```
 
@@ -108,7 +108,7 @@ Using standard Graph Query Language (GQL) syntax in BigQuery, you can traverse t
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
-  graph_v5.agent_decisions_graph
+  graph.agent_decisions_graph
   MATCH (de:DecisionExecution) -[:executedAtDecisionPoint]-> (dp:DecisionPoint),
         (dp) -[:evaluatesCandidate]-> (option:Candidate),
         (de) -[:hasSelectionOutcome]-> (so:SelectionOutcome),
