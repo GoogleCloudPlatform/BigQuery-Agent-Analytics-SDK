@@ -324,6 +324,8 @@ The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa c
 ## Phase 3: Materialize the Decision Graph
 Duration: 0:05
 
+`bqaa context-graph` reads the raw `agent_events`, uses the **ontology** to identify which entities and relationships to extract and the **binding** to map them onto your BigQuery tables and columns, then populates the tables behind the property graph. The property-graph schema you applied in Phase 1 only defines the *query surface* over those tables — it cannot populate them, which is exactly why this step requires both `--ontology` and `--binding`.
+
 Run the materializer locally:
 
 <!-- colab:code bash -->
