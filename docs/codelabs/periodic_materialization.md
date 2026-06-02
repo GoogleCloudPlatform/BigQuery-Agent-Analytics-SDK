@@ -164,45 +164,192 @@ Cloud Shell users can skip this step; credentials are already configured. (In Co
 ## Get the Codelab Artifacts
 Duration: 0:02
 
-The codelab ships a set of ready-to-use artifacts: the property-graph schema, the ontology, the binding, and a synthetic event generator. You do not author any of these yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
+The codelab ships a set of ready-to-use artifacts: the table DDL, the property-graph schema, the ontology, and the binding. You do not author any of these yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
 
-Download the artifacts to a working directory:
+This codelab is self-contained: the cell below writes the four artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/codelab/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization).
 
-<!-- colab:skip -->
-```bash
-mkdir -p ~/bqaa-codelab && cd ~/bqaa-codelab
+<!-- colab:code python -->
+```python
+# This codelab is self-contained: rather than downloading files, this
+# cell writes the four artifacts into a working directory. They are
+# identical to the files in examples/codelab/periodic_materialization/.
+from pathlib import Path
 
-BASE="https://raw.githubusercontent.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/main/examples/codelab/periodic_materialization"
-for f in property_graph.sql table_ddl.sql ontology.yaml binding.yaml seed_events.py; do
-  curl -fsSL "$BASE/$f" -o "$f"
-done
-ls
-```
+work = Path.home() / "bqaa-codelab"
+work.mkdir(exist_ok=True)
 
-<!-- colab:cell python
-# Source of the bundled codelab artifacts.
+artifacts = {
+    "table_ddl.sql": r"""-- Node and edge table DDL for the BQAA codelab.
+--
+-- The materializer writes into these tables on every run.
+-- ``session_id`` and ``extracted_at`` are SDK metadata columns the
+-- materializer fills automatically; they are required on every
+-- bound table.
+--
+-- Apply with:
+--   envsubst < table_ddl.sql | bq query --use_legacy_sql=false
+--
+-- Required shell variables:
+--   PROJECT_ID  : your GCP project ID
+--   DATASET     : the BigQuery dataset that holds both raw agent_events
+--                 and the materialized graph tables
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET}.decision_request` (
+  request_id STRING, request_text STRING, requested_at TIMESTAMP,
+  session_id STRING, extracted_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET}.decision_option` (
+  option_id STRING, option_label STRING, confidence FLOAT64,
+  session_id STRING, extracted_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET}.decision_outcome` (
+  outcome_id STRING, status STRING, rationale STRING, decided_at TIMESTAMP,
+  session_id STRING, extracted_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET}.evaluates_option` (
+  request_id STRING, option_id STRING,
+  session_id STRING, extracted_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS `${PROJECT_ID}.${DATASET}.resulted_in` (
+  request_id STRING, outcome_id STRING,
+  session_id STRING, extracted_at TIMESTAMP
+);
+""",
+    "property_graph.sql": r"""-- Property-graph DDL for the BQAA codelab.
+--
+-- Models a generic agent decision flow:
+--   DecisionRequest -> evaluatesOption -> DecisionOption
+--   DecisionRequest -> resultedIn       -> DecisionOutcome
+--
+-- Apply with:
+--   envsubst < property_graph.sql | bq query --use_legacy_sql=false
+--
+-- Required shell variables:
+--   PROJECT_ID  : your GCP project ID
+--   DATASET     : the BigQuery dataset that holds both raw agent_events
+--                 and the materialized graph tables (single-dataset shape)
+CREATE OR REPLACE PROPERTY GRAPH `${PROJECT_ID}.${DATASET}.agent_decisions_graph`
+  NODE TABLES (
+    `${PROJECT_ID}.${DATASET}.decision_request` AS decision_request
+      KEY (request_id)
+      LABEL DecisionRequest PROPERTIES (request_id, request_text, requested_at),
+    `${PROJECT_ID}.${DATASET}.decision_option` AS decision_option
+      KEY (option_id)
+      LABEL DecisionOption PROPERTIES (option_id, option_label, confidence),
+    `${PROJECT_ID}.${DATASET}.decision_outcome` AS decision_outcome
+      KEY (outcome_id)
+      LABEL DecisionOutcome PROPERTIES (outcome_id, status, rationale, decided_at)
+  )
+  EDGE TABLES (
+    `${PROJECT_ID}.${DATASET}.evaluates_option` AS evaluates_option
+      KEY (request_id, option_id)
+      SOURCE KEY (request_id) REFERENCES decision_request (request_id)
+      DESTINATION KEY (option_id) REFERENCES decision_option (option_id)
+      LABEL evaluatesOption,
+    `${PROJECT_ID}.${DATASET}.resulted_in` AS resulted_in
+      KEY (request_id, outcome_id)
+      SOURCE KEY (request_id) REFERENCES decision_request (request_id)
+      DESTINATION KEY (outcome_id) REFERENCES decision_outcome (outcome_id)
+      LABEL resultedIn
+  );
+""",
+    "ontology.yaml": r"""# Ontology for the BQAA codelab.
 #
-# By default, BASE points at the latest `main` branch. If you are running
-# this notebook against a feature branch under review, override BASE in
-# your shell before launching the notebook (or edit the line below).
-import os
-os.environ["BASE"] = os.environ.get(
-    "BASE",
-    "https://raw.githubusercontent.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/main/examples/codelab/periodic_materialization",
-)
-print(f"Downloading codelab artifacts from: {os.environ['BASE']}")
+# Names the entities and relationships in the codelab's sample
+# agent decision flow. The materializer uses this vocabulary
+# when it constructs the AI.GENERATE extraction prompt.
+#
+# Paired with binding.yaml (which maps these entities to
+# physical BigQuery tables) and property_graph.sql (which
+# stitches the tables into a queryable BigQuery property graph).
+ontology: agent_decision_flow
+entities:
+  - name: DecisionRequest
+    keys:
+      primary: [requestId]
+    properties:
+      - {name: requestId,   type: string}
+      - {name: requestText, type: string}
+      - {name: requestedAt, type: timestamp}
+  - name: DecisionOption
+    keys:
+      primary: [optionId]
+    properties:
+      - {name: optionId,    type: string}
+      - {name: optionLabel, type: string}
+      - {name: confidence,  type: double}
+  - name: DecisionOutcome
+    keys:
+      primary: [outcomeId]
+    properties:
+      - {name: outcomeId,   type: string}
+      - {name: status,      type: string}
+      - {name: rationale,   type: string}
+      - {name: decidedAt,   type: timestamp}
+relationships:
+  - {name: evaluatesOption, from: DecisionRequest, to: DecisionOption}
+  - {name: resultedIn,      from: DecisionRequest, to: DecisionOutcome}
+""",
+    "binding.yaml": r"""# Binding for the BQAA codelab.
+#
+# Maps the ontology's entities and relationships to physical
+# BigQuery tables and columns. Paired with ontology.yaml
+# and property_graph.sql.
+#
+# Before passing this file to bqaa context-graph, render
+# the shell placeholders with envsubst:
+#   envsubst < binding.yaml > binding.yaml.tmp && mv binding.yaml.tmp binding.yaml
+#
+# Required shell variables:
+#   PROJECT_ID  : your GCP project ID
+#   DATASET     : the BigQuery dataset that holds both raw agent_events
+#                 and the materialized graph tables
+binding: agent_decisions_binding
+ontology: agent_decision_flow
+target:
+  backend: bigquery
+  project: ${PROJECT_ID}
+  dataset: ${DATASET}
+entities:
+  - name: DecisionRequest
+    source: ${PROJECT_ID}.${DATASET}.decision_request
+    properties:
+      - {name: requestId,    column: request_id}
+      - {name: requestText,  column: request_text}
+      - {name: requestedAt,  column: requested_at}
+  - name: DecisionOption
+    source: ${PROJECT_ID}.${DATASET}.decision_option
+    properties:
+      - {name: optionId,     column: option_id}
+      - {name: optionLabel,  column: option_label}
+      - {name: confidence,   column: confidence}
+  - name: DecisionOutcome
+    source: ${PROJECT_ID}.${DATASET}.decision_outcome
+    properties:
+      - {name: outcomeId,    column: outcome_id}
+      - {name: status,       column: status}
+      - {name: rationale,    column: rationale}
+      - {name: decidedAt,    column: decided_at}
+relationships:
+  - name: evaluatesOption
+    source: ${PROJECT_ID}.${DATASET}.evaluates_option
+    from_columns: [request_id]
+    to_columns:   [option_id]
+  - name: resultedIn
+    source: ${PROJECT_ID}.${DATASET}.resulted_in
+    from_columns: [request_id]
+    to_columns:   [outcome_id]
+""",
+}
+for name, body in artifacts.items():
+    (work / name).write_text(body)
 
-!mkdir -p ~/bqaa-codelab && cd ~/bqaa-codelab && \
-  for f in property_graph.sql table_ddl.sql ontology.yaml binding.yaml seed_events.py; do \
-    curl -fsSL "$BASE/$f" -o "$f"; \
-  done && \
-  ls -la
--->
+print("Wrote:", ", ".join(sorted(p.name for p in work.glob("*"))))
+```
 
-You should see five files:
+You should see four files:
 
 ```
-binding.yaml  ontology.yaml  property_graph.sql  seed_events.py  table_ddl.sql
+binding.yaml  ontology.yaml  property_graph.sql  table_ddl.sql
 ```
 
 The decision flow these artifacts describe has three node types and two heterogeneous edges:
