@@ -629,6 +629,12 @@ You should see fifteen rows: three options per request, five requests. Each row 
 
 For a single decision's full picture, filter by `request_id` to get the row set an audit team needs: the question that came in, the options that were weighed (with scores), and the rationale that was committed.
 
+#### Visualize the graph in BigQuery Studio
+
+BigQuery Studio can also render the property graph visually. Open the `agent_decisions_graph` in the BigQuery console and run a path query — for example, `GRAPH ${DATASET}.agent_decisions_graph MATCH p = (a)-[e]->(b) RETURN TO_JSON(p) AS path_json` — then switch the results pane to the **Graph** tab to see the decision web. With the realistic-scale corpus this gives you a visual map of requests, options, and outcomes:
+
+![The materialized decision graph rendered in BigQuery Studio's Graph view from a GQL path query](images/graph-visualization.png)
+
 #### Ask the same question in plain English
 
 Not every audit reader writes GQL. With **BigQuery Conversational Analytics** (Preview), your compliance team can ask the same kind of question in natural language and get back a structured answer card — no query syntax, no joins to learn.
