@@ -49,7 +49,7 @@ This codelab is for developers of all levels, including those new to property gr
 
 The resources created in this codelab cost very little, and the final step tears everything down so you are not billed for an idle dataset.
 
-**Estimated duration:** This codelab takes approximately 35 minutes to complete.
+**Estimated duration:** This codelab takes approximately 42 minutes to complete.
 
 ## Before you begin
 
