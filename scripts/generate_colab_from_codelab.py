@@ -103,9 +103,17 @@ FENCE_CLOSE = re.compile(r"^```\s*$")
 EXPORT_LINE = re.compile(r"^\s*export\s+([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$")
 
 # Claat-specific metadata lines that should not leak into the notebook
-# narrative. ``Duration: 0:03`` is the codelab renderer's per-section
+# narrative. ``Duration: 03:00`` is the codelab renderer's per-section
 # time hint and reads like leaked publishing metadata in Colab.
 CLAAT_METADATA_LINE = re.compile(r"^Duration:\s+\d+:\d+\s*$")
+
+# Claat aside markers (``> aside positive`` / ``> aside negative``) open a
+# callout box in the rendered codelab. claat consumes that first line; the
+# blockquote lines beneath it are the callout body. Colab has no notion of
+# claat asides, so the marker line would render as the literal text
+# "aside positive" inside a blockquote. Drop it from the notebook and let
+# the remaining ``> ...`` lines render as an ordinary Markdown blockquote.
+CLAAT_ASIDE_LINE = re.compile(r"^>\s*aside\s+(?:positive|negative)\s*$")
 
 
 def _strip_frontmatter(lines: list[str]) -> list[str]:
@@ -258,9 +266,16 @@ def parse_blocks(markdown: str) -> Iterator[dict]:
       i = i_after
       continue
 
-    # Skip claat-only metadata lines (Duration: 0:03 etc.) so they
+    # Skip claat-only metadata lines (Duration: 03:00 etc.) so they
     # do not appear as visible prose in the generated notebook.
     if CLAAT_METADATA_LINE.match(line):
+      i += 1
+      continue
+
+    # Drop claat aside marker lines (``> aside positive``/``> aside
+    # negative``) so the callout body renders as a plain blockquote in
+    # Colab instead of leaking the literal marker text.
+    if CLAAT_ASIDE_LINE.match(line):
       i += 1
       continue
 

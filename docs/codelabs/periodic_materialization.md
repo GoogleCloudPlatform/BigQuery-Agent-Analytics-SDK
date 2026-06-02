@@ -1,15 +1,17 @@
-summary: Build a queryable BigQuery property graph of your AI agent's decisions. You will apply a graph schema to a BigQuery dataset, seed it with sample agent events, run the bqaa context-graph CLI to extract a decision graph from those events, and query the result with Graph Query Language (GQL) to trace any decision end-to-end.
+---
 id: bqaa-periodic-materialization
-categories: bigquery,adk,agents
-tags: bigquery,adk,bigquery-agent-analytics,cloud-run,cloud-scheduler,property-graph,gql
-status: Draft
+summary: Build a queryable BigQuery property graph of your AI agent's decisions. You will apply a graph schema to a BigQuery dataset, seed it with sample agent events, run the bqaa context-graph CLI to extract a decision graph from those events, and query the result with Graph Query Language (GQL) to trace any decision end-to-end.
 authors: BigQuery Agent Analytics team
-feedback link: https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues
+keywords: category:Cloud, product:BigQuery, product:VertexAi, product:Adk
+layout: paginated
+
+---
 
 # Trace AI Agent Decisions with BigQuery Property Graphs
 
 ## Introduction
-Duration: 0:03
+
+Duration: 03:00
 
 *BigQuery property graphs, BigQuery Conversational Analytics, and the BigQuery Agent Analytics SDK are currently in Preview on Google Cloud. The BigQuery Agent Analytics Plugin is Generally Available (GA). Examples in this codelab use synthetic data.*
 
@@ -17,36 +19,43 @@ As autonomous AI agents take on more operational responsibilities (evaluating lo
 
 This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a **Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
 
-### What You Will Build
+![Context Graph workflow: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table, bqaa context-graph extracts a structured decision graph, and you query it with GQL and Conversational Analytics](images/context-graph-flow.png)
 
-* A Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
-* A populated `agent_events` table with a synthetic event corpus.
-* A working `bqaa context-graph` run that fills the graph from those events.
-* A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
-* An audit-style GQL query that traces a single decision end-to-end.
+### What you'll build
 
-### What You Will Learn
+- A Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
+- A populated `agent_events` table with a synthetic event corpus.
+- A working `bqaa context-graph` run that fills the graph from those events.
+- A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
+- An audit-style GQL query that traces a single decision end-to-end.
 
-* How the BigQuery Agent Analytics Plugin writes to `agent_events`.
-* How a property graph is composed from a small set of declarative artifacts (table DDL, property-graph DDL, ontology, binding).
-* How to run `bqaa context-graph` against a property graph.
-* How to query a BigQuery property graph in GQL.
-* The production-grade capabilities the SDK supports for enterprise deployments.
+### What you'll learn
 
-### What You Will Need
+- How the BigQuery Agent Analytics Plugin writes to `agent_events`.
+- How a property graph is composed from a small set of declarative artifacts (table DDL, property-graph DDL, ontology, binding).
+- How to run `bqaa context-graph` against a property graph.
+- How to query a BigQuery property graph in GQL.
+- The production-grade capabilities the SDK supports for enterprise deployments.
 
-* A Google Cloud project with billing enabled.
-* Owner or Editor role on that project. You will create a BigQuery dataset and grant IAM.
-* The `gcloud` CLI installed and authenticated, or access to Cloud Shell.
-* Python 3.10 or newer.
-* Familiarity with BigQuery SQL. GQL knowledge is not required.
+### What you'll need
 
-**Total time: about 35 minutes.**
+- A Google Cloud project with billing enabled.
+- Owner or Editor role on that project. You will create a BigQuery dataset and grant IAM.
+- The `gcloud` CLI installed and authenticated, or access to Cloud Shell.
+- Python 3.10 or newer.
+- Familiarity with BigQuery SQL. GQL knowledge is not required.
 
-## Before You Begin
-Duration: 0:05
+This codelab is for developers of all levels, including those new to property graphs.
 
-### Pick a Project and Region
+The resources created in this codelab cost very little, and the final step tears everything down so you are not billed for an idle dataset.
+
+**Estimated duration:** This codelab takes approximately 35 minutes to complete.
+
+## Before you begin
+
+Duration: 05:00
+
+#### Pick a project and region
 
 Open Cloud Shell or a local terminal:
 
@@ -96,7 +105,9 @@ except ImportError:
 
 The single `DATASET` variable holds both the raw `agent_events` table and the materialized graph tables. Using one dataset keeps the codelab simple. Production deployments often split events and graph into separate datasets so IAM can be granted narrowly per dataset.
 
-### Enable the Required APIs
+#### Enable the required APIs
+
+**Run the following command** to enable the APIs this codelab uses:
 
 <!-- colab:code bash -->
 ```bash
@@ -108,19 +119,28 @@ gcloud services enable \
 
 The `aiplatform.googleapis.com` API is required because the SDK's default extraction path calls BigQuery's `AI.GENERATE` function. If you later switch to deterministic extraction with `--extraction-mode=compiled-only`, this API is no longer needed.
 
-### Create the BigQuery Dataset
+#### Create the BigQuery dataset
+
+**Create the dataset** that will hold both the raw `agent_events` table and the materialized graph tables:
 
 <!-- colab:code bash -->
 ```bash
 bq --location=US mk --dataset "$PROJECT_ID:$DATASET"
 ```
 
-You should see "Dataset '...' successfully created". If the dataset already exists, the command errors harmlessly. Leave it in place.
+You should see a success message:
+
+```console
+Dataset 'your-project-id:agent_analytics_demo' successfully created.
+```
+
+If the dataset already exists, the command errors harmlessly. Leave it in place.
 
 ## Install the SDK
-Duration: 0:02
 
-Set up a Python virtual environment and install the SDK from PyPI:
+Duration: 02:00
+
+Set up a Python virtual environment and **install the SDK** from PyPI:
 
 <!-- colab:skip -->
 ```bash
@@ -138,7 +158,7 @@ pip install bigquery-agent-analytics
 !pip install --quiet --upgrade bigquery-agent-analytics google-cloud-bigquery
 -->
 
-Verify the install:
+**Verify the install:**
 
 <!-- colab:code bash -->
 ```bash
@@ -147,9 +167,10 @@ bqaa context-graph --help | head -8
 
 You should see the CLI banner.
 
-> 💡 **Migrating from `bqaa-materialize-window`?** The old standalone command still works and accepts the same flags — it now prints a one-line deprecation notice on stderr and forwards to the same handler. Existing scripts and Cloud Run Jobs keep running while you migrate.
+> aside positive
+> **Migrating from `bqaa-materialize-window`?** The old standalone command still works and accepts the same flags — it now prints a one-line deprecation notice on stderr and forwards to the same handler. Existing scripts and Cloud Run Jobs keep running while you migrate.
 
-### Authenticate
+#### Authenticate
 
 If you are on a workstation:
 
@@ -161,8 +182,9 @@ gcloud auth application-default login
 
 Cloud Shell users can skip this step; credentials are already configured. (In Colab the configuration cell above already handled this via `google.colab.auth`.)
 
-## Get the Codelab Artifacts
-Duration: 0:02
+## Get the codelab artifacts
+
+Duration: 02:00
 
 The codelab ships a set of ready-to-use artifacts: the table DDL, the property-graph schema, the ontology, and the binding. You do not author any of these yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
 
@@ -361,10 +383,11 @@ DecisionRequest --[evaluatesOption]--> DecisionOption
 
 `DecisionRequest` is the question the agent received. `DecisionOption` is one alternative the agent considered. `DecisionOutcome` records the committed choice and the rationale.
 
-## Phase 1: Apply the Property Graph Schema
-Duration: 0:04
+## Apply the property graph schema
 
-The materializer writes into BigQuery tables, so they must exist before the first run. Apply the table DDL first, then the property-graph DDL (the property graph references those tables, and BigQuery rejects a `CREATE PROPERTY GRAPH` that points at tables that do not yet exist):
+Duration: 04:00
+
+The materializer writes into BigQuery tables, so they must exist before the first run. **Apply the table DDL first, then the property-graph DDL** (the property graph references those tables, and BigQuery rejects a `CREATE PROPERTY GRAPH` that points at tables that do not yet exist):
 
 <!-- colab:code bash -->
 ```bash
@@ -375,9 +398,9 @@ envsubst < property_graph.sql | bq query --use_legacy_sql=false
 
 You should see five `CREATE TABLE` results and one `CREATE PROPERTY GRAPH` result. The DDL is idempotent; you can re-run it safely.
 
-### Render the Binding
+#### Render the binding
 
-The materializer reads `binding.yaml` directly. Substitute the shell variables once before any tool reads the file:
+The materializer reads `binding.yaml` directly. **Substitute the shell variables once** before any tool reads the file:
 
 <!-- colab:code bash -->
 ```bash
@@ -387,8 +410,9 @@ envsubst < binding.yaml > binding.rendered.yaml
 
 After this, `binding.rendered.yaml` contains your real project ID and dataset name instead of the `${...}` markers. If you skip this step, `bqaa context-graph` validates against literal `${PROJECT_ID}` text and fails closed.
 
-## Phase 2: Generate Sample Agent Events
-Duration: 0:04
+## Generate sample agent events
+
+Duration: 04:00
 
 In production, the BigQuery Agent Analytics Plugin captures events automatically as your ADK agent runs:
 
@@ -436,7 +460,7 @@ bq query --use_legacy_sql=false \
 
 You should see 25 `TOOL_COMPLETED` rows and 5 `AGENT_COMPLETED` rows (each session emits one `submit_request`, three `evaluate_option`, one `commit_outcome`, and one closing `AGENT_COMPLETED` — five tool events plus one agent terminator per session). The `AGENT_COMPLETED` rows are the session terminators that the materializer keys on for terminal-event detection.
 
-### Optional: Realistic-scale data
+#### Optional: realistic-scale data
 
 The 5-session corpus above is intentionally tiny so the first run is fast. When you want production-shaped data — multiple agents and users spread over several days, with failed, orphaned, and truncated sessions — use the `decision-realistic` scenario. It defaults to 100 sessions over a 72-hour window; the first-run path above is unchanged.
 
@@ -452,6 +476,7 @@ bqaa seed-events \
 
 The JSON report's `session_outcome_counts` shows the mix — roughly `{"success": 70, "failed": 10, "orphaned": 10, "truncated": 10}`.
 
+> aside positive
 > Once you have this realistic corpus, the [Conversational Analytics-first guide](../guides/conversational-analytics-first.md) shows how to ask it in plain English ("which requests weighed a low-confidence option?") before dropping to GQL.
 
 Confirm the outcome distribution by classifying each session from its rows (orphaned = no `AGENT_COMPLETED`; failed = `AGENT_COMPLETED` with `status = 'error'`; truncated = any row with `is_truncated = true`; otherwise success). A first pass classifies each session, then a second aggregates per outcome:
@@ -466,14 +491,16 @@ You should see roughly 70 success, 10 failed, 10 orphaned, and 10 truncated (plu
 
 The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa context-graph` run skips them (it materializes only terminal-event-closed sessions). To surface them as `session_orphaned` instead of silently retrying forever, add `--max-session-age-hours` when you materialize — see the orphan-watchdog discussion later in this codelab.
 
-> **Note** — this scenario spreads its sessions across a 72-hour window on purpose. The Phase 3 walkthrough below uses `--lookback-hours 24` and is written for the small 5-session first-run corpus, so its exact counts assume you have *not* run this optional step. If you did, that is the intended lesson: a 24-hour materialization window picks up only the recent slice of a multi-day backlog — widen `--lookback-hours` (or backfill) to capture the older sessions.
+> aside negative
+> This scenario spreads its sessions across a 72-hour window on purpose. The *Materialize the decision graph* walkthrough below uses `--lookback-hours 24` and is written for the small 5-session first-run corpus, so its exact counts assume you have *not* run this optional step. If you did, that is the intended lesson: a 24-hour materialization window picks up only the recent slice of a multi-day backlog — widen `--lookback-hours` (or backfill) to capture the older sessions.
 
-## Phase 3: Materialize the Decision Graph
-Duration: 0:05
+## Materialize the decision graph
 
-`bqaa context-graph` reads the raw `agent_events`, uses the **ontology** to identify which entities and relationships to extract and the **binding** to map them onto your BigQuery tables and columns, then populates the tables behind the property graph. The property-graph schema you applied in Phase 1 only defines the *query surface* over those tables — it cannot populate them, which is exactly why this step requires both `--ontology` and `--binding`.
+Duration: 05:00
 
-Run the materializer locally:
+`bqaa context-graph` reads the raw `agent_events`, uses the **ontology** to identify which entities and relationships to extract and the **binding** to map them onto your BigQuery tables and columns, then populates the tables behind the property graph. The property-graph schema you applied earlier only defines the *query surface* over those tables — it cannot populate them, which is exactly why this step requires both `--ontology` and `--binding`.
+
+**Run the materializer** locally:
 
 <!-- colab:code bash -->
 ```bash
@@ -524,19 +551,21 @@ bq query --use_legacy_sql=false \
 
 You should see five rows.
 
-### Two Ways to Extract Decisions From Events
+#### Two ways to extract decisions from events
 
 The materializer offers two extraction paths. Pick the one that matches your workload:
 
-* **Default extraction.** The easiest path. Uses BigQuery's `AI.GENERATE` to read event content and infer entities and relationships. Works against any event shape with no extra code. This is what the codelab uses.
-* **Deterministic extraction** (`--extraction-mode=compiled-only`). The lower-cost, audit-friendly path. Uses a small Python reference extractor you write once for your ontology. No Vertex AI calls, no per-token charges, fully reproducible output. Production deployments choose this when cost predictability or strict reproducibility matters.
+- **Default extraction.** The easiest path. Uses BigQuery's `AI.GENERATE` to read event content and infer entities and relationships. Works against any event shape with no extra code. This is what the codelab uses.
+- **Deterministic extraction** (`--extraction-mode=compiled-only`). The lower-cost, audit-friendly path. Uses a small Python reference extractor you write once for your ontology. No Vertex AI calls, no per-token charges, fully reproducible output. Production deployments choose this when cost predictability or strict reproducibility matters.
 
-> 💡 **Tip.** Deterministic extraction is also the path for regulated workloads that need to remove the Vertex AI dependency from the runtime service account entirely. See the [production deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the IAM details.
+> aside positive
+> **Tip:** Deterministic extraction is also the path for regulated workloads that need to remove the Vertex AI dependency from the runtime service account entirely. See the [production deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the IAM details.
 
-## Phase 4: Query the Decision Trace
-Duration: 0:05
+## Query the decision trace
 
-With the graph populated, you can answer the audit question directly. Take a concrete one: *"For each request, what options did the agent weigh, and how did it resolve?"* In GQL that is a single traversal across the request, its options, and its outcome. Save the following as `traversal.sql`:
+Duration: 05:00
+
+With the graph populated, you can answer the audit question directly. Take a concrete one: *"For each request, what options did the agent weigh, and how did it resolve?"* In GQL that is a single traversal across the request, its options, and its outcome. **Save the following as `traversal.sql`:**
 
 <!-- colab:markdown -->
 ```sql
@@ -600,7 +629,7 @@ You should see fifteen rows: three options per request, five requests. Each row 
 
 For a single decision's full picture, filter by `request_id` to get the row set an audit team needs: the question that came in, the options that were weighed (with scores), and the rationale that was committed.
 
-### Ask the Same Question in Plain English
+#### Ask the same question in plain English
 
 Not every audit reader writes GQL. With **BigQuery Conversational Analytics** (Preview), your compliance team can ask the same kind of question in natural language and get back a structured answer card — no query syntax, no joins to learn.
 
@@ -612,16 +641,18 @@ Conversational Analytics reasons over the graph, writes the SQL for you, and rep
 
 ![Conversational Analytics answering "Which requests never reached a committed outcome?" over the decision graph: every recorded request reached a committed outcome (orphaned sessions are not materialized as graph nodes)](images/ca-conversation.png)
 
-> The reply above reflects the realistic-scale corpus from the optional *Realistic-scale data* step (90 materialized requests, all committed). Your exact numbers depend on which corpus you seeded — the default 5-session run shows five.
+> aside positive
+> The reply above reflects the realistic-scale corpus from the optional *realistic-scale data* step (90 materialized requests, all committed). Your exact numbers depend on which corpus you seeded — the default 5-session run shows five.
 
 See the [Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) for setup.
 
-## Advanced: Replay a Past Window
-Duration: 0:04
+## Replay a past window
+
+Duration: 04:00
 
 Sometimes you need to re-process a past time window: events arrived during an outage, a schema change requires re-extraction, or an audit team asks about a specific historical period. Backfill mode lets you do that **without disturbing the regular refresh schedule** — the replay runs against a fixed start-and-end window you choose, and its progress is tracked separately from the regular refresh.
 
-In a real recovery you would point the backfill at the window where the missed events actually arrived. For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The replay finishes immediately because there is nothing to materialize, which lets you see the audit trail it produces without re-touching the rows you already wrote in Phase 3.
+In a real recovery you would point the backfill at the window where the missed events actually arrived. For this codelab, run a backfill against an **empty historical window** (eight to nine hours ago, before you seeded any events). The replay finishes immediately because there is nothing to materialize, which lets you see the audit trail it produces without re-touching the rows you already wrote in *Materialize the decision graph*.
 
 <!-- colab:skip -->
 ```bash
@@ -672,14 +703,16 @@ bq query --use_legacy_sql=false \
      ORDER BY run_started_at DESC LIMIT 5"
 ```
 
-You should see at least two rows: one from the Phase 3 materialization (`mode = 'steady'`) and one from this backfill (`mode = 'backfill'`). The two are independent — the backfill's progress is tracked separately, so it cannot disrupt the regular refresh.
+You should see at least two rows: one from the steady-state materialization (`mode = 'steady'`) and one from this backfill (`mode = 'backfill'`). The two are independent — the backfill's progress is tracked separately, so it cannot disrupt the regular refresh.
 
-> 💡 **Tip — how the isolation works (optional detail).** Each materializer run writes a row to the `_bqaa_materialization_state` table keyed by a `state_key` hash. Backfill mode mixes the `--state-key-suffix` you pass into that hash, so the backfill writes to a different `state_key` than the regular schedule. Same table, different rows, separate progress markers. Production operators query this table to confirm a catch-up actually ran.
+> aside positive
+> **How the isolation works (optional detail):** Each materializer run writes a row to the `_bqaa_materialization_state` table keyed by a `state_key` hash. Backfill mode mixes the `--state-key-suffix` you pass into that hash, so the backfill writes to a different `state_key` than the regular schedule. Same table, different rows, separate progress markers. Production operators query this table to confirm a catch-up actually ran.
 
-## Production-Grade Capabilities
-Duration: 0:03
+## Production-grade capabilities
 
-The local run you completed in Phase 3 uses default behavior. Real deployments care about cost, reliability, and audit posture — the SDK supports each one out of the box.
+Duration: 03:00
+
+The local run you completed in *Materialize the decision graph* uses default behavior. Real deployments care about cost, reliability, and audit posture — the SDK supports each one out of the box.
 
 **What you get by default:**
 
@@ -691,15 +724,17 @@ The local run you completed in Phase 3 uses default behavior. Real deployments c
 
 * **Lower-cost, deterministic extraction** (`--extraction-mode=compiled-only`). Swaps the LLM-based extractor for a small reference-extractor module you write once. Removes the Vertex AI dependency and the per-token cost. Recommended for steady-state production workloads and any audit that requires reproducibility.
 * **Catch stuck sessions** (`--max-session-age-hours`). If your agents sometimes fail to emit a terminal event, this flags long-running sessions as orphaned so operators can drain them — instead of the scheduled refresh silently retrying them forever.
-* **Replay a past window** (`--backfill --from / --to`). You exercised this in *Advanced: Replay a Past Window* above. The replay is tracked separately from the regular schedule so it cannot interfere with the live refresh.
+* **Replay a past window** (`--backfill --from / --to`). You exercised this in *Replay a past window* above. The replay is tracked separately from the regular schedule so it cannot interfere with the live refresh.
 * **Bound the per-run batch size** (`--max-sessions`). Useful when an upstream event spike threatens to overwhelm a single scan.
 
-> 💡 **From "run this once" to "run this every six hours."** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, and the recommended schedules.
+> aside positive
+> **From "run this once" to "run this every six hours":** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. See the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) for the worked example, the IAM matrix, and the recommended schedules.
 
-## Clean Up
-Duration: 0:03
+## Clean up
 
-Tear down what you created so you do not get billed for an idle dataset:
+Duration: 03:00
+
+**Tear down what you created** so you do not get billed for an idle dataset:
 
 <!-- colab:skip -->
 ```bash
@@ -715,23 +750,26 @@ bq rm -r -f --dataset "$PROJECT_ID:$DATASET"
 
 That single command removes the dataset, the agent events, the graph tables, and the state table together.
 
-## Summary
-Duration: 0:02
+## Congratulations
 
-You have:
+Duration: 02:00
 
-* Created a BigQuery dataset and applied a property-graph schema describing an agent decision domain.
-* Populated `agent_events` with a synthetic event corpus.
-* Run `bqaa context-graph` to extract a decision graph from those events.
-* Replayed a past time window with backfill mode, separately from the regular refresh schedule.
-* Queried the resulting graph in GQL and seen the audit-style answer.
+Congratulations! You've turned raw agent event logs into a queryable Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
 
 The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point and adapt the four declarative files (table DDL, property-graph DDL, ontology, binding) to your domain.
 
-### Further Reading
+#### What you've learned
 
-* [BigQuery Agent Analytics SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
-* [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization)
-* [Periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization): required APIs, IAM matrix, recommended schedules, Cloud Monitoring alert queries, and the Terraform module.
-* [BigQuery property graphs documentation](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
-* [BigQuery Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) (Preview).
+- How to create a BigQuery dataset and apply a property-graph schema describing an agent decision domain.
+- How to populate `agent_events` with a synthetic event corpus.
+- How to run `bqaa context-graph` to extract a decision graph from those events.
+- How to replay a past time window with backfill mode, separately from the regular refresh schedule.
+- How to query the resulting graph in GQL and read the audit-style answer.
+
+#### Reference docs
+
+- [BigQuery Agent Analytics SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
+- [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization)
+- [Periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization): required APIs, IAM matrix, recommended schedules, Cloud Monitoring alert queries, and the Terraform module.
+- [BigQuery property graphs documentation](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
+- [BigQuery Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) (Preview).
