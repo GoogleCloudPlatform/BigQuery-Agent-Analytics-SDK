@@ -23,21 +23,21 @@ Context Graph in BigQuery transforms raw agent traces into a structured, trusted
 
 Crucially, this happens natively within your existing data warehouse; there is no need to export logs to a specialized graph database or build complex ETL pipelines. By providing this structured, easily queryable visibility, Context Graph helps organizations not just deploy a system of agents, but build a proactive system of action they can stand behind.
 
-> **Diagram placeholder:** an agent produces raw logs → the SDK turns them into a Context Graph → a human consumes it in natural language. *(Diagram to be added before publish.)*
+![Context Graph architecture: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table (raw telemetry); bqaa context-graph turns them into the agent_decisions_graph Context Graph (a structured decision trace); consumed via GQL / BigQuery Studio, Conversational Analytics, and by auditors, operators, and executives — with no external graph database](./images/context-graph-flow.png)
 
-## Context Graph in Yahoo Agentic Media Buying
+## Context Graph in agentic media buying
 
-Consider digital media buying, where sell-side processes, like negotiating ad placements, evaluating pricing rules, and checking compliance, historically took weeks of manual handoffs and spreadsheet coordination. By deploying an autonomous Seller Agent, Yahoo can compress this entire lifecycle from months down to seconds. However, moving real advertising budgets at machine speed requires regulator-grade trust. If an executive or auditor asks why a specific live campaign was executed at a certain price point, digging through fragmented, raw system logs with ad-hoc SQL is the wrong control surface.
+Consider digital media buying, where sell-side processes, like negotiating ad placements, evaluating pricing rules, and checking compliance, historically took weeks of manual handoffs and spreadsheet coordination. By deploying an autonomous Seller Agent, a digital media company can compress this entire lifecycle from months down to seconds. However, moving real advertising budgets at machine speed requires regulator-grade trust. If an executive or auditor asks why a specific live campaign was executed at a certain price point, digging through fragmented, raw system logs with ad-hoc SQL is the wrong control surface.
 
-By using BigQuery Context Graph, Yahoo can verify that every automated decision is transparent and auditable. Every time the Seller Agent takes an action, the process is captured and structured automatically:
+By using BigQuery Context Graph, the company can verify that every automated decision is transparent and auditable. Every time the Seller Agent takes an action, the process is captured and structured automatically:
 
 * **Capturing the action:** The moment the agent queries a knowledge graph, hands a task to a specialized brand-safety sub-agent, or evaluates an inventory pricing rule, the event is captured natively by the BigQuery Agent Analytics plugin.
 
-* **Structuring the trace:** Instead of dumping these details into messy text logs, the system shapes the raw telemetry into a typed, queryable Context Graph based on Yahoo's provided ontology.
+* **Structuring the trace:** Instead of dumping these details into messy text logs, the system shapes the raw telemetry into a typed, queryable Context Graph based on the company's provided ontology.
 
 * **Answering the audit:** If a campaign's parameters need to be verified, compliance teams can traverse the resulting graph to see exactly which active contracts, floor prices, and brand safety rules triggered that specific execution.
 
-By turning flat log files into an interconnected relationship map, Yahoo doesn't just run a fast system, they have a strictly governed, trusted system of action.
+By turning flat log files into an interconnected relationship map, the company doesn't just run a fast system, it has a strictly governed, trusted system of action.
 
 ## Let's walk through an example
 
@@ -98,7 +98,7 @@ CREATE OR REPLACE PROPERTY GRAPH agent_analytics.agent_decisions_graph
 
 ### Step 3: Extract context graph from agent traces
 
-A single command reads the raw `agent_events`, extracts the entities and relationships your ontology declares, and populates the graph tables. Run it on a schedule (a Cloud Run Job + Cloud Scheduler trigger) to keep the graph fresh:
+A single command reads the raw `agent_events`, extracts the entities and relationships your ontology declares, and populates the graph tables. For local development, run the materializer once:
 
 ```bash
 bqaa context-graph \
@@ -106,6 +106,8 @@ bqaa context-graph \
     --ontology ontology.yaml --binding binding.rendered.yaml \
     --lookback-hours 24
 ```
+
+For production, run the same materialization path on a schedule with the SDK's Cloud Run Job + Cloud Scheduler [deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) or Terraform module.
 
 Extraction is your choice: an LLM path (`AI.GENERATE`) for flexible onboarding against variable log structures, or a deterministic compiled mode (`--extraction-mode=compiled-only`) for lower cost and reproducible, auditor-verifiable output with no Vertex AI dependency.
 
