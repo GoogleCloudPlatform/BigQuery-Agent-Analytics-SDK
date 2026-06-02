@@ -5,31 +5,47 @@
 
 *BigQuery property graphs, BigQuery Conversational Analytics, and the BigQuery Agent Analytics SDK are currently in Preview on Google Cloud. The BigQuery Agent Analytics Plugin is Generally Available (GA). Examples in this post use synthetic data.*
 
-As autonomous AI agents take on more operational responsibilities—such as evaluating loan applications, managing marketing budgets, or approving access requests—organizations must be able to audit and explain their decisions. Understanding the exact context, alternatives considered, and final rationale of an agent's decision is critical for compliance, risk management, and operational trust.
+Enterprises are rapidly deploying AI agents to transform their data platforms into proactive [Systems of Action](https://cloud.google.com/transform/shift-system-of-action-architecting-the-agentic-data-cloud-ai). However, scaling these mission-critical applications requires a reliable foundation of trust. Historically, systems of record focused on capturing what happened; in the agentic era, organizations must capture why it happened. When an auditor or executive asks "Why did the agent make that decision?", organizations need prompt, verifiable visibility into the agent's dynamic reasoning: its context, weighed options, exceptions granted, and final actions. Today, we are introducing Context Graph in BigQuery: an integrated solution that elevates standard agent telemetry into a structured, audit-ready graph of decisions. By capturing every action and linking it to its triggering context, Context Graph provides the transparent, reliable foundation you need to scale your System of Action with confidence.
 
-While capturing raw agent event logs is a straightforward first step, querying those logs to reconstruct a complex decision path can be difficult and time-consuming. Traditionally, analyzing these relationships required exporting log data into external, specialized graph databases via complex ETL pipelines.
+## The challenge of a trusted system of action
 
-To simplify this process, we are introducing scheduled, native graph materialization in BigQuery. Using the new `bqaa context-graph` command in the BigQuery Agent Analytics SDK, you can continuously convert agent event logs into an active [BigQuery property graph](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-query-language)—without setting up a separate database or leaving your BigQuery environment.
+AI agents provide a natural mechanism for reasoning over live data, orchestrating complex cross-system tasks, and driving proactive business outcomes. However, deploying autonomous agents for mission-critical applications at enterprise scale often presents the following challenges:
 
----
+* **Lack of transparency and trust:** As agents take actions on your behalf, it can be difficult to determine exactly why an agent made a specific decision, what data it touched, or whether you can confidently trust the outcome. Traditional data tools often just store the final outcome, suffering from an "amnesia" that loses the inputs, context, and synthesis that led to that specific action.
 
-## Why use BigQuery for agent decision traces?
+* **Increased business risk:** Without clear, explainable visibility into automated actions, organizations are left vulnerable to potential monetary losses and internal policy violations. When an agent makes an anomalous choice, such as executing a transaction at an unexpected price, the inability to trace its root cause makes the system incredibly difficult to debug and reliably govern. Effective governance requires an auditable process to verify that guardrails are actually working.
 
-Three core architectural advantages distinguish this approach from traditional external graph database setups:
+* **Unmanageable telemetry:** While tools like Google's Agent Development Kit (ADK) make it substantially easier to build and deploy agents, the raw traces they produce, such as event logs, tool calls, and reasoning steps, are inherently unstructured. This leaves the data difficult to query, hard to audit, and challenging to govern at scale. The valuable precedents buried in these logs are often lost, preventing the system from building a feedback loop to learn from past decisions.
 
-* **BigQuery-Native Architecture**: There is no new database infrastructure to provision, manage, or pay for. The raw events, materialized property graph, identity and access management (IAM), billing, and analytical queries all remain natively within BigQuery.  
-* **Governed by Design**: The architecture supports a strong security posture. The event log dataset remains read-only to the materialization engine, while the graph dataset serves as the write target. The execution service account uses least-privilege access, and every run is logged to a state table, providing a complete audit trail of the materialization history.  
-* **Deterministic and AI-Driven Extraction**: You can choose how data is extracted from your events. By default, the system can use LLM-based extraction (`AI.GENERATE`) for flexible onboarding against variable log structures. For regulated workloads requiring strict determinism, you can use a compiled extraction mode to run custom, auditor-verifiable Python parser modules without any external AI dependencies.
+## Introducing Context Graph in BigQuery
 
----
+Context Graph in BigQuery transforms raw agent traces into a structured, trusted context, elevating flat telemetry into an interconnected, traversable web of decision traces, data lineage, and tool executions. Built on [BigQuery Agent Analytics](https://cloud.google.com/blog/products/data-analytics/introducing-bigquery-agent-analytics), which centralizes your Agent Development Kit (ADK) events directly in BigQuery, it connects every reasoning step to make automated decisions highly auditable. By doing so, it serves as a queryable "institutional memory" for your data platform, capturing the exceptions, overrides, and precedents that map how decisions are actually made.
 
-## How scheduled graph materialization works
+Crucially, this happens natively within your existing data warehouse; there is no need to export logs to a specialized graph database or build complex ETL pipelines. By providing this structured, easily queryable visibility, Context Graph helps organizations not just deploy a system of agents, but build a proactive system of action they can stand behind.
 
-Transforming flat agent logs into a queryable property graph relies on four key operational phases:
+![Context Graph architecture: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table (raw telemetry); bqaa context-graph turns them into the agent_decisions_graph Context Graph (a structured decision trace); consumed via GQL / BigQuery Studio, Conversational Analytics, and by auditors, operators, and executives — with no external graph database](./images/context-graph-flow.png)
 
-### 1\. Ingesting Agent Events
+## Context Graph in agentic media buying
 
-First, the Generally Available BigQuery Agent Analytics Plugin captures agent activities—such as tool calls, LLM requests, and human approvals—the moment your agent runs. It stream-writes these events into a structured, sixteen-column `agent_events` table in BigQuery using the BigQuery Storage Write API.
+Consider digital media buying, where sell-side processes, like negotiating ad placements, evaluating pricing rules, and checking compliance, historically took weeks of manual handoffs and spreadsheet coordination. By deploying an autonomous Seller Agent, a digital media company can compress this entire lifecycle from months down to seconds. However, moving real advertising budgets at machine speed requires regulator-grade trust. If an executive or auditor asks why a specific live campaign was executed at a certain price point, digging through fragmented, raw system logs with ad-hoc SQL is the wrong control surface.
+
+By using BigQuery Context Graph, the company can verify that every automated decision is transparent and auditable. Every time the Seller Agent takes an action, the process is captured and structured automatically:
+
+* **Capturing the action:** The moment the agent queries a knowledge graph, hands a task to a specialized brand-safety sub-agent, or evaluates an inventory pricing rule, the event is captured natively by the BigQuery Agent Analytics plugin.
+
+* **Structuring the trace:** Instead of dumping these details into messy text logs, the system shapes the raw telemetry into a typed, queryable Context Graph based on the company's provided ontology.
+
+* **Answering the audit:** If a campaign's parameters need to be verified, compliance teams can traverse the resulting graph to see exactly which active contracts, floor prices, and brand safety rules triggered that specific execution.
+
+By turning flat log files into an interconnected relationship map, the company doesn't just run a fast system, it has a strictly governed, trusted system of action.
+
+## Let's walk through an example
+
+The example below uses the same generic agent decision flow the [hands-on codelab](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/codelabs/periodic_materialization.md) runs end to end: a request comes in, the agent weighs options with confidence scores, and an outcome is committed. Everything runs natively in BigQuery.
+
+### Step 1: Capture agent traces
+
+In production, the Generally Available BigQuery Agent Analytics Plugin captures agent activity (tool calls, LLM requests, approvals) the moment your ADK agent runs and stream-writes it to a structured `agent_events` table:
 
 ```py
 from google.adk.plugins import BigQueryAgentAnalyticsPlugin
@@ -41,123 +57,97 @@ plugin = BigQueryAgentAnalyticsPlugin(
 runner = Runner(agent=root_agent, plugins=[plugin])
 ```
 
-### 2\. Defining the Property Graph
+To follow along without an agent, the SDK ships a generator that writes a realistic, production-shaped corpus directly to `agent_events`:
 
-Next, you define the property graph schema directly in BigQuery. This schema represents your domain-specific decision model: the agent's context, decision points, alternatives evaluated, and selected outcomes. You define this model once using standard SQL Data Definition Language (DDL).
+```bash
+bqaa seed-events \
+    --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
+    --scenario decision-realistic --seed 42
+```
+
+### Step 2: Define the context graph
+
+Declare the graph shape once, in standard SQL. This models the decision flow: requests, the options each request weighed, the committed outcome, and the edges that connect them.
 
 ```sql
-CREATE OR REPLACE PROPERTY GRAPH graph.agent_decisions_graph
-NODE TABLES (
-  graph.DecisionExecution
-    KEY (decision_execution_id) LABEL DecisionExecution,
-  graph.DecisionPoint
-    KEY (decision_point_id) LABEL DecisionPoint,
-  graph.Candidate
-    KEY (candidate_id) LABEL Candidate,
-  graph.SelectionOutcome
-    KEY (selection_outcome_id) LABEL SelectionOutcome
-)
-EDGE TABLES (
-  graph.ExecutedAt
-    SOURCE KEY (decision_execution_id) REFERENCES DecisionExecution (decision_execution_id)
-    DESTINATION KEY (decision_point_id) REFERENCES DecisionPoint (decision_point_id)
-    LABEL executedAtDecisionPoint,
-  graph.EvaluatesCandidate
-    SOURCE KEY (decision_point_id) REFERENCES DecisionPoint (decision_point_id)
-    DESTINATION KEY (candidate_id) REFERENCES Candidate (candidate_id)
-    LABEL evaluatesCandidate,
-  graph.HasSelectionOutcome
-    SOURCE KEY (decision_execution_id) REFERENCES DecisionExecution (decision_execution_id)
-    DESTINATION KEY (selection_outcome_id) REFERENCES SelectionOutcome (selection_outcome_id)
-    LABEL hasSelectionOutcome,
-  graph.SelectedCandidate
-    SOURCE KEY (selection_outcome_id) REFERENCES SelectionOutcome (selection_outcome_id)
-    DESTINATION KEY (candidate_id) REFERENCES Candidate (candidate_id)
-    LABEL selectedCandidate
-);
+CREATE OR REPLACE PROPERTY GRAPH agent_analytics.agent_decisions_graph
+  NODE TABLES (
+    agent_analytics.decision_request AS decision_request
+      KEY (request_id)
+      LABEL DecisionRequest PROPERTIES (request_id, request_text, requested_at),
+    agent_analytics.decision_option AS decision_option
+      KEY (option_id)
+      LABEL DecisionOption PROPERTIES (option_id, option_label, confidence),
+    agent_analytics.decision_outcome AS decision_outcome
+      KEY (outcome_id)
+      LABEL DecisionOutcome PROPERTIES (outcome_id, status, rationale, decided_at)
+  )
+  EDGE TABLES (
+    agent_analytics.evaluates_option AS evaluates_option
+      KEY (request_id, option_id)
+      SOURCE KEY (request_id) REFERENCES decision_request (request_id)
+      DESTINATION KEY (option_id) REFERENCES decision_option (option_id)
+      LABEL evaluatesOption,
+    agent_analytics.resulted_in AS resulted_in
+      KEY (request_id, outcome_id)
+      SOURCE KEY (request_id) REFERENCES decision_request (request_id)
+      DESTINATION KEY (outcome_id) REFERENCES decision_outcome (outcome_id)
+      LABEL resultedIn
+  );
 ```
 
-### 3\. Executing the Materializer
+### Step 3: Extract context graph from agent traces
 
-To keep the graph updated, you run the `bqaa context-graph` CLI command on a schedule (e.g., every few hours). The SDK provides a deployment script to set this up as a Cloud Run Job triggered by Cloud Scheduler.
+A single command reads the raw `agent_events`, extracts the entities and relationships your ontology declares, and populates the graph tables. For local development, run the materializer once:
 
-During each run, the materializer:
-
-* Identifies completed agent sessions from the raw event dataset within the specified time window.  
-* Extracts node and edge entities based on your schema.  
-* Populates the corresponding graph tables in your read/write dataset.  
-* Updates a persistent execution state table to ensure exactly-once processing.
-
-```shell
-./deploy_cloud_run_job.sh \
-    --project your-project-id \
-    --region us-central1 \
-    --events-dataset agent_analytics \
-    --graph-dataset graph \
-    --schedule "0 */6 * * *"
+```bash
+bqaa context-graph \
+    --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
+    --ontology ontology.yaml --binding binding.rendered.yaml \
+    --lookback-hours 24
 ```
 
----
+For production, run the same materialization path on a schedule with the SDK's Cloud Run Job + Cloud Scheduler [deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) or Terraform module.
 
-## Developer Walkthrough: Querying a Decision Trace
+Extraction is your choice: an LLM path (`AI.GENERATE`) for flexible onboarding against variable log structures, or a deterministic compiled mode (`--extraction-mode=compiled-only`) for lower cost and reproducible, auditor-verifiable output with no Vertex AI dependency.
 
-Once the materialization job runs, your property graph is ready for analysis. Consider a scenario where a compliance team needs to audit why an underwriting agent declined a specific loan application.
+### Step 4: Access the context graph
 
-Using standard Graph Query Language (GQL) syntax in BigQuery, you can traverse the decision graph to pull the decision, the options evaluated, the final choice, and the system's recorded rationale.
+The graph is now queryable two ways. For exact, repeatable lineage, traverse it with Graph Query Language (GQL):
 
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
-  graph.agent_decisions_graph
-  MATCH (de:DecisionExecution) -[:executedAtDecisionPoint]-> (dp:DecisionPoint),
-        (dp) -[:evaluatesCandidate]-> (option:Candidate),
-        (de) -[:hasSelectionOutcome]-> (so:SelectionOutcome),
-        (so) -[:selectedCandidate]-> (chosen:Candidate)
-  WHERE de.business_entity_id = 'customer-4029-7'
+  agent_analytics.agent_decisions_graph
+  MATCH
+    (req:DecisionRequest) -[:evaluatesOption]-> (opt:DecisionOption),
+    (req)                 -[:resultedIn]->      (out:DecisionOutcome)
   COLUMNS (
-    de.decision_execution_id AS decision_id,
-    dp.decision_point_id      AS decision_point,
-    option.candidate_id       AS option_evaluated,
-    chosen.candidate_id       AS chosen_option,
-    so.rationale              AS rationale
+    req.request_id   AS request,
+    req.request_text AS question,
+    opt.option_label AS considered,
+    opt.confidence   AS score,
+    out.status       AS outcome
   )
-);
+)
+ORDER BY request, score DESC;
 ```
 
-The query returns a flat, queryable representation of the decision graph, detailing every candidate option considered alongside the selected outcome and the structured reasoning:
-
-| decision\_id | decision\_point | option\_evaluated | chosen\_option | rationale |
-| :---- | :---- | :---- | :---- | :---- |
-| de-9c2e | dp-mortgage-approval | cand-decline | **cand-decline** | *"DTI ratio of 42% exceeds the 40% maximum threshold; recent late payments fall inside the 90-day risk window."* |
-| de-9c2e | dp-mortgage-approval | cand-refer-to-human | **cand-decline** | *"DTI ratio of 42% exceeds the 40% maximum threshold; recent late payments fall inside the 90-day risk window."* |
-| de-9c2e | dp-mortgage-approval | cand-approve | **cand-decline** | *"DTI ratio of 42% exceeds the 40% maximum threshold; recent late payments fall inside the 90-day risk window."* |
-
-By joining these relational and graph operations natively within BigQuery, audit teams can quickly pinpoint the exact factors that influenced any specific agent action.
-
-BigQuery Studio can also render the property graph visually. A `GRAPH … MATCH p = (a)-[e]->(b) RETURN TO_JSON(p)` query over the materialized graph draws the full decision web — here, 527 nodes and 438 edges across the seeded corpus:
+BigQuery Studio can also render the property graph visually. A `GRAPH … MATCH p = (a)-[e]->(b) RETURN TO_JSON(p)` query draws the full decision web:
 
 ![The materialized decision graph (527 nodes, 438 edges) visualized in BigQuery Studio from a GQL query](./images/graph-visualization.png)
 
----
-
-## Production-Grade Capabilities
-
-The latest 0.3.2 release of the BigQuery Agent Analytics SDK includes several features designed to support enterprise-grade deployments:
-
-* **Least-Privilege Split Service Accounts**: The deployment scripts separate execution privileges. One service account runs the materializer job with restricted BigQuery and Vertex AI permissions, while a separate, highly restricted service account is used by Cloud Scheduler solely to trigger the job.  
-* **Deterministic Parsing Options**: For highly regulated industries, you can pass the `--extraction-mode=compiled-only` flag. This disables LLM calls entirely and uses predefined Python parsing logic to guarantee deterministic, reproducible graph builds.  
-* **Outage Resiliency and Backfills**: If network disruptions occur, the materializer handles late-arriving events through configurable lookback windows. You can also run the tool in `--backfill` mode to reprocess historical data without affecting your active schedule's progress markers.  
-* **Infrastructure-as-Code Integration**: To align with enterprise deployment standards, the SDK includes a complete [Terraform module](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization/terraform) to provision all necessary GCP resources with consistent IAM configurations.
-
----
-
-## Get Started
-
-To begin building scheduled decision graphs for your agent workloads, check out the resources below:
-
-* **Code Repository**: Visit the [BigQuery Agent Analytics SDK on GitHub](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).  
-* **Setup Guide**: Review the [Periodic Materialization Guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) to configure IAM, jobs, and schedulers.  
-* **Hands-on Codelab**: Follow the step-by-step *Periodic Materialization for BigQuery Agent Analytics* codelab to deploy a local test environment from scratch.
-* **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL, then drop to GQL for exact lineage.
+For the business reader who does not write SQL, **BigQuery Conversational Analytics** (Preview) answers the same questions in plain English over the graph, generating the query for you:
 
 ![Conversational Analytics summarizing the materialized decision graph in plain English: every recorded decision request reached a committed outcome (orphaned sessions are not materialized as graph nodes)](./images/ca-conversation.png)
+
+Ask in plain English first; drop to GQL when an answer needs to become a saved query, a scheduled report, or an audit artifact. The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) walks through that workflow.
+
+## Get started
+
+To begin building Context Graphs for your agent workloads, check out the resources below:
+
+* **Code Repository**: Visit the [BigQuery Agent Analytics SDK on GitHub](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).
+* **Hands-on Codelab**: Follow the step-by-step *Trace AI Agent Decisions with BigQuery Property Graphs* codelab to build and query a Context Graph from scratch.
+* **Production Setup**: Review the [Periodic Materialization guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) to configure IAM, the Cloud Run Job, and the Cloud Scheduler trigger.
+* **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL.

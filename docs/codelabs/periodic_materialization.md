@@ -15,11 +15,11 @@ Duration: 0:03
 
 As autonomous AI agents take on more operational responsibilities (evaluating loan applications, managing marketing budgets, approving access requests), organizations must be able to audit and explain their decisions. Reconstructing the exact context, alternatives considered, and final rationale of an agent's decision is essential for compliance, risk management, and operational trust.
 
-This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a queryable BigQuery property graph, on a schedule, without any external graph database or ETL pipeline.
+This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a **Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
 
 ### What You Will Build
 
-* A BigQuery property graph that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
+* A Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
 * A populated `agent_events` table with a synthetic event corpus.
 * A working `bqaa context-graph` run that fills the graph from those events.
 * A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
