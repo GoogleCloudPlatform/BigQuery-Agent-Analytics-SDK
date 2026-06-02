@@ -343,10 +343,10 @@ relationships:
 for name, body in artifacts.items():
     (work / name).write_text(body)
 
-print("Wrote:", ", ".join(sorted(p.name for p in work.glob("*"))))
+print("Wrote:", ", ".join(sorted(artifacts)))
 ```
 
-You should see four files:
+The cell writes these four artifacts:
 
 ```
 binding.yaml  ontology.yaml  property_graph.sql  table_ddl.sql
