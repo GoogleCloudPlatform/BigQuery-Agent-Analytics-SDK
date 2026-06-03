@@ -98,8 +98,13 @@ def _build_entity(
     entity_name: str,
     column_types: dict,
     metadata: frozenset,
-) -> tuple[Entity, EntityBinding]:
-  """Build the Entity + EntityBinding for one node table."""
+) -> tuple[Entity, EntityBinding, dict[str, str]]:
+  """Build the Entity + EntityBinding for one node table.
+
+  Also returns the node's ``{column -> property_name}`` map, which edges use to
+  translate their ``REFERENCES`` physical PK columns into endpoint property
+  names.
+  """
   # Stored, non-metadata properties (derived properties have column=None).
   column_to_name: dict[str, str] = {}
   ordered: list[tuple[str, str]] = []  # (property_name, column)
@@ -144,7 +149,50 @@ def _build_entity(
   entity_binding = EntityBinding(
       name=entity_name, source=node.source, properties=property_bindings
   )
-  return entity, entity_binding
+  return entity, entity_binding, column_to_name
+
+
+def _endpoint_column_refs(
+    edge_alias: str,
+    side: str,
+    fk_columns: tuple[str, ...],
+    ref_columns: tuple[str, ...],
+    target_column_to_name: dict[str, str],
+    metadata: frozenset,
+) -> list[dict[str, str]]:
+  """Build explicit ``{edge_fk_column: endpoint_pk_property}`` ColumnRefs.
+
+  The property graph's ``SOURCE/DESTINATION KEY (fk...) REFERENCES Node
+  (pk...)`` clause pairs each edge FK column with a specific physical PK column
+  of the endpoint, positionally. We preserve that pairing as dict-shape
+  ColumnRefs rather than a bare column list: a bare list is interpreted by the
+  resolver positionally against the endpoint's PK *declaration* order, which
+  silently mismatches whenever the REFERENCES order differs from the KEY order
+  (composite-key permutation) or the PK column is a renamed property.
+  Metadata columns (e.g. ``session_id``) are dropped as paired entries.
+  """
+  if len(fk_columns) != len(ref_columns):
+    raise GraphSpecSynthesisError(
+        f"Edge {edge_alias!r} {side} KEY has {len(fk_columns)} columns but its"
+        f" REFERENCES has {len(ref_columns)}; they must pair one-to-one."
+    )
+  refs: list[dict[str, str]] = []
+  for fk_column, ref_column in zip(fk_columns, ref_columns):
+    if fk_column in metadata or ref_column in metadata:
+      continue
+    target_property = target_column_to_name.get(ref_column)
+    if target_property is None:
+      raise GraphSpecSynthesisError(
+          f"Edge {edge_alias!r} {side} REFERENCES column {ref_column!r}, which"
+          " is not a key property of the referenced entity."
+      )
+    refs.append({fk_column: target_property})
+  if not refs:
+    raise GraphSpecSynthesisError(
+        f"Edge {edge_alias!r} has no non-metadata {side} key columns to bind"
+        " its endpoint."
+    )
+  return refs
 
 
 def _build_relationship(
@@ -152,6 +200,8 @@ def _build_relationship(
     rel_name: str,
     from_entity: str,
     to_entity: str,
+    from_column_to_name: dict[str, str],
+    to_column_to_name: dict[str, str],
     column_types: dict,
     metadata: frozenset,
 ) -> tuple[Relationship, RelationshipBinding]:
@@ -171,13 +221,22 @@ def _build_relationship(
         PropertyBinding(name=prop.name, column=prop.column)
     )
 
-  from_columns = [c for c in edge.source_key_columns if c not in metadata]
-  to_columns = [c for c in edge.dest_key_columns if c not in metadata]
-  if not from_columns or not to_columns:
-    raise GraphSpecSynthesisError(
-        f"Edge {edge.alias!r} has no non-metadata SOURCE/DESTINATION key "
-        "columns to bind its endpoints."
-    )
+  from_columns = _endpoint_column_refs(
+      edge.alias,
+      "SOURCE",
+      edge.source_key_columns,
+      edge.source_ref_columns,
+      from_column_to_name,
+      metadata,
+  )
+  to_columns = _endpoint_column_refs(
+      edge.alias,
+      "DESTINATION",
+      edge.dest_key_columns,
+      edge.dest_ref_columns,
+      to_column_to_name,
+      metadata,
+  )
 
   relationship = Relationship(
       name=rel_name, from_=from_entity, to=to_entity, properties=properties
@@ -185,8 +244,8 @@ def _build_relationship(
   relationship_binding = RelationshipBinding(
       name=rel_name,
       source=edge.source,
-      from_columns=list(from_columns),
-      to_columns=list(to_columns),
+      from_columns=from_columns,
+      to_columns=to_columns,
       properties=property_bindings,
   )
   return relationship, relationship_binding
@@ -219,12 +278,15 @@ def derive_ontology_binding(
 
   Raises:
     GraphSpecSynthesisError: For graphs outside the synthesisable subset
-      (multi-label nodes, missing primary key, dangling edge endpoints, or a
-      parsed-graph / column-types mismatch).
+      (multi-label nodes, duplicate entity/relationship labels, missing primary
+      key, dangling edge endpoints, mismatched SOURCE/DESTINATION key vs.
+      REFERENCES arity, or a parsed-graph / column-types mismatch).
   """
   metadata = frozenset(metadata_columns)
 
   alias_to_entity: dict[str, str] = {}
+  alias_to_column_name: dict[str, dict[str, str]] = {}
+  entity_names: set[str] = set()
   entities: list[Entity] = []
   entity_bindings: list[EntityBinding] = []
   for node in graph.nodes:
@@ -233,18 +295,33 @@ def derive_ontology_binding(
       raise GraphSpecSynthesisError(
           f"Duplicate node alias {node.alias!r} in the property graph."
       )
+    if entity_name in entity_names:
+      raise GraphSpecSynthesisError(
+          f"Duplicate entity name {entity_name!r}: two node tables share the"
+          " LABEL. Give them distinct labels or provide an explicit"
+          " ontology/binding."
+      )
     types = column_types.node(node.alias).column_types
-    entity, entity_binding = _build_entity(
+    entity, entity_binding, column_to_name = _build_entity(
         node, entity_name, dict(types), metadata
     )
     alias_to_entity[node.alias] = entity_name
+    alias_to_column_name[node.alias] = column_to_name
+    entity_names.add(entity_name)
     entities.append(entity)
     entity_bindings.append(entity_binding)
 
+  relationship_names: set[str] = set()
   relationships: list[Relationship] = []
   relationship_bindings: list[RelationshipBinding] = []
   for edge in graph.edges:
     rel_name = _single_label(edge.alias, edge.labels, "Edge")
+    if rel_name in relationship_names:
+      raise GraphSpecSynthesisError(
+          f"Duplicate relationship name {rel_name!r}: two edge tables share the"
+          " LABEL. Give them distinct labels or provide an explicit"
+          " ontology/binding."
+      )
     if edge.source_ref_alias not in alias_to_entity:
       raise GraphSpecSynthesisError(
           f"Edge {edge.alias!r} SOURCE references unknown node alias "
@@ -261,9 +338,12 @@ def derive_ontology_binding(
         rel_name,
         alias_to_entity[edge.source_ref_alias],
         alias_to_entity[edge.dest_ref_alias],
+        alias_to_column_name[edge.source_ref_alias],
+        alias_to_column_name[edge.dest_ref_alias],
         dict(types),
         metadata,
     )
+    relationship_names.add(rel_name)
     relationships.append(relationship)
     relationship_bindings.append(relationship_binding)
 

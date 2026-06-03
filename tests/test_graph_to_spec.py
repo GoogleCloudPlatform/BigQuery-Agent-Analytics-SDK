@@ -130,9 +130,9 @@ def test_relationship_endpoints_resolve_aliases_to_entity_names() -> None:
   assert rel.to == "DecisionOption"
 
   rel_binding = binding.relationships[0]
-  # FK columns stripped of session_id.
-  assert rel_binding.from_columns == ["request_id"]
-  assert rel_binding.to_columns == ["option_id"]
+  # Explicit FK -> endpoint-PK-property mapping (session_id pair stripped).
+  assert rel_binding.from_columns == [{"request_id": "request_id"}]
+  assert rel_binding.to_columns == [{"option_id": "option_id"}]
 
 
 def test_binding_target_and_sources() -> None:
@@ -200,6 +200,82 @@ def test_derived_property_is_skipped() -> None:
   assert "full_name" not in names  # derived -> skipped
   assert names == {"person_id"}
   assert all(p.expr is None for p in ontology.entities[0].properties)
+
+
+def test_composite_pk_permutation_maps_fk_to_correct_property() -> None:
+  # REFERENCES order differs from the node KEY declaration order. A bare
+  # positional column list would mismatch; explicit dict-shape refs must pair
+  # each edge FK to the PK property the DDL actually references.
+  ddl = """
+  CREATE PROPERTY GRAPH g
+    NODE TABLES (
+      raw.thing AS Thing
+        KEY (pk_a, pk_b)
+        LABEL Thing PROPERTIES (pk_a AS key_a, pk_b AS key_b),
+      raw.other AS Other
+        KEY (oid)
+        LABEL Other PROPERTIES (oid)
+    )
+    EDGE TABLES (
+      raw.rel AS rel
+        KEY (fk_b, fk_a, o_fk)
+        SOURCE KEY (fk_b, fk_a) REFERENCES Thing (pk_b, pk_a)
+        DESTINATION KEY (o_fk) REFERENCES Other (oid)
+        LABEL Rel
+    )
+  """
+  schemas = {
+      "raw.thing": {"pk_a": "STRING", "pk_b": "INT64"},
+      "raw.other": {"oid": "STRING"},
+      "raw.rel": {"fk_a": "STRING", "fk_b": "INT64", "o_fk": "STRING"},
+  }
+  _, binding = _derive(ddl, schemas)
+  rel = binding.relationships[0]
+  # fk_b references pk_b (property key_b); fk_a references pk_a (property key_a).
+  # NOT the positional (fk_b -> key_a) a bare list would have produced.
+  assert rel.from_columns == [{"fk_b": "key_b"}, {"fk_a": "key_a"}]
+  assert rel.to_columns == [{"o_fk": "oid"}]
+
+
+def test_duplicate_node_label_raises() -> None:
+  ddl = """
+  CREATE PROPERTY GRAPH g
+    NODE TABLES (
+      raw.a AS a KEY (id) LABEL Dup PROPERTIES (id),
+      raw.b AS b KEY (id) LABEL Dup PROPERTIES (id)
+    )
+  """
+  schemas = {"raw.a": {"id": "STRING"}, "raw.b": {"id": "STRING"}}
+  with pytest.raises(GraphSpecSynthesisError, match="Duplicate entity name"):
+    _derive(ddl, schemas)
+
+
+def test_duplicate_edge_label_raises() -> None:
+  ddl = """
+  CREATE PROPERTY GRAPH g
+    NODE TABLES (
+      raw.a AS A KEY (id) LABEL A PROPERTIES (id),
+      raw.b AS B KEY (id) LABEL B PROPERTIES (id)
+    )
+    EDGE TABLES (
+      raw.e1 AS e1 KEY (x, y)
+        SOURCE KEY (x) REFERENCES A (id)
+        DESTINATION KEY (y) REFERENCES B (id) LABEL Dup,
+      raw.e2 AS e2 KEY (x, y)
+        SOURCE KEY (x) REFERENCES A (id)
+        DESTINATION KEY (y) REFERENCES B (id) LABEL Dup
+    )
+  """
+  schemas = {
+      "raw.a": {"id": "STRING"},
+      "raw.b": {"id": "STRING"},
+      "raw.e1": {"x": "STRING", "y": "STRING"},
+      "raw.e2": {"x": "STRING", "y": "STRING"},
+  }
+  with pytest.raises(
+      GraphSpecSynthesisError, match="Duplicate relationship name"
+  ):
+    _derive(ddl, schemas)
 
 
 def test_multi_label_node_raises() -> None:
