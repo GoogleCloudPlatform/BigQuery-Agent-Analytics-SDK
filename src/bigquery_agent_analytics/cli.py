@@ -1775,11 +1775,28 @@ def materialize_window(
     dataset_id: str = typer.Option(
         ..., envvar="BQ_AGENT_DATASET", help="BigQuery dataset."
     ),
-    ontology_path: str = typer.Option(
-        ..., "--ontology", help="Path to ontology YAML file."
+    ontology_path: Optional[str] = typer.Option(
+        None,
+        "--ontology",
+        help=(
+            "Path to ontology YAML file. Use with --binding, or omit both and"
+            " pass --property-graph to derive them from the graph DDL."
+        ),
     ),
-    binding_path: str = typer.Option(
-        ..., "--binding", help="Path to binding YAML file."
+    binding_path: Optional[str] = typer.Option(
+        None,
+        "--binding",
+        help="Path to binding YAML file (use with --ontology).",
+    ),
+    property_graph_path: Optional[str] = typer.Option(
+        None,
+        "--property-graph",
+        help=(
+            "Path to a CREATE PROPERTY GRAPH .sql file. Derives the ontology"
+            " and binding from the graph definition + table schemas, so no"
+            " hand-written ontology.yaml/binding.yaml is needed. Mutually"
+            " exclusive with --ontology/--binding."
+        ),
     ),
     events_table: str = typer.Option(
         "agent_events",
@@ -1977,6 +1994,20 @@ def materialize_window(
       2 — unexpected internal error (load failure, missing flag,
           programming bug).
   """
+  # Validate the input mode before any work: exactly one of
+  # (--ontology + --binding) or (--property-graph).
+  has_separated = ontology_path is not None or binding_path is not None
+  if property_graph_path is not None and has_separated:
+    raise typer.BadParameter(
+        "Use either --property-graph or --ontology/--binding, not both."
+    )
+  if property_graph_path is None:
+    if ontology_path is None or binding_path is None:
+      raise typer.BadParameter(
+          "Provide --property-graph PATH, or both --ontology PATH and"
+          " --binding PATH."
+      )
+
   try:
     from .materialize_window import _parse_backfill_timestamp
     from .materialize_window import run_materialize_window
@@ -1994,6 +2025,7 @@ def materialize_window(
         dataset_id=dataset_id,
         ontology_path=ontology_path,
         binding_path=binding_path,
+        property_graph_path=property_graph_path,
         events_table=events_table,
         lookback_hours=lookback_hours,
         overlap_minutes=overlap_minutes,
