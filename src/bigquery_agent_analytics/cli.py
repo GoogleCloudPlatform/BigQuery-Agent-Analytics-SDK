@@ -1767,6 +1767,32 @@ def views_create(
 # ------------------------------------------------------------------ #
 
 
+def _validate_context_graph_input_mode(
+    ontology_path: Optional[str],
+    binding_path: Optional[str],
+    property_graph_path: Optional[str],
+) -> None:
+  """Enforce exactly one input mode for the graph-refresh command.
+
+  Exactly one of (``--ontology`` + ``--binding``) or ``--property-graph`` must
+  be supplied. Raises ``typer.BadParameter`` (rendered as a usage error)
+  otherwise. Kept as a pure helper so the rule is unit-tested directly rather
+  than through brittle assertions on rendered CLI output.
+  """
+  has_separated = ontology_path is not None or binding_path is not None
+  if property_graph_path is not None and has_separated:
+    raise typer.BadParameter(
+        "Use either --property-graph or --ontology/--binding, not both."
+    )
+  if property_graph_path is None and (
+      ontology_path is None or binding_path is None
+  ):
+    raise typer.BadParameter(
+        "Provide --property-graph PATH, or both --ontology PATH and"
+        " --binding PATH."
+    )
+
+
 @app.command("materialize-window")
 def materialize_window(
     project_id: str = typer.Option(
@@ -1996,17 +2022,9 @@ def materialize_window(
   """
   # Validate the input mode before any work: exactly one of
   # (--ontology + --binding) or (--property-graph).
-  has_separated = ontology_path is not None or binding_path is not None
-  if property_graph_path is not None and has_separated:
-    raise typer.BadParameter(
-        "Use either --property-graph or --ontology/--binding, not both."
-    )
-  if property_graph_path is None:
-    if ontology_path is None or binding_path is None:
-      raise typer.BadParameter(
-          "Provide --property-graph PATH, or both --ontology PATH and"
-          " --binding PATH."
-      )
+  _validate_context_graph_input_mode(
+      ontology_path, binding_path, property_graph_path
+  )
 
   try:
     from .materialize_window import _parse_backfill_timestamp

@@ -146,3 +146,63 @@ def test_derive_surfaces_unresolved_placeholder() -> None:
     derive_ontology_binding_from_ddl(
         ddl, project_id="p", dataset_id="d", bq_client=_FakeClient({})
     )
+
+
+# --------------------------------------------------------------------------- #
+# Orchestrator load seam (the branch run_materialize_window actually uses)
+# --------------------------------------------------------------------------- #
+
+
+def test_orchestrator_resolves_via_property_graph(tmp_path) -> None:
+  # Proves run_materialize_window's --property-graph branch reads the DDL file,
+  # derives the pair, and converges on the same (Ontology, Binding) the YAML
+  # path would feed downstream -- exercised through the exact helper the
+  # orchestrator calls.
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  ddl_file = tmp_path / "property_graph.sql"
+  ddl_file.write_text(_DDL, encoding="utf-8")
+
+  ontology, binding = _resolve_ontology_binding(
+      ontology_path=None,
+      binding_path=None,
+      property_graph_path=str(ddl_file),
+      project_id="p",
+      dataset_id="d",
+      bq_client=_FakeClient(_SCHEMAS),
+  )
+  assert ontology.ontology == "agent_decisions_graph"
+  assert {e.name for e in ontology.entities} == {
+      "DecisionRequest",
+      "DecisionOption",
+  }
+  assert [r.name for r in ontology.relationships] == ["evaluatesOption"]
+  assert binding.target.project == "p"
+
+
+def test_orchestrator_rejects_both_modes() -> None:
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  with pytest.raises(ValueError, match="not both"):
+    _resolve_ontology_binding(
+        ontology_path="o.yaml",
+        binding_path="b.yaml",
+        property_graph_path="g.sql",
+        project_id="p",
+        dataset_id="d",
+        bq_client=_FakeClient({}),
+    )
+
+
+def test_orchestrator_rejects_neither_mode() -> None:
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  with pytest.raises(ValueError, match="Provide --property-graph"):
+    _resolve_ontology_binding(
+        ontology_path=None,
+        binding_path=None,
+        property_graph_path=None,
+        project_id="p",
+        dataset_id="d",
+        bq_client=_FakeClient({}),
+    )
