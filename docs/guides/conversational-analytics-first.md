@@ -36,10 +36,9 @@ an audit artifact.
 already followed the
 [Periodic Materialization codelab](../codelabs/periodic_materialization.md)
 through materialization, so that your project has: the dataset created, the
-`ontology.yaml` / `binding.yaml` bundle in place with the binding rendered
-(`envsubst < binding.yaml > binding.rendered.yaml`), the graph-table DDL
-applied, and the `agent_decisions_graph` property graph defined. That setup is
-about ten minutes and is not repeated here.
+graph-table DDL applied, and the `agent_decisions_graph` property graph defined
+(`property_graph.sql`). That setup is about ten minutes and is not repeated
+here.
 
 With the codelab setup in place, the only two commands specific to this guide
 produce a realistic corpus and materialize it:
@@ -57,7 +56,7 @@ bqaa seed-events \
 #    covers the corpus's 72-hour spread so every completed session is captured.
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
-    --ontology ontology.yaml --binding binding.rendered.yaml \
+    --property-graph property_graph.sql \
     --lookback-hours 80
 ```
 
