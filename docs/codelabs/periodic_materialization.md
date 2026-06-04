@@ -32,7 +32,7 @@ This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event 
 ### What you'll learn
 
 - How the BigQuery Agent Analytics Plugin writes to `agent_events`.
-- How a property graph is composed from a small set of declarative artifacts (table DDL, property-graph DDL, ontology, binding).
+- How a context graph is defined by two declarative artifacts (table DDL + a `CREATE PROPERTY GRAPH` schema) — and why no separate ontology or binding file is required.
 - How to run `bqaa context-graph` against a property graph.
 - How to query a BigQuery property graph in GQL.
 - The production-grade capabilities the SDK supports for enterprise deployments.
@@ -186,14 +186,16 @@ Cloud Shell users can skip this step; credentials are already configured. (In Co
 
 Duration: 02:00
 
-The codelab ships a set of ready-to-use artifacts: the table DDL, the property-graph schema, the ontology, and the binding. You do not author any of these yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
+The codelab needs just two ready-to-use artifacts: the **table DDL** (the physical graph tables) and the **property-graph schema** (`CREATE PROPERTY GRAPH`). You do not author either yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
 
-This codelab is self-contained: the cell below writes the four artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/codelab/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization).
+The property-graph schema is the single source of truth for *what* the graph contains. `bqaa context-graph` reads it (plus your table schemas) to figure out which entities and relationships to extract and where to write them — so you do **not** need to write a separate ontology or binding file.
+
+This codelab is self-contained: the cell below writes the two artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/codelab/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization).
 
 <!-- colab:code python -->
 ```python
 # This codelab is self-contained: rather than downloading files, this
-# cell writes the four artifacts into a working directory. They are
+# cell writes the two artifacts into a working directory. They are
 # identical to the files in examples/codelab/periodic_materialization/.
 from pathlib import Path
 
@@ -274,93 +276,6 @@ CREATE OR REPLACE PROPERTY GRAPH `${PROJECT_ID}.${DATASET}.agent_decisions_graph
       LABEL resultedIn
   );
 """,
-    "ontology.yaml": r"""# Ontology for the BQAA codelab.
-#
-# Names the entities and relationships in the codelab's sample
-# agent decision flow. The materializer uses this vocabulary
-# when it constructs the AI.GENERATE extraction prompt.
-#
-# Paired with binding.yaml (which maps these entities to
-# physical BigQuery tables) and property_graph.sql (which
-# stitches the tables into a queryable BigQuery property graph).
-ontology: agent_decision_flow
-entities:
-  - name: DecisionRequest
-    keys:
-      primary: [requestId]
-    properties:
-      - {name: requestId,   type: string}
-      - {name: requestText, type: string}
-      - {name: requestedAt, type: timestamp}
-  - name: DecisionOption
-    keys:
-      primary: [optionId]
-    properties:
-      - {name: optionId,    type: string}
-      - {name: optionLabel, type: string}
-      - {name: confidence,  type: double}
-  - name: DecisionOutcome
-    keys:
-      primary: [outcomeId]
-    properties:
-      - {name: outcomeId,   type: string}
-      - {name: status,      type: string}
-      - {name: rationale,   type: string}
-      - {name: decidedAt,   type: timestamp}
-relationships:
-  - {name: evaluatesOption, from: DecisionRequest, to: DecisionOption}
-  - {name: resultedIn,      from: DecisionRequest, to: DecisionOutcome}
-""",
-    "binding.yaml": r"""# Binding for the BQAA codelab.
-#
-# Maps the ontology's entities and relationships to physical
-# BigQuery tables and columns. Paired with ontology.yaml
-# and property_graph.sql.
-#
-# Before passing this file to bqaa context-graph, render
-# the shell placeholders with envsubst:
-#   envsubst < binding.yaml > binding.yaml.tmp && mv binding.yaml.tmp binding.yaml
-#
-# Required shell variables:
-#   PROJECT_ID  : your GCP project ID
-#   DATASET     : the BigQuery dataset that holds both raw agent_events
-#                 and the materialized graph tables
-binding: agent_decisions_binding
-ontology: agent_decision_flow
-target:
-  backend: bigquery
-  project: ${PROJECT_ID}
-  dataset: ${DATASET}
-entities:
-  - name: DecisionRequest
-    source: ${PROJECT_ID}.${DATASET}.decision_request
-    properties:
-      - {name: requestId,    column: request_id}
-      - {name: requestText,  column: request_text}
-      - {name: requestedAt,  column: requested_at}
-  - name: DecisionOption
-    source: ${PROJECT_ID}.${DATASET}.decision_option
-    properties:
-      - {name: optionId,     column: option_id}
-      - {name: optionLabel,  column: option_label}
-      - {name: confidence,   column: confidence}
-  - name: DecisionOutcome
-    source: ${PROJECT_ID}.${DATASET}.decision_outcome
-    properties:
-      - {name: outcomeId,    column: outcome_id}
-      - {name: status,       column: status}
-      - {name: rationale,    column: rationale}
-      - {name: decidedAt,    column: decided_at}
-relationships:
-  - name: evaluatesOption
-    source: ${PROJECT_ID}.${DATASET}.evaluates_option
-    from_columns: [request_id]
-    to_columns:   [option_id]
-  - name: resultedIn
-    source: ${PROJECT_ID}.${DATASET}.resulted_in
-    from_columns: [request_id]
-    to_columns:   [outcome_id]
-""",
 }
 for name, body in artifacts.items():
     (work / name).write_text(body)
@@ -368,13 +283,13 @@ for name, body in artifacts.items():
 print("Wrote:", ", ".join(sorted(artifacts)))
 ```
 
-The cell writes these four artifacts:
+The cell writes these two artifacts:
 
 ```
-binding.yaml  ontology.yaml  property_graph.sql  table_ddl.sql
+property_graph.sql  table_ddl.sql
 ```
 
-The decision flow these artifacts describe has three node types and two heterogeneous edges:
+The decision flow they describe has three node types and two heterogeneous edges:
 
 ```
 DecisionRequest --[evaluatesOption]--> DecisionOption
@@ -382,6 +297,9 @@ DecisionRequest --[evaluatesOption]--> DecisionOption
 ```
 
 `DecisionRequest` is the question the agent received. `DecisionOption` is one alternative the agent considered. `DecisionOutcome` records the committed choice and the rationale.
+
+> aside positive
+> **Advanced: bring your own ontology + binding.** Schema-derived mode covers the common case. When you need finer control — human-readable descriptions to steer the AI extraction prompt, entity inheritance, derived (computed) properties, or column renames — author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` instead of `--property-graph`. The [artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization) ships both files as a starting point.
 
 ## Apply the property graph schema
 
@@ -398,17 +316,7 @@ envsubst < property_graph.sql | bq query --use_legacy_sql=false
 
 You should see five `CREATE TABLE` results and one `CREATE PROPERTY GRAPH` result. The DDL is idempotent; you can re-run it safely.
 
-#### Render the binding
-
-The materializer reads `binding.yaml` directly. **Substitute the shell variables once** before any tool reads the file:
-
-<!-- colab:code bash -->
-```bash
-cd ~/bqaa-codelab
-envsubst < binding.yaml > binding.rendered.yaml
-```
-
-After this, `binding.rendered.yaml` contains your real project ID and dataset name instead of the `${...}` markers. If you skip this step, `bqaa context-graph` validates against literal `${PROJECT_ID}` text and fails closed.
+That is the only schema work you do. Because `bqaa context-graph` derives what to extract from this property graph, there is no separate binding file to render — the `${PROJECT_ID}` / `${DATASET}` markers in `property_graph.sql` are resolved for you from `--project-id` / `--dataset-id` when you materialize.
 
 ## Generate sample agent events
 
@@ -498,7 +406,7 @@ The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa c
 
 Duration: 05:00
 
-`bqaa context-graph` reads the raw `agent_events`, uses the **ontology** to identify which entities and relationships to extract and the **binding** to map them onto your BigQuery tables and columns, then populates the tables behind the property graph. The property-graph schema you applied earlier only defines the *query surface* over those tables — it cannot populate them, which is exactly why this step requires both `--ontology` and `--binding`.
+`bqaa context-graph` reads the raw `agent_events`, then **derives what to extract directly from your property graph**: it reads the `CREATE PROPERTY GRAPH` definition you applied in *Apply the property graph schema* and the schemas of the tables it references, works out the entities, relationships, and column types, and populates the graph tables. Point it at `property_graph.sql` with `--property-graph` — no separate ontology or binding file required.
 
 **Run the materializer** locally:
 
@@ -507,8 +415,7 @@ Duration: 05:00
 bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --ontology ~/bqaa-codelab/ontology.yaml \
-    --binding ~/bqaa-codelab/binding.rendered.yaml \
+    --property-graph ~/bqaa-codelab/property_graph.sql \
     --lookback-hours 24 \
     --format json
 ```
@@ -670,8 +577,7 @@ TO=$(date -u -d "8 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
 bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --ontology ~/bqaa-codelab/ontology.yaml \
-    --binding ~/bqaa-codelab/binding.rendered.yaml \
+    --property-graph ~/bqaa-codelab/property_graph.sql \
     --lookback-hours 1 \
     --backfill --from "$FROM" --to "$TO" \
     --state-key-suffix codelab_backfill_demo \
@@ -689,8 +595,7 @@ print(f"Backfill window TO   = {os.environ['TO']}")
 !cd ~/bqaa-codelab && bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --ontology ontology.yaml \
-    --binding binding.rendered.yaml \
+    --property-graph property_graph.sql \
     --lookback-hours 1 \
     --backfill --from "$FROM" --to "$TO" \
     --state-key-suffix codelab_backfill_demo \
@@ -762,7 +667,7 @@ Duration: 02:00
 
 Congratulations! You've turned raw agent event logs into a queryable Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
 
-The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point and adapt the four declarative files (table DDL, property-graph DDL, ontology, binding) to your domain.
+The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point and adapt the two declarative files (table DDL + the `CREATE PROPERTY GRAPH` schema) to your domain — `bqaa context-graph --property-graph` derives the rest. Reach for an explicit `ontology.yaml` + `binding.yaml` only when you need descriptions, inheritance, derived properties, or column renames.
 
 #### What you've learned
 

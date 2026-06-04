@@ -98,18 +98,18 @@ CREATE OR REPLACE PROPERTY GRAPH agent_analytics.agent_decisions_graph
 
 ### Step 3: Extract context graph from agent traces
 
-A single command reads the raw `agent_events`, extracts the entities and relationships your ontology declares, and populates the graph tables. For local development, run the materializer once:
+A single command reads the raw `agent_events` and populates the graph tables. It derives what to extract directly from the property graph you defined in Step 2: `bqaa context-graph` reads that `CREATE PROPERTY GRAPH` definition and the schemas of the tables it references, so the property-graph schema is the only thing you author — no separate ontology or binding file. For local development, run the materializer once:
 
 ```bash
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
-    --ontology ontology.yaml --binding binding.rendered.yaml \
+    --property-graph property_graph.sql \
     --lookback-hours 24
 ```
 
 For production, run the same materialization path on a schedule with the SDK's Cloud Run Job + Cloud Scheduler [deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) or Terraform module.
 
-Extraction is your choice: an LLM path (`AI.GENERATE`) for flexible onboarding against variable log structures, or a deterministic compiled mode (`--extraction-mode=compiled-only`) for lower cost and reproducible, auditor-verifiable output with no Vertex AI dependency.
+Extraction is your choice: an LLM path (`AI.GENERATE`) for flexible onboarding against variable log structures, or a deterministic compiled mode (`--extraction-mode=compiled-only`) for lower cost and reproducible, auditor-verifiable output with no Vertex AI dependency. (Need descriptions, inheritance, derived properties, or column renames? Author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` instead.)
 
 ### Step 4: Access the context graph
 

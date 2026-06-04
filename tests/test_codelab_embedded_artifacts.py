@@ -32,7 +32,7 @@ _ARTIFACTS = _REPO / "examples" / "codelab" / "periodic_materialization"
 
 @pytest.mark.parametrize(
     "name",
-    ["table_ddl.sql", "property_graph.sql", "ontology.yaml", "binding.yaml"],
+    ["table_ddl.sql", "property_graph.sql"],
 )
 def test_embedded_artifact_matches_canonical(name: str) -> None:
   canonical = (_ARTIFACTS / name).read_text(encoding="utf-8").rstrip("\n")
