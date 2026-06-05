@@ -101,6 +101,7 @@ MAX_SESSIONS=""
 JOB_NAME="bqaa-periodic-materialization"
 SMOKE=false
 EXTRACTION_MODE="ai-fallback"
+PROPERTY_GRAPH=""
 MAX_SESSION_AGE_HOURS=""
 # Production posture by default: split runtime + scheduler-caller
 # SAs (issue #182). ``--single-sa`` is the escape hatch for
@@ -148,6 +149,14 @@ Optional:
                                roles/aiplatform.user grant and idempotently
                                removes any pre-existing grant from a prior
                                ai-fallback deploy of the same SA.
+  --property-graph PATH        Schema-derived mode (#286): derive the
+                               ontology + binding from this CREATE PROPERTY
+                               GRAPH .sql file plus the table schemas, instead
+                               of staging ontology.yaml/binding.yaml. A
+                               placeholdered (\${PROJECT_ID}/\${DATASET})
+                               table_ddl.sql must sit next to it. Use for
+                               rename-free graphs; not compatible with
+                               --extraction-mode=compiled-only.
   --max-session-age-hours N    Enable the orphan-session watchdog (issue
                                #180). When set, each cron pass additionally
                                scans for sessions whose first event is
@@ -214,6 +223,7 @@ while [[ $# -gt 0 ]]; do
     --job-name)        require_arg "$1" "${2-}"; JOB_NAME="$2"; shift 2 ;;
     --smoke)           SMOKE=true; shift ;;
     --extraction-mode) require_arg "$1" "${2-}"; EXTRACTION_MODE="$2"; shift 2 ;;
+    --property-graph)  require_arg "$1" "${2-}"; PROPERTY_GRAPH="$2"; shift 2 ;;
     --max-session-age-hours)
                        require_arg "$1" "${2-}"; MAX_SESSION_AGE_HOURS="$2"; shift 2 ;;
     --single-sa)       SINGLE_SA=true; shift ;;
@@ -252,6 +262,33 @@ case "$EXTRACTION_MODE" in
     exit 1
     ;;
 esac
+
+# Spec input mode (#286). ``--property-graph`` selects schema-derived
+# mode: the ontology + binding are derived from the property graph + the
+# table schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged.
+# Unset = the explicit migration-v5 ontology+binding (compiled-extractor)
+# path. Exactly one mode is in effect.
+TABLE_DDL_SRC=""
+if [[ -n "$PROPERTY_GRAPH" ]]; then
+  # Derived mode has no reference extractors staged, so compiled-only
+  # would empty_extract at runtime — reject it at the deploy boundary.
+  if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
+    echo "Error: --property-graph (schema-derived mode) does not support --extraction-mode=compiled-only: no reference extractors are staged in derived mode. Use 'ai-fallback', or deploy the explicit ontology/binding path." >&2
+    exit 1
+  fi
+  if [[ ! -f "$PROPERTY_GRAPH" ]]; then
+    echo "Error: --property-graph file not found: $PROPERTY_GRAPH" >&2
+    exit 1
+  fi
+  # The derived path also needs the graph tables to exist before the first
+  # run (it reads INFORMATION_SCHEMA), so a placeholdered table_ddl.sql must
+  # sit next to the property graph.
+  TABLE_DDL_SRC="$(dirname "$PROPERTY_GRAPH")/table_ddl.sql"
+  if [[ ! -f "$TABLE_DDL_SRC" ]]; then
+    echo "Error: schema-derived mode also needs a 'table_ddl.sql' next to the property graph (so the graph tables can be bootstrapped); not found: $TABLE_DDL_SRC" >&2
+    exit 1
+  fi
+fi
 
 # Validate ``--max-retries`` at the boundary (issue #183). A typo
 # like ``--max-retries=-1`` would otherwise be forwarded to
@@ -586,17 +623,26 @@ STAGING="$(mktemp -d -t bqaa-cloud-run-job-XXXXXXXX)"
 
 echo "==> staging at $STAGING"
 cp "${SCRIPT_DIR}/run_job.py" "$STAGING/"
-cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
-cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
-cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"
-# Stage the reference extractor module next to ``run_job.py`` so
-# Python can import it via ``BQAA_REFERENCE_EXTRACTORS_MODULE=
-# reference_extractor`` (Buildpacks sets the container working
-# directory to the staging dir's contents, which puts the
-# extractor on ``sys.path``). Shipped in both modes so an
-# operator who flips an existing deploy from ai-fallback to
-# compiled-only doesn't need to also re-stage extractor code.
-cp "${ARTIFACTS_DIR}/reference_extractor.py" "$STAGING/"
+if [[ -n "$PROPERTY_GRAPH" ]]; then
+  # Schema-derived mode: stage only the property graph + its companion
+  # table DDL. The runtime derives ontology + binding from them, so no
+  # ontology.yaml / binding.yaml / reference_extractor.py is needed.
+  cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"
+  cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"
+else
+  # Explicit ontology + binding (migration-v5 / compiled-extractor path).
+  cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
+  cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
+  cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"
+  # Stage the reference extractor module next to ``run_job.py`` so
+  # Python can import it via ``BQAA_REFERENCE_EXTRACTORS_MODULE=
+  # reference_extractor`` (Buildpacks sets the container working
+  # directory to the staging dir's contents, which puts the
+  # extractor on ``sys.path``). Shipped in both modes so an
+  # operator who flips an existing deploy from ai-fallback to
+  # compiled-only doesn't need to also re-stage extractor code.
+  cp "${ARTIFACTS_DIR}/reference_extractor.py" "$STAGING/"
+fi
 
 # Vendor the local SDK source.
 mkdir -p "$STAGING/sdk_src/src"
@@ -666,6 +712,11 @@ fi
 # set it themselves on a custom image.
 if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
   ENV_VARS+=("BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor")
+fi
+# Schema-derived mode: tell the runtime to derive the spec from the staged
+# property graph instead of the explicit ontology/binding pair (#286).
+if [[ -n "$PROPERTY_GRAPH" ]]; then
+  ENV_VARS+=("BQAA_PROPERTY_GRAPH=property_graph.sql")
 fi
 # Orphan-session watchdog (issue #180). Only wired when the
 # operator explicitly opts in via ``--max-session-age-hours``;

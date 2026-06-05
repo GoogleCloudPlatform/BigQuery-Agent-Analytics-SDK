@@ -56,6 +56,11 @@ Optional:
   --tag TAG              Image tag (default: short git SHA of HEAD, or
                          a timestamp if HEAD isn't a git ref).
   --create-repo          Create the AR repo if it doesn't exist.
+  --property-graph PATH   Schema-derived mode (#286): stage this CREATE
+                         PROPERTY GRAPH .sql plus a sibling table_ddl.sql
+                         instead of ontology.yaml/binding.yaml/
+                         reference_extractor.py. The runtime derives the
+                         ontology + binding from them.
   -h | --help            Show this help.
 
 Outputs (last line of stdout):
@@ -67,22 +72,37 @@ EOF
 }
 
 CREATE_REPO=false
+PROPERTY_GRAPH=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --project)      PROJECT="$2"; shift 2 ;;
-    --repo)         REPO="$2"; shift 2 ;;
-    --region)       REGION="$2"; shift 2 ;;
-    --image)        IMAGE="$2"; shift 2 ;;
-    --tag)          TAG="$2"; shift 2 ;;
-    --create-repo)  CREATE_REPO=true; shift ;;
-    -h|--help)      usage 0 ;;
-    *)              echo "Unknown arg: $1" >&2; usage 1 ;;
+    --project)        PROJECT="$2"; shift 2 ;;
+    --repo)           REPO="$2"; shift 2 ;;
+    --region)         REGION="$2"; shift 2 ;;
+    --image)          IMAGE="$2"; shift 2 ;;
+    --tag)            TAG="$2"; shift 2 ;;
+    --create-repo)    CREATE_REPO=true; shift ;;
+    --property-graph) PROPERTY_GRAPH="$2"; shift 2 ;;
+    -h|--help)        usage 0 ;;
+    *)                echo "Unknown arg: $1" >&2; usage 1 ;;
   esac
 done
 
 if [[ -z "$PROJECT" || -z "$REPO" ]]; then
   echo "Error: --project and --repo are required." >&2
   usage 1
+fi
+
+TABLE_DDL_SRC=""
+if [[ -n "$PROPERTY_GRAPH" ]]; then
+  if [[ ! -f "$PROPERTY_GRAPH" ]]; then
+    echo "Error: --property-graph file not found: $PROPERTY_GRAPH" >&2
+    usage 1
+  fi
+  TABLE_DDL_SRC="$(dirname "$PROPERTY_GRAPH")/table_ddl.sql"
+  if [[ ! -f "$TABLE_DDL_SRC" ]]; then
+    echo "Error: schema-derived mode needs a 'table_ddl.sql' next to the property graph; not found: $TABLE_DDL_SRC" >&2
+    usage 1
+  fi
 fi
 
 if [[ -z "$TAG" ]]; then
@@ -131,10 +151,17 @@ echo "==> staging build context at $STAGING" >&2
 # pins these copies to lock the contract.
 
 cp "${SCRIPT_DIR}/run_job.py" "$STAGING/"
-cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
-cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
-cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"
-cp "${ARTIFACTS_DIR}/reference_extractor.py" "$STAGING/"
+if [[ -n "$PROPERTY_GRAPH" ]]; then
+  # Schema-derived mode: stage the property graph + its companion table DDL.
+  cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"
+  cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"
+else
+  # Explicit ontology + binding (migration-v5 / compiled-extractor path).
+  cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
+  cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
+  cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"
+  cp "${ARTIFACTS_DIR}/reference_extractor.py" "$STAGING/"
+fi
 
 mkdir -p "$STAGING/sdk_src/src"
 cp -r "$REPO_ROOT/src/bigquery_agent_analytics" "$STAGING/sdk_src/src/"
