@@ -41,11 +41,17 @@ jobs:
       - name: Run autoformat and check for changes
         run: |
           bash autoformat.sh
-          if ! git diff --exit-code src/ tests/ examples/; then
+          if ! git diff --exit-code src/ tests/ examples/ scripts/; then
             echo ""
             echo "::error::Code is not formatted. Run 'bash autoformat.sh' and commit the changes."
             exit 1
           fi
+
+      - name: Check codelab notebook is in sync with markdown source
+        run: |
+          python scripts/generate_colab_from_codelab.py --check \
+            docs/codelabs/periodic_materialization.md \
+            examples/codelab/periodic_materialization/colab_notebook.ipynb
 
   test:
     name: Test (Python ${{ matrix.python-version }})

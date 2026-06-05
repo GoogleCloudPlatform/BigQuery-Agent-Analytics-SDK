@@ -1,6 +1,6 @@
 # Periodic materialization — Cloud Run Job + Cloud Scheduler
 
-Run `bqaa-materialize-window` on a cron, against your own
+Run `bqaa context-graph` on a cron, against your own
 BigQuery project, with one local command and one deploy command.
 
 The migration v5 demo (`examples/migration_v5/`) ships the
@@ -41,7 +41,7 @@ deployment verification in PR #166.
 ## Production shape
 
 ```
-agent_events            bqaa-materialize-window         graph entity/
+agent_events            bqaa context-graph         graph entity/
 (your events DS)  ────► (Cloud Run Job, every N hrs) ──► relationship tables
                               │                          (your graph DS)
                               ▼
@@ -239,7 +239,7 @@ events trickle in over hours, scale up).
 | **~1 hour** | `0 * * * *` | `2` | `15` | Tight window + small overlap. Best for low-latency monitoring use cases. Higher BQ cost per day (24 runs). |
 | **~6 hours** | `0 */6 * * *` | `8` | `30` | Default in the deploy script. Good balance for dashboarding / reporting use cases. 4 runs per day. |
 | **Daily** | `0 2 * * *` | `30` | `60` | Catch-up window covers any late-arriving events from the prior day. 1 run per day. Pair with off-peak `02:00` to avoid contending with daytime BQ slots. |
-| **Backfill** | (manual) | depends | depends | For one-shot catch-up: `bqaa-materialize-window --lookback-hours $N` with N covering the gap. Defer to a future `--backfill --from/--to` mode once it ships. |
+| **Backfill** | (manual) | depends | depends | For one-shot catch-up: `bqaa context-graph --lookback-hours $N` with N covering the gap. Defer to a future `--backfill --from/--to` mode once it ships. |
 
 Rules of thumb:
 

@@ -228,7 +228,7 @@ A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells a
 
 The notebook walks through the four guarantees once, ad hoc. Real deployments want the graph kept fresh on a cron — events arrive continuously, the materialized entity/relationship tables should follow within a chosen latency budget.
 
-[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa-materialize-window` every N hours against your project, using the MAKO demo's bound artifacts. The deploy script bundles the checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql` from this directory — running it against a different `OntologyConfig` means regenerating those snapshots for your config first and pointing the deploy at the new files. The deploy script doesn't yet wire that as a CLI flag; that's a natural follow-up but out of scope for this PR.
+[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa context-graph` every N hours against your project, using the MAKO demo's bound artifacts (the standalone `bqaa-materialize-window` command remains a deprecated alias for the same handler if your existing scripts still call it). The deploy script bundles the checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql` from this directory — running it against a different `OntologyConfig` means regenerating those snapshots for your config first and pointing the deploy at the new files. The deploy script doesn't yet wire that as a CLI flag; that's a natural follow-up but out of scope for this PR.
 
 The flow customers actually follow:
 

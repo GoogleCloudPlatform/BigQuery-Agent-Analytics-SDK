@@ -1230,12 +1230,62 @@ def _parse_backfill_timestamp(
 # ------------------------------------------------------------------ #
 
 
+def _resolve_ontology_binding(
+    *,
+    ontology_path: Optional[str],
+    binding_path: Optional[str],
+    property_graph_path: Optional[str],
+    project_id: str,
+    dataset_id: str,
+    bq_client: Any,
+):
+  """Resolve the ``(Ontology, Binding)`` pair from one of two input modes.
+
+  * Explicit YAML: ``ontology_path`` + ``binding_path`` together.
+  * Schema-derived: ``property_graph_path`` (a ``CREATE PROPERTY GRAPH`` DDL
+    file) -- parse it, read column types from ``INFORMATION_SCHEMA.COLUMNS``
+    via ``bq_client``, and synthesise the pair in memory (#277). No
+    hand-written ontology/binding required.
+
+  Exactly one mode must be supplied; both or neither raises ``ValueError``.
+  This is the single seam the orchestrator uses to obtain its spec, so both
+  input modes converge here onto the same downstream ``resolve()`` path.
+  """
+  from bigquery_ontology import load_binding
+  from bigquery_ontology import load_ontology
+
+  if property_graph_path is not None:
+    if ontology_path is not None or binding_path is not None:
+      raise ValueError(
+          "Provide either --property-graph or --ontology/--binding, not both."
+      )
+    from .property_graph_spec import derive_ontology_binding_from_ddl
+
+    ddl_text = pathlib.Path(property_graph_path).read_text(encoding="utf-8")
+    return derive_ontology_binding_from_ddl(
+        ddl_text,
+        project_id=project_id,
+        dataset_id=dataset_id,
+        bq_client=bq_client,
+    )
+
+  if ontology_path is None or binding_path is None:
+    raise ValueError(
+        "Provide --property-graph PATH, or both --ontology PATH and"
+        " --binding PATH."
+    )
+  ontology_obj = load_ontology(ontology_path)
+  binding_obj = load_binding(binding_path, ontology=ontology_obj)
+  return ontology_obj, binding_obj
+
+
 def run_materialize_window(
     *,
     project_id: str,
     dataset_id: str,
-    ontology_path: str,
-    binding_path: str,
+    ontology_path: Optional[str] = None,
+    binding_path: Optional[str] = None,
+    property_graph_path: Optional[str] = None,
     events_table: str = "agent_events",
     lookback_hours: float,
     overlap_minutes: float = DEFAULT_OVERLAP_MINUTES,
@@ -1265,7 +1315,12 @@ def run_materialize_window(
 
   Args:
     project_id, dataset_id: BigQuery target.
-    ontology_path, binding_path: YAML paths.
+    ontology_path, binding_path: YAML paths for the explicit input mode (use
+      both together).
+    property_graph_path: Path to a ``CREATE PROPERTY GRAPH`` DDL file for the
+      schema-derived input mode; the ontology + binding are synthesised from
+      the graph definition and live table schemas. Mutually exclusive with
+      ``ontology_path`` / ``binding_path``; exactly one mode must be supplied.
     events_table: Source telemetry table name (relative to
       ``--dataset-id``).
     lookback_hours: Window size. The discovery query lower bound
@@ -1508,16 +1563,19 @@ def run_materialize_window(
   )
   state_table_ref = f"{state_project}.{state_dataset}.{state_table_local}"
 
-  # Load ontology + binding (raw text for the fingerprint helper +
-  # parsed objects for the orchestrator).
-  from bigquery_ontology import Binding
-  from bigquery_ontology import load_binding
-  from bigquery_ontology import load_ontology
-  from bigquery_ontology import Ontology
+  # Resolve the ontology + binding from one of two input modes (see
+  # _resolve_ontology_binding): explicit YAML, or schema-derived from a
+  # CREATE PROPERTY GRAPH DDL.
   from bigquery_ontology._fingerprint import fingerprint_model
 
-  ontology_obj: Ontology = load_ontology(ontology_path)
-  binding_obj: Binding = load_binding(binding_path, ontology=ontology_obj)
+  ontology_obj, binding_obj = _resolve_ontology_binding(
+      ontology_path=ontology_path,
+      binding_path=binding_path,
+      property_graph_path=property_graph_path,
+      project_id=project_id,
+      dataset_id=dataset_id,
+      bq_client=client,
+  )
   ontology_fp = fingerprint_model(ontology_obj)
   binding_fp = fingerprint_model(binding_obj)
 

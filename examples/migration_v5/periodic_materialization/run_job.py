@@ -21,7 +21,7 @@ Scheduler trigger that fires every N hours; the orchestrator's
 state-table checkpoint plus overlap window handles "exactly once"
 across consecutive runs.
 
-This wrapper does three things the bare ``bqaa-materialize-window``
+This wrapper does three things the bare ``bqaa context-graph``
 CLI doesn't, all needed for a hands-off scheduled deployment:
 
 1. **Retargets the demo binding** to the customer's
