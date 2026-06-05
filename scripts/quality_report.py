@@ -1233,6 +1233,15 @@ def run_evaluation(
 
   if eval_spec is None:
     eval_spec = _load_eval_spec()
+  if not eval_spec or not eval_spec.get("golden_qa"):
+    logger.warning(
+        "No golden_qa in the eval spec: response_usefulness and task_grounding "
+        "are LLM estimates WITHOUT ground truth and can mislabel verbose, "
+        "tool-grounded answers as ungrounded/unhelpful. For trustworthy "
+        "correctness, pass --eval-spec with a golden_qa list (question + "
+        "expected_answer); the judge then grades against the expected answer "
+        "(see summary.golden_eval_summary)."
+    )
   metrics = get_eval_metrics(eval_spec=eval_spec, eval_config=eval_config)
   cat_config = CategoricalEvaluationConfig(
       metrics=metrics,
