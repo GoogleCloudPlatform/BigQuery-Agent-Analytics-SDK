@@ -9,9 +9,18 @@ Standalone scripts for the BigQuery Agent Analytics SDK.
 
 ## Quality Report
 
-Runs LLM-as-a-judge evaluation over agent sessions stored in BigQuery
-and produces a quality report with per-agent breakdown, unhelpful session
-analysis, and category distributions.
+Runs LLM-as-a-judge evaluation over agent sessions and produces a diagnostic
+quality report — not just a pass/fail scorecard. On top of the per-agent
+breakdown, unhelpful-session analysis, and category distributions, it scores
+**5 quality dimensions**, grades **factual correctness against ground truth**
+(golden Q&A), attributes each failure to a **cause** (skill / knowledge / tool),
+analyzes **multi-turn corrections**, and renders **execution traces** so you can
+see *where* a session went wrong.
+
+Sessions can come from **BigQuery** (the default) or from a **local JSON file**
+of conversations (`--conversations-file`, no BigQuery required) — see
+[Adding evals](#adding-evals-grounding-the-report-in-ground-truth) for the
+recommended workflow.
 
 ### Prerequisites
 
@@ -47,7 +56,7 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ### Usage
 
 ```bash
-# From the repo root:
+# From the repo root — basics:
 ./scripts/quality_report.sh                         # evaluate last 100 sessions
 ./scripts/quality_report.sh --limit 500             # evaluate last 500 sessions
 ./scripts/quality_report.sh --time-period 7d        # evaluate last 7 days
@@ -55,23 +64,41 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --no-eval               # browse Q&A only (no evaluation)
 ./scripts/quality_report.sh --persist               # persist results to BigQuery
 ./scripts/quality_report.sh --model gemini-2.5-pro  # use a specific model
-./scripts/quality_report.sh --samples 20            # show 20 sessions per category
-./scripts/quality_report.sh --samples all           # show all sessions per category
+./scripts/quality_report.sh --env path/to/.env      # load a specific .env file
+
+# Add ground truth — the most important usage (see "Adding evals" below):
+./scripts/quality_report.sh --eval-spec eval_spec.json --report  # scope + golden Q&A
+./scripts/quality_report.sh --conversations-file traffic.json \
+  --eval-spec eval_spec.json --report              # score local cases, no BigQuery
+./scripts/quality_report.sh --conversations-file traffic.json --concurrency 20
+./scripts/quality_report.sh --golden-threshold 0.85  # looser golden_qa matching
+./scripts/quality_report.sh --eval-config my_metrics.json  # custom metric definitions
+
+# Choose how much to score:
+./scripts/quality_report.sh --dimensions full       # 7 metrics (default)
+./scripts/quality_report.sh --dimensions primary    # 2 primary metrics only (~3.5x cheaper)
+./scripts/quality_report.sh --tag-turns             # classify each user turn (multi-turn)
+./scripts/quality_report.sh --trajectory-samples 5  # include N execution traces
+
+# Filter which sessions to evaluate:
 ./scripts/quality_report.sh --app-name my_agent     # filter to a specific agent app
 ./scripts/quality_report.sh --label version=v2.1    # filter by custom label
 ./scripts/quality_report.sh --label version=v2 --label env=prod  # multiple labels (AND)
 ./scripts/quality_report.sh --session-ids-file ids.json  # evaluate specific sessions
-./scripts/quality_report.sh --output-json report.json    # write structured JSON output
-./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
 ./scripts/quality_report.sh --session <session_id>  # evaluate single session (verbose)
 
-# Grounded evaluation with scope + golden Q&A (see --eval-spec section below)
-./scripts/quality_report.sh --eval-spec eval_spec.json --report
+# Control the report:
+./scripts/quality_report.sh --samples 20            # show 20 sessions per category
+./scripts/quality_report.sh --samples all           # show all sessions per category
+./scripts/quality_report.sh --samples unhelpful=10,partial=5,low=3  # per-category caps
+./scripts/quality_report.sh --output-json report.json    # write structured JSON output
+./scripts/quality_report.sh --threshold 15          # unhelpful rate warning at 15%
 
-# Full report with all filters
+# Full ground-truth report with all the trimmings:
 ./scripts/quality_report.sh --report --limit 50 --app-name my_agent \
   --label version=v2.1 --label env=prod --time-period 7d \
-  --tag-turns --trajectory-samples 5 --eval-spec eval_spec.json
+  --tag-turns --trajectory-samples 5 \
+  --eval-spec eval_spec.json --output-json results.json
 ```
 
 Or run the Python script directly:
@@ -106,6 +133,109 @@ justifications** for the single session (verbose mode). See
 - Unhelpful / Declined / Partial session details with conversations
 
 **Log files** are saved to `scripts/reports/` for each eval run.
+
+### Adding evals: grounding the report in ground truth
+
+This is the single most important way to use the quality report. Without
+ground truth, `response_usefulness` and `task_grounding` are **LLM estimates** —
+the judge guesses whether an answer is good. That can mislabel a verbose,
+tool-grounded answer as "meaningful" when it is actually wrong, or flag a correct
+decline as a failure. Adding evals turns the report into a **trustworthy
+regression signal**.
+
+There are two things you "add", and they compose:
+
+1. **An eval spec** (`--eval-spec`) — describes what the agent should do and the
+   facts it should know: `scope`, `tools`, `ground_truth`, and `golden_qa`.
+   See [Grounding the judge](#grounding-the-judge---eval-spec) below for the
+   full schema. Golden Q&A is the highest-value field: each session's question is
+   matched to a known question and the **expected answer** is injected into the
+   judge, so it grades factual correctness against ground truth instead of
+   guessing. The output gains a `golden_eval_summary` — the headline number for
+   regression testing.
+
+2. **A set of conversations to score** — either pulled from BigQuery (the
+   default) or supplied directly as a **local JSON file** with
+   `--conversations-file` (no BigQuery, no GCP credentials). This is what lets you
+   score eval cases offline, in CI, or before anything is deployed.
+
+**Recommended workflow:**
+
+```bash
+# 1. Create an eval spec for your agent (scope + tools + ground truth + golden Q&A)
+cp scripts/eval/data/eval_spec.example.json scripts/eval/data/eval_spec.json
+#   edit it — see "Grounding the judge" below
+
+# 2a. Score live sessions from BigQuery against that spec
+./scripts/quality_report.sh --eval-spec scripts/eval/data/eval_spec.json --report
+
+# 2b. OR score a local set of conversations offline (no BigQuery)
+./scripts/quality_report.sh --conversations-file traffic.json \
+  --eval-spec scripts/eval/data/eval_spec.json --report --output-json results.json
+```
+
+#### Local conversations (`--conversations-file`)
+
+`--conversations-file PATH` evaluates conversations from a local JSON file using
+the Gemini API directly — no BigQuery table and no GCP/BQ credentials required
+(you still need `GOOGLE_API_KEY`/Vertex auth for the judge model). The report
+format is identical to the BigQuery path, so every flag below
+(`--eval-spec`, `--dimensions`, `--tag-turns`, `--report`, `--output-json`, …)
+works the same way.
+
+The file is either a list of conversation objects or `{"conversations": [...]}`.
+Each conversation is multi-turn (`conversation` array) or single-turn
+(`question` + `final_response`):
+
+```json
+{
+  "conversations": [
+    {
+      "session_id": "case_001",
+      "answered_by": "hr_agent",
+      "question": "How many PTO days do I get per year?",
+      "final_response": "You get 20 PTO days per year, accrued monthly.",
+      "tool_calls": 1
+    },
+    {
+      "session_id": "case_002",
+      "answered_by": "hr_agent",
+      "conversation": [
+        {"role": "user", "text": "How many sick days?"},
+        {"role": "agent", "text": "You get 5 sick days."},
+        {"role": "user", "text": "I thought it was 10?", "tag": "CORRECTION"},
+        {"role": "agent", "text": "You're right — 10 sick days per year."}
+      ],
+      "tool_calls": 2,
+      "corrections": 1
+    }
+  ]
+}
+```
+
+Optional per-conversation fields: `session_id` (auto-generated if omitted),
+`answered_by`, `tool_calls`, `corrections`, `verifications`, and per-turn `tag`.
+When corrections/verifications are not provided for a multi-turn conversation,
+they are inferred concurrently (tune parallelism with `--concurrency`, default
+`10`). `--limit` caps how many conversations from the file are scored.
+
+#### Failure-cause taxonomy (who fixes it)
+
+When an eval spec is provided, the judge attributes each failure to a **cause**,
+so the report tells you *who* should fix it rather than just *that* it failed:
+
+| Cause | Meaning | Fix |
+|-------|---------|-----|
+| `skill_gap` | Had the tool **and** the data but misbehaved | A skill / prompt fix (evolution) |
+| `knowledge_gap` | Used the tool correctly but the fact is missing | Add data to the knowledge source |
+| `tool_gap` | No tool/data source, or a personal-data / action request | Build a new tool |
+
+The `tools` field in the eval spec is what lets the judge tell a `knowledge_gap`
+(a covered topic with a missing fact) from a `tool_gap` (no data source at all).
+The report also detects **routing failures** (a supervisor answered from LLM
+knowledge instead of routing to a specialist) and **parroting** (the agent echoed
+the user's correction without re-verifying via a tool — penalized as unhelpful so
+it can't inflate the score).
 
 ### Filtering
 
@@ -211,16 +341,49 @@ Evaluate a single session and see all 7 metrics with full justifications:
 ```
 
 This is useful for verifying whether the LLM judge scored a specific
-session correctly, or for debugging individual conversations.
+session correctly, or for debugging individual conversations. The execution
+trace for the session is fetched automatically — no extra flags needed.
+
+### Choosing what to score (`--dimensions`)
+
+Controls how many LLM-judge metrics run per session:
+
+| Value | Metrics | Cost | Use when |
+|-------|---------|------|----------|
+| `full` (default) | All 7 (2 primary + 5 quality dimensions) | ~7 calls/session | You want the full diagnostic |
+| `primary` | Only `response_usefulness` + `task_grounding` | ~2 calls/session (~3.5x cheaper) | You only need the pass/fail view |
+
+Use `--no-eval` to skip LLM scoring entirely and just browse Q&A pairs.
+
+### Multi-turn analysis and execution traces
+
+Two flags add deeper diagnostics on top of the scores:
+
+- **`--tag-turns`** runs the full turn tagger on multi-turn conversations,
+  classifying each user turn as `CORRECTION`, `VERIFY`, `SPECIFICS`, `SCOPE`,
+  `FOLLOWUP`, or `END`. This drives correction-boundary detection and
+  sub-trajectory segmentation — for a corrected session the report shows what
+  the agent claimed, what the user corrected, and whether it recovered (vs.
+  parroted the correction without re-verifying).
+
+- **`--trajectory-samples N`** fetches `N` execution traces from BigQuery and
+  renders the full routing tree — per-span tool calls, latency, and TTFT —
+  prioritizing unhelpful and correction sessions so the traces shown are the
+  ones worth debugging. (With `--session`, the trace is fetched automatically.)
+
+```bash
+./scripts/quality_report.sh --report --tag-turns --trajectory-samples 5
+```
 
 ### Grounding the judge (`--eval-spec`)
 
 For more accurate scoring, provide an **eval spec** — a single JSON file that
-grounds the LLM judge. All three fields are optional:
+grounds the LLM judge. All four fields are optional:
 
 ```json
 {
   "scope": "Answers HR policy questions: PTO, benefits, expenses, holidays. Does not handle salary, equity, or IT support.",
+  "tools": "lookup_company_policy(topic) returns policy text for PTO, sick leave, expenses, benefits, holidays only. No tool can read personal/account data or perform actions.",
   "ground_truth": "PTO: 20 days/year. 401k match: 4%, vested after 1 year.",
   "golden_qa": [
     {"question": "How many PTO days?", "expected_answer": "20/year", "topic": "pto"},
@@ -244,17 +407,29 @@ enumerate out-of-scope topics. This lets the judge:
   rather than `unhelpful` (a bug), and
 - score the `scope_compliance` dimension accurately.
 
+**`tools`** — a free-text description of what the agent's tools can and cannot
+do. This is what lets the failure-cause taxonomy distinguish a `knowledge_gap`
+(a covered topic with a missing fact → add data) from a `tool_gap` (no data
+source at all, or a personal-data / action request → build a tool). See
+[Failure-cause taxonomy](#failure-cause-taxonomy-who-fixes-it).
+
 **`ground_truth`** — authoritative facts injected into every judge prompt for
 correctness checking.
 
 **`golden_qa`** — a list of `{question, expected_answer, topic?,
 expected_behavior?}`. Each session's question is matched to the closest golden
-question by embedding similarity (cosine ≥ `--golden-threshold`, default 0.92);
-on a match, the expected answer is injected into the judge prompt to ground
-correctness, and the report gains a `golden_eval_summary` block. Entries with
-`expected_behavior: "decline"` (or `topic: "out_of_scope"`) double as
-scope-boundary examples. Golden Q&A is something teams usually already have;
-it is the most reliable correctness signal.
+question by embedding similarity (cosine ≥ `--golden-threshold`, default 0.92;
+lower the threshold to match more aggressively); on a match, the expected answer
+is injected into the judge prompt to ground correctness, and the report gains a
+`golden_eval_summary` block (matched/unmatched split, `matched_meaningful_rate`,
+and the golden-matched questions the agent got wrong — the trustworthy headline
+for regression testing). Entries with `expected_behavior: "decline"` (or
+`topic: "out_of_scope"`) double as scope-boundary examples. Golden Q&A is
+something teams usually already have; it is the most reliable correctness signal.
+
+> **No golden Q&A?** When the spec has no `golden_qa`, the report prints a
+> warning that usefulness/grounding are LLM estimates without ground truth (they
+> can mislabel verbose, tool-grounded answers) and points you back here.
 
 A sample spec is provided at `scripts/eval/data/eval_spec.example.json`:
 
