@@ -272,6 +272,44 @@ the logs, so you find out *now* whether the deploy actually
 works — not when the first scheduled fire happens six hours
 later.
 
+### Schema-derived deploy (`--property-graph`)
+
+The deploy above bundles the MAKO `ontology.yaml` + `binding.yaml`. For a
+**rename-free, codelab-style graph** you can skip those entirely and deploy
+from just a property graph — the same one-artifact flow the
+[codelab](../../../docs/codelabs/periodic_materialization.md) uses locally:
+
+```bash
+./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+  --project your-project \
+  --region us-central1 \
+  --events-dataset your_events_dataset \
+  --graph-dataset your_graph_dataset \
+  --schedule "0 */6 * * *" \
+  --property-graph path/to/property_graph.sql
+```
+
+`--property-graph` points at a `CREATE PROPERTY GRAPH` `.sql`; a placeholdered
+(`${PROJECT_ID}` / `${DATASET}`) `table_ddl.sql` must sit **next to it**. The
+deploy stages both (no `ontology.yaml`/`binding.yaml`), sets
+`BQAA_PROPERTY_GRAPH=property_graph.sql`, and the runtime derives the ontology +
+binding from the property graph + your live table schemas at run time (#286).
+Events stay read-only in your events dataset; the graph tables, schema lookup,
+and the state table all target the graph dataset.
+
+Requirements / limits:
+
+* Both files must be **placeholdered** (`${PROJECT_ID}` / `${DATASET}`) — the
+  deploy refuses hardcoded references so the job can never derive against the
+  wrong dataset.
+* Not compatible with `--extraction-mode=compiled-only` (no reference
+  extractors are staged in derived mode); the deploy rejects that combination.
+
+**Advanced — explicit ontology + binding.** Omit `--property-graph` to keep the
+default MAKO path: descriptions for AI prompting, entity inheritance, derived
+properties, column renames, and the hand-authored compiled extractor. That is
+the right path for migration v5 and any graph that outgrows schema-derived mode.
+
 The script:
 
 1. **Pre-creates the graph dataset** (`bq mk`, idempotent) so
