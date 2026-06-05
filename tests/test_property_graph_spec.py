@@ -253,3 +253,31 @@ def test_orchestrator_graph_dataset_defaults_to_events_dataset(
   )
   assert binding.target.project == "p"
   assert binding.target.dataset == "d"
+
+
+def test_state_table_defaults_to_graph_dataset_in_split_mode() -> None:
+  # The per-run checkpoint must land in the WRITABLE graph dataset, never the
+  # read-only events dataset, when split-dataset mode is in use and no explicit
+  # state_table is given.
+  from bigquery_agent_analytics.materialize_window import _state_table_defaults
+  from bigquery_agent_analytics.materialize_window import DEFAULT_STATE_TABLE_NAME
+  from bigquery_agent_analytics.materialize_window import parse_state_table_ref
+
+  proj, ds = _state_table_defaults(
+      "events-proj", "events_ds", "graph-proj", "graph_ds"
+  )
+  assert (proj, ds) == ("graph-proj", "graph_ds")
+
+  # End-to-end: with no explicit state_table, the ref resolves to the graph
+  # dataset (not the events dataset).
+  state_proj, state_ds, state_name = parse_state_table_ref(
+      DEFAULT_STATE_TABLE_NAME, default_project=proj, default_dataset=ds
+  )
+  assert (state_proj, state_ds) == ("graph-proj", "graph_ds")
+  assert state_name == DEFAULT_STATE_TABLE_NAME
+
+
+def test_state_table_defaults_to_events_in_single_dataset() -> None:
+  from bigquery_agent_analytics.materialize_window import _state_table_defaults
+
+  assert _state_table_defaults("p", "d", None, None) == ("p", "d")

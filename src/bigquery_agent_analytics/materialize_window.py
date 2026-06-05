@@ -1230,6 +1230,23 @@ def _parse_backfill_timestamp(
 # ------------------------------------------------------------------ #
 
 
+def _state_table_defaults(
+    project_id: str,
+    dataset_id: str,
+    graph_project_id: Optional[str],
+    graph_dataset_id: Optional[str],
+) -> tuple[str, str]:
+  """Default project/dataset for the state table.
+
+  Follows the graph target when split-dataset mode is in use
+  (``graph_dataset_id`` / ``graph_project_id`` set), so the per-run
+  checkpoint is never written into a read-only events dataset. Defaults to
+  ``project_id`` / ``dataset_id`` otherwise (single-dataset shape). An explicit
+  ``state_table`` always overrides these defaults.
+  """
+  return (graph_project_id or project_id, graph_dataset_id or dataset_id)
+
+
 def _resolve_ontology_binding(
     *,
     ontology_path: Optional[str],
@@ -1574,10 +1591,18 @@ def run_materialize_window(
 
   # Resolve identifiers + qualified refs.
   events_table_ref = validated_table_ref(project_id, dataset_id, events_table)
+  # The state/checkpoint table is written every run, so it must live in a
+  # WRITABLE dataset. In split-dataset mode (graph_dataset_id set, e.g. a
+  # read-only events dataset + a separate graph dataset) it defaults to the
+  # graph target, never the events dataset. An explicit --state-table still
+  # wins. Single-dataset callers are unchanged (graph_* default to events).
+  state_default_project, state_default_dataset = _state_table_defaults(
+      project_id, dataset_id, graph_project_id, graph_dataset_id
+  )
   state_project, state_dataset, state_table_local = parse_state_table_ref(
       state_table or DEFAULT_STATE_TABLE_NAME,
-      default_project=project_id,
-      default_dataset=dataset_id,
+      default_project=state_default_project,
+      default_dataset=state_default_dataset,
   )
   state_table_ref = f"{state_project}.{state_dataset}.{state_table_local}"
 
