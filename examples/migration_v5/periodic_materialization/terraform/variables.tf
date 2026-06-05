@@ -74,6 +74,12 @@ variable "extraction_mode" {
   }
 }
 
+variable "property_graph" {
+  description = "Schema-derived mode (#286). When ``true``, the runtime derives the ontology + binding from a staged ``property_graph.sql`` + the table schemas instead of an explicit ``ontology.yaml`` / ``binding.yaml`` pair (the module sets ``BQAA_PROPERTY_GRAPH=property_graph.sql``). The published image must be built with ``build_image.sh --property-graph`` so the placeholdered (``$${PROJECT_ID}`` / ``$${DATASET}``) ``property_graph.sql`` + ``table_ddl.sql`` are staged. Use for rename-free graphs; not compatible with ``extraction_mode = \"compiled-only\"`` (no reference extractors are staged in derived mode). ``false`` (default) = explicit ontology + binding (the migration-v5 / compiled-extractor path)."
+  type        = bool
+  default     = false
+}
+
 variable "max_retries" {
   description = "Cloud Run Job retry count on failure. The orchestrator's session-level idempotency + append-only state table make additional retries safe. Default 2 matches the deploy script post-#183 (production posture: silently absorb transient BQ slot pressure / rate-limit noise instead of paging on-call)."
   type        = number
