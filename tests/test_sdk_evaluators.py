@@ -873,7 +873,8 @@ class TestCodeEvaluatorAlias:
     assert CodeEvaluator is SystemEvaluator
 
   def test_default_name(self):
-    assert CodeEvaluator().name == "code_evaluator"
+    assert CodeEvaluator().name == "system_evaluator"
+    assert SystemEvaluator().name == "system_evaluator"
 
   def test_prebuilt_isinstance(self):
     evaluator = CodeEvaluator.latency()

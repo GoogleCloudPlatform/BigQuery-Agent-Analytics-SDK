@@ -189,7 +189,7 @@ class SystemEvaluator:
 
   def __init__(
       self,
-      name: str = "code_evaluator",
+      name: str = "system_evaluator",
       metrics: Optional[list[_MetricDef]] = None,
   ) -> None:
     self.name = name

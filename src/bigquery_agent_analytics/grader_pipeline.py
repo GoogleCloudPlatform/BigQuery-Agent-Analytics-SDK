@@ -28,7 +28,7 @@ Example usage::
         GraderPipeline(WeightedStrategy(
             weights={"latency": 0.3, "correctness": 0.7},
         ))
-        .add_code_grader(SystemEvaluator.latency(), weight=0.3)
+        .add_system_grader(SystemEvaluator.latency(), weight=0.3)
         .add_llm_grader(LLMAsJudge.correctness(), weight=0.7)
     )
 
@@ -257,7 +257,7 @@ class GraderPipeline:
 
       pipeline = (
           GraderPipeline(WeightedStrategy(threshold=0.6))
-          .add_code_grader(SystemEvaluator.latency())
+          .add_system_grader(SystemEvaluator.latency())
           .add_llm_grader(LLMAsJudge.correctness())
       )
       verdict = await pipeline.evaluate(
@@ -276,12 +276,12 @@ class GraderPipeline:
     self.strategy = strategy
     self._graders: list[_GraderEntry] = []
 
-  def add_code_grader(
+  def add_system_grader(
       self,
       evaluator: SystemEvaluator,
       weight: float = 1.0,
   ) -> GraderPipeline:
-    """Adds a code-based grader to the pipeline.
+    """Adds a system-based grader to the pipeline.
 
     Args:
         evaluator: A SystemEvaluator instance.
@@ -299,6 +299,9 @@ class GraderPipeline:
         )
     )
     return self
+
+  # Keep alias for backward compatibility
+  add_code_grader = add_system_grader
 
   def add_llm_grader(
       self,

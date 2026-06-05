@@ -588,8 +588,8 @@ pipeline = (
         },
         threshold=0.6,
     ))
-    .add_code_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
-    .add_code_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=5000), weight=0.2)
+    .add_system_grader(SystemEvaluator.cost_per_session(max_cost_usd=0.50), weight=0.1)
     .add_llm_grader(LLMAsJudge.correctness(threshold=0.7), weight=0.7)
 )
 
@@ -618,8 +618,8 @@ from bigquery_agent_analytics import BinaryStrategy
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(SystemEvaluator.latency(threshold_ms=3000))
-    .add_code_grader(SystemEvaluator.error_rate(max_error_rate=0.05))
+    .add_system_grader(SystemEvaluator.latency(threshold_ms=3000))
+    .add_system_grader(SystemEvaluator.error_rate(max_error_rate=0.05))
     .add_llm_grader(LLMAsJudge.hallucination(threshold=0.8))
 )
 
@@ -649,7 +649,7 @@ def business_rules_grader(context):
 
 pipeline = (
     GraderPipeline(BinaryStrategy())
-    .add_code_grader(SystemEvaluator.latency())
+    .add_system_grader(SystemEvaluator.latency())
     .add_custom_grader("business_rules", business_rules_grader)
 )
 ```
