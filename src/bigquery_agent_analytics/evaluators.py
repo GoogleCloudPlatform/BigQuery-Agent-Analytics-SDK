@@ -630,18 +630,7 @@ class SystemEvaluator:
 
 
 # Keep alias for backward compatibility
-class CodeEvaluator(SystemEvaluator):
-  """Backward-compatible alias for SystemEvaluator.
-
-  Preserves the legacy default name="code_evaluator" when instantiated directly.
-  """
-
-  def __init__(
-      self,
-      name: str = "code_evaluator",
-      metrics: Optional[list[_MetricDef]] = None,
-  ) -> None:
-    super().__init__(name=name, metrics=metrics)
+CodeEvaluator = SystemEvaluator
 
 
 # ------------------------------------------------------------------ #

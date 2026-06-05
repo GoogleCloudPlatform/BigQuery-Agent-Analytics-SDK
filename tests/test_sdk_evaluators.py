@@ -25,6 +25,7 @@ from bigquery_agent_analytics.evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
 from bigquery_agent_analytics.evaluators import DEFAULT_ENDPOINT
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
+from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore
@@ -863,3 +864,17 @@ class TestSessionSummaryQueryTTFT:
 
   def test_contains_time_to_first_token(self):
     assert "time_to_first_token_ms" in SESSION_SUMMARY_QUERY
+
+
+class TestCodeEvaluatorAlias:
+  """Regression tests for CodeEvaluator alias behavior."""
+
+  def test_alias_identity(self):
+    assert CodeEvaluator is SystemEvaluator
+
+  def test_default_name(self):
+    assert CodeEvaluator().name == "code_evaluator"
+
+  def test_prebuilt_isinstance(self):
+    evaluator = CodeEvaluator.latency()
+    assert isinstance(evaluator, CodeEvaluator)
