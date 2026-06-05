@@ -75,8 +75,8 @@ EVAL_MODEL_ID=gemini-2.5-flash
 ./scripts/quality_report.sh --eval-config my_metrics.json  # custom metric definitions
 
 # Choose how much to score:
-./scripts/quality_report.sh --dimensions full       # 7 metrics (default)
-./scripts/quality_report.sh --dimensions primary    # 2 primary metrics only (~3.5x cheaper)
+./scripts/quality_report.sh --dimensions full       # 8 metrics (default)
+./scripts/quality_report.sh --dimensions primary    # 2 primary metrics only (~4x cheaper)
 ./scripts/quality_report.sh --tag-turns             # classify each user turn (multi-turn)
 ./scripts/quality_report.sh --trajectory-samples 5  # include N execution traces
 
@@ -119,7 +119,7 @@ python scripts/quality_report.py --limit 50 --report
 - Execution details — all active filters (`app_name`, `labels`, `time_period`,
   `limit`), plus project, dataset, location, eval model, and elapsed time
 
-When `--session` is used, the console shows **all 7 metrics with full
+When `--session` is used, the console shows **all 8 metrics with full
 justifications** for the single session (verbose mode). See
 [sample single-session output](sample_quality_report_session.md).
 
@@ -268,14 +268,16 @@ produced a given report.
 
 ### Metrics
 
-The evaluation scores each session on **7 dimensions** using LLM-as-a-judge.
+The evaluation scores each session on **8 metrics** using LLM-as-a-judge:
+2 primary, 5 quality dimensions, and `failure_attribution`.
 
-> **Cost:** the default `--dimensions full` makes **7 LLM-judge calls per
-> session** (2 primary + 5 quality dimensions). A 100-session run is ~700 calls;
-> a 1000-session bulk eval is ~7000. If you only need the pass/fail view, pass
-> `--dimensions primary` to score just the 2 primary metrics (~2 calls/session,
-> roughly **3.5x cheaper**) at the cost of the Quality Dimensions table. Use
-> `--no-eval` to skip LLM scoring entirely and only browse Q&A pairs.
+> **Cost:** the default `--dimensions full` makes **8 LLM-judge calls per
+> session** (2 primary + 5 quality dimensions + failure_attribution). A
+> 100-session run is ~800 calls; a 1000-session bulk eval is ~8000. If you only
+> need the pass/fail view, pass `--dimensions primary` to score just the 2
+> primary metrics (~2 calls/session, roughly **4x cheaper**) at the cost of the
+> Quality Dimensions table. Use `--no-eval` to skip LLM scoring entirely and
+> only browse Q&A pairs.
 
 **Primary metrics** classify each session:
 
@@ -334,7 +336,7 @@ exactly which sessions had low tool usage and why.
 
 ### Single-Session Evaluation (`--session`)
 
-Evaluate a single session and see all 7 metrics with full justifications:
+Evaluate a single session and see all 8 metrics with full justifications:
 
 ```bash
 ./scripts/quality_report.sh --session conv_484affd8
@@ -350,8 +352,8 @@ Controls how many LLM-judge metrics run per session:
 
 | Value | Metrics | Cost | Use when |
 |-------|---------|------|----------|
-| `full` (default) | All 7 (2 primary + 5 quality dimensions) | ~7 calls/session | You want the full diagnostic |
-| `primary` | Only `response_usefulness` + `task_grounding` | ~2 calls/session (~3.5x cheaper) | You only need the pass/fail view |
+| `full` (default) | All 8 (2 primary + 5 quality dimensions + failure_attribution) | ~8 calls/session | You want the full diagnostic |
+| `primary` | Only `response_usefulness` + `task_grounding` | ~2 calls/session (~4x cheaper) | You only need the pass/fail view |
 
 Use `--no-eval` to skip LLM scoring entirely and just browse Q&A pairs.
 
@@ -503,7 +505,7 @@ Override the built-in metric definitions with your own:
 ```
 
 The eval config file is a JSON file with a `metrics` key — a list of metric
-definitions that replace the built-in 7 dimensions. Each metric has a `name`,
+definitions that replace the built-in 8 metrics. Each metric has a `name`,
 `definition`, and a list of `categories` with scoring criteria. Metrics with
 `scope_aware: true` are automatically enriched with scope context when an
 eval spec with a `scope` is provided (`--eval-spec`).

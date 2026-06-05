@@ -37,6 +37,7 @@ from quality_report import _extract_conversation
 from quality_report import _failure_class
 from quality_report import _group_by_category
 from quality_report import _has_dimension_data
+from quality_report import _has_failure_attribution_data
 from quality_report import _inject_golden_summary
 from quality_report import _is_single_word_routing
 from quality_report import _load_eval_spec
@@ -1192,3 +1193,57 @@ class TestPublicAPI:
     out = capsys.readouterr().out
     assert "80.0%" in out
     assert "correctness" in out
+
+
+# ---------------------------------------------------------------------------
+# TraceFilter custom_tags JSON path
+# Regression guard for the $.labels -> $.custom_tags fix in trace.py: a wrong
+# JSON path makes --label filtering silently return nothing, with no error.
+# ---------------------------------------------------------------------------
+
+
+class TestCustomTagsJsonPath:
+
+  def test_custom_labels_uses_custom_tags_json_path(self):
+    from bigquery_agent_analytics import TraceFilter
+
+    where, _params = TraceFilter(
+        custom_labels={"version": "v1"}
+    ).to_sql_conditions()
+    assert "$.custom_tags." in where
+    assert "$.labels." not in where
+
+
+# ---------------------------------------------------------------------------
+# Failure-attribution gating (_has_failure_attribution_data)
+# The failure-cause taxonomy must only render when the metrics that drive it
+# were actually scored; otherwise it would default every failure to skill_gap.
+# ---------------------------------------------------------------------------
+
+
+class TestHasFailureAttributionData:
+
+  @staticmethod
+  def _report(metric_names):
+    """Build a minimal report stub with one session scored on metric_names."""
+
+    metrics = [_FakeMetric(m, "n/a") for m in metric_names]
+    return _FakeReport([_FakeSession("s1", metrics)])
+
+  def test_true_with_failure_attribution(self):
+    report = self._report(["response_usefulness", "failure_attribution"])
+    assert _has_failure_attribution_data(report) is True
+
+  def test_true_with_tool_usage_and_correctness(self):
+    report = self._report(["response_usefulness", "tool_usage", "correctness"])
+    assert _has_failure_attribution_data(report) is True
+
+  def test_false_with_primary_only(self):
+    # --dimensions primary: only the 2 primary metrics scored.
+    report = self._report(["response_usefulness", "task_grounding"])
+    assert _has_failure_attribution_data(report) is False
+
+  def test_false_with_tool_usage_alone(self):
+    # tool_usage without correctness is not enough for the 2-way fallback.
+    report = self._report(["response_usefulness", "tool_usage"])
+    assert _has_failure_attribution_data(report) is False

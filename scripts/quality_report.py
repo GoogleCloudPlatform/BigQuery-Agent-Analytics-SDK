@@ -371,7 +371,15 @@ def _embed_texts(texts, model=None, batch_size=50):
   return vectors
 
 
-def match_golden_qa(question_by_sid, golden_qa, threshold=0.92):
+# Default cosine-similarity threshold for matching a session question to a
+# golden-Q&A entry. Referenced by match_golden_qa, the eval entry points, and
+# the --golden-threshold argparse default so the value lives in one place.
+_DEFAULT_GOLDEN_THRESHOLD = 0.92
+
+
+def match_golden_qa(
+    question_by_sid, golden_qa, threshold=_DEFAULT_GOLDEN_THRESHOLD
+):
   """Match session questions to golden Q&A by embedding cosine similarity.
 
   Args:
@@ -559,7 +567,7 @@ def _load_eval_config(eval_config_path=None):
 
   When *eval_config_path* is provided, loads from that path.  Otherwise
   auto-discovers ``eval/eval_config.json`` relative to the repo root or
-  script directory (same pattern as agent-context auto-discovery).
+  script directory (same pattern as eval-spec auto-discovery).
 
   The file is expected to contain:
     - ``metrics``: list of metric definitions (see eval/eval_config.json)
@@ -747,7 +755,7 @@ def get_a2a_response(trace) -> tuple:
           text, agent = _extract_a2a_text(parsed)
           agent = agent or span.agent or "remote_agent"
           return (text or "(no response)"), agent
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError:
           logger.warning(
               "Failed to parse A2A payload for session %s, skipping",
               getattr(trace, "session_id", "?"),
@@ -1224,6 +1232,7 @@ def run_evaluation(
     tag_turns=False,
     eval_config=None,
     custom_labels=None,
+    golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig
   from bigquery_agent_analytics import TraceFilter
@@ -1292,6 +1301,28 @@ def run_evaluation(
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
+  # Golden Q&A matching (same as the --conversations-file path). The server-side
+  # judge (AI.GENERATE over BigQuery) can't receive per-session expected answers,
+  # so on this path golden Q&A drives the golden_eval_summary regression headline
+  # and per-session matched/expected reporting — but does NOT inject the expected
+  # answer into the judge for correctness grounding (that is conversations-only).
+  # scope/ground_truth still ground the judge on both paths.
+  golden_metadata = {}
+  golden_qa = (eval_spec or {}).get("golden_qa")
+  if golden_qa:
+    question_by_sid = {
+        sid: ctx.get("question", "") for sid, ctx in resolved_map.items()
+    }
+    _golden_ctx, golden_metadata = match_golden_qa(
+        question_by_sid, golden_qa, threshold=golden_threshold
+    )
+    logger.warning(
+        "Golden Q&A on the BigQuery path produces the golden_eval_summary and "
+        "per-session matches, but the server-side judge cannot take per-session "
+        "expected answers — expected-answer correctness grounding applies on the "
+        "--conversations-file path only (scope/ground_truth ground both paths)."
+    )
+
   # Infer corrections/verifications for multi-turn sessions (concurrent).
   mt_sessions = [
       r
@@ -1355,6 +1386,7 @@ def run_evaluation(
   return {
       "report": report,
       "resolved_map": resolved_map,
+      "golden_metadata": golden_metadata,
   }
 
 
@@ -1394,6 +1426,7 @@ def generate_quality_report(
   elapsed = time.time() - t0
 
   output = _build_json_output(result["report"], result["resolved_map"])
+  _inject_golden_summary(output, result.get("golden_metadata"))
   output["summary"]["elapsed_seconds"] = round(elapsed, 1)
   return output
 
@@ -1406,7 +1439,7 @@ def run_evaluation_from_conversations(
     tag_turns=False,
     eval_config=None,
     per_session_context=None,
-    golden_threshold=0.92,
+    golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
 ):
   """Evaluate local conversations without BigQuery.
 
@@ -1519,7 +1552,8 @@ def generate_quality_report_from_conversations(
     tag_turns=False,
     trajectory_samples=0,
     per_session_context=None,
-    golden_threshold=0.92,
+    golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
+    eval_config=None,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1539,6 +1573,8 @@ def generate_quality_report_from_conversations(
       per_session_context: Optional caller-supplied per-session judge context
           (merged with golden-Q&A matches).
       golden_threshold: Cosine-similarity threshold for golden matching.
+      eval_config: Optional metric-definition override (same as the CLI
+          ``--eval-config``); when None the built-in metrics are used.
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys. When the eval spec carries
@@ -1556,6 +1592,7 @@ def generate_quality_report_from_conversations(
       tag_turns=tag_turns,
       per_session_context=per_session_context,
       golden_threshold=golden_threshold,
+      eval_config=eval_config,
   )
   elapsed = time.time() - t0
 
@@ -1761,11 +1798,13 @@ def run_eval(args):
 
   t0 = time.time()
   eval_spec = _load_eval_spec(getattr(args, "eval_spec", None))
-  golden_threshold = getattr(args, "golden_threshold", 0.92)
+  golden_threshold = getattr(
+      args, "golden_threshold", _DEFAULT_GOLDEN_THRESHOLD
+  )
   eval_config = _load_eval_config(getattr(args, "eval_config", None))
 
   # --dimensions primary: keep only the 2 primary metrics to cut LLM-judge
-  # cost ~3.5x. Build a filtered copy so the cached config is not mutated.
+  # cost ~4x. Build a filtered copy so the cached config is not mutated.
   if getattr(args, "dimensions", "full") == "primary":
     eval_config = {
         **eval_config,
@@ -1888,6 +1927,7 @@ def run_eval(args):
           tag_turns=tag_turns,
           eval_config=eval_config,
           custom_labels=custom_labels,
+          golden_threshold=golden_threshold,
       )
     except Exception:
       logger.exception("Evaluation failed")
@@ -2430,7 +2470,7 @@ def _print_eval_results(
   # --- Failure breakdown: skill gap vs knowledge gap vs tool gap ---
   counts, _ = _failure_breakdown_from_report(report)
   total_sessions = report.total_sessions or 1
-  if any(counts.values()):
+  if _has_failure_attribution_data(report) and any(counts.values()):
     unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
     addressable = total_sessions - unaddressable
     good = sum(
@@ -3421,7 +3461,7 @@ def _write_md_report(
   addressable = total - unaddressable
   good = meaningful_count + declined_count
   addr_rate = (good / addressable * 100) if addressable else 0.0
-  if any(counts.values()):
+  if _has_failure_attribution_data(report) and any(counts.values()):
     w(f"| &nbsp;&nbsp;↳ Skill gaps (evolution fixes) | {counts['skill_gap']} |")
     w(
         f"| &nbsp;&nbsp;↳ Knowledge gaps (add a fact) "
@@ -3728,6 +3768,26 @@ def _failure_class(usefulness, tool, correctness, attribution=None):
   return "skill_gap"
 
 
+def _has_failure_attribution_data(report):
+  """True when failures can actually be attributed to a cause.
+
+  The failure-cause taxonomy (skill/knowledge/tool gap) needs either the judge's
+  ``failure_attribution`` metric, or both ``tool_usage`` and ``correctness`` (the
+  deterministic 2-way fallback). When none were scored — e.g. ``--dimensions
+  primary`` — ``_failure_class`` would default every failure to ``skill_gap``,
+  which reads as "no knowledge/tool gaps, just evolution work" when it is really
+  "those metrics weren't scored." So all output paths gate the failure breakdown
+  on this predicate (analogous to ``_has_dimension_data``).
+  """
+  for sr in report.session_results:
+    cats = {mr.metric_name for mr in sr.metrics}
+    if "failure_attribution" in cats or (
+        "tool_usage" in cats and "correctness" in cats
+    ):
+      return True
+  return False
+
+
 def _failure_breakdown_from_report(report):
   """Return (counts_by_class, gap_session_ids_by_class) from a raw report."""
   counts = {c: 0 for c in _FAILURE_CLASSES}
@@ -3907,7 +3967,11 @@ def _build_json_output(report, resolved_map, trajectories=None):
       "sessions": sessions,
       "details": {k: str(v) for k, v in report.details.items()},
   }
-  _classify_failures(output)
+  # Only attribute failures when the metrics that drive attribution were scored;
+  # otherwise skill_gap/knowledge_gap/tool_gap would all default to a misleading
+  # N/0/0. When ungated, those keys are simply absent from the summary.
+  if _has_failure_attribution_data(report):
+    _classify_failures(output)
   return output
 
 
@@ -4010,11 +4074,11 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       "--dimensions",
       choices=["full", "primary"],
       default="full",
-      help="Which LLM-judge metrics to run. 'full' (default) scores all 7 "
-      "metrics: 2 primary (response_usefulness, task_grounding) plus the 5 "
-      "quality dimensions. 'primary' scores only the 2 primary metrics — "
-      "about 3.5x cheaper (2 LLM calls/session instead of 7) but omits the "
-      "Quality Dimensions table. Use --no-eval to skip evaluation entirely.",
+      help="Which LLM-judge metrics to run. 'full' (default) scores all 8 "
+      "metrics: 2 primary (response_usefulness, task_grounding), the 5 quality "
+      "dimensions, and failure_attribution. 'primary' scores only the 2 primary "
+      "metrics — about 4x cheaper (2 LLM calls/session instead of 8) but omits "
+      "the Quality Dimensions table. Use --no-eval to skip evaluation entirely.",
   )
   parser.add_argument(
       "--time-period",
@@ -4105,7 +4169,7 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
   parser.add_argument(
       "--golden-threshold",
       type=float,
-      default=0.92,
+      default=_DEFAULT_GOLDEN_THRESHOLD,
       metavar="FLOAT",
       help="Cosine-similarity threshold for golden_qa matching "
       "(default: 0.92). Lower matches more aggressively.",
