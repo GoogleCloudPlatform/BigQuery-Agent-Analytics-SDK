@@ -206,3 +206,50 @@ def test_orchestrator_rejects_neither_mode() -> None:
         dataset_id="d",
         bq_client=_FakeClient({}),
     )
+
+
+def test_orchestrator_separate_graph_dataset(tmp_path) -> None:
+  # Two-dataset deploy: events live in one dataset, the graph in another.
+  # The derived binding must target the GRAPH dataset (graph_*), while the
+  # events dataset_id is left for the orchestrator's event read.
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  ddl_file = tmp_path / "property_graph.sql"
+  ddl_file.write_text(_DDL, encoding="utf-8")  # uses ${PROJECT_ID}.${DATASET}
+
+  _, binding = _resolve_ontology_binding(
+      ontology_path=None,
+      binding_path=None,
+      property_graph_path=str(ddl_file),
+      project_id="events-proj",
+      dataset_id="events_ds",
+      graph_project_id="graph-proj",
+      graph_dataset_id="graph_ds",
+      bq_client=_FakeClient(_SCHEMAS),
+  )
+  # Binding target + sources resolve to the GRAPH dataset, not events.
+  assert binding.target.project == "graph-proj"
+  assert binding.target.dataset == "graph_ds"
+  request = next(e for e in binding.entities if e.name == "DecisionRequest")
+  assert request.source == "graph-proj.graph_ds.decision_request"
+
+
+def test_orchestrator_graph_dataset_defaults_to_events_dataset(
+    tmp_path,
+) -> None:
+  # Single-dataset shape (codelab/CLI): omitting graph_* targets dataset_id.
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  ddl_file = tmp_path / "property_graph.sql"
+  ddl_file.write_text(_DDL, encoding="utf-8")
+
+  _, binding = _resolve_ontology_binding(
+      ontology_path=None,
+      binding_path=None,
+      property_graph_path=str(ddl_file),
+      project_id="p",
+      dataset_id="d",
+      bq_client=_FakeClient(_SCHEMAS),
+  )
+  assert binding.target.project == "p"
+  assert binding.target.dataset == "d"
