@@ -103,6 +103,16 @@ if [[ -n "$PROPERTY_GRAPH" ]]; then
     echo "Error: schema-derived mode needs a 'table_ddl.sql' next to the property graph; not found: $TABLE_DDL_SRC" >&2
     usage 1
   fi
+  # Placeholder contract (#286): refuse to bake a hardcoded graph DDL into the
+  # image. Both artifacts must use \${PROJECT_ID} / \${DATASET} so the runtime
+  # retargets them to the customer's project + graph dataset.
+  for _pg_artifact in "$PROPERTY_GRAPH" "$TABLE_DDL_SRC"; do
+    if ! grep -qF '${PROJECT_ID}' "$_pg_artifact" \
+      || ! grep -qF '${DATASET}' "$_pg_artifact"; then
+      echo "Error: schema-derived mode requires placeholdered artifacts: $_pg_artifact must contain \${PROJECT_ID} and \${DATASET}. Hardcoded graph DDL would derive against the wrong dataset." >&2
+      usage 1
+    fi
+  done
 fi
 
 if [[ -z "$TAG" ]]; then

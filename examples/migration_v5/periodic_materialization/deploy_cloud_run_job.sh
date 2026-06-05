@@ -288,6 +288,18 @@ if [[ -n "$PROPERTY_GRAPH" ]]; then
     echo "Error: schema-derived mode also needs a 'table_ddl.sql' next to the property graph (so the graph tables can be bootstrapped); not found: $TABLE_DDL_SRC" >&2
     exit 1
   fi
+  # Enforce the placeholder contract (#286). Both artifacts must use
+  # \${PROJECT_ID} / \${DATASET} so the runtime retargets them to the
+  # customer's project + graph dataset. A hardcoded graph DDL (e.g. the
+  # migration-v5 snapshot pointing at a canonical demo dataset) would derive
+  # against the wrong dataset -- reject it here, not after deploy.
+  for _pg_artifact in "$PROPERTY_GRAPH" "$TABLE_DDL_SRC"; do
+    if ! grep -qF '${PROJECT_ID}' "$_pg_artifact" \
+      || ! grep -qF '${DATASET}' "$_pg_artifact"; then
+      echo "Error: schema-derived mode requires placeholdered artifacts: $_pg_artifact must contain \${PROJECT_ID} and \${DATASET} so it can be retargeted to your project/graph dataset. Hardcoded graph DDL would derive against the wrong dataset. Use placeholdered, rename-free artifacts, or deploy the explicit --ontology/--binding path." >&2
+      exit 1
+    fi
+  done
 fi
 
 # Validate ``--max-retries`` at the boundary (issue #183). A typo

@@ -95,6 +95,44 @@ def test_rejects_missing_property_graph_file(tmp_path) -> None:
   assert "not found" in result.stderr
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_rejects_hardcoded_property_graph_without_placeholders(
+    tmp_path,
+) -> None:
+  # The original #286 failure mode: a hardcoded graph DDL (no
+  # ${PROJECT_ID}/${DATASET}) would derive against the wrong dataset. Both
+  # files exist and mode is ai-fallback, so this must be caught by the
+  # placeholder check, not the earlier existence checks.
+  (tmp_path / "property_graph.sql").write_text(
+      "CREATE PROPERTY GRAPH `proj.ds.g` NODE TABLES ()"
+  )
+  (tmp_path / "table_ddl.sql").write_text(
+      "CREATE TABLE `${PROJECT_ID}.${DATASET}.t` (id STRING)"
+  )
+  result = _run_deploy(
+      ["--property-graph", str(tmp_path / "property_graph.sql")]
+  )
+  assert result.returncode != 0
+  assert "${PROJECT_ID}" in result.stderr or "placeholder" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")
+def test_rejects_hardcoded_table_ddl_without_placeholders(tmp_path) -> None:
+  # The graph is placeholdered but the companion table DDL is not -> still a
+  # wrong-dataset risk at bootstrap time -> reject.
+  (tmp_path / "property_graph.sql").write_text(
+      "CREATE PROPERTY GRAPH `${PROJECT_ID}.${DATASET}.g` NODE TABLES ()"
+  )
+  (tmp_path / "table_ddl.sql").write_text(
+      "CREATE TABLE `proj.ds.t` (id STRING)"
+  )
+  result = _run_deploy(
+      ["--property-graph", str(tmp_path / "property_graph.sql")]
+  )
+  assert result.returncode != 0
+  assert "${PROJECT_ID}" in result.stderr or "placeholder" in result.stderr
+
+
 # --------------------------------------------------------------------------- #
 # Staging / env-var contract (static text assertions)
 # --------------------------------------------------------------------------- #
@@ -108,6 +146,9 @@ def test_deploy_script_property_graph_staging_contract() -> None:
   # property-graph mode stages the graph + its table DDL, not ontology/binding
   assert 'cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"' in text
   assert 'cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"' in text
+  # placeholder contract is enforced for both artifacts
+  assert "grep -qF '${PROJECT_ID}'" in text
+  assert "grep -qF '${DATASET}'" in text
 
 
 def test_build_image_property_graph_staging_contract() -> None:
@@ -115,3 +156,6 @@ def test_build_image_property_graph_staging_contract() -> None:
   assert "--property-graph)" in text
   assert 'cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"' in text
   assert 'cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"' in text
+  # Terraform-built images can't bake hardcoded artifacts either.
+  assert "grep -qF '${PROJECT_ID}'" in text
+  assert "grep -qF '${DATASET}'" in text
