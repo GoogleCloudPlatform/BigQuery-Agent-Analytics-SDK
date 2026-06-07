@@ -1,9 +1,8 @@
-import re
-
-from google.cloud import bigquery
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+import pandas as pd
+from google.cloud import bigquery
+import plotly.express as px
+import re
 
 # --- 1. Page Configuration ---
 st.set_page_config(page_title="Agent Analytics V2", layout="wide")

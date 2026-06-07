@@ -300,8 +300,18 @@ class GraderPipeline:
     )
     return self
 
-  # Keep alias for backward compatibility
-  add_code_grader = add_system_grader
+  def add_code_grader(
+      self,
+      evaluator: SystemEvaluator,
+      weight: float = 1.0,
+  ) -> GraderPipeline:
+    """Adds a code grader to the pipeline.
+
+    Note this grader is preserved for backwards compatibility, but isn't
+    recommended for use.
+    """
+    return self.add_system_grader(evaluator, weight=weight)
+
 
   def add_llm_grader(
       self,
