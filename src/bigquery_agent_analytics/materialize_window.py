@@ -1474,7 +1474,7 @@ def run_materialize_window(
         "graphs for every session. Pass --reference-extractors-module "
         "for the simple reference-only path (e.g. "
         "--reference-extractors-module=reference_extractor on the "
-        "migration v5 demo), or pre-compile bundles and pass "
+        "context graph demo), or pre-compile bundles and pass "
         "--bundles-root alongside --reference-extractors-module."
     )
 

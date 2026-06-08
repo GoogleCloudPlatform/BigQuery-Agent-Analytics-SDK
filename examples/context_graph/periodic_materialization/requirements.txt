@@ -19,7 +19,7 @@
 #   pip install -e .
 #
 #   # Then install this example's ancillary deps:
-#   pip install -r examples/migration_v5/periodic_materialization/requirements.txt
+#   pip install -r examples/context_graph/periodic_materialization/requirements.txt
 #
 # Pinning a PyPI version (alternative — NOT in addition — to the
 # editable-mode install above): use ``pip install
@@ -27,7 +27,7 @@
 # -e .``. Don't run both: the published wheel install would
 # replace any in-flight local edits with the released code.
 # The quotes are required so the shell doesn't interpret ``>=``
-# as a redirection operator. 0.3.2 is the migration-v5
+# as a redirection operator. 0.3.2 is the context-graph
 # production-track release — earlier versions lack the
 # compiled-only deploy path, backfill, orphan watchdog, and
 # Terraform module this README documents.

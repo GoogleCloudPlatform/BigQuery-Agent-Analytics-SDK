@@ -14,7 +14,7 @@
 
 """Runtime wrapper tests for the Cloud Run Job's spec input modes (issue #286).
 
-Loads ``examples/migration_v5/periodic_materialization/run_job.py`` and drives
+Loads ``examples/context_graph/periodic_materialization/run_job.py`` and drives
 ``main()`` with BigQuery, dataset bootstrap, and the orchestrator all faked, so
 we can assert how each mode calls ``run_materialize_window`` without touching
 BigQuery.
@@ -30,7 +30,7 @@ import pytest
 _RUN_JOB = (
     pathlib.Path(__file__).resolve().parents[1]
     / "examples"
-    / "migration_v5"
+    / "context_graph"
     / "periodic_materialization"
     / "run_job.py"
 )

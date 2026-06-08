@@ -21,7 +21,7 @@ Consumed by:
 * The revalidation CLI
   (``bqaa-revalidate-extractors``) via
   ``--reference-extractors-module
-  examples.migration_v5.reference_extractor``.
+  examples.context_graph.reference_extractor``.
 
 Both consumers expect the same module-level surface:
 

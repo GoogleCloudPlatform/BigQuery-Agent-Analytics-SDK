@@ -32,7 +32,7 @@ import pytest
 _TF_DIR = (
     Path(__file__).resolve().parents[1]
     / "examples"
-    / "migration_v5"
+    / "context_graph"
     / "periodic_materialization"
     / "terraform"
 )

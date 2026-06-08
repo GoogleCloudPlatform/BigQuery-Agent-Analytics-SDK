@@ -3,7 +3,7 @@
 Run `bqaa context-graph` on a cron, against your own
 BigQuery project, with one local command and one deploy command.
 
-The migration v5 demo (`examples/migration_v5/`) ships the
+The context graph demo (`examples/context_graph/`) ships the
 ontology, binding, and entity-table DDL. The artifact
 pipeline that produced them (`ontology_artifacts.py`) is
 ontology-agnostic, but **this deploy bundles the checked-in
@@ -130,7 +130,7 @@ modes.
 * **Events dataset** (`BQAA_EVENTS_DATASET_ID`) already exists
   with a populated `agent_events` table. The BQ AA plugin writes
   to this; if you've never run an agent against BQAA, seed one
-  for this demo via `python examples/migration_v5/run_agent.py
+  for this demo via `python examples/context_graph/run_agent.py
   --project YOUR_PROJECT --dataset YOUR_EVENTS_DS --sessions 3`.
   This dataset is **read-only** for the periodic job — the
   job never writes here.
@@ -195,21 +195,21 @@ pip install -e .
 #
 # (b) Pinned from PyPI — once you're on a stable SDK version.
 #     0.3.3 adds schema-derived (``--property-graph``) deploy
-#     parity on top of the 0.3.2 migration-v5 production track
+#     parity on top of the 0.3.2 context-graph production track
 #     (compiled-only deploy, backfill, orphan watchdog,
 #     Terraform module, split SAs, ``--max-retries``). Use this
 #     for unmodified production use.
 pip install 'bigquery-agent-analytics>=0.3.3'
 
 # Either way, install the example's ancillary deps:
-pip install -r examples/migration_v5/periodic_materialization/requirements.txt
+pip install -r examples/context_graph/periodic_materialization/requirements.txt
 
 BQAA_PROJECT_ID=your-project \
 BQAA_EVENTS_DATASET_ID=your_events_dataset \
 BQAA_GRAPH_DATASET_ID=your_graph_dataset \
 BQAA_LOOKBACK_HOURS=6 \
 BQAA_OVERLAP_MINUTES=15 \
-python examples/migration_v5/periodic_materialization/run_job.py
+python examples/context_graph/periodic_materialization/run_job.py
 ```
 
 Output is a single JSON line on stdout (the materialize-window
@@ -259,7 +259,7 @@ Rules of thumb:
 One command:
 
 ```bash
-./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+./examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh \
   --project your-project \
   --region us-central1 \
   --events-dataset your_events_dataset \
@@ -281,7 +281,7 @@ from just a property graph — the same one-artifact flow the
 [codelab](../../../docs/codelabs/periodic_materialization.md) uses locally:
 
 ```bash
-./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+./examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh \
   --project your-project \
   --region us-central1 \
   --events-dataset your_events_dataset \
@@ -316,7 +316,7 @@ call is made). Applies to both the schema-derived and explicit paths (#298).
 **Advanced — explicit ontology + binding.** Omit `--property-graph` to keep the
 default MAKO path: descriptions for AI prompting, entity inheritance, derived
 properties, column renames, and the hand-authored compiled extractor. That is
-the right path for migration v5 and any graph that outgrows schema-derived mode.
+the right path for context graph and any graph that outgrows schema-derived mode.
 
 The script:
 
@@ -631,10 +631,10 @@ log.
 
 **Inputs:**
 
-* Events dataset: `migration_v5_idem_43c51d05` (3 demo
+* Events dataset: `context_graph_idem_43c51d05` (3 demo
   sessions, 115 events, pre-populated by `run_agent.py` in PR
   #164).
-* Graph dataset: `migration_v5_graph_verify_500c9f` (auto-
+* Graph dataset: `context_graph_verify_500c9f` (auto-
   created by deploy script).
 * Job name: `bqaa-periodic-verify-500c9f`.
 * Schedule: `0 */6 * * *`.

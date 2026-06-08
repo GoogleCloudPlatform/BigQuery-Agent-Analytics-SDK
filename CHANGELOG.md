@@ -66,6 +66,23 @@ renames, and the migration-v5 compiled-extractor path.
   comments and splits on `;` only at the top level (never inside `'`, `"`, or
   `` ` `` quoting). Found by a live `--property-graph` deploy smoke.
 
+### Changed
+
+- **Renamed the context-graph example for product-facing clarity**
+  ([#282](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/282))
+  — `examples/migration_v5/` → `examples/context_graph/` (the `migration_v5`
+  label was internal milestone bookkeeping). The scheduled-deploy entrypoints
+  move with it (`examples/context_graph/periodic_materialization/...`). The
+  demo's default BigQuery dataset is now `context_graph` (was `migration_v5_demo`)
+  and the Terraform example's graph dataset is `context_graph` (was
+  `migration_v5_graph`). The user-facing docs (blog, codelab, runbook, deploy +
+  Terraform READMEs) now lead with the one-artifact `property_graph.sql` path as
+  primary and frame explicit `ontology.yaml` / `binding.yaml` as the advanced
+  override. The previously executed demo notebook is archived as
+  `examples/_archive/context_graph_historical_notebook.ipynb`. **Action for
+  users:** update any deep links to `examples/migration_v5/...` and any reference
+  to the `migration_v5_demo` dataset.
+
 ## [0.3.2] - 2026-05-22
 
 ### Release highlights

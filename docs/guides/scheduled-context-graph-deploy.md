@@ -9,7 +9,7 @@ binding from it — no hand-written `ontology.yaml` / `binding.yaml`.
 It's the rename-free / common path. For richer graphs (descriptions to steer the
 AI prompt, entity inheritance, derived properties, column renames, or a
 compiled extractor) keep the explicit `--ontology` / `--binding` path in the
-[migration-v5 deploy README](../../examples/migration_v5/periodic_materialization/README.md),
+[context-graph deploy README](../../examples/context_graph/periodic_materialization/README.md),
 which is also the deep reference for IAM, scheduling, monitoring, and teardown.
 
 > Requires `bigquery-agent-analytics >= 0.3.3`.
@@ -85,7 +85,7 @@ pip install -e .   # or: pip install 'bigquery-agent-analytics>=0.3.3'
 # Stage the runtime + your two artifacts together (mirrors what the deploy
 # script bundles into the image).
 mkdir -p /tmp/cg-deploy && cp \
-  examples/migration_v5/periodic_materialization/run_job.py \
+  examples/context_graph/periodic_materialization/run_job.py \
   property_graph.sql table_ddl.sql /tmp/cg-deploy/
 
 BQAA_PROJECT_ID="$PROJECT_ID" \
@@ -115,7 +115,7 @@ first.
 ### Option A — bash (one command, with a smoke run)
 
 ```bash
-./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+./examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh \
   --project "$PROJECT_ID" --region us-central1 \
   --events-dataset "$EVENTS_DS" --graph-dataset "$GRAPH_DS" \
   --schedule "0 */6 * * *" \
@@ -135,7 +135,7 @@ To pick the `AI.GENERATE` extraction model — e.g. a Gemini 3.x model — add
 runtime keeps its `gemini-2.5-flash` default:
 
 ```bash
-./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+./examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh \
   --project "$PROJECT_ID" --region us-central1 \
   --events-dataset "$EVENTS_DS" --graph-dataset "$GRAPH_DS" \
   --schedule "0 */6 * * *" \
@@ -151,7 +151,7 @@ Terraform takes a published image as input, so build one first with
 `table_ddl.sql` instead of `ontology.yaml`/`binding.yaml`/`reference_extractor.py`):
 
 ```bash
-IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
+IMAGE_URI="$(./examples/context_graph/periodic_materialization/build_image.sh \
   --project "$PROJECT_ID" --repo bqaa --create-repo \
   --property-graph property_graph.sql)"     # → REGION-docker.pkg.dev/.../...:<tag>
 ```
@@ -174,7 +174,7 @@ wires `BQAA_ENDPOINT` on the Job. Leave it at its `""` default to keep the
 runtime's `gemini-2.5-flash`.
 
 ```bash
-cd examples/migration_v5/periodic_materialization/terraform
+cd examples/context_graph/periodic_materialization/terraform
 terraform init
 terraform apply -var "image_uri=$IMAGE_URI"
 ```
@@ -202,7 +202,7 @@ bq query --use_legacy_sql=false \
 The Cloud Logging entry per run is structured JSON; the key fields are
 `mode = "property-graph"`, `sessions_materialized`, `sessions_failed`, and
 `ok`. Wire a Cloud Monitoring alert on `ok = false` (see the
-[deploy README](../../examples/migration_v5/periodic_materialization/README.md#cloud-monitoring-alerts)).
+[deploy README](../../examples/context_graph/periodic_materialization/README.md#cloud-monitoring-alerts)).
 
 Then query the graph itself — the materialized decision traces are GQL-queryable
 exactly as in [Phase 4 of the codelab](../codelabs/periodic_materialization.md).
@@ -226,6 +226,6 @@ explicit pair (omit `--property-graph`; the deploy bundles `ontology.yaml` +
 `binding.yaml`) when you need: human-readable descriptions to steer the
 `AI.GENERATE` prompt, entity inheritance, derived (computed) properties, column
 renames, or a deterministic compiled extractor (`--extraction-mode=compiled-only`).
-The [migration-v5 deploy README](../../examples/migration_v5/periodic_materialization/README.md)
+The [context-graph deploy README](../../examples/context_graph/periodic_materialization/README.md)
 is the reference for that path and for the full IAM matrix, recommended
 schedules, monitoring, and teardown.

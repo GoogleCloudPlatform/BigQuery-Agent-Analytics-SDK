@@ -24,10 +24,10 @@ trace + tool calls are captured into the configured
 Usage (uses defaults from ``mako_demo_agent`` module-level
 env-var lookups; pass flags to override):
 
-    PYTHONPATH=src python examples/migration_v5/run_agent.py \\
+    PYTHONPATH=src python examples/context_graph/run_agent.py \\
         --sessions 50 \\
         --project test-project-0728-467323 \\
-        --dataset migration_v5_demo \\
+        --dataset context_graph \\
         --location US
 
 Requires:

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the migration v5 ontology-agnostic artifact pipeline.
+"""Tests for the context graph ontology-agnostic artifact pipeline.
 
 Covers two things:
 
@@ -50,16 +50,16 @@ import yaml
 pytest.importorskip("rdflib")
 
 # ``mako_artifacts`` and ``ontology_artifacts`` are sibling
-# modules inside ``examples/migration_v5/`` that import each
+# modules inside ``examples/context_graph/`` that import each
 # other top-level (the notebook + run_agent.py do the same).
 # This test uses the same sibling-style import surface those
-# callers do — only ``examples/migration_v5/`` needs to be on
-# sys.path. Don't mix package-style (``examples.migration_v5.X``)
+# callers do — only ``examples/context_graph/`` needs to be on
+# sys.path. Don't mix package-style (``examples.context_graph.X``)
 # imports here: that path requires both the repo root AND the
 # v5 dir on sys.path, and silently masks regressions in the
 # notebook's import contract (see PR #172 review).
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_V5_DIR = _REPO_ROOT / "examples" / "migration_v5"
+_V5_DIR = _REPO_ROOT / "examples" / "context_graph"
 if str(_V5_DIR) not in sys.path:
   sys.path.insert(0, str(_V5_DIR))
 
@@ -78,7 +78,7 @@ from bigquery_ontology import load_ontology_from_string
 
 
 _MAKO_CHECKED_IN_PROJECT = "test-project-0728-467323"
-_MAKO_CHECKED_IN_DATASET = "migration_v5_demo"
+_MAKO_CHECKED_IN_DATASET = "context_graph"
 
 
 def _temp_mako_config(tmp_path: pathlib.Path):

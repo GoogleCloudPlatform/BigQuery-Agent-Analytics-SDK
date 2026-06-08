@@ -14,7 +14,7 @@ artifacts that demonstrate SDK capabilities.
 | [categorical_evaluation_demo.ipynb](categorical_evaluation_demo.ipynb) | Hatteras categorical evaluation |
 | [context_graph_adcp_demo.ipynb](context_graph_adcp_demo.ipynb) | Property Graph use cases |
 | [ontology_graph_v5_demo.ipynb](ontology_graph_v5_demo.ipynb) | OWL import, mixed extraction, temporal lineage, GQL |
-| [migration_v5_demo_notebook.ipynb](migration_v5_demo_notebook.ipynb) | Migrated V5 pipeline using separated ontology + binding |
+| [_archive/context_graph_historical_notebook.ipynb](_archive/context_graph_historical_notebook.ipynb) | Archived: the original MAKO context-graph pipeline (explicit ontology + binding), kept as frozen evidence |
 | [ontology_graph_v4_demo.ipynb](ontology_graph_v4_demo.ipynb) | Ontology extraction + GQL **(legacy)** |
 | [memory_service_demo.ipynb](memory_service_demo.ipynb) | Cross-session memory |
 | [event_semantics_views_bigframes_demo.ipynb](event_semantics_views_bigframes_demo.ipynb) | Event views + BigFrames |
@@ -51,6 +51,7 @@ artifacts that demonstrate SDK capabilities.
 
 | Directory | Description |
 |-----------|-------------|
+| [context_graph/](context_graph/) | Context Graph extraction: a runnable ADK agent + BQ AA plugin, the ontology-driven artifact pipeline (MAKO reference config), and the scheduled Cloud Run + Cloud Scheduler deploy. The advanced explicit-ontology path; for the primary one-artifact path see the [codelab](../docs/codelabs/periodic_materialization.md). |
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
 | [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
 
@@ -64,4 +65,4 @@ artifacts that demonstrate SDK capabilities.
 > **Note:** `ontology_graph_v4_demo.ipynb` and `ymgo_graph_spec.yaml` use the legacy combined
 > `GraphSpec` format. The current approach uses separated ontology + binding YAML files with
 > `load_ontology()` + `load_binding()` from `bigquery_ontology`. See `ontology_graph_v5_demo.ipynb`
-> or `migration_v5_demo_notebook.ipynb`.
+> or `_archive/context_graph_historical_notebook.ipynb`.

@@ -535,7 +535,7 @@ class TestCompilePropertyGraphSelfEdge:
   the canonical mapping through the materializer +
   ``bigquery_ontology.graph_ddl_compiler`` but missed this
   public compiler; the reviewer surfaced the gap against the
-  migration v5 self-edge binding."""
+  context graph self-edge binding."""
 
   def test_self_edge_dict_shape_compiles(self):
     """A self-edge with disambiguated ``src_*`` / ``dst_*`` FK
@@ -580,9 +580,9 @@ class TestCompilePropertyGraphSelfEdge:
         "REFERENCES DecisionExecution (decision_execution_id, session_id)"
     ) in clause
 
-  def test_migration_v5_binding_compiles_end_to_end(self):
+  def test_context_graph_binding_compiles_end_to_end(self):
     """Pin the reviewer's exact reproducer: load the committed
-    migration v5 ontology + binding (which now includes self-edges
+    context graph ontology + binding (which now includes self-edges
     in dict-shape) and emit the public PG DDL. Before the fix this
     raised ``ValueError`` at
     ``ontology_property_graph._compile_edge_table_clause``."""
@@ -595,19 +595,19 @@ class TestCompilePropertyGraphSelfEdge:
     base = (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
     )
     if not (base / "ontology.yaml").exists():
-      pytest.skip("migration_v5 snapshots not checked in")
+      pytest.skip("context_graph snapshots not checked in")
     ont = load_ontology(str(base / "ontology.yaml"))
     binding = load_binding(str(base / "binding.yaml"), ontology=ont)
     spec = resolve(ont, binding)
     ddl = compile_property_graph_ddl(
-        spec, "test-project-0728-467323", "migration_v5_demo"
+        spec, "test-project-0728-467323", "context_graph"
     )
     # Both self-edges emitted with correct positional pairing.
     for self_edge in ("evolved_from", "superseded_by"):
-      assert f"`test-project-0728-467323.migration_v5_demo.{self_edge}`" in ddl
+      assert f"`test-project-0728-467323.context_graph.{self_edge}`" in ddl
     assert (
         "SOURCE KEY (src_decision_execution_id, session_id) "
         "REFERENCES DecisionExecution (decision_execution_id, session_id)"

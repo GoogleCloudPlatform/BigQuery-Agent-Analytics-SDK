@@ -75,7 +75,7 @@ if os.path.exists(_env_path):
 
 _, _auth_project = google.auth.default()
 PROJECT_ID = os.getenv("PROJECT_ID") or _auth_project
-DATASET_ID = os.getenv("DATASET_ID", "migration_v5_demo")
+DATASET_ID = os.getenv("DATASET_ID", "context_graph")
 DATASET_LOCATION = os.getenv("DATASET_LOCATION", "US")
 TABLE_ID = os.getenv("TABLE_ID", "agent_events")
 MODEL_ID = os.getenv("DEMO_AGENT_MODEL", "gemini-2.5-flash")
@@ -88,7 +88,7 @@ os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID or ""
 os.environ["GOOGLE_CLOUD_LOCATION"] = AGENT_LOCATION
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
-APP_NAME = "migration_v5_demo"
+APP_NAME = "context_graph"
 
 
 SYSTEM_PROMPT = """You are a MAKO decision agent for an

@@ -275,7 +275,7 @@ esac
 # Spec input mode (#286). ``--property-graph`` selects schema-derived
 # mode: the ontology + binding are derived from the property graph + the
 # table schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged.
-# Unset = the explicit migration-v5 ontology+binding (compiled-extractor)
+# Unset = the explicit context-graph ontology+binding (compiled-extractor)
 # path. Exactly one mode is in effect.
 TABLE_DDL_SRC=""
 if [[ -n "$PROPERTY_GRAPH" ]]; then
@@ -300,7 +300,7 @@ if [[ -n "$PROPERTY_GRAPH" ]]; then
   # Enforce the placeholder contract (#286). Both artifacts must use
   # \${PROJECT_ID} / \${DATASET} so the runtime retargets them to the
   # customer's project + graph dataset. A hardcoded graph DDL (e.g. the
-  # migration-v5 snapshot pointing at a canonical demo dataset) would derive
+  # context-graph snapshot pointing at a canonical demo dataset) would derive
   # against the wrong dataset -- reject it here, not after deploy.
   for _pg_artifact in "$PROPERTY_GRAPH" "$TABLE_DDL_SRC"; do
     if ! grep -qF '${PROJECT_ID}' "$_pg_artifact" \
@@ -327,7 +327,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACTS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Repo root — used to locate the SDK source for vendoring.
 # ``periodic_materialization/`` lives under
-# ``examples/migration_v5/``, so the repo root is two dirs up.
+# ``examples/context_graph/``, so the repo root is two dirs up.
 REPO_ROOT="$(cd "${ARTIFACTS_DIR}/../.." && pwd)"
 
 # Cleanup state — the staging dir is created later in section
@@ -651,7 +651,7 @@ if [[ -n "$PROPERTY_GRAPH" ]]; then
   cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"
   cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"
 else
-  # Explicit ontology + binding (migration-v5 / compiled-extractor path).
+  # Explicit ontology + binding (context-graph / compiled-extractor path).
   cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
   cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
   cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"

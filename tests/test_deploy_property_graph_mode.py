@@ -31,7 +31,7 @@ import pytest
 _DEPLOY_DIR = (
     Path(__file__).resolve().parents[1]
     / "examples"
-    / "migration_v5"
+    / "context_graph"
     / "periodic_materialization"
 )
 _DEPLOY = _DEPLOY_DIR / "deploy_cloud_run_job.sh"

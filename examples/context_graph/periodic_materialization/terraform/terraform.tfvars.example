@@ -8,7 +8,7 @@
 project_id        = "your-project"
 region            = "us-central1"
 events_dataset_id = "agent_analytics"
-graph_dataset_id  = "migration_v5_graph"
+graph_dataset_id  = "context_graph"
 schedule          = "0 */6 * * *"
 image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-materialization:v1"
 

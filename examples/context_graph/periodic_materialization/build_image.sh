@@ -166,7 +166,7 @@ if [[ -n "$PROPERTY_GRAPH" ]]; then
   cp "$PROPERTY_GRAPH" "$STAGING/property_graph.sql"
   cp "$TABLE_DDL_SRC" "$STAGING/table_ddl.sql"
 else
-  # Explicit ontology + binding (migration-v5 / compiled-extractor path).
+  # Explicit ontology + binding (context-graph / compiled-extractor path).
   cp "${ARTIFACTS_DIR}/ontology.yaml" "$STAGING/"
   cp "${ARTIFACTS_DIR}/binding.yaml" "$STAGING/"
   cp "${ARTIFACTS_DIR}/table_ddl.sql" "$STAGING/"

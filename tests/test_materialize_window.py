@@ -3366,7 +3366,7 @@ class TestDeployScriptExtractionModeBoundary:
     return (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "deploy_cloud_run_job.sh"
     )
@@ -3375,7 +3375,7 @@ class TestDeployScriptExtractionModeBoundary:
     return (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "reference_extractor.py"
     )
 
@@ -4044,7 +4044,7 @@ class TestDeployScriptHardening:
     return (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "deploy_cloud_run_job.sh"
     )
@@ -4207,7 +4207,7 @@ class TestDeployScriptHardening:
     run_job = (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "run_job.py"
     )
@@ -4247,7 +4247,7 @@ class TestTerraformModuleSurface:
     return (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "terraform"
     )
@@ -4493,7 +4493,7 @@ class TestTerraformModuleSurface:
     helper = (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "build_image.sh"
     )
@@ -4516,7 +4516,7 @@ class TestTerraformModuleSurface:
     helper = (
         pathlib.Path(__file__).resolve().parents[1]
         / "examples"
-        / "migration_v5"
+        / "context_graph"
         / "periodic_materialization"
         / "build_image.sh"
     )

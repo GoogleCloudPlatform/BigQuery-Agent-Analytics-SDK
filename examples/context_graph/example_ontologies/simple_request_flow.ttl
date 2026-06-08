@@ -1,8 +1,8 @@
 # =============================================================================
-# Simple Request Flow — pluggability smoke fixture for the migration v5 demo
+# Simple Request Flow — pluggability smoke fixture for the context graph demo
 #
 # Purpose: prove the ontology pipeline in
-#          ``examples/migration_v5/ontology_artifacts.py`` is genuinely
+#          ``examples/context_graph/ontology_artifacts.py`` is genuinely
 #          ontology-agnostic. This TTL is intentionally domain-neutral
 #          (Request → Action → Outcome) and intentionally minimal: three
 #          entities, two relationships, no cross-namespace imports, no
@@ -32,7 +32,7 @@
     a owl:Ontology ;
     owl:versionInfo "0.1.0" ;
     dcterms:title "Simple Request Flow — Pluggability Smoke Fixture" ;
-    dcterms:description "Domain-neutral Request → Action → Outcome ontology used to prove the migration v5 artifact pipeline accepts any OWL TTL." ;
+    dcterms:description "Domain-neutral Request → Action → Outcome ontology used to prove the context graph artifact pipeline accepts any OWL TTL." ;
     dcterms:license <https://creativecommons.org/licenses/by/4.0/> .
 
 # =============================================================================
@@ -42,7 +42,7 @@
 # path (not just the FILL_IN synthesis path MAKO uses). The PR review found
 # the prior version of this fixture didn't catch a bug where ``make_binding``
 # hard-coded ``id`` as the bound PK property; declaring ``owl:hasKey`` here
-# makes the regression test in ``tests/test_migration_v5_ontology_artifacts.py``
+# makes the regression test in ``tests/test_context_graph_ontology_artifacts.py``
 # meaningful.
 # =============================================================================
 

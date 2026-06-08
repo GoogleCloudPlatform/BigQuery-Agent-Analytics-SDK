@@ -23,7 +23,7 @@ The module takes the **published** image URI as the required `image_uri` variabl
 
 ```bash
 # From the repo root.
-IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
+IMAGE_URI="$(./examples/context_graph/periodic_materialization/build_image.sh \
   --project my-project \
   --repo bqaa \
   --region us-central1 \
@@ -82,7 +82,7 @@ For the image-build step (Cloud Buildpacks via `gcloud builds submit`), also ena
 project_id         = "my-project"
 region             = "us-central1"
 events_dataset_id  = "agent_analytics"
-graph_dataset_id   = "migration_v5_graph"
+graph_dataset_id   = "context_graph"
 schedule           = "0 */6 * * *"
 image_uri          = "us-central1-docker.pkg.dev/my-project/bqaa/periodic-materialization:v1"
 # Optional overrides — defaults match the bash deploy
@@ -113,7 +113,7 @@ compiled-extractor path.
 ### 2. Init + plan + apply
 
 ```bash
-cd examples/migration_v5/periodic_materialization/terraform
+cd examples/context_graph/periodic_materialization/terraform
 terraform init
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -127,7 +127,7 @@ terraform output
 # scheduler_sa_email   = "bqaa-periodic-scheduler-sa@my-project.iam.gserviceaccount.com"
 # cloud_run_job_name   = "bqaa-periodic-materialization"
 # scheduler_name       = "bqaa-periodic-materialization-cron"
-# graph_dataset_id     = "migration_v5_graph"
+# graph_dataset_id     = "context_graph"
 ```
 
 ### 4. Optional smoke

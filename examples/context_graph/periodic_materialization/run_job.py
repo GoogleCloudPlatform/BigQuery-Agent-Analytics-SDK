@@ -146,8 +146,8 @@ def _find_artifact(name: str) -> pathlib.Path:
   Two layouts are supported:
 
   * **Repo checkout / local dev** — artifacts live in the parent
-    directory (``examples/migration_v5/<name>``); this script
-    sits in ``examples/migration_v5/periodic_materialization/``.
+    directory (``examples/context_graph/<name>``); this script
+    sits in ``examples/context_graph/periodic_materialization/``.
   * **Cloud Run Job container** — the deploy script bundles the
     artifacts next to ``run_job.py`` to keep the deployed source
     tree flat. Artifacts are at ``<_HERE>/<name>``.
@@ -170,7 +170,7 @@ def _find_artifact(name: str) -> pathlib.Path:
 # swaps it for the customer's ``{project}.{graph_dataset}``
 # pair at runtime. Single source of truth so both the binding
 # rewrite and the DDL rewrite stay in sync.
-_CANONICAL_PREFIX = "test-project-0728-467323.migration_v5_demo"
+_CANONICAL_PREFIX = "test-project-0728-467323.context_graph"
 
 
 def _require_env(name: str) -> str:
@@ -280,7 +280,7 @@ def _bootstrap_entity_tables(
   the customer doesn't need a separate one-time setup step.
   """
   # Retarget the table DDL to the customer's graph dataset. Two artifact
-  # styles are supported: the migration-v5 snapshot hard-codes the canonical
+  # styles are supported: the context-graph snapshot hard-codes the canonical
   # ``project.dataset`` prefix; the property-graph (codelab-style) artifacts use
   # ``${PROJECT_ID}`` / ``${DATASET}`` placeholders. Resolve both so either
   # style lands in ``{project}.{graph_dataset}`` -- which is also where the
@@ -484,7 +484,7 @@ def main() -> int:
   # selects schema-derived mode (#277/#286): the ontology + binding are derived
   # from the property graph + table schemas, so no ``ontology.yaml`` /
   # ``binding.yaml`` is staged and no binding retargeting happens. When unset,
-  # the wrapper uses the explicit ontology + binding (the migration-v5 /
+  # the wrapper uses the explicit ontology + binding (the context-graph /
   # compiled-extractor advanced path). Exactly one mode is in effect.
   property_graph_name = os.environ.get("BQAA_PROPERTY_GRAPH") or None
   # Orphan-session watchdog (issue #180). Unset means disabled —
@@ -615,7 +615,7 @@ def main() -> int:
           **common_kwargs,
       )
     else:
-      # Explicit ontology + binding (advanced; migration-v5 compiled path).
+      # Explicit ontology + binding (advanced; context-graph compiled path).
       # Retarget the committed binding to the customer's graph dataset.
       _emit("INFO", message="spec input mode", mode="explicit")
       binding_path = _retarget_binding(project_id, graph_dataset_id)
