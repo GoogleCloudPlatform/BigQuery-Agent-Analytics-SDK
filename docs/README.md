@@ -61,7 +61,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 
 | Document | Description |
 |----------|-------------|
-| [Migration v5 periodic materialization playbook](../examples/migration_v5/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO migration v5 graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
+| [Context Graph periodic materialization playbook](../examples/context_graph/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO context graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
 | [proposal_bigquery_agent_cli.md](proposal_bigquery_agent_cli.md) | CLI proposal and command design |
 | [python_udf_support_design.md](python_udf_support_design.md) | BigQuery Python UDF architecture |
 | [remote_function_rationale.md](remote_function_rationale.md) | Cloud Run remote function rationale |

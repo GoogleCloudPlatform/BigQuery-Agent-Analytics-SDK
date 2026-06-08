@@ -1996,6 +1996,18 @@ def materialize_window(
             "mode."
         ),
     ),
+    endpoint: str = typer.Option(
+        "gemini-2.5-flash",
+        "--endpoint",
+        help=(
+            "Vertex AI model for the AI.GENERATE extraction "
+            "fallback (used in 'ai-fallback' mode). Short names "
+            "resolve to a locations/global publisher URL, so "
+            "Gemini 3.x models such as 'gemini-3.5-flash' work "
+            "here. Ignored under --extraction-mode=compiled-only "
+            "(no AI call is made)."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -2063,6 +2075,7 @@ def materialize_window(
         extraction_mode=extraction_mode,
         state_key_suffix=state_key_suffix,
         max_session_age_hours=max_session_age_hours,
+        endpoint=endpoint,
     )
     typer.echo(format_output(result.to_json(), fmt))
     if not result.ok:

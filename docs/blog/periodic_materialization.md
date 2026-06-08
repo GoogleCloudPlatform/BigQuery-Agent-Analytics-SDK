@@ -107,7 +107,7 @@ bqaa context-graph \
     --lookback-hours 24
 ```
 
-For production, run the same materialization path on a schedule with the SDK's Cloud Run Job + Cloud Scheduler [deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) or Terraform module.
+For production, run the same materialization path on a schedule with the SDK's Cloud Run Job + Cloud Scheduler [deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) or Terraform module.
 
 Extraction is your choice: an LLM path (`AI.GENERATE`) for flexible onboarding against variable log structures, or a deterministic compiled mode (`--extraction-mode=compiled-only`) for lower cost and reproducible, auditor-verifiable output with no Vertex AI dependency. (Need descriptions, inheritance, derived properties, or column renames? Author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` instead.)
 
@@ -149,5 +149,5 @@ To begin building Context Graphs for your agent workloads, check out the resourc
 
 * **Code Repository**: Visit the [BigQuery Agent Analytics SDK on GitHub](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK).
 * **Hands-on Codelab**: Follow the step-by-step *Trace AI Agent Decisions with BigQuery Property Graphs* codelab to build and query a Context Graph from scratch.
-* **Production Setup**: Review the [Periodic Materialization guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/migration_v5/periodic_materialization) to configure IAM, the Cloud Run Job, and the Cloud Scheduler trigger.
+* **Production Setup**: Review the [Periodic Materialization guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) to configure IAM, the Cloud Run Job, and the Cloud Scheduler trigger.
 * **Ask in plain English**: The [Conversational Analytics-first guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/conversational-analytics-first.md) shows business readers how to query the decision graph without writing SQL.

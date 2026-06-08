@@ -45,11 +45,11 @@ query time.
 
 Usage:
 
-    PYTHONPATH=src python examples/migration_v5/export_events_jsonl.py \\
+    PYTHONPATH=src python examples/context_graph/export_events_jsonl.py \\
         --project test-project-0728-467323 \\
-        --dataset migration_v5_demo \\
+        --dataset context_graph \\
         --table agent_events \\
-        --out examples/migration_v5/events.jsonl \\
+        --out examples/context_graph/events.jsonl \\
         --limit 200
 
 Pin a fixed ``--limit`` so the captured snapshot stays

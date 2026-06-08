@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pluggability smoke fixtures for the migration v5 artifact pipeline.
+"""Pluggability smoke fixtures for the context graph artifact pipeline.
 
 Each module in this package defines a small
 :class:`ontology_artifacts.OntologyConfig` paired with a TTL

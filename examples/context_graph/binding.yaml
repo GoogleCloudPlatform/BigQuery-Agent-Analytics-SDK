@@ -1,38 +1,38 @@
-binding: migration_v5_demo_binding
+binding: context_graph_binding
 ontology: mako
 target:
   backend: bigquery
   project: test-project-0728-467323
-  dataset: migration_v5_demo
+  dataset: context_graph
 entities:
 - name: AgentSession
-  source: test-project-0728-467323.migration_v5_demo.agent_session
+  source: test-project-0728-467323.context_graph.agent_session
   properties:
   - name: id
     column: agent_session_id
   - name: sessionId
     column: session_id
 - name: BusinessConstraint
-  source: test-project-0728-467323.migration_v5_demo.business_constraint
+  source: test-project-0728-467323.context_graph.business_constraint
   properties:
   - name: id
     column: business_constraint_id
   - name: constraintType
     column: constraint_type
 - name: Candidate
-  source: test-project-0728-467323.migration_v5_demo.candidate
+  source: test-project-0728-467323.context_graph.candidate
   properties:
   - name: id
     column: candidate_id
 - name: ConstraintApplication
-  source: test-project-0728-467323.migration_v5_demo.constraint_application
+  source: test-project-0728-467323.context_graph.constraint_application
   properties:
   - name: id
     column: constraint_application_id
   - name: constraintResult
     column: constraint_result
 - name: ContextSnapshot
-  source: test-project-0728-467323.migration_v5_demo.context_snapshot
+  source: test-project-0728-467323.context_graph.context_snapshot
   properties:
   - name: id
     column: context_snapshot_id
@@ -41,7 +41,7 @@ entities:
   - name: snapshotTimestamp
     column: snapshot_timestamp
 - name: DecisionExecution
-  source: test-project-0728-467323.migration_v5_demo.decision_execution
+  source: test-project-0728-467323.context_graph.decision_execution
   properties:
   - name: id
     column: decision_execution_id
@@ -54,19 +54,19 @@ entities:
   - name: traceId
     column: trace_id
 - name: DecisionPoint
-  source: test-project-0728-467323.migration_v5_demo.decision_point
+  source: test-project-0728-467323.context_graph.decision_point
   properties:
   - name: id
     column: decision_point_id
   - name: reversibility
     column: reversibility
 - name: OutcomeSignal
-  source: test-project-0728-467323.migration_v5_demo.outcome_signal
+  source: test-project-0728-467323.context_graph.outcome_signal
   properties:
   - name: id
     column: outcome_signal_id
 - name: RejectionReason
-  source: test-project-0728-467323.migration_v5_demo.rejection_reason
+  source: test-project-0728-467323.context_graph.rejection_reason
   properties:
   - name: id
     column: rejection_reason_id
@@ -75,111 +75,111 @@ entities:
   - name: rejectionText
     column: rejection_text
 - name: RewardComputation
-  source: test-project-0728-467323.migration_v5_demo.reward_computation
+  source: test-project-0728-467323.context_graph.reward_computation
   properties:
   - name: id
     column: reward_computation_id
   - name: rewardValue
     column: reward_value
 - name: SelectionOutcome
-  source: test-project-0728-467323.migration_v5_demo.selection_outcome
+  source: test-project-0728-467323.context_graph.selection_outcome
   properties:
   - name: id
     column: selection_outcome_id
 relationships:
 - name: appliedConstraint
-  source: test-project-0728-467323.migration_v5_demo.applied_constraint
+  source: test-project-0728-467323.context_graph.applied_constraint
   from_columns:
   - constraint_application_id
   to_columns:
   - business_constraint_id
   properties: []
 - name: atContextSnapshot
-  source: test-project-0728-467323.migration_v5_demo.at_context_snapshot
+  source: test-project-0728-467323.context_graph.at_context_snapshot
   from_columns:
   - decision_execution_id
   to_columns:
   - context_snapshot_id
   properties: []
 - name: derivedReward
-  source: test-project-0728-467323.migration_v5_demo.derived_reward
+  source: test-project-0728-467323.context_graph.derived_reward
   from_columns:
   - reward_computation_id
   to_columns:
   - outcome_signal_id
   properties: []
 - name: evaluatesCandidate
-  source: test-project-0728-467323.migration_v5_demo.evaluates_candidate
+  source: test-project-0728-467323.context_graph.evaluates_candidate
   from_columns:
   - decision_point_id
   to_columns:
   - candidate_id
   properties: []
 - name: evolvedFrom
-  source: test-project-0728-467323.migration_v5_demo.evolved_from
+  source: test-project-0728-467323.context_graph.evolved_from
   from_columns:
   - src_decision_execution_id: id
   to_columns:
   - dst_decision_execution_id: id
   properties: []
 - name: executedAtDecisionPoint
-  source: test-project-0728-467323.migration_v5_demo.executed_at_decision_point
+  source: test-project-0728-467323.context_graph.executed_at_decision_point
   from_columns:
   - decision_execution_id
   to_columns:
   - decision_point_id
   properties: []
 - name: filteredByConstraint
-  source: test-project-0728-467323.migration_v5_demo.filtered_by_constraint
+  source: test-project-0728-467323.context_graph.filtered_by_constraint
   from_columns:
   - candidate_id
   to_columns:
   - constraint_application_id
   properties: []
 - name: hasRejectionReason
-  source: test-project-0728-467323.migration_v5_demo.has_rejection_reason
+  source: test-project-0728-467323.context_graph.has_rejection_reason
   from_columns:
   - candidate_id
   to_columns:
   - rejection_reason_id
   properties: []
 - name: hasSelectionOutcome
-  source: test-project-0728-467323.migration_v5_demo.has_selection_outcome
+  source: test-project-0728-467323.context_graph.has_selection_outcome
   from_columns:
   - decision_execution_id
   to_columns:
   - selection_outcome_id
   properties: []
 - name: partOfSession
-  source: test-project-0728-467323.migration_v5_demo.part_of_session
+  source: test-project-0728-467323.context_graph.part_of_session
   from_columns:
   - decision_execution_id
   to_columns:
   - agent_session_id
   properties: []
 - name: producedOutcome
-  source: test-project-0728-467323.migration_v5_demo.produced_outcome
+  source: test-project-0728-467323.context_graph.produced_outcome
   from_columns:
   - decision_execution_id
   to_columns:
   - outcome_signal_id
   properties: []
 - name: rejectedCandidate
-  source: test-project-0728-467323.migration_v5_demo.rejected_candidate
+  source: test-project-0728-467323.context_graph.rejected_candidate
   from_columns:
   - selection_outcome_id
   to_columns:
   - candidate_id
   properties: []
 - name: selectedCandidate
-  source: test-project-0728-467323.migration_v5_demo.selected_candidate
+  source: test-project-0728-467323.context_graph.selected_candidate
   from_columns:
   - selection_outcome_id
   to_columns:
   - candidate_id
   properties: []
 - name: supersededBy
-  source: test-project-0728-467323.migration_v5_demo.superseded_by
+  source: test-project-0728-467323.context_graph.superseded_by
   from_columns:
   - src_decision_execution_id: id
   to_columns:

@@ -27,7 +27,7 @@ Covers:
 * The list-view shim (``ResolvedRelationship.from_columns`` /
   ``to_columns`` remain ``tuple[str, ...]`` so downstream surfaces
   that only need column names keep working unchanged).
-* Byte-identical SQL emission for the existing migration v5 binding
+* Byte-identical SQL emission for the existing context graph binding
   (the canonical form is only consumed by callers that opt in;
   legacy callers see no SQL drift).
 """
@@ -370,12 +370,12 @@ class TestResolvedRelationshipShape:
 
 
 # ------------------------------------------------------------------ #
-# Byte-identical SQL for existing bindings (migration v5)              #
+# Byte-identical SQL for existing bindings (context graph)              #
 # ------------------------------------------------------------------ #
 
 
-class TestExistingMigrationV5BindingByteIdenticalSQL:
-  """The migration v5 binding mixes both shapes: heterogeneous
+class TestExistingContextGraphBindingByteIdenticalSQL:
+  """The context graph binding mixes both shapes: heterogeneous
   edges use the legacy ``list[str]`` form, and (post-C2) the two
   ``DecisionExecution → DecisionExecution`` self-edges use the
   dict-shape ``[{src_<col>: <pk_prop>}]``. ``resolve()`` must
@@ -383,8 +383,8 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
   binding shape — that's the contract downstream surfaces depend
   on for byte-identical SQL output across the two shapes."""
 
-  def test_migration_v5_binding_round_trips_via_edge_column_names(self):
-    """Load the committed migration v5 binding and confirm every
+  def test_context_graph_binding_round_trips_via_edge_column_names(self):
+    """Load the committed context graph binding and confirm every
     relationship's ``ResolvedRelationship.from_columns`` /
     ``to_columns`` list-view equals the same shape extracted from
     the upstream binding via ``edge_column_names``."""
@@ -393,10 +393,10 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
     from bigquery_ontology.binding_loader import edge_column_names
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    ont_path = repo_root / "examples" / "migration_v5" / "ontology.yaml"
-    binding_path = repo_root / "examples" / "migration_v5" / "binding.yaml"
+    ont_path = repo_root / "examples" / "context_graph" / "ontology.yaml"
+    binding_path = repo_root / "examples" / "context_graph" / "binding.yaml"
     if not ont_path.exists() or not binding_path.exists():
-      pytest.skip("migration_v5 snapshots not checked in")
+      pytest.skip("context_graph snapshots not checked in")
     ont = load_ontology_from_string(ont_path.read_text())
     binding = load_binding_from_string(binding_path.read_text(), ontology=ont)
     from bigquery_agent_analytics.resolved_spec import resolve
@@ -419,7 +419,7 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
       assert len(rel.from_column_mapping) == len(rb.from_columns)
       assert len(rel.to_column_mapping) == len(rb.to_columns)
 
-  def test_migration_v5_self_edges_use_dict_shape_correctly(self):
+  def test_context_graph_self_edges_use_dict_shape_correctly(self):
     """The two self-edges (``evolvedFrom``, ``supersededBy``) must
     resolve to ``ResolvedRelationship`` with distinct ``src_*`` /
     ``dst_*`` edge columns and the canonical mapping pointing each
@@ -427,10 +427,10 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    ont_path = repo_root / "examples" / "migration_v5" / "ontology.yaml"
-    binding_path = repo_root / "examples" / "migration_v5" / "binding.yaml"
+    ont_path = repo_root / "examples" / "context_graph" / "ontology.yaml"
+    binding_path = repo_root / "examples" / "context_graph" / "binding.yaml"
     if not ont_path.exists() or not binding_path.exists():
-      pytest.skip("migration_v5 snapshots not checked in")
+      pytest.skip("context_graph snapshots not checked in")
     ont = load_ontology_from_string(ont_path.read_text())
     binding = load_binding_from_string(binding_path.read_text(), ontology=ont)
     from bigquery_agent_analytics.resolved_spec import resolve
@@ -440,7 +440,7 @@ class TestExistingMigrationV5BindingByteIdenticalSQL:
     for self_edge in ("evolvedFrom", "supersededBy"):
       assert (
           self_edge in by_name
-      ), f"migration v5 binding missing self-edge {self_edge!r}"
+      ), f"context graph binding missing self-edge {self_edge!r}"
       r = by_name[self_edge]
       assert r.from_entity == "DecisionExecution"
       assert r.to_entity == "DecisionExecution"

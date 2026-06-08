@@ -8,14 +8,19 @@
 project_id        = "your-project"
 region            = "us-central1"
 events_dataset_id = "agent_analytics"
-graph_dataset_id  = "migration_v5_graph"
+graph_dataset_id  = "context_graph"
 schedule          = "0 */6 * * *"
 image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-materialization:v1"
 
 # Optional overrides (commented = use the default)
 # location              = "US"
 # job_name              = "bqaa-periodic-materialization"
+# property_graph        = false           # true → schema-derived mode (no ontology/binding);
+#                                         #        build the image with build_image.sh --property-graph;
+#                                         #        not compatible with extraction_mode = "compiled-only"
 # extraction_mode       = "ai-fallback"   # or "compiled-only"
+# endpoint              = ""               # AI.GENERATE model (BQAA_ENDPOINT); e.g. "gemini-3.5-flash";
+#                                         #        "" → runtime default gemini-2.5-flash
 # max_retries           = 2
 # max_session_age_hours = 24              # null → orphan watchdog disabled
 # single_sa             = false           # true → combined bqaa-periodic-sa identity

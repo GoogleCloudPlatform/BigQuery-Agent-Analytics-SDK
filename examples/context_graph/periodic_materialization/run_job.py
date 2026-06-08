@@ -47,6 +47,14 @@ Env vars (all set by the deploy script via
   ``agent_events``.
 * ``BQAA_GRAPH_DATASET_ID`` (required) — target dataset for
   the materialized graph (entity + relationship tables).
+* ``BQAA_PROPERTY_GRAPH`` (default unset) — when set to a staged
+  ``CREATE PROPERTY GRAPH`` ``.sql`` filename (e.g.
+  ``property_graph.sql``), runs in schema-derived mode (#286): the
+  ontology + binding are derived from the property graph + table
+  schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged and no
+  binding retargeting happens. Use placeholdered (``${PROJECT_ID}`` /
+  ``${DATASET}``), rename-free graphs. Unset ⇒ explicit ontology +
+  binding (the advanced / compiled-extractor path).
 * ``BQAA_LOCATION`` (default ``US``) — BigQuery location;
   must match both datasets.
 * ``BQAA_LOOKBACK_HOURS`` (default ``6``) — scan window size.
@@ -80,6 +88,11 @@ Env vars (all set by the deploy script via
   gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
   span the compiled extractors don't cover surfaces as a typed
   ``empty_extraction`` failure with sample diagnostics.
+* ``BQAA_ENDPOINT`` (default ``gemini-2.5-flash``) — Vertex AI
+  model for the ``ai-fallback`` AI.GENERATE call. Short names
+  resolve to a ``locations/global`` publisher URL, so Gemini 3.x
+  names (e.g. ``gemini-3.5-flash``) work. Ignored under
+  ``compiled-only`` (no AI call is made).
 * ``BQAA_REFERENCE_EXTRACTORS_MODULE`` (default unset, set to
   ``reference_extractor`` by the deploy script in
   compiled-only mode) — dotted module path whose ``EXTRACTORS``
@@ -133,8 +146,8 @@ def _find_artifact(name: str) -> pathlib.Path:
   Two layouts are supported:
 
   * **Repo checkout / local dev** — artifacts live in the parent
-    directory (``examples/migration_v5/<name>``); this script
-    sits in ``examples/migration_v5/periodic_materialization/``.
+    directory (``examples/context_graph/<name>``); this script
+    sits in ``examples/context_graph/periodic_materialization/``.
   * **Cloud Run Job container** — the deploy script bundles the
     artifacts next to ``run_job.py`` to keep the deployed source
     tree flat. Artifacts are at ``<_HERE>/<name>``.
@@ -157,7 +170,7 @@ def _find_artifact(name: str) -> pathlib.Path:
 # swaps it for the customer's ``{project}.{graph_dataset}``
 # pair at runtime. Single source of truth so both the binding
 # rewrite and the DDL rewrite stay in sync.
-_CANONICAL_PREFIX = "test-project-0728-467323.migration_v5_demo"
+_CANONICAL_PREFIX = "test-project-0728-467323.context_graph"
 
 
 def _require_env(name: str) -> str:
@@ -266,21 +279,81 @@ def _bootstrap_entity_tables(
   silently fails on every run. Bootstrapping at startup means
   the customer doesn't need a separate one-time setup step.
   """
+  # Retarget the table DDL to the customer's graph dataset. Two artifact
+  # styles are supported: the context-graph snapshot hard-codes the canonical
+  # ``project.dataset`` prefix; the property-graph (codelab-style) artifacts use
+  # ``${PROJECT_ID}`` / ``${DATASET}`` placeholders. Resolve both so either
+  # style lands in ``{project}.{graph_dataset}`` -- which is also where the
+  # derive path reads INFORMATION_SCHEMA from.
   ddl_text = (
       _find_artifact("table_ddl.sql")
       .read_text()
-      .replace(
-          _CANONICAL_PREFIX,
-          f"{project_id}.{graph_dataset_id}",
-      )
+      .replace(_CANONICAL_PREFIX, f"{project_id}.{graph_dataset_id}")
+      .replace("${PROJECT_ID}", project_id)
+      .replace("${DATASET}", graph_dataset_id)
   )
   count = 0
-  for stmt in ddl_text.strip().split(";"):
-    stmt = stmt.strip()
-    if stmt:
-      bq_client.query(stmt).result()
-      count += 1
+  for stmt in _split_sql_statements(ddl_text):
+    bq_client.query(stmt).result()
+    count += 1
   return count
+
+
+def _split_sql_statements(ddl_text: str) -> list[str]:
+  """Split a multi-statement DDL script into individual statements.
+
+  A quote- and comment-aware scanner: it removes ``--`` line comments and
+  ``/* */`` block comments and splits on ``;`` only at the top level -- never
+  inside a single-quoted string, double-quoted string, or backtick-quoted
+  identifier. A naive ``split(";")`` corrupts otherwise-valid BigQuery DDL such
+  as a comment containing ``;`` (which yields a fragment BigQuery rejects with
+  "Unexpected end of statement"), ``OPTIONS(description="has; semicolon")``,
+  ``DEFAULT 'a;b'``, or a quoted ``--``. Empty fragments are dropped.
+  """
+  statements: list[str] = []
+  buf: list[str] = []
+  quote: Optional[str] = None  # "'", '"', or "`" while inside a quoted span
+  i, n = 0, len(ddl_text)
+  while i < n:
+    ch = ddl_text[i]
+    if quote is not None:
+      buf.append(ch)
+      if ch == "\\" and i + 1 < n:  # escaped char inside the quote
+        buf.append(ddl_text[i + 1])
+        i += 2
+        continue
+      if ch == quote:
+        quote = None
+      i += 1
+      continue
+    # Outside any quote: comments and the statement separator are structural.
+    if ch == "-" and i + 1 < n and ddl_text[i + 1] == "-":
+      newline = ddl_text.find("\n", i)
+      i = n if newline == -1 else newline  # keep the newline as whitespace
+      continue
+    if ch == "/" and i + 1 < n and ddl_text[i + 1] == "*":
+      close = ddl_text.find("*/", i + 2)
+      i = n if close == -1 else close + 2
+      buf.append(" ")  # don't glue the tokens the comment separated
+      continue
+    if ch in ("'", '"', "`"):
+      quote = ch
+      buf.append(ch)
+      i += 1
+      continue
+    if ch == ";":
+      stmt = "".join(buf).strip()
+      if stmt:
+        statements.append(stmt)
+      buf = []
+      i += 1
+      continue
+    buf.append(ch)
+    i += 1
+  tail = "".join(buf).strip()
+  if tail:
+    statements.append(tail)
+  return statements
 
 
 def _ensure_graph_dataset(
@@ -390,6 +463,11 @@ def main() -> int:
   extraction_mode = (
       os.environ.get("BQAA_EXTRACTION_MODE") or "ai-fallback"
   ).strip()
+  # AI.GENERATE model for the ai-fallback path. Short names resolve to a
+  # locations/global publisher URL inside the SDK, so Gemini 3.x names
+  # (e.g. ``gemini-3.5-flash``) work. Default matches the SDK default so
+  # an unset env var is a no-op. Ignored under ``compiled-only`` (no AI call).
+  endpoint = (os.environ.get("BQAA_ENDPOINT") or "gemini-2.5-flash").strip()
   # Reference module + bundles root. Both default to None;
   # ``compiled-only`` mode requires at least one of them to be set
   # at the SDK boundary (else the manager has no structured
@@ -402,6 +480,13 @@ def main() -> int:
       os.environ.get("BQAA_REFERENCE_EXTRACTORS_MODULE") or None
   )
   bundles_root = os.environ.get("BQAA_BUNDLES_ROOT") or None
+  # Spec input mode. ``BQAA_PROPERTY_GRAPH`` (a staged ``*.sql`` filename)
+  # selects schema-derived mode (#277/#286): the ontology + binding are derived
+  # from the property graph + table schemas, so no ``ontology.yaml`` /
+  # ``binding.yaml`` is staged and no binding retargeting happens. When unset,
+  # the wrapper uses the explicit ontology + binding (the context-graph /
+  # compiled-extractor advanced path). Exactly one mode is in effect.
+  property_graph_name = os.environ.get("BQAA_PROPERTY_GRAPH") or None
   # Orphan-session watchdog (issue #180). Unset means disabled —
   # mirrors the CLI flag. ``_optional_env_float`` raises ``exit 2``
   # on a non-numeric value at the boundary, and the materializer's
@@ -432,6 +517,7 @@ def main() -> int:
       to_time=to_time_raw,
       state_key_suffix=state_key_suffix,
       extraction_mode=extraction_mode,
+      endpoint=endpoint,
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
       max_session_age_hours=max_session_age_hours,
@@ -475,18 +561,11 @@ def main() -> int:
         statements=ddl_count,
     )
 
-    # 3. Retarget binding to the customer's graph dataset.
-    binding_path = _retarget_binding(project_id, graph_dataset_id)
-
-    # 4. Run the orchestrator. Reads events from
-    # ``BQAA_EVENTS_DATASET_ID``; writes entities/relationships
-    # AND the state/checkpoint table into
-    # ``BQAA_GRAPH_DATASET_ID`` per the retargeted binding.
-    # The state-table arg is fully-qualified
-    # (``project.dataset.table``) so it ignores the
-    # orchestrator's default-dataset fallback (which would point
-    # at the read-only events dataset). This keeps the source
-    # dataset truly read-only per the README contract.
+    # 3. Run the orchestrator. Reads events from
+    # ``BQAA_EVENTS_DATASET_ID``; writes entities/relationships AND the
+    # state/checkpoint table into ``BQAA_GRAPH_DATASET_ID``. The
+    # state-table arg is fully-qualified (``project.dataset.table``) so the
+    # read-only events dataset is never written, per the README contract.
     state_table_ref = (
         f"{project_id}.{graph_dataset_id}._bqaa_materialization_state"
     )
@@ -496,11 +575,9 @@ def main() -> int:
     parsed_from = mw._parse_backfill_timestamp("BQAA_FROM", from_time_raw)
     parsed_to = mw._parse_backfill_timestamp("BQAA_TO", to_time_raw)
 
-    result = mw.run_materialize_window(
+    common_kwargs = dict(
         project_id=project_id,
         dataset_id=events_dataset_id,
-        ontology_path=str(_find_artifact("ontology.yaml")),
-        binding_path=str(binding_path),
         lookback_hours=lookback_hours,
         overlap_minutes=overlap_minutes,
         max_sessions=max_sessions,
@@ -514,10 +591,41 @@ def main() -> int:
         to_time=parsed_to,
         state_key_suffix=state_key_suffix,
         extraction_mode=extraction_mode,
-        bundles_root=bundles_root,
-        reference_extractors_module=reference_extractors_module,
         max_session_age_hours=max_session_age_hours,
+        endpoint=endpoint,
     )
+
+    if property_graph_name:
+      # Schema-derived mode (#286): no ontology/binding, no binding retarget.
+      # ``graph_*`` target the writable graph dataset for placeholder
+      # resolution, INFORMATION_SCHEMA lookup, and writes; events stay
+      # read-only in ``events_dataset_id``. ``property_graph.sql`` is staged
+      # with ``${PROJECT_ID}`` / ``${DATASET}`` placeholders that the
+      # materializer resolves from ``project_id`` / ``graph_dataset_id``.
+      _emit(
+          "INFO",
+          message="spec input mode",
+          mode="property-graph",
+          property_graph=property_graph_name,
+      )
+      result = mw.run_materialize_window(
+          property_graph_path=str(_find_artifact(property_graph_name)),
+          graph_project_id=project_id,
+          graph_dataset_id=graph_dataset_id,
+          **common_kwargs,
+      )
+    else:
+      # Explicit ontology + binding (advanced; context-graph compiled path).
+      # Retarget the committed binding to the customer's graph dataset.
+      _emit("INFO", message="spec input mode", mode="explicit")
+      binding_path = _retarget_binding(project_id, graph_dataset_id)
+      result = mw.run_materialize_window(
+          ontology_path=str(_find_artifact("ontology.yaml")),
+          binding_path=str(binding_path),
+          bundles_root=bundles_root,
+          reference_extractors_module=reference_extractors_module,
+          **common_kwargs,
+      )
 
     # Structured JSON report for Cloud Logging. Cloud Logging
     # filters / metrics can pivot on the keys here directly

@@ -23,6 +23,8 @@ wiring exits non-zero.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -90,3 +92,46 @@ def test_cli_exits_nonzero_when_both_modes() -> None:
       _BASE + ["--property-graph", "g.sql", "--ontology", "o.yaml"],
   )
   assert result.exit_code != 0
+
+
+# --------------------------------------------------------------------------- #
+# --endpoint forwarding: the operator's AI.GENERATE model selection must reach
+# run_materialize_window, else `bqaa context-graph` users stay pinned to the
+# SDK default regardless of --endpoint.
+# --------------------------------------------------------------------------- #
+
+
+class _FakeResult:
+  ok = True
+
+  def to_json(self):
+    return {}
+
+
+def _invoke_capturing_endpoint(extra_args):
+  captured: dict = {}
+
+  def _fake_run(**kwargs):
+    captured.update(kwargs)
+    return _FakeResult()
+
+  with mock.patch(
+      "bigquery_agent_analytics.materialize_window.run_materialize_window",
+      _fake_run,
+  ):
+    result = runner.invoke(
+        bqaa_app, _BASE + ["--property-graph", "g.sql"] + extra_args
+    )
+  assert result.exit_code == 0, result.output
+  return captured["endpoint"]
+
+
+def test_cli_endpoint_forwarded() -> None:
+  assert (
+      _invoke_capturing_endpoint(["--endpoint", "gemini-3.5-flash"])
+      == "gemini-3.5-flash"
+  )
+
+
+def test_cli_endpoint_defaults_to_gemini_25_flash() -> None:
+  assert _invoke_capturing_endpoint([]) == "gemini-2.5-flash"

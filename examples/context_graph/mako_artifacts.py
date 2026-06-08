@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MAKO-specific config for the migration v5 ontology pipeline.
+"""MAKO-specific config for the context graph ontology pipeline.
 
 This module is a thin wrapper around
 :mod:`ontology_artifacts` that fixes the per-ontology
@@ -198,7 +198,7 @@ def make_property_graph_sql(
 def regenerate_snapshots(
     *,
     project: str = "test-project-0728-467323",
-    dataset: str = "migration_v5_demo",
+    dataset: str = "context_graph",
 ) -> dict:
   """Regenerate the MAKO demo's TTL-derived artifact snapshots.
 
@@ -218,12 +218,12 @@ if __name__ == "__main__":  # pragma: no cover
 
   parser = argparse.ArgumentParser(
       description=(
-          "Regenerate the migration v5 demo snapshot files "
+          "Regenerate the context graph demo snapshot files "
           "from the authored mako_core.ttl input."
       ),
   )
   parser.add_argument("--project", default="test-project-0728-467323")
-  parser.add_argument("--dataset", default="migration_v5_demo")
+  parser.add_argument("--dataset", default="context_graph")
   args = parser.parse_args()
   summary = regenerate_snapshots(project=args.project, dataset=args.dataset)
   print(json.dumps(summary, indent=2, sort_keys=True))

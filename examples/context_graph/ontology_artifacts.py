@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generic ontology-artifact pipeline for the migration v5 demo.
+"""Generic ontology-artifact pipeline for the context graph demo.
 
 Reads exactly one input — an OWL TTL file — and produces
 every TTL-derived artifact the demo consumes:

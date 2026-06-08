@@ -66,6 +66,19 @@ locals {
     var.extraction_mode == "compiled-only" ? {
       BQAA_REFERENCE_EXTRACTORS_MODULE = "reference_extractor"
     } : {},
+    # Schema-derived mode (#286): tell the runtime to derive the spec from the
+    # staged ``property_graph.sql`` instead of the explicit ontology/binding
+    # pair. Mirrors the bash deploy's ``BQAA_PROPERTY_GRAPH`` wiring.
+    var.property_graph ? {
+      BQAA_PROPERTY_GRAPH = "property_graph.sql"
+    } : {},
+    # AI.GENERATE model selection (#298). Empty string (default) leaves
+    # BQAA_ENDPOINT unset so the runtime keeps its own gemini-2.5-flash
+    # default; a value wires the env var. Mirrors the bash deploy's
+    # ``--endpoint`` → ``BQAA_ENDPOINT`` wiring. No-op under compiled-only.
+    var.endpoint == "" ? {} : {
+      BQAA_ENDPOINT = var.endpoint
+    },
   )
 }
 
@@ -265,6 +278,16 @@ resource "google_cloud_run_v2_job" "periodic" {
           }
         }
       }
+    }
+  }
+
+  # Schema-derived mode has no reference extractors staged, so
+  # ``compiled-only`` would empty_extract at runtime. Reject the
+  # combination at plan time, mirroring the bash deploy's boundary check.
+  lifecycle {
+    precondition {
+      condition     = !(var.property_graph && var.extraction_mode == "compiled-only")
+      error_message = "property_graph = true (schema-derived mode) does not support extraction_mode = \"compiled-only\": no reference extractors are staged in derived mode. Use \"ai-fallback\", or the explicit ontology/binding path."
     }
   }
 

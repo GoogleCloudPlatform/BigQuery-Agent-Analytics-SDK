@@ -1,6 +1,17 @@
-# Migration v5 Demo — Ontology-Driven Artifact Pipeline
+# Context Graph — Ontology-Driven Artifact Pipeline (advanced)
 
-**Status:** The four-guarantee notebook (`examples/migration_v5_demo_notebook.ipynb`) is live end-to-end against `test-project-0728-467323` using the MAKO ontology as the canonical reference example. PR [#155](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/155) shipped the fixture foundation; PR [#157](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/157) added `reference_extractor.py`; PR [#160](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/160) wired Beat 3 + Beat 4.4 live.
+> **Which path is this?** This is the **advanced** explicit-ontology example: it
+> authors a full `ontology.yaml` + `binding.yaml` to get descriptions that steer
+> the AI prompt, entity inheritance, derived properties, column renames, and a
+> hand-authored compiled reference extractor. **Most users want the primary
+> one-artifact path instead** — ship a `property_graph.sql` and let `bqaa
+> context-graph --property-graph` derive the ontology + binding for you. Start
+> there: the [Periodic Materialization codelab](../../docs/codelabs/periodic_materialization.md)
+> and the [scheduled deploy runbook](../../docs/guides/scheduled-context-graph-deploy.md).
+> Reach for this explicit pipeline only when the one-artifact path can't express
+> your graph.
+
+**Status:** The four-guarantee notebook (`examples/_archive/context_graph_historical_notebook.ipynb`) is live end-to-end against `test-project-0728-467323` using the MAKO ontology as the canonical reference example. PR [#155](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/155) shipped the fixture foundation; PR [#157](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/157) added `reference_extractor.py`; PR [#160](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/160) wired Beat 3 + Beat 4.4 live.
 
 The demo's event source of truth is **a runnable agent talking to the BQ AA plugin**, not a hand-coded event generator. The artifact pipeline that turns a TTL into binding + DDL + property-graph SQL is **ontology-agnostic** — see `ontology_artifacts.py` — and the MAKO config (in `mako_artifacts.py`) is one concrete configuration of it.
 
@@ -28,7 +39,7 @@ This demo ships **two** ontology configs. The MAKO config is the load-bearing re
 | Config | TTL | Where | Surface |
 |---|---|---|---|
 | `MAKO_CONFIG` | `mako_core.ttl` (Yahoo Monetization decision ontology, 18 namespace entities) | `mako_artifacts.py` | Full demo: notebook, `mako_demo_agent.py` (5 decision-flow tools), `reference_extractor.py`, periodic materialization deploy. |
-| `SIMPLE_REQUEST_FLOW_CONFIG` | `example_ontologies/simple_request_flow.ttl` (3-entity Request → Action → Outcome flow) | `example_ontologies/simple_request_flow_config.py` | Smoke fixture only. Exercised by `tests/test_migration_v5_ontology_artifacts.py`. No runnable agent ships with it. |
+| `SIMPLE_REQUEST_FLOW_CONFIG` | `example_ontologies/simple_request_flow.ttl` (3-entity Request → Action → Outcome flow) | `example_ontologies/simple_request_flow_config.py` | Smoke fixture only. Exercised by `tests/test_context_graph_ontology_artifacts.py`. No runnable agent ships with it. |
 
 A new ontology plugs in the same way: write a TTL, define an `OntologyConfig` naming it, call `regenerate_snapshots(your_config, project=..., dataset=...)`.
 
@@ -44,7 +55,7 @@ A new ontology plugs in the same way: write a TTL, define an `OntologyConfig` na
 | `export_events_jsonl.py` | **Authored.** | Optional. Exports a pinned subset of `agent_events` to a local JSONL file for the notebook's deterministic offline revalidation tests. Not an event generator — it reads from BigQuery. |
 | `example_ontologies/simple_request_flow.ttl` | **Authored.** | Pluggability smoke fixture (3 entities, 2 relationships, no cross-namespace imports). |
 | `example_ontologies/simple_request_flow_config.py` | **Authored.** | `SIMPLE_REQUEST_FLOW_CONFIG` — second `OntologyConfig` that plugs into the same generic pipeline. |
-| `ontology.yaml` / `binding.yaml` / `table_ddl.sql` / `property_graph.sql` | **Generated** for MAKO by `mako_artifacts.regenerate_snapshots()`. Checked in so reviewers can read them as-is. | TTL-derived artifacts for `(test-project-0728-467323, migration_v5_demo)`. The notebook regenerates against a fresh `migration_v5_demo_<8-hex>` dataset at runtime. |
+| `ontology.yaml` / `binding.yaml` / `table_ddl.sql` / `property_graph.sql` | **Generated** for MAKO by `mako_artifacts.regenerate_snapshots()`. Checked in so reviewers can read them as-is. | TTL-derived artifacts for `(test-project-0728-467323, context_graph)`. The notebook regenerates against a fresh `context_graph_<8-hex>` dataset at runtime. |
 | `events.jsonl` | **Captured.** | Optional offline snapshot exported via `export_events_jsonl.py`. Not checked in; populated on demand. |
 
 The Simple Request Flow config's snapshots are **not checked in** — they're regenerated to a tmpdir by the pluggability test. The TTL + config are the only files under `example_ontologies/`.
@@ -135,7 +146,7 @@ The agent uses Vertex AI Gemini by default (`DEMO_AGENT_MODEL=gemini-2.5-flash`)
 
 ### 5. `(project, dataset)` is a parameter, not a baked-in value
 
-`mako_artifacts.regenerate_snapshots(project=..., dataset=...)` and `run_agent.py --project X --dataset Y` both take the target as input. The checked-in snapshots use `test-project-0728-467323` / `migration_v5_demo` as defaults so reviewers can `cat` them; the notebook regenerates everything against a fresh `migration_v5_demo_<8-hex>` dataset at runtime. The generic pipeline takes `(project, dataset)` the same way — they're never config-time constants.
+`mako_artifacts.regenerate_snapshots(project=..., dataset=...)` and `run_agent.py --project X --dataset Y` both take the target as input. The checked-in snapshots use `test-project-0728-467323` / `context_graph` as defaults so reviewers can `cat` them; the notebook regenerates everything against a fresh `context_graph_<8-hex>` dataset at runtime. The generic pipeline takes `(project, dataset)` the same way — they're never config-time constants.
 
 ### 6. `events.jsonl` is captured, not synthesized
 
@@ -178,31 +189,31 @@ The MAKO TTL declares `mako:Candidate rdfs:subClassOf mako:RoleTrait`; the OWL i
 
 ```bash
 # MAKO artifact pipeline runs end-to-end and regenerates snapshots.
-PYTHONPATH=src python examples/migration_v5/mako_artifacts.py
+PYTHONPATH=src python examples/context_graph/mako_artifacts.py
 # → {"binding_entities": 11, "binding_relationships": 14,
 #    "ontology_entities": 18}
 
 # Generic pipeline works against the Simple Request Flow smoke fixture.
-PYTHONPATH=src pytest tests/test_migration_v5_ontology_artifacts.py
+PYTHONPATH=src pytest tests/test_context_graph_ontology_artifacts.py
 # → 10 passed (MAKO snapshot regression + pluggability assertions
 #   + owl:hasKey regression coverage)
 
 # Generated MAKO ontology validates clean.
-python -m bigquery_ontology.cli validate examples/migration_v5/ontology.yaml
+python -m bigquery_ontology.cli validate examples/context_graph/ontology.yaml
 
 # Generated MAKO binding validates against the generated ontology.
-python -m bigquery_ontology.cli validate examples/migration_v5/binding.yaml \
-    --ontology examples/migration_v5/ontology.yaml
+python -m bigquery_ontology.cli validate examples/context_graph/binding.yaml \
+    --ontology examples/context_graph/ontology.yaml
 
 # Property graph + concept index DDL compiles clean.
 python -m bigquery_ontology.cli compile \
     --emit-concept-index \
-    --concept-index-table 'test-project-0728-467323.migration_v5_demo.mako_concept_index' \
-    --ontology examples/migration_v5/ontology.yaml \
-    examples/migration_v5/binding.yaml
+    --concept-index-table 'test-project-0728-467323.context_graph.mako_concept_index' \
+    --ontology examples/context_graph/ontology.yaml \
+    examples/context_graph/binding.yaml
 
 # Demo agent + plugin import cleanly.
-PYTHONPATH=src:examples/migration_v5 python -c "
+PYTHONPATH=src:examples/context_graph python -c "
 import mako_demo_agent
 print(type(mako_demo_agent.root_agent).__name__,
       len(mako_demo_agent.root_agent.tools),
@@ -210,34 +221,37 @@ print(type(mako_demo_agent.root_agent).__name__,
 # → LlmAgent 9 BigQueryAgentAnalyticsPlugin
 
 # Driver --help works without live BQ / Vertex.
-PYTHONPATH=src python examples/migration_v5/run_agent.py --help
+PYTHONPATH=src python examples/context_graph/run_agent.py --help
 
 # Exporter --help + identifier validation.
-PYTHONPATH=src python examples/migration_v5/export_events_jsonl.py --help
+PYTHONPATH=src python examples/context_graph/export_events_jsonl.py --help
 ```
 
-A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells against a fresh scratch dataset on `test-project-0728-467323`) is captured with cell outputs inline in `examples/migration_v5_demo_notebook.ipynb`. Per-beat evidence (exact numbers depend on which `--sessions N` run produced the committed snapshot):
+A live end-to-end notebook run (`run_agent.py --sessions 3` + Beat 1–4 cells against a fresh scratch dataset on `test-project-0728-467323`) is captured with cell outputs inline in `examples/_archive/context_graph_historical_notebook.ipynb`. Per-beat evidence (exact numbers depend on which `--sessions N` run produced the committed snapshot):
 
 - **Beat 1**: GQL `DecisionExecution` count `before=0, after=N>0`, `rows_materialized total>0`, `property_graph_status='skipped:user_requested'`, zero SDK-issued `CREATE OR REPLACE PROPERTY GRAPH` jobs.
 - **Beat 2**: `binding-validate` exits 1 with a `missing_column` failure after column rename; restore + re-validate exits 0; cell 2.5 reuses cell 1.4's `property_graph_status='skipped:user_requested'` + non-zero `rows_materialized` to close the combined "validate + build" flow without re-materializing inside BigQuery's streaming-buffer window.
 - **Beat 3.6**: synthetic `ExtractedGraph` triggers all three `FallbackScope` failures (`NODE + FIELD + EDGE`).
 - **Beat 4**: concept index emitted + applied; `LabelSynonymResolver.resolve("DecisionExecution")` returns 1 candidate with a 12-hex `compile_id`; `GRAPH_TABLE` count over the user-authored property graph is non-zero. Hub-shape `(DecisionExecution)-[partOfSession]->(AgentSession)` returns at least one row per current session — the compiled extractor wired in Beat 3.5 synthesizes the envelope-side `AgentSession` + `partOfSession`.
-- **Beat 5**: feedback / reward loop closes the demo arc. The agent emits four additional tool calls per decision — `record_rejection` (one per losing candidate), optional `apply_constraint` (when a candidate is filtered by policy), `record_outcome_signal` (one to three per execution; observed real-world result), `compute_reward` (one per execution; aggregates the signals into a scalar RL reward). The reference extractor at `examples/migration_v5/reference_extractor.py` covers all four, emitting `RejectionReason`, `BusinessConstraint` + `ConstraintApplication`, `OutcomeSignal`, and `RewardComputation` nodes plus the edges (`hasRejectionReason`, `appliedConstraint`, `filteredByConstraint`, `producedOutcome`, `derivedReward`) that wire them back into the Beat 1–4 hub. **Live notebook smoke passed**: a single coherent end-to-end run against a fresh `migration_v5_demo_0a300070` scratch dataset on `test-project-0728-467323` with three MAKO agent sessions, captured in `examples/migration_v5_demo_notebook.ipynb` — all 29 code cells executed with monotonic execution counts 1–29 and zero error outputs. Beat 1's build materializes `rows_materialized total=89` across 18 tables (Beats 1–4 hub + Beat 5 entities + edges); Beat 5's cells extract 125 nodes / 46 edges and confirm 6 `OutcomeSignal` + 3 `RewardComputation` + 8 `RejectionReason` rows landed in BigQuery alongside their edges. Both payoff GQL traversals project unique edge tuples via `SELECT DISTINCT` and assert their row count matches the underlying `DISTINCT` edge count: `(DecisionExecution)-[producedOutcome]->(OutcomeSignal)<-[derivedReward]-(RewardComputation)` returns 6 unique rows with real `reward_value` floats (0.80 / 1.00) from the agent's `compute_reward` payload; `(Candidate)-[hasRejectionReason]->(RejectionReason)` returns 8 unique rows attributing every losing candidate to a recorded reason. The `DISTINCT` projection makes the cells robust to BigQuery's streaming-buffer DELETE rejection (which can pin Beat 1.4 + Beat 3.5's row sets within the same ~30 min window) and the assertions catch any join-cardinality regression. The binding scope grows from 6 to **11** entities; 9 to **14** relationships (the prior 9 already included the two `DecisionExecution` self-edges from C2).
+- **Beat 5**: feedback / reward loop closes the demo arc. The agent emits four additional tool calls per decision — `record_rejection` (one per losing candidate), optional `apply_constraint` (when a candidate is filtered by policy), `record_outcome_signal` (one to three per execution; observed real-world result), `compute_reward` (one per execution; aggregates the signals into a scalar RL reward). The reference extractor at `examples/context_graph/reference_extractor.py` covers all four, emitting `RejectionReason`, `BusinessConstraint` + `ConstraintApplication`, `OutcomeSignal`, and `RewardComputation` nodes plus the edges (`hasRejectionReason`, `appliedConstraint`, `filteredByConstraint`, `producedOutcome`, `derivedReward`) that wire them back into the Beat 1–4 hub. **Live notebook smoke passed**: a single coherent end-to-end run against a fresh `context_graph_0a300070` scratch dataset on `test-project-0728-467323` with three MAKO agent sessions, captured in `examples/_archive/context_graph_historical_notebook.ipynb` — all 29 code cells executed with monotonic execution counts 1–29 and zero error outputs. Beat 1's build materializes `rows_materialized total=89` across 18 tables (Beats 1–4 hub + Beat 5 entities + edges); Beat 5's cells extract 125 nodes / 46 edges and confirm 6 `OutcomeSignal` + 3 `RewardComputation` + 8 `RejectionReason` rows landed in BigQuery alongside their edges. Both payoff GQL traversals project unique edge tuples via `SELECT DISTINCT` and assert their row count matches the underlying `DISTINCT` edge count: `(DecisionExecution)-[producedOutcome]->(OutcomeSignal)<-[derivedReward]-(RewardComputation)` returns 6 unique rows with real `reward_value` floats (0.80 / 1.00) from the agent's `compute_reward` payload; `(Candidate)-[hasRejectionReason]->(RejectionReason)` returns 8 unique rows attributing every losing candidate to a recorded reason. The `DISTINCT` projection makes the cells robust to BigQuery's streaming-buffer DELETE rejection (which can pin Beat 1.4 + Beat 3.5's row sets within the same ~30 min window) and the assertions catch any join-cardinality regression. The binding scope grows from 6 to **11** entities; 9 to **14** relationships (the prior 9 already included the two `DecisionExecution` self-edges from C2).
 
 ## Run this every N hours in production
 
 The notebook walks through the four guarantees once, ad hoc. Real deployments want the graph kept fresh on a cron — events arrive continuously, the materialized entity/relationship tables should follow within a chosen latency budget.
 
-[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa context-graph` every N hours against your project, using the MAKO demo's bound artifacts (the standalone `bqaa-materialize-window` command remains a deprecated alias for the same handler if your existing scripts still call it). The deploy script bundles the checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql` from this directory — running it against a different `OntologyConfig` means regenerating those snapshots for your config first and pointing the deploy at the new files. The deploy script doesn't yet wire that as a CLI flag; that's a natural follow-up but out of scope for this PR.
+[`periodic_materialization/`](./periodic_materialization/) is the production path: a packaged Cloud Run Job + Cloud Scheduler trigger that runs `bqaa context-graph` every N hours against your project (the standalone `bqaa-materialize-window` command remains a deprecated alias for the same handler if your existing scripts still call it). Two deploy shapes:
+
+* **Rename-free custom graph (the common path):** use the deploy script's `--property-graph property_graph.sql` mode (#286). The runtime derives the ontology + binding from your placeholdered property graph at run time — no snapshot regeneration, no editing checked-in files. See the [scheduled deploy runbook](../../docs/guides/scheduled-context-graph-deploy.md).
+* **Explicit MAKO-style graph (this directory):** the deploy bundles the checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql`. Running it against a different `OntologyConfig` means regenerating those snapshots for your config first (`mako_artifacts.py`/`ontology_artifacts.py`) and pointing the deploy at the new files.
 
 The flow customers actually follow:
 
-1. **Get events** — point at your existing `agent_events` table (the BQ AA plugin already writes here; if you don't have one yet, seed via `python examples/migration_v5/run_agent.py --sessions 3` against a scratch dataset to populate it with MAKO traces).
+1. **Get events** — point at your existing `agent_events` table (the BQ AA plugin already writes here; if you don't have one yet, seed via `python examples/context_graph/run_agent.py --sessions 3` against a scratch dataset to populate it with MAKO traces).
 2. **Local dry-run** — `python periodic_materialization/run_job.py` with env vars. Same code path as the deployed job, no Cloud Run required. Verifies your IAM / dataset setup before paying for a deploy.
 3. **Deploy** — one command:
 
    ```bash
-   ./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+   ./examples/context_graph/periodic_materialization/deploy_cloud_run_job.sh \
      --project your-project --region us-central1 \
      --events-dataset your_events_dataset \
      --graph-dataset your_graph_dataset \

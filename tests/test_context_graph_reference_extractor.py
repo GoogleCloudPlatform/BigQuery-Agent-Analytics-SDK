@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for ``examples/migration_v5/reference_extractor.py``.
+"""Tests for ``examples/context_graph/reference_extractor.py``.
 
 Covers:
 
@@ -39,13 +39,13 @@ import pytest
 
 # The reference extractor lives under ``examples/``, which isn't
 # on ``sys.path`` by default. Add the repo root so
-# ``import examples.migration_v5.reference_extractor`` works.
+# ``import examples.context_graph.reference_extractor`` works.
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(_REPO_ROOT))
 
 reference_extractor = importlib.import_module(
-    "examples.migration_v5.reference_extractor"
+    "examples.context_graph.reference_extractor"
 )
 
 from bigquery_agent_analytics.extracted_models import ExtractedGraph
