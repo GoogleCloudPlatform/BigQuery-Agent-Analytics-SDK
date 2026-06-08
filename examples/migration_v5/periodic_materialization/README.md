@@ -306,6 +306,13 @@ Requirements / limits:
 * Not compatible with `--extraction-mode=compiled-only` (no reference
   extractors are staged in derived mode); the deploy rejects that combination.
 
+**Pick the `AI.GENERATE` model.** Add `--endpoint MODEL` to choose the
+extraction model; it wires `BQAA_ENDPOINT` on the Job. Default is unset, so the
+runtime keeps its `gemini-2.5-flash` default. Short names resolve to the Vertex
+`locations/global` publisher URL, so Gemini 3.x models such as
+`gemini-3.5-flash` work. Ignored under `--extraction-mode=compiled-only` (no AI
+call is made). Applies to both the schema-derived and explicit paths (#298).
+
 **Advanced — explicit ontology + binding.** Omit `--property-graph` to keep the
 default MAKO path: descriptions for AI prompting, entity inheritance, derived
 properties, column renames, and the hand-authored compiled extractor. That is

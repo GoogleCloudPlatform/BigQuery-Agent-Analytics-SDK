@@ -11,7 +11,7 @@ Resolves [#186](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-
 | Graph dataset | `google_bigquery_dataset` | §1 — `bq mk` (pre-create so the runtime SA never needs `bigquery.datasets.create`) |
 | Runtime SA + scheduler-caller SA | `google_service_account` ×2 | §2 — `_ensure_sa` (split by default; `single_sa = true` collapses to one) |
 | Project + dataset IAM grants | `google_project_iam_member`, `google_bigquery_dataset_iam_member` | §3 — `_retry_iam gcloud projects add-iam-policy-binding` and the dataset-level grant block. Terraform's dependency graph handles the IAM-propagation race declaratively (the `depends_on` on the Cloud Run Job resource ensures grants land before the first invocation) |
-| Cloud Run v2 Job | `google_cloud_run_v2_job` | §4 — `gcloud run jobs deploy`. Same env-var set the bash deploy wires (`BQAA_PROJECT_ID`, `BQAA_EVENTS_DATASET_ID`, `BQAA_GRAPH_DATASET_ID`, `BQAA_LOCATION`, `BQAA_LOOKBACK_HOURS`, `BQAA_OVERLAP_MINUTES`, `BQAA_EXTRACTION_MODE`, `BQAA_MAX_RETRIES`, conditionally `BQAA_MAX_SESSIONS`, `BQAA_MAX_SESSION_AGE_HOURS`, `BQAA_REFERENCE_EXTRACTORS_MODULE`, and `BQAA_PROPERTY_GRAPH` when `property_graph = true`) |
+| Cloud Run v2 Job | `google_cloud_run_v2_job` | §4 — `gcloud run jobs deploy`. Same env-var set the bash deploy wires (`BQAA_PROJECT_ID`, `BQAA_EVENTS_DATASET_ID`, `BQAA_GRAPH_DATASET_ID`, `BQAA_LOCATION`, `BQAA_LOOKBACK_HOURS`, `BQAA_OVERLAP_MINUTES`, `BQAA_EXTRACTION_MODE`, `BQAA_MAX_RETRIES`, conditionally `BQAA_MAX_SESSIONS`, `BQAA_MAX_SESSION_AGE_HOURS`, `BQAA_REFERENCE_EXTRACTORS_MODULE`, `BQAA_PROPERTY_GRAPH` when `property_graph = true`, and `BQAA_ENDPOINT` when `endpoint != ""`) |
 | `roles/run.invoker` on the job → scheduler SA | `google_cloud_run_v2_job_iam_member` | §5 — `_retry_iam gcloud run jobs add-iam-policy-binding` |
 | Cloud Scheduler trigger | `google_cloud_scheduler_job` | §6 — `gcloud scheduler jobs create http` with `--oauth-service-account-email` pointing at the scheduler SA |
 
@@ -88,6 +88,7 @@ image_uri          = "us-central1-docker.pkg.dev/my-project/bqaa/periodic-materi
 # Optional overrides — defaults match the bash deploy
 # property_graph        = false   # true → schema-derived mode (see below)
 # extraction_mode       = "ai-fallback"
+# endpoint              = ""       # AI.GENERATE model (BQAA_ENDPOINT); e.g. "gemini-3.5-flash"
 # max_retries           = 2
 # max_session_age_hours = 24
 # single_sa             = false
@@ -180,6 +181,7 @@ Optional (defaults match `deploy_cloud_run_job.sh`):
 * `location` — `"US"`
 * `job_name` — `"bqaa-periodic-materialization"`
 * `extraction_mode` — `"ai-fallback"`
+* `endpoint` — `""` (AI.GENERATE model; wires `BQAA_ENDPOINT` when non-empty, e.g. `"gemini-3.5-flash"`; `""` → runtime default `gemini-2.5-flash`)
 * `max_retries` — `2`
 * `max_session_age_hours` — `null` (watchdog disabled)
 * `single_sa` — `false` (split-SA default)
