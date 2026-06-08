@@ -122,6 +122,40 @@ def test_split_sql_statements_handles_semicolon_in_comments() -> None:
   assert all(";" not in s for s in stmts)
 
 
+def test_split_sql_statements_is_quote_aware() -> None:
+  # Semicolons / -- inside string literals, OPTIONS descriptions, and
+  # backtick identifiers must NOT split the statement or be stripped.
+  run_job = _load_run_job()
+  ddl = (
+      "CREATE TABLE `p.d.a` (\n"
+      '  id STRING OPTIONS(description="has; a semicolon and -- dashes"),\n'
+      "  note STRING DEFAULT 'x;y'\n"
+      ");\n"
+      "CREATE TABLE `p.d.b` (id STRING);\n"
+  )
+  stmts = run_job._split_sql_statements(ddl)
+  assert len(stmts) == 2
+  # The in-string semicolons and dashes survive intact in the first statement.
+  assert 'description="has; a semicolon and -- dashes"' in stmts[0]
+  assert "DEFAULT 'x;y'" in stmts[0]
+  assert stmts[1] == "CREATE TABLE `p.d.b` (id STRING)"
+
+
+def test_split_sql_statements_handles_block_comments_and_escapes() -> None:
+  run_job = _load_run_job()
+  ddl = (
+      "CREATE TABLE `p.d.a` /* inline; comment */ (\n"
+      "  s STRING DEFAULT 'a\\';b'\n"  # escaped quote then ; inside the string
+      ");\n"
+      "CREATE TABLE `p.d.b` (id STRING)"
+  )
+  stmts = run_job._split_sql_statements(ddl)
+  assert len(stmts) == 2
+  assert "/* inline; comment */" not in stmts[0]  # block comment removed
+  assert "DEFAULT 'a\\';b'" in stmts[0]  # in-string ; preserved
+  assert stmts[1] == "CREATE TABLE `p.d.b` (id STRING)"
+
+
 def test_property_graph_mode(monkeypatch) -> None:
   rc, kwargs, retargets = _drive(
       monkeypatch, {**_BASE_ENV, "BQAA_PROPERTY_GRAPH": "property_graph.sql"}

@@ -127,7 +127,6 @@ import datetime as _dt
 import json
 import os
 import pathlib
-import re
 import sys
 import tempfile
 from typing import Any, Optional
@@ -298,15 +297,58 @@ def _bootstrap_entity_tables(
 def _split_sql_statements(ddl_text: str) -> list[str]:
   """Split a multi-statement DDL script into individual statements.
 
-  Strips ``--`` line comments first, because comment prose can contain ``;``
-  (e.g. ``materializer fills automatically; they are required``) and a naive
-  ``split(";")`` would otherwise produce a comment-only fragment that BigQuery
-  rejects with "Unexpected end of statement". The committed table DDL uses no
-  string literals or quoted identifiers containing ``--`` or ``;``, so
-  line-comment stripping is safe here. Empty fragments are dropped.
+  A quote- and comment-aware scanner: it removes ``--`` line comments and
+  ``/* */`` block comments and splits on ``;`` only at the top level -- never
+  inside a single-quoted string, double-quoted string, or backtick-quoted
+  identifier. A naive ``split(";")`` corrupts otherwise-valid BigQuery DDL such
+  as a comment containing ``;`` (which yields a fragment BigQuery rejects with
+  "Unexpected end of statement"), ``OPTIONS(description="has; semicolon")``,
+  ``DEFAULT 'a;b'``, or a quoted ``--``. Empty fragments are dropped.
   """
-  without_comments = re.sub(r"--[^\n]*", "", ddl_text)
-  return [s.strip() for s in without_comments.split(";") if s.strip()]
+  statements: list[str] = []
+  buf: list[str] = []
+  quote: Optional[str] = None  # "'", '"', or "`" while inside a quoted span
+  i, n = 0, len(ddl_text)
+  while i < n:
+    ch = ddl_text[i]
+    if quote is not None:
+      buf.append(ch)
+      if ch == "\\" and i + 1 < n:  # escaped char inside the quote
+        buf.append(ddl_text[i + 1])
+        i += 2
+        continue
+      if ch == quote:
+        quote = None
+      i += 1
+      continue
+    # Outside any quote: comments and the statement separator are structural.
+    if ch == "-" and i + 1 < n and ddl_text[i + 1] == "-":
+      newline = ddl_text.find("\n", i)
+      i = n if newline == -1 else newline  # keep the newline as whitespace
+      continue
+    if ch == "/" and i + 1 < n and ddl_text[i + 1] == "*":
+      close = ddl_text.find("*/", i + 2)
+      i = n if close == -1 else close + 2
+      buf.append(" ")  # don't glue the tokens the comment separated
+      continue
+    if ch in ("'", '"', "`"):
+      quote = ch
+      buf.append(ch)
+      i += 1
+      continue
+    if ch == ";":
+      stmt = "".join(buf).strip()
+      if stmt:
+        statements.append(stmt)
+      buf = []
+      i += 1
+      continue
+    buf.append(ch)
+    i += 1
+  tail = "".join(buf).strip()
+  if tail:
+    statements.append(tail)
+  return statements
 
 
 def _ensure_graph_dataset(
