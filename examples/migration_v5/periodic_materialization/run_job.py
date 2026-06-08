@@ -127,6 +127,7 @@ import datetime as _dt
 import json
 import os
 import pathlib
+import re
 import sys
 import tempfile
 from typing import Any, Optional
@@ -288,12 +289,24 @@ def _bootstrap_entity_tables(
       .replace("${DATASET}", graph_dataset_id)
   )
   count = 0
-  for stmt in ddl_text.strip().split(";"):
-    stmt = stmt.strip()
-    if stmt:
-      bq_client.query(stmt).result()
-      count += 1
+  for stmt in _split_sql_statements(ddl_text):
+    bq_client.query(stmt).result()
+    count += 1
   return count
+
+
+def _split_sql_statements(ddl_text: str) -> list[str]:
+  """Split a multi-statement DDL script into individual statements.
+
+  Strips ``--`` line comments first, because comment prose can contain ``;``
+  (e.g. ``materializer fills automatically; they are required``) and a naive
+  ``split(";")`` would otherwise produce a comment-only fragment that BigQuery
+  rejects with "Unexpected end of statement". The committed table DDL uses no
+  string literals or quoted identifiers containing ``--`` or ``;``, so
+  line-comment stripping is safe here. Empty fragments are dropped.
+  """
+  without_comments = re.sub(r"--[^\n]*", "", ddl_text)
+  return [s.strip() for s in without_comments.split(";") if s.strip()]
 
 
 def _ensure_graph_dataset(

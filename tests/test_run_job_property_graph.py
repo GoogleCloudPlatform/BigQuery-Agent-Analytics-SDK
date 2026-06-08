@@ -93,6 +93,35 @@ _BASE_ENV = {
 }
 
 
+def _load_run_job():
+  spec = importlib.util.spec_from_file_location("_run_job_split", _RUN_JOB)
+  run_job = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(run_job)
+  return run_job
+
+
+def test_split_sql_statements_handles_semicolon_in_comments() -> None:
+  # Regression: the codelab table_ddl.sql comment "fills automatically; they
+  # are required" has a ';' inside a comment. A naive split(';') turns that
+  # into a comment-only fragment BigQuery rejects ("Unexpected end of
+  # statement"). The splitter must strip comments first.
+  run_job = _load_run_job()
+  ddl = (
+      "-- ``session_id`` are SDK metadata columns the\n"
+      "-- materializer fills automatically; they are required on every\n"
+      "-- bound table.\n"
+      "--\n"
+      "-- Apply with:\n"
+      "--   envsubst < table_ddl.sql | bq query\n"
+      "CREATE TABLE IF NOT EXISTS `p.d.a` (id STRING);\n"
+      "CREATE TABLE IF NOT EXISTS `p.d.b` (id STRING);\n"
+  )
+  stmts = run_job._split_sql_statements(ddl)
+  assert len(stmts) == 2
+  assert all(s.startswith("CREATE TABLE IF NOT EXISTS") for s in stmts)
+  assert all(";" not in s for s in stmts)
+
+
 def test_property_graph_mode(monkeypatch) -> None:
   rc, kwargs, retargets = _drive(
       monkeypatch, {**_BASE_ENV, "BQAA_PROPERTY_GRAPH": "property_graph.sql"}
