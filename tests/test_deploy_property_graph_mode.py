@@ -159,3 +159,13 @@ def test_build_image_property_graph_staging_contract() -> None:
   # Terraform-built images can't bake hardcoded artifacts either.
   assert "grep -qF '${PROJECT_ID}'" in text
   assert "grep -qF '${DATASET}'" in text
+
+
+def test_deploy_script_endpoint_wiring() -> None:
+  # --endpoint MODEL must wire BQAA_ENDPOINT on the Job, and only when set
+  # (unset leaves the runtime's gemini-2.5-flash default in place) — so an
+  # operator can pick Gemini 3.x on the scheduled path, not just locally.
+  text = _DEPLOY.read_text()
+  assert "--endpoint)" in text
+  assert '[[ -n "$ENDPOINT" ]]' in text
+  assert 'ENV_VARS+=("BQAA_ENDPOINT=${ENDPOINT}")' in text

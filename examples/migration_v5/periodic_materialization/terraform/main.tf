@@ -72,6 +72,13 @@ locals {
     var.property_graph ? {
       BQAA_PROPERTY_GRAPH = "property_graph.sql"
     } : {},
+    # AI.GENERATE model selection (#298). Empty string (default) leaves
+    # BQAA_ENDPOINT unset so the runtime keeps its own gemini-2.5-flash
+    # default; a value wires the env var. Mirrors the bash deploy's
+    # ``--endpoint`` → ``BQAA_ENDPOINT`` wiring. No-op under compiled-only.
+    var.endpoint == "" ? {} : {
+      BQAA_ENDPOINT = var.endpoint
+    },
   )
 }
 

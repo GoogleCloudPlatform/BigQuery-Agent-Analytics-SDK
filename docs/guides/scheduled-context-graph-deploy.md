@@ -101,6 +101,10 @@ Expect a JSON report with `"mode": "property-graph"` and
 `"sessions_materialized" > 0`. This is the cheapest way to confirm the
 placeholder + split-dataset wiring before deploying.
 
+To validate a specific `AI.GENERATE` model here too, add
+`BQAA_ENDPOINT="gemini-3.5-flash"` to the env block above — the same knob the
+deploy wires from `--endpoint` (bash) / `endpoint` (Terraform).
+
 ## 3. Deploy on a schedule
 
 Pick one path. The **bash** deploy builds its own image inline (Cloud
@@ -126,6 +130,20 @@ source, pre-creates the graph dataset, sets up least-privilege service accounts
 and wires the Cloud Scheduler trigger. (`--property-graph` is incompatible with
 `--extraction-mode=compiled-only`, which the script rejects at the boundary.)
 
+To pick the `AI.GENERATE` extraction model — e.g. a Gemini 3.x model — add
+`--endpoint`; it's wired as `BQAA_ENDPOINT` on the Job. Default is unset, so the
+runtime keeps its `gemini-2.5-flash` default:
+
+```bash
+./examples/migration_v5/periodic_materialization/deploy_cloud_run_job.sh \
+  --project "$PROJECT_ID" --region us-central1 \
+  --events-dataset "$EVENTS_DS" --graph-dataset "$GRAPH_DS" \
+  --schedule "0 */6 * * *" \
+  --property-graph property_graph.sql \
+  --endpoint gemini-3.5-flash \
+  --smoke
+```
+
 ### Option B — Terraform
 
 Terraform takes a published image as input, so build one first with
@@ -148,7 +166,12 @@ events_dataset_id = "agent_analytics"
 graph_dataset_id  = "agent_decisions_graph"
 schedule          = "0 */6 * * *"
 property_graph    = true
+# endpoint        = "gemini-3.5-flash"   # optional: AI.GENERATE model (BQAA_ENDPOINT)
 ```
+
+Set `endpoint` to pick the `AI.GENERATE` model (e.g. a Gemini 3.x model); it
+wires `BQAA_ENDPOINT` on the Job. Leave it at its `""` default to keep the
+runtime's `gemini-2.5-flash`.
 
 ```bash
 cd examples/migration_v5/periodic_materialization/terraform
@@ -183,6 +206,18 @@ The Cloud Logging entry per run is structured JSON; the key fields are
 
 Then query the graph itself — the materialized decision traces are GQL-queryable
 exactly as in [Phase 4 of the codelab](../codelabs/periodic_materialization.md).
+
+## Troubleshooting
+
+**`404 NOT_FOUND ... Publisher Model ... was not found or your project does not
+have access to it`** when you set `--endpoint` / `BQAA_ENDPOINT` to a Gemini 3.x
+model. This is almost always a *location* mismatch, not an access problem:
+Gemini 3.x models on Vertex AI are served from the **`global`** location, and
+the SDK already resolves a short model name (`gemini-3.5-flash`) to a
+`locations/global` publisher URL. If you still hit a 404, pass the model name
+exactly as published for Vertex AI's `global` endpoint (a regional name like a
+`us-central1`-only model will 404), and confirm the model is enabled for your
+project. The runtime's default `gemini-2.5-flash` works without any of this.
 
 ## When to use explicit `--ontology` / `--binding` instead
 

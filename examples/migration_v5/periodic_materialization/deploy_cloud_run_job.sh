@@ -102,6 +102,7 @@ JOB_NAME="bqaa-periodic-materialization"
 SMOKE=false
 EXTRACTION_MODE="ai-fallback"
 PROPERTY_GRAPH=""
+ENDPOINT=""
 MAX_SESSION_AGE_HOURS=""
 # Production posture by default: split runtime + scheduler-caller
 # SAs (issue #182). ``--single-sa`` is the escape hatch for
@@ -157,6 +158,13 @@ Optional:
                                table_ddl.sql must sit next to it. Use for
                                rename-free graphs; not compatible with
                                --extraction-mode=compiled-only.
+  --endpoint MODEL             Vertex AI model for the AI.GENERATE extraction
+                               fallback, wired as BQAA_ENDPOINT on the Job.
+                               Short names resolve to the locations/global
+                               publisher URL, so Gemini 3.x models (e.g.
+                               gemini-3.5-flash) work. Default unset → the
+                               runtime's gemini-2.5-flash. Ignored under
+                               --extraction-mode=compiled-only (no AI call).
   --max-session-age-hours N    Enable the orphan-session watchdog (issue
                                #180). When set, each cron pass additionally
                                scans for sessions whose first event is
@@ -224,6 +232,7 @@ while [[ $# -gt 0 ]]; do
     --smoke)           SMOKE=true; shift ;;
     --extraction-mode) require_arg "$1" "${2-}"; EXTRACTION_MODE="$2"; shift 2 ;;
     --property-graph)  require_arg "$1" "${2-}"; PROPERTY_GRAPH="$2"; shift 2 ;;
+    --endpoint)        require_arg "$1" "${2-}"; ENDPOINT="$2"; shift 2 ;;
     --max-session-age-hours)
                        require_arg "$1" "${2-}"; MAX_SESSION_AGE_HOURS="$2"; shift 2 ;;
     --single-sa)       SINGLE_SA=true; shift ;;
@@ -729,6 +738,12 @@ fi
 # property graph instead of the explicit ontology/binding pair (#286).
 if [[ -n "$PROPERTY_GRAPH" ]]; then
   ENV_VARS+=("BQAA_PROPERTY_GRAPH=property_graph.sql")
+fi
+# AI.GENERATE model selection (#298). Only wired when the operator opts in via
+# ``--endpoint``; default deploys leave it unset so the runtime keeps its own
+# gemini-2.5-flash default. No-op under compiled-only (run_job ignores it).
+if [[ -n "$ENDPOINT" ]]; then
+  ENV_VARS+=("BQAA_ENDPOINT=${ENDPOINT}")
 fi
 # Orphan-session watchdog (issue #180). Only wired when the
 # operator explicitly opts in via ``--max-session-age-hours``;

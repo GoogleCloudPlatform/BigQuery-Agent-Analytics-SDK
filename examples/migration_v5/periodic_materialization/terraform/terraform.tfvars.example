@@ -19,6 +19,8 @@ image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-mater
 #                                         #        build the image with build_image.sh --property-graph;
 #                                         #        not compatible with extraction_mode = "compiled-only"
 # extraction_mode       = "ai-fallback"   # or "compiled-only"
+# endpoint              = ""               # AI.GENERATE model (BQAA_ENDPOINT); e.g. "gemini-3.5-flash";
+#                                         #        "" → runtime default gemini-2.5-flash
 # max_retries           = 2
 # max_session_age_hours = 24              # null → orphan watchdog disabled
 # single_sa             = false           # true → combined bqaa-periodic-sa identity

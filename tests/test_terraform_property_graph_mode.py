@@ -64,6 +64,18 @@ def test_tfvars_example_documents_property_graph() -> None:
   assert "property_graph" in _TFVARS
 
 
+def test_endpoint_variable_declared() -> None:
+  assert 'variable "endpoint"' in _VARS
+  assert "type        = string" in _VARS
+
+
+def test_endpoint_env_wired_conditionally() -> None:
+  # BQAA_ENDPOINT is set only when var.endpoint is non-empty — mirrors the
+  # bash deploy's `[[ -n "$ENDPOINT" ]]` guard so the two surfaces don't drift.
+  assert 'var.endpoint == "" ?' in _MAIN
+  assert "BQAA_ENDPOINT = var.endpoint" in _MAIN
+
+
 @pytest.mark.skipif(
     shutil.which("terraform") is None, reason="terraform binary not available"
 )

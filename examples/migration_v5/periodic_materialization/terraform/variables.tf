@@ -80,6 +80,12 @@ variable "property_graph" {
   default     = false
 }
 
+variable "endpoint" {
+  description = "AI.GENERATE model selection (#298). Vertex AI model for the ``ai-fallback`` extraction call, wired as ``BQAA_ENDPOINT`` on the Job. Short names resolve to the ``locations/global`` publisher URL, so Gemini 3.x models (e.g. ``gemini-3.5-flash``) work. Empty string (default) leaves ``BQAA_ENDPOINT`` unset so the runtime keeps its own ``gemini-2.5-flash`` default. Ignored under ``extraction_mode = \"compiled-only\"`` (no AI call is made)."
+  type        = string
+  default     = ""
+}
+
 variable "max_retries" {
   description = "Cloud Run Job retry count on failure. The orchestrator's session-level idempotency + append-only state table make additional retries safe. Default 2 matches the deploy script post-#183 (production posture: silently absorb transient BQ slot pressure / rate-limit noise instead of paging on-call)."
   type        = number

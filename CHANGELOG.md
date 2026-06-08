@@ -41,6 +41,15 @@ renames, and the migration-v5 compiled-extractor path.
   graph dataset). Explicit `--ontology`/`--binding` is preserved as the advanced
   override (descriptions, inheritance, derived properties, renames, the
   migration-v5 compiled extractor).
+- **Selectable `AI.GENERATE` extraction model**
+  ([#298](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/298))
+  — choose the model for the `ai-fallback` extraction across every surface:
+  `run_materialize_window(endpoint=...)` (Python API), `bqaa context-graph
+  --endpoint` (CLI), and `BQAA_ENDPOINT` for the scheduled `run_job.py` deploy.
+  Short names resolve to the Vertex `locations/global` publisher URL, so Gemini
+  3.x models such as `gemini-3.5-flash` work. Defaults to `gemini-2.5-flash`
+  everywhere, so existing callers are unaffected; ignored under
+  `--extraction-mode=compiled-only` (no AI call is made).
 
 ### Fixed
 
