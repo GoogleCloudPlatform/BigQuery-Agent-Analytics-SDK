@@ -1335,6 +1335,7 @@ def run_materialize_window(
     state_key_suffix: Optional[str] = None,
     extraction_mode: str = EXTRACTION_MODE_AI_FALLBACK,
     max_session_age_hours: Optional[float] = None,
+    endpoint: str = "gemini-2.5-flash",
 ) -> MaterializeWindowResult:
   """The end-to-end run.
 
@@ -1427,6 +1428,12 @@ def run_materialize_window(
       (backfill runs scan a fixed historical window where the
       "what's still in-flight?" question is undefined).
       ``None`` (default) disables the watchdog.
+    endpoint: Vertex AI model for the ``AI.GENERATE`` extraction
+      fallback (``ai-fallback`` / ``ai-only`` modes). Resolved to a
+      ``locations/global`` publisher URL, so Gemini 3.x names such as
+      ``gemini-3.5-flash`` work here. Defaults to ``gemini-2.5-flash``.
+      Ignored when extraction is fully served by compiled/reference
+      extractors (no AI fallback is invoked).
   """
   # Orphan-watchdog validation. Like the numeric guardrails below,
   # a typo at the boundary (``--max-session-age-hours=-1`` or ``0``)
@@ -1865,6 +1872,7 @@ def run_materialize_window(
       outcome_callback=outcomes_cb,
       table_id=events_table,
       expected_fingerprint=compile_bundle_fingerprint,
+      endpoint=endpoint,
   )
 
   # Materialize per session so a single-session failure doesn't
@@ -2235,6 +2243,7 @@ def _build_manager(
     outcome_callback: Callable[[str, Any], None],
     table_id: str,
     expected_fingerprint: Optional[str] = None,
+    endpoint: str = "gemini-2.5-flash",
 ) -> Any:
   """Construct the OntologyGraphManager — with compiled bundles
   wired when ``bundles_root`` is set, otherwise the plain
@@ -2284,6 +2293,7 @@ def _build_manager(
         bq_client=bq_client,
         table_id=table_id,
         extractors=extractors,
+        endpoint=endpoint,
     )
 
   if reference_extractors_module is None:
@@ -2345,6 +2355,7 @@ def _build_manager(
       bq_client=bq_client,
       table_id=table_id,
       on_outcome=outcome_callback,
+      endpoint=endpoint,
   )
 
 

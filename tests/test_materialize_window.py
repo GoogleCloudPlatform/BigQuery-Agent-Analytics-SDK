@@ -801,6 +801,65 @@ class TestEventsTableThreading:
     assert captured["table_id"] == "custom_events"
 
 
+class TestEndpointThreading:
+  """``endpoint=`` must reach the AI.GENERATE model selection.
+
+  The materializer's ``AI.GENERATE`` model is set when the manager is
+  built (``from_ontology_binding(endpoint=...)``). Before this was
+  threaded, ``run_materialize_window`` had no way to pick the model —
+  every run used the ``gemini-2.5-flash`` default regardless of caller
+  intent. These tests pin the full chain
+  ``run_materialize_window -> _build_manager -> from_ontology_binding``
+  by leaving ``_build_manager`` real and capturing at the factory."""
+
+  def _run_capturing_endpoint(self, fixture_paths, **extra):
+    ontology_yaml, binding_yaml = fixture_paths
+    now = _dt.datetime(2026, 5, 15, 14, 0, tzinfo=_dt.timezone.utc)
+    client = _stub_bq_client([])
+    captured: dict[str, str] = {}
+
+    def _factory(**kwargs):
+      captured["endpoint"] = kwargs.get("endpoint")
+      return mock.Mock(spec=["spec", "extract_graph"])
+
+    with (
+        mock.patch(
+            "bigquery_agent_analytics.ontology_graph."
+            "OntologyGraphManager.from_ontology_binding",
+            side_effect=_factory,
+        ),
+        mock.patch(
+            "bigquery_agent_analytics.ontology_materializer.OntologyMaterializer"
+        ),
+    ):
+      mw.run_materialize_window(
+          project_id="test-proj",
+          dataset_id="test_ds",
+          ontology_path=str(ontology_yaml),
+          binding_path=str(binding_yaml),
+          lookback_hours=6.0,
+          validate_binding=False,
+          bq_client=client,
+          run_started_at=now,
+          **extra,
+      )
+    return captured["endpoint"]
+
+  def test_endpoint_reaches_ai_generate_factory(self, fixture_paths):
+    """An explicit ``endpoint`` reaches
+    ``from_ontology_binding(endpoint=...)`` through the real
+    ``_build_manager`` (no mock on the forwarder)."""
+    assert (
+        self._run_capturing_endpoint(fixture_paths, endpoint="gemini-3.5-flash")
+        == "gemini-3.5-flash"
+    )
+
+  def test_endpoint_defaults_to_gemini_25_flash(self, fixture_paths):
+    """Omitting ``endpoint`` preserves the prior default — this
+    change must not move the model for existing callers."""
+    assert self._run_capturing_endpoint(fixture_paths) == "gemini-2.5-flash"
+
+
 class TestCheckpointCarryForward:
 
   def test_failure_carries_forward_prior_checkpoint(self, fixture_paths):
