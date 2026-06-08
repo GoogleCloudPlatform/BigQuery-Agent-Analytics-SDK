@@ -30,14 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`run_job.py` table-DDL bootstrap mis-split on comment semicolons**
+- **`run_job.py` table-DDL bootstrap mis-split on statement boundaries**
   ([#286](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/286))
-  — `_bootstrap_entity_tables` split the DDL on `;` without stripping `--`
-  comments, so a comment containing `;` (e.g. the codelab `table_ddl.sql`'s
-  "materializer fills automatically; they are required") produced a
-  comment-only fragment BigQuery rejected with "Unexpected end of statement".
-  Now strips line comments before splitting. Found by a live `--property-graph`
-  deploy smoke.
+  — `_bootstrap_entity_tables` split the DDL on `;` without accounting for
+  comments or quoting, so a `;` inside a `--` comment (e.g. the codelab
+  `table_ddl.sql`'s "materializer fills automatically; they are required")
+  produced a comment-only fragment BigQuery rejected with "Unexpected end of
+  statement" — and a `;` or `--` inside a string literal
+  (`OPTIONS(description="has; semicolon")`, `DEFAULT 'a;b'`) or a backtick
+  identifier could corrupt a customer's DDL. Replaced with a quote- and
+  comment-aware splitter: it strips `--` line comments and `/* */` block
+  comments and splits on `;` only at the top level (never inside `'`, `"`, or
+  `` ` `` quoting). Found by a live `--property-graph` deploy smoke.
 
 ## [0.3.2] - 2026-05-22
 
