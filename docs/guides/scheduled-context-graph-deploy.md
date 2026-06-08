@@ -101,21 +101,12 @@ Expect a JSON report with `"mode": "property-graph"` and
 `"sessions_materialized" > 0`. This is the cheapest way to confirm the
 placeholder + split-dataset wiring before deploying.
 
-## 3. Build the image
+## 3. Deploy on a schedule
 
-The image build is outside Terraform; the helper stages your artifacts + the SDK
-source and runs Cloud Build:
-
-```bash
-IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
-  --project "$PROJECT_ID" --repo bqaa --create-repo \
-  --property-graph property_graph.sql)"     # → REGION-docker.pkg.dev/.../...:<tag>
-```
-
-`--property-graph` stages `property_graph.sql` + the sibling `table_ddl.sql`
-(instead of `ontology.yaml`/`binding.yaml`/`reference_extractor.py`).
-
-## 4. Deploy on a schedule
+Pick one path. The **bash** deploy builds its own image inline (Cloud
+Buildpacks from local source), so you do *not* run `build_image.sh` for it.
+**Terraform** consumes a pre-published image, so that path builds the image
+first.
 
 ### Option A — bash (one command, with a smoke run)
 
@@ -129,36 +120,46 @@ IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
 ```
 
 `--smoke` runs the job once after deploy and tails the logs, so you find out
-*now* whether it works. The script pre-creates the graph dataset, sets up
-least-privilege service accounts + IAM, deploys the Cloud Run Job with
-`BQAA_PROPERTY_GRAPH=property_graph.sql`, and wires the Cloud Scheduler trigger.
-(`--property-graph` is incompatible with `--extraction-mode=compiled-only`,
-which the script rejects at the boundary.)
+*now* whether it works. The script builds + publishes the image from local
+source, pre-creates the graph dataset, sets up least-privilege service accounts
++ IAM, deploys the Cloud Run Job with `BQAA_PROPERTY_GRAPH=property_graph.sql`,
+and wires the Cloud Scheduler trigger. (`--property-graph` is incompatible with
+`--extraction-mode=compiled-only`, which the script rejects at the boundary.)
 
 ### Option B — Terraform
 
-Build the image with `build_image.sh --property-graph` (step 3), then:
+Terraform takes a published image as input, so build one first with
+`build_image.sh --property-graph` (it stages `property_graph.sql` + the sibling
+`table_ddl.sql` instead of `ontology.yaml`/`binding.yaml`/`reference_extractor.py`):
+
+```bash
+IMAGE_URI="$(./examples/migration_v5/periodic_materialization/build_image.sh \
+  --project "$PROJECT_ID" --repo bqaa --create-repo \
+  --property-graph property_graph.sql)"     # → REGION-docker.pkg.dev/.../...:<tag>
+```
+
+Then point Terraform at it:
 
 ```hcl
-# terraform.tfvars
+# terraform.tfvars  (image_uri is passed on the CLI below from $IMAGE_URI)
 project_id        = "your-project"
 region            = "us-central1"
 events_dataset_id = "agent_analytics"
 graph_dataset_id  = "agent_decisions_graph"
 schedule          = "0 */6 * * *"
-image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-materialization:<tag>"
 property_graph    = true
 ```
 
 ```bash
 cd examples/migration_v5/periodic_materialization/terraform
-terraform init && terraform apply
+terraform init
+terraform apply -var "image_uri=$IMAGE_URI"
 ```
 
 `property_graph = true` sets `BQAA_PROPERTY_GRAPH` on the Job; a plan-time
 precondition rejects it together with `extraction_mode = "compiled-only"`.
 
-## 5. Verify
+## 4. Verify
 
 After the first run (the `--smoke` execution, or the first scheduled fire):
 
