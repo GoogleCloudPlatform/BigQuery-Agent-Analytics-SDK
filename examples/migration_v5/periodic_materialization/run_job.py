@@ -88,6 +88,11 @@ Env vars (all set by the deploy script via
   gaps). ``compiled-only`` skips ``AI.GENERATE`` entirely; any
   span the compiled extractors don't cover surfaces as a typed
   ``empty_extraction`` failure with sample diagnostics.
+* ``BQAA_ENDPOINT`` (default ``gemini-2.5-flash``) — Vertex AI
+  model for the ``ai-fallback`` AI.GENERATE call. Short names
+  resolve to a ``locations/global`` publisher URL, so Gemini 3.x
+  names (e.g. ``gemini-3.5-flash``) work. Ignored under
+  ``compiled-only`` (no AI call is made).
 * ``BQAA_REFERENCE_EXTRACTORS_MODULE`` (default unset, set to
   ``reference_extractor`` by the deploy script in
   compiled-only mode) — dotted module path whose ``EXTRACTORS``
@@ -458,6 +463,11 @@ def main() -> int:
   extraction_mode = (
       os.environ.get("BQAA_EXTRACTION_MODE") or "ai-fallback"
   ).strip()
+  # AI.GENERATE model for the ai-fallback path. Short names resolve to a
+  # locations/global publisher URL inside the SDK, so Gemini 3.x names
+  # (e.g. ``gemini-3.5-flash``) work. Default matches the SDK default so
+  # an unset env var is a no-op. Ignored under ``compiled-only`` (no AI call).
+  endpoint = (os.environ.get("BQAA_ENDPOINT") or "gemini-2.5-flash").strip()
   # Reference module + bundles root. Both default to None;
   # ``compiled-only`` mode requires at least one of them to be set
   # at the SDK boundary (else the manager has no structured
@@ -507,6 +517,7 @@ def main() -> int:
       to_time=to_time_raw,
       state_key_suffix=state_key_suffix,
       extraction_mode=extraction_mode,
+      endpoint=endpoint,
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
       max_session_age_hours=max_session_age_hours,
@@ -581,6 +592,7 @@ def main() -> int:
         state_key_suffix=state_key_suffix,
         extraction_mode=extraction_mode,
         max_session_age_hours=max_session_age_hours,
+        endpoint=endpoint,
     )
 
     if property_graph_name:

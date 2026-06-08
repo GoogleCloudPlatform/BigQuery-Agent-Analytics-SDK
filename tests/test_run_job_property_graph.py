@@ -185,3 +185,22 @@ def test_explicit_mode_unchanged(monkeypatch) -> None:
   assert "property_graph_path" not in kwargs
   assert retargets == [("proj", "graph_ds")]
   assert kwargs["dataset_id"] == "events_ds"
+
+
+def test_endpoint_env_forwarded(monkeypatch) -> None:
+  # BQAA_ENDPOINT must reach run_materialize_window so scheduled deploys can
+  # pick the AI.GENERATE model (e.g. gemini-3.5-flash). Without this the cron
+  # path is pinned to the SDK default regardless of operator intent.
+  rc, kwargs, _ = _drive(
+      monkeypatch, {**_BASE_ENV, "BQAA_ENDPOINT": "gemini-3.5-flash"}
+  )
+  assert rc == 0
+  assert kwargs["endpoint"] == "gemini-3.5-flash"
+
+
+def test_endpoint_defaults_when_env_unset(monkeypatch) -> None:
+  # Unset BQAA_ENDPOINT keeps the SDK default — no behavior change for
+  # existing deploys.
+  rc, kwargs, _ = _drive(monkeypatch, _BASE_ENV)  # no BQAA_ENDPOINT
+  assert rc == 0
+  assert kwargs["endpoint"] == "gemini-2.5-flash"
