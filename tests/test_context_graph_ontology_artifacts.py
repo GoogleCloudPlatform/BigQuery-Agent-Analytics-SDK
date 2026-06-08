@@ -56,12 +56,12 @@ pytest.importorskip("rdflib")
 # callers do — only ``examples/context_graph/`` needs to be on
 # sys.path. Don't mix package-style (``examples.context_graph.X``)
 # imports here: that path requires both the repo root AND the
-# v5 dir on sys.path, and silently masks regressions in the
+# context_graph dir on sys.path, and silently masks regressions in the
 # notebook's import contract (see PR #172 review).
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_V5_DIR = _REPO_ROOT / "examples" / "context_graph"
-if str(_V5_DIR) not in sys.path:
-  sys.path.insert(0, str(_V5_DIR))
+_CONTEXT_GRAPH_DIR = _REPO_ROOT / "examples" / "context_graph"
+if str(_CONTEXT_GRAPH_DIR) not in sys.path:
+  sys.path.insert(0, str(_CONTEXT_GRAPH_DIR))
 
 ontology_artifacts = importlib.import_module("ontology_artifacts")
 mako_artifacts = importlib.import_module("mako_artifacts")
@@ -107,7 +107,7 @@ def test_mako_regenerate_matches_checked_in_snapshots(tmp_path):
       "table_ddl.sql",
       "property_graph.sql",
   ):
-    checked_in = (_V5_DIR / filename).read_text(encoding="utf-8")
+    checked_in = (_CONTEXT_GRAPH_DIR / filename).read_text(encoding="utf-8")
     regenerated = (tmp_path / filename).read_text(encoding="utf-8")
     assert regenerated == checked_in, (
         f"{filename} drifted after refactor — first 200 chars:\n"

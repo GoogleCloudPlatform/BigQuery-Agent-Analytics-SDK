@@ -374,7 +374,7 @@ class TestResolvedRelationshipShape:
 # ------------------------------------------------------------------ #
 
 
-class TestExistingMigrationV5BindingByteIdenticalSQL:
+class TestExistingContextGraphBindingByteIdenticalSQL:
   """The context graph binding mixes both shapes: heterogeneous
   edges use the legacy ``list[str]`` form, and (post-C2) the two
   ``DecisionExecution → DecisionExecution`` self-edges use the
