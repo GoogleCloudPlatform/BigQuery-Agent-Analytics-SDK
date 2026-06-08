@@ -1,0 +1,38 @@
+{
+  "v0": {
+    "overall": {
+      "rate": 23.8,
+      "correct": 5,
+      "total": 21
+    },
+    "single_turn": {
+      "rate": 22.2,
+      "correct": 4,
+      "total": 18
+    },
+    "corrections": {
+      "rate": 33.3,
+      "correct": 1,
+      "total": 3
+    },
+    "parroted": 0
+  },
+  "v1": {
+    "overall": {
+      "rate": 100.0,
+      "correct": 21,
+      "total": 21
+    },
+    "single_turn": {
+      "rate": 100.0,
+      "correct": 18,
+      "total": 18
+    },
+    "corrections": {
+      "rate": 100.0,
+      "correct": 3,
+      "total": 3
+    },
+    "parroted": 0
+  }
+}

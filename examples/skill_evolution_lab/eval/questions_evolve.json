@@ -1,0 +1,35 @@
+{
+  "description": "Single-agent skill lab - EVOLVE set. Flawed prompt bakes PTO/sick/remote + vague 'competitive benefits' and says 'answer only from the above, else contact HR'. All questions ARE answerable via lookup_company_policy / lookup_benefits (run with POLICY_AGENT_INCLUDE_BENEFITS=1). The flaw makes the agent defer/give vague answers, especially on benefits. Algorithm should learn a tool-first rule.",
+  "questions": [
+    {"id": "ev_parental", "category": "benefits", "question": "As a primary caregiver, how many weeks of parental leave do I get?"},
+    {"id": "ev_401k_match", "category": "benefits", "question": "What percentage does the company match on my 401k?"},
+    {"id": "ev_401k_vest", "category": "benefits", "question": "When do I become vested in the company 401k match?"},
+    {"id": "ev_dental", "category": "benefits", "question": "What does the dental insurance plan cover?"},
+    {"id": "ev_vision", "category": "benefits", "question": "What's the vision benefit and frame allowance?"},
+    {"id": "ev_ortho", "category": "benefits", "question": "Is orthodontia covered, and up to how much?"},
+    {"id": "ev_hsa", "category": "benefits", "question": "How much does the company contribute to my HSA each year?"},
+    {"id": "ev_premium", "category": "benefits", "question": "What percentage of my health insurance premium does the company pay?"},
+    {"id": "ev_oop", "category": "benefits", "question": "What's the in-network out-of-pocket maximum on the PPO?"},
+    {"id": "ev_tuition", "category": "benefits", "question": "What's the annual tuition reimbursement limit?"},
+    {"id": "ev_std", "category": "benefits", "question": "What does short-term disability pay, and for how long?"},
+    {"id": "ev_eap", "category": "benefits", "question": "How many counseling sessions does the EAP offer?"},
+
+    {"id": "ev_exp_meal", "category": "expenses", "question": "What's the meal reimbursement limit on business travel?"},
+    {"id": "ev_exp_receipt", "category": "expenses", "question": "For what expense amount do I need to submit a receipt?"},
+    {"id": "ev_exp_flight", "category": "expenses", "question": "Do I need pre-approval for a $600 flight?"},
+    {"id": "ev_hol_list", "category": "holidays", "question": "What are the company holidays this year?"},
+    {"id": "ev_hol_blackfri", "category": "holidays", "question": "Is the day after Thanksgiving a paid holiday?"},
+    {"id": "ev_ber_immediate", "category": "bereavement", "question": "How many bereavement days do I get for an immediate family member?"},
+    {"id": "ev_jury_paid", "category": "jury_duty", "question": "Is jury duty paid, and for how long?"},
+    {"id": "ev_flex_start", "category": "flex_time", "question": "Can I start work at 9am instead of earlier?"},
+    {"id": "ev_sick_note", "category": "sick_leave", "question": "After how many days of illness is a doctor's note required?"},
+    {"id": "ev_pto_payout", "category": "pto", "question": "If I leave the company, is my unused PTO paid out?"},
+
+    {"id": "ev_pto_days", "category": "pto", "question": "How many PTO days do I get per year?"},
+    {"id": "ev_sick_days", "category": "sick_leave", "question": "How many sick days do I have each year?"},
+    {"id": "ev_remote_days", "category": "remote_work", "question": "How many days a week can I work from home?"},
+    {"id": "ev_sick_rollover", "category": "sick_leave", "question": "Do unused sick days roll over to next year?"},
+    {"id": "ev_remote_4", "category": "remote_work", "question": "Can I work remotely four days a week?"},
+    {"id": "ev_pto_carry", "category": "pto", "question": "How many unused PTO days can I carry into next year?"}
+  ]
+}

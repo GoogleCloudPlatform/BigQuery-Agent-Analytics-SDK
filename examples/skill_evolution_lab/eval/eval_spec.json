@@ -1,0 +1,151 @@
+{
+  "scope": "Employee HR questions about company policy and benefits: PTO, sick leave, remote work, expenses, holidays, bereavement, jury duty, flex time, health/dental/vision insurance, HSA, 401k, parental leave, EAP, tuition reimbursement, short-term disability.",
+  "ground_truth": "Use the golden_qa expected answers as authoritative. The lookup_company_policy tool returns these same figures; a correct answer must reflect the tool's value, not a number the user asserts.",
+  "golden_qa": [
+    {
+      "question": "How many weeks of parental leave does a secondary caregiver get?",
+      "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary).",
+      "topic": "benefits"
+    },
+    {
+      "question": "Does the company match my 401k contributions, and by how much?",
+      "expected_answer": "Yes, a 4% company match, fully vested after 1 year.",
+      "topic": "benefits"
+    },
+    {
+      "question": "If I leave after six months, do I keep the 401k match?",
+      "expected_answer": "No - the match is vested only after 1 year, so leaving at 6 months means you don't keep it.",
+      "topic": "benefits"
+    },
+    {
+      "question": "Is my child's orthodontia (braces) covered by our plan?",
+      "expected_answer": "Yes - orthodontia is covered at 50% up to a $2,000 lifetime maximum.",
+      "topic": "benefits"
+    },
+    {
+      "question": "What's the benefit for eye exams and glasses?",
+      "expected_answer": "Annual eye exam covered; $200 frame allowance every 2 years.",
+      "topic": "benefits"
+    },
+    {
+      "question": "How much does the company put into an HSA for family coverage?",
+      "expected_answer": "$1,500/year for family coverage ($750 individual).",
+      "topic": "benefits"
+    },
+    {
+      "question": "How much of my health premium do I pay versus the company?",
+      "expected_answer": "The company covers 80% of the employee premium (you pay ~20%); 50% for dependents.",
+      "topic": "benefits"
+    },
+    {
+      "question": "What's the out-of-pocket maximum for a family on the PPO?",
+      "expected_answer": "$8,000 for a family in-network ($4,000 individual).",
+      "topic": "benefits"
+    },
+    {
+      "question": "Can I get a work-related course reimbursed, and up to how much?",
+      "expected_answer": "Yes - tuition reimbursement up to $5,250/year for job-related courses (manager pre-approval, grade B or better).",
+      "topic": "benefits"
+    },
+    {
+      "question": "How many therapy sessions does the employee assistance program cover?",
+      "expected_answer": "Up to 8 counseling sessions per issue per year (plus a 24/7 hotline).",
+      "topic": "benefits"
+    },
+    {
+      "question": "What's the daily per-diem for meals when I travel for work?",
+      "expected_answer": "$75/day for meals on business travel.",
+      "topic": "expenses"
+    },
+    {
+      "question": "Do I need a receipt for a $30 taxi ride?",
+      "expected_answer": "Yes - receipts are required for any expense over $25.",
+      "topic": "expenses"
+    },
+    {
+      "question": "Can you list our paid company holidays?",
+      "expected_answer": "11 paid holidays: New Year's Day, MLK Day, Presidents' Day, Memorial Day, Independence Day, Labor Day, the Wednesday and Thursday of Thanksgiving week, Christmas Eve, Christmas Day, and New Year's Eve.",
+      "topic": "holidays"
+    },
+    {
+      "question": "How many days off do I get for the death of a sibling?",
+      "expected_answer": "5 paid days (a sibling is immediate family).",
+      "topic": "bereavement"
+    },
+    {
+      "question": "Can I work four 10-hour days instead of five 8-hour days?",
+      "expected_answer": "Yes - compressed work weeks like four 10-hour days are allowed with manager approval.",
+      "topic": "flex_time"
+    },
+    {
+      "question": "How many vacation days do I get a year?",
+      "expected_answer": "20 PTO days per year, accrued monthly.",
+      "topic": "pto"
+    },
+    {
+      "question": "How many sick days am I given annually?",
+      "expected_answer": "10 sick days per year (no rollover).",
+      "topic": "sick_leave"
+    },
+    {
+      "question": "How many unused PTO days can roll into next year?",
+      "expected_answer": "Up to 5 unused PTO days roll over.",
+      "topic": "pto"
+    },
+    {
+      "question": "How many PTO days do I get per year?",
+      "expected_answer": "20 PTO days per year, accrued monthly (not 25).",
+      "topic": "pto"
+    },
+    {
+      "question": "What is the company 401k match?",
+      "expected_answer": "A 4% company 401(k) match, fully vested after 1 year (not 6%).",
+      "topic": "benefits"
+    },
+    {
+      "question": "How many sick days do I get a year?",
+      "expected_answer": "10 sick days per year, no rollover (not 15).",
+      "topic": "sick_leave"
+    },
+    {
+      "question": "How many days a week can I work from home?",
+      "expected_answer": "Up to 3 days per week with manager approval (not 4).",
+      "topic": "remote_work"
+    },
+    {
+      "question": "What's the meal reimbursement limit on business travel?",
+      "expected_answer": "$75/day for meals on business travel (not $100).",
+      "topic": "expenses"
+    },
+    {
+      "question": "How much does the company contribute to my HSA for family coverage?",
+      "expected_answer": "$1,500/year for family HSA coverage ($750 individual), not $2,000.",
+      "topic": "benefits"
+    },
+    {
+      "question": "What's the annual tuition reimbursement limit?",
+      "expected_answer": "Up to $5,250/year for tuition reimbursement (not $10,000).",
+      "topic": "benefits"
+    },
+    {
+      "question": "How many counseling sessions does the EAP cover?",
+      "expected_answer": "Up to 8 EAP counseling sessions per issue per year (not 12).",
+      "topic": "benefits"
+    },
+    {
+      "question": "How much parental leave does a secondary caregiver get?",
+      "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary), not 12.",
+      "topic": "benefits"
+    },
+    {
+      "question": "How many bereavement days do I get for the death of a sibling?",
+      "expected_answer": "5 paid days (a sibling is immediate family), not 3.",
+      "topic": "bereavement"
+    },
+    {
+      "question": "Is orthodontia covered, and up to how much?",
+      "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum (not $5,000).",
+      "topic": "benefits"
+    }
+  ]
+}

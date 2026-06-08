@@ -1,0 +1,23 @@
+{
+  "description": "Single-agent skill lab - HELD-OUT TEST set (disjoint from evolve). Benefits-heavy, all answerable via lookup_company_policy / lookup_benefits. expected_answer is ground truth for correctness scoring (score_correctness.py).",
+  "questions": [
+    {"id": "te_parental_sec", "category": "benefits", "question": "How many weeks of parental leave does a secondary caregiver get?", "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary)."},
+    {"id": "te_401k", "category": "benefits", "question": "Does the company match my 401k contributions, and by how much?", "expected_answer": "Yes, a 4% company match, fully vested after 1 year."},
+    {"id": "te_401k_leave6mo", "category": "benefits", "question": "If I leave after six months, do I keep the 401k match?", "expected_answer": "No - the match is vested only after 1 year, so leaving at 6 months means you don't keep it."},
+    {"id": "te_ortho_kid", "category": "benefits", "question": "Is my child's orthodontia (braces) covered by our plan?", "expected_answer": "Yes - orthodontia is covered at 50% up to a $2,000 lifetime maximum."},
+    {"id": "te_eye", "category": "benefits", "question": "What's the benefit for eye exams and glasses?", "expected_answer": "Annual eye exam covered; $200 frame allowance every 2 years."},
+    {"id": "te_hsa_family", "category": "benefits", "question": "How much does the company put into an HSA for family coverage?", "expected_answer": "$1,500/year for family coverage ($750 individual)."},
+    {"id": "te_premium_split", "category": "benefits", "question": "How much of my health premium do I pay versus the company?", "expected_answer": "The company covers 80% of the employee premium (you pay ~20%); 50% for dependents."},
+    {"id": "te_oop_family", "category": "benefits", "question": "What's the out-of-pocket maximum for a family on the PPO?", "expected_answer": "$8,000 for a family in-network ($4,000 individual)."},
+    {"id": "te_tuition_course", "category": "benefits", "question": "Can I get a work-related course reimbursed, and up to how much?", "expected_answer": "Yes - tuition reimbursement up to $5,250/year for job-related courses (manager pre-approval, grade B or better)."},
+    {"id": "te_eap_therapy", "category": "benefits", "question": "How many therapy sessions does the employee assistance program cover?", "expected_answer": "Up to 8 counseling sessions per issue per year (plus a 24/7 hotline)."},
+    {"id": "te_exp_perdiem", "category": "expenses", "question": "What's the daily per-diem for meals when I travel for work?", "expected_answer": "$75/day for meals on business travel."},
+    {"id": "te_exp_taxi", "category": "expenses", "question": "Do I need a receipt for a $30 taxi ride?", "expected_answer": "Yes - receipts are required for any expense over $25."},
+    {"id": "te_hol_list", "category": "holidays", "question": "Can you list our paid company holidays?", "expected_answer": "11 paid holidays: New Year's Day, MLK Day, Presidents' Day, Memorial Day, Independence Day, Labor Day, Wed+Thu of Thanksgiving week, Christmas Eve, Christmas Day, New Year's Eve."},
+    {"id": "te_ber_sibling", "category": "bereavement", "question": "How many days off do I get for the death of a sibling?", "expected_answer": "5 paid days (a sibling is immediate family)."},
+    {"id": "te_flex_4x10", "category": "flex_time", "question": "Can I work four 10-hour days instead of five 8-hour days?", "expected_answer": "Yes - compressed work weeks like four 10-hour days are allowed with manager approval."},
+    {"id": "te_pto_vacation", "category": "pto", "question": "How many vacation days do I get a year?", "expected_answer": "20 PTO days per year, accrued monthly."},
+    {"id": "te_sick_annual", "category": "sick_leave", "question": "How many sick days am I given annually?", "expected_answer": "10 sick days per year (no rollover)."},
+    {"id": "te_pto_rollover", "category": "pto", "question": "How many unused PTO days can roll into next year?", "expected_answer": "Up to 5 unused PTO days roll over."}
+  ]
+}
