@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-08
+
+### Release highlights
+
+Schema-derived Context Graph materialization, end to end. `bqaa context-graph
+--property-graph property_graph.sql` now derives the ontology + binding from the
+property graph plus live table schemas, so rename-free graphs need no
+hand-written `ontology.yaml` / `binding.yaml` — and the same one-artifact flow
+reaches the scheduled production path (Cloud Run deploy script, image builder,
+`run_job.py`, and the Terraform module), with a split read-only-events /
+writable-graph dataset contract. Explicit `--ontology` / `--binding` is retained
+as the advanced override for descriptions, inheritance, derived properties,
+renames, and the migration-v5 compiled-extractor path.
+
 ### Added
 
 - **Schema-derived (`--property-graph`) materialization, local → production**

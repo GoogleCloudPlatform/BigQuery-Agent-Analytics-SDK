@@ -194,11 +194,12 @@ before paying for a deploy:
 pip install -e .
 #
 # (b) Pinned from PyPI — once you're on a stable SDK version.
-#     0.3.2 is the migration-v5 production-track release
+#     0.3.3 adds schema-derived (``--property-graph``) deploy
+#     parity on top of the 0.3.2 migration-v5 production track
 #     (compiled-only deploy, backfill, orphan watchdog,
 #     Terraform module, split SAs, ``--max-retries``). Use this
 #     for unmodified production use.
-pip install 'bigquery-agent-analytics>=0.3.2'
+pip install 'bigquery-agent-analytics>=0.3.3'
 
 # Either way, install the example's ancillary deps:
 pip install -r examples/migration_v5/periodic_materialization/requirements.txt
