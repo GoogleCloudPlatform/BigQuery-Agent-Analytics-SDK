@@ -67,7 +67,7 @@ bqaa seed-events \
 
 ### Step 2: Define the context graph
 
-Declare the graph shape once, in standard SQL. This models the decision flow: requests, the options each request weighed, the committed outcome, and the edges that connect them.
+Declare the graph shape once, in standard SQL, and run it in BigQuery. This models the decision flow: requests, the options each request weighed, the committed outcome, and the edges that connect them. The deployed graph becomes the single source of truth — the materializer in the next step reads this definition back from BigQuery's `INFORMATION_SCHEMA.PROPERTY_GRAPHS`.
 
 ```sql
 CREATE OR REPLACE PROPERTY GRAPH agent_analytics.agent_decisions_graph
@@ -98,12 +98,12 @@ CREATE OR REPLACE PROPERTY GRAPH agent_analytics.agent_decisions_graph
 
 ### Step 3: Extract context graph from agent traces
 
-A single command reads the raw `agent_events` and populates the graph tables. It derives what to extract directly from the property graph you defined in Step 2: `bqaa context-graph` reads that `CREATE PROPERTY GRAPH` definition and the schemas of the tables it references, so the property-graph schema is the only thing you author — no separate ontology or binding file. For local development, run the materializer once:
+A single command reads the raw `agent_events` and populates the graph tables. It derives what to extract directly from the graph you deployed in Step 2: `bqaa context-graph` reads the `CREATE PROPERTY GRAPH` definition back from `INFORMATION_SCHEMA.PROPERTY_GRAPHS` along with the schemas of the tables it references, so the property-graph schema is the only thing you author — no SQL file handed to the materializer, no separate ontology or binding file. For local development, run the materializer once:
 
 ```bash
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
-    --property-graph property_graph.sql \
+    --graph agent_decisions_graph \
     --lookback-hours 24
 ```
 

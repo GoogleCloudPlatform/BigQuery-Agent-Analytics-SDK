@@ -36,8 +36,8 @@ an audit artifact.
 already followed the
 [Periodic Materialization codelab](../codelabs/periodic_materialization.md)
 through materialization, so that your project has: the dataset created, the
-graph-table DDL applied, and the `agent_decisions_graph` property graph defined
-(`property_graph.sql`). That setup is about ten minutes and is not repeated
+graph-table DDL applied, and the `agent_decisions_graph` property graph
+deployed to BigQuery. That setup is about ten minutes and is not repeated
 here.
 
 With the codelab setup in place, the only two commands specific to this guide
@@ -52,11 +52,13 @@ bqaa seed-events \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
     --scenario decision-realistic --seed 42
 
-# 2. Materialize the decision graph from the events. --lookback-hours 80
-#    covers the corpus's 72-hour spread so every completed session is captured.
+# 2. Materialize the decision graph from the events. The materializer reads
+#    the deployed graph's definition back from INFORMATION_SCHEMA.PROPERTY_GRAPHS.
+#    --lookback-hours 80 covers the corpus's 72-hour spread so every completed
+#    session is captured.
 bqaa context-graph \
     --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
-    --property-graph property_graph.sql \
+    --graph agent_decisions_graph \
     --lookback-hours 80
 ```
 

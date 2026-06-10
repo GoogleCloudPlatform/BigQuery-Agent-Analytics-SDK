@@ -57,25 +57,29 @@ bq query --use_legacy_sql=false < table_ddl.sql
 bq query --use_legacy_sql=false < property_graph.sql
 ```
 
-Both files are idempotent — re-running them is safe.
+Both files are idempotent — re-running them is safe. This is the only time
+the SQL files are used: from here on the **deployed graph in BigQuery is the
+single source of truth**.
 
 ### Materialize the graph from agent events
 
 `bqaa context-graph` reads raw `agent_events` rows (written by the BigQuery
 Agent Analytics Plugin), derives the entities and relationships to extract
-**directly from your property graph**, and populates the node and edge tables:
+**directly from your deployed graph** — it reads the graph's definition back
+from `INFORMATION_SCHEMA.PROPERTY_GRAPHS` — and populates the node and edge
+tables:
 
 ```bash
 bqaa context-graph \
     --project-id your-project \
     --dataset-id your_dataset \
-    --property-graph property_graph.sql \
+    --graph mako_demo_graph \
     --lookback-hours 24 \
     --format json
 ```
 
-That single `--property-graph` flag is the whole configuration — no separate
-ontology or binding file is needed on this path.
+That single `--graph` flag is the whole configuration — no SQL file handed to
+the materializer, no separate ontology or binding file on this path.
 
 ### Query it
 
@@ -118,8 +122,9 @@ The flow:
    Deploys the Cloud Run Job, creates the runtime service account with narrow
    IAM (events-READ, graph-WRITE), wires the Cloud Scheduler trigger, and runs
    `--smoke` to verify in one shot. The deploy script's
-   `--property-graph property_graph.sql` mode derives everything from your
-   placeholdered property graph at run time — no checked-in files to edit.
+   `--graph <name>` mode derives everything from your deployed graph at run
+   time (via `INFORMATION_SCHEMA.PROPERTY_GRAPHS`) — nothing staged, no
+   checked-in files to edit.
 
 4. **Verify** — Cloud Logging shows the JSON report on every run
    (`jsonPayload.ok`, `sessions_materialized`, `rows_materialized`, per-table
@@ -163,7 +168,7 @@ above covers the common case; reach for an explicit `ontology.yaml` +
 `binding.yaml` only when you need finer control — human-readable descriptions
 that steer the AI extraction prompt, entity inheritance, derived (computed)
 properties, or column renames. You then pass `--ontology`/`--binding` to
-`bqaa context-graph` instead of `--property-graph`.
+`bqaa context-graph` instead of `--graph`.
 
 The artifact pipeline that turns an OWL TTL into binding + DDL +
 property-graph SQL is **ontology-agnostic** — see `ontology_artifacts.py` —
@@ -386,18 +391,18 @@ PYTHONPATH=src python examples/context_graph/export_events_jsonl.py --help
 ### Deploying the explicit-ontology graph on a schedule
 
 The periodic-materialization deploy also supports this path: bundle the
-checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql` instead of a
-placeholdered property graph. Running it against a different `OntologyConfig`
+checked-in `binding.yaml` / `ontology.yaml` / `table_ddl.sql` instead of
+pointing at a deployed graph. Running it against a different `OntologyConfig`
 means regenerating those snapshots for your config first
 (`mako_artifacts.py` / `ontology_artifacts.py`) and pointing the deploy at the
-new files. The rename-free `--property-graph` mode described above remains the
+new files. The rename-free `--graph` mode described above remains the
 common path.
 
 ## Related
 
 - [`periodic_materialization/`](./periodic_materialization/) — production deployment: Cloud Run Job + Cloud Scheduler, IAM matrix, alerting.
 - [Periodic Materialization codelab](../../docs/codelabs/periodic_materialization.md) — guided end-to-end walkthrough.
-- [Scheduled deploy runbook](../../docs/guides/scheduled-context-graph-deploy.md) — take a `--property-graph` graph to a scheduled deploy.
+- [Scheduled deploy runbook](../../docs/guides/scheduled-context-graph-deploy.md) — take a deployed graph to a scheduled `--graph` deploy.
 - [`examples/decision_lineage_demo/`](../decision_lineage_demo/) — reference pattern for ADK agent + BigQuery Agent Analytics plugin wiring.
 - [Rollout guide](../../docs/extractor_compilation_rollout_guide.md) — extractor compilation pipeline reference.
 - [Ontology runtime reader](../../docs/ontology_runtime_reader.md) — runtime reader API.
