@@ -516,3 +516,43 @@ def test_orchestrator_rejects_graph_with_other_modes() -> None:
         dataset_id="d",
         bq_client=_FakeClient({}),
     )
+
+
+def test_normalize_graph_target_qualified_ref_sets_graph_target() -> None:
+  # P2 from PR review: a qualified --graph ref must drive the WHOLE graph
+  # target (state table, binding target), not just the INFORMATION_SCHEMA
+  # lookup — otherwise a CLI user with a read-only events dataset writes
+  # state into it.
+  from bigquery_agent_analytics.materialize_window import _normalize_graph_target
+  from bigquery_agent_analytics.materialize_window import _state_table_defaults
+
+  gp, gd, name = _normalize_graph_target(
+      "p2.graph_ds.my_graph", "events-proj", "events_ds", None, None
+  )
+  assert (gp, gd, name) == ("p2", "graph_ds", "my_graph")
+  # The state table then follows the graph's own dataset.
+  assert _state_table_defaults("events-proj", "events_ds", gp, gd) == (
+      "p2",
+      "graph_ds",
+  )
+
+  # dataset.graph: project falls back to the events project.
+  gp, gd, name = _normalize_graph_target(
+      "graph_ds.my_graph", "events-proj", "events_ds", None, None
+  )
+  assert (gp, gd, name) == ("events-proj", "graph_ds", "my_graph")
+
+
+def test_normalize_graph_target_bare_name_keeps_explicit_args() -> None:
+  from bigquery_agent_analytics.materialize_window import _normalize_graph_target
+
+  # Bare name + explicit graph_* args (the run_job split-dataset shape).
+  assert _normalize_graph_target(
+      "my_graph", "events-proj", "events_ds", "gproj", "gds"
+  ) == ("gproj", "gds", "my_graph")
+  # Bare name, single-dataset shape: falls back to the events target.
+  assert _normalize_graph_target("my_graph", "p", "d", None, None) == (
+      "p",
+      "d",
+      "my_graph",
+  )

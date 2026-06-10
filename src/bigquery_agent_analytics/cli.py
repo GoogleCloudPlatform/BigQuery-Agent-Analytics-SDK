@@ -1811,7 +1811,8 @@ def materialize_window(
         "--ontology",
         help=(
             "Path to ontology YAML file. Use with --binding, or omit both and"
-            " pass --property-graph to derive them from the graph DDL."
+            " pass --graph to derive them from the property graph you already"
+            " deployed to BigQuery."
         ),
     ),
     binding_path: Optional[str] = typer.Option(

@@ -1247,6 +1247,32 @@ def _state_table_defaults(
   return (graph_project_id or project_id, graph_dataset_id or dataset_id)
 
 
+def _normalize_graph_target(
+    graph: str,
+    project_id: str,
+    dataset_id: str,
+    graph_project_id: Optional[str],
+    graph_dataset_id: Optional[str],
+) -> tuple[str, str, str]:
+  """Resolve a (possibly qualified) ``graph`` ref into the graph target.
+
+  Returns ``(graph_project_id, graph_dataset_id, bare_graph_name)``. A
+  qualified reference (``dataset.graph`` / ``project.dataset.graph``) is the
+  most specific signal, so its parts become the effective graph target — the
+  state table, the binding target, and the ``INFORMATION_SCHEMA`` lookups all
+  follow the graph's own dataset, never a (possibly read-only) events
+  dataset. A bare name keeps the explicit ``graph_*`` args (falling back to
+  the events ``project_id`` / ``dataset_id``, the single-dataset shape).
+  """
+  from .property_graph_spec import split_graph_ref
+
+  return split_graph_ref(
+      graph,
+      default_project=graph_project_id or project_id,
+      default_dataset=graph_dataset_id or dataset_id,
+  )
+
+
 def _resolve_ontology_binding(
     *,
     ontology_path: Optional[str],
@@ -1392,7 +1418,12 @@ def run_materialize_window(
       ``graph_project_id``, defaulting to ``dataset_id`` / ``project_id``) and
       derives the ontology + binding from it plus the live table schemas, so
       the deployed graph is the single source of truth and no local SQL file
-      is consumed. Mutually exclusive with the other input modes.
+      is consumed. A *qualified* reference sets the effective graph target:
+      its dataset/project become the ``graph_dataset_id`` /
+      ``graph_project_id`` defaults, so the state table and the binding
+      target follow the graph's own dataset rather than a (possibly
+      read-only) events ``dataset_id``. Mutually exclusive with the other
+      input modes.
     graph_project_id, graph_dataset_id: For schema-derived mode, the project /
       dataset that holds the graph tables and receives the materialized graph
       (``${PROJECT_ID}`` / ``${DATASET}`` placeholder resolution, schema lookup,
@@ -1638,6 +1669,14 @@ def run_materialize_window(
   run_id = generate_run_id()
 
   client = bq_client or bigquery.Client(project=project_id, location=location)
+
+  # Normalize a qualified ``graph`` reference BEFORE anything derives a
+  # graph target from it (state-table defaults, binding target, schema
+  # lookups).
+  if graph is not None:
+    graph_project_id, graph_dataset_id, graph = _normalize_graph_target(
+        graph, project_id, dataset_id, graph_project_id, graph_dataset_id
+    )
 
   # Resolve identifiers + qualified refs.
   events_table_ref = validated_table_ref(project_id, dataset_id, events_table)
