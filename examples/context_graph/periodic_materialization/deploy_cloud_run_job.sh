@@ -101,6 +101,7 @@ MAX_SESSIONS=""
 JOB_NAME="bqaa-periodic-materialization"
 SMOKE=false
 EXTRACTION_MODE="ai-fallback"
+GRAPH=""
 PROPERTY_GRAPH=""
 ENDPOINT=""
 MAX_SESSION_AGE_HOURS=""
@@ -150,14 +151,26 @@ Optional:
                                roles/aiplatform.user grant and idempotently
                                removes any pre-existing grant from a prior
                                ai-fallback deploy of the same SA.
-  --property-graph PATH        Schema-derived mode (#286): derive the
-                               ontology + binding from this CREATE PROPERTY
-                               GRAPH .sql file plus the table schemas, instead
-                               of staging ontology.yaml/binding.yaml. A
-                               placeholdered (\${PROJECT_ID}/\${DATASET})
-                               table_ddl.sql must sit next to it. Use for
-                               rename-free graphs; not compatible with
+  --graph NAME                 Deployed-graph mode (recommended): NAME is a
+                               property graph you already created in BigQuery
+                               (bare name resolved in --graph-dataset, or
+                               dataset.graph / project.dataset.graph). The
+                               runtime reads the graph's DDL back from
+                               INFORMATION_SCHEMA.PROPERTY_GRAPHS and derives
+                               the ontology + binding from it plus the live
+                               table schemas — nothing is staged; the deployed
+                               graph is the single source of truth. Apply your
+                               table DDL + CREATE PROPERTY GRAPH with bq
+                               before deploying. Not compatible with
                                --extraction-mode=compiled-only.
+  --property-graph PATH        Legacy file-based schema-derived mode (#286):
+                               derive the ontology + binding from this CREATE
+                               PROPERTY GRAPH .sql file plus the table
+                               schemas, instead of staging
+                               ontology.yaml/binding.yaml. A placeholdered
+                               (\${PROJECT_ID}/\${DATASET}) table_ddl.sql must
+                               sit next to it. Prefer --graph. Not compatible
+                               with --extraction-mode=compiled-only.
   --endpoint MODEL             Vertex AI model for the AI.GENERATE extraction
                                fallback, wired as BQAA_ENDPOINT on the Job.
                                Short names resolve to the locations/global
@@ -231,6 +244,7 @@ while [[ $# -gt 0 ]]; do
     --job-name)        require_arg "$1" "${2-}"; JOB_NAME="$2"; shift 2 ;;
     --smoke)           SMOKE=true; shift ;;
     --extraction-mode) require_arg "$1" "${2-}"; EXTRACTION_MODE="$2"; shift 2 ;;
+    --graph)           require_arg "$1" "${2-}"; GRAPH="$2"; shift 2 ;;
     --property-graph)  require_arg "$1" "${2-}"; PROPERTY_GRAPH="$2"; shift 2 ;;
     --endpoint)        require_arg "$1" "${2-}"; ENDPOINT="$2"; shift 2 ;;
     --max-session-age-hours)
@@ -272,11 +286,24 @@ case "$EXTRACTION_MODE" in
     ;;
 esac
 
-# Spec input mode (#286). ``--property-graph`` selects schema-derived
-# mode: the ontology + binding are derived from the property graph + the
-# table schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged.
-# Unset = the explicit context-graph ontology+binding (compiled-extractor)
-# path. Exactly one mode is in effect.
+# Spec input mode. ``--graph`` (recommended) selects deployed-graph mode:
+# the runtime reads the customer's already-deployed property graph back from
+# ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` and derives the ontology + binding
+# from it — nothing is staged. ``--property-graph`` (legacy) selects the
+# file-based schema-derived mode. Unset (both) = the explicit context-graph
+# ontology+binding (compiled-extractor) path. Exactly one mode is in effect.
+if [[ -n "$GRAPH" && -n "$PROPERTY_GRAPH" ]]; then
+  echo "Error: --graph and --property-graph are mutually exclusive; pass exactly one spec input mode." >&2
+  exit 1
+fi
+if [[ -n "$GRAPH" ]]; then
+  # Deployed-graph mode has no reference extractors staged, so compiled-only
+  # would empty_extract at runtime — reject it at the deploy boundary.
+  if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
+    echo "Error: --graph (deployed-graph mode) does not support --extraction-mode=compiled-only: no reference extractors are staged in derived mode. Use 'ai-fallback', or deploy the explicit ontology/binding path." >&2
+    exit 1
+  fi
+fi
 TABLE_DDL_SRC=""
 if [[ -n "$PROPERTY_GRAPH" ]]; then
   # Derived mode has no reference extractors staged, so compiled-only
@@ -644,7 +671,12 @@ STAGING="$(mktemp -d -t bqaa-cloud-run-job-XXXXXXXX)"
 
 echo "==> staging at $STAGING"
 cp "${SCRIPT_DIR}/run_job.py" "$STAGING/"
-if [[ -n "$PROPERTY_GRAPH" ]]; then
+if [[ -n "$GRAPH" ]]; then
+  # Deployed-graph mode: nothing to stage. The runtime reads the customer's
+  # deployed graph back from INFORMATION_SCHEMA.PROPERTY_GRAPHS; the graph's
+  # existence proves its node/edge tables exist, so no table DDL ships either.
+  :
+elif [[ -n "$PROPERTY_GRAPH" ]]; then
   # Schema-derived mode: stage only the property graph + its companion
   # table DDL. The runtime derives ontology + binding from them, so no
   # ontology.yaml / binding.yaml / reference_extractor.py is needed.
@@ -734,8 +766,13 @@ fi
 if [[ "$EXTRACTION_MODE" == "compiled-only" ]]; then
   ENV_VARS+=("BQAA_REFERENCE_EXTRACTORS_MODULE=reference_extractor")
 fi
-# Schema-derived mode: tell the runtime to derive the spec from the staged
-# property graph instead of the explicit ontology/binding pair (#286).
+# Deployed-graph mode: tell the runtime to derive the spec from the
+# customer's already-deployed property graph (INFORMATION_SCHEMA lookup).
+if [[ -n "$GRAPH" ]]; then
+  ENV_VARS+=("BQAA_GRAPH=${GRAPH}")
+fi
+# Schema-derived mode (legacy): tell the runtime to derive the spec from the
+# staged property graph instead of the explicit ontology/binding pair (#286).
 if [[ -n "$PROPERTY_GRAPH" ]]; then
   ENV_VARS+=("BQAA_PROPERTY_GRAPH=property_graph.sql")
 fi

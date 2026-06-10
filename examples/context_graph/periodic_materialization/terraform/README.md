@@ -11,7 +11,7 @@ Resolves [#186](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-
 | Graph dataset | `google_bigquery_dataset` | §1 — `bq mk` (pre-create so the runtime SA never needs `bigquery.datasets.create`) |
 | Runtime SA + scheduler-caller SA | `google_service_account` ×2 | §2 — `_ensure_sa` (split by default; `single_sa = true` collapses to one) |
 | Project + dataset IAM grants | `google_project_iam_member`, `google_bigquery_dataset_iam_member` | §3 — `_retry_iam gcloud projects add-iam-policy-binding` and the dataset-level grant block. Terraform's dependency graph handles the IAM-propagation race declaratively (the `depends_on` on the Cloud Run Job resource ensures grants land before the first invocation) |
-| Cloud Run v2 Job | `google_cloud_run_v2_job` | §4 — `gcloud run jobs deploy`. Same env-var set the bash deploy wires (`BQAA_PROJECT_ID`, `BQAA_EVENTS_DATASET_ID`, `BQAA_GRAPH_DATASET_ID`, `BQAA_LOCATION`, `BQAA_LOOKBACK_HOURS`, `BQAA_OVERLAP_MINUTES`, `BQAA_EXTRACTION_MODE`, `BQAA_MAX_RETRIES`, conditionally `BQAA_MAX_SESSIONS`, `BQAA_MAX_SESSION_AGE_HOURS`, `BQAA_REFERENCE_EXTRACTORS_MODULE`, `BQAA_PROPERTY_GRAPH` when `property_graph = true`, and `BQAA_ENDPOINT` when `endpoint != ""`) |
+| Cloud Run v2 Job | `google_cloud_run_v2_job` | §4 — `gcloud run jobs deploy`. Same env-var set the bash deploy wires (`BQAA_PROJECT_ID`, `BQAA_EVENTS_DATASET_ID`, `BQAA_GRAPH_DATASET_ID`, `BQAA_LOCATION`, `BQAA_LOOKBACK_HOURS`, `BQAA_OVERLAP_MINUTES`, `BQAA_EXTRACTION_MODE`, `BQAA_MAX_RETRIES`, conditionally `BQAA_MAX_SESSIONS`, `BQAA_MAX_SESSION_AGE_HOURS`, `BQAA_REFERENCE_EXTRACTORS_MODULE`, `BQAA_GRAPH` when `graph != ""`, `BQAA_PROPERTY_GRAPH` when `property_graph = true` (legacy), and `BQAA_ENDPOINT` when `endpoint != ""`) |
 | `roles/run.invoker` on the job → scheduler SA | `google_cloud_run_v2_job_iam_member` | §5 — `_retry_iam gcloud run jobs add-iam-policy-binding` |
 | Cloud Scheduler trigger | `google_cloud_scheduler_job` | §6 — `gcloud scheduler jobs create http` with `--oauth-service-account-email` pointing at the scheduler SA |
 
@@ -19,7 +19,7 @@ Resolves [#186](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-
 
 **Container image build + publish.** The bash deploy builds the image from local sources via Cloud Buildpacks (`gcloud run jobs deploy --source $STAGING`), assembling a staging directory with `run_job.py` + `reference_extractor.py` + the demo artifacts + the vendored SDK source + `Procfile` + `requirements.txt` before invoking the build. That staging step is non-trivial — pointing `gcloud builds submit` directly at the `periodic_materialization/` directory would build an image that's missing the SDK source, the demo artifacts, and the Procfile.
 
-The module takes the **published** image URI as the required `image_uri` variable. To produce a Terraform-compatible image, use the bundled [`../build_image.sh`](../build_image.sh) helper — it stages the exact layout `deploy_cloud_run_job.sh` produces in its temp dir, then runs `gcloud builds submit` against that staging dir. Same image contents either way; Terraform just consumes the publish artifact instead of doing the build inline. For schema-derived deploys (`property_graph = true`), build the image with `build_image.sh --property-graph path/to/property_graph.sql` so the placeholdered `property_graph.sql` + `table_ddl.sql` are staged instead of `ontology.yaml`/`binding.yaml`.
+The module takes the **published** image URI as the required `image_uri` variable. To produce a Terraform-compatible image, use the bundled [`../build_image.sh`](../build_image.sh) helper — it stages the exact layout `deploy_cloud_run_job.sh` produces in its temp dir, then runs `gcloud builds submit` against that staging dir. Same image contents either way; Terraform just consumes the publish artifact instead of doing the build inline. Deployed-graph deploys (`graph = "<name>"`) use the default image as-is — nothing graph-specific is staged. (Legacy file-based deploys with `property_graph = true` build the image with `build_image.sh --property-graph path/to/property_graph.sql` so the placeholdered `property_graph.sql` + `table_ddl.sql` are staged instead of `ontology.yaml`/`binding.yaml`.)
 
 ```bash
 # From the repo root.
@@ -86,7 +86,7 @@ graph_dataset_id   = "context_graph"
 schedule           = "0 */6 * * *"
 image_uri          = "us-central1-docker.pkg.dev/my-project/bqaa/periodic-materialization:v1"
 # Optional overrides — defaults match the bash deploy
-# property_graph        = false   # true → schema-derived mode (see below)
+# graph                 = ""      # deployed-graph mode (see below)
 # extraction_mode       = "ai-fallback"
 # endpoint              = ""       # AI.GENERATE model (BQAA_ENDPOINT); e.g. "gemini-3.5-flash"
 # max_retries           = 2
@@ -95,20 +95,22 @@ image_uri          = "us-central1-docker.pkg.dev/my-project/bqaa/periodic-materi
 # location              = "US"
 ```
 
-#### Schema-derived mode (`property_graph = true`)
+#### Deployed-graph mode (`graph = "<name>"`)
 
 For a **rename-free, codelab-style graph** you can skip the explicit
-`ontology.yaml` / `binding.yaml` and derive the spec from a property graph (the
-[#286](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/286)
-one-artifact flow). Set `property_graph = true` and build the image with
-`build_image.sh --property-graph path/to/property_graph.sql` (a placeholdered
-`${PROJECT_ID}` / `${DATASET}` `table_ddl.sql` must sit next to it). The module
-then sets `BQAA_PROPERTY_GRAPH=property_graph.sql` on the Job so the runtime
-derives the ontology + binding from the property graph + your live table
-schemas. `property_graph = true` is rejected at plan time with
-`extraction_mode = "compiled-only"` (no reference extractors are staged in
-derived mode). Leave `property_graph = false` (default) for the explicit MAKO /
-compiled-extractor path.
+`ontology.yaml` / `binding.yaml` and derive the spec from the property graph
+you already created in BigQuery. Apply your table DDL + `CREATE PROPERTY
+GRAPH` with `bq query` first, then set `graph` to the deployed graph's name
+(bare name resolved in the graph dataset, or `dataset.graph` /
+`project.dataset.graph`). The module sets `BQAA_GRAPH` on the Job so the
+runtime reads the graph's definition back from
+`INFORMATION_SCHEMA.PROPERTY_GRAPHS` on every run and derives the ontology +
+binding from it plus your live table schemas — nothing graph-specific is
+staged in the image, so the default `build_image.sh` image works as-is.
+`graph` is rejected at plan time with `extraction_mode = "compiled-only"` (no
+reference extractors are staged in derived mode) and with `property_graph =
+true` (legacy file-based mode; prefer `graph`). Leave `graph = ""` (default)
+for the explicit MAKO / compiled-extractor path.
 
 ### 2. Init + plan + apply
 

@@ -47,14 +47,25 @@ Env vars (all set by the deploy script via
   ``agent_events``.
 * ``BQAA_GRAPH_DATASET_ID`` (required) — target dataset for
   the materialized graph (entity + relationship tables).
-* ``BQAA_PROPERTY_GRAPH`` (default unset) — when set to a staged
-  ``CREATE PROPERTY GRAPH`` ``.sql`` filename (e.g.
-  ``property_graph.sql``), runs in schema-derived mode (#286): the
-  ontology + binding are derived from the property graph + table
-  schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged and no
-  binding retargeting happens. Use placeholdered (``${PROJECT_ID}`` /
-  ``${DATASET}``), rename-free graphs. Unset ⇒ explicit ontology +
-  binding (the advanced / compiled-extractor path).
+* ``BQAA_GRAPH`` (default unset) — the name of a property graph the
+  customer already deployed to BigQuery (bare name resolved in
+  ``BQAA_GRAPH_DATASET_ID``, or ``dataset.graph`` /
+  ``project.dataset.graph``). The runtime reads the graph's DDL back
+  from ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` and derives the
+  ontology + binding from it plus the live table schemas — the
+  deployed graph is the single source of truth, nothing is staged,
+  and no table bootstrap runs (the graph's existence proves its
+  node/edge tables exist). Mutually exclusive with
+  ``BQAA_PROPERTY_GRAPH``.
+* ``BQAA_PROPERTY_GRAPH`` (default unset; legacy) — when set to a
+  staged ``CREATE PROPERTY GRAPH`` ``.sql`` filename (e.g.
+  ``property_graph.sql``), runs in file-based schema-derived mode
+  (#286): the ontology + binding are derived from the staged file +
+  table schemas, so no ``ontology.yaml`` / ``binding.yaml`` is staged
+  and no binding retargeting happens. Use placeholdered
+  (``${PROJECT_ID}`` / ``${DATASET}``), rename-free graphs. Prefer
+  ``BQAA_GRAPH``. Unset (both) ⇒ explicit ontology + binding (the
+  advanced / compiled-extractor path).
 * ``BQAA_LOCATION`` (default ``US``) — BigQuery location;
   must match both datasets.
 * ``BQAA_LOOKBACK_HOURS`` (default ``6``) — scan window size.
@@ -480,13 +491,30 @@ def main() -> int:
       os.environ.get("BQAA_REFERENCE_EXTRACTORS_MODULE") or None
   )
   bundles_root = os.environ.get("BQAA_BUNDLES_ROOT") or None
-  # Spec input mode. ``BQAA_PROPERTY_GRAPH`` (a staged ``*.sql`` filename)
-  # selects schema-derived mode (#277/#286): the ontology + binding are derived
-  # from the property graph + table schemas, so no ``ontology.yaml`` /
-  # ``binding.yaml`` is staged and no binding retargeting happens. When unset,
-  # the wrapper uses the explicit ontology + binding (the context-graph /
+  # Spec input mode, in precedence order. ``BQAA_GRAPH`` (a deployed
+  # property-graph name) selects deployed-graph mode: the runtime reads the
+  # graph's DDL back from ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` and derives
+  # the ontology + binding from it — nothing staged, no table bootstrap.
+  # ``BQAA_PROPERTY_GRAPH`` (a staged ``*.sql`` filename; legacy) selects
+  # file-based schema-derived mode (#277/#286). When both are unset, the
+  # wrapper uses the explicit ontology + binding (the context-graph /
   # compiled-extractor advanced path). Exactly one mode is in effect.
+  graph = os.environ.get("BQAA_GRAPH") or None
   property_graph_name = os.environ.get("BQAA_PROPERTY_GRAPH") or None
+  if graph and property_graph_name:
+    print(
+        json.dumps(
+            {
+                "severity": "ERROR",
+                "message": (
+                    "BQAA_GRAPH and BQAA_PROPERTY_GRAPH are mutually"
+                    " exclusive; set exactly one spec input mode."
+                ),
+            }
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(2)
   # Orphan-session watchdog (issue #180). Unset means disabled —
   # mirrors the CLI flag. ``_optional_env_float`` raises ``exit 2``
   # on a non-numeric value at the boundary, and the materializer's
@@ -518,6 +546,7 @@ def main() -> int:
       state_key_suffix=state_key_suffix,
       extraction_mode=extraction_mode,
       endpoint=endpoint,
+      graph=graph,
       bundles_root=bundles_root,
       reference_extractors_module=reference_extractors_module,
       max_session_age_hours=max_session_age_hours,
@@ -552,14 +581,25 @@ def main() -> int:
     )
 
     # 2. Bootstrap entity tables. Idempotent — no-op after first run.
-    ddl_count = _bootstrap_entity_tables(
-        bq_client, project_id, graph_dataset_id
-    )
-    _emit(
-        "INFO",
-        message="entity-table DDL applied",
-        statements=ddl_count,
-    )
+    # Skipped in deployed-graph (``BQAA_GRAPH``) mode: the customer's
+    # ``CREATE PROPERTY GRAPH`` can only have succeeded if its node/edge
+    # tables already exist, and the staged demo ``table_ddl.sql`` would not
+    # match their graph anyway.
+    if graph:
+      _emit(
+          "INFO",
+          message="entity-table bootstrap skipped (deployed-graph mode)",
+          graph=graph,
+      )
+    else:
+      ddl_count = _bootstrap_entity_tables(
+          bq_client, project_id, graph_dataset_id
+      )
+      _emit(
+          "INFO",
+          message="entity-table DDL applied",
+          statements=ddl_count,
+      )
 
     # 3. Run the orchestrator. Reads events from
     # ``BQAA_EVENTS_DATASET_ID``; writes entities/relationships AND the
@@ -595,7 +635,24 @@ def main() -> int:
         endpoint=endpoint,
     )
 
-    if property_graph_name:
+    if graph:
+      # Deployed-graph mode: the runtime reads the graph's DDL back from
+      # ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` in the graph dataset and
+      # derives the ontology + binding from it + the live table schemas.
+      # Nothing is staged; the deployed graph is the single source of truth.
+      _emit(
+          "INFO",
+          message="spec input mode",
+          mode="deployed-graph",
+          graph=graph,
+      )
+      result = mw.run_materialize_window(
+          graph=graph,
+          graph_project_id=project_id,
+          graph_dataset_id=graph_dataset_id,
+          **common_kwargs,
+      )
+    elif property_graph_name:
       # Schema-derived mode (#286): no ontology/binding, no binding retarget.
       # ``graph_*`` target the writable graph dataset for placeholder
       # resolution, INFORMATION_SCHEMA lookup, and writes; events stay
