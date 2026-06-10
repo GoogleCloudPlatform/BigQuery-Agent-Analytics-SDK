@@ -38,12 +38,12 @@ from bigquery_agent_analytics.cli import bqaa_app
 
 
 def test_rejects_both_modes() -> None:
-  with pytest.raises(typer.BadParameter, match="not both"):
+  with pytest.raises(typer.BadParameter, match="exactly one"):
     _validate_context_graph_input_mode("o.yaml", "b.yaml", "g.sql")
 
 
 def test_rejects_neither_mode() -> None:
-  with pytest.raises(typer.BadParameter, match="Provide --property-graph"):
+  with pytest.raises(typer.BadParameter, match="Provide --graph"):
     _validate_context_graph_input_mode(None, None, None)
 
 
@@ -53,7 +53,7 @@ def test_rejects_ontology_without_binding() -> None:
 
 
 def test_rejects_property_graph_with_partial_separated() -> None:
-  with pytest.raises(typer.BadParameter, match="not both"):
+  with pytest.raises(typer.BadParameter, match="exactly one"):
     _validate_context_graph_input_mode("o.yaml", None, "g.sql")
 
 
@@ -63,6 +63,20 @@ def test_accepts_separated_mode() -> None:
 
 def test_accepts_property_graph_mode() -> None:
   _validate_context_graph_input_mode(None, None, "g.sql")  # no raise
+
+
+def test_accepts_graph_mode() -> None:
+  _validate_context_graph_input_mode(None, None, None, "my_graph")  # no raise
+
+
+def test_rejects_graph_with_property_graph() -> None:
+  with pytest.raises(typer.BadParameter, match="exactly one"):
+    _validate_context_graph_input_mode(None, None, "g.sql", "my_graph")
+
+
+def test_rejects_graph_with_separated() -> None:
+  with pytest.raises(typer.BadParameter, match="exactly one"):
+    _validate_context_graph_input_mode("o.yaml", "b.yaml", None, "my_graph")
 
 
 # --------------------------------------------------------------------------- #

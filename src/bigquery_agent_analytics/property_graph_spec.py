@@ -12,12 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Derive an ontology + binding from a property-graph DDL file.
+"""Derive an ontology + binding from property-graph DDL.
 
 The capstone of GitHub issue #277, Option A: turn the ``CREATE PROPERTY GRAPH``
 DDL the user already authors (the query surface) into the in-memory
 ``Ontology`` + ``Binding`` the materializer needs -- so ``bqaa context-graph``
 no longer requires hand-written ``ontology.yaml`` / ``binding.yaml``.
+
+The DDL text can come from two sources:
+
+* A local ``.sql`` file (``--property-graph``), possibly placeholdered for
+  ``envsubst`` (``${PROJECT_ID}`` / ``${DATASET}``).
+* The graph the user already deployed to BigQuery (``--graph``):
+  :func:`fetch_property_graph_ddl` reads the normalized ``CREATE PROPERTY
+  GRAPH`` statement back from ``INFORMATION_SCHEMA.PROPERTY_GRAPHS``, making
+  the deployed graph itself the single source of truth.
 
 This ties together the three offline building blocks in ``bigquery_ontology``:
 
@@ -59,6 +68,107 @@ def resolve_placeholders(text: str, mapping: Mapping[str, str]) -> str:
     return mapping.get(match.group(1), match.group(0))
 
   return _PLACEHOLDER_RE.sub(_replace, text)
+
+
+class PropertyGraphLookupError(ValueError):
+  """A deployed property graph could not be resolved in INFORMATION_SCHEMA."""
+
+
+def split_graph_ref(
+    graph_ref: str,
+    *,
+    default_project: str,
+    default_dataset: str,
+) -> tuple[str, str, str]:
+  """Split a graph reference into ``(project, dataset, graph_name)``.
+
+  Accepts a bare graph name, ``dataset.graph``, or ``project.dataset.graph``;
+  missing qualifiers fall back to ``default_project`` / ``default_dataset``.
+  """
+  parts = graph_ref.split(".")
+  if len(parts) == 3:
+    project, dataset, name = parts
+  elif len(parts) == 2:
+    project, (dataset, name) = default_project, parts
+  elif len(parts) == 1:
+    project, dataset, name = default_project, default_dataset, parts[0]
+  else:
+    raise PropertyGraphLookupError(
+        f"Cannot parse graph reference {graph_ref!r}: expected 1-3"
+        " dot-separated parts (graph, dataset.graph, or"
+        " project.dataset.graph)."
+    )
+  if not all((project, dataset, name)):
+    raise PropertyGraphLookupError(
+        f"Graph reference {graph_ref!r} is not fully qualified and no"
+        " default project/dataset is available."
+    )
+  return project, dataset, name
+
+
+def fetch_property_graph_ddl(
+    bq_client: Any,
+    *,
+    project_id: str,
+    dataset_id: str,
+    graph_name: str,
+) -> str:
+  """Fetch a deployed graph's DDL from ``INFORMATION_SCHEMA.PROPERTY_GRAPHS``.
+
+  Args:
+    bq_client: A ``google.cloud.bigquery.Client``.
+    project_id: Default project for unqualified ``graph_name`` references.
+    dataset_id: Default dataset for unqualified ``graph_name`` references.
+    graph_name: The deployed graph -- a bare name, ``dataset.graph``, or
+      ``project.dataset.graph``.
+
+  Returns:
+    The normalized ``CREATE PROPERTY GRAPH`` statement BigQuery recorded for
+    the graph. Fully qualified, placeholder-free -- ready for
+    :func:`derive_ontology_binding_from_ddl`.
+
+  Raises:
+    PropertyGraphLookupError: The graph does not exist in the target dataset;
+      the message lists the graphs that do.
+  """
+  from google.cloud import bigquery
+
+  project, dataset, name = split_graph_ref(
+      graph_name, default_project=project_id, default_dataset=dataset_id
+  )
+  sql = (
+      "SELECT ddl\n"
+      f"FROM `{project}.{dataset}`.INFORMATION_SCHEMA.PROPERTY_GRAPHS\n"
+      "WHERE property_graph_name = @graph_name"
+  )
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("graph_name", "STRING", name)
+      ]
+  )
+  rows = list(bq_client.query(sql, job_config=job_config).result())
+  if rows:
+    return rows[0]["ddl"]
+
+  available_sql = (
+      "SELECT property_graph_name\n"
+      f"FROM `{project}.{dataset}`.INFORMATION_SCHEMA.PROPERTY_GRAPHS\n"
+      "ORDER BY property_graph_name"
+  )
+  available = [
+      row["property_graph_name"]
+      for row in bq_client.query(available_sql).result()
+  ]
+  hint = (
+      f" Graphs in that dataset: {', '.join(available)}."
+      if available
+      else " The dataset has no property graphs; apply your CREATE PROPERTY"
+      " GRAPH DDL first."
+  )
+  raise PropertyGraphLookupError(
+      f"Property graph `{name}` not found in `{project}.{dataset}`"
+      " (INFORMATION_SCHEMA.PROPERTY_GRAPHS)." + hint
+  )
 
 
 def derive_ontology_binding_from_ddl(
