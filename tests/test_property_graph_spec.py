@@ -367,28 +367,26 @@ def test_split_graph_ref_qualification() -> None:
       "d",
       "g",
   )
-  assert split_graph_ref(
-      "ds2.g", default_project="p", default_dataset="d"
-  ) == ("p", "ds2", "g")
+  assert split_graph_ref("ds2.g", default_project="p", default_dataset="d") == (
+      "p",
+      "ds2",
+      "g",
+  )
   assert split_graph_ref(
       "p2.ds2.g", default_project="p", default_dataset="d"
   ) == ("p2", "ds2", "g")
 
 
 def test_split_graph_ref_rejects_too_many_parts() -> None:
-  from bigquery_agent_analytics.property_graph_spec import (
-      PropertyGraphLookupError,
-      split_graph_ref,
-  )
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
+  from bigquery_agent_analytics.property_graph_spec import split_graph_ref
 
   with pytest.raises(PropertyGraphLookupError, match="1-3"):
     split_graph_ref("a.b.c.d", default_project="p", default_dataset="d")
 
 
 def test_fetch_property_graph_ddl_happy_path() -> None:
-  from bigquery_agent_analytics.property_graph_spec import (
-      fetch_property_graph_ddl,
-  )
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
 
   client = _FakeGraphClient(
       {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
@@ -405,9 +403,7 @@ def test_fetch_property_graph_ddl_happy_path() -> None:
 
 
 def test_fetch_property_graph_ddl_qualified_name_overrides_defaults() -> None:
-  from bigquery_agent_analytics.property_graph_spec import (
-      fetch_property_graph_ddl,
-  )
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
 
   client = _FakeGraphClient(
       {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
@@ -424,10 +420,8 @@ def test_fetch_property_graph_ddl_qualified_name_overrides_defaults() -> None:
 
 
 def test_fetch_property_graph_ddl_not_found_lists_available() -> None:
-  from bigquery_agent_analytics.property_graph_spec import (
-      PropertyGraphLookupError,
-      fetch_property_graph_ddl,
-  )
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
 
   client = _FakeGraphClient(
       {"other_graph": "CREATE PROPERTY GRAPH ..."}, _SCHEMAS_WITH_METADATA
@@ -441,15 +435,11 @@ def test_fetch_property_graph_ddl_not_found_lists_available() -> None:
 
 
 def test_fetch_property_graph_ddl_not_found_empty_dataset() -> None:
-  from bigquery_agent_analytics.property_graph_spec import (
-      PropertyGraphLookupError,
-      fetch_property_graph_ddl,
-  )
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
 
   client = _FakeGraphClient({}, _SCHEMAS_WITH_METADATA)
-  with pytest.raises(
-      PropertyGraphLookupError, match="no property graphs"
-  ):
+  with pytest.raises(PropertyGraphLookupError, match="no property graphs"):
     fetch_property_graph_ddl(
         client, project_id="p", dataset_id="d", graph_name="missing_graph"
     )
@@ -461,9 +451,7 @@ def test_orchestrator_resolves_via_deployed_graph() -> None:
   # is the live-captured normalized form, so this also pins parser tolerance
   # for that shape (KEY without spaces, metadata columns in edge PROPERTIES,
   # no OR REPLACE).
-  from bigquery_agent_analytics.materialize_window import (
-      _resolve_ontology_binding,
-  )
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
 
   client = _FakeGraphClient(
       {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
@@ -493,9 +481,7 @@ def test_orchestrator_graph_mode_uses_graph_dataset_for_lookup() -> None:
   # Split-dataset deploy: the deployed graph lives in the graph dataset, so
   # the INFORMATION_SCHEMA lookup must target graph_dataset_id, not the
   # events dataset.
-  from bigquery_agent_analytics.materialize_window import (
-      _resolve_ontology_binding,
-  )
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
 
   graph_ddl = _INFOSCHEMA_DDL.replace("`p.d.", "`p.graph_ds.")
   client = _FakeGraphClient(
@@ -518,9 +504,7 @@ def test_orchestrator_graph_mode_uses_graph_dataset_for_lookup() -> None:
 
 
 def test_orchestrator_rejects_graph_with_other_modes() -> None:
-  from bigquery_agent_analytics.materialize_window import (
-      _resolve_ontology_binding,
-  )
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
 
   with pytest.raises(ValueError, match="exactly one"):
     _resolve_ontology_binding(
