@@ -15,7 +15,7 @@
 """The codelab embeds its artifacts inline so the notebook is self-contained.
 
 Those embedded copies must stay byte-for-byte in sync with the canonical files
-in ``examples/codelab/periodic_materialization/``; otherwise the codelab would
+in ``examples/context_graph/codelab/``; otherwise the codelab would
 write stale artifacts. This test fails if either side drifts.
 """
 
@@ -27,7 +27,7 @@ import pytest
 
 _REPO = Path(__file__).resolve().parents[1]
 _CODELAB = _REPO / "docs" / "codelabs" / "periodic_materialization.md"
-_ARTIFACTS = _REPO / "examples" / "codelab" / "periodic_materialization"
+_ARTIFACTS = _REPO / "examples" / "context_graph" / "codelab"
 
 
 @pytest.mark.parametrize(
@@ -39,6 +39,6 @@ def test_embedded_artifact_matches_canonical(name: str) -> None:
   codelab = _CODELAB.read_text(encoding="utf-8")
   assert canonical in codelab, (
       f"The codelab's embedded copy of {name} has drifted from"
-      f" examples/codelab/periodic_materialization/{name}. Re-run the embed so"
+      f" examples/context_graph/codelab/{name}. Re-run the embed so"
       f" the self-contained notebook writes the current artifact."
   )

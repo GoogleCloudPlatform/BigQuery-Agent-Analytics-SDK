@@ -40,8 +40,8 @@ _REPO = Path(__file__).resolve().parents[1]
 _CODELAB_DDL = (
     _REPO
     / "examples"
+    / "context_graph"
     / "codelab"
-    / "periodic_materialization"
     / "property_graph.sql"
 )
 

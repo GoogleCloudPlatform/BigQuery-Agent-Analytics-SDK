@@ -199,4 +199,4 @@ conversation.
 ## Related
 
 - [Periodic Materialization codelab](../codelabs/periodic_materialization.md) — build the graph step by step.
-- [`bqaa seed-events`](../../examples/codelab/periodic_materialization/README.md) — the synthetic data generator, including the `decision-realistic` scenario used here.
+- [`bqaa seed-events`](../../examples/context_graph/codelab/README.md) — the synthetic data generator, including the `decision-realistic` scenario used here.

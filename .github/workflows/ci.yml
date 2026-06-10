@@ -51,7 +51,7 @@ jobs:
         run: |
           python scripts/generate_colab_from_codelab.py --check \
             docs/codelabs/periodic_materialization.md \
-            examples/codelab/periodic_materialization/colab_notebook.ipynb
+            examples/context_graph/codelab/colab_notebook.ipynb
 
   test:
     name: Test (Python ${{ matrix.python-version }})

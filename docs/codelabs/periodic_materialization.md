@@ -186,17 +186,17 @@ Cloud Shell users can skip this step; credentials are already configured. (In Co
 
 Duration: 02:00
 
-The codelab needs just two ready-to-use artifacts: the **table DDL** (the physical graph tables) and the **property-graph schema** (`CREATE PROPERTY GRAPH`). You do not author either yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
+The codelab needs just two ready-to-use artifacts: the **table DDL** (the physical graph tables) and the **property-graph schema** (`CREATE PROPERTY GRAPH`). You do not author either yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/context_graph/codelab/README.md) explains how to adapt them for your own decision domain.
 
 The property-graph schema is the single source of truth for *what* the graph contains. You apply it to BigQuery once; from then on the **deployed graph itself is the contract**: `bqaa context-graph` reads the graph's definition back from BigQuery's `INFORMATION_SCHEMA.PROPERTY_GRAPHS` (plus your table schemas) to figure out which entities and relationships to extract and where to write them — so you do **not** need to write a separate ontology or binding file, and no SQL file is ever passed to the materializer.
 
-This codelab is self-contained: the cell below writes the two artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/codelab/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization).
+This codelab is self-contained: the cell below writes the two artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/context_graph/codelab/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/codelab).
 
 <!-- colab:code python -->
 ```python
 # This codelab is self-contained: rather than downloading files, this
 # cell writes the two artifacts into a working directory. They are
-# identical to the files in examples/codelab/periodic_materialization/.
+# identical to the files in examples/context_graph/codelab/.
 from pathlib import Path
 
 work = Path.home() / "bqaa-codelab"
@@ -680,7 +680,7 @@ The same pattern applies wherever an agent makes consequential decisions: credit
 #### Reference docs
 
 - [BigQuery Agent Analytics SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
-- [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization)
+- [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/codelab)
 - [Periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization): required APIs, IAM matrix, recommended schedules, Cloud Monitoring alert queries, and the Terraform module.
 - [BigQuery property graphs documentation](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
 - [BigQuery Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) (Preview).

@@ -23,7 +23,7 @@ import pytest
 
 _WRAPPER_PATH = (
     Path(__file__).resolve().parents[1]
-    / "examples/codelab/periodic_materialization/seed_events.py"
+    / "examples/context_graph/codelab/seed_events.py"
 )
 
 

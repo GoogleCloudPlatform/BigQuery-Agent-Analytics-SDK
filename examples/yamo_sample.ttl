@@ -1,0 +1,85 @@
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix yamo: <https://example.com/yamo#> .
+
+# ============================================================
+# Classes
+# ============================================================
+
+yamo:Party a owl:Class ;
+  rdfs:label "Party" ;
+  owl:hasKey ( yamo:party_id ) .
+
+yamo:AdUnit a owl:Class ;
+  rdfs:label "Ad Unit" ;
+  rdfs:subClassOf yamo:Party ;
+  owl:hasKey ( yamo:ad_unit_id ) .
+
+yamo:Campaign a owl:Class ;
+  rdfs:label "Campaign" ;
+  owl:hasKey ( yamo:campaign_id ) .
+
+yamo:RejectionReason a owl:Class ;
+  rdfs:label "Rejection Reason" ;
+  owl:hasKey ( yamo:rejection_type ) .
+
+# DecisionPoint has NO owl:hasKey -> should produce FILL_IN.
+yamo:DecisionPoint a owl:Class ;
+  rdfs:label "Decision Point" .
+
+# ============================================================
+# Datatype Properties
+# ============================================================
+
+yamo:party_id a owl:DatatypeProperty ;
+  rdfs:domain yamo:Party ;
+  rdfs:range xsd:string .
+
+yamo:name a owl:DatatypeProperty ;
+  rdfs:domain yamo:Party ;
+  rdfs:range xsd:string .
+
+yamo:ad_unit_id a owl:DatatypeProperty ;
+  rdfs:domain yamo:AdUnit ;
+  rdfs:range xsd:string .
+
+yamo:campaign_id a owl:DatatypeProperty ;
+  rdfs:domain yamo:Campaign ;
+  rdfs:range xsd:string .
+
+yamo:decision_id a owl:DatatypeProperty ;
+  rdfs:domain yamo:DecisionPoint ;
+  rdfs:range xsd:string .
+
+yamo:decision_type a owl:DatatypeProperty ;
+  rdfs:domain yamo:DecisionPoint ;
+  rdfs:range xsd:string .
+
+yamo:rejection_type a owl:DatatypeProperty ;
+  rdfs:domain yamo:RejectionReason ;
+  rdfs:range xsd:string .
+
+# budget is xsd:decimal -> should narrow to double with a warning.
+yamo:budget a owl:DatatypeProperty ;
+  rdfs:domain yamo:Campaign ;
+  rdfs:range xsd:decimal .
+
+yamo:start_date a owl:DatatypeProperty ;
+  rdfs:domain yamo:Campaign ;
+  rdfs:range xsd:date .
+
+# ============================================================
+# Object Properties (relationships)
+# ============================================================
+
+yamo:evaluates a owl:ObjectProperty ;
+  rdfs:label "evaluates" ;
+  rdfs:domain yamo:DecisionPoint ;
+  rdfs:range yamo:AdUnit .
+
+yamo:rejectedBy a owl:ObjectProperty ;
+  rdfs:label "rejected by" ;
+  rdfs:domain yamo:AdUnit ;
+  rdfs:range yamo:RejectionReason .

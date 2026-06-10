@@ -20,7 +20,7 @@ These are the artifacts the *Trace AI Agent Decisions with BigQuery Property Gra
 
 ### Advanced: explicit ontology + binding
 
-When you outgrow derived mode — when you need human-readable descriptions to steer the AI extraction prompt, entity inheritance, derived (computed) properties, or column renames — author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` in place of `--graph`. The [`examples/context_graph/`](../../context_graph/) example ships a complete checked-in pair (and the generator pipeline that produced them) as a reference.
+When you outgrow derived mode — when you need human-readable descriptions to steer the AI extraction prompt, entity inheritance, derived (computed) properties, or column renames — author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` in place of `--graph`. The [`examples/context_graph/`](../) example ships a complete checked-in pair (and the generator pipeline that produced them) as a reference.
 
 ## Domain model
 
@@ -40,7 +40,7 @@ For a production deployment you author your own versions of just **two** files d
 * `property_graph.sql` — `CREATE OR REPLACE PROPERTY GRAPH ... NODE TABLES (...) EDGE TABLES (... SOURCE KEY (...) REFERENCES ... LABEL ...)`.
 * `table_ddl.sql` — `CREATE TABLE IF NOT EXISTS` for each node and edge table, with the SDK metadata columns `session_id` and `extracted_at` included on every bound table.
 
-If you later need the explicit-override path, the files have this shape (see [`examples/context_graph/`](../../context_graph/) for a complete checked-in pair):
+If you later need the explicit-override path, the files have this shape (see [`examples/context_graph/`](../) for a complete checked-in pair):
 
 * `ontology.yaml` — entity definitions with primary-key declarations, plus relationship definitions naming their endpoint entities.
 * `binding.yaml` — per-entity mapping from ontology property names to physical column names, plus per-relationship source-and-target column declarations.

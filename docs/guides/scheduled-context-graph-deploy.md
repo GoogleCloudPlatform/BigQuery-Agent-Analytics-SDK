@@ -69,8 +69,8 @@ This is the only schema work you do, and you do it once. The codelab ships
 both DDL files, ready to adapt to your own decision domain:
 
 ```bash
-cp examples/codelab/periodic_materialization/property_graph.sql .
-cp examples/codelab/periodic_materialization/table_ddl.sql .
+cp examples/context_graph/codelab/property_graph.sql .
+cp examples/context_graph/codelab/table_ddl.sql .
 
 bq --location=US mk --dataset "$PROJECT_ID:$GRAPH_DS" 2>/dev/null || true
 

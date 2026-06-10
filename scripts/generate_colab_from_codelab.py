@@ -70,13 +70,13 @@ Usage
     # Generate
     python scripts/generate_colab_from_codelab.py \\
         docs/codelabs/periodic_materialization.md \\
-        examples/codelab/periodic_materialization/colab_notebook.ipynb
+        examples/context_graph/codelab/colab_notebook.ipynb
 
     # Check (CI mode): exit 1 if the notebook on disk differs from
     # what the generator would produce.
     python scripts/generate_colab_from_codelab.py --check \\
         docs/codelabs/periodic_materialization.md \\
-        examples/codelab/periodic_materialization/colab_notebook.ipynb
+        examples/context_graph/codelab/colab_notebook.ipynb
 """
 
 from __future__ import annotations
