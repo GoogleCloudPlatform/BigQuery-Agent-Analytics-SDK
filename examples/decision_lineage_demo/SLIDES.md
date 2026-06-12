@@ -1,6 +1,6 @@
 ---
 marp: true
-title: Decision Lineage with BigQuery Context Graphs
+title: Decision Lineage with BigQuery Agent Context Graphs
 description: A leadership-pitched deck that mirrors examples/decision_lineage_demo/.
 author: BigQuery Agent Analytics SDK
 theme: gaia
@@ -291,14 +291,14 @@ style: |
   section.hero footer {
     color: rgba(255,255,255,0.70);
   }
-footer: "Decision Lineage with BigQuery Context Graphs · examples/decision_lineage_demo"
+footer: "Decision Lineage with BigQuery Agent Context Graphs · examples/decision_lineage_demo"
 ---
 
 <!--
 Copyright 2026 Google LLC
 Licensed under the Apache License, Version 2.0.
 
-Decision Lineage with BigQuery Context Graphs — leadership deck.
+Decision Lineage with BigQuery Agent Context Graphs — leadership deck.
 
 Render with Marp (https://marp.app):
   marp SLIDES.md --html --pdf     # SLIDES.pdf
@@ -1406,7 +1406,7 @@ Apache 2.0
 
 # Q&A
 
-## Decision Lineage with BigQuery Context Graphs
+## Decision Lineage with BigQuery Agent Context Graphs
 
 <div class="footer-note">
 Open source · Apache 2.0 · github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK

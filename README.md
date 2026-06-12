@@ -7,7 +7,7 @@
 An open-source Python SDK for analyzing, evaluating, and curating agent traces
 stored in BigQuery. Built on top of the
 [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/), it provides
-a consumption-layer toolkit for agent observability, analysis, evaluation, and advanced capabilities like context graph at scale.
+a consumption-layer toolkit for agent observability, analysis, evaluation, and advanced capabilities like the Agent Context Graph — extracting decision traces from your agent's context graph — at scale.
 
 ## Overview
 
@@ -39,8 +39,7 @@ regressions — all through BigQuery SQL or Python.
 - Categorical (Hatteras-style) evaluation via BigFrames
 
 **Advanced Analytics**
-- Context Graph — property graph linking traces to business entities with GQL traversal
-- YAML-driven ontology extraction and materialization
+- Agent Context Graph — extract decision traces from your agent's context graph: the requests an agent handled, the options it weighed, and the outcomes it committed, materialized into a queryable BigQuery property graph (GQL traversal, scheduled refresh via `bqaa context-graph`)
 - Long-horizon cross-session memory
 - Multi-stage agent insights pipeline
 - Drift detection for golden vs production question distributions
@@ -100,11 +99,53 @@ trace.render()
 See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
 feature.
 
+### Try it: extract decision traces (Agent Context Graph, ~10 minutes)
+
+Deploy a context graph, seed sample agent events, extract the decision
+traces, and query one in GQL — entirely from your terminal:
+
+```bash
+export PROJECT_ID="your-project" DATASET="agent_analytics_demo"
+gcloud config set project "$PROJECT_ID"
+bq --location=US mk --dataset "$PROJECT_ID:$DATASET"
+
+# 1. Deploy the context graph (one-time DDL: tables, then the property graph).
+cd examples/context_graph/codelab
+envsubst < table_ddl.sql      | bq query --use_legacy_sql=false
+envsubst < property_graph.sql | bq query --use_legacy_sql=false
+
+# 2. Seed five sample agent sessions into agent_events.
+bqaa seed-events --project-id "$PROJECT_ID" --dataset-id "$DATASET" --sessions 5
+
+# 3. Extract decision traces from the deployed graph
+#    (read back via INFORMATION_SCHEMA.PROPERTY_GRAPHS — no SQL file passed).
+bqaa context-graph --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
+    --graph agent_decisions_graph --lookback-hours 24 --format json
+
+# 4. Query a decision trace: what did the agent weigh, and how did it resolve?
+bq query --use_legacy_sql=false "
+SELECT * FROM GRAPH_TABLE(
+  $DATASET.agent_decisions_graph
+  MATCH (req:DecisionRequest)-[eo:evaluatesOption]->(opt:DecisionOption),
+        (req)-[ri:resultedIn]->(out:DecisionOutcome)
+  COLUMNS (req.request_text AS question, opt.option_label AS considered,
+           out.status AS outcome, out.rationale AS rationale))"
+```
+
+Expect `"ok": true` with 5 sessions materialized, and fifteen GQL rows — three
+options weighed per request, each with the committed outcome and rationale.
+The [Agent Context Graph codelab](docs/codelabs/periodic_materialization.md) is the
+guided version of these steps (plus backfill and production scheduling), and
+[`examples/context_graph/`](examples/context_graph/) is the worked example
+with a runnable ADK agent.
+
 ## Documentation
 
 | Resource | Description |
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
+| [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
+| [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |
 | [Examples](examples/README.md) | Notebooks, SQL scripts, and demos |
 | [Deployment Guides](deploy/README.md) | Four deployment surfaces for Google Cloud |
@@ -139,16 +180,12 @@ src/bigquery_agent_analytics/
 ├── Analytics
 │   ├── insights.py                # Multi-stage insights pipeline
 │   ├── feedback.py                # Drift detection & question distribution
-│   ├── context_graph.py           # Property Graph: BizNode extraction, GQL
 │   └── memory_service.py          # Long-horizon agent memory
 │
-├── Ontology
-│   ├── ontology_models.py         # Pydantic models for ontology schema
-│   ├── ontology_schema_compiler.py# YAML → compiled schema
-│   ├── ontology_graph.py          # Ontology graph construction
-│   ├── ontology_materializer.py   # Graph materialization to BigQuery
-│   ├── ontology_property_graph.py # Property graph operations
-│   └── ontology_orchestrator.py   # End-to-end ontology pipeline
+├── Agent Context Graph
+│   ├── context_graph.py           # Decision-trace extraction & GQL traversal
+│   ├── materialize_window.py      # Scheduled materialization (bqaa context-graph)
+│   └── property_graph_spec.py     # Derive the spec from your deployed property graph
 │
 └── CLI & Deploy
     ├── cli.py                     # CLI entry point (bq-agent-sdk)

@@ -7,6 +7,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-10
+
+### Release highlights
+
+Consume the graph you already deployed. `bqaa context-graph --graph <name>`
+reads your property graph's definition back from BigQuery's
+`INFORMATION_SCHEMA.PROPERTY_GRAPHS` and derives the ontology + binding from
+it plus the live table schemas — no SQL file is passed to (or staged for) the
+materializer. You deploy the graph with standard `bq` DDL once; from then on
+the deployed graph is the single source of truth, so what you query with GQL
+and what gets materialized can never drift apart. The docs (codelab, blog,
+scheduled-deploy runbook, guides) now teach this flow exclusively.
+
+### Added
+
+- **Deployed-graph (`--graph`) materialization mode** — point the
+  materializer at a property graph that already exists in BigQuery instead of
+  a local DDL file. Available on every surface: `bqaa context-graph --graph`
+  (CLI; accepts a bare name resolved in `--dataset-id`, or qualified
+  `dataset.graph` / `project.dataset.graph`),
+  `run_materialize_window(graph=...)` (Python API), `BQAA_GRAPH` (scheduled
+  `run_job.py`), `deploy_cloud_run_job.sh --graph`, and the Terraform
+  module's `graph` variable. The SDK fetches the normalized `CREATE PROPERTY
+  GRAPH` statement from the dataset-qualified
+  `INFORMATION_SCHEMA.PROPERTY_GRAPHS` view and feeds the existing
+  schema-derive pipeline; a missing graph fails with an error that lists the
+  graphs the dataset does contain. In deployed-graph deploys nothing is
+  staged into the image and the entity-table bootstrap is skipped (the
+  graph's existence proves its node/edge tables exist). Mutually exclusive
+  with `--property-graph` and `--ontology`/`--binding`; incompatible with
+  `--extraction-mode=compiled-only` (no reference extractors are staged in
+  derived mode).
+
+### Changed
+
+- **Docs teach only the deployed-graph flow.** The codelab (+ regenerated
+  Colab notebook), blog post, scheduled Context Graph deploy runbook, the
+  Conversational Analytics-first guide, and the example READMEs now apply the
+  table DDL + `CREATE PROPERTY GRAPH` to BigQuery as the one-time deploy step
+  and materialize with `--graph` / `BQAA_GRAPH` / `graph =`. The file-based
+  `--property-graph` mode from 0.3.3 keeps working for existing scripts and
+  images but is no longer documented; prefer `--graph`.
+
+## [0.3.3] - 2026-06-08
+
+### Release highlights
+
+Schema-derived Context Graph materialization, end to end. `bqaa context-graph
+--property-graph property_graph.sql` now derives the ontology + binding from the
+property graph plus live table schemas, so rename-free graphs need no
+hand-written `ontology.yaml` / `binding.yaml` — and the same one-artifact flow
+reaches the scheduled production path (Cloud Run deploy script, image builder,
+`run_job.py`, and the Terraform module), with a split read-only-events /
+writable-graph dataset contract. Explicit `--ontology` / `--binding` is retained
+as the advanced override for descriptions, inheritance, derived properties,
+renames, and the migration-v5 compiled-extractor path.
+
+### Added
+
+- **Schema-derived (`--property-graph`) materialization, local → production**
+  (local: [#277](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/277)
+  via [#278](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/278)–[#281](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/281),
+  [#285](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/285),
+  [#287](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/287);
+  deploy: [#286](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/286)
+  via [#288](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/288)–[#292](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/292))
+  — `bqaa context-graph --property-graph property_graph.sql` derives the ontology
+  + binding from the property graph + live table schemas, so no hand-written
+  `ontology.yaml` / `binding.yaml` is needed for rename-free graphs. Scheduled
+  production reaches parity: the Cloud Run deploy script, image builder,
+  `run_job.py` (`BQAA_PROPERTY_GRAPH`), and the Terraform module all accept the
+  one-artifact flow (placeholdered `property_graph.sql` + sibling
+  `table_ddl.sql`), with a split read-only-events / writable-graph contract
+  (events read-only; graph tables + `_bqaa_materialization_state` land in the
+  graph dataset). Explicit `--ontology`/`--binding` is preserved as the advanced
+  override (descriptions, inheritance, derived properties, renames, the
+  migration-v5 compiled extractor).
+- **Selectable `AI.GENERATE` extraction model**
+  ([#298](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/298))
+  — choose the model for the `ai-fallback` extraction across every surface:
+  `run_materialize_window(endpoint=...)` (Python API), `bqaa context-graph
+  --endpoint` (CLI), and `BQAA_ENDPOINT` for the scheduled `run_job.py` deploy.
+  Short names resolve to the Vertex `locations/global` publisher URL, so Gemini
+  3.x models such as `gemini-3.5-flash` work. Defaults to `gemini-2.5-flash`
+  everywhere, so existing callers are unaffected; ignored under
+  `--extraction-mode=compiled-only` (no AI call is made).
+
+### Fixed
+
+- **`run_job.py` table-DDL bootstrap mis-split on statement boundaries**
+  ([#286](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/286))
+  — `_bootstrap_entity_tables` split the DDL on `;` without accounting for
+  comments or quoting, so a `;` inside a `--` comment (e.g. the codelab
+  `table_ddl.sql`'s "materializer fills automatically; they are required")
+  produced a comment-only fragment BigQuery rejected with "Unexpected end of
+  statement" — and a `;` or `--` inside a string literal
+  (`OPTIONS(description="has; semicolon")`, `DEFAULT 'a;b'`) or a backtick
+  identifier could corrupt a customer's DDL. Replaced with a quote- and
+  comment-aware splitter: it strips `--` line comments and `/* */` block
+  comments and splits on `;` only at the top level (never inside `'`, `"`, or
+  `` ` `` quoting). Found by a live `--property-graph` deploy smoke.
+
+### Changed
+
+- **Renamed the context-graph example for product-facing clarity**
+  ([#282](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/282))
+  — `examples/migration_v5/` → `examples/context_graph/` (the `migration_v5`
+  label was internal milestone bookkeeping). The scheduled-deploy entrypoints
+  move with it (`examples/context_graph/periodic_materialization/...`). The
+  demo's default BigQuery dataset is now `context_graph` (was `migration_v5_demo`)
+  and the Terraform example's graph dataset is `context_graph` (was
+  `migration_v5_graph`). The user-facing docs (blog, codelab, runbook, deploy +
+  Terraform READMEs) now lead with the one-artifact `property_graph.sql` path as
+  primary and frame explicit `ontology.yaml` / `binding.yaml` as the advanced
+  override. The previously executed demo notebook is archived as
+  `examples/_archive/context_graph_historical_notebook.ipynb`. **Action for
+  users:** update any deep links to `examples/migration_v5/...` and any reference
+  to the `migration_v5_demo` dataset.
+
 ## [0.3.2] - 2026-05-22
 
 ### Release highlights
