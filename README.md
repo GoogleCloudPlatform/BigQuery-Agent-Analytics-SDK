@@ -99,11 +99,52 @@ trace.render()
 See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
 feature.
 
+### Try it: extract decision traces (Context Graph, ~10 minutes)
+
+Deploy a context graph, seed sample agent events, extract the decision
+traces, and query one in GQL — entirely from your terminal:
+
+```bash
+export PROJECT_ID="your-project" DATASET="agent_analytics_demo"
+bq --location=US mk --dataset "$PROJECT_ID:$DATASET"
+
+# 1. Deploy the context graph (one-time DDL: tables, then the property graph).
+cd examples/context_graph/codelab
+envsubst < table_ddl.sql      | bq query --use_legacy_sql=false
+envsubst < property_graph.sql | bq query --use_legacy_sql=false
+
+# 2. Seed five sample agent sessions into agent_events.
+bqaa seed-events --project-id "$PROJECT_ID" --dataset-id "$DATASET" --sessions 5
+
+# 3. Extract decision traces from the deployed graph
+#    (read back via INFORMATION_SCHEMA.PROPERTY_GRAPHS — no SQL file passed).
+bqaa context-graph --project-id "$PROJECT_ID" --dataset-id "$DATASET" \
+    --graph agent_decisions_graph --lookback-hours 24 --format json
+
+# 4. Query a decision trace: what did the agent weigh, and how did it resolve?
+bq query --use_legacy_sql=false "
+SELECT * FROM GRAPH_TABLE(
+  $DATASET.agent_decisions_graph
+  MATCH (req:DecisionRequest)-[eo:evaluatesOption]->(opt:DecisionOption),
+        (req)-[ri:resultedIn]->(out:DecisionOutcome)
+  COLUMNS (req.request_text AS question, opt.option_label AS considered,
+           out.status AS outcome, out.rationale AS rationale))"
+```
+
+Expect `"ok": true` with 5 sessions materialized, and fifteen GQL rows — three
+options weighed per request, each with the committed outcome and rationale.
+The [Context Graph codelab](docs/codelabs/periodic_materialization.md) is the
+guided version of these steps (plus backfill and production scheduling), and
+[`examples/context_graph/`](examples/context_graph/) is the worked example
+with a runnable ADK agent.
+
 ## Documentation
 
 | Resource | Description |
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
+| [Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
+| [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |
 | [Examples](examples/README.md) | Notebooks, SQL scripts, and demos |
 | [Deployment Guides](deploy/README.md) | Four deployment surfaces for Google Cloud |
