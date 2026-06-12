@@ -1,4 +1,4 @@
-# Decision Lineage with BigQuery Context Graphs
+# Decision Lineage with BigQuery Agent Context Graphs
 
 > Issue [#98](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/98) — *Unboxing the AI Agent: Decision Lineage with BigQuery Context Graphs*.
 

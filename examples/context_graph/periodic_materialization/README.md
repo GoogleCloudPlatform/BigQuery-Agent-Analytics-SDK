@@ -194,12 +194,12 @@ before paying for a deploy:
 pip install -e .
 #
 # (b) Pinned from PyPI — once you're on a stable SDK version.
-#     0.3.3 adds schema-derived (``--property-graph``) deploy
-#     parity on top of the 0.3.2 context-graph production track
-#     (compiled-only deploy, backfill, orphan watchdog,
-#     Terraform module, split SAs, ``--max-retries``). Use this
-#     for unmodified production use.
-pip install 'bigquery-agent-analytics>=0.3.3'
+#     0.3.4 adds the deployed-graph (``--graph`` / ``BQAA_GRAPH``)
+#     mode: the runtime derives the spec from the property graph
+#     you already created in BigQuery, read back via
+#     INFORMATION_SCHEMA.PROPERTY_GRAPHS. Use this for unmodified
+#     production use.
+pip install 'bigquery-agent-analytics>=0.3.4'
 
 # Either way, install the example's ancillary deps:
 pip install -r examples/context_graph/periodic_materialization/requirements.txt
@@ -273,11 +273,13 @@ the logs, so you find out *now* whether the deploy actually
 works — not when the first scheduled fire happens six hours
 later.
 
-### Schema-derived deploy (`--property-graph`)
+### Deployed-graph deploy (`--graph`)
 
 The deploy above bundles the MAKO `ontology.yaml` + `binding.yaml`. For a
-**rename-free, codelab-style graph** you can skip those entirely and deploy
-from just a property graph — the same one-artifact flow the
+**rename-free, codelab-style graph** you can skip those entirely: deploy your
+graph to BigQuery once (apply your table DDL, then your `CREATE PROPERTY
+GRAPH`, with `bq query`), and point the job at it by name — the same
+deployed-graph flow the
 [codelab](../../../docs/codelabs/periodic_materialization.md) uses locally:
 
 ```bash
@@ -287,22 +289,24 @@ from just a property graph — the same one-artifact flow the
   --events-dataset your_events_dataset \
   --graph-dataset your_graph_dataset \
   --schedule "0 */6 * * *" \
-  --property-graph path/to/property_graph.sql
+  --graph your_graph_name
 ```
 
-`--property-graph` points at a `CREATE PROPERTY GRAPH` `.sql`; a placeholdered
-(`${PROJECT_ID}` / `${DATASET}`) `table_ddl.sql` must sit **next to it**. The
-deploy stages both (no `ontology.yaml`/`binding.yaml`), sets
-`BQAA_PROPERTY_GRAPH=property_graph.sql`, and the runtime derives the ontology +
-binding from the property graph + your live table schemas at run time (#286).
-Events stay read-only in your events dataset; the graph tables, schema lookup,
+`--graph` names a property graph that already exists in BigQuery (bare name
+resolved in `--graph-dataset`, or `dataset.graph` / `project.dataset.graph`).
+The deploy stages nothing — it sets `BQAA_GRAPH` on the Job, and on every run
+the runtime reads the graph's definition back from
+`INFORMATION_SCHEMA.PROPERTY_GRAPHS` and derives the ontology + binding from
+it plus your live table schemas. The deployed graph is the single source of
+truth: what you query with GQL is exactly what the job materializes. Events
+stay read-only in your events dataset; the schema lookup, materialized rows,
 and the state table all target the graph dataset.
 
 Requirements / limits:
 
-* Both files must be **placeholdered** (`${PROJECT_ID}` / `${DATASET}`) — the
-  deploy refuses hardcoded references so the job can never derive against the
-  wrong dataset.
+* The graph (and therefore its node/edge tables) must exist before the first
+  run — apply your DDL with `bq query` first. A missing graph fails the run
+  with an error that lists the graphs the dataset does contain.
 * Not compatible with `--extraction-mode=compiled-only` (no reference
   extractors are staged in derived mode); the deploy rejects that combination.
 
@@ -311,12 +315,12 @@ extraction model; it wires `BQAA_ENDPOINT` on the Job. Default is unset, so the
 runtime keeps its `gemini-2.5-flash` default. Short names resolve to the Vertex
 `locations/global` publisher URL, so Gemini 3.x models such as
 `gemini-3.5-flash` work. Ignored under `--extraction-mode=compiled-only` (no AI
-call is made). Applies to both the schema-derived and explicit paths (#298).
+call is made). Applies to both the deployed-graph and explicit paths (#298).
 
-**Advanced — explicit ontology + binding.** Omit `--property-graph` to keep the
+**Advanced — explicit ontology + binding.** Omit `--graph` to keep the
 default MAKO path: descriptions for AI prompting, entity inheritance, derived
 properties, column renames, and the hand-authored compiled extractor. That is
-the right path for context graph and any graph that outgrows schema-derived mode.
+the right path for context graph and any graph that outgrows derived mode.
 
 The script:
 

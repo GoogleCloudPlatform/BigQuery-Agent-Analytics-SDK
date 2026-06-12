@@ -17,13 +17,13 @@ Duration: 03:00
 
 As autonomous AI agents take on more operational responsibilities (evaluating loan applications, managing marketing budgets, approving access requests), organizations must be able to audit and explain their decisions. Reconstructing the exact context, alternatives considered, and final rationale of an agent's decision is essential for compliance, risk management, and operational trust.
 
-This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a **Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
+This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into an **Agent Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
 
-![Context Graph workflow: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table, bqaa context-graph extracts a structured decision graph, and you query it with GQL and Conversational Analytics](images/context-graph-flow.png)
+![Agent Context Graph workflow: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table, bqaa context-graph extracts a structured decision graph, and you query it with GQL and Conversational Analytics](images/context-graph-flow.png)
 
 ### What you'll build
 
-- A Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
+- An Agent Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
 - A populated `agent_events` table with a synthetic event corpus.
 - A working `bqaa context-graph` run that fills the graph from those events.
 - A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
@@ -186,17 +186,17 @@ Cloud Shell users can skip this step; credentials are already configured. (In Co
 
 Duration: 02:00
 
-The codelab needs just two ready-to-use artifacts: the **table DDL** (the physical graph tables) and the **property-graph schema** (`CREATE PROPERTY GRAPH`). You do not author either yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/codelab/periodic_materialization/README.md) explains how to adapt them for your own decision domain.
+The codelab needs just two ready-to-use artifacts: the **table DDL** (the physical graph tables) and the **property-graph schema** (`CREATE PROPERTY GRAPH`). You do not author either yourself; the codelab uses them as-is, and the [README in the artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/context_graph/codelab/README.md) explains how to adapt them for your own decision domain.
 
-The property-graph schema is the single source of truth for *what* the graph contains. `bqaa context-graph` reads it (plus your table schemas) to figure out which entities and relationships to extract and where to write them — so you do **not** need to write a separate ontology or binding file.
+The property-graph schema is the single source of truth for *what* the graph contains. You apply it to BigQuery once; from then on the **deployed graph itself is the contract**: `bqaa context-graph` reads the graph's definition back from BigQuery's `INFORMATION_SCHEMA.PROPERTY_GRAPHS` (plus your table schemas) to figure out which entities and relationships to extract and where to write them — so you do **not** need to write a separate ontology or binding file, and no SQL file is ever passed to the materializer.
 
-This codelab is self-contained: the cell below writes the two artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/codelab/periodic_materialization/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization).
+This codelab is self-contained: the cell below writes the two artifacts into a working directory, so there is nothing to download. They are the same files shipped in [`examples/context_graph/codelab/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/codelab).
 
 <!-- colab:code python -->
 ```python
 # This codelab is self-contained: rather than downloading files, this
 # cell writes the two artifacts into a working directory. They are
-# identical to the files in examples/codelab/periodic_materialization/.
+# identical to the files in examples/context_graph/codelab/.
 from pathlib import Path
 
 work = Path.home() / "bqaa-codelab"
@@ -299,7 +299,7 @@ DecisionRequest --[evaluatesOption]--> DecisionOption
 `DecisionRequest` is the question the agent received. `DecisionOption` is one alternative the agent considered. `DecisionOutcome` records the committed choice and the rationale.
 
 > aside positive
-> **Advanced: bring your own ontology + binding.** Schema-derived mode covers the common case. When you need finer control — human-readable descriptions to steer the AI extraction prompt, entity inheritance, derived (computed) properties, or column renames — author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` instead of `--property-graph`. The [artifacts folder](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization) ships both files as a starting point.
+> **Advanced: bring your own ontology + binding.** Schema-derived mode covers the common case. When you need finer control — human-readable descriptions to steer the AI extraction prompt, entity inheritance, derived (computed) properties, or column renames — author an explicit `ontology.yaml` + `binding.yaml` and pass `--ontology`/`--binding` instead of `--graph`. The [context-graph example](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph) ships a complete checked-in pair as a reference.
 
 ## Apply the property graph schema
 
@@ -316,7 +316,7 @@ envsubst < property_graph.sql | bq query --use_legacy_sql=false
 
 You should see five `CREATE TABLE` results and one `CREATE PROPERTY GRAPH` result. The DDL is idempotent; you can re-run it safely.
 
-That is the only schema work you do. Because `bqaa context-graph` derives what to extract from this property graph, there is no separate binding file to render — the `${PROJECT_ID}` / `${DATASET}` markers in `property_graph.sql` are resolved for you from `--project-id` / `--dataset-id` when you materialize.
+That is the only schema work you do — and the only time the SQL files are used. BigQuery now records your graph's definition, and `bqaa context-graph` reads it back from `INFORMATION_SCHEMA.PROPERTY_GRAPHS` by name, so there is no separate binding file to render and no SQL file to pass to the materializer. What you query with GQL and what gets materialized can never drift apart: they are the same deployed graph.
 
 ## Generate sample agent events
 
@@ -406,7 +406,7 @@ The 10 orphaned sessions never emitted `AGENT_COMPLETED`, so the default `bqaa c
 
 Duration: 05:00
 
-`bqaa context-graph` reads the raw `agent_events`, then **derives what to extract directly from your property graph**: it reads the `CREATE PROPERTY GRAPH` definition you applied in *Apply the property graph schema* and the schemas of the tables it references, works out the entities, relationships, and column types, and populates the graph tables. Point it at `property_graph.sql` with `--property-graph` — no separate ontology or binding file required.
+`bqaa context-graph` reads the raw `agent_events`, then **derives what to extract directly from your deployed graph**: it reads the `CREATE PROPERTY GRAPH` definition you applied in *Apply the property graph schema* back from BigQuery's `INFORMATION_SCHEMA.PROPERTY_GRAPHS`, joins it with the schemas of the tables it references, works out the entities, relationships, and column types, and populates the graph tables. Point it at the deployed graph by name with `--graph` — no SQL file, no separate ontology or binding file.
 
 **Run the materializer** locally:
 
@@ -415,7 +415,7 @@ Duration: 05:00
 bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --property-graph ~/bqaa-codelab/property_graph.sql \
+    --graph agent_decisions_graph \
     --lookback-hours 24 \
     --format json
 ```
@@ -577,7 +577,7 @@ TO=$(date -u -d "8 hours ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
 bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --property-graph ~/bqaa-codelab/property_graph.sql \
+    --graph agent_decisions_graph \
     --lookback-hours 1 \
     --backfill --from "$FROM" --to "$TO" \
     --state-key-suffix codelab_backfill_demo \
@@ -592,10 +592,10 @@ os.environ["TO"]   = (now - datetime.timedelta(hours=8)).strftime("%Y-%m-%dT%H:%
 print(f"Backfill window FROM = {os.environ['FROM']}")
 print(f"Backfill window TO   = {os.environ['TO']}")
 
-!cd ~/bqaa-codelab && bqaa context-graph \
+!bqaa context-graph \
     --project-id "$PROJECT_ID" \
     --dataset-id "$DATASET" \
-    --property-graph property_graph.sql \
+    --graph agent_decisions_graph \
     --lookback-hours 1 \
     --backfill --from "$FROM" --to "$TO" \
     --state-key-suffix codelab_backfill_demo \
@@ -639,7 +639,7 @@ The local run you completed in *Materialize the decision graph* uses default beh
 * **Bound the per-run batch size** (`--max-sessions`). Useful when an upstream event spike threatens to overwhelm a single scan.
 
 > aside positive
-> **From "run this once" to "run this every six hours":** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. Follow the [scheduled Context Graph deploy runbook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/scheduled-context-graph-deploy.md) to take *this* `--property-graph` graph to a scheduled deploy with the same one-artifact flow, or the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) for the full IAM matrix and the explicit-ontology/binding path.
+> **From "run this once" to "run this every six hours":** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. Follow the [scheduled Agent Context Graph deploy runbook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/scheduled-context-graph-deploy.md) to take *this* deployed graph to a scheduled deploy with the same `--graph` flow, or the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) for the full IAM matrix and the explicit-ontology/binding path.
 
 ## Clean up
 
@@ -665,9 +665,9 @@ That single command removes the dataset, the agent events, the graph tables, and
 
 Duration: 02:00
 
-Congratulations! You've turned raw agent event logs into a queryable Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
+Congratulations! You've turned raw agent event logs into a queryable Agent Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
 
-The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point and adapt the two declarative files (table DDL + the `CREATE PROPERTY GRAPH` schema) to your domain — `bqaa context-graph --property-graph` derives the rest. Reach for an explicit `ontology.yaml` + `binding.yaml` only when you need descriptions, inheritance, derived properties, or column renames.
+The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point, adapt the two declarative files (table DDL + the `CREATE PROPERTY GRAPH` schema) to your domain, and apply them to BigQuery — `bqaa context-graph --graph` reads the deployed graph and derives the rest. Reach for an explicit `ontology.yaml` + `binding.yaml` only when you need descriptions, inheritance, derived properties, or column renames.
 
 #### What you've learned
 
@@ -680,7 +680,7 @@ The same pattern applies wherever an agent makes consequential decisions: credit
 #### Reference docs
 
 - [BigQuery Agent Analytics SDK repository](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK)
-- [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/codelab/periodic_materialization)
+- [Codelab artifacts and adaptation guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/codelab)
 - [Periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization): required APIs, IAM matrix, recommended schedules, Cloud Monitoring alert queries, and the Terraform module.
 - [BigQuery property graphs documentation](https://cloud.google.com/bigquery/docs/reference/standard-sql/graph-intro) (Preview).
 - [BigQuery Conversational Analytics documentation](https://cloud.google.com/bigquery/docs/conversational-analytics) (Preview).

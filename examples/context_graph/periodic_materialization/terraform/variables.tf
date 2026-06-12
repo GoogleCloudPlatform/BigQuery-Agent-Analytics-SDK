@@ -74,8 +74,14 @@ variable "extraction_mode" {
   }
 }
 
+variable "graph" {
+  description = "Deployed-graph mode (recommended). The name of a property graph you already created in BigQuery (bare name resolved in the graph dataset, or ``dataset.graph`` / ``project.dataset.graph``). The runtime reads the graph's DDL back from ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` and derives the ontology + binding from it plus the live table schemas (the module sets ``BQAA_GRAPH``) — nothing is staged in the image; the deployed graph is the single source of truth. Apply your table DDL + ``CREATE PROPERTY GRAPH`` with ``bq`` before ``terraform apply``. Not compatible with ``extraction_mode = \"compiled-only\"`` (no reference extractors are staged in derived mode), and mutually exclusive with ``property_graph``. Empty string (default) disables the mode."
+  type        = string
+  default     = ""
+}
+
 variable "property_graph" {
-  description = "Schema-derived mode (#286). When ``true``, the runtime derives the ontology + binding from a staged ``property_graph.sql`` + the table schemas instead of an explicit ``ontology.yaml`` / ``binding.yaml`` pair (the module sets ``BQAA_PROPERTY_GRAPH=property_graph.sql``). The published image must be built with ``build_image.sh --property-graph`` so the placeholdered (``$${PROJECT_ID}`` / ``$${DATASET}``) ``property_graph.sql`` + ``table_ddl.sql`` are staged. Use for rename-free graphs; not compatible with ``extraction_mode = \"compiled-only\"`` (no reference extractors are staged in derived mode). ``false`` (default) = explicit ontology + binding (the context-graph / compiled-extractor path)."
+  description = "Legacy file-based schema-derived mode (#286); prefer ``graph``. When ``true``, the runtime derives the ontology + binding from a staged ``property_graph.sql`` + the table schemas instead of an explicit ``ontology.yaml`` / ``binding.yaml`` pair (the module sets ``BQAA_PROPERTY_GRAPH=property_graph.sql``). The published image must be built with ``build_image.sh --property-graph`` so the placeholdered (``$${PROJECT_ID}`` / ``$${DATASET}``) ``property_graph.sql`` + ``table_ddl.sql`` are staged. Use for rename-free graphs; not compatible with ``extraction_mode = \"compiled-only\"`` (no reference extractors are staged in derived mode). ``false`` (default) = explicit ontology + binding (the context-graph / compiled-extractor path)."
   type        = bool
   default     = false
 }

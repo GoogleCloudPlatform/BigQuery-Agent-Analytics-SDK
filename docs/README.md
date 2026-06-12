@@ -16,19 +16,35 @@ architecture, rationale, and implementation plans behind key SDK features.
 |----------|-------------|
 | [hatteras_evaluation.md](hatteras_evaluation.md) | Hatteras-style categorical evaluation design |
 
-## Context & Ontology
+## Agent Context Graph
+
+Extract decision traces from your agent's context graph — the requests an
+agent handled, the options it weighed, and the outcomes it committed —
+materialized into a queryable BigQuery property graph.
 
 | Document | Description |
 |----------|-------------|
+| [codelabs/periodic_materialization.md](codelabs/periodic_materialization.md) | **Start here.** Deploy a graph, seed events, materialize with `bqaa context-graph --graph`, query decision traces in GQL |
+| [guides/scheduled-context-graph-deploy.md](guides/scheduled-context-graph-deploy.md) | Take the deployed graph to a scheduled Cloud Run + Cloud Scheduler production deploy |
+| [guides/conversational-analytics-first.md](guides/conversational-analytics-first.md) | Ask the decision graph questions in plain English before dropping to GQL |
 | [context_graph_v2_design.md](context_graph_v2_design.md) | Property Graph V2 design |
 | [context_graph_v3_design.md](context_graph_v3_design.md) | Property Graph V3 with GQL and world-change detection |
+
+## Ontology & Binding Internals (advanced)
+
+Internal machinery behind the Agent Context Graph's extraction spec. Most users
+never touch these — `bqaa context-graph --graph` derives everything from the
+deployed property graph.
+
+| Document | Description |
+|----------|-------------|
 | [ontology_graph_v4_design.md](ontology_graph_v4_design.md) | YAML-driven ontology extraction and materialization |
 | [ontology_graph_v5_design.md](ontology_graph_v5_design.md) | V5: TTL import, mixed extraction, temporal lineage |
 | [learning_ontology_and_context_graph.md](learning_ontology_and_context_graph.md) | Learning guide for ontology and context graph |
 | [implementation_plan_concept_index_runtime.md](implementation_plan_concept_index_runtime.md) | Phased implementation plan for concept index + runtime entity resolution (issue #58) |
 | [ontology_runtime_reader.md](ontology_runtime_reader.md) | Ontology runtime reader (issue #58 reader follow-on to PR #92). `OntologyRuntime` loads ontology + binding + optional concept-index lookup. `EntityResolver` Protocol + two reference impls: `ExactEntityResolver` (in-memory) + `LabelSynonymResolver` (BQ-backed). `ConceptIndexLookup` is fingerprint-strict: eager `verify()` at construction + every `lookup_*` query includes `WHERE compile_fingerprint = @expected_fp` as defense in depth. Stable failure codes: `FingerprintMismatchError`, `MetaTableMissingError`, `MetaTableEmptyError`, `MetaTableMultipleRowsError`. `table_id` validated at construction (same regex discipline as Phase C's bundle mirror); `verify()` always re-queries (no cache); SKOS traversal helpers (`in_scheme`, `broader`, `narrower`, `related`) + `relationships_by_name` (tuple, never singular) reflect #58's traversal-first contract. NO embedding / LLM / fuzzy in this slice — those are explicit non-goals; future PRs can implement the Protocol without changing the runtime surface. |
 
-## Ontology Reference
+### Component reference
 
 | Document | Description |
 |----------|-------------|
@@ -61,7 +77,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 
 | Document | Description |
 |----------|-------------|
-| [Context Graph periodic materialization playbook](../examples/context_graph/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO context graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
+| [Agent Context Graph periodic materialization playbook](../examples/context_graph/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO context graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
 | [proposal_bigquery_agent_cli.md](proposal_bigquery_agent_cli.md) | CLI proposal and command design |
 | [python_udf_support_design.md](python_udf_support_design.md) | BigQuery Python UDF architecture |
 | [remote_function_rationale.md](remote_function_rationale.md) | Cloud Run remote function rationale |

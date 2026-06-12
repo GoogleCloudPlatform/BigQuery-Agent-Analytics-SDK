@@ -183,7 +183,7 @@ def test_orchestrator_resolves_via_property_graph(tmp_path) -> None:
 def test_orchestrator_rejects_both_modes() -> None:
   from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
 
-  with pytest.raises(ValueError, match="not both"):
+  with pytest.raises(ValueError, match="exactly one"):
     _resolve_ontology_binding(
         ontology_path="o.yaml",
         binding_path="b.yaml",
@@ -197,7 +197,7 @@ def test_orchestrator_rejects_both_modes() -> None:
 def test_orchestrator_rejects_neither_mode() -> None:
   from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
 
-  with pytest.raises(ValueError, match="Provide --property-graph"):
+  with pytest.raises(ValueError, match="Provide --graph"):
     _resolve_ontology_binding(
         ontology_path=None,
         binding_path=None,
@@ -281,3 +281,278 @@ def test_state_table_defaults_to_events_in_single_dataset() -> None:
   from bigquery_agent_analytics.materialize_window import _state_table_defaults
 
   assert _state_table_defaults("p", "d", None, None) == ("p", "d")
+
+
+# --------------------------------------------------------------------------- #
+# Deployed-graph mode: fetch the DDL from INFORMATION_SCHEMA.PROPERTY_GRAPHS
+# --------------------------------------------------------------------------- #
+
+# Captured live from BigQuery (test-project-0728-467323, 2026-06): the
+# normalized ``ddl`` column INFORMATION_SCHEMA.PROPERTY_GRAPHS returns for the
+# codelab graph, genericized to project ``p`` / dataset ``d``. Shape pins the
+# parser against the normalized form: plain ``CREATE PROPERTY GRAPH`` (no
+# ``OR REPLACE``), newline-heavy layout, ``KEY (a,b)`` without spaces, edge
+# PROPERTIES that include the SDK metadata columns, trailing semicolon.
+_INFOSCHEMA_DDL = """CREATE PROPERTY GRAPH `p.d.agent_decisions_graph`
+NODE TABLES (
+`p.d.decision_request` AS decision_request
+KEY (request_id)
+LABEL DecisionRequest PROPERTIES (request_id, request_text, requested_at),
+
+`p.d.decision_option` AS decision_option
+KEY (option_id)
+LABEL DecisionOption PROPERTIES (option_id, option_label, confidence))
+
+EDGE TABLES (
+`p.d.evaluates_option` AS evaluates_option
+KEY (request_id,option_id)
+SOURCE KEY (request_id)
+  REFERENCES decision_request (request_id)
+DESTINATION KEY (option_id)
+  REFERENCES decision_option (option_id)
+LABEL evaluatesOption PROPERTIES (request_id, option_id, session_id, extracted_at));
+"""
+
+_SCHEMAS_WITH_METADATA = {
+    "decision_request": _SCHEMAS["decision_request"]
+    + [
+        {"column_name": "session_id", "data_type": "STRING"},
+        {"column_name": "extracted_at", "data_type": "TIMESTAMP"},
+    ],
+    "decision_option": _SCHEMAS["decision_option"]
+    + [
+        {"column_name": "session_id", "data_type": "STRING"},
+        {"column_name": "extracted_at", "data_type": "TIMESTAMP"},
+    ],
+    "evaluates_option": _SCHEMAS["evaluates_option"]
+    + [
+        {"column_name": "session_id", "data_type": "STRING"},
+        {"column_name": "extracted_at", "data_type": "TIMESTAMP"},
+    ],
+}
+
+
+class _FakeGraphClient:
+  """Dispatches on the query's parameter name.
+
+  ``graph_name`` -> INFORMATION_SCHEMA.PROPERTY_GRAPHS lookup;
+  ``table_name`` -> INFORMATION_SCHEMA.COLUMNS lookup; a parameter-less query
+  is the available-graphs listing used for not-found error messages. Records
+  every SQL string for assertions.
+  """
+
+  def __init__(self, graphs, schemas):
+    self._graphs = graphs  # {graph_name: ddl}
+    self._schemas = schemas
+    self.queries = []
+
+  def query(self, sql, job_config=None):
+    self.queries.append(sql)
+    if job_config is None:
+      return _FakeJob(
+          [{"property_graph_name": name} for name in sorted(self._graphs)]
+      )
+    param = job_config.query_parameters[0]
+    if param.name == "graph_name":
+      ddl = self._graphs.get(param.value)
+      return _FakeJob([{"ddl": ddl}] if ddl is not None else [])
+    return _FakeJob(self._schemas.get(param.value, []))
+
+
+def test_split_graph_ref_qualification() -> None:
+  from bigquery_agent_analytics.property_graph_spec import split_graph_ref
+
+  assert split_graph_ref("g", default_project="p", default_dataset="d") == (
+      "p",
+      "d",
+      "g",
+  )
+  assert split_graph_ref("ds2.g", default_project="p", default_dataset="d") == (
+      "p",
+      "ds2",
+      "g",
+  )
+  assert split_graph_ref(
+      "p2.ds2.g", default_project="p", default_dataset="d"
+  ) == ("p2", "ds2", "g")
+
+
+def test_split_graph_ref_rejects_too_many_parts() -> None:
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
+  from bigquery_agent_analytics.property_graph_spec import split_graph_ref
+
+  with pytest.raises(PropertyGraphLookupError, match="1-3"):
+    split_graph_ref("a.b.c.d", default_project="p", default_dataset="d")
+
+
+def test_fetch_property_graph_ddl_happy_path() -> None:
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+
+  client = _FakeGraphClient(
+      {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
+  )
+  ddl = fetch_property_graph_ddl(
+      client,
+      project_id="p",
+      dataset_id="d",
+      graph_name="agent_decisions_graph",
+  )
+  assert ddl == _INFOSCHEMA_DDL
+  # The lookup is dataset-qualified (no region qualifier needed).
+  assert "`p.d`.INFORMATION_SCHEMA.PROPERTY_GRAPHS" in client.queries[0]
+
+
+def test_fetch_property_graph_ddl_qualified_name_overrides_defaults() -> None:
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+
+  client = _FakeGraphClient(
+      {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
+  )
+  fetch_property_graph_ddl(
+      client,
+      project_id="p",
+      dataset_id="d",
+      graph_name="p2.graph_ds.agent_decisions_graph",
+  )
+  assert "`p2.graph_ds`.INFORMATION_SCHEMA.PROPERTY_GRAPHS" in (
+      client.queries[0]
+  )
+
+
+def test_fetch_property_graph_ddl_not_found_lists_available() -> None:
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
+
+  client = _FakeGraphClient(
+      {"other_graph": "CREATE PROPERTY GRAPH ..."}, _SCHEMAS_WITH_METADATA
+  )
+  with pytest.raises(PropertyGraphLookupError) as exc_info:
+    fetch_property_graph_ddl(
+        client, project_id="p", dataset_id="d", graph_name="missing_graph"
+    )
+  assert "missing_graph" in str(exc_info.value)
+  assert "other_graph" in str(exc_info.value)
+
+
+def test_fetch_property_graph_ddl_not_found_empty_dataset() -> None:
+  from bigquery_agent_analytics.property_graph_spec import fetch_property_graph_ddl
+  from bigquery_agent_analytics.property_graph_spec import PropertyGraphLookupError
+
+  client = _FakeGraphClient({}, _SCHEMAS_WITH_METADATA)
+  with pytest.raises(PropertyGraphLookupError, match="no property graphs"):
+    fetch_property_graph_ddl(
+        client, project_id="p", dataset_id="d", graph_name="missing_graph"
+    )
+
+
+def test_orchestrator_resolves_via_deployed_graph() -> None:
+  # End-to-end: --graph mode fetches the normalized INFORMATION_SCHEMA DDL
+  # and derives the same ontology + binding the file path would. The fixture
+  # is the live-captured normalized form, so this also pins parser tolerance
+  # for that shape (KEY without spaces, metadata columns in edge PROPERTIES,
+  # no OR REPLACE).
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  client = _FakeGraphClient(
+      {"agent_decisions_graph": _INFOSCHEMA_DDL}, _SCHEMAS_WITH_METADATA
+  )
+  ontology, binding = _resolve_ontology_binding(
+      ontology_path=None,
+      binding_path=None,
+      property_graph_path=None,
+      graph="agent_decisions_graph",
+      project_id="p",
+      dataset_id="d",
+      bq_client=client,
+  )
+  assert ontology.ontology == "agent_decisions_graph"
+  assert {e.name for e in ontology.entities} == {
+      "DecisionRequest",
+      "DecisionOption",
+  }
+  assert [r.name for r in ontology.relationships] == ["evaluatesOption"]
+  request_binding = next(
+      e for e in binding.entities if e.name == "DecisionRequest"
+  )
+  assert request_binding.source == "p.d.decision_request"
+
+
+def test_orchestrator_graph_mode_uses_graph_dataset_for_lookup() -> None:
+  # Split-dataset deploy: the deployed graph lives in the graph dataset, so
+  # the INFORMATION_SCHEMA lookup must target graph_dataset_id, not the
+  # events dataset.
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  graph_ddl = _INFOSCHEMA_DDL.replace("`p.d.", "`p.graph_ds.")
+  client = _FakeGraphClient(
+      {"agent_decisions_graph": graph_ddl}, _SCHEMAS_WITH_METADATA
+  )
+  _, binding = _resolve_ontology_binding(
+      ontology_path=None,
+      binding_path=None,
+      property_graph_path=None,
+      graph="agent_decisions_graph",
+      project_id="p",
+      dataset_id="events_ds",
+      graph_dataset_id="graph_ds",
+      bq_client=client,
+  )
+  assert "`p.graph_ds`.INFORMATION_SCHEMA.PROPERTY_GRAPHS" in (
+      client.queries[0]
+  )
+  assert binding.target.dataset == "graph_ds"
+
+
+def test_orchestrator_rejects_graph_with_other_modes() -> None:
+  from bigquery_agent_analytics.materialize_window import _resolve_ontology_binding
+
+  with pytest.raises(ValueError, match="exactly one"):
+    _resolve_ontology_binding(
+        ontology_path=None,
+        binding_path=None,
+        property_graph_path="g.sql",
+        graph="agent_decisions_graph",
+        project_id="p",
+        dataset_id="d",
+        bq_client=_FakeClient({}),
+    )
+
+
+def test_normalize_graph_target_qualified_ref_sets_graph_target() -> None:
+  # P2 from PR review: a qualified --graph ref must drive the WHOLE graph
+  # target (state table, binding target), not just the INFORMATION_SCHEMA
+  # lookup — otherwise a CLI user with a read-only events dataset writes
+  # state into it.
+  from bigquery_agent_analytics.materialize_window import _normalize_graph_target
+  from bigquery_agent_analytics.materialize_window import _state_table_defaults
+
+  gp, gd, name = _normalize_graph_target(
+      "p2.graph_ds.my_graph", "events-proj", "events_ds", None, None
+  )
+  assert (gp, gd, name) == ("p2", "graph_ds", "my_graph")
+  # The state table then follows the graph's own dataset.
+  assert _state_table_defaults("events-proj", "events_ds", gp, gd) == (
+      "p2",
+      "graph_ds",
+  )
+
+  # dataset.graph: project falls back to the events project.
+  gp, gd, name = _normalize_graph_target(
+      "graph_ds.my_graph", "events-proj", "events_ds", None, None
+  )
+  assert (gp, gd, name) == ("events-proj", "graph_ds", "my_graph")
+
+
+def test_normalize_graph_target_bare_name_keeps_explicit_args() -> None:
+  from bigquery_agent_analytics.materialize_window import _normalize_graph_target
+
+  # Bare name + explicit graph_* args (the run_job split-dataset shape).
+  assert _normalize_graph_target(
+      "my_graph", "events-proj", "events_ds", "gproj", "gds"
+  ) == ("gproj", "gds", "my_graph")
+  # Bare name, single-dataset shape: falls back to the events target.
+  assert _normalize_graph_target("my_graph", "p", "d", None, None) == (
+      "p",
+      "d",
+      "my_graph",
+  )

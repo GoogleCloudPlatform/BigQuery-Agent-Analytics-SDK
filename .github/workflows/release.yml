@@ -31,7 +31,7 @@ jobs:
   build:
     name: Build package
     if: startsWith(github.event.release.tag_name, 'v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +64,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     environment: pypi
     permissions:
       id-token: write
@@ -80,7 +80,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     environment: testpypi
     permissions:
       id-token: write

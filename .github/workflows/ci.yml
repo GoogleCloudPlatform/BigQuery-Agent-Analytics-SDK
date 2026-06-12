@@ -27,7 +27,7 @@ concurrency:
 jobs:
   format:
     name: Format check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -51,11 +51,11 @@ jobs:
         run: |
           python scripts/generate_colab_from_codelab.py --check \
             docs/codelabs/periodic_materialization.md \
-            examples/codelab/periodic_materialization/colab_notebook.ipynb
+            examples/context_graph/codelab/colab_notebook.ipynb
 
   test:
     name: Test (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
@@ -75,7 +75,7 @@ jobs:
 
   build:
     name: Build package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [format, test]
     steps:
       - uses: actions/checkout@v4

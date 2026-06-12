@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-10
+
+### Release highlights
+
+Consume the graph you already deployed. `bqaa context-graph --graph <name>`
+reads your property graph's definition back from BigQuery's
+`INFORMATION_SCHEMA.PROPERTY_GRAPHS` and derives the ontology + binding from
+it plus the live table schemas — no SQL file is passed to (or staged for) the
+materializer. You deploy the graph with standard `bq` DDL once; from then on
+the deployed graph is the single source of truth, so what you query with GQL
+and what gets materialized can never drift apart. The docs (codelab, blog,
+scheduled-deploy runbook, guides) now teach this flow exclusively.
+
+### Added
+
+- **Deployed-graph (`--graph`) materialization mode** — point the
+  materializer at a property graph that already exists in BigQuery instead of
+  a local DDL file. Available on every surface: `bqaa context-graph --graph`
+  (CLI; accepts a bare name resolved in `--dataset-id`, or qualified
+  `dataset.graph` / `project.dataset.graph`),
+  `run_materialize_window(graph=...)` (Python API), `BQAA_GRAPH` (scheduled
+  `run_job.py`), `deploy_cloud_run_job.sh --graph`, and the Terraform
+  module's `graph` variable. The SDK fetches the normalized `CREATE PROPERTY
+  GRAPH` statement from the dataset-qualified
+  `INFORMATION_SCHEMA.PROPERTY_GRAPHS` view and feeds the existing
+  schema-derive pipeline; a missing graph fails with an error that lists the
+  graphs the dataset does contain. In deployed-graph deploys nothing is
+  staged into the image and the entity-table bootstrap is skipped (the
+  graph's existence proves its node/edge tables exist). Mutually exclusive
+  with `--property-graph` and `--ontology`/`--binding`; incompatible with
+  `--extraction-mode=compiled-only` (no reference extractors are staged in
+  derived mode).
+
+### Changed
+
+- **Docs teach only the deployed-graph flow.** The codelab (+ regenerated
+  Colab notebook), blog post, scheduled Context Graph deploy runbook, the
+  Conversational Analytics-first guide, and the example READMEs now apply the
+  table DDL + `CREATE PROPERTY GRAPH` to BigQuery as the one-time deploy step
+  and materialize with `--graph` / `BQAA_GRAPH` / `graph =`. The file-based
+  `--property-graph` mode from 0.3.3 keeps working for existing scripts and
+  images but is no longer documented; prefer `--graph`.
+
 ## [0.3.3] - 2026-06-08
 
 ### Release highlights

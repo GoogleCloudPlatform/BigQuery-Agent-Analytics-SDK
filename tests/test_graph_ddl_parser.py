@@ -37,11 +37,7 @@ from bigquery_ontology.graph_ddl_parser import ParsedProperty
 
 _REPO = Path(__file__).resolve().parents[1]
 _CODELAB_DDL = (
-    _REPO
-    / "examples"
-    / "codelab"
-    / "periodic_materialization"
-    / "property_graph.sql"
+    _REPO / "examples" / "context_graph" / "codelab" / "property_graph.sql"
 )
 
 

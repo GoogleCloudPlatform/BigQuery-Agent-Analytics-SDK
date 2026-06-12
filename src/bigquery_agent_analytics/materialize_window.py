@@ -1247,6 +1247,32 @@ def _state_table_defaults(
   return (graph_project_id or project_id, graph_dataset_id or dataset_id)
 
 
+def _normalize_graph_target(
+    graph: str,
+    project_id: str,
+    dataset_id: str,
+    graph_project_id: Optional[str],
+    graph_dataset_id: Optional[str],
+) -> tuple[str, str, str]:
+  """Resolve a (possibly qualified) ``graph`` ref into the graph target.
+
+  Returns ``(graph_project_id, graph_dataset_id, bare_graph_name)``. A
+  qualified reference (``dataset.graph`` / ``project.dataset.graph``) is the
+  most specific signal, so its parts become the effective graph target — the
+  state table, the binding target, and the ``INFORMATION_SCHEMA`` lookups all
+  follow the graph's own dataset, never a (possibly read-only) events
+  dataset. A bare name keeps the explicit ``graph_*`` args (falling back to
+  the events ``project_id`` / ``dataset_id``, the single-dataset shape).
+  """
+  from .property_graph_spec import split_graph_ref
+
+  return split_graph_ref(
+      graph,
+      default_project=graph_project_id or project_id,
+      default_dataset=graph_dataset_id or dataset_id,
+  )
+
+
 def _resolve_ontology_binding(
     *,
     ontology_path: Optional[str],
@@ -1257,34 +1283,68 @@ def _resolve_ontology_binding(
     bq_client: Any,
     graph_project_id: Optional[str] = None,
     graph_dataset_id: Optional[str] = None,
+    graph: Optional[str] = None,
 ):
-  """Resolve the ``(Ontology, Binding)`` pair from one of two input modes.
+  """Resolve the ``(Ontology, Binding)`` pair from one of three input modes.
 
   * Explicit YAML: ``ontology_path`` + ``binding_path`` together.
-  * Schema-derived: ``property_graph_path`` (a ``CREATE PROPERTY GRAPH`` DDL
-    file) -- parse it, read column types from ``INFORMATION_SCHEMA.COLUMNS``
-    via ``bq_client``, and synthesise the pair in memory (#277). No
-    hand-written ontology/binding required.
+  * Schema-derived from the deployed graph: ``graph`` (the name of a property
+    graph the user already created in BigQuery) -- read its normalized
+    ``CREATE PROPERTY GRAPH`` DDL back from
+    ``INFORMATION_SCHEMA.PROPERTY_GRAPHS``, then derive as below. The deployed
+    graph is the single source of truth; no local SQL file is consumed.
+  * Schema-derived from a local file: ``property_graph_path`` (a ``CREATE
+    PROPERTY GRAPH`` DDL file) -- parse it, read column types from
+    ``INFORMATION_SCHEMA.COLUMNS`` via ``bq_client``, and synthesise the pair
+    in memory (#277). No hand-written ontology/binding required.
 
   ``graph_project_id`` / ``graph_dataset_id`` target the derived graph (its
   ``${PROJECT_ID}`` / ``${DATASET}`` placeholder resolution, schema lookup, and
   binding target) at a project/dataset distinct from the events ``project_id`` /
   ``dataset_id``. They default to ``project_id`` / ``dataset_id`` (single-dataset
   shape, e.g. the codelab). A two-dataset deploy -- a read-only events dataset
-  and a separate graph dataset -- sets them to the graph dataset.
+  and a separate graph dataset -- sets them to the graph dataset. In ``graph``
+  mode they also locate the ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` lookup
+  (unless ``graph`` itself is dataset- or project-qualified).
 
-  Exactly one mode must be supplied; both or neither raises ``ValueError``.
-  This is the single seam the orchestrator uses to obtain its spec, so both
+  Exactly one mode must be supplied; anything else raises ``ValueError``.
+  This is the single seam the orchestrator uses to obtain its spec, so all
   input modes converge here onto the same downstream ``resolve()`` path.
   """
   from bigquery_ontology import load_binding
   from bigquery_ontology import load_ontology
 
+  modes_supplied = sum(
+      [
+          graph is not None,
+          property_graph_path is not None,
+          ontology_path is not None or binding_path is not None,
+      ]
+  )
+  if modes_supplied > 1:
+    raise ValueError(
+        "Provide exactly one of --graph, --property-graph, or"
+        " --ontology/--binding."
+    )
+
+  if graph is not None:
+    from .property_graph_spec import derive_ontology_binding_from_ddl
+    from .property_graph_spec import fetch_property_graph_ddl
+
+    ddl_text = fetch_property_graph_ddl(
+        bq_client,
+        project_id=graph_project_id or project_id,
+        dataset_id=graph_dataset_id or dataset_id,
+        graph_name=graph,
+    )
+    return derive_ontology_binding_from_ddl(
+        ddl_text,
+        project_id=graph_project_id or project_id,
+        dataset_id=graph_dataset_id or dataset_id,
+        bq_client=bq_client,
+    )
+
   if property_graph_path is not None:
-    if ontology_path is not None or binding_path is not None:
-      raise ValueError(
-          "Provide either --property-graph or --ontology/--binding, not both."
-      )
     from .property_graph_spec import derive_ontology_binding_from_ddl
 
     ddl_text = pathlib.Path(property_graph_path).read_text(encoding="utf-8")
@@ -1297,8 +1357,8 @@ def _resolve_ontology_binding(
 
   if ontology_path is None or binding_path is None:
     raise ValueError(
-        "Provide --property-graph PATH, or both --ontology PATH and"
-        " --binding PATH."
+        "Provide --graph NAME, --property-graph PATH, or both"
+        " --ontology PATH and --binding PATH."
     )
   ontology_obj = load_ontology(ontology_path)
   binding_obj = load_binding(binding_path, ontology=ontology_obj)
@@ -1312,6 +1372,7 @@ def run_materialize_window(
     ontology_path: Optional[str] = None,
     binding_path: Optional[str] = None,
     property_graph_path: Optional[str] = None,
+    graph: Optional[str] = None,
     graph_project_id: Optional[str] = None,
     graph_dataset_id: Optional[str] = None,
     events_table: str = "agent_events",
@@ -1350,6 +1411,19 @@ def run_materialize_window(
       schema-derived input mode; the ontology + binding are synthesised from
       the graph definition and live table schemas. Mutually exclusive with
       ``ontology_path`` / ``binding_path``; exactly one mode must be supplied.
+    graph: Name of a property graph the user already deployed to BigQuery --
+      a bare name, ``dataset.graph``, or ``project.dataset.graph``. The
+      orchestrator reads the graph's normalized DDL back from
+      ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` (in ``graph_dataset_id`` /
+      ``graph_project_id``, defaulting to ``dataset_id`` / ``project_id``) and
+      derives the ontology + binding from it plus the live table schemas, so
+      the deployed graph is the single source of truth and no local SQL file
+      is consumed. A *qualified* reference sets the effective graph target:
+      its dataset/project become the ``graph_dataset_id`` /
+      ``graph_project_id`` defaults, so the state table and the binding
+      target follow the graph's own dataset rather than a (possibly
+      read-only) events ``dataset_id``. Mutually exclusive with the other
+      input modes.
     graph_project_id, graph_dataset_id: For schema-derived mode, the project /
       dataset that holds the graph tables and receives the materialized graph
       (``${PROJECT_ID}`` / ``${DATASET}`` placeholder resolution, schema lookup,
@@ -1596,6 +1670,14 @@ def run_materialize_window(
 
   client = bq_client or bigquery.Client(project=project_id, location=location)
 
+  # Normalize a qualified ``graph`` reference BEFORE anything derives a
+  # graph target from it (state-table defaults, binding target, schema
+  # lookups).
+  if graph is not None:
+    graph_project_id, graph_dataset_id, graph = _normalize_graph_target(
+        graph, project_id, dataset_id, graph_project_id, graph_dataset_id
+    )
+
   # Resolve identifiers + qualified refs.
   events_table_ref = validated_table_ref(project_id, dataset_id, events_table)
   # The state/checkpoint table is written every run, so it must live in a
@@ -1613,15 +1695,17 @@ def run_materialize_window(
   )
   state_table_ref = f"{state_project}.{state_dataset}.{state_table_local}"
 
-  # Resolve the ontology + binding from one of two input modes (see
-  # _resolve_ontology_binding): explicit YAML, or schema-derived from a
-  # CREATE PROPERTY GRAPH DDL.
+  # Resolve the ontology + binding from one of three input modes (see
+  # _resolve_ontology_binding): explicit YAML, schema-derived from the
+  # deployed graph (INFORMATION_SCHEMA.PROPERTY_GRAPHS), or schema-derived
+  # from a local CREATE PROPERTY GRAPH DDL file.
   from bigquery_ontology._fingerprint import fingerprint_model
 
   ontology_obj, binding_obj = _resolve_ontology_binding(
       ontology_path=ontology_path,
       binding_path=binding_path,
       property_graph_path=property_graph_path,
+      graph=graph,
       project_id=project_id,
       dataset_id=dataset_id,
       graph_project_id=graph_project_id,

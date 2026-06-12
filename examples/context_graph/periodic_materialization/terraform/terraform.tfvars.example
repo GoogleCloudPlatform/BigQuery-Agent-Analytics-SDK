@@ -15,7 +15,12 @@ image_uri         = "us-central1-docker.pkg.dev/your-project/bqaa/periodic-mater
 # Optional overrides (commented = use the default)
 # location              = "US"
 # job_name              = "bqaa-periodic-materialization"
-# property_graph        = false           # true → schema-derived mode (no ontology/binding);
+# graph                 = ""              # deployed-graph mode (recommended): name of a property
+#                                         #        graph you already created in BigQuery (BQAA_GRAPH);
+#                                         #        the runtime reads its DDL from
+#                                         #        INFORMATION_SCHEMA.PROPERTY_GRAPHS — nothing staged;
+#                                         #        not compatible with extraction_mode = "compiled-only"
+# property_graph        = false           # legacy file-based schema-derived mode (prefer graph);
 #                                         #        build the image with build_image.sh --property-graph;
 #                                         #        not compatible with extraction_mode = "compiled-only"
 # extraction_mode       = "ai-fallback"   # or "compiled-only"

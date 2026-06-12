@@ -66,9 +66,16 @@ locals {
     var.extraction_mode == "compiled-only" ? {
       BQAA_REFERENCE_EXTRACTORS_MODULE = "reference_extractor"
     } : {},
-    # Schema-derived mode (#286): tell the runtime to derive the spec from the
-    # staged ``property_graph.sql`` instead of the explicit ontology/binding
-    # pair. Mirrors the bash deploy's ``BQAA_PROPERTY_GRAPH`` wiring.
+    # Deployed-graph mode: tell the runtime to derive the spec from the
+    # customer's already-deployed property graph (INFORMATION_SCHEMA lookup).
+    # Mirrors the bash deploy's ``--graph`` → ``BQAA_GRAPH`` wiring.
+    var.graph == "" ? {} : {
+      BQAA_GRAPH = var.graph
+    },
+    # Schema-derived mode (#286, legacy): tell the runtime to derive the spec
+    # from the staged ``property_graph.sql`` instead of the explicit
+    # ontology/binding pair. Mirrors the bash deploy's ``BQAA_PROPERTY_GRAPH``
+    # wiring.
     var.property_graph ? {
       BQAA_PROPERTY_GRAPH = "property_graph.sql"
     } : {},
@@ -281,13 +288,21 @@ resource "google_cloud_run_v2_job" "periodic" {
     }
   }
 
-  # Schema-derived mode has no reference extractors staged, so
+  # Schema-derived modes have no reference extractors staged, so
   # ``compiled-only`` would empty_extract at runtime. Reject the
-  # combination at plan time, mirroring the bash deploy's boundary check.
+  # combinations at plan time, mirroring the bash deploy's boundary checks.
   lifecycle {
     precondition {
       condition     = !(var.property_graph && var.extraction_mode == "compiled-only")
       error_message = "property_graph = true (schema-derived mode) does not support extraction_mode = \"compiled-only\": no reference extractors are staged in derived mode. Use \"ai-fallback\", or the explicit ontology/binding path."
+    }
+    precondition {
+      condition     = !(var.graph != "" && var.extraction_mode == "compiled-only")
+      error_message = "graph (deployed-graph mode) does not support extraction_mode = \"compiled-only\": no reference extractors are staged in derived mode. Use \"ai-fallback\", or the explicit ontology/binding path."
+    }
+    precondition {
+      condition     = !(var.graph != "" && var.property_graph)
+      error_message = "graph and property_graph are mutually exclusive; set exactly one spec input mode."
     }
   }
 

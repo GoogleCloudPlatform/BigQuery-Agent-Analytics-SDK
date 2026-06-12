@@ -38,11 +38,7 @@ from bigquery_ontology.scaffold import _ONTOLOGY_TO_BQ_TYPE
 
 _REPO = Path(__file__).resolve().parents[1]
 _CODELAB_DDL = (
-    _REPO
-    / "examples"
-    / "codelab"
-    / "periodic_materialization"
-    / "property_graph.sql"
+    _REPO / "examples" / "context_graph" / "codelab" / "property_graph.sql"
 )
 
 
