@@ -1,6 +1,6 @@
-# Context Graph — Extract Decision Traces from Your Agent's Context Graph
+# Agent Context Graph — Extract Decision Traces from Your Agent's Runs
 
-Turn raw agent event logs into a **Context Graph**: a queryable BigQuery
+Turn raw agent event logs into a **Agent Context Graph**: a queryable BigQuery
 property graph of your agent's decision traces. Every request, every candidate
 the agent weighed, every committed outcome — connected, queryable in GQL, and
 kept fresh on a schedule. No external graph database, no ETL pipeline.
@@ -12,7 +12,7 @@ deployment.
 
 ## The graph is defined by two SQL artifacts
 
-Everything the Context Graph needs is declared in two plain SQL files. They
+Everything the Agent Context Graph needs is declared in two plain SQL files. They
 are the contract; the rest of this directory exists to generate, populate,
 and operate them.
 

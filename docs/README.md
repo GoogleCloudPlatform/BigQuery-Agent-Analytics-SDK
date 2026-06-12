@@ -16,7 +16,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 |----------|-------------|
 | [hatteras_evaluation.md](hatteras_evaluation.md) | Hatteras-style categorical evaluation design |
 
-## Context Graph
+## Agent Context Graph
 
 Extract decision traces from your agent's context graph — the requests an
 agent handled, the options it weighed, and the outcomes it committed —
@@ -32,7 +32,7 @@ materialized into a queryable BigQuery property graph.
 
 ## Ontology & Binding Internals (advanced)
 
-Internal machinery behind the Context Graph's extraction spec. Most users
+Internal machinery behind the Agent Context Graph's extraction spec. Most users
 never touch these — `bqaa context-graph --graph` derives everything from the
 deployed property graph.
 
@@ -77,7 +77,7 @@ deployed property graph.
 
 | Document | Description |
 |----------|-------------|
-| [Context Graph periodic materialization playbook](../examples/context_graph/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO context graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
+| [Agent Context Graph periodic materialization playbook](../examples/context_graph/periodic_materialization/README.md) | Customer deployment path for keeping the MAKO context graph fresh on a schedule: local dry-run, Cloud Run Job + Cloud Scheduler deploy with `--smoke`, IAM matrix, schedule guidance, JSON log shape, Cloud Monitoring alert filters, state-table inspection, cleanup, and troubleshooting. |
 | [proposal_bigquery_agent_cli.md](proposal_bigquery_agent_cli.md) | CLI proposal and command design |
 | [python_udf_support_design.md](python_udf_support_design.md) | BigQuery Python UDF architecture |
 | [remote_function_rationale.md](remote_function_rationale.md) | Cloud Run remote function rationale |

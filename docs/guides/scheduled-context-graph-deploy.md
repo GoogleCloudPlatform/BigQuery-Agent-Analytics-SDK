@@ -1,4 +1,4 @@
-# Deploy a Context Graph on a schedule — consume the deployed graph
+# Deploy an Agent Context Graph on a schedule — consume the deployed graph
 
 This runbook takes the [Periodic Materialization codelab](../codelabs/periodic_materialization.md)
 graph from a local run to a **hands-off scheduled production deploy**, using the

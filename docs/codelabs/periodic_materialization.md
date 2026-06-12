@@ -17,13 +17,13 @@ Duration: 03:00
 
 As autonomous AI agents take on more operational responsibilities (evaluating loan applications, managing marketing budgets, approving access requests), organizations must be able to audit and explain their decisions. Reconstructing the exact context, alternatives considered, and final rationale of an agent's decision is essential for compliance, risk management, and operational trust.
 
-This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a **Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
+This codelab uses the BigQuery Agent Analytics SDK to transform raw agent event logs into a **Agent Context Graph** — a queryable BigQuery property graph of agent decisions — on a schedule, without any external graph database or ETL pipeline.
 
-![Context Graph workflow: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table, bqaa context-graph extracts a structured decision graph, and you query it with GQL and Conversational Analytics](images/context-graph-flow.png)
+![Agent Context Graph workflow: an ADK agent's events flow through the BigQuery Agent Analytics Plugin into the agent_events table, bqaa context-graph extracts a structured decision graph, and you query it with GQL and Conversational Analytics](images/context-graph-flow.png)
 
 ### What you'll build
 
-- A Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
+- An Agent Context Graph (a BigQuery property graph) that models a generic agent decision flow: a request comes in, the agent weighs options, an outcome is committed.
 - A populated `agent_events` table with a synthetic event corpus.
 - A working `bqaa context-graph` run that fills the graph from those events.
 - A one-shot replay (backfill) of a past time window — useful when events arrived during an outage — without disturbing the regular refresh schedule.
@@ -639,7 +639,7 @@ The local run you completed in *Materialize the decision graph* uses default beh
 * **Bound the per-run batch size** (`--max-sessions`). Useful when an upstream event spike threatens to overwhelm a single scan.
 
 > aside positive
-> **From "run this once" to "run this every six hours":** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. Follow the [scheduled Context Graph deploy runbook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/scheduled-context-graph-deploy.md) to take *this* deployed graph to a scheduled deploy with the same `--graph` flow, or the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) for the full IAM matrix and the explicit-ontology/binding path.
+> **From "run this once" to "run this every six hours":** The SDK ships a deploy script and a Terraform module that wrap `bqaa context-graph` as a Cloud Run Job triggered by Cloud Scheduler, with least-privilege service accounts and the IAM grants the job needs. Follow the [scheduled Agent Context Graph deploy runbook](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/docs/guides/scheduled-context-graph-deploy.md) to take *this* deployed graph to a scheduled deploy with the same `--graph` flow, or the [periodic-materialization deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/context_graph/periodic_materialization) for the full IAM matrix and the explicit-ontology/binding path.
 
 ## Clean up
 
@@ -665,7 +665,7 @@ That single command removes the dataset, the agent events, the graph tables, and
 
 Duration: 02:00
 
-Congratulations! You've turned raw agent event logs into a queryable Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
+Congratulations! You've turned raw agent event logs into a queryable Agent Context Graph in BigQuery and traced a single decision end-to-end, with no external graph database or ETL pipeline.
 
 The same pattern applies wherever an agent makes consequential decisions: credit underwriting, prior authorization, marketing budget moves, procurement, customer service, and internal IT. To build your own decision graph, copy the codelab artifacts as a starting point, adapt the two declarative files (table DDL + the `CREATE PROPERTY GRAPH` schema) to your domain, and apply them to BigQuery — `bqaa context-graph --graph` reads the deployed graph and derives the rest. Reach for an explicit `ontology.yaml` + `binding.yaml` only when you need descriptions, inheritance, derived properties, or column renames.
 
