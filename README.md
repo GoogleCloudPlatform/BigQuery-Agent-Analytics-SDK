@@ -106,6 +106,7 @@ traces, and query one in GQL — entirely from your terminal:
 
 ```bash
 export PROJECT_ID="your-project" DATASET="agent_analytics_demo"
+gcloud config set project "$PROJECT_ID"
 bq --location=US mk --dataset "$PROJECT_ID:$DATASET"
 
 # 1. Deploy the context graph (one-time DDL: tables, then the property graph).

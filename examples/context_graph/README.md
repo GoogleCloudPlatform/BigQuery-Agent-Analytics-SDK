@@ -1,6 +1,6 @@
 # Agent Context Graph — Extract Decision Traces from Your Agent's Runs
 
-Turn raw agent event logs into a **Agent Context Graph**: a queryable BigQuery
+Turn raw agent event logs into an **Agent Context Graph**: a queryable BigQuery
 property graph of your agent's decision traces. Every request, every candidate
 the agent weighed, every committed outcome — connected, queryable in GQL, and
 kept fresh on a schedule. No external graph database, no ETL pipeline.
