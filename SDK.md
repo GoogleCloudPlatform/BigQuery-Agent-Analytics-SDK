@@ -1505,9 +1505,9 @@ See [`examples/categorical_dashboard.sql`](examples/categorical_dashboard.sql) f
 
 ---
 
-## 18. Context Graph (Property Graph for Agentic Ads)
+## 18. Context Graph (Decision-Trace Extraction)
 
-The **Context Graph** module builds a BigQuery Property Graph that cross-links technical execution traces (TechNodes) with business-domain entities (BizNodes). It enables GQL-based trace reconstruction, causal reasoning, and world-change detection for long-running agent tasks.
+The **Context Graph** module extracts decision traces from your agent's context graph: it builds a BigQuery property graph that cross-links technical execution traces (TechNodes) with the business-domain entities the agent reasoned over (BizNodes), so you can reconstruct any decision — the request, the options weighed, the outcome committed — with GQL traversal, causal reasoning, and world-change detection for long-running agent tasks.
 
 ### Architecture: 4-Pillar Property Graph
 
@@ -2076,7 +2076,7 @@ bigquery_agent_analytics/
 │   └── bigframes_evaluator.py ← BigFrames DataFrame evaluator (optional)
 │
 │   Context Graph
-│   └── context_graph.py       ← Property Graph, BizNode extraction, GQL, world-change
+│   └── context_graph.py       ← Decision-trace extraction, GQL, world-change
 │
 │   CLI & Interfaces
 │   ├── cli.py                 ← typer CLI (bq-agent-sdk)

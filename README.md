@@ -7,7 +7,7 @@
 An open-source Python SDK for analyzing, evaluating, and curating agent traces
 stored in BigQuery. Built on top of the
 [BigQuery Agent Analytics](https://adk.dev/integrations/bigquery-agent-analytics/), it provides
-a consumption-layer toolkit for agent observability, analysis, evaluation, and advanced capabilities like context graph at scale.
+a consumption-layer toolkit for agent observability, analysis, evaluation, and advanced capabilities like the Context Graph — extracting decision traces from your agent's context graph — at scale.
 
 ## Overview
 
@@ -39,8 +39,7 @@ regressions — all through BigQuery SQL or Python.
 - Categorical (Hatteras-style) evaluation via BigFrames
 
 **Advanced Analytics**
-- Context Graph — property graph linking traces to business entities with GQL traversal
-- YAML-driven ontology extraction and materialization
+- Context Graph — extract decision traces from your agent's context graph: the requests an agent handled, the options it weighed, and the outcomes it committed, materialized into a queryable BigQuery property graph (GQL traversal, scheduled refresh via `bqaa context-graph`)
 - Long-horizon cross-session memory
 - Multi-stage agent insights pipeline
 - Drift detection for golden vs production question distributions
@@ -139,16 +138,12 @@ src/bigquery_agent_analytics/
 ├── Analytics
 │   ├── insights.py                # Multi-stage insights pipeline
 │   ├── feedback.py                # Drift detection & question distribution
-│   ├── context_graph.py           # Property Graph: BizNode extraction, GQL
 │   └── memory_service.py          # Long-horizon agent memory
 │
-├── Ontology
-│   ├── ontology_models.py         # Pydantic models for ontology schema
-│   ├── ontology_schema_compiler.py# YAML → compiled schema
-│   ├── ontology_graph.py          # Ontology graph construction
-│   ├── ontology_materializer.py   # Graph materialization to BigQuery
-│   ├── ontology_property_graph.py # Property graph operations
-│   └── ontology_orchestrator.py   # End-to-end ontology pipeline
+├── Context Graph
+│   ├── context_graph.py           # Decision-trace extraction & GQL traversal
+│   ├── materialize_window.py      # Scheduled materialization (bqaa context-graph)
+│   └── property_graph_spec.py     # Derive the spec from your deployed property graph
 │
 └── CLI & Deploy
     ├── cli.py                     # CLI entry point (bq-agent-sdk)

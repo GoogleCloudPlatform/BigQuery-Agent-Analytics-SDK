@@ -1,14 +1,14 @@
-# Context Graph — Agent Decision Lineage on BigQuery Property Graphs
+# Context Graph — Extract Decision Traces from Your Agent's Context Graph
 
 Turn raw agent event logs into a **Context Graph**: a queryable BigQuery
-property graph of your agent's decisions. Every request, every candidate the
-agent weighed, every committed outcome — connected, queryable in GQL, and kept
-fresh on a schedule. No external graph database, no ETL pipeline.
+property graph of your agent's decision traces. Every request, every candidate
+the agent weighed, every committed outcome — connected, queryable in GQL, and
+kept fresh on a schedule. No external graph database, no ETL pipeline.
 
-This directory ships a complete worked example built on the MAKO decision
-ontology (an 18-entity production decision model), including a runnable ADK
-agent, the SQL artifacts that define the graph, and a packaged
-Cloud Run + Cloud Scheduler deployment.
+This directory ships a complete worked example built on a production decision
+model (the 18-entity MAKO reference), including a runnable ADK agent, the SQL
+artifacts that define the graph, and a packaged Cloud Run + Cloud Scheduler
+deployment.
 
 ## The graph is defined by two SQL artifacts
 
