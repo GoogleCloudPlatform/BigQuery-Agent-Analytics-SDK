@@ -1292,6 +1292,23 @@ vm.create_view("LLM_REQUEST")
 print(vm.get_view_sql("TOOL_COMPLETED"))
 ```
 
+#### ADK 2.0 event types
+
+The plugin emits additional event types under ADK 2.0, each with a typed view:
+`AGENT_TRANSFER` (`from_agent`, `to_agent`), `EVENT_COMPACTION`
+(`start_timestamp`, `end_timestamp`, `compacted_content`),
+`AGENT_STATE_CHECKPOINT` (`end_of_agent`, `agent_state`), and `TOOL_PAUSED`
+(`function_call_id`, `pause_kind`). `WORKFLOW_NODE_STARTING` /
+`WORKFLOW_NODE_COMPLETED` are registered with header-only views for now; their
+typed columns follow the workflow-boundary derivation work.
+
+The `TOOL_COMPLETED` view also exposes the long-running pair keys
+`function_call_id`, `pause_kind`, and `pause_orphan`. These are populated only
+on the resume row that pairs with a `TOOL_PAUSED`; on ordinary (non-long-running)
+tool completions they are **null**. `pause_orphan` is reserved for the pause
+registry and stays null until that ships — treat a null `pause_orphan` as
+"not yet determined", not as "not an orphan".
+
 ---
 
 ## 17. Categorical Evaluation & Real-Time Dashboards

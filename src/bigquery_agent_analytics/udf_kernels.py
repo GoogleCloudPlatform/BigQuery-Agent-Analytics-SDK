@@ -274,8 +274,15 @@ _EVENT_LABEL_MAP: dict[str, str] = {
     "TOOL_STARTING": "tool",
     "TOOL_COMPLETED": "tool",
     "TOOL_ERROR": "tool_error",
+    "TOOL_PAUSED": "tool",
     "USER_MESSAGE_RECEIVED": "user",
     "AGENT_COMPLETED": "agent",
+    # ADK 2.0 event types (producer #293).
+    "AGENT_TRANSFER": "agent",
+    "AGENT_STATE_CHECKPOINT": "agent",
+    "EVENT_COMPACTION": "compaction",
+    "WORKFLOW_NODE_STARTING": "workflow",
+    "WORKFLOW_NODE_COMPLETED": "workflow",
 }
 
 
@@ -289,7 +296,7 @@ def normalize_event_label(event_type: str) -> str:
 
   Returns:
       One of ``"llm"``, ``"tool"``, ``"tool_error"``, ``"user"``,
-      ``"agent"``, or ``"other"``.
+      ``"agent"``, ``"compaction"``, ``"workflow"``, or ``"other"``.
   """
   return _EVENT_LABEL_MAP.get(event_type, "other")
 
