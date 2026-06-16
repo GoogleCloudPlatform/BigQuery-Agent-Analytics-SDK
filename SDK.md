@@ -1297,7 +1297,9 @@ print(vm.get_view_sql("TOOL_COMPLETED"))
 The plugin emits additional event types under ADK 2.0, each with a typed view:
 `AGENT_TRANSFER` (`from_agent`, `to_agent`), `EVENT_COMPACTION`
 (`start_timestamp`, `end_timestamp`, `compacted_content`),
-`AGENT_STATE_CHECKPOINT` (`end_of_agent`, `agent_state`), and `TOOL_PAUSED`
+`AGENT_STATE_CHECKPOINT` (`agent_state`, `agent_state_type`, `end_of_agent`;
+`agent_state_type` is a `JSON_TYPE` discriminator that distinguishes a missing
+state key from an explicit JSON null), and `TOOL_PAUSED`
 (`function_call_id`, `pause_kind`). `WORKFLOW_NODE_STARTING` /
 `WORKFLOW_NODE_COMPLETED` are registered with header-only views for now; their
 typed columns follow the workflow-boundary derivation work.

@@ -149,6 +149,12 @@ def test_agent_state_checkpoint_columns_inline(vm):
       in sql
   )
   assert "JSON_QUERY(content, '$.agent_state') AS agent_state" in sql
+  # Presence discriminator preserves missing-vs-explicit-JSON-null
+  # (mirrors the producer's own view).
+  assert (
+      "JSON_TYPE(JSON_QUERY(content, '$.agent_state')) AS agent_state_type"
+      in sql
+  )
   # Offload columns are a #208 follow-up — must not be present yet.
   assert "agent_state_uri" not in sql
   assert "agent_state_sha256" not in sql

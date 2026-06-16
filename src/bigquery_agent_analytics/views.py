@@ -269,9 +269,17 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
         "agent_state_checkpoints",
         # Inline payload only; offload columns (agent_state_uri,
         # agent_state_sha256) are a #208 follow-up.
+        #
+        # agent_state_type is the presence discriminator (mirrors the
+        # producer's own view). JSON_QUERY on an explicit JSON null
+        # returns JSON null, not SQL NULL, so consumers read JSON_TYPE
+        # to tell apart: SQL NULL = key absent, 'null' = the explicit
+        # {agent_state: null, end_of_agent: true} shape, anything else
+        # = a real state object.
         """\
-  CAST(JSON_VALUE(content, '$.end_of_agent') AS BOOL) AS end_of_agent,
-  JSON_QUERY(content, '$.agent_state') AS agent_state""",
+  JSON_QUERY(content, '$.agent_state') AS agent_state,
+  JSON_TYPE(JSON_QUERY(content, '$.agent_state')) AS agent_state_type,
+  CAST(JSON_VALUE(content, '$.end_of_agent') AS BOOL) AS end_of_agent""",
     ),
     "TOOL_PAUSED": (
         "tool_pauses",
