@@ -166,9 +166,9 @@ class TestGraderPipeline:
   @pytest.mark.asyncio
   async def test_system_grader(self):
     """Test pipeline with a system grader."""
-    pipeline = GraderPipeline(WeightedStrategy(threshold=0.5)).add_system_grader(
-        SystemEvaluator.latency(threshold_ms=5000)
-    )
+    pipeline = GraderPipeline(
+        WeightedStrategy(threshold=0.5)
+    ).add_system_grader(SystemEvaluator.latency(threshold_ms=5000))
 
     verdict = await pipeline.evaluate(
         session_summary={

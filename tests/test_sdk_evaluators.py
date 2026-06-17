@@ -22,10 +22,10 @@ import pytest
 
 from bigquery_agent_analytics.evaluators import _parse_json_from_text
 from bigquery_agent_analytics.evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
+from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import DEFAULT_ENDPOINT
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
-from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore

@@ -312,7 +312,6 @@ class GraderPipeline:
     """
     return self.add_system_grader(evaluator, weight=weight)
 
-
   def add_llm_grader(
       self,
       judge: LLMAsJudge,
