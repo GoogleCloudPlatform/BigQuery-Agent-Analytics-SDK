@@ -667,3 +667,14 @@ def test_retail_returns_result_counts_include_new_event_types() -> None:
       "TOOL_ERROR",
   ):
     assert counts.get(event_type, 0) > 0, event_type
+
+
+def test_retail_returns_agent_starting_has_text_summary() -> None:
+  # adk_agent_starts extracts content.text_summary AS agent_instruction;
+  # every AGENT_STARTING row must populate it (not NULL in that view).
+  rows, _ = _retail_corpus()
+  starts = [r for r in rows if r["event_type"] == "AGENT_STARTING"]
+  assert starts
+  for row in starts:
+    summary = json.loads(row["content"]).get("text_summary")
+    assert isinstance(summary, str) and summary

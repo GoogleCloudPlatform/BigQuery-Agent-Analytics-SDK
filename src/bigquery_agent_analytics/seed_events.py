@@ -611,7 +611,13 @@ def _retail_returns_session(
   # --- intake & triage agent ---
   add(
       "AGENT_STARTING",
-      {"task": "intake_and_triage"},
+      {
+          "task": "intake_and_triage",
+          "text_summary": (
+              "Authenticate the customer, look up order history, and triage"
+              " the return request."
+          ),
+      },
       agent=intake,
       parent=inv_span,
       span=intake_span,
@@ -672,7 +678,13 @@ def _retail_returns_session(
   # --- fraud & abuse agent ---
   add(
       "AGENT_STARTING",
-      {"task": "fraud_and_abuse"},
+      {
+          "task": "fraud_and_abuse",
+          "text_summary": (
+              "Assess return fraud and abuse risk from the customer's"
+              " return-to-purchase history and cross-account patterns."
+          ),
+      },
       agent=fraud,
       parent=inv_span,
       span=fraud_span,
@@ -715,7 +727,13 @@ def _retail_returns_session(
   if outcome not in {"exchange_offered", "fraud_rejected"}:
     add(
         "AGENT_STARTING",
-        {"task": "quality_and_defect"},
+        {
+            "task": "quality_and_defect",
+            "text_summary": (
+                "Categorize the product defect and extract quality signals"
+                " from the customer's description."
+            ),
+        },
         agent=quality,
         parent=inv_span,
         span=quality_span,
