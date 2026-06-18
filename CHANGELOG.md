@@ -7,10 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-18
+
+### Release highlights
+
+Richer analytics out of the box. A new `retail-returns` seed scenario gives
+token-usage and latency demos real data to query the moment you seed a
+dataset, the SDK's type surfaces now recognize the ADK 2.0 event vocabulary
+end to end, and the quality report graduates from two pass/fail metrics to a
+diagnostic view that tells you *why* a session failed and *what to fix*.
+
 ### Added
 
-- Added `SystemEvaluator` as the preferred name for deterministic/code-defined metrics.
-- Kept `CodeEvaluator` as a backward-compatible alias. Note that calling `CodeEvaluator()` now emits `evaluator_name="system_evaluator"`.
+- **`retail-returns` seed-events scenario** — `bqaa seed-events --scenario
+  retail-returns` generates a multi-agent refund/exchange trace (intake-triage,
+  fraud-abuse, quality-defect) with `LLM_REQUEST`/`LLM_RESPONSE` token-usage
+  and latency telemetry, so token/latency analytics and the `v_llm_response`
+  view's `usage_*_tokens` / `total_ms` / `ttft_ms` columns are non-empty
+  immediately. Emits one terminal `AGENT_COMPLETED` per session, deterministic
+  outcome buckets (surfaced via `session_outcome_counts`), product-quality
+  feedback text, and `legacy_crm_db` diagnostic errors for filterable demo
+  queries. Output is deterministic for a fixed `(seed, now)`; existing
+  `decision` / `decision-realistic` scenarios are unchanged and byte-identical.
+- **ADK 2.0 event types across the SDK type surfaces** — the four
+  #293-shipped event types are registered with full typed views and the two
+  workflow-boundary types as header-only, across every consumer type surface,
+  and `TOOL_COMPLETED` is extended with the long-running pair keys.
+- **`SystemEvaluator`** as the preferred name for deterministic/code-defined
+  metrics. `CodeEvaluator` is kept as a backward-compatible alias; calling
+  `CodeEvaluator()` now emits `evaluator_name="system_evaluator"`.
+- **Expanded quality report** — adds quality dimensions, correction analysis,
+  execution traces, golden-Q&A grounding, and version filtering, so a failing
+  session shows why it failed, whether the answer is correct, and what to fix
+  (beyond the original `response_usefulness` / `task_grounding` pass/fail
+  metrics).
 
 ## [0.3.4] - 2026-06-10
 
