@@ -2141,7 +2141,8 @@ def seed_events(
         "--sessions",
         help=(
             "Number of synthetic sessions (>= 1). Default depends on"
-            " --scenario: 5 for decision, 100 for decision-realistic."
+            " --scenario: 5 for decision, 100 for decision-realistic,"
+            " 100 for retail-returns."
         ),
     ),
     seed: Optional[int] = typer.Option(
@@ -2156,8 +2157,10 @@ def seed_events(
         "decision",
         "--scenario",
         help=(
-            "Synthetic scenario: decision (small, default) or"
-            " decision-realistic (100-session, multi-day, mixed outcomes)."
+            "Synthetic scenario: decision (small, default),"
+            " decision-realistic (100-session, multi-day, mixed outcomes), or"
+            " retail-returns (multi-agent refund/exchange flow with LLM"
+            " token/latency telemetry)."
         ),
     ),
     dry_run: bool = typer.Option(
@@ -2175,6 +2178,9 @@ def seed_events(
   ``bqaa context-graph`` has sessions to process. The ``decision`` scenario
   emits only terminal-event-closed sessions; ``decision-realistic`` also
   includes failed, truncated, and orphaned (no terminal event) sessions.
+  ``retail-returns`` emits a multi-agent refund/exchange flow with
+  LLM_REQUEST/LLM_RESPONSE token-usage and latency telemetry (one terminal
+  AGENT_COMPLETED per session) for token/latency analytics demos.
 
   Exit codes:
       0 — events generated (and inserted, unless --dry-run).
