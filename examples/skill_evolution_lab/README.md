@@ -64,7 +64,9 @@ outputs (and what each file means) without running anything. Live runs write to
 
 - A GCP project with Vertex AI enabled; `roles/aiplatform.user`.
 - `gcloud auth application-default login`.
-- [`uv`](https://github.com/astral-sh/uv) (used to run with the repo's deps).
+- [`uv`](https://github.com/astral-sh/uv) — the scripts run via `uv run`, which
+  installs the repo's dependencies from the root `pyproject.toml` automatically
+  on first use, so there's no separate install step.
 - Gemini 3.x models are served from the Vertex `global` endpoint (handled
   automatically); the Skill Registry is regional (`us-central1` by default).
 
@@ -80,6 +82,26 @@ The run deploys the flawed V0, generates and scores traffic on the evolve and
 held-out test sets, evolves a tool-first V1 skill, re-scores the held-out set,
 prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
+
+**Runtime:** about **6–7 minutes** end-to-end (almost entirely Gemini API calls);
+`setup.sh` takes a few seconds. The first run also does a one-time `uv`
+dependency sync.
+
+**What you'll see** — a per-step progress trace ending in the comparison table:
+
+```text
+[V0] traffic + score ...
+     V0 test:   23.8% (5/21 golden-matched)
+[evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
+[V1] traffic + score ...
+     V1 test:   100.0% (21/21 golden-matched)
+
+| Metric                    | V0 (flawed)  | V1 (evolved)  | Delta   |
+| Overall                   | 23.8% (5/21) | 100.0% (21/21)| +76.2pp |
+```
+
+Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
+stable. See [`VERIFICATION.md`](VERIFICATION.md) for a recorded + reproduced run.
 
 ### With the Skill Registry
 

@@ -14,7 +14,8 @@ actual run (not aspirational).
 | Ground truth | `eval/eval_spec.json` golden Q&A (matched at cosine ≥ 0.92) |
 | Evolve set | `questions_evolve.json` (28) + `questions_corrections.json` (5) |
 | Held-out test set | `questions_test.json` (18) + `questions_corrections_heldout.json` (3) |
-| Date | 2026-06-05 |
+| Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~6 min (first run adds a one-time `uv` sync) |
+| Date | 2026-06-05 (recorded); 2026-06-22 (reproduced from a clean checkout) |
 
 The agent model, tools, and questions are identical for V0 and V1 — **only the
 skill file changes** — so the delta is attributable to the skill.
@@ -94,15 +95,21 @@ You have the following knowledge about company policies:
   knowledge. You must always attempt to use your available tools first.
 ```
 
-## Reproduce
+## Reproduce (tested)
 
 ```bash
 cd examples/skill_evolution_lab
-./setup.sh YOUR_PROJECT_ID us-central1
-./run_e2e_demo.sh
+./setup.sh YOUR_PROJECT_ID us-central1   # ~5s
+./run_e2e_demo.sh                        # ~6 min; first run also does a one-time uv sync
 ```
 
-Exact numbers vary run-to-run (LLM nondeterminism, golden-match set), but the
+This was re-run from a clean checkout (no `.env`, no `runs/`) on **2026-06-22**
+following only the two documented commands, and reproduced the table above
+**identically**: Overall **23.8% (5/21) → 100% (21/21), +76.2pp**; single-turn
+22.2% → 100%; corrections 33.3% → 100%. End-to-end **6m 13s**; the V0 skill was
+auto-restored on exit. `uv run` installed dependencies with no manual step.
+
+Exact numbers can vary run-to-run (LLM nondeterminism, golden-match set), but the
 direction is stable: the flawed V0 defers/declines on topics it has a tool for,
 and the evolved V1 uses the tool and answers correctly, including when the user
 asserts a wrong "correction".
