@@ -8,7 +8,7 @@ The skill is versioned in the **Gemini Enterprise Agent Platform Skill
 Registry** (V0 = revision 1, V1 = revision 2).
 
 This is the runnable companion to the blog post *"Your Agent Can Write Its Own
-Skill."* See [`BLOG.md`](BLOG.md) for the full story and
+Skill"* (BigQuery Agent Analytics Series). See
 [`VERIFICATION.md`](VERIFICATION.md) for a recorded end-to-end run.
 
 ## What it shows
@@ -23,7 +23,7 @@ Skill."* See [`BLOG.md`](BLOG.md) for the full story and
 - **The anti-parroting rule.** Multi-turn cases where the user asserts a *wrong*
   correction. A good agent re-verifies with its tool and holds the right figure
   instead of caving. The engine detects parroting and learns a "re-verify, don't
-  just agree" rule. (See [BLOG.md](BLOG.md#corrections-are-not-answers-the-anti-parroting-rule).)
+  just agree" rule.
 - **Skill Registry versioning.** The evolved skill is mirrored to the registry
   as a new immutable revision; `reset.sh` reverts both the local copy and the
   registry to V0.

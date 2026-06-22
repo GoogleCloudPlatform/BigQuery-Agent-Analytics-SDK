@@ -1,8 +1,8 @@
 # Verification — recorded end-to-end run
 
 A full `./run_e2e_demo.sh` run of this example, captured so the result is
-reproducible and the numbers in [`BLOG.md`](BLOG.md) are
-backed by an actual run (not aspirational).
+reproducible and the numbers reported in the companion blog post are backed by an
+actual run (not aspirational).
 
 ## Configuration
 
