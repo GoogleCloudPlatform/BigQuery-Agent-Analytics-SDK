@@ -14,9 +14,9 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Parse --env flag before other processing
+# Parse --env flag before other processing (supports --env PATH and --env=PATH).
+# The flag is NOT stripped — Python also accepts --env for report metadata.
 ENV_FILE=""
-PASSTHROUGH_ARGS=()
 for arg in "$@"; do
     if [ "$_NEXT_IS_ENV" = "1" ]; then
         ENV_FILE="$arg"
@@ -27,10 +27,12 @@ for arg in "$@"; do
         _NEXT_IS_ENV=1
         continue
     fi
-    PASSTHROUGH_ARGS+=("$arg")
+    if [[ "$arg" == --env=* ]]; then
+        ENV_FILE="${arg#--env=}"
+        continue
+    fi
 done
 unset _NEXT_IS_ENV
-set -- "${PASSTHROUGH_ARGS[@]}"
 
 # Load .env: explicit --env wins, then repo root default
 if [ -n "$ENV_FILE" ]; then
@@ -47,14 +49,31 @@ elif [ -f "${SCRIPT_DIR}/../.env" ]; then
     set +a
 fi
 
-# Validate required env vars
-for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
-    if [ -z "${!var}" ]; then
-        echo "ERROR: Required environment variable ${var} is not set."
-        echo "Set it in your shell or create a .env file. See scripts/README.md."
-        exit 1
+# Short-circuit: pass --help / -h straight to Python (no env needed)
+for arg in "$@"; do
+    if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        python3 "${SCRIPT_DIR}/quality_report.py" "$@"
+        exit $?
     fi
 done
+
+# Validate required env vars (skip for --conversations-file mode)
+HAS_CONVERSATIONS_FILE=false
+for arg in "$@"; do
+    if [[ "$arg" == "--conversations-file" || "$arg" == --conversations-file=* ]]; then
+        HAS_CONVERSATIONS_FILE=true
+        break
+    fi
+done
+if ! $HAS_CONVERSATIONS_FILE; then
+    for var in PROJECT_ID DATASET_ID TABLE_ID DATASET_LOCATION; do
+        if [ -z "${!var}" ]; then
+            echo "ERROR: Required environment variable ${var} is not set."
+            echo "Use --env /path/to/.env, or 'export ${var}=...' in your shell."
+            exit 1
+        fi
+    done
+fi
 
 # Log eval runs (skip logging for --no-eval)
 if [[ " $* " != *" --no-eval "* ]]; then

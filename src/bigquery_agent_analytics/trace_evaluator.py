@@ -432,6 +432,13 @@ class BigQueryTraceEvaluator:
       "HITL_CREDENTIAL_REQUEST_COMPLETED",
       "HITL_INPUT_REQUEST",
       "HITL_INPUT_REQUEST_COMPLETED",
+      # ADK 2.0 event types (producer #293).
+      "AGENT_TRANSFER",
+      "EVENT_COMPACTION",
+      "AGENT_STATE_CHECKPOINT",
+      "TOOL_PAUSED",
+      "WORKFLOW_NODE_STARTING",
+      "WORKFLOW_NODE_COMPLETED",
   ]
 
   _SESSION_TRACE_QUERY = """

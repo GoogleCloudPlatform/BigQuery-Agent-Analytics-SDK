@@ -220,12 +220,12 @@ Dispatch logic:
 ```python
 # Map CLI --evaluator to SDK factory
 EVALUATOR_FACTORIES = {
-    "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
-    "error_rate": lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-    "turn_count": lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-    "token_efficiency": lambda t: CodeEvaluator.token_efficiency(max_tokens=int(t)),
-    "ttft": lambda t: CodeEvaluator.ttft(threshold_ms=t),
-    "cost": lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
+    "latency": lambda t: SystemEvaluator.latency(threshold_ms=t),
+    "error_rate": lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+    "turn_count": lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+    "token_efficiency": lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
+    "ttft": lambda t: SystemEvaluator.ttft(threshold_ms=t),
+    "cost": lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
     "llm-judge": None,  # special handling
 }
 # context_cache_hit_rate is special-cased so callers can pass
@@ -292,7 +292,7 @@ import functions_framework
 from flask import jsonify
 
 from bigquery_agent_analytics import Client, serialize
-from bigquery_agent_analytics import CodeEvaluator, LLMAsJudge
+from bigquery_agent_analytics import SystemEvaluator, LLMAsJudge
 from bigquery_agent_analytics import TraceFilter
 
 
@@ -396,35 +396,35 @@ def _bool_param(value):
 
 
 def _build_evaluator(params):
-    """Build CodeEvaluator from params dict."""
+    """Build SystemEvaluator from params dict."""
     metric = params.get("metric", "latency")
     threshold = params.get("threshold")
     fail_on_missing_telemetry = _bool_param(
         params.get("fail_on_missing_telemetry", False)
     )
     factories = {
-        "latency": lambda t: CodeEvaluator.latency(threshold_ms=t),
-        "error_rate": lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-        "turn_count": lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-        "token_efficiency": lambda t: CodeEvaluator.token_efficiency(
+        "latency": lambda t: SystemEvaluator.latency(threshold_ms=t),
+        "error_rate": lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+        "turn_count": lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+        "token_efficiency": lambda t: SystemEvaluator.token_efficiency(
             max_tokens=int(t)
         ),
-        "ttft": lambda t: CodeEvaluator.ttft(threshold_ms=t),
-        "cost": lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
+        "ttft": lambda t: SystemEvaluator.ttft(threshold_ms=t),
+        "cost": lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
     }
     factories_default = {
-        "latency": CodeEvaluator.latency,
-        "error_rate": CodeEvaluator.error_rate,
-        "turn_count": CodeEvaluator.turn_count,
-        "token_efficiency": CodeEvaluator.token_efficiency,
-        "ttft": CodeEvaluator.ttft,
-        "cost": CodeEvaluator.cost_per_session,
+        "latency": SystemEvaluator.latency,
+        "error_rate": SystemEvaluator.error_rate,
+        "turn_count": SystemEvaluator.turn_count,
+        "token_efficiency": SystemEvaluator.token_efficiency,
+        "ttft": SystemEvaluator.ttft,
+        "cost": SystemEvaluator.cost_per_session,
     }
     if metric == "context_cache_hit_rate":
         kwargs = {"fail_on_missing_telemetry": fail_on_missing_telemetry}
         if threshold is not None:
             kwargs["min_hit_rate"] = threshold
-        return CodeEvaluator.context_cache_hit_rate(**kwargs)
+        return SystemEvaluator.context_cache_hit_rate(**kwargs)
     if metric not in factories:
         raise ValueError(f"Unknown metric: {metric}")
     if threshold is not None:
@@ -612,7 +612,7 @@ Complete mapping from interface operations to current SDK code:
 | Operation | SDK Method | File:Line | Return Type | Serialization Strategy |
 |-----------|-----------|-----------|-------------|----------------------|
 | `analyze` | `Client.get_session_trace()` | `client.py` | `Trace` (dataclass) | `serialize()` → recursive `.to_dict()` |
-| `evaluate` | `Client.evaluate(CodeEvaluator)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
+| `evaluate` | `Client.evaluate(SystemEvaluator)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
 | `judge` | `Client.evaluate(LLMAsJudge)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
 | `insights` | `Client.insights()` | `client.py` | `InsightsReport` (Pydantic) | `.model_dump(mode="json")` |
 | `drift` | `Client.drift_detection()` | `client.py` | `DriftReport` (Pydantic) | `.model_dump(mode="json")` |
@@ -625,13 +625,13 @@ Complete mapping from interface operations to current SDK code:
 
 | CLI `--evaluator` | SDK Factory | File |
 |-------------------|------------|------|
-| `latency` | `CodeEvaluator.latency(threshold_ms)` | `evaluators.py` |
-| `error_rate` | `CodeEvaluator.error_rate(max_error_rate)` | `evaluators.py` |
-| `turn_count` | `CodeEvaluator.turn_count(max_turns)` | `evaluators.py` |
-| `token_efficiency` | `CodeEvaluator.token_efficiency(max_tokens)` | `evaluators.py` |
-| `context_cache_hit_rate` | `CodeEvaluator.context_cache_hit_rate(min_hit_rate)` | `evaluators.py` |
-| `ttft` | `CodeEvaluator.ttft(threshold_ms)` | `evaluators.py` |
-| `cost` | `CodeEvaluator.cost_per_session(max_cost_usd)` | `evaluators.py` |
+| `latency` | `SystemEvaluator.latency(threshold_ms)` | `evaluators.py` |
+| `error_rate` | `SystemEvaluator.error_rate(max_error_rate)` | `evaluators.py` |
+| `turn_count` | `SystemEvaluator.turn_count(max_turns)` | `evaluators.py` |
+| `token_efficiency` | `SystemEvaluator.token_efficiency(max_tokens)` | `evaluators.py` |
+| `context_cache_hit_rate` | `SystemEvaluator.context_cache_hit_rate(min_hit_rate)` | `evaluators.py` |
+| `ttft` | `SystemEvaluator.ttft(threshold_ms)` | `evaluators.py` |
+| `cost` | `SystemEvaluator.cost_per_session(max_cost_usd)` | `evaluators.py` |
 | `llm-judge` | `LLMAsJudge.correctness/hallucination/sentiment(threshold)` | `evaluators.py` |
 
 ### SDK Capabilities NOT Exposed (v1.2+ candidates)

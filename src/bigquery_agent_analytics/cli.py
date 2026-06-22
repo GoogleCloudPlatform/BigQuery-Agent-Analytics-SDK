@@ -39,9 +39,9 @@ from typing import Optional
 
 import typer
 
-from .evaluators import CodeEvaluator
 from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
+from .evaluators import SystemEvaluator
 from .formatter import format_output
 from .trace import TraceFilter
 
@@ -50,6 +50,33 @@ app = typer.Typer(
     help="BigQuery Agent Analytics SDK CLI.",
     add_completion=False,
 )
+
+# Product-facing CLI surface. Wraps the same handlers that ``bq-agent-sdk``
+# exposes under their implementation-shaped names, but presents them with
+# product-aligned vocabulary (``context-graph`` for the materialization
+# pass, etc.). New customer-facing commands should be added here.
+bqaa_app = typer.Typer(
+    name="bqaa",
+    help=(
+        "BigQuery Agent Analytics — product-facing CLI surface for building"
+        " and refreshing the BigQuery context graph that traces your AI"
+        " agent's decisions."
+    ),
+    add_completion=False,
+    no_args_is_help=True,
+)
+
+
+@bqaa_app.callback()
+def _bqaa_callback() -> None:
+  """BigQuery Agent Analytics — product-facing CLI.
+
+  The ``@callback`` keeps Typer from auto-promoting a single
+  subcommand's options to the top level. Without it, ``bqaa --help``
+  would show the ``context-graph`` flags directly instead of the
+  subcommand list.
+  """
+  return None
 
 
 # ------------------------------------------------------------------ #
@@ -213,30 +240,30 @@ def _load_spec_from_args(
 # Evaluator factories                                                  #
 # ------------------------------------------------------------------ #
 
-_CODE_EVALUATORS = {
+_SYSTEM_EVALUATORS = {
     "latency": (
-        lambda t: CodeEvaluator.latency(threshold_ms=t),
-        lambda: CodeEvaluator.latency(),
+        lambda t: SystemEvaluator.latency(threshold_ms=t),
+        lambda: SystemEvaluator.latency(),
     ),
     "error_rate": (
-        lambda t: CodeEvaluator.error_rate(max_error_rate=t),
-        lambda: CodeEvaluator.error_rate(),
+        lambda t: SystemEvaluator.error_rate(max_error_rate=t),
+        lambda: SystemEvaluator.error_rate(),
     ),
     "turn_count": (
-        lambda t: CodeEvaluator.turn_count(max_turns=int(t)),
-        lambda: CodeEvaluator.turn_count(),
+        lambda t: SystemEvaluator.turn_count(max_turns=int(t)),
+        lambda: SystemEvaluator.turn_count(),
     ),
     "token_efficiency": (
-        lambda t: CodeEvaluator.token_efficiency(max_tokens=int(t)),
-        lambda: CodeEvaluator.token_efficiency(),
+        lambda t: SystemEvaluator.token_efficiency(max_tokens=int(t)),
+        lambda: SystemEvaluator.token_efficiency(),
     ),
     "ttft": (
-        lambda t: CodeEvaluator.ttft(threshold_ms=t),
-        lambda: CodeEvaluator.ttft(),
+        lambda t: SystemEvaluator.ttft(threshold_ms=t),
+        lambda: SystemEvaluator.ttft(),
     ),
     "cost": (
-        lambda t: CodeEvaluator.cost_per_session(max_cost_usd=t),
-        lambda: CodeEvaluator.cost_per_session(),
+        lambda t: SystemEvaluator.cost_per_session(max_cost_usd=t),
+        lambda: SystemEvaluator.cost_per_session(),
     ),
 }
 
@@ -430,9 +457,9 @@ def evaluate(
       }
       if threshold is not None:
         kwargs["min_hit_rate"] = threshold
-      ev = CodeEvaluator.context_cache_hit_rate(**kwargs)
+      ev = SystemEvaluator.context_cache_hit_rate(**kwargs)
     else:
-      entry = _CODE_EVALUATORS.get(evaluator)
+      entry = _SYSTEM_EVALUATORS.get(evaluator)
       if not entry:
         typer.echo(
             f"Error: unknown evaluator: {evaluator!r}.",
@@ -494,7 +521,7 @@ def _emit_evaluate_failures(
   """Emit readable FAIL lines for failing sessions before --exit-code exits.
 
   One line per (session_id, metric_name) that failed its threshold.
-  Prefers the raw observed + budget pair (``CodeEvaluator`` prebuilts);
+  Prefers the raw observed + budget pair (``SystemEvaluator`` prebuilts);
   falls back to score + threshold when the metric didn't declare
   observed/budget (custom ``add_metric`` users, ``LLMAsJudge``
   criteria). For LLM-judge failures the line also carries a bounded
@@ -1740,6 +1767,37 @@ def views_create(
 # ------------------------------------------------------------------ #
 
 
+def _validate_context_graph_input_mode(
+    ontology_path: Optional[str],
+    binding_path: Optional[str],
+    property_graph_path: Optional[str],
+    graph: Optional[str] = None,
+) -> None:
+  """Enforce exactly one input mode for the graph-refresh command.
+
+  Exactly one of ``--graph``, ``--property-graph``, or (``--ontology`` +
+  ``--binding``) must be supplied. Raises ``typer.BadParameter`` (rendered as
+  a usage error) otherwise. Kept as a pure helper so the rule is unit-tested
+  directly rather than through brittle assertions on rendered CLI output.
+  """
+  has_separated = ontology_path is not None or binding_path is not None
+  modes_supplied = sum(
+      [graph is not None, property_graph_path is not None, has_separated]
+  )
+  if modes_supplied > 1:
+    raise typer.BadParameter(
+        "Use exactly one of --graph, --property-graph, or"
+        " --ontology/--binding."
+    )
+  if modes_supplied == 0 or (
+      has_separated and (ontology_path is None or binding_path is None)
+  ):
+    raise typer.BadParameter(
+        "Provide --graph NAME, --property-graph PATH, or both --ontology PATH"
+        " and --binding PATH."
+    )
+
+
 @app.command("materialize-window")
 def materialize_window(
     project_id: str = typer.Option(
@@ -1748,11 +1806,42 @@ def materialize_window(
     dataset_id: str = typer.Option(
         ..., envvar="BQ_AGENT_DATASET", help="BigQuery dataset."
     ),
-    ontology_path: str = typer.Option(
-        ..., "--ontology", help="Path to ontology YAML file."
+    ontology_path: Optional[str] = typer.Option(
+        None,
+        "--ontology",
+        help=(
+            "Path to ontology YAML file. Use with --binding, or omit both and"
+            " pass --graph to derive them from the property graph you already"
+            " deployed to BigQuery."
+        ),
     ),
-    binding_path: str = typer.Option(
-        ..., "--binding", help="Path to binding YAML file."
+    binding_path: Optional[str] = typer.Option(
+        None,
+        "--binding",
+        help="Path to binding YAML file (use with --ontology).",
+    ),
+    property_graph_path: Optional[str] = typer.Option(
+        None,
+        "--property-graph",
+        help=(
+            "Path to a CREATE PROPERTY GRAPH .sql file. Derives the ontology"
+            " and binding from the graph definition + table schemas, so no"
+            " hand-written ontology.yaml/binding.yaml is needed. Mutually"
+            " exclusive with --ontology/--binding."
+        ),
+    ),
+    graph: Optional[str] = typer.Option(
+        None,
+        "--graph",
+        help=(
+            "Name of a property graph already deployed to BigQuery (bare"
+            " name, dataset.graph, or project.dataset.graph; bare names"
+            " resolve in --dataset-id). Reads the graph's DDL back from"
+            " INFORMATION_SCHEMA.PROPERTY_GRAPHS and derives the ontology and"
+            " binding from it + the live table schemas — the deployed graph"
+            " is the single source of truth. Mutually exclusive with"
+            " --property-graph and --ontology/--binding."
+        ),
     ),
     events_table: str = typer.Option(
         "agent_events",
@@ -1926,6 +2015,18 @@ def materialize_window(
             "mode."
         ),
     ),
+    endpoint: str = typer.Option(
+        "gemini-2.5-flash",
+        "--endpoint",
+        help=(
+            "Vertex AI model for the AI.GENERATE extraction "
+            "fallback (used in 'ai-fallback' mode). Short names "
+            "resolve to a locations/global publisher URL, so "
+            "Gemini 3.x models such as 'gemini-3.5-flash' work "
+            "here. Ignored under --extraction-mode=compiled-only "
+            "(no AI call is made)."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -1950,6 +2051,12 @@ def materialize_window(
       2 — unexpected internal error (load failure, missing flag,
           programming bug).
   """
+  # Validate the input mode before any work: exactly one of
+  # --graph, --property-graph, or (--ontology + --binding).
+  _validate_context_graph_input_mode(
+      ontology_path, binding_path, property_graph_path, graph
+  )
+
   try:
     from .materialize_window import _parse_backfill_timestamp
     from .materialize_window import run_materialize_window
@@ -1967,6 +2074,8 @@ def materialize_window(
         dataset_id=dataset_id,
         ontology_path=ontology_path,
         binding_path=binding_path,
+        property_graph_path=property_graph_path,
+        graph=graph,
         events_table=events_table,
         lookback_hours=lookback_hours,
         overlap_minutes=overlap_minutes,
@@ -1986,6 +2095,109 @@ def materialize_window(
         extraction_mode=extraction_mode,
         state_key_suffix=state_key_suffix,
         max_session_age_hours=max_session_age_hours,
+        endpoint=endpoint,
+    )
+    typer.echo(format_output(result.to_json(), fmt))
+    if not result.ok:
+      raise typer.Exit(code=1)
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
+# Register the same ``materialize_window`` callback as the
+# ``context-graph`` subcommand on the product-facing ``bqaa`` app.
+# Both ``bq-agent-sdk materialize-window`` and ``bqaa context-graph``
+# now reach the identical implementation. The latter is the
+# product-facing name; the former is preserved for backward
+# compatibility with the internal developer workflow.
+bqaa_app.command(
+    "context-graph",
+    help=(
+        "Build or refresh the BigQuery context graph from agent events."
+        " Scans the configured event window, extracts entities and"
+        " relationships per session, and materializes the graph tables."
+    ),
+)(materialize_window)
+
+
+@bqaa_app.command("seed-events")
+def seed_events(
+    project_id: str = typer.Option(
+        ..., envvar="BQ_AGENT_PROJECT", help=_PROJECT_HELP
+    ),
+    dataset_id: str = typer.Option(
+        ..., envvar="BQ_AGENT_DATASET", help=_DATASET_HELP
+    ),
+    events_table: str = typer.Option(
+        "agent_events",
+        "--events-table",
+        help="Destination telemetry table name (in --dataset-id).",
+    ),
+    sessions: Optional[int] = typer.Option(
+        None,
+        "--sessions",
+        help=(
+            "Number of synthetic sessions (>= 1). Default depends on"
+            " --scenario: 5 for decision, 100 for decision-realistic,"
+            " 100 for retail-returns."
+        ),
+    ),
+    seed: Optional[int] = typer.Option(
+        None,
+        "--seed",
+        help=(
+            "Seed for deterministic IDs/content. Timestamps remain anchored to"
+            " run time unless using the SDK with an injected now."
+        ),
+    ),
+    scenario: str = typer.Option(
+        "decision",
+        "--scenario",
+        help=(
+            "Synthetic scenario: decision (small, default),"
+            " decision-realistic (100-session, multi-day, mixed outcomes), or"
+            " retail-returns (multi-agent refund/exchange flow with LLM"
+            " token/latency telemetry)."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Generate and report events without creating the table or inserting.",
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """Seed a dataset with synthetic agent_events for the context graph.
+
+  Generates decision telemetry (TOOL_COMPLETED + AGENT_COMPLETED) so
+  ``bqaa context-graph`` has sessions to process. The ``decision`` scenario
+  emits only terminal-event-closed sessions; ``decision-realistic`` also
+  includes failed, truncated, and orphaned (no terminal event) sessions.
+  ``retail-returns`` emits a multi-agent refund/exchange flow with
+  LLM_REQUEST/LLM_RESPONSE token-usage and latency telemetry (one terminal
+  AGENT_COMPLETED per session) for token/latency analytics demos.
+
+  Exit codes:
+      0 — events generated (and inserted, unless --dry-run).
+      1 — BigQuery returned insert errors (reported in the JSON output).
+      2 — invalid input or unexpected internal error.
+  """
+  try:
+    from .seed_events import run_seed_events
+
+    result = run_seed_events(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        sessions=sessions,
+        seed=seed,
+        scenario=scenario,
+        events_table=events_table,
+        dry_run=dry_run,
     )
     typer.echo(format_output(result.to_json(), fmt))
     if not result.ok:
@@ -2002,24 +2214,45 @@ def main() -> None:
   app()
 
 
+def bqaa_main() -> None:
+  """Entry point for the product-facing ``bqaa`` console script."""
+  bqaa_app()
+
+
+_DEPRECATION_NOTICE = (
+    "DeprecationWarning: 'bqaa-materialize-window' is deprecated and will"
+    " be removed in a future release. Use 'bqaa context-graph' with the"
+    " same flags instead."
+)
+
+
+def _print_deprecation_warning() -> None:
+  """Print the ``bqaa-materialize-window`` deprecation notice to stderr.
+
+  Extracted from ``_materialize_window_entry`` for testability.
+  """
+  print(_DEPRECATION_NOTICE, file=sys.stderr)
+
+
 def _materialize_window_entry() -> None:
-  """Entry point for the standalone ``bqaa-materialize-window``
+  """Deprecated entry point for the standalone ``bqaa-materialize-window``
   console script.
+
+  Prints a one-line deprecation notice to stderr, then invokes the same
+  handler the ``bqaa context-graph`` subcommand uses. Behavior is
+  otherwise unchanged so existing deploy scripts, Terraform modules,
+  and CI pipelines that already shell out to ``bqaa-materialize-window``
+  keep working through the deprecation window.
 
   Builds a Click command directly from the ``materialize_window``
   callback so ``--help`` renders as
   ``Usage: bqaa-materialize-window [OPTIONS]`` — collapsed, no
-  nested subcommand. ``typer.run`` would re-register the function
-  as a subcommand named ``materialize-window``, producing the
-  confusing
-  ``Usage: bqaa-materialize-window materialize-window [OPTIONS]``.
-  The function body is the same one registered on the main ``app``
-  as the ``materialize-window`` subcommand; both call paths share
-  the implementation.
+  nested subcommand.
   """
   from typer.main import get_command_from_info
   from typer.models import CommandInfo
 
+  _print_deprecation_warning()
   info = CommandInfo(name=None, callback=materialize_window)
   click_cmd = get_command_from_info(
       info, pretty_exceptions_short=True, rich_markup_mode=None

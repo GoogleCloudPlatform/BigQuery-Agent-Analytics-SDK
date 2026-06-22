@@ -12,9 +12,9 @@ artifacts that demonstrate SDK capabilities.
 | [e2e_notebook_demo.ipynb](e2e_notebook_demo.ipynb) | End-to-end SDK workflow |
 | [ai_ml_integration_demo.ipynb](ai_ml_integration_demo.ipynb) | AI.GENERATE, AI.EMBED, anomaly detection |
 | [categorical_evaluation_demo.ipynb](categorical_evaluation_demo.ipynb) | Hatteras categorical evaluation |
-| [context_graph_adcp_demo.ipynb](context_graph_adcp_demo.ipynb) | Property Graph use cases |
+| [context_graph_adcp_demo.ipynb](context_graph_adcp_demo.ipynb) | Agent Context Graph decision-trace use cases |
 | [ontology_graph_v5_demo.ipynb](ontology_graph_v5_demo.ipynb) | OWL import, mixed extraction, temporal lineage, GQL |
-| [migration_v5_demo_notebook.ipynb](migration_v5_demo_notebook.ipynb) | Migrated V5 pipeline using separated ontology + binding |
+| [_archive/context_graph_historical_notebook.ipynb](_archive/context_graph_historical_notebook.ipynb) | Archived: the original MAKO context-graph pipeline (explicit ontology + binding), kept as frozen evidence |
 | [ontology_graph_v4_demo.ipynb](ontology_graph_v4_demo.ipynb) | Ontology extraction + GQL **(legacy)** |
 | [memory_service_demo.ipynb](memory_service_demo.ipynb) | Cross-session memory |
 | [event_semantics_views_bigframes_demo.ipynb](event_semantics_views_bigframes_demo.ipynb) | Event views + BigFrames |
@@ -51,7 +51,9 @@ artifacts that demonstrate SDK capabilities.
 
 | Directory | Description |
 |-----------|-------------|
+| [context_graph/](context_graph/) | Agent Context Graph: extract decision traces from your agent's context graph — a runnable ADK agent + BQ AA plugin streaming events, the codelab artifacts ([codelab/](context_graph/codelab/)), and the scheduled Cloud Run + Cloud Scheduler deploy ([periodic_materialization/](context_graph/periodic_materialization/)). Start with the [codelab](../docs/codelabs/periodic_materialization.md). |
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
+| [self_evolving_agent_demo/](self_evolving_agent_demo/) | Metric-driven self-evolution demo for a single ADK agent. Uses trace signals to generate and gate a bounded prompt evolution. |
 | [skill_evolution_lab/](skill_evolution_lab/) | An agent that rewrites its own versioned `SKILL.md` from its conversation traces (no teacher model): flawed V0 → `evolve_skill()` → tool-first V1, golden-Q&A scored, with the anti-parroting rule and Skill Registry versioning. See the dedicated section below. |
 | [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
 
@@ -103,7 +105,8 @@ V1 100%** overall; corrections (anti-parroting) **33.3% → 100%**; evolved skil
 | [e2e_demo_output.txt](e2e_demo_output.txt) | Expected output from e2e_demo.py |
 | [ymgo_graph_spec.yaml](ymgo_graph_spec.yaml) | Example ontology YAML specification **(legacy)** |
 
-> **Note:** `ontology_graph_v4_demo.ipynb` and `ymgo_graph_spec.yaml` use the legacy combined
-> `GraphSpec` format. The current approach uses separated ontology + binding YAML files with
-> `load_ontology()` + `load_binding()` from `bigquery_ontology`. See `ontology_graph_v5_demo.ipynb`
-> or `migration_v5_demo_notebook.ipynb`.
+> **Note:** `ontology_graph_v4_demo.ipynb`, `ontology_graph_v5_demo.ipynb`, and
+> `ymgo_graph_spec.yaml` are kept for reference. The current Agent Context Graph approach
+> needs none of these files: deploy your property graph to BigQuery and
+> `bqaa context-graph --graph` derives everything from it — start with the
+> [codelab](../docs/codelabs/periodic_materialization.md).

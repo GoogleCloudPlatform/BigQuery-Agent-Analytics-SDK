@@ -119,7 +119,14 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
   JSON_VALUE(content, '$.tool') AS tool_name,
   JSON_QUERY(content, '$.result') AS tool_result,
   JSON_VALUE(content, '$.tool_origin') AS tool_origin,
-  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms""",
+  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,
+  -- ADK 2.0 long-running pair keys (#199/#293). Null on ordinary
+  -- (non-long-running) completions; set on the resume row that pairs
+  -- with a TOOL_PAUSED. `pause_orphan` is reserved for the pause
+  -- registry (#206) — the producer emits it null until that lands.
+  JSON_VALUE(attributes, '$.adk.function_call_id') AS function_call_id,
+  JSON_VALUE(attributes, '$.adk.pause_kind') AS pause_kind,
+  CAST(JSON_VALUE(attributes, '$.adk.pause_orphan') AS BOOL) AS pause_orphan""",
     ),
     "TOOL_ERROR": (
         "tool_errors",
@@ -234,6 +241,67 @@ _EVENT_VIEW_DEFS: dict[str, tuple[str, str]] = {
       '$.a2a_metadata."a2a:response".metadata.adk_session_id'
     )
   ) AS receiver_session_id""",
+    ),
+    # ---------------------------------------------------------------- #
+    # ADK 2.0 event types (producer: BQ AA Plugin minimum cut, #293).   #
+    # Column SQL mirrors the keys the producer actually emits.          #
+    # ---------------------------------------------------------------- #
+    "AGENT_TRANSFER": (
+        "agent_transfers",
+        """\
+  JSON_VALUE(content, '$.from_agent') AS from_agent,
+  JSON_VALUE(content, '$.to_agent') AS to_agent""",
+    ),
+    "EVENT_COMPACTION": (
+        "event_compactions",
+        # start/end are float epoch seconds; preserve sub-second
+        # precision via micros rather than CAST(... AS TIMESTAMP).
+        """\
+  TIMESTAMP_MICROS(CAST(
+    CAST(JSON_VALUE(content, '$.start_timestamp') AS FLOAT64) * 1000000 AS INT64
+  )) AS start_timestamp,
+  TIMESTAMP_MICROS(CAST(
+    CAST(JSON_VALUE(content, '$.end_timestamp') AS FLOAT64) * 1000000 AS INT64
+  )) AS end_timestamp,
+  JSON_VALUE(content, '$.compacted_content') AS compacted_content""",
+    ),
+    "AGENT_STATE_CHECKPOINT": (
+        "agent_state_checkpoints",
+        # Inline payload only; offload columns (agent_state_uri,
+        # agent_state_sha256) are a #208 follow-up.
+        #
+        # agent_state_type is the presence discriminator (mirrors the
+        # producer's own view). JSON_QUERY on an explicit JSON null
+        # returns JSON null, not SQL NULL, so consumers read JSON_TYPE
+        # to tell apart: SQL NULL = key absent, 'null' = the explicit
+        # {agent_state: null, end_of_agent: true} shape, anything else
+        # = a real state object.
+        """\
+  JSON_QUERY(content, '$.agent_state') AS agent_state,
+  JSON_TYPE(JSON_QUERY(content, '$.agent_state')) AS agent_state_type,
+  CAST(JSON_VALUE(content, '$.end_of_agent') AS BOOL) AS end_of_agent""",
+    ),
+    "TOOL_PAUSED": (
+        "tool_pauses",
+        # pause_orphan is NOT a TOOL_PAUSED field — it lives on the
+        # long-running TOOL_COMPLETED row (see that view + #206/#215).
+        """\
+  JSON_VALUE(content, '$.tool') AS tool_name,
+  JSON_QUERY(content, '$.args') AS tool_args,
+  JSON_VALUE(attributes, '$.adk.function_call_id') AS function_call_id,
+  JSON_VALUE(attributes, '$.adk.pause_kind') AS pause_kind""",
+    ),
+    # Workflow-node boundaries: base-header-only views for now. Typed
+    # columns are blocked on the producer's boundary-derivation choice
+    # in #207 (event-observation vs OTel-span) and land in a follow-up.
+    # TODO(#207): add typed extra columns once the boundary shape is set.
+    "WORKFLOW_NODE_STARTING": (
+        "workflow_node_starts",
+        "",
+    ),
+    "WORKFLOW_NODE_COMPLETED": (
+        "workflow_node_completions",
+        "",
     ),
 }
 

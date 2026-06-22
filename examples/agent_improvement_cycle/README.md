@@ -104,7 +104,7 @@ This demo shows how to close that gap using four components:
    logged sessions back from BigQuery, evaluates quality using an LLM
    judge, and produces structured reports that drive automated
    improvement.
-3. **[`SDK CodeEvaluator`](../../bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
+3. **[`SDK SystemEvaluator`](../../bigquery_agent_analytics/evaluators.py)** (the SDK's deterministic evaluator) checks
    operational metrics — latency, token efficiency, and turn count —
    on the same sessions. No LLM calls needed, just math on the data
    already in BigQuery. This ensures the improved prompt doesn't trade
@@ -130,7 +130,7 @@ The full cycle:
 5. **MEASURE IMPROVEMENT:** Verify the improved prompt against fresh traffic to quantify the quality jump.
 
 At each evaluation step (3 and 5), the SDK's deterministic
-`CodeEvaluator` also checks latency, token efficiency, and turn count.
+`SystemEvaluator` also checks latency, token efficiency, and turn count.
 Step 3 establishes the operational baseline; Step 5 shows the
 before/after comparison to verify the improved prompt didn't regress
 on cost or performance. No extra agent runs — just math on the session
@@ -429,7 +429,7 @@ using ADK's `InMemoryRunner`. Sessions are logged to BigQuery via the
 **Step 3: Evaluate Quality** -- The SDK's `quality_report.py` reads
 sessions from BigQuery and scores each one on response_usefulness
 (meaningful/partial/unhelpful) and task_grounding (grounded/ungrounded).
-The SDK's `CodeEvaluator` also runs deterministic checks on the same
+The SDK's `SystemEvaluator` also runs deterministic checks on the same
 sessions — latency, token efficiency, and turn count — to establish
 an operational baseline.
 
@@ -721,7 +721,7 @@ deployments, consider periodically pruning redundant golden cases.
 
 ## Further Reading
 
-- [Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed) — Using the SDK's `CodeEvaluator` and `categorical-eval` CLI to gate PRs against production traces. Covers the same deterministic evaluators (latency, token efficiency, turn count, error rate) this demo uses in Steps 3 and 5.
+- [Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed) — Using the SDK's `SystemEvaluator` and `categorical-eval` CLI to gate PRs against production traces. Covers the same deterministic evaluators (latency, token efficiency, turn count, error rate) this demo uses in Steps 3 and 5.
 - [BigQuery Agent Analytics: From Logs to Graphs](https://medium.com/google-cloud/bigquery-agent-analytics-from-logs-to-graphs-ab0bc34e1418) — Visualizing agent session traces as interactive graphs. Shows how the `BigQueryAgentAnalyticsPlugin` captures the data that powers this improvement cycle.
 
 ## Future / Next Steps

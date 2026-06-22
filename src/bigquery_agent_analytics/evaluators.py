@@ -14,7 +14,7 @@
 
 """Evaluation engine for BigQuery Agent Analytics SDK.
 
-Provides ``CodeEvaluator`` for deterministic, code-based metrics and
+Provides ``SystemEvaluator`` for deterministic, code-based metrics and
 ``LLMAsJudge`` for semantic evaluation using LLM-as-a-judge. The
 ``evaluate()`` function orchestrates batch evaluation using BigQuery's
 native AI functions for scalable, zero-ETL assessment.
@@ -22,11 +22,11 @@ native AI functions for scalable, zero-ETL assessment.
 Example usage::
 
     from bigquery_agent_analytics.evaluators import (
-        CodeEvaluator, LLMAsJudge,
+        SystemEvaluator, LLMAsJudge,
     )
 
     # Deterministic evaluation
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
 
     # LLM-based semantic evaluation
     judge = LLMAsJudge.correctness()
@@ -166,7 +166,7 @@ class _MetricDef:
   detail_fn: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None
 
 
-class CodeEvaluator:
+class SystemEvaluator:
   """Deterministic evaluator using code-based metric functions.
 
   Metrics operate on a session summary dict containing::
@@ -189,7 +189,7 @@ class CodeEvaluator:
 
   def __init__(
       self,
-      name: str = "code_evaluator",
+      name: str = "system_evaluator",
       metrics: Optional[list[_MetricDef]] = None,
   ) -> None:
     self.name = name
@@ -204,7 +204,7 @@ class CodeEvaluator:
       budget: Optional[float] = None,
       observed_fn: Optional[Callable[[dict[str, Any]], Any]] = None,
       detail_fn: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Adds a custom metric function.
 
     Args:
@@ -322,7 +322,7 @@ class CodeEvaluator:
   @staticmethod
   def latency(
       threshold_ms: float = 5000.0,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator that fails when average latency exceeds the budget.
 
     Pass/fail is a raw comparison: ``avg_latency_ms <= threshold_ms``
@@ -333,14 +333,14 @@ class CodeEvaluator:
         threshold_ms: Maximum acceptable average latency in ms.
 
     Returns:
-        CodeEvaluator configured for latency checking.
+        SystemEvaluator configured for latency checking.
     """
 
     def _score(s: dict[str, Any]) -> float:
       observed = s.get("avg_latency_ms", 0) or 0
       return 1.0 if observed <= threshold_ms else 0.0
 
-    evaluator = CodeEvaluator(name="latency_evaluator")
+    evaluator = SystemEvaluator(name="latency_evaluator")
     evaluator.add_metric(
         "latency",
         _score,
@@ -351,7 +351,7 @@ class CodeEvaluator:
     return evaluator
 
   @staticmethod
-  def turn_count(max_turns: int = 10) -> CodeEvaluator:
+  def turn_count(max_turns: int = 10) -> SystemEvaluator:
     """Pre-built evaluator that fails when turn count exceeds the budget.
 
     Pass/fail is a raw comparison: ``turn_count <= max_turns`` passes,
@@ -361,14 +361,14 @@ class CodeEvaluator:
         max_turns: Maximum acceptable number of turns.
 
     Returns:
-        CodeEvaluator configured for turn count checking.
+        SystemEvaluator configured for turn count checking.
     """
 
     def _score(s: dict[str, Any]) -> float:
       observed = s.get("turn_count", 0) or 0
       return 1.0 if observed <= max_turns else 0.0
 
-    evaluator = CodeEvaluator(name="turn_count_evaluator")
+    evaluator = SystemEvaluator(name="turn_count_evaluator")
     evaluator.add_metric(
         "turn_count",
         _score,
@@ -381,7 +381,7 @@ class CodeEvaluator:
   @staticmethod
   def error_rate(
       max_error_rate: float = 0.1,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator that fails when tool error rate exceeds the budget.
 
     Pass/fail is a raw comparison: ``(tool_errors / tool_calls) <= max_error_rate``
@@ -392,7 +392,7 @@ class CodeEvaluator:
         max_error_rate: Maximum acceptable tool error fraction.
 
     Returns:
-        CodeEvaluator configured for error rate checking.
+        SystemEvaluator configured for error rate checking.
     """
 
     def _observed(s: dict[str, Any]) -> float:
@@ -408,7 +408,7 @@ class CodeEvaluator:
         return 1.0
       return 1.0 if _observed(s) <= max_error_rate else 0.0
 
-    evaluator = CodeEvaluator(name="error_rate_evaluator")
+    evaluator = SystemEvaluator(name="error_rate_evaluator")
     evaluator.add_metric(
         "error_rate",
         _score,
@@ -421,7 +421,7 @@ class CodeEvaluator:
   @staticmethod
   def token_efficiency(
       max_tokens: int = 50000,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator that fails when total tokens exceed the budget.
 
     Pass/fail is a raw comparison: ``total_tokens <= max_tokens``
@@ -431,14 +431,14 @@ class CodeEvaluator:
         max_tokens: Maximum acceptable total token count.
 
     Returns:
-        CodeEvaluator configured for token efficiency.
+        SystemEvaluator configured for token efficiency.
     """
 
     def _score(s: dict[str, Any]) -> float:
       observed = s.get("total_tokens", 0) or 0
       return 1.0 if observed <= max_tokens else 0.0
 
-    evaluator = CodeEvaluator(name="token_efficiency_evaluator")
+    evaluator = SystemEvaluator(name="token_efficiency_evaluator")
     evaluator.add_metric(
         "token_efficiency",
         _score,
@@ -451,7 +451,7 @@ class CodeEvaluator:
   @staticmethod
   def ttft(
       threshold_ms: float = 1000.0,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator that fails when TTFT exceeds the budget.
 
     Pass/fail is a raw comparison: ``avg_ttft_ms <= threshold_ms``
@@ -461,14 +461,14 @@ class CodeEvaluator:
         threshold_ms: Maximum acceptable average TTFT in ms.
 
     Returns:
-        CodeEvaluator configured for TTFT checking.
+        SystemEvaluator configured for TTFT checking.
     """
 
     def _score(s: dict[str, Any]) -> float:
       observed = s.get("avg_ttft_ms", 0) or 0
       return 1.0 if observed <= threshold_ms else 0.0
 
-    evaluator = CodeEvaluator(name="ttft_evaluator")
+    evaluator = SystemEvaluator(name="ttft_evaluator")
     evaluator.add_metric(
         "ttft",
         _score,
@@ -483,7 +483,7 @@ class CodeEvaluator:
       max_cost_usd: float = 1.0,
       input_cost_per_1k: float = 0.00025,
       output_cost_per_1k: float = 0.00125,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator that fails when per-session cost exceeds the budget.
 
     Pass/fail is a raw comparison: ``estimated_cost_usd <= max_cost_usd``
@@ -495,7 +495,7 @@ class CodeEvaluator:
         output_cost_per_1k: Cost per 1K output tokens.
 
     Returns:
-        CodeEvaluator configured for cost checking.
+        SystemEvaluator configured for cost checking.
     """
 
     def _observed(s: dict[str, Any]) -> float:
@@ -508,7 +508,7 @@ class CodeEvaluator:
     def _score(s: dict[str, Any]) -> float:
       return 1.0 if _observed(s) <= max_cost_usd else 0.0
 
-    evaluator = CodeEvaluator(name="cost_evaluator")
+    evaluator = SystemEvaluator(name="cost_evaluator")
     evaluator.add_metric(
         "cost",
         _score,
@@ -524,7 +524,7 @@ class CodeEvaluator:
       fail_on_missing_telemetry: bool = False,
       cold_start_rate: float = 0.1,
       warm_rate: float = 0.9,
-  ) -> CodeEvaluator:
+  ) -> SystemEvaluator:
     """Pre-built evaluator for Gemini context cache prefix hit rate.
 
     The observed rate is ``cached_tokens / input_tokens``. The session
@@ -545,7 +545,7 @@ class CodeEvaluator:
             ``"warm"``.
 
     Returns:
-        CodeEvaluator configured for context cache efficiency.
+        SystemEvaluator configured for context cache efficiency.
     """
     try:
       min_hit_rate = float(min_hit_rate)
@@ -617,7 +617,7 @@ class CodeEvaluator:
           "fail_on_missing_telemetry": fail_on_missing_telemetry,
       }
 
-    evaluator = CodeEvaluator(name="context_cache_hit_rate_evaluator")
+    evaluator = SystemEvaluator(name="context_cache_hit_rate_evaluator")
     evaluator.add_metric(
         "context_cache_hit_rate",
         _score,
@@ -627,6 +627,10 @@ class CodeEvaluator:
         detail_fn=_details,
     )
     return evaluator
+
+
+# Keep alias for backward compatibility
+CodeEvaluator = SystemEvaluator
 
 
 # ------------------------------------------------------------------ #

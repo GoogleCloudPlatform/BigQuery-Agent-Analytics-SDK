@@ -59,9 +59,9 @@ from google.genai import types
 # ---------------------------------------------------------------------------
 from bigquery_agent_analytics import BigQueryTraceEvaluator
 from bigquery_agent_analytics import Client
-from bigquery_agent_analytics import CodeEvaluator
 from bigquery_agent_analytics import InsightsConfig
 from bigquery_agent_analytics import LLMAsJudge
+from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import TraceFilter
 from bigquery_agent_analytics.trace_evaluator import MatchType
 
@@ -459,12 +459,12 @@ async def phase2_evaluate(
   print("\n--- 2b. Code-Based Evaluation ---\n")
   trace_filter = TraceFilter(session_ids=session_ids)
   presets = [
-      ("latency", CodeEvaluator.latency(threshold_ms=30000)),
-      ("turn_count", CodeEvaluator.turn_count(max_turns=10)),
-      ("error_rate", CodeEvaluator.error_rate(max_error_rate=0.1)),
+      ("latency", SystemEvaluator.latency(threshold_ms=30000)),
+      ("turn_count", SystemEvaluator.turn_count(max_turns=10)),
+      ("error_rate", SystemEvaluator.error_rate(max_error_rate=0.1)),
       (
           "token_efficiency",
-          CodeEvaluator.token_efficiency(max_tokens=100000),
+          SystemEvaluator.token_efficiency(max_tokens=100000),
       ),
   ]
   for preset_name, evaluator in presets:

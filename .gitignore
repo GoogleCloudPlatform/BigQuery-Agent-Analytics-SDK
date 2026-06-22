@@ -14,13 +14,13 @@ env/
 .adk/
 uv.lock
 .env
+/.idea/
 
 # Script outputs
 scripts/reports/
 
 # Example run artifacts
 examples/*/reports/
-examples/*/reports_*/
 examples/*/trials_*/
 scripts/**/*.log
 examples/**/*.log

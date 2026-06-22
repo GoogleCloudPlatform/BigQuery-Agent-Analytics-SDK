@@ -98,7 +98,7 @@ Step two sends those ten questions to the agent. Every session is logged to BigQ
 
 Step three is where the SDK earns its keep. The quality report script reads those sessions back from BigQuery and an LLM judge scores each one. Four sessions are marked unhelpful — the agent deflected instead of using its tools. One is partial. Five are meaningful. The baseline score: fifty percent meaningful. That's our starting point.
 
-Right below the quality score, the SDK's deterministic CodeEvaluator runs on the same sessions — average latency, total tokens per session,  turn count and error_rate. These are the operational baselines. No LLM needed, just math on the data already in BigQuery. We'll compare against these numbers after the improvement to make sure the new prompt didn't trade quality for cost.
+Right below the quality score, the SDK's deterministic SystemEvaluator runs on the same sessions — average latency, total tokens per session,  turn count and error_rate. These are the operational baselines. No LLM needed, just math on the data already in BigQuery. We'll compare against these numbers after the improvement to make sure the new prompt didn't trade quality for cost.
 
 ---
 
@@ -167,7 +167,7 @@ Let's recap what just happened:
 
 3. We **generated ten synthetic questions** covering all six policy topics and ran them through the agent. The agent deflected on expenses, benefits, and holidays — topics it could answer but the prompt told it not to try.
 
-4. The **SDK's quality report** read those sessions from BigQuery and an LLM judge scored them. Baseline: roughly fifty percent meaningful. Right below, the **SDK's CodeEvaluator** established operational baselines — latency, tokens, turns, tool error rate — all from the same BigQuery data, no extra LLM calls.
+4. The **SDK's quality report** read those sessions from BigQuery and an LLM judge scored them. Baseline: roughly fifty percent meaningful. Right below, the **SDK's SystemEvaluator** established operational baselines — latency, tokens, turns, tool error rate — all from the same BigQuery data, no extra LLM calls.
 
 5. We **extracted the failures** into the golden eval set — growing it from three to about eight cases. A **teacher agent** — same model, same tools, different prompt — generated ground truth for each failed question. The **Vertex AI Prompt Optimizer** used those triples to generate an improved prompt, and the **regression gate** validated it against all golden cases before promoting it to V2.
 
@@ -217,5 +217,5 @@ By default, the script runs a single cycle and stops. The `--auto` flag enables 
 ## [CLOSING]
 
 That's the agent improvement cycle. Capture sessions with the BigQuery Agent Analytics Plugin, evaluate quality with the SDK's LLM judge,
-check operational metrics with the SDK's CodeEvaluator, optimize prompts with Vertex AI, and measure the results — all automated, all repeatable. 
+check operational metrics with the SDK's SystemEvaluator, optimize prompts with Vertex AI, and measure the results — all automated, all repeatable.
 The golden eval set grows with every cycle, so failures you discover today become regression tests for tomorrow.

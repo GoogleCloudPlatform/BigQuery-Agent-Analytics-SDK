@@ -1230,12 +1230,151 @@ def _parse_backfill_timestamp(
 # ------------------------------------------------------------------ #
 
 
+def _state_table_defaults(
+    project_id: str,
+    dataset_id: str,
+    graph_project_id: Optional[str],
+    graph_dataset_id: Optional[str],
+) -> tuple[str, str]:
+  """Default project/dataset for the state table.
+
+  Follows the graph target when split-dataset mode is in use
+  (``graph_dataset_id`` / ``graph_project_id`` set), so the per-run
+  checkpoint is never written into a read-only events dataset. Defaults to
+  ``project_id`` / ``dataset_id`` otherwise (single-dataset shape). An explicit
+  ``state_table`` always overrides these defaults.
+  """
+  return (graph_project_id or project_id, graph_dataset_id or dataset_id)
+
+
+def _normalize_graph_target(
+    graph: str,
+    project_id: str,
+    dataset_id: str,
+    graph_project_id: Optional[str],
+    graph_dataset_id: Optional[str],
+) -> tuple[str, str, str]:
+  """Resolve a (possibly qualified) ``graph`` ref into the graph target.
+
+  Returns ``(graph_project_id, graph_dataset_id, bare_graph_name)``. A
+  qualified reference (``dataset.graph`` / ``project.dataset.graph``) is the
+  most specific signal, so its parts become the effective graph target — the
+  state table, the binding target, and the ``INFORMATION_SCHEMA`` lookups all
+  follow the graph's own dataset, never a (possibly read-only) events
+  dataset. A bare name keeps the explicit ``graph_*`` args (falling back to
+  the events ``project_id`` / ``dataset_id``, the single-dataset shape).
+  """
+  from .property_graph_spec import split_graph_ref
+
+  return split_graph_ref(
+      graph,
+      default_project=graph_project_id or project_id,
+      default_dataset=graph_dataset_id or dataset_id,
+  )
+
+
+def _resolve_ontology_binding(
+    *,
+    ontology_path: Optional[str],
+    binding_path: Optional[str],
+    property_graph_path: Optional[str],
+    project_id: str,
+    dataset_id: str,
+    bq_client: Any,
+    graph_project_id: Optional[str] = None,
+    graph_dataset_id: Optional[str] = None,
+    graph: Optional[str] = None,
+):
+  """Resolve the ``(Ontology, Binding)`` pair from one of three input modes.
+
+  * Explicit YAML: ``ontology_path`` + ``binding_path`` together.
+  * Schema-derived from the deployed graph: ``graph`` (the name of a property
+    graph the user already created in BigQuery) -- read its normalized
+    ``CREATE PROPERTY GRAPH`` DDL back from
+    ``INFORMATION_SCHEMA.PROPERTY_GRAPHS``, then derive as below. The deployed
+    graph is the single source of truth; no local SQL file is consumed.
+  * Schema-derived from a local file: ``property_graph_path`` (a ``CREATE
+    PROPERTY GRAPH`` DDL file) -- parse it, read column types from
+    ``INFORMATION_SCHEMA.COLUMNS`` via ``bq_client``, and synthesise the pair
+    in memory (#277). No hand-written ontology/binding required.
+
+  ``graph_project_id`` / ``graph_dataset_id`` target the derived graph (its
+  ``${PROJECT_ID}`` / ``${DATASET}`` placeholder resolution, schema lookup, and
+  binding target) at a project/dataset distinct from the events ``project_id`` /
+  ``dataset_id``. They default to ``project_id`` / ``dataset_id`` (single-dataset
+  shape, e.g. the codelab). A two-dataset deploy -- a read-only events dataset
+  and a separate graph dataset -- sets them to the graph dataset. In ``graph``
+  mode they also locate the ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` lookup
+  (unless ``graph`` itself is dataset- or project-qualified).
+
+  Exactly one mode must be supplied; anything else raises ``ValueError``.
+  This is the single seam the orchestrator uses to obtain its spec, so all
+  input modes converge here onto the same downstream ``resolve()`` path.
+  """
+  from bigquery_ontology import load_binding
+  from bigquery_ontology import load_ontology
+
+  modes_supplied = sum(
+      [
+          graph is not None,
+          property_graph_path is not None,
+          ontology_path is not None or binding_path is not None,
+      ]
+  )
+  if modes_supplied > 1:
+    raise ValueError(
+        "Provide exactly one of --graph, --property-graph, or"
+        " --ontology/--binding."
+    )
+
+  if graph is not None:
+    from .property_graph_spec import derive_ontology_binding_from_ddl
+    from .property_graph_spec import fetch_property_graph_ddl
+
+    ddl_text = fetch_property_graph_ddl(
+        bq_client,
+        project_id=graph_project_id or project_id,
+        dataset_id=graph_dataset_id or dataset_id,
+        graph_name=graph,
+    )
+    return derive_ontology_binding_from_ddl(
+        ddl_text,
+        project_id=graph_project_id or project_id,
+        dataset_id=graph_dataset_id or dataset_id,
+        bq_client=bq_client,
+    )
+
+  if property_graph_path is not None:
+    from .property_graph_spec import derive_ontology_binding_from_ddl
+
+    ddl_text = pathlib.Path(property_graph_path).read_text(encoding="utf-8")
+    return derive_ontology_binding_from_ddl(
+        ddl_text,
+        project_id=graph_project_id or project_id,
+        dataset_id=graph_dataset_id or dataset_id,
+        bq_client=bq_client,
+    )
+
+  if ontology_path is None or binding_path is None:
+    raise ValueError(
+        "Provide --graph NAME, --property-graph PATH, or both"
+        " --ontology PATH and --binding PATH."
+    )
+  ontology_obj = load_ontology(ontology_path)
+  binding_obj = load_binding(binding_path, ontology=ontology_obj)
+  return ontology_obj, binding_obj
+
+
 def run_materialize_window(
     *,
     project_id: str,
     dataset_id: str,
-    ontology_path: str,
-    binding_path: str,
+    ontology_path: Optional[str] = None,
+    binding_path: Optional[str] = None,
+    property_graph_path: Optional[str] = None,
+    graph: Optional[str] = None,
+    graph_project_id: Optional[str] = None,
+    graph_dataset_id: Optional[str] = None,
     events_table: str = "agent_events",
     lookback_hours: float,
     overlap_minutes: float = DEFAULT_OVERLAP_MINUTES,
@@ -1257,6 +1396,7 @@ def run_materialize_window(
     state_key_suffix: Optional[str] = None,
     extraction_mode: str = EXTRACTION_MODE_AI_FALLBACK,
     max_session_age_hours: Optional[float] = None,
+    endpoint: str = "gemini-2.5-flash",
 ) -> MaterializeWindowResult:
   """The end-to-end run.
 
@@ -1265,7 +1405,32 @@ def run_materialize_window(
 
   Args:
     project_id, dataset_id: BigQuery target.
-    ontology_path, binding_path: YAML paths.
+    ontology_path, binding_path: YAML paths for the explicit input mode (use
+      both together).
+    property_graph_path: Path to a ``CREATE PROPERTY GRAPH`` DDL file for the
+      schema-derived input mode; the ontology + binding are synthesised from
+      the graph definition and live table schemas. Mutually exclusive with
+      ``ontology_path`` / ``binding_path``; exactly one mode must be supplied.
+    graph: Name of a property graph the user already deployed to BigQuery --
+      a bare name, ``dataset.graph``, or ``project.dataset.graph``. The
+      orchestrator reads the graph's normalized DDL back from
+      ``INFORMATION_SCHEMA.PROPERTY_GRAPHS`` (in ``graph_dataset_id`` /
+      ``graph_project_id``, defaulting to ``dataset_id`` / ``project_id``) and
+      derives the ontology + binding from it plus the live table schemas, so
+      the deployed graph is the single source of truth and no local SQL file
+      is consumed. A *qualified* reference sets the effective graph target:
+      its dataset/project become the ``graph_dataset_id`` /
+      ``graph_project_id`` defaults, so the state table and the binding
+      target follow the graph's own dataset rather than a (possibly
+      read-only) events ``dataset_id``. Mutually exclusive with the other
+      input modes.
+    graph_project_id, graph_dataset_id: For schema-derived mode, the project /
+      dataset that holds the graph tables and receives the materialized graph
+      (``${PROJECT_ID}`` / ``${DATASET}`` placeholder resolution, schema lookup,
+      and binding target). Default to ``project_id`` / ``dataset_id`` (the
+      single-dataset shape). A two-dataset deploy -- a read-only events dataset
+      (``dataset_id``) and a separate graph dataset -- sets these to the graph
+      dataset so events are still read from ``dataset_id``.
     events_table: Source telemetry table name (relative to
       ``--dataset-id``).
     lookback_hours: Window size. The discovery query lower bound
@@ -1337,6 +1502,12 @@ def run_materialize_window(
       (backfill runs scan a fixed historical window where the
       "what's still in-flight?" question is undefined).
       ``None`` (default) disables the watchdog.
+    endpoint: Vertex AI model for the ``AI.GENERATE`` extraction
+      fallback (``ai-fallback`` / ``ai-only`` modes). Resolved to a
+      ``locations/global`` publisher URL, so Gemini 3.x names such as
+      ``gemini-3.5-flash`` work here. Defaults to ``gemini-2.5-flash``.
+      Ignored when extraction is fully served by compiled/reference
+      extractors (no AI fallback is invoked).
   """
   # Orphan-watchdog validation. Like the numeric guardrails below,
   # a typo at the boundary (``--max-session-age-hours=-1`` or ``0``)
@@ -1377,7 +1548,7 @@ def run_materialize_window(
         "graphs for every session. Pass --reference-extractors-module "
         "for the simple reference-only path (e.g. "
         "--reference-extractors-module=reference_extractor on the "
-        "migration v5 demo), or pre-compile bundles and pass "
+        "context graph demo), or pre-compile bundles and pass "
         "--bundles-root alongside --reference-extractors-module."
     )
 
@@ -1499,25 +1670,48 @@ def run_materialize_window(
 
   client = bq_client or bigquery.Client(project=project_id, location=location)
 
+  # Normalize a qualified ``graph`` reference BEFORE anything derives a
+  # graph target from it (state-table defaults, binding target, schema
+  # lookups).
+  if graph is not None:
+    graph_project_id, graph_dataset_id, graph = _normalize_graph_target(
+        graph, project_id, dataset_id, graph_project_id, graph_dataset_id
+    )
+
   # Resolve identifiers + qualified refs.
   events_table_ref = validated_table_ref(project_id, dataset_id, events_table)
+  # The state/checkpoint table is written every run, so it must live in a
+  # WRITABLE dataset. In split-dataset mode (graph_dataset_id set, e.g. a
+  # read-only events dataset + a separate graph dataset) it defaults to the
+  # graph target, never the events dataset. An explicit --state-table still
+  # wins. Single-dataset callers are unchanged (graph_* default to events).
+  state_default_project, state_default_dataset = _state_table_defaults(
+      project_id, dataset_id, graph_project_id, graph_dataset_id
+  )
   state_project, state_dataset, state_table_local = parse_state_table_ref(
       state_table or DEFAULT_STATE_TABLE_NAME,
-      default_project=project_id,
-      default_dataset=dataset_id,
+      default_project=state_default_project,
+      default_dataset=state_default_dataset,
   )
   state_table_ref = f"{state_project}.{state_dataset}.{state_table_local}"
 
-  # Load ontology + binding (raw text for the fingerprint helper +
-  # parsed objects for the orchestrator).
-  from bigquery_ontology import Binding
-  from bigquery_ontology import load_binding
-  from bigquery_ontology import load_ontology
-  from bigquery_ontology import Ontology
+  # Resolve the ontology + binding from one of three input modes (see
+  # _resolve_ontology_binding): explicit YAML, schema-derived from the
+  # deployed graph (INFORMATION_SCHEMA.PROPERTY_GRAPHS), or schema-derived
+  # from a local CREATE PROPERTY GRAPH DDL file.
   from bigquery_ontology._fingerprint import fingerprint_model
 
-  ontology_obj: Ontology = load_ontology(ontology_path)
-  binding_obj: Binding = load_binding(binding_path, ontology=ontology_obj)
+  ontology_obj, binding_obj = _resolve_ontology_binding(
+      ontology_path=ontology_path,
+      binding_path=binding_path,
+      property_graph_path=property_graph_path,
+      graph=graph,
+      project_id=project_id,
+      dataset_id=dataset_id,
+      graph_project_id=graph_project_id,
+      graph_dataset_id=graph_dataset_id,
+      bq_client=client,
+  )
   ontology_fp = fingerprint_model(ontology_obj)
   binding_fp = fingerprint_model(binding_obj)
 
@@ -1762,6 +1956,7 @@ def run_materialize_window(
       outcome_callback=outcomes_cb,
       table_id=events_table,
       expected_fingerprint=compile_bundle_fingerprint,
+      endpoint=endpoint,
   )
 
   # Materialize per session so a single-session failure doesn't
@@ -2132,6 +2327,7 @@ def _build_manager(
     outcome_callback: Callable[[str, Any], None],
     table_id: str,
     expected_fingerprint: Optional[str] = None,
+    endpoint: str = "gemini-2.5-flash",
 ) -> Any:
   """Construct the OntologyGraphManager — with compiled bundles
   wired when ``bundles_root`` is set, otherwise the plain
@@ -2181,6 +2377,7 @@ def _build_manager(
         bq_client=bq_client,
         table_id=table_id,
         extractors=extractors,
+        endpoint=endpoint,
     )
 
   if reference_extractors_module is None:
@@ -2242,6 +2439,7 @@ def _build_manager(
       bq_client=bq_client,
       table_id=table_id,
       on_outcome=outcome_callback,
+      endpoint=endpoint,
   )
 
 
