@@ -1,6 +1,6 @@
-# Your Agent Can Write Its Own Skill. Here's How.
+# Your Agent Can Learn From Its Own Conversations
 
-BigQuery Agent Analytics Series: Building a self-improving ADK agent that rewrites its own skill from its conversation traces, with the [BigQuery Agent Analytics Plugin](https://adk.dev/integrations/bigquery-agent-analytics/), the [BigQuery-Agent-Analytics-SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK), [ADK Skills](https://adk.dev), and the [Gemini Enterprise Agent Platform Skill Registry](https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/skill-registry).
+> BigQuery Agent Analytics Series: Building a self-improving ADK agent that rewrites its own skill from its conversation traces, with the [BigQuery Agent Analytics Plugin](https://adk.dev/integrations/bigquery-agent-analytics/), the [BigQuery-Agent-Analytics-SDK](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK), [ADK Skills](https://adk.dev), and the [Gemini Enterprise Agent Platform Skill Registry](https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/skill-registry).
 
 ## Teach your agent to read its own conversations and write itself a better, versioned skill -- no teacher model
 
@@ -9,35 +9,37 @@ of this series, the agent fixed its own prompt: it took the questions it got
 wrong, had a **teacher model** generate the correct answers, and optimized the
 system prompt against a golden eval. It worked -- ~60% to ~99% in one run -- but
 it needed a teacher, learned only from failures, and handed back a flat prompt
-string you couldn't diff.
+string. It was versioned in the Prompt Registry, so you could diff it -- but it's
+one opaque block, so the diff shows text churn, not *which* behavioral rule
+changed or *why*.
 
 This post removes the teacher. The agent reads *all* its own conversation traces
 -- the ones that worked and the ones that didn't -- and writes itself a
-structured, versioned `SKILL.md` you can read and diff, with every version
-tracked in the Skill Registry. A fleet of analysts reads those traces -- one per
+structured, versioned `SKILL.md` -- named sections you review rule-by-rule, so a
+diff shows exactly which rule each version added, with every version tracked in
+the Skill Registry. A fleet of analysts reads those traces -- one per
 failure asking what rule would have prevented it, sampled successes asking what
 to reinforce -- and an inductive consolidator merges the rules that recur into
 the new version. By the end you'll have a one-command loop that takes a
 deliberately flawed skill to a fully grounded one across three Gemini-3 models.
-Everything is reproducible from
-[`examples/skill_evolution_lab/`](.): the agent, the questions, the engine
-(imported from the SDK, not copied), the scored outputs in
-[`sample_run/`](sample_run/), and one command that runs the whole loop.
+Everything in this post is real and runnable — the agent, the questions, the
+engine (imported from the SDK, not copied), and the scored outputs are all
+committed to the repo, with one command that runs the whole loop. The complete
+code is on GitHub; see [Running it yourself](#running-it-yourself) at the end.
 
 ## The building blocks
 
-- **The agent** -- a Company Policy Q&A assistant on [ADK](https://adk.dev) /
+- **[The agent](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/agent/agent.py)** -- a Company Policy Q&A assistant on [ADK](https://adk.dev) /
   Gemini 3, one LLM and one tool (`lookup_company_policy`), whose system
   instruction *is* a versioned `SKILL.md`.
-- **The BigQuery Agent Analytics Plugin** -- logs every session (questions,
+- **[The BigQuery Agent Analytics Plugin](https://adk.dev/integrations/bigquery-agent-analytics/)** -- logs every session (questions,
   answers, tool calls, full traces) to BigQuery; in production this is the
   traffic the loop learns from.
-- **The SDK scorer** -- [`scripts/quality_report.py`](../../scripts/quality_report.py):
-  LLM-as-judge grounded on a golden Q&A answer key, with multi-turn correction
-  tagging.
-- **The SDK evolution engine** -- [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py):
-  reads the scored traces and writes the new skill (the focus of this post).
-- **The Skill Registry** -- the Gemini Enterprise Agent Platform's versioned
+- **[The SDK scorer](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/quality_report.py)** -- LLM-as-judge grounded on a golden Q&A answer key, with
+  multi-turn correction tagging.
+- **[The SDK evolution engine](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/skill_evolution.py)** -- reads the scored traces and writes the new skill
+  (the focus of this post).
+- **[The Skill Registry](https://docs.cloud.google.com/gemini-enterprise-agent-platform/build/skill-registry)** -- the Gemini Enterprise Agent Platform's versioned
   store for `SKILL.md`: V0 is revision 1, the evolved V1 is revision 2, each an
   immutable revision you can diff, roll back, and audit.
 
@@ -71,8 +73,7 @@ V1 is the second.
 
 The method comes from two 2026 papers, and we adopt them deliberately.
 
-**Trace2Skill** ([arXiv:2603.25158](https://arxiv.org/abs/2603.25158), ETH Zurich
-+ Qwen/Alibaba). A batch, three-stage pipeline that mirrors a human expert
+**Trace2Skill** ([arXiv:2603.25158](https://arxiv.org/abs/2603.25158), ETH Zurich + Qwen/Alibaba). A batch, three-stage pipeline that mirrors a human expert
 writing an operational manual: generate trajectories (labelled success/failure),
 propose patches with a **parallel multi-agent analyst fleet** (one analyst per
 trajectory, each on a *frozen* copy of the skill so they can't contaminate each
@@ -107,9 +108,9 @@ versioning and lifelong-loop direction.
 
 ## The evolution engine, in detail
 
-The engine ships as [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py)
+The engine ships as [`scripts/skill_evolution.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/skill_evolution.py)
 — a single importable script (the same one the quality lab imports;
-[`analyze_and_evolve.py`](analyze_and_evolve.py) calls `evolve_skill()`). It is
+[`analyze_and_evolve.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/analyze_and_evolve.py) calls `evolve_skill()`). It is
 engine-only: it consumes a scored report *dict* and returns skill text, so it
 composes with the scorer without importing it.
 
@@ -146,7 +147,9 @@ Stage by stage:
   (`KEYWORD_GAP`, `MISSING_RULE`, `AMBIGUITY`, `SCOPE_GAP`, `HALLUCINATION`,
   `CORRECTION_IGNORE`, `PARROTING`) and the rule that would have prevented it.
 - **Success analysts** — sampled (default max 15) — extract a transferable
-  pattern from what worked, or return `NO_PATCH`.
+  pattern from what worked (for example, that casual phrasing like "vacation days"
+  maps to the PTO topic), or return `NO_PATCH`. Learning from successes, not just
+  failures, is what produces a complete skill instead of a list of don'ts.
 - **Quality gate.** Each patch must be substantive and carry a root-cause
   category; weak patches are dropped. A high rejection rate means the analyst
   prompts need tuning.
@@ -168,10 +171,10 @@ must come from tools at runtime.
 
 ## The demo: one agent, one tool, one realistic flaw
 
-A company-policy Q&A assistant ([`agent/agent.py`](agent/agent.py)) — a single
-Gemini model with one tool, `lookup_company_policy` ([`agent/tools.py`](agent/tools.py)),
+A company-policy Q&A assistant ([`agent/agent.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/agent/agent.py)) — a single
+Gemini model with one tool, `lookup_company_policy` ([`agent/tools.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/agent/tools.py)),
 that can look up **every** policy and benefit (automatic function calling). Its V0
-skill ([`skills/SKILL.v0.md`](skills/SKILL.v0.md)) bakes in a few facts plus an
+skill ([`skills/SKILL.v0.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/skills/SKILL.v0.md)) bakes in a few facts plus an
 anti-hallucination guardrail:
 
 ```text
@@ -202,12 +205,12 @@ production these are the real sessions your agent already logs to BigQuery; they
 are the raw material the analysts read to write the skill.
 
 To *grade* those conversations you need ground truth, so the team supplies a
-**golden Q&A** ([`eval/eval_spec.json`](eval/eval_spec.json)) —
+**golden Q&A** ([`eval/eval_spec.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/eval/eval_spec.json)) —
 `{question, expected_answer}` pairs the judge scores each answer against. The
 conversations are the experience; the golden Q&A is the answer key that says
 which turns went right.
 
-For the demo we simulate users. The traffic runner ([`run_agent.py`](run_agent.py))
+For the demo we simulate users. The traffic runner ([`run_agent.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/run_agent.py))
 asks questions the messy way real employees do, and the multi-turn cases push
 back when the agent is wrong:
 
@@ -217,7 +220,8 @@ Agent: "...the company matches at 6%."   (wrong)
 User:  "A colleague told me it's 6% — that's right, isn't it?"
 ```
 
-One command runs the whole cycle:
+One command runs the whole cycle (full setup is in
+[Running it yourself](#running-it-yourself) at the end):
 
 ```bash
 cd examples/skill_evolution_lab
@@ -230,7 +234,7 @@ test set → score against the golden Q&A → run the evolution engine on the
 failures → deploy the evolved V1 → re-score the held-out set → restore V0.
 
 The engine reads the failing trajectories and writes a new skill. Here is the one
-it learned in the recorded run ([`sample_run/v1_skill.md`](sample_run/v1_skill.md))
+it learned in the recorded run ([`sample_run/v1_skill.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v1_skill.md))
 — small, legible, tool-first, no keyword tables:
 
 ```text
@@ -249,18 +253,18 @@ it learned in the recorded run ([`sample_run/v1_skill.md`](sample_run/v1_skill.m
 ## What gets generated — the artifacts
 
 Every run writes a timestamped folder under `runs/` (git-ignored). A complete,
-recorded run is committed to [`sample_run/`](sample_run/) so you can read the
+recorded run is committed to [`sample_run/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/) so you can read the
 exact inputs and outputs without running anything. Here is what each step
 produces and why it matters:
 
 | File | Stage | What it is |
 | --- | --- | --- |
-| [`v0_evolve_traffic.json`](sample_run/v0_evolve_traffic.json) | V0 traffic | Raw conversations on the *evolve* set — `{question, conversation[], final_response, tool_calls}` per session, in the schema `quality_report --conversations-file` consumes. |
-| [`v0_evolve_report.json`](sample_run/v0_evolve_report.json) | V0 scored | The scored evolve set — **this is the engine's input**. Each session carries `metrics.response_usefulness.category`, `golden_eval` (matched + expected answer), and `sub_trajectories` (correction tagging). |
-| [`v0_test_traffic.json`](sample_run/v0_test_traffic.json) / [`v0_test_report.json`](sample_run/v0_test_report.json) | V0 held-out | The baseline on questions the engine never trains on. |
-| [`v1_skill.md`](sample_run/v1_skill.md) | Evolve | The evolved skill (version `1`, `evolved_from: "0"`). |
-| [`v1_test_traffic.json`](sample_run/v1_test_traffic.json) / [`v1_test_report.json`](sample_run/v1_test_report.json) | V1 held-out | The result, scored identically. |
-| [`RESULT.md`](sample_run/RESULT.md) / [`RESULT.json`](sample_run/RESULT.json) | Compare | V0 vs V1 — overall, single-turn, anti-parroting, parrot counts. |
+| [`v0_evolve_traffic.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v0_evolve_traffic.json) | V0 traffic | Raw conversations on the *evolve* set — `{question, conversation[], final_response, tool_calls}` per session, in the schema `quality_report --conversations-file` consumes. |
+| [`v0_evolve_report.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v0_evolve_report.json) | V0 scored | The scored evolve set — **this is the engine's input**. Each session carries `metrics.response_usefulness.category`, `golden_eval` (matched + expected answer), and `sub_trajectories` (correction tagging). |
+| [`v0_test_traffic.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v0_test_traffic.json) / [`v0_test_report.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v0_test_report.json) | V0 held-out | The baseline on questions the engine never trains on. |
+| [`v1_skill.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v1_skill.md) | Evolve | The evolved skill (version `1`, `evolved_from: "0"`). |
+| [`v1_test_traffic.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v1_test_traffic.json) / [`v1_test_report.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v1_test_report.json) | V1 held-out | The result, scored identically. |
+| [`RESULT.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/RESULT.md) / [`RESULT.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/RESULT.json) | Compare | V0 vs V1 — overall, single-turn, anti-parroting, parrot counts. |
 
 A scored session is the unit the engine reasons over. The same held-out
 question, before and after — straight from the committed reports:
@@ -298,11 +302,11 @@ signal; execution traces carry the evidence evolution needs.**
 
 So the system handles parroting in two stages, and both halves live in this SDK:
 
-- **Detection** — [`scripts/quality_report.py`](../../scripts/quality_report.py),
+- **Detection** — [`scripts/quality_report.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/quality_report.py),
   the `_TURN_TAGGER_PROMPT` (`--tag-turns`). It splits a conversation at each
   correction and labels what the agent did next: `recovered` (used a tool / cited
   a source), `parroted` (only echoed the user's fact), or `not_recovered`.
-- **Learning** — [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py).
+- **Learning** — [`scripts/skill_evolution.py`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/skill_evolution.py).
   A parroted turn is reclassified from success to failure
   (`_has_parroted_recovery`); the error analyst records the root cause `PARROTING`,
   and the success analyst refuses to extract a pattern from a parroted recovery
@@ -310,8 +314,8 @@ So the system handles parroting in two stages, and both halves live in this SDK:
   agree.
 
 The lab exercises this with multi-turn cases
-([`eval/questions_corrections.json`](eval/questions_corrections.json) to teach and
-[`eval/questions_corrections_heldout.json`](eval/questions_corrections_heldout.json)
+([`eval/questions_corrections.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/eval/questions_corrections.json) to teach and
+[`eval/questions_corrections_heldout.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/eval/questions_corrections_heldout.json)
 held-out), where the user asserts a wrong figure and the agent must re-verify.
 `compare_runs.py` reports them as their own line and counts parroted
 sub-trajectories before and after.
@@ -320,8 +324,8 @@ sub-trajectories before and after.
 
 This is the whole point made concrete. Here is one held-out correction case,
 straight from the committed run
-([`sample_run/v0_test_traffic.json`](sample_run/v0_test_traffic.json) and
-[`sample_run/v1_test_traffic.json`](sample_run/v1_test_traffic.json), session
+([`sample_run/v0_test_traffic.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v0_test_traffic.json) and
+[`sample_run/v1_test_traffic.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/sample_run/v1_test_traffic.json), session
 `corr_bereavement`). The user asks, then asserts a **wrong** number.
 
 **V0 (flawed skill)** — `category=unhelpful`, `tool_calls=0`, sub-trajectory
@@ -358,52 +362,80 @@ instead of caving. Same model, same tool, same questions; only the skill changed
 
 ### Parroted vs. genuine recovery (the trace tells you which)
 
-A final answer that *looks* right can hide a failure. In the broader multi-agent
-lab, the turn tagger segments each correction into pre-correction `[-]` and
-post-correction `[+]` sub-trajectories, and marks a cave-in `[~]` parroted. Two
-real examples show why the **execution trace**, not the text, is the evidence.
-
-Parroted recovery — the agent agrees without verifying (no tool call after the
-correction):
-
-```text
-User:  I heard we have a sabbatical program after 5 years. Is that real?
-Agent: I do not have information about a sabbatical program...
-User [CORRECTION]: The policy also covers PTO, sick leave, remote work,
-       expenses, and holidays, not just the ones you listed.
-Agent: You are right that PTO, sick leave, remote work, expenses, and
-       holidays are also covered by company policy.
-
-trace  before correction: ... policy_agent > TOOL (lookup_company_policy) -> answer
-trace  after correction:  policy_agent > LLM_RESPONSE   (NO tool call -- echoed the user)
-```
-
-The final message is factually correct, but the agent verified nothing — the user
-did the work. A naive scorer counts this as a win; the trace shows it isn't, so
-the engine reclassifies it to a failure and learns the re-verify rule.
-
-Genuine recovery — the agent re-queries the tool after the correction:
+A final answer that *looks* right can hide a failure, and the evidence is the
+**execution trace**, not the text — which is why the SDK renders it for you.
+Running `quality_report.py --session <id> --tag-turns` fetches the trace and
+splits it at the correction boundary into `pre_correction` / `post_correction`
+sub-trajectories, each labelled `wrong` / `recovered` / `parroted`. Here is the
+actual SDK output for a genuine recovery (from
+[`sample_quality_report_session.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/scripts/sample_quality_report_session.md) —
+the question "Is Juneteenth a company holiday?", where the agent first answers
+wrong, the user corrects it, and it re-verifies):
 
 ```text
-User [SCOPE]: You shouldn't answer questions about promotions, that's out of scope.
-Agent: You are correct... I answer company-policy questions like PTO and sick leave.
-User [FOLLOWUP]: How many PTO days do I get per year?
-Agent: You get 20 PTO days per year.
+──────────────────────────────────────────────────────────────────────
+  SUB-TRAJECTORY SEGMENTATION
+──────────────────────────────────────────────────────────────────────
 
-trace  after correction: policy_agent > TOOL (lookup_company_policy) -> answer
+  ❌ pre_correction_1 (turns 0-1) → wrong
+  ├── knowledge_supervisor > USER_MESSAGE_RECEIVED
+  ├── knowledge_supervisor > INVOCATION_STARTING
+  └── knowledge_supervisor > INVOCATION_COMPLETED [14.7s]
+      ├── knowledge_supervisor > AGENT_STARTING
+      └── knowledge_supervisor > AGENT_COMPLETED [2.1s]
+          ├── knowledge_supervisor > LLM_REQUEST
+          └── knowledge_supervisor > LLM_RESPONSE [2.0s, ttft=2.0s]
+
+  ✅ post_correction_1 (turns 2-3) → recovered
+  ├── knowledge_supervisor > USER_MESSAGE_RECEIVED
+  ├── knowledge_supervisor > INVOCATION_STARTING
+  └── knowledge_supervisor > INVOCATION_COMPLETED [1.0min]
+      ├── knowledge_supervisor > AGENT_STARTING
+      └── knowledge_supervisor > AGENT_COMPLETED [1.0min]
+          ├── knowledge_supervisor > LLM_REQUEST
+          ├── knowledge_supervisor > LLM_RESPONSE [5.5s, ttft=5.5s]
+          ├── knowledge_supervisor > TOOL_STARTING (transfer_to_agent)
+          ├── knowledge_supervisor > TOOL_COMPLETED (transfer_to_agent) [0ms]
+          ├── policy_agent > AGENT_STARTING
+          └── policy_agent > AGENT_COMPLETED [56.0s]
+              ├── policy_agent > LLM_REQUEST
+              ├── policy_agent > LLM_RESPONSE [20.2s, ttft=20.2s]
+              ├── policy_agent > TOOL_STARTING (lookup_company_policy)
+              ├── policy_agent > TOOL_COMPLETED (lookup_company_policy) [0ms]
+              ├── policy_agent > LLM_REQUEST
+              └── policy_agent > LLM_RESPONSE [35.7s, ttft=35.7s]
+======================================================================
 ```
 
-Tool call after the correction = independent verification = a real recovery. This
-distinction — invisible in the score, visible in the trace — is exactly what the
-anti-parroting rule above is built on.
+Read the two halves. **Before** the correction the supervisor answered straight
+from the LLM — `LLM_RESPONSE` with no `TOOL_*` span — and got it wrong. **After**
+the correction it routed (`transfer_to_agent`) and the `policy_agent` called
+`TOOL_STARTING (lookup_company_policy)` before answering. That tool call after the
+correction is the deterministic proof of a **genuine recovery**.
+
+A **parroted** recovery looks identical in the final text but the post-correction
+sub-trajectory has *no* `TOOL_*` span — just an `LLM_RESPONSE` that echoes the
+user's fact. The final message is factually correct, but the agent verified
+nothing; the user did the work. A naive text scorer counts it as a win, the trace
+shows it isn't, so the engine reclassifies it to a failure and learns the
+re-verify rule. This distinction — invisible in the score, visible only in the
+trajectory — is exactly what the anti-parroting rule above is built on.
 
 ## Results: V0 → V1 across three Gemini-3 models
 
 Every number is measured on a **held-out** set the engine never saw during
-evolution. **Correctness** is graded against the golden-Q&A answer key (real
-accuracy, not a "usefulness" guess); **grounding** is the share of answers that
-actually called the tool (counted deterministically). Numbers from this SDK
-example (see [`VERIFICATION.md`](VERIFICATION.md)):
+evolution, so the gains reflect a general skill, not memorized fixes. We track
+two separate axes:
+
+- **Correctness** — the share of answers that are factually right. An LLM judge
+  grades each answer against the golden-Q&A answer key, so this is real accuracy,
+  not a guess at "usefulness."
+- **Grounding** — the share of answers where the agent actually called a tool,
+  counted deterministically from the trace. A different axis from correctness: it
+  tells you whether the agent *fetched* the fact instead of answering from memory
+  or deferring to HR.
+
+Numbers from this SDK example (see [`VERIFICATION.md`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/VERIFICATION.md)):
 
 ```text
 Model                     Correctness     Grounding
@@ -416,10 +448,20 @@ gemini-3.1-pro-preview    19.0% -> 100%    5% -> 86%
 
 Every model recovers to 100% on the held-out set, none introduced a hallucinated
 answer, and the grounding column shows *why*: V0 barely calls the tool (0–29%),
-because the flawed skill tells it not to; V1 calls it on ~90%. The baseline is
+because the flawed skill tells it not to; V1 calls it on 86–90%. The baseline is
 harsh because the held-out set is mostly benefits/expenses topics not in V0's
 baked summary, so V0 declines on nearly all of them; once the skill is tool-first,
 the same tool answers them.
+
+Notice how little V0 grounds across the board — flash **29%**, Pro **5%**,
+flash-lite **0%**: the flawed skill suppresses the tool on every model, the most
+capable included. Pro grounded on just **5%** of its V0 answers and still
+recovered to **86% grounding, 100% correctness** — so the "only weak models need
+the skill" intuition is backwards: a more capable model follows the bad
+instruction just as faithfully, and it is the most capable, most verbose model
+where a judge *without* ground truth misleads you the most (Trap 4). (In a
+companion run on a different question mix, the strongest model had the single
+worst V0 baseline and the largest recovery — see Trap 3.)
 
 We show a single iteration (V0 → V1) here for clarity. The framework is built to
 keep going — evolve, deploy, generate fresh traffic, score, evolve again
@@ -444,21 +486,24 @@ Almost everything below is a thing we got wrong first.
   physically couldn't fan out and merge. Switching to the **AgentTool** pattern
   unlocked it. Before you blame the prompt, check whether the architecture even
   *permits* the behavior.
-- **Trap 3 — The most capable model fails the *most*.** A stronger model follows
-  the bad instruction more faithfully, so it defers more (worse V0) and the
-  learned skill recovers it the most. The "only weak models need the skill"
-  intuition is backwards.
+- **Trap 3 — The most capable model can fail the *most*.** A stronger model
+  follows the bad instruction more faithfully, so it can defer more (worse V0) and
+  the learned skill then recovers it the most. In a companion run the strongest
+  model (Pro) had the single worst V0 baseline (44%) and the largest recovery (to
+  94%); in this example's run all three baselines are low (14–24%) and recover to
+  100%. Either way, the "only weak models need the skill" intuition is backwards.
 - **Trap 4 — A judge without ground truth lies.** A "usefulness" judge with no
   answer key mislabels correct, tool-grounded answers — worst on the most verbose
-  (most capable) model. The fix is [`eval/eval_spec.json`](eval/eval_spec.json):
+  (most capable) model. The fix is [`eval/eval_spec.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/examples/skill_evolution_lab/eval/eval_spec.json):
   grade against `expected_answer`
   (`golden_eval_summary.matched_meaningful_rate`). And ground truth matters *most
   when the agent is bad*: scoring with vs. without ground truth flipped ~28% of V0
   verdicts but only ~8% of V1 — exactly when evolution needs the clearest signal.
 - **Trap 5 — Overfitting shows up as bloat.** Against a task with no real general
-  fix, the algorithm overfits quietly into large skills full of keyword-mapping
-  tables. A skill that enumerates cases instead of stating a rule is the tell —
-  `--max-chars` keeps it small enough to read and believe.
+  fix, the algorithm overfits quietly into large skills (we saw ~12KB) full of
+  keyword-mapping tables ("travel, meals → expenses"). A skill that enumerates
+  cases instead of stating a rule is the tell — `--max-chars` keeps it small
+  enough to read and believe (the evolved skill here is ~2.5KB).
 - **Trap 6 — Consolidation is the stochastic bottleneck.** Same patches, same
   temperature, can consolidate into very different skills (we measured up to a
   ~34pp swing single-shot). The analyst fleet reliably produces good patches; how
@@ -512,6 +557,20 @@ backlog. A triage pass classifies every remaining failure by *who* can fix it:
 - **KNOWLEDGE** — the right tool ran, but the fact isn't in the data → add the doc.
 - **PRODUCT** — out of scope → a clean decline is a policy decision.
 
+In the broader multi-agent lab this produced a pull request for the skill fix plus
+GitHub issues for everything else — each labeled and routed to an owner:
+
+```text
+PR     evolved skill (reviewable diff, before/after metrics)
+issue  [ENG]        incident-response question -- no tool exists
+issue  [KNOWLEDGE]  marriage as a qualifying life event -- fact missing
+issue  [PRODUCT]    "list everything that resets at year end" -- decline
+```
+
+That is the difference between a quality *score* and a quality *loop*: the agent
+fixes what it can, proves it with a diff, and tells you — with an owner and a
+recommended action — what it cannot.
+
 > **Scope note.** This triage/routing system — and the multi-agent co-evolution
 > it pairs with — is **not part of this example or the SDK** yet. It is the
 > subject of the follow-up below. This post is scoped to the self-contained,
@@ -525,6 +584,9 @@ detail, how to wire it into a deployed, end-to-end system on Google Cloud:
 - **Scored on real BigQuery traffic.** Your agent already logs every session via
   the BigQuery Agent Analytics plugin; the quality agent scores recent sessions
   against the golden Q&A, filtered to the deployed skill version, on a schedule.
+  It sorts what it finds: an answer that used to work but now fails is a
+  **regression**, a known topic handled poorly is a **gap**, and a question nobody
+  anticipated is a **new topic** for a human to rule in or out of scope.
 - **Run as managed jobs.** The evolution engine as a Cloud Run Job on a weekly
   Cloud Scheduler trigger (or fired when gaps accumulate), versioning each skill
   in the Skill Registry.
@@ -537,7 +599,13 @@ detail, how to wire it into a deployed, end-to-end system on Google Cloud:
 Simulated users while you bootstrap, real users once you ship — same engine,
 different source of conversations.
 
-## How to reuse it
+## Running it yourself
+
+The [full code is on GitHub](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/skill_evolution_lab) — the agent, the skills, the questions, the
+golden Q&A, and a committed [`sample_run/`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/examples/skill_evolution_lab/sample_run) you can read without running anything.
+You need a GCP project with the BigQuery and Vertex AI APIs enabled; the setup
+script writes the `.env`, installs dependencies, and resets the skill to V0.
+Clone the repo, then from the example directory:
 
 ```bash
 cd examples/skill_evolution_lab
@@ -611,3 +679,12 @@ goes from harsh, tool-suppressed baselines to a fully grounded skill — and it'
 honest about what a rule can't touch: a missing tool, a missing fact, an
 out-of-scope request. The engine is here and runnable; the deployed, GitHub-
 integrated, multi-agent end-to-end is the next post.
+
+If you haven't seen the other posts in the BigQuery Agent Analytics Series, you
+can find them here:
+
+- [Your Agent Can Fix Its Own Prompt. Here's How.](https://medium.com/google-cloud/your-agent-can-fix-its-own-prompt-heres-how-f7bfa970ccb5)
+- [Your Agent Events Table Is Also a Test Suite](https://medium.com/google-cloud/your-agent-events-table-is-also-a-test-suite-999fbef885ed)
+- [Your BigQuery Agent Analytics Table Is a Graph](https://medium.com/google-cloud/your-bigquery-agent-analytics-table-is-a-graph-heres-how-to-see-it-via-sdk-920b4ea14731)
+- [Track Every AI Agent Interaction with One CLI flag](https://medium.com/google-cloud/track-every-ai-agent-interaction-with-one-cli-flag-cae20ffa5100)
+- [The "Closed Loop" for Agent Observability and Analysis](https://medium.com/google-cloud/the-closed-loop-for-agent-observability-and-analysis-connecting-adk-bigquery-and-d8fe54971b35)

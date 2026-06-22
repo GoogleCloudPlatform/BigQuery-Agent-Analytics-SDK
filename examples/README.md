@@ -94,8 +94,8 @@ cd skill_evolution_lab
 
 A verified run (gemini-3-flash-preview, golden-grounded, held-out): **V0 23.8% →
 V1 100%** overall; corrections (anti-parroting) **33.3% → 100%**; evolved skill
-2.5KB. See the example's [README](skill_evolution_lab/README.md),
-[DEMO_NARRATION](skill_evolution_lab/DEMO_NARRATION.md), and
+2.5KB. See the example's [README](skill_evolution_lab/README.md), the full
+[blog post](skill_evolution_lab/BLOG.md), and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 
 ## Reference Artifacts
