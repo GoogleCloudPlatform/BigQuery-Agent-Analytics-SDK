@@ -1,37 +1,37 @@
 {
   "v0": {
     "overall": {
-      "rate": 14.3,
-      "correct": 3,
-      "total": 21
+      "rate": 16.4,
+      "correct": 9,
+      "total": 55
     },
     "single_turn": {
-      "rate": 16.7,
-      "correct": 3,
-      "total": 18
+      "rate": 18.0,
+      "correct": 9,
+      "total": 50
     },
     "corrections": {
       "rate": 0.0,
       "correct": 0,
-      "total": 3
+      "total": 5
     },
     "parroted": 0
   },
   "v1": {
     "overall": {
-      "rate": 100.0,
-      "correct": 21,
-      "total": 21
+      "rate": 98.2,
+      "correct": 54,
+      "total": 55
     },
     "single_turn": {
-      "rate": 100.0,
-      "correct": 18,
-      "total": 18
+      "rate": 98.0,
+      "correct": 49,
+      "total": 50
     },
     "corrections": {
       "rate": 100.0,
-      "correct": 3,
-      "total": 3
+      "correct": 5,
+      "total": 5
     },
     "parroted": 0
   }

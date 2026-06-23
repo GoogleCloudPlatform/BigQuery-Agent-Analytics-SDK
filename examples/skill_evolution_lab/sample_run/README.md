@@ -7,8 +7,8 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 14.3% → V1 100%**, grounding (tool-call share) **10% → 86%**, evolved skill
-**2.0 KB**.
+**V0 16.4% → V1 98.2%** (54/55), grounding (tool-call share) **7% → 80%**,
+evolved skill **2.6 KB**. (Held-out set: 50 single-turn + 5 anti-parroting.)
 
 ## The workflow, and what each file is
 
@@ -55,7 +55,8 @@ The same held-out question, V0 vs V1 (from `v0_test_report.json` and
 Q: "How much does the company contribute to my HSA for family coverage?"
 
 V0:  category=unhelpful   tool_calls=0   golden_matched=true
-  "I do not have that information. I suggest you contact HR ..."
+  "I do not have that information. Please contact HR for details regarding
+   HSA contributions and family coverage."
 
 V1:  category=meaningful  tool_calls=1   golden_matched=true
   "For family coverage, the company contributes $1,500 per year to your HSA."

@@ -83,21 +83,21 @@ held-out test sets, evolves a tool-first V1 skill, re-scores the held-out set,
 prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
-**Runtime:** about **6–7 minutes** end-to-end (almost entirely Gemini API calls);
-`setup.sh` takes a few seconds. The first run also does a one-time `uv`
-dependency sync.
+**Runtime:** about **15–18 minutes** end-to-end at the default size (55 evolve +
+55 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
+seconds. The first run also does a one-time `uv` dependency sync.
 
 **What you'll see** — a per-step progress trace ending in the comparison table:
 
 ```text
 [V0] traffic + score ...
-     V0 test:   14.3% (3/21 golden-matched)
+     V0 test:   16.4% (9/55 golden-matched)
 [evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
 [V1] traffic + score ...
-     V1 test:   100.0% (21/21 golden-matched)
+     V1 test:   98.2% (54/55 golden-matched)
 
-| Metric                    | V0 (flawed)  | V1 (evolved)  | Delta   |
-| Overall                   | 14.3% (3/21) | 100.0% (21/21)| +85.7pp |
+| Metric                    | V0 (flawed)  | V1 (evolved)   | Delta   |
+| Overall                   | 16.4% (9/55) | 98.2% (54/55)  | +81.8pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
