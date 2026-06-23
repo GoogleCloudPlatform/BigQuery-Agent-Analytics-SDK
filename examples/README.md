@@ -92,9 +92,10 @@ cd skill_evolution_lab
 ./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
 ```
 
-A verified run (gemini-3-flash-preview, golden-grounded, held-out): **V0 23.8% →
-V1 100%** overall; corrections (anti-parroting) **33.3% → 100%**; evolved skill
-2.5KB. See the example's [README](skill_evolution_lab/README.md) and
+A verified run (gemini-3.5-flash, golden-grounded, held-out): **V0 14.3% →
+V1 100%** overall; corrections (anti-parroting) **0% → 100%**; evolved skill
+2.0KB. Across four GA-era models V0→V1 ranges from 67% to 100%. See the example's
+[README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 
 ## Reference Artifacts

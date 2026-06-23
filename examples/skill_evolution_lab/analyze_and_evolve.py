@@ -51,8 +51,12 @@ logger = logging.getLogger("analyze_and_evolve")
 
 
 def _location_for(model: str) -> str:
-  """Gemini 3.x analysts run on 'global'; 2.5 on a region."""
-  if model.startswith("gemini-3"):
+  """Vertex location for the analyst model.
+
+  Gemini 3.x and gemini-2.5-pro run on 'global' (most capacity, avoids regional
+  429s under the parallel analyst fleet); others fall back to the region.
+  """
+  if model.startswith("gemini-3") or model == "gemini-2.5-pro":
     return "global"
   return os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 

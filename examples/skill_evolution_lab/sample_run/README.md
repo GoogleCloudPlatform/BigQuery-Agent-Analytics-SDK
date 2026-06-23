@@ -1,13 +1,14 @@
 # sample_run — a committed end-to-end run
 
 This folder is a complete, recorded run of `./run_e2e_demo.sh` on
-`gemini-3-flash-preview`, committed so you can inspect the exact inputs and
-outputs of the skill-evolution loop without running anything. (Live runs go to
-`runs/<timestamp>/`, which is git-ignored; this is a curated copy of one.)
+`gemini-3.5-flash` (the default agent model), committed so you can inspect the
+exact inputs and outputs of the skill-evolution loop without running anything.
+(Live runs go to `runs/<timestamp>/`, which is git-ignored; this is a curated
+copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 23.8% → V1 100%**, grounding (tool-call share) **29% → 86%**, evolved skill
-**2.5 KB**.
+**V0 14.3% → V1 100%**, grounding (tool-call share) **10% → 86%**, evolved skill
+**2.0 KB**.
 
 ## The workflow, and what each file is
 
@@ -36,7 +37,8 @@ and V1 — only the `SKILL.md` changes — so any delta is attributable to the s
    failures, runs the analyst fleet, consolidates (best-of-N), and writes a new
    skill.
    → `v1_skill.md` — the evolved skill (`version: "1"`, `evolved_from: "0"`),
-   tool-first, with a "Premature HR Deflection" anti-pattern.
+   tool-first: it lists which topics to look up with tools and forbids premature
+   HR deflection (and bakes no specific data values).
 
 5. **V1 result + compare (held-out).** Deploy V1, re-run the held-out set, score,
    and compare.
@@ -50,14 +52,13 @@ The same held-out question, V0 vs V1 (from `v0_test_report.json` and
 `v1_test_report.json`):
 
 ```text
-Q: "How much does the company put into an HSA for family coverage?"
+Q: "How much does the company contribute to my HSA for family coverage?"
 
-V0:  category=unhelpful   tool_calls=1   golden_matched=true
-  "I do not have that information. Please contact HR ..."
+V0:  category=unhelpful   tool_calls=0   golden_matched=true
+  "I do not have that information. I suggest you contact HR ..."
 
 V1:  category=meaningful  tool_calls=1   golden_matched=true
-  "The company contributes $1,500 per year into an HSA for family coverage
-   ($750 individual)."
+  "For family coverage, the company contributes $1,500 per year to your HSA."
 ```
 
 ## Reproduce

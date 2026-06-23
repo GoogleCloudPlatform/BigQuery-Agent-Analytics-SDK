@@ -11,18 +11,10 @@
     "avg_user_turns": 1.1,
     "avg_tool_calls": 0.9,
     "multi_turn_sessions": 3,
-    "correction_rate": 0.0,
-    "verification_rate": 14.3,
-    "avg_corrections": 0.0,
-    "avg_verifications": 0.14,
-    "skill_gap": 0,
-    "knowledge_gap": 0,
-    "tool_gap": 0,
-    "knowledge_gap_rate": 0.0,
-    "tool_gap_rate": 0.0,
-    "addressable_meaningful_rate": 100.0,
-    "knowledge_gap_questions": [],
-    "tool_gap_questions": [],
+    "correction_rate": 4.8,
+    "verification_rate": 9.5,
+    "avg_corrections": 0.05,
+    "avg_verifications": 0.1,
     "golden_eval_summary": {
       "total_sessions": 21,
       "matched": 21,
@@ -61,10 +53,10 @@
     {
       "session_id": "te_parental_sec",
       "question": "How many weeks of parental leave does a secondary caregiver get?",
-      "response": "A secondary caregiver is entitled to **8 weeks** of paid parental leave. (For comparison, primary caregivers receive 16 weeks).",
+      "response": "A secondary caregiver is eligible for **8 weeks** of paid parental leave.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.44,
+      "latency_s": 6.42,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -72,11 +64,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about parental leave for a secondary caregiver, providing the correct number of weeks (8 weeks) and additional relevant context."
+          "justification": "The agent directly and accurately answers the user's question about parental leave for a secondary caregiver with the correct number of weeks (8 weeks), which aligns with the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides a specific numerical answer (8 weeks) for a company policy question, which indicates it is based on data retrieved from a tool like `lookup_company_policy`."
+          "justification": "The agent provides a specific policy detail (8 weeks of parental leave) which would be retrieved from a tool like 'lookup_company_policy', indicating it is grounded in actual data."
         }
       },
       "quality_scores": {},
@@ -87,7 +79,7 @@
         },
         {
           "role": "agent",
-          "text": "A secondary caregiver is entitled to **8 weeks** of paid parental leave. (For comparison, primary caregivers receive 16 weeks)."
+          "text": "A secondary caregiver is eligible for **8 weeks** of paid parental leave."
         }
       ],
       "golden_eval": {
@@ -102,10 +94,10 @@
     {
       "session_id": "te_401k",
       "question": "Does the company match my 401k contributions, and by how much?",
-      "response": "Yes, the company provides a 401(k) match. The company matches your contributions up to **4%**, and these contributions are fully vested after one year of employment.",
+      "response": "Yes, the company matches your 401(k) contributions up to **4%**. This match is fully vested after 1 year of employment.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.77,
+      "latency_s": 4.54,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -113,11 +105,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and substantively answers the user's question about 401k matching and vesting, providing the correct details (4% match, 1 year vesting)."
+          "justification": "The agent directly and accurately answers the user's question about 401k matching and vesting, providing the correct percentage and timeframe."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific details (4% match, 1 year vesting) that would be retrieved from a company policy tool, not general LLM knowledge."
+          "justification": "The agent's response provides specific details (4% match, 1 year vesting) that would be retrieved from a company policy tool, aligning with the expected answer."
         }
       },
       "quality_scores": {},
@@ -128,7 +120,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, the company provides a 401(k) match. The company matches your contributions up to **4%**, and these contributions are fully vested after one year of employment."
+          "text": "Yes, the company matches your 401(k) contributions up to **4%**. This match is fully vested after 1 year of employment."
         }
       ],
       "golden_eval": {
@@ -143,10 +135,10 @@
     {
       "session_id": "te_401k_leave6mo",
       "question": "If I leave after six months, do I keep the 401k match?",
-      "response": "Based on the company's benefits policy, the 401(k) plan includes a 4% company match that is **fully vested after 1 year** of employment.\n\nSince you are planning to leave after six months, you would not yet be vested. This means you would not be able to keep the company's matching contributions; you would only keep the money you personally contributed to the account.",
+      "response": "Based on the company's benefits policy, the 401(k) plan offers a 4% company match that becomes **fully vested after 1 year** of employment. \n\nSince leaving after six months is less than the 1-year vesting requirement, you will not be vested. Therefore, **no, you will not keep the company 401(k) match** if you leave after six months.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.99,
+      "latency_s": 7.15,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -154,11 +146,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly answers the user's question about 401k match vesting by stating the 1-year vesting period and applying it to the 6-month scenario, which aligns with the expected answer."
+          "justification": "The agent directly answers the user's question about keeping the 401k match, stating that it is not kept due to the 1-year vesting period, which is consistent with the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response about the 401k vesting period is explicitly stated to be 'Based on the company's benefits policy', indicating it was retrieved from a tool like `lookup_company_policy`."
+          "justification": "The agent's response cites 'the company's benefits policy' and provides specific details (4% match, 1-year vesting) that would be retrieved from a tool like `lookup_company_policy`."
         }
       },
       "quality_scores": {},
@@ -169,7 +161,7 @@
         },
         {
           "role": "agent",
-          "text": "Based on the company's benefits policy, the 401(k) plan includes a 4% company match that is **fully vested after 1 year** of employment.\n\nSince you are planning to leave after six months, you would not yet be vested. This means you would not be able to keep the company's matching contributions; you would only keep the money you personally contributed to the account."
+          "text": "Based on the company's benefits policy, the 401(k) plan offers a 4% company match that becomes **fully vested after 1 year** of employment. \n\nSince leaving after six months is less than the 1-year vesting requirement, you will not be vested. Therefore, **no, you will not keep the company 401(k) match** if you leave after six months."
         }
       ],
       "golden_eval": {
@@ -184,10 +176,10 @@
     {
       "session_id": "te_ortho_kid",
       "question": "Is my child's orthodontia (braces) covered by our plan?",
-      "response": "Yes, orthodontia (braces) is covered under the company's dental plan. The policy provides **50% coverage** for orthodontia, up to a **$2,000 lifetime maximum**. \n\nFor more specific details or to check your remaining balance, you may want to consult the Benefits Handbook or contact the insurance provider directly.",
+      "response": "Yes, orthodontia (including braces) is covered under our dental plan. The plan covers **50% of orthodontia costs up to a $2,000 lifetime maximum**.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.86,
+      "latency_s": 4.07,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -195,11 +187,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent's response directly answers the user's question about orthodontia coverage, providing specific details (50% coverage, $2,000 lifetime maximum) that match the expected answer."
+          "justification": "The agent's response directly and substantively answers the user's question about orthodontia coverage, providing the correct percentage and lifetime maximum as per the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response includes specific numerical details (50% coverage, $2,000 lifetime maximum) that are consistent with data retrieved from a tool like 'lookup_company_policy' and match the ground truth."
+          "justification": "The agent's response includes specific details (50% coverage, $2,000 lifetime maximum) that align with data expected from the `lookup_company_policy` tool, indicating it is grounded in tool results."
         }
       },
       "quality_scores": {},
@@ -210,7 +202,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, orthodontia (braces) is covered under the company's dental plan. The policy provides **50% coverage** for orthodontia, up to a **$2,000 lifetime maximum**. \n\nFor more specific details or to check your remaining balance, you may want to consult the Benefits Handbook or contact the insurance provider directly."
+          "text": "Yes, orthodontia (including braces) is covered under our dental plan. The plan covers **50% of orthodontia costs up to a $2,000 lifetime maximum**."
         }
       ],
       "golden_eval": {
@@ -225,10 +217,10 @@
     {
       "session_id": "te_eye",
       "question": "What's the benefit for eye exams and glasses?",
-      "response": "The company's vision coverage includes the following benefits for eye exams and glasses:\n\n*   **Eye Exams:** One annual eye exam is fully covered.\n*   **Glasses/Frames:** There is a **$200 frame allowance** available every 2 years.",
+      "response": "Under the company's vision benefits, you are covered for:\n* **Eye Exams:** One annual eye exam is fully covered.\n* **Glasses/Frames:** You receive a **$200 frame allowance** every 2 years.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.85,
+      "latency_s": 54.72,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -240,7 +232,7 @@
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details (annual eye exam, $200 frame allowance every 2 years) which are clearly derived from a tool lookup, as indicated by the 'lookup_company_policy' tool returning these same figures in the ground truth."
+          "justification": "The agent's response provides specific details (e.g., '$200 frame allowance every 2 years') that are clearly derived from a tool lookup, matching the ground truth data."
         }
       },
       "quality_scores": {},
@@ -251,7 +243,7 @@
         },
         {
           "role": "agent",
-          "text": "The company's vision coverage includes the following benefits for eye exams and glasses:\n\n*   **Eye Exams:** One annual eye exam is fully covered.\n*   **Glasses/Frames:** There is a **$200 frame allowance** available every 2 years."
+          "text": "Under the company's vision benefits, you are covered for:\n* **Eye Exams:** One annual eye exam is fully covered.\n* **Glasses/Frames:** You receive a **$200 frame allowance** every 2 years."
         }
       ],
       "golden_eval": {
@@ -266,10 +258,10 @@
     {
       "session_id": "te_hsa_family",
       "question": "How much does the company put into an HSA for family coverage?",
-      "response": "The company contributes **$1,500 per year** into an HSA for employees with family coverage. For those with individual coverage, the contribution is $750 per year.",
+      "response": "For family coverage, the company contributes **$1,500 per year** to your Health Savings Account (HSA).",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.95,
+      "latency_s": 20.01,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -277,11 +269,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about HSA contributions for family coverage, providing the correct amount of $1,500 per year."
+          "justification": "The agent directly and accurately answers the user's question about HSA contributions for family coverage, matching the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific numerical data about company policy, which indicates it was retrieved from a tool like 'lookup_company_policy' rather than being general LLM knowledge."
+          "justification": "The response provides a specific numerical value for a company policy, which indicates it was retrieved from a tool (e.g., lookup_company_policy) rather than being general knowledge."
         }
       },
       "quality_scores": {},
@@ -292,7 +284,7 @@
         },
         {
           "role": "agent",
-          "text": "The company contributes **$1,500 per year** into an HSA for employees with family coverage. For those with individual coverage, the contribution is $750 per year."
+          "text": "For family coverage, the company contributes **$1,500 per year** to your Health Savings Account (HSA)."
         }
       ],
       "golden_eval": {
@@ -307,10 +299,10 @@
     {
       "session_id": "te_premium_split",
       "question": "How much of my health premium do I pay versus the company?",
-      "response": "According to the company's benefits policy, the cost-sharing for health insurance premiums is as follows:\n\n*   **For the employee:** The company covers **80%** of the premium, meaning you pay **20%**.\n*   **For dependents:** The company covers **50%** of the premium, meaning you pay **50%**.\n\nThese rates apply to both the PPO and HMO plan options.",
+      "response": "For your health insurance (PPO and HMO plans), the premium split is as follows:\n\n* **For yourself (the employee):** The company covers **80%** of the premium, meaning you pay **20%**.\n* **For your dependents:** The company covers **50%** of the premium, meaning you pay **50%**.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.61,
+      "latency_s": 6.32,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -318,11 +310,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent's response directly and substantively answers the user's question about health premium cost sharing, providing specific percentages for both employee and dependents, which matches the expected answer."
+          "justification": "The agent's response directly and substantively answers the user's question about health premium split with specific percentages for both employee and dependents, matching the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent explicitly states 'According to the company's benefits policy' and provides specific, factual percentages, indicating the information was retrieved from a tool like 'lookup_company_policy'."
+          "justification": "The response provides specific numerical data (80%, 20%, 50%) which indicates it was retrieved from a tool like 'lookup_company_policy' rather than being general LLM knowledge."
         }
       },
       "quality_scores": {},
@@ -333,7 +325,7 @@
         },
         {
           "role": "agent",
-          "text": "According to the company's benefits policy, the cost-sharing for health insurance premiums is as follows:\n\n*   **For the employee:** The company covers **80%** of the premium, meaning you pay **20%**.\n*   **For dependents:** The company covers **50%** of the premium, meaning you pay **50%**.\n\nThese rates apply to both the PPO and HMO plan options."
+          "text": "For your health insurance (PPO and HMO plans), the premium split is as follows:\n\n* **For yourself (the employee):** The company covers **80%** of the premium, meaning you pay **20%**.\n* **For your dependents:** The company covers **50%** of the premium, meaning you pay **50%**."
         }
       ],
       "golden_eval": {
@@ -348,10 +340,10 @@
     {
       "session_id": "te_oop_family",
       "question": "What's the out-of-pocket maximum for a family on the PPO?",
-      "response": "For a family on the PPO plan, the in-network out-of-pocket maximum is **$8,000**.",
+      "response": "The out-of-pocket maximum for a family on the PPO plan is **$8,000** (for in-network care).",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.83,
+      "latency_s": 28.34,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -359,11 +351,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly answers the user's question about the PPO out-of-pocket maximum for a family with the correct amount ($8,000)."
+          "justification": "The agent directly and substantively answered the user's question about the PPO out-of-pocket maximum with the correct figure."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides a specific numerical value for a company policy, which is explicitly stated to be retrieved from the `lookup_company_policy` tool in the ground truth data."
+          "justification": "The specific numerical information provided by the agent ($8,000) must have been retrieved from a tool like 'lookup_company_policy', as it's not general knowledge."
         }
       },
       "quality_scores": {},
@@ -374,7 +366,7 @@
         },
         {
           "role": "agent",
-          "text": "For a family on the PPO plan, the in-network out-of-pocket maximum is **$8,000**."
+          "text": "The out-of-pocket maximum for a family on the PPO plan is **$8,000** (for in-network care)."
         }
       ],
       "golden_eval": {
@@ -389,10 +381,10 @@
     {
       "session_id": "te_tuition_course",
       "question": "Can I get a work-related course reimbursed, and up to how much?",
-      "response": "Yes, the company offers tuition reimbursement for work-related courses. \n\nAccording to the policy, you can be reimbursed up to **$5,250 per calendar year** for job-related courses or degree programs. \n\nPlease keep in mind the following requirements:\n*   **Pre-approval:** You must get manager approval before starting the course.\n*   **Grades:** You must achieve a grade of \"B\" or better (or a \"Pass\" for pass/fail courses) to qualify for reimbursement.",
+      "response": "Yes, you can get a work-related course reimbursed! \n\nThe company's tuition reimbursement policy covers up to **$5,250 per calendar year** for job-related courses or degree programs. \n\nTo qualify for reimbursement, please keep the following requirements in mind:\n* **Pre-approval:** You must obtain manager pre-approval before starting the course.\n* **Grade Requirement:** You must achieve a grade of **B or better** (or a \"pass\" for pass/fail courses).",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.45,
+      "latency_s": 3.93,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -400,11 +392,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly answers the user's question about tuition reimbursement, stating that it is available and providing the maximum amount, along with key requirements, which aligns with the expected answer."
+          "justification": "The agent directly answers the user's question about tuition reimbursement eligibility and the maximum amount, providing specific details that match the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response provides specific details about tuition reimbursement, including the amount and conditions, explicitly stating 'According to the policy', indicating it is based on retrieved policy data."
+          "justification": "The response provides specific figures ($5,250) and conditions (manager pre-approval, grade B or better) that are clearly derived from the lookup_company_policy tool, as confirmed by the ground truth data."
         }
       },
       "quality_scores": {},
@@ -415,7 +407,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, the company offers tuition reimbursement for work-related courses. \n\nAccording to the policy, you can be reimbursed up to **$5,250 per calendar year** for job-related courses or degree programs. \n\nPlease keep in mind the following requirements:\n*   **Pre-approval:** You must get manager approval before starting the course.\n*   **Grades:** You must achieve a grade of \"B\" or better (or a \"Pass\" for pass/fail courses) to qualify for reimbursement."
+          "text": "Yes, you can get a work-related course reimbursed! \n\nThe company's tuition reimbursement policy covers up to **$5,250 per calendar year** for job-related courses or degree programs. \n\nTo qualify for reimbursement, please keep the following requirements in mind:\n* **Pre-approval:** You must obtain manager pre-approval before starting the course.\n* **Grade Requirement:** You must achieve a grade of **B or better** (or a \"pass\" for pass/fail courses)."
         }
       ],
       "golden_eval": {
@@ -430,10 +422,10 @@
     {
       "session_id": "te_eap_therapy",
       "question": "How many therapy sessions does the employee assistance program cover?",
-      "response": "The Employee Assistance Program (EAP) covers up to **8 free, confidential counseling sessions** per issue per year. Additionally, the program provides a 24/7 hotline for support with mental health, stress, legal, and financial matters.",
+      "response": "The Employee Assistance Program (EAP) covers up to **8 free, confidential counseling sessions** per issue per year. \n\nAdditionally, the program provides a 24/7 hotline covering mental health, stress, legal, and financial matters.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.12,
+      "latency_s": 3.9,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -445,7 +437,7 @@
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details (8 sessions per issue per year, 24/7 hotline) that would be retrieved from a company policy tool, not general knowledge."
+          "justification": "The response provides specific policy details (8 sessions, 24/7 hotline) that would be retrieved from a company policy tool, not general knowledge."
         }
       },
       "quality_scores": {},
@@ -456,7 +448,7 @@
         },
         {
           "role": "agent",
-          "text": "The Employee Assistance Program (EAP) covers up to **8 free, confidential counseling sessions** per issue per year. Additionally, the program provides a 24/7 hotline for support with mental health, stress, legal, and financial matters."
+          "text": "The Employee Assistance Program (EAP) covers up to **8 free, confidential counseling sessions** per issue per year. \n\nAdditionally, the program provides a 24/7 hotline covering mental health, stress, legal, and financial matters."
         }
       ],
       "golden_eval": {
@@ -471,10 +463,10 @@
     {
       "session_id": "te_exp_perdiem",
       "question": "What's the daily per-diem for meals when I travel for work?",
-      "response": "The daily per-diem for meals during business travel is **$75 per day**. \n\nPlease keep in mind that receipts are required for any expense over $25, and all expenses must be submitted within 30 days.",
+      "response": "The daily reimbursement limit for meals during business travel is **$75 per day**. \n\nPlease keep in mind:\n* Receipts are required for any expense over $25.\n* Expense reports must be submitted within 30 days of the travel.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.5,
+      "latency_s": 3.57,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -482,11 +474,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about the daily per-diem for meals, providing the correct amount and additional relevant policy details."
+          "justification": "The agent directly and accurately answers the user's question about the daily per-diem for meals with the correct amount of $75 per day, matching the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent provides a specific numerical value ($75) for the per-diem, which is a detail that would be retrieved from a company policy tool, as indicated by the ground truth data."
+          "justification": "The agent provides a specific numerical answer ($75 per day) for a company policy, which indicates the information was retrieved from a tool like 'lookup_company_policy'."
         }
       },
       "quality_scores": {},
@@ -497,7 +489,7 @@
         },
         {
           "role": "agent",
-          "text": "The daily per-diem for meals during business travel is **$75 per day**. \n\nPlease keep in mind that receipts are required for any expense over $25, and all expenses must be submitted within 30 days."
+          "text": "The daily reimbursement limit for meals during business travel is **$75 per day**. \n\nPlease keep in mind:\n* Receipts are required for any expense over $25.\n* Expense reports must be submitted within 30 days of the travel."
         }
       ],
       "golden_eval": {
@@ -512,10 +504,10 @@
     {
       "session_id": "te_exp_taxi",
       "question": "Do I need a receipt for a $30 taxi ride?",
-      "response": "Yes, you will need a receipt for your $30 taxi ride. According to the company's expense policy, receipts are required for any expense over $25.",
+      "response": "Yes, you will need a receipt for your $30 taxi ride. \n\nAccording to the company expense policy, receipts are required for any business expense over **$25**. Since your taxi ride is $30, it exceeds this threshold, so a receipt must be submitted with your expense report.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.33,
+      "latency_s": 4.0,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -523,11 +515,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and correctly answers the user's question about needing a receipt for a $30 taxi ride, citing the company policy that receipts are required for expenses over $25, which matches the expected answer."
+          "justification": "The agent directly and correctly answers the user's question about needing a receipt for a $30 taxi ride, citing the $25 threshold from company policy."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response provides specific policy information ('receipts are required for any expense over $25') which would be retrieved from a tool like 'lookup_company_policy', not general knowledge."
+          "justification": "The response explicitly references 'company expense policy' and provides a specific threshold ($25) that would have been retrieved from a tool like `lookup_company_policy`."
         }
       },
       "quality_scores": {},
@@ -538,7 +530,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, you will need a receipt for your $30 taxi ride. According to the company's expense policy, receipts are required for any expense over $25."
+          "text": "Yes, you will need a receipt for your $30 taxi ride. \n\nAccording to the company expense policy, receipts are required for any business expense over **$25**. Since your taxi ride is $30, it exceeds this threshold, so a receipt must be submitted with your expense report."
         }
       ],
       "golden_eval": {
@@ -553,10 +545,10 @@
     {
       "session_id": "te_hol_list",
       "question": "Can you list our paid company holidays?",
-      "response": "The company observes 11 paid holidays per year:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   Wednesday of Thanksgiving week\n*   Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Juneteenth, Veterans Day, and Columbus Day are not observed as company holidays.",
+      "response": "The company observes **11 paid holidays** per year:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   Wednesday of Thanksgiving week\n*   Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\n*Note: Juneteenth, Veterans Day, and Columbus Day are not observed as company holidays.*",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.2,
+      "latency_s": 3.68,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -564,11 +556,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent provided a complete and accurate list of paid company holidays, directly answering the user's question."
+          "justification": "The agent provided a complete and accurate list of all paid company holidays, directly answering the user's question."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response contains specific details about company holidays that would be retrieved from a tool like 'lookup_company_policy', matching the ground truth data."
+          "justification": "The response contains specific details (list of 11 holidays) that are clearly derived from a tool lookup (lookup_company_policy) as per the ground truth data."
         }
       },
       "quality_scores": {},
@@ -579,7 +571,7 @@
         },
         {
           "role": "agent",
-          "text": "The company observes 11 paid holidays per year:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   Wednesday of Thanksgiving week\n*   Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Juneteenth, Veterans Day, and Columbus Day are not observed as company holidays."
+          "text": "The company observes **11 paid holidays** per year:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   Wednesday of Thanksgiving week\n*   Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\n*Note: Juneteenth, Veterans Day, and Columbus Day are not observed as company holidays.*"
         }
       ],
       "golden_eval": {
@@ -594,10 +586,10 @@
     {
       "session_id": "te_ber_sibling",
       "question": "How many days off do I get for the death of a sibling?",
-      "response": "For the death of a sibling, you are entitled to **5 paid days** of bereavement leave, as siblings are considered immediate family members under the company policy.",
+      "response": "Under the company's bereavement leave policy, you are eligible for **5 paid days off** for the death of a sibling, as siblings are considered immediate family members.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.09,
+      "latency_s": 3.26,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -605,11 +597,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about bereavement leave for a sibling's death, stating the correct number of paid days (5) and the reason (immediate family), which aligns with the expected answer and agent scope."
+          "justification": "The agent directly and correctly answers the user's question about bereavement leave for a sibling, providing the specific number of paid days off, which matches the ground truth."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details (5 paid days for immediate family) that would be retrieved from a company policy lookup tool, not general knowledge."
+          "justification": "The agent's response provides specific policy details (5 paid days off for a sibling) that would be retrieved from a company policy tool, indicating it is grounded in data."
         }
       },
       "quality_scores": {},
@@ -620,7 +612,7 @@
         },
         {
           "role": "agent",
-          "text": "For the death of a sibling, you are entitled to **5 paid days** of bereavement leave, as siblings are considered immediate family members under the company policy."
+          "text": "Under the company's bereavement leave policy, you are eligible for **5 paid days off** for the death of a sibling, as siblings are considered immediate family members."
         }
       ],
       "golden_eval": {
@@ -635,10 +627,10 @@
     {
       "session_id": "te_flex_4x10",
       "question": "Can I work four 10-hour days instead of five 8-hour days?",
-      "response": "Yes, you can work four 10-hour days. According to the company's flex time policy, compressed workweeks are allowed. \n\nHowever, please keep in mind that this arrangement is subject to **manager approval**. Additionally, the policy requires that you cover the core hours of 10:00 AM to 3:00 PM and typically start your day between 7:00 AM and 10:00 AM.",
+      "response": "Yes, you can work four 10-hour days instead of five 8-hour days. Under the company's flexible scheduling policy, compressed work weeks (such as four 10-hour days) are allowed, but they do require approval from your manager.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.32,
+      "latency_s": 3.89,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -646,11 +638,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly answers the user's question about working four 10-hour days, confirming it's allowed under the flex time policy with manager approval and specific conditions, which aligns with the expected answer."
+          "justification": "The agent directly and substantively answers the user's question about working four 10-hour days, stating it is allowed with manager approval, which matches the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent explicitly cites the 'company's flex time policy' and provides specific details (manager approval, core hours) that would be retrieved from a policy lookup tool."
+          "justification": "The agent's response about compressed work weeks requiring manager approval is specific company policy information, indicating it was retrieved from a tool (policy_agent) rather than being general knowledge."
         }
       },
       "quality_scores": {},
@@ -661,7 +653,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, you can work four 10-hour days. According to the company's flex time policy, compressed workweeks are allowed. \n\nHowever, please keep in mind that this arrangement is subject to **manager approval**. Additionally, the policy requires that you cover the core hours of 10:00 AM to 3:00 PM and typically start your day between 7:00 AM and 10:00 AM."
+          "text": "Yes, you can work four 10-hour days instead of five 8-hour days. Under the company's flexible scheduling policy, compressed work weeks (such as four 10-hour days) are allowed, but they do require approval from your manager."
         }
       ],
       "golden_eval": {
@@ -676,10 +668,10 @@
     {
       "session_id": "te_pto_vacation",
       "question": "How many vacation days do I get a year?",
-      "response": "You get **20 days of PTO (vacation) per year**, which are accrued on a monthly basis. \n\nAdditionally, up to 5 unused days can roll over to the following year. If you leave the company, any accrued but unused PTO will be paid out in your final paycheck.",
+      "response": "You get 20 days of PTO (vacation) per year, which are accrued monthly. Up to 5 unused days can roll over to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.34,
+      "latency_s": 2.24,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -687,11 +679,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about vacation days, providing the correct number (20 days) and additional relevant details about accrual, rollover, and payout, matching the expected answer."
+          "justification": "The agent directly and substantively answers the user's question about vacation days, providing the correct number and accrual details, which aligns with the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response provides specific policy details (20 days PTO, monthly accrual, rollover, payout) that would be retrieved from a company policy tool, indicating it is grounded in actual data."
+          "justification": "The response provides specific policy details (20 days, accrued monthly, rollover) that would be retrieved from a tool like 'lookup_company_policy', indicating it is grounded in actual data."
         }
       },
       "quality_scores": {},
@@ -702,7 +694,7 @@
         },
         {
           "role": "agent",
-          "text": "You get **20 days of PTO (vacation) per year**, which are accrued on a monthly basis. \n\nAdditionally, up to 5 unused days can roll over to the following year. If you leave the company, any accrued but unused PTO will be paid out in your final paycheck."
+          "text": "You get 20 days of PTO (vacation) per year, which are accrued monthly. Up to 5 unused days can roll over to the next year."
         }
       ],
       "golden_eval": {
@@ -717,10 +709,10 @@
     {
       "session_id": "te_sick_annual",
       "question": "How many sick days am I given annually?",
-      "response": "You are given 10 days of sick leave per year. Please note that these days do not roll over to the next year.",
+      "response": "You are given 10 sick days per year. Please note that unused sick leave does not roll over to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.4,
+      "latency_s": 1.82,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -728,11 +720,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and completely answers the user's question about sick days, providing the correct number and an important detail about rollover, matching the expected answer."
+          "justification": "The agent directly and accurately answers the user's question about the number of sick days and provides the additional detail about rollover, matching the expected answer."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response provides specific policy details (10 days, no rollover) that would be retrieved from a tool like 'lookup_company_policy', not general knowledge."
+          "justification": "The agent's response provides specific policy details (10 sick days, no rollover) that would be retrieved from a tool like 'lookup_company_policy', not general knowledge."
         }
       },
       "quality_scores": {},
@@ -743,7 +735,7 @@
         },
         {
           "role": "agent",
-          "text": "You are given 10 days of sick leave per year. Please note that these days do not roll over to the next year."
+          "text": "You are given 10 sick days per year. Please note that unused sick leave does not roll over to the next year."
         }
       ],
       "golden_eval": {
@@ -761,7 +753,7 @@
       "response": "Up to 5 unused PTO days can roll over into the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.26,
+      "latency_s": 1.66,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -799,22 +791,22 @@
     {
       "session_id": "corr_parental",
       "question": "How much parental leave does a secondary caregiver get?",
-      "response": "According to the company's benefits policy, a secondary caregiver is entitled to **8 weeks** of paid parental leave. The 12-week period you mentioned is not currently reflected in the policy, which specifies 16 weeks for the primary caregiver and 8 weeks for the secondary caregiver.",
+      "response": "According to the official company policy, a secondary caregiver is eligible for **8 weeks** of paid parental leave. The **16 weeks** of paid leave is designated for the primary caregiver.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.94,
+      "latency_s": 5.06,
       "user_turns": 2,
       "tool_calls": 1,
-      "corrections": 0,
-      "verifications": 1,
+      "corrections": 1,
+      "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent correctly answered the question about parental leave for a secondary caregiver, and then re-affirmed the correct answer and clarified the discrepancy after the user's incorrect assertion, citing the policy."
+          "justification": "The agent's final response correctly states that a secondary caregiver gets 8 weeks of parental leave, which aligns with the ground truth. The agent did not merely repeat the user's incorrect assertion but re-affirmed the correct policy."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent explicitly states 'According to the company's benefits policy', indicating the information was retrieved from a tool, and the answer aligns with the ground truth data from the lookup_company_policy tool."
+          "justification": "The agent explicitly states that the information is 'Based on the company's parental leave policy' and 'According to the official company policy', indicating it used its tools to retrieve the data."
         }
       },
       "quality_scores": {},
@@ -822,28 +814,42 @@
         {
           "role": "user",
           "text": "How much parental leave does a secondary caregiver get?",
-          "inferred_tag": "FOLLOWUP",
-          "tag_evidence": "Initial request for information about company policy."
+          "inferred_tag": "SPECIFICS",
+          "tag_evidence": "User asks for a specific quantity (how much leave)."
         },
         {
           "role": "agent",
-          "text": "A secondary caregiver is entitled to **8 weeks** of paid parental leave."
+          "text": "Based on the company's parental leave policy, a secondary caregiver is eligible for **8 weeks** of paid parental leave."
         },
         {
           "role": "user",
           "text": "I'm fairly sure it's 12 weeks for the secondary caregiver, right?",
-          "inferred_tag": "VERIFY",
-          "tag_evidence": "User expresses doubt about the agent's previous answer and suggests an alternative, asking for confirmation ('right?')."
+          "inferred_tag": "CORRECTION",
+          "tag_evidence": "User states the agent's previous answer is wrong and provides a different fact ('12 weeks')."
         },
         {
           "role": "agent",
-          "text": "According to the company's benefits policy, a secondary caregiver is entitled to **8 weeks** of paid parental leave. The 12-week period you mentioned is not currently reflected in the policy, which specifies 16 weeks for the primary caregiver and 8 weeks for the secondary caregiver."
+          "text": "According to the official company policy, a secondary caregiver is eligible for **8 weeks** of paid parental leave. The **16 weeks** of paid leave is designated for the primary caregiver."
+        }
+      ],
+      "correction_boundaries": [
+        {
+          "turn_index": 2,
+          "wrong_claim": "8 weeks of paid parental leave.",
+          "correct_fact": "12 weeks for the secondary caregiver",
+          "agent_recovered": true
         }
       ],
       "sub_trajectories": [
         {
-          "label": "full_conversation",
+          "label": "pre_correction_1",
           "start_turn": 0,
+          "end_turn": 1,
+          "outcome": "wrong"
+        },
+        {
+          "label": "post_correction_1",
+          "start_turn": 2,
           "end_turn": 3,
           "outcome": "recovered"
         }
@@ -860,10 +866,10 @@
     {
       "session_id": "corr_bereavement",
       "question": "How many bereavement days do I get for the death of a sibling?",
-      "response": "According to the company policy, siblings are specifically categorized as **immediate family members**. \n\nThe policy provides **5 paid days** for immediate family members (which includes a spouse or domestic partner, child, parent, or sibling) and **3 paid days** for extended family members (such as grandparents, grandchildren, or in-laws). Therefore, you are eligible for 5 days for the loss of a sibling.",
+      "response": "According to the official company policy, a sibling is explicitly categorized as an **immediate family member** (along with spouses/domestic partners, children, and parents), which qualifies for **5 paid days** of bereavement leave. \n\nThe **3 paid days** limit applies to extended family members, such as grandparents, grandchildren, or in-laws. So you are indeed eligible for 5 days.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.21,
+      "latency_s": 5.17,
       "user_turns": 2,
       "tool_calls": 1,
       "corrections": 0,
@@ -871,11 +877,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent's final response correctly clarifies that a sibling is considered immediate family and is eligible for 5 paid days, which aligns with the ground truth. The agent did not merely repeat the user's incorrect correction but re-affirmed the correct policy."
+          "justification": "The agent's final response correctly states that a sibling qualifies for 5 paid days of bereavement leave, clarifying the distinction between immediate and extended family members, which aligns with the ground truth."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent explicitly refers to 'company policy' and categorizes siblings as 'immediate family members' to justify the 5 paid days, indicating the use of a tool like 'lookup_company_policy'."
+          "justification": "The agent explicitly states that its information is 'According to the company's bereavement policy' and 'According to the official company policy', indicating the use of a tool to retrieve policy details."
         }
       },
       "quality_scores": {},
@@ -883,22 +889,22 @@
         {
           "role": "user",
           "text": "How many bereavement days do I get for the death of a sibling?",
-          "inferred_tag": "FOLLOWUP",
-          "tag_evidence": "User asks an initial question about company policy regarding bereavement leave."
+          "inferred_tag": "SPECIFICS",
+          "tag_evidence": "User asks for a concrete number of bereavement days."
         },
         {
           "role": "agent",
-          "text": "For the death of a sibling, you are entitled to **5 paid days** of bereavement leave. According to the company policy, siblings are considered immediate family members."
+          "text": "According to the company's bereavement policy, a sibling is considered an immediate family member. Therefore, you are eligible for **5 paid days** of bereavement leave for the death of a sibling."
         },
         {
           "role": "user",
           "text": "I think it's only 3 days for a sibling, isn't it?",
           "inferred_tag": "VERIFY",
-          "tag_evidence": "User expresses doubt about the agent's previous answer (5 days) and suggests an alternative (3 days) as a question ('isn't it?'), without definitively stating it as a correction. The agent's original answer was correct according to ground truth."
+          "tag_evidence": "User expresses doubt about the agent's answer ('I think it's only 3 days') and asks for confirmation ('isn't it?'), without definitively stating a correction."
         },
         {
           "role": "agent",
-          "text": "According to the company policy, siblings are specifically categorized as **immediate family members**. \n\nThe policy provides **5 paid days** for immediate family members (which includes a spouse or domestic partner, child, parent, or sibling) and **3 paid days** for extended family members (such as grandparents, grandchildren, or in-laws). Therefore, you are eligible for 5 days for the loss of a sibling."
+          "text": "According to the official company policy, a sibling is explicitly categorized as an **immediate family member** (along with spouses/domestic partners, children, and parents), which qualifies for **5 paid days** of bereavement leave. \n\nThe **3 paid days** limit applies to extended family members, such as grandparents, grandchildren, or in-laws. So you are indeed eligible for 5 days."
         }
       ],
       "sub_trajectories": [
@@ -906,7 +912,7 @@
           "label": "full_conversation",
           "start_turn": 0,
           "end_turn": 3,
-          "outcome": null
+          "outcome": "recovered"
         }
       ],
       "golden_eval": {
@@ -921,10 +927,10 @@
     {
       "session_id": "corr_ortho",
       "question": "Is orthodontia covered, and up to how much?",
-      "response": "According to the official company benefits policy, the lifetime maximum for orthodontia is **$2,000**, not $5,000. \n\nThe policy covers orthodontia at 50% up to that $2,000 lifetime limit. Therefore, your coworker's information is incorrect based on the current documentation.",
+      "response": "No, that is incorrect. According to the company's dental policy, the lifetime maximum for orthodontia coverage is **$2,000** (at 50% coverage), not $5,000.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.49,
+      "latency_s": 4.96,
       "user_turns": 2,
       "tool_calls": 1,
       "corrections": 0,
@@ -932,11 +938,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent's final response confirms the correct lifetime maximum for orthodontia coverage, explicitly stating it's based on the official company policy and correcting the user's coworker's misinformation. This is a direct and substantive answer."
+          "justification": "The agent's final response correctly confirms the orthodontia coverage details, including the lifetime maximum, and explicitly corrects the user's misconception based on the company policy, without merely repeating the user's input."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent explicitly states the information is 'According to the official company benefits policy' and the values provided ($2,000 lifetime maximum) match the ground truth data, indicating it used its tools to retrieve the information."
+          "justification": "The agent's response is consistent with the expected answer and the `lookup_company_policy` tool, indicating it is grounded in actual data."
         }
       },
       "quality_scores": {},
@@ -945,28 +951,29 @@
           "role": "user",
           "text": "Is orthodontia covered, and up to how much?",
           "inferred_tag": "SPECIFICS",
-          "tag_evidence": "User asks for concrete details regarding coverage and the maximum amount."
+          "tag_evidence": "User asks for a concrete detail, specifically 'up to how much' for coverage."
         },
         {
           "role": "agent",
-          "text": "Yes, orthodontia is covered under the company's dental insurance. It is covered at **50%** up to a **$2,000 lifetime maximum**."
+          "text": "Yes, orthodontia is covered under the company's dental benefits. It is covered at **50%** up to a **$2,000 lifetime maximum**."
         },
         {
           "role": "user",
           "text": "My coworker said the lifetime max is $5,000, can you confirm?",
           "inferred_tag": "VERIFY",
-          "tag_evidence": "User expresses doubt about the agent's previous answer by citing conflicting information and asks for confirmation."
+          "tag_evidence": "User doubts the agent's previous answer by citing conflicting information ('My coworker said the lifetime max is $5,000') and asks for confirmation ('can you confirm?'). The user does not provide the factually correct information, but rather questions the agent's correct answer."
         },
         {
           "role": "agent",
-          "text": "According to the official company benefits policy, the lifetime maximum for orthodontia is **$2,000**, not $5,000. \n\nThe policy covers orthodontia at 50% up to that $2,000 lifetime limit. Therefore, your coworker's information is incorrect based on the current documentation."
+          "text": "No, that is incorrect. According to the company's dental policy, the lifetime maximum for orthodontia coverage is **$2,000** (at 50% coverage), not $5,000."
         }
       ],
       "sub_trajectories": [
         {
           "label": "full_conversation",
           "start_turn": 0,
-          "end_turn": 3
+          "end_turn": 3,
+          "outcome": "correct"
         }
       ],
       "golden_eval": {
@@ -982,7 +989,7 @@
   "details": {
     "parse_errors": "0",
     "parse_error_rate": "0.0",
-    "elapsed_seconds": "39.8",
+    "elapsed_seconds": "34.4",
     "project": "agent-quality-lab-01",
     "dataset": "local.conversations",
     "location": "us-central1",

@@ -91,13 +91,13 @@ dependency sync.
 
 ```text
 [V0] traffic + score ...
-     V0 test:   23.8% (5/21 golden-matched)
+     V0 test:   14.3% (3/21 golden-matched)
 [evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
 [V1] traffic + score ...
      V1 test:   100.0% (21/21 golden-matched)
 
 | Metric                    | V0 (flawed)  | V1 (evolved)  | Delta   |
-| Overall                   | 23.8% (5/21) | 100.0% (21/21)| +76.2pp |
+| Overall                   | 14.3% (3/21) | 100.0% (21/21)| +85.7pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
@@ -117,7 +117,9 @@ Inspect revisions any time: `uv run python registry_cli.py revisions
 ### Model overrides
 
 ```bash
-AGENT_MODEL=gemini-3.1-pro-preview ANALYST_MODEL=gemini-3.1-pro-preview ./run_e2e_demo.sh
+# Default agent is gemini-3.5-flash; try other GA models:
+AGENT_MODEL=gemini-3.1-flash-lite ./run_e2e_demo.sh
+AGENT_MODEL=gemini-2.5-pro ./run_e2e_demo.sh
 ```
 
 `AGENT_MODEL` is the agent under test; `ANALYST_MODEL` runs the evolution

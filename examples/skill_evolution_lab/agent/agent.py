@@ -45,8 +45,12 @@ def skill_instruction(skill_text: str) -> str:
 
 
 def model_location(model: str) -> str:
-  """Vertex location for a model: 'global' for Gemini 3.x, else regional."""
-  if model.startswith("gemini-3"):
+  """Vertex location for a model.
+
+  Gemini 3.x and gemini-2.5-pro are served from (and have the most capacity on)
+  the 'global' endpoint; other models fall back to the regional location.
+  """
+  if model.startswith("gemini-3") or model == "gemini-2.5-pro":
     return "global"
   return os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
