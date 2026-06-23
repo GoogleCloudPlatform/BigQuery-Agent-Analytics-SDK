@@ -99,6 +99,15 @@ class EventType(Enum):
   HITL_CONFIRMATION_REQUEST_COMPLETED = "HITL_CONFIRMATION_REQUEST_COMPLETED"
   HITL_CREDENTIAL_REQUEST_COMPLETED = "HITL_CREDENTIAL_REQUEST_COMPLETED"
   HITL_INPUT_REQUEST_COMPLETED = "HITL_INPUT_REQUEST_COMPLETED"
+  # ADK 2.0 event types (producer: BQ AA Plugin minimum cut, #293).
+  AGENT_TRANSFER = "AGENT_TRANSFER"
+  EVENT_COMPACTION = "EVENT_COMPACTION"
+  AGENT_STATE_CHECKPOINT = "AGENT_STATE_CHECKPOINT"
+  TOOL_PAUSED = "TOOL_PAUSED"
+  # Workflow-node boundaries — registered now; the producer derives
+  # these per #207 (typed-view columns are a #207 follow-up).
+  WORKFLOW_NODE_STARTING = "WORKFLOW_NODE_STARTING"
+  WORKFLOW_NODE_COMPLETED = "WORKFLOW_NODE_COMPLETED"
 
 
 @dataclass
@@ -449,6 +458,7 @@ class TraceFilter:
       session_id: str | None = None,
       user_id: str | None = None,
       has_error: bool | None = None,
+      custom_labels: dict[str, str] | None = None,
       limit: int = 100,
   ) -> "TraceFilter":
     """Build a ``TraceFilter`` from CLI-style arguments.
@@ -467,6 +477,8 @@ class TraceFilter:
         session_id: Filter to a single session.
         user_id: Filter to a specific user.
         has_error: If set, filter by error presence.
+        custom_labels: Filter by custom_tags key-value pairs
+            written via ``BigQueryLoggerConfig.custom_tags``.
         limit: Maximum number of traces to return.
 
     Returns:
@@ -485,6 +497,7 @@ class TraceFilter:
         user_id=user_id,
         session_ids=session_ids,
         has_error=has_error,
+        custom_labels=custom_labels,
         limit=limit,
     )
 
@@ -606,7 +619,7 @@ class TraceFilter:
         param_val = f"label_val_{i}"
         conditions.append(
             f"JSON_VALUE(attributes,"
-            f" CONCAT('$.labels.', @{param_key}))"
+            f" CONCAT('$.custom_tags.', @{param_key}))"
             f" = @{param_val}"
         )
         params.append(bigquery.ScalarQueryParameter(param_key, "STRING", key))

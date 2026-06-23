@@ -53,6 +53,7 @@ artifacts that demonstrate SDK capabilities.
 |-----------|-------------|
 | [context_graph/](context_graph/) | Agent Context Graph: extract decision traces from your agent's context graph — a runnable ADK agent + BQ AA plugin streaming events, the codelab artifacts ([codelab/](context_graph/codelab/)), and the scheduled Cloud Run + Cloud Scheduler deploy ([periodic_materialization/](context_graph/periodic_materialization/)). Start with the [codelab](../docs/codelabs/periodic_materialization.md). |
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
+| [self_evolving_agent_demo/](self_evolving_agent_demo/) | Metric-driven self-evolution demo for a single ADK agent. Uses trace signals to generate and gate a bounded prompt evolution. |
 | [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
 
 ## Reference Artifacts

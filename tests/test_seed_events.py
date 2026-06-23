@@ -24,8 +24,10 @@ import random
 import pytest
 
 from bigquery_agent_analytics.seed_events import _outcome_allocation
+from bigquery_agent_analytics.seed_events import _retail_outcome_allocation
 from bigquery_agent_analytics.seed_events import _shuffled_cycle
 from bigquery_agent_analytics.seed_events import build_realistic_corpus
+from bigquery_agent_analytics.seed_events import build_retail_returns_corpus
 from bigquery_agent_analytics.seed_events import generate_seed_events
 from bigquery_agent_analytics.seed_events import run_seed_events
 from bigquery_agent_analytics.seed_events import Scenario
@@ -437,3 +439,242 @@ def test_explicit_sessions_overrides_scenario_default() -> None:
   )
   assert result.sessions == 40
   assert sum(result.session_outcome_counts.values()) == 40
+
+
+# --------------------------------------------------------------------------- #
+# retail-returns scenario (issue #313)                                        #
+# --------------------------------------------------------------------------- #
+
+_RETAIL_AGENT_NAMES = {
+    "retail-intake-triage-agent",
+    "retail-fraud-abuse-agent",
+    "retail-quality-defect-agent",
+}
+_RETAIL_OUTCOME_NAMES = {
+    "refund_approved",
+    "exchange_offered",
+    "manual_review",
+    "fraud_rejected",
+    "defect_escalated",
+    "system_error",
+}
+_LATENCY_BEARING = {
+    "LLM_RESPONSE",
+    "LLM_ERROR",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR",
+    "AGENT_COMPLETED",
+}
+
+
+def _retail_corpus(seed: int = 99, sessions: int = 100):
+  return build_retail_returns_corpus(random.Random(seed), _FIXED_NOW, sessions)
+
+
+def test_retail_returns_scenario_is_available() -> None:
+  rows = generate_seed_events(
+      sessions=6, seed=1, now=_FIXED_NOW, scenario=Scenario.RETAIL_RETURNS
+  )
+  assert rows
+  assert all(set(row) == _EXPECTED_COLS for row in rows)
+  assert Scenario.RETAIL_RETURNS.value == "retail-returns"
+
+
+def test_retail_returns_default_sessions() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      scenario="retail-returns",
+      seed=1,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert result.sessions == 100
+
+
+def test_retail_outcome_allocation_sums_and_covers_at_100() -> None:
+  counts = _retail_outcome_allocation(100)
+  assert set(counts) == _RETAIL_OUTCOME_NAMES
+  assert sum(counts.values()) == 100
+  assert all(v > 0 for v in counts.values())  # all six buckets present
+
+
+def test_retail_outcome_allocation_sums_for_small_sessions() -> None:
+  for n in (1, 2, 5, 7):
+    counts = _retail_outcome_allocation(n)
+    assert set(counts) == _RETAIL_OUTCOME_NAMES
+    assert sum(counts.values()) == n
+
+
+def test_retail_returns_reports_outcome_counts() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      scenario="retail-returns",
+      seed=7,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  assert set(result.session_outcome_counts) == _RETAIL_OUTCOME_NAMES
+  assert sum(result.session_outcome_counts.values()) == 100
+
+
+def test_retail_returns_has_three_agents() -> None:
+  rows, _ = _retail_corpus()
+  assert _RETAIL_AGENT_NAMES <= {r["agent"] for r in rows}
+
+
+def test_retail_returns_single_terminal_event_per_session() -> None:
+  rows, _ = _retail_corpus()
+  for session in _by_session(rows).values():
+    terminals = [r for r in session if r["event_type"] == "AGENT_COMPLETED"]
+    assert len(terminals) == 1
+    # Terminal row is always the top-level intake agent's completion.
+    assert terminals[0]["agent"] == "retail-intake-triage-agent"
+
+
+def test_retail_returns_emits_llm_events() -> None:
+  rows, _ = _retail_corpus()
+  types = {r["event_type"] for r in rows}
+  assert "LLM_REQUEST" in types
+  assert "LLM_RESPONSE" in types
+
+
+def test_retail_returns_llm_response_usage_is_view_compatible() -> None:
+  rows, _ = _retail_corpus()
+  responses = [r for r in rows if r["event_type"] == "LLM_RESPONSE"]
+  assert responses
+  for row in responses:
+    usage = json.loads(row["content"])["usage"]
+    prompt = int(usage["prompt"])
+    completion = int(usage["completion"])
+    total = int(usage["total"])
+    assert prompt > 0 and completion > 0
+    assert total == prompt + completion
+
+
+def test_retail_returns_latency_is_view_compatible() -> None:
+  rows, _ = _retail_corpus()
+  relevant = [r for r in rows if r["event_type"] in _LATENCY_BEARING]
+  assert relevant
+  for row in relevant:
+    total = int(json.loads(row["latency_ms"])["total_ms"])
+    assert total > 0
+  for row in rows:
+    if row["event_type"] == "LLM_RESPONSE":
+      latency = json.loads(row["latency_ms"])
+      ttft = int(latency["time_to_first_token_ms"])
+      assert 0 < ttft <= int(latency["total_ms"])
+
+
+def test_retail_returns_starting_rows_have_empty_latency() -> None:
+  rows, _ = _retail_corpus()
+  for row in rows:
+    if row["event_type"] in {"TOOL_STARTING", "LLM_REQUEST"}:
+      assert json.loads(row["latency_ms"]) == {}
+
+
+def test_retail_returns_json_columns_round_trip() -> None:
+  rows, _ = _retail_corpus()
+  for row in rows:
+    assert isinstance(json.loads(row["content"]), (dict, list))
+    assert isinstance(json.loads(row["attributes"]), dict)
+    assert isinstance(json.loads(row["latency_ms"]), dict)
+
+
+def test_retail_returns_error_messages_include_legacy_crm_db() -> None:
+  rows, _ = _retail_corpus()
+  carriers = [
+      r
+      for r in rows
+      if r["error_message"] and "legacy_crm_db" in r["error_message"]
+  ]
+  assert carriers
+  # Errors live on terminal error rows and/or non-terminal *_ERROR rows.
+  assert all(
+      r["event_type"] in {"AGENT_COMPLETED", "TOOL_ERROR", "LLM_ERROR"}
+      for r in carriers
+  )
+
+
+def test_retail_returns_product_quality_feedback_present() -> None:
+  rows, _ = _retail_corpus()
+  blob = " ".join(r["content"] for r in rows)
+  assert "zipper is broken" in blob
+
+
+def test_retail_returns_has_tool_start_completion_pairs() -> None:
+  rows, _ = _retail_corpus()
+  for session in _by_session(rows).values():
+    started: dict[str, int] = {}
+    finished: dict[str, int] = {}
+    for row in session:
+      tool = json.loads(row["content"]).get("tool")
+      if row["event_type"] == "TOOL_STARTING":
+        started[tool] = started.get(tool, 0) + 1
+      elif row["event_type"] in {"TOOL_COMPLETED", "TOOL_ERROR"}:
+        finished[tool] = finished.get(tool, 0) + 1
+    assert started == finished  # every start pairs with a completion/error
+
+
+def test_retail_returns_span_lineage_is_present() -> None:
+  rows, _ = _retail_corpus()
+  for session in _by_session(rows).values():
+    # Every row shares one trace; trace_id mirrors session_id.
+    assert len({r["trace_id"] for r in session}) == 1
+    assert all(r["trace_id"] == r["session_id"] for r in session)
+    # At least one row carries parent_span_id lineage.
+    assert any(r["parent_span_id"] for r in session)
+
+
+def test_retail_returns_multi_day_span_and_no_future() -> None:
+  rows, _ = _retail_corpus()
+  ts = [datetime.fromisoformat(r["timestamp"]) for r in rows]
+  span = max(ts) - min(ts)
+  assert span > timedelta(hours=24)
+  assert span <= timedelta(hours=72)
+  assert max(ts) <= _FIXED_NOW  # no future timestamps
+
+
+def test_retail_returns_is_deterministic() -> None:
+  a, ca = _retail_corpus()
+  b, cb = _retail_corpus()
+  assert a == b and ca == cb
+
+
+def test_retail_returns_result_counts_include_new_event_types() -> None:
+  result = run_seed_events(
+      project_id="p",
+      dataset_id="d",
+      scenario="retail-returns",
+      seed=7,
+      dry_run=True,
+      now=_FIXED_NOW,
+      bq_client=_FakeBQClient(),
+  )
+  counts = result.event_type_counts
+  for event_type in (
+      "INVOCATION_STARTING",
+      "INVOCATION_COMPLETED",
+      "AGENT_STARTING",
+      "AGENT_COMPLETED",
+      "LLM_REQUEST",
+      "LLM_RESPONSE",
+      "TOOL_STARTING",
+      "TOOL_COMPLETED",
+      "TOOL_ERROR",
+  ):
+    assert counts.get(event_type, 0) > 0, event_type
+
+
+def test_retail_returns_agent_starting_has_text_summary() -> None:
+  # adk_agent_starts extracts content.text_summary AS agent_instruction;
+  # every AGENT_STARTING row must populate it (not NULL in that view).
+  rows, _ = _retail_corpus()
+  starts = [r for r in rows if r["event_type"] == "AGENT_STARTING"]
+  assert starts
+  for row in starts:
+    summary = json.loads(row["content"]).get("text_summary")
+    assert isinstance(summary, str) and summary

@@ -18,6 +18,9 @@ Writes a corpus of TOOL_COMPLETED + AGENT_COMPLETED events to a configured
 -> evaluate_option -> commit_outcome); the ``decision`` scenario closes every
 session with an AGENT_COMPLETED terminal row, while ``decision-realistic``
 mixes in failed, truncated, and orphaned (no terminal event) sessions. The
+``retail-returns`` scenario (#313) emits a richer multi-agent refund/exchange
+trace -- INVOCATION/AGENT/LLM/TOOL events with token-usage and latency
+telemetry -- keeping exactly one terminal AGENT_COMPLETED per session. The
 materializer keys on the terminal AGENT_COMPLETED row.
 
 ``--seed`` freezes IDs and content (and event structure); timestamps stay
@@ -44,6 +47,7 @@ class Scenario(str, enum.Enum):
 
   DECISION = "decision"
   DECISION_REALISTIC = "decision-realistic"
+  RETAIL_RETURNS = "retail-returns"
 
 
 _EVENT_SCHEMA_FIELDS = (
@@ -91,6 +95,43 @@ _REALISTIC_WINDOW = timedelta(hours=72)
 # timestamp after ``now`` (a session spans at most ~8s; 60s is safe margin).
 _MAX_SESSION_SPAN = timedelta(seconds=60)
 
+# --- retail-returns scenario (#313) -------------------------------------- #
+# A multi-agent refund/exchange trace. One shared session_id/trace_id per
+# case; the three agents are distinguished by ``agent`` and span lineage.
+_RETAIL_AGENTS = (
+    "retail-intake-triage-agent",  # top-level; owns the terminal event
+    "retail-fraud-abuse-agent",
+    "retail-quality-defect-agent",
+)
+_RETAIL_OUTCOMES = (
+    "refund_approved",
+    "exchange_offered",
+    "manual_review",
+    "fraud_rejected",
+    "defect_escalated",
+    "system_error",
+)
+# Relatable product-quality text for filterable demo queries.
+_RETAIL_PRODUCT_FEEDBACK = (
+    "zipper is broken",
+    "sizing runs incredibly small",
+    "sole separated after one wear",
+    "stitching came loose",
+    "barcode label is unreadable",
+)
+# Diagnostic error strings; a `WHERE error_message LIKE '%legacy_crm_db%'`
+# demo returns rows because ``system_error`` sessions always carry one.
+_RETAIL_LEGACY_CRM_ERRORS = (
+    "legacy_crm_db timeout while retrieving order history",
+    "legacy_crm_db returned stale customer profile",
+)
+_RETAIL_MODEL = "gemini-2.0-flash"
+_RETAIL_MODEL_VERSION = "gemini-2.0-flash-001"
+# Per-row timestamp step. The largest retail session emits ~32 rows, so the
+# intra-session span is ~16s -- comfortably inside _MAX_SESSION_SPAN (60s),
+# keeping ``max(timestamp) <= now``. ``latency_ms`` is reported independently.
+_RETAIL_STEP = timedelta(seconds=0.5)
+
 
 def _hex(rng: random.Random, length: int) -> str:
   """Deterministic hex id of ``length`` chars, driven by ``rng``."""
@@ -106,24 +147,41 @@ def _row(
     *,
     agent: str = "demo-agent",
     user_id: str = "demo-user",
+    attributes: Optional[dict] = None,
+    latency_ms: Optional[dict] = None,
+    span_id: Optional[str] = None,
+    parent_span_id: Optional[str] = None,
+    status: str = "ok",
+    error_message: Optional[str] = None,
+    is_truncated: bool = False,
 ) -> dict:
+  """Build one agent_events row.
+
+  ``content``/``attributes``/``latency_ms`` are accepted as Python objects and
+  serialized with ``json.dumps`` to preserve the string-valued JSON-column
+  shape (and byte-stability). ``invocation_id`` then ``span_id`` consume the
+  RNG in that order; passing an explicit ``span_id`` skips the RNG draw, so
+  callers that leave it ``None`` keep the legacy consumption order intact.
+  """
+  invocation_id = _hex(rng, 32)
+  span = _hex(rng, 16) if span_id is None else span_id
   return {
       "timestamp": ts.isoformat(),
       "event_type": event_type,
       "agent": agent,
       "session_id": session_id,
-      "invocation_id": _hex(rng, 32),
+      "invocation_id": invocation_id,
       "user_id": user_id,
       # One trace per session in the demo corpus; trace_id mirrors session_id.
       "trace_id": session_id,
-      "span_id": _hex(rng, 16),
-      "parent_span_id": None,
-      "status": "ok",
-      "error_message": None,
-      "is_truncated": False,
+      "span_id": span,
+      "parent_span_id": parent_span_id,
+      "status": status,
+      "error_message": error_message,
+      "is_truncated": is_truncated,
       "content": json.dumps(content),
-      "attributes": "{}",
-      "latency_ms": "{}",
+      "attributes": "{}" if attributes is None else json.dumps(attributes),
+      "latency_ms": "{}" if latency_ms is None else json.dumps(latency_ms),
   }
 
 
@@ -395,10 +453,395 @@ def build_realistic_corpus(
   return rows, counts
 
 
+def _retail_outcome_allocation(sessions: int) -> dict[str, int]:
+  """Even, deterministic split of ``sessions`` across the six retail outcomes.
+
+  The remainder is distributed to the first buckets. All six buckets are
+  non-empty once ``sessions >= len(_RETAIL_OUTCOMES)`` (true for the
+  100-session default); smaller runs leave trailing buckets at zero but the
+  counts always sum to ``sessions``.
+  """
+  if sessions < 1:
+    raise ValueError("sessions must be >= 1")
+  base, extra = divmod(sessions, len(_RETAIL_OUTCOMES))
+  return {
+      name: base + (1 if i < extra else 0)
+      for i, name in enumerate(_RETAIL_OUTCOMES)
+  }
+
+
+def _retail_usage(rng: random.Random, lo: int, hi: int) -> dict[str, int]:
+  """Synthetic token usage with ``total == prompt + completion`` (both > 0)."""
+  total = rng.randint(lo, hi)
+  completion = rng.randint(max(1, total // 10), max(2, total // 2))
+  return {
+      "prompt": total - completion,
+      "completion": completion,
+      "total": total,
+  }
+
+
+def _retail_llm_latency(rng: random.Random) -> dict[str, int]:
+  """LLM latency with ``0 < time_to_first_token_ms <= total_ms``."""
+  total = rng.randint(800, 7500)
+  ttft = rng.randint(150, min(900, total))
+  return {"total_ms": total, "time_to_first_token_ms": ttft}
+
+
+def _retail_returns_session(
+    rng: random.Random, start: datetime, outcome: str, feedback: str
+) -> list[dict]:
+  """One retail return/refund/exchange case as a single shared trace.
+
+  All rows share ``session_id``/``trace_id``; the three retail agents are
+  distinguished by ``agent`` and ``parent_span_id`` lineage under the
+  invocation span. Exactly one terminal ``AGENT_COMPLETED`` is emitted (the
+  intake agent's final completion); ``system_error`` cases mark it
+  ``status="error"`` with a ``legacy_crm_db`` message and model the mid-trace
+  failure as a non-terminal ``TOOL_ERROR`` -- never an orphan/no-terminal
+  session. ``latency_ms`` is a reported metric, independent of the small
+  per-row timestamp offsets.
+  """
+  intake, fraud, quality = _RETAIL_AGENTS
+  session_id = f"sess-{_hex(rng, 8)}"
+  user_id = f"cust-{_hex(rng, 6)}"
+  inv_span = _hex(rng, 16)
+  intake_span = _hex(rng, 16)
+  fraud_span = _hex(rng, 16)
+  quality_span = _hex(rng, 16)
+  is_error = outcome == "system_error"
+  rows: list[dict] = []
+  step = 0
+
+  def add(
+      event_type: str,
+      content: dict,
+      *,
+      agent: str,
+      parent: Optional[str],
+      span: Optional[str] = None,
+      attributes: Optional[dict] = None,
+      latency: Optional[dict] = None,
+      status: str = "ok",
+      error_message: Optional[str] = None,
+  ) -> None:
+    nonlocal step
+    rows.append(
+        _row(
+            rng,
+            event_type,
+            session_id,
+            content,
+            start + step * _RETAIL_STEP,
+            agent=agent,
+            user_id=user_id,
+            attributes=attributes,
+            latency_ms=latency,
+            span_id=span,
+            parent_span_id=parent,
+            status=status,
+            error_message=error_message,
+        )
+    )
+    step += 1
+
+  def llm_call(agent, agent_span, lo, hi, prompt, response, tools):
+    add(
+        "LLM_REQUEST",
+        {"messages": [{"role": "user", "content": prompt}]},
+        agent=agent,
+        parent=agent_span,
+        attributes={
+            "model": _RETAIL_MODEL,
+            "llm_config": {"temperature": 0.2, "max_output_tokens": 1024},
+            "tools": tools,
+        },
+    )
+    usage = _retail_usage(rng, lo, hi)
+    add(
+        "LLM_RESPONSE",
+        {"response": response, "usage": usage},
+        agent=agent,
+        parent=agent_span,
+        attributes={
+            "model_version": _RETAIL_MODEL_VERSION,
+            "usage_metadata": {
+                "prompt_token_count": usage["prompt"],
+                "candidates_token_count": usage["completion"],
+                "total_token_count": usage["total"],
+            },
+        },
+        latency=_retail_llm_latency(rng),
+    )
+
+  def tool_call(agent, agent_span, name, args, result, *, error=None):
+    add(
+        "TOOL_STARTING",
+        {"tool": name, "args": args},
+        agent=agent,
+        parent=agent_span,
+    )
+    if error is not None:
+      add(
+          "TOOL_ERROR",
+          {"tool": name, "args": args},
+          agent=agent,
+          parent=agent_span,
+          latency={"total_ms": rng.randint(20, 1200)},
+          status="error",
+          error_message=error,
+      )
+    else:
+      add(
+          "TOOL_COMPLETED",
+          {"tool": name, "result": result},
+          agent=agent,
+          parent=agent_span,
+          latency={"total_ms": rng.randint(20, 1200)},
+      )
+
+  add(
+      "INVOCATION_STARTING",
+      {"returns_case": outcome},
+      agent=intake,
+      parent=None,
+      span=inv_span,
+  )
+
+  # --- intake & triage agent ---
+  add(
+      "AGENT_STARTING",
+      {
+          "task": "intake_and_triage",
+          "text_summary": (
+              "Authenticate the customer, look up order history, and triage"
+              " the return request."
+          ),
+      },
+      agent=intake,
+      parent=inv_span,
+      span=intake_span,
+  )
+  llm_call(
+      intake,
+      intake_span,
+      800,
+      2500,
+      "Customer wants to return an item; classify the request.",
+      {"intent": "return", "needs_photo": True},
+      [
+          "authenticate_customer",
+          "lookup_order_history",
+          "classify_return_reason",
+          "inspect_item_photo",
+      ],
+  )
+  tool_call(
+      intake,
+      intake_span,
+      "authenticate_customer",
+      {"customer_id": user_id},
+      {"verified": True},
+  )
+  if is_error:
+    tool_call(
+        intake,
+        intake_span,
+        "lookup_order_history",
+        {"customer_id": user_id},
+        None,
+        error=rng.choice(_RETAIL_LEGACY_CRM_ERRORS),
+    )
+  else:
+    tool_call(
+        intake,
+        intake_span,
+        "lookup_order_history",
+        {"customer_id": user_id},
+        {"order_id": f"ord-{_hex(rng, 6)}", "items": rng.randint(1, 4)},
+    )
+  tool_call(
+      intake,
+      intake_span,
+      "classify_return_reason",
+      {"customer_text": feedback},
+      {"reason": "defect"},
+  )
+  tool_call(
+      intake,
+      intake_span,
+      "inspect_item_photo",
+      {"customer_text": feedback},
+      {"condition": "used", "notes": feedback},
+  )
+
+  # --- fraud & abuse agent ---
+  add(
+      "AGENT_STARTING",
+      {
+          "task": "fraud_and_abuse",
+          "text_summary": (
+              "Assess return fraud and abuse risk from the customer's"
+              " return-to-purchase history and cross-account patterns."
+          ),
+      },
+      agent=fraud,
+      parent=inv_span,
+      span=fraud_span,
+  )
+  llm_call(
+      fraud,
+      fraud_span,
+      300,
+      1200,
+      "Assess return fraud / abuse risk for this customer.",
+      {"risk": "high" if outcome == "fraud_rejected" else "low"},
+      ["compute_return_ratio", "cross_account_pattern_match", "score_risk"],
+  )
+  tool_call(
+      fraud,
+      fraud_span,
+      "compute_return_ratio",
+      {"customer_id": user_id},
+      {"ratio": round(rng.uniform(0.0, 0.9), 2)},
+  )
+  tool_call(
+      fraud,
+      fraud_span,
+      "cross_account_pattern_match",
+      {"customer_id": user_id},
+      {"matches": rng.randint(0, 3)},
+  )
+  tool_call(
+      fraud,
+      fraud_span,
+      "score_risk",
+      {"customer_id": user_id},
+      {
+          "score": round(rng.uniform(0.0, 1.0), 2),
+          "decision": "reject" if outcome == "fraud_rejected" else "allow",
+      },
+  )
+
+  # --- product quality & defect agent (skipped for clear low-risk paths) ---
+  if outcome not in {"exchange_offered", "fraud_rejected"}:
+    add(
+        "AGENT_STARTING",
+        {
+            "task": "quality_and_defect",
+            "text_summary": (
+                "Categorize the product defect and extract quality signals"
+                " from the customer's description."
+            ),
+        },
+        agent=quality,
+        parent=inv_span,
+        span=quality_span,
+    )
+    llm_call(
+        quality,
+        quality_span,
+        300,
+        1200,
+        f"Categorize the defect described as: {feedback}",
+        {"defect_bucket": "hardware", "severity": "high"},
+        ["categorize_defect", "extract_quality_signal"],
+    )
+    tool_call(
+        quality,
+        quality_span,
+        "categorize_defect",
+        {"customer_text": feedback},
+        {"bucket": "hardware"},
+    )
+    tool_call(
+        quality,
+        quality_span,
+        "extract_quality_signal",
+        {"customer_text": feedback},
+        {"signal": feedback, "confidence": round(rng.uniform(0.5, 0.99), 2)},
+    )
+
+  # --- intake composes the customer-facing resolution ---
+  llm_call(
+      intake,
+      intake_span,
+      200,
+      700,
+      "Compose the final customer-facing resolution.",
+      {"resolution": outcome},
+      [],
+  )
+
+  # Exactly one terminal AGENT_COMPLETED per session (the intake agent).
+  if is_error:
+    add(
+        "AGENT_COMPLETED",
+        {"final": True, "outcome": outcome},
+        agent=intake,
+        parent=inv_span,
+        latency={"total_ms": rng.randint(3000, 20000)},
+        status="error",
+        error_message=rng.choice(_RETAIL_LEGACY_CRM_ERRORS),
+    )
+  else:
+    add(
+        "AGENT_COMPLETED",
+        {"final": True, "outcome": outcome},
+        agent=intake,
+        parent=inv_span,
+        latency={"total_ms": rng.randint(3000, 20000)},
+    )
+  add(
+      "INVOCATION_COMPLETED",
+      {"outcome": outcome},
+      agent=intake,
+      parent=None,
+  )
+  return rows
+
+
+def build_retail_returns_corpus(
+    rng: random.Random, now: datetime, sessions: int
+) -> tuple[list[dict], dict[str, int]]:
+  """Corpus builder for ``retail-returns`` (see issue #313).
+
+  Emits a multi-agent refund/exchange trace per session with LLM token/latency
+  telemetry, multi-day spread over ``[now - 72h, now - _MAX_SESSION_SPAN]``,
+  and deterministic outcome buckets. Supports any ``sessions >= 1``; full
+  six-bucket / three-agent / error / product-feedback coverage is guaranteed
+  in the 100-session default. Returns ``(rows, session_outcome_counts)``.
+  """
+  if sessions < 1:
+    raise ValueError("sessions must be >= 1")
+  counts = _retail_outcome_allocation(sessions)
+  outcomes: list[str] = []
+  for name in _RETAIL_OUTCOMES:
+    outcomes.extend([name] * counts[name])
+  rng.shuffle(outcomes)
+
+  window_start = now - _REALISTIC_WINDOW
+  window_end = now - _MAX_SESSION_SPAN
+  slot = (window_end - window_start).total_seconds() / sessions
+  starts = [
+      window_start + timedelta(seconds=i * slot + rng.uniform(0, slot))
+      for i in range(sessions)
+  ]
+  feedback = _shuffled_cycle(rng, _RETAIL_PRODUCT_FEEDBACK, sessions)
+
+  rows: list[dict] = []
+  for i in range(sessions):
+    rows.extend(
+        _retail_returns_session(rng, starts[i], outcomes[i], feedback[i])
+    )
+  return rows, counts
+
+
 # scenario -> corpus builder ``(rng, now, sessions) -> (rows, outcome_counts)``
 _SCENARIO_BUILDERS = {
     Scenario.DECISION: _build_decision_corpus,
     Scenario.DECISION_REALISTIC: build_realistic_corpus,
+    Scenario.RETAIL_RETURNS: build_retail_returns_corpus,
 }
 assert set(_SCENARIO_BUILDERS) == set(Scenario), (
     "every Scenario needs a builder; missing: "
@@ -408,6 +851,7 @@ assert set(_SCENARIO_BUILDERS) == set(Scenario), (
 _SCENARIO_DEFAULT_SESSIONS = {
     Scenario.DECISION: 5,
     Scenario.DECISION_REALISTIC: 100,
+    Scenario.RETAIL_RETURNS: 100,
 }
 assert set(_SCENARIO_DEFAULT_SESSIONS) == set(Scenario), (
     "every Scenario needs a default session count; missing: "
@@ -482,7 +926,8 @@ def run_seed_events(
   """Generate synthetic events and (unless ``dry_run``) insert them.
 
   ``sessions`` defaults per scenario: 5 for ``decision``, 100 for
-  ``decision-realistic``. Pass an explicit value to override.
+  ``decision-realistic``, 100 for ``retail-returns``. Pass an explicit value
+  to override.
   Invalid input (``sessions < 1``, unknown ``scenario``) raises; the CLI
   maps that to exit 2. BigQuery insert errors are modeled as ``ok=False``
   with ``errors`` populated -- not raised -- so the JSON report stays

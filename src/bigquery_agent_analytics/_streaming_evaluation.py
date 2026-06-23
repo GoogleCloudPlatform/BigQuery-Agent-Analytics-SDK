@@ -25,9 +25,9 @@ import hashlib
 import json
 from typing import Any
 
-from bigquery_agent_analytics import CodeEvaluator
 from bigquery_agent_analytics import EvaluationReport
 from bigquery_agent_analytics import serialize
+from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import udf_kernels
 
 STREAMING_EVALUATOR_PROFILE = "streaming_observability_v1"
@@ -69,12 +69,12 @@ class StreamingTrigger:
     return self.trigger_kind == TRIGGER_KIND_SESSION_TERMINAL
 
 
-def build_streaming_observability_evaluator() -> CodeEvaluator:
+def build_streaming_observability_evaluator() -> SystemEvaluator:
   """Build the fixed launch evaluator profile for streaming observability.
 
   Uses raw-budget gates (a session passes iff the observed metric is
   within the configured budget) for consistency with
-  ``CodeEvaluator.latency`` / ``.error_rate`` / ``.turn_count``.
+  ``SystemEvaluator.latency`` / ``.error_rate`` / ``.turn_count``.
   Prior implementation used normalized scores with a 0.5 pass cutoff,
   which caused gates to fire at roughly half the configured budget.
   """
@@ -102,7 +102,7 @@ def build_streaming_observability_evaluator() -> CodeEvaluator:
     observed = session_summary.get("turn_count", 0) or 0
     return 1.0 if observed <= _MAX_TURNS else 0.0
 
-  evaluator = CodeEvaluator(name=STREAMING_EVALUATOR_PROFILE)
+  evaluator = SystemEvaluator(name=STREAMING_EVALUATOR_PROFILE)
   evaluator.add_metric(
       "latency",
       _score_latency,

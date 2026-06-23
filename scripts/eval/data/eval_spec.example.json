@@ -1,0 +1,22 @@
+{
+  "scope": "This assistant answers questions about company HR policies using its lookup tools: PTO and time off, sick leave, remote work, expenses and reimbursements, benefits (medical, dental, vision, 401k), parental leave, and company holidays. It is OUT OF SCOPE for salary and compensation (bonuses, severance, salary bands), stock/equity, promotions and performance reviews, IT support, office and facilities, training budgets, employee relations (harassment, grievances), code of conduct, internal mobility, and dress code. For any out-of-scope topic the agent should politely decline rather than guess.",
+  "tools": "lookup_company_policy(topic) returns static policy text for: PTO, sick leave, remote work, expenses, benefits, holidays ONLY (returns 'topic not found' for anything else). No tool can read an individual employee's personal/account data or perform actions (submit, enroll, file). Used by the judge's failure_attribution metric to tell a knowledge gap (covered topic, missing fact) from a tool gap (no data source, or a personal-data / action request).",
+  "ground_truth": "PTO: 20 days/year, accrued monthly (~1.67/mo), max 5 days rollover.\nSICK LEAVE: 10 days/year, no rollover.\nBENEFITS: 401k match 4% of salary, vested after 1 year.\nHOLIDAYS: 11 paid holidays/year; Juneteenth and Veterans Day are NOT company holidays.",
+  "golden_qa": [
+    {
+      "question": "How many PTO days do I get per year?",
+      "expected_answer": "20 days per year, accrued monthly at ~1.67 days/month.",
+      "topic": "pto"
+    },
+    {
+      "question": "How does the 401k match work?",
+      "expected_answer": "The company matches 4% of salary, vested after 1 year.",
+      "topic": "benefits"
+    },
+    {
+      "question": "What are the salary bands for senior engineers?",
+      "expected_behavior": "decline",
+      "topic": "out_of_scope"
+    }
+  ]
+}

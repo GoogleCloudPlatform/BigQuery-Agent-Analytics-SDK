@@ -29,13 +29,14 @@ from bigquery_agent_analytics.evaluators import LLM_JUDGE_BATCH_QUERY
 from bigquery_agent_analytics.evaluators import LLMAsJudge
 from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.evaluators import SystemEvaluator
 
 
-class TestCodeEvaluator:
-  """Tests for CodeEvaluator class."""
+class TestSystemEvaluator:
+  """Tests for SystemEvaluator class."""
 
   def test_custom_metric(self):
-    evaluator = CodeEvaluator(name="test")
+    evaluator = SystemEvaluator(name="test")
     evaluator.add_metric(
         name="custom",
         fn=lambda s: 0.8,
@@ -50,7 +51,7 @@ class TestCodeEvaluator:
     assert score.passed is True
 
   def test_custom_metric_fail(self):
-    evaluator = CodeEvaluator(name="test")
+    evaluator = SystemEvaluator(name="test")
     evaluator.add_metric(
         name="custom",
         fn=lambda s: 0.2,
@@ -63,7 +64,7 @@ class TestCodeEvaluator:
     assert score.passed is False
 
   def test_metric_exception_handled(self):
-    evaluator = CodeEvaluator(name="test")
+    evaluator = SystemEvaluator(name="test")
     evaluator.add_metric(
         name="broken",
         fn=lambda s: 1 / 0,
@@ -76,7 +77,7 @@ class TestCodeEvaluator:
     assert score.passed is False
 
   def test_metric_clamping(self):
-    evaluator = CodeEvaluator(name="test")
+    evaluator = SystemEvaluator(name="test")
     evaluator.add_metric(
         name="over",
         fn=lambda s: 1.5,
@@ -95,7 +96,7 @@ class TestCodeEvaluator:
 
   def test_chaining(self):
     evaluator = (
-        CodeEvaluator(name="chain")
+        SystemEvaluator(name="chain")
         .add_metric("a", lambda s: 0.9)
         .add_metric("b", lambda s: 0.7)
     )
@@ -104,11 +105,11 @@ class TestCodeEvaluator:
     assert "b" in score.scores
 
 
-class TestCodeEvaluatorPrebuilt:
-  """Tests for pre-built CodeEvaluator factories."""
+class TestSystemEvaluatorPrebuilt:
+  """Tests for pre-built SystemEvaluator factories."""
 
   def test_latency_pass(self):
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -119,7 +120,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.scores["latency"] == 1.0
 
   def test_latency_fail(self):
-    evaluator = CodeEvaluator.latency(threshold_ms=1000)
+    evaluator = SystemEvaluator.latency(threshold_ms=1000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -130,7 +131,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.scores["latency"] == 0.0
 
   def test_latency_zero(self):
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -140,7 +141,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.scores["latency"] == 1.0
 
   def test_turn_count_pass(self):
-    evaluator = CodeEvaluator.turn_count(max_turns=10)
+    evaluator = SystemEvaluator.turn_count(max_turns=10)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -151,7 +152,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.scores["turn_count"] == 1.0
 
   def test_turn_count_fail(self):
-    evaluator = CodeEvaluator.turn_count(max_turns=5)
+    evaluator = SystemEvaluator.turn_count(max_turns=5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -161,7 +162,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.passed is False
 
   def test_error_rate_pass(self):
-    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -172,7 +173,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.passed is True
 
   def test_error_rate_fail(self):
-    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -183,7 +184,7 @@ class TestCodeEvaluatorPrebuilt:
     assert score.passed is False
 
   def test_error_rate_no_calls(self):
-    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -199,13 +200,13 @@ class TestPrebuiltRawBudgetBoundaries:
 
   Prior implementation used normalized scores with a 0.5 pass cutoff,
   which caused every gate to effectively fire at ``budget / 2`` (e.g.
-  ``CodeEvaluator.latency(threshold_ms=5000)`` failed at observed >
+  ``SystemEvaluator.latency(threshold_ms=5000)`` failed at observed >
   2500 ms). These tests lock in the new raw-budget semantics and
   guard against regressions.
   """
 
   def test_latency_boundary_inclusive(self):
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     at_budget = evaluator.evaluate_session(
         {"session_id": "s1", "avg_latency_ms": 5000}
     )
@@ -222,7 +223,7 @@ class TestPrebuiltRawBudgetBoundaries:
   def test_latency_old_midpoint_now_passes(self):
     # The old normalized impl failed at 2501ms with threshold=5000; under
     # the new impl this is nowhere near the budget and must pass.
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     score = evaluator.evaluate_session(
         {"session_id": "s1", "avg_latency_ms": 2501}
     )
@@ -230,7 +231,7 @@ class TestPrebuiltRawBudgetBoundaries:
     assert score.scores["latency"] == 1.0
 
   def test_turn_count_boundary_inclusive(self):
-    evaluator = CodeEvaluator.turn_count(max_turns=10)
+    evaluator = SystemEvaluator.turn_count(max_turns=10)
     at_budget = evaluator.evaluate_session(
         {"session_id": "s1", "turn_count": 10}
     )
@@ -241,13 +242,13 @@ class TestPrebuiltRawBudgetBoundaries:
     assert just_over.passed is False
 
   def test_turn_count_old_midpoint_now_passes(self):
-    evaluator = CodeEvaluator.turn_count(max_turns=10)
+    evaluator = SystemEvaluator.turn_count(max_turns=10)
     score = evaluator.evaluate_session({"session_id": "s1", "turn_count": 6})
     # Old impl: 1.0 - 6/10 = 0.4 -> fail. New: 6 <= 10 -> pass.
     assert score.passed is True
 
   def test_error_rate_boundary_inclusive(self):
-    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
     at_budget = evaluator.evaluate_session(
         {"session_id": "s1", "tool_calls": 10, "tool_errors": 1}
     )
@@ -258,7 +259,7 @@ class TestPrebuiltRawBudgetBoundaries:
     assert just_over.passed is False
 
   def test_token_efficiency_boundary_inclusive(self):
-    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
     at_budget = evaluator.evaluate_session(
         {"session_id": "s1", "total_tokens": 50000}
     )
@@ -269,7 +270,7 @@ class TestPrebuiltRawBudgetBoundaries:
     assert just_over.passed is False
 
   def test_ttft_boundary_inclusive(self):
-    evaluator = CodeEvaluator.ttft(threshold_ms=1000)
+    evaluator = SystemEvaluator.ttft(threshold_ms=1000)
     at_budget = evaluator.evaluate_session(
         {"session_id": "s1", "avg_ttft_ms": 1000}
     )
@@ -280,7 +281,7 @@ class TestPrebuiltRawBudgetBoundaries:
     assert just_over.passed is False
 
   def test_cost_per_session_boundary_inclusive(self):
-    evaluator = CodeEvaluator.cost_per_session(
+    evaluator = SystemEvaluator.cost_per_session(
         max_cost_usd=0.01,
         input_cost_per_1k=0.001,
         output_cost_per_1k=0.001,
@@ -298,7 +299,7 @@ class TestPrebuiltRawBudgetBoundaries:
 
   def test_observed_key_and_budget_in_details(self):
     """Per-metric detail must expose observed/budget for CLI output."""
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     score = evaluator.evaluate_session(
         {"session_id": "s1", "avg_latency_ms": 6000}
     )
@@ -310,7 +311,7 @@ class TestPrebuiltRawBudgetBoundaries:
 
   def test_error_rate_observed_fn_in_details(self):
     """Computed observed (errors/calls) surfaces in details via observed_fn."""
-    evaluator = CodeEvaluator.error_rate(max_error_rate=0.1)
+    evaluator = SystemEvaluator.error_rate(max_error_rate=0.1)
     score = evaluator.evaluate_session(
         {"session_id": "s1", "tool_calls": 10, "tool_errors": 5}
     )
@@ -322,7 +323,7 @@ class TestPrebuiltRawBudgetBoundaries:
 
   def test_cost_observed_fn_in_details(self):
     """Computed cost surfaces in details via observed_fn."""
-    evaluator = CodeEvaluator.cost_per_session(
+    evaluator = SystemEvaluator.cost_per_session(
         max_cost_usd=0.01,
         input_cost_per_1k=0.001,
         output_cost_per_1k=0.001,
@@ -494,10 +495,10 @@ class TestSessionSummaryQuery:
 
 
 class TestTokenEfficiencyPrebuilt:
-  """Tests for CodeEvaluator.token_efficiency() preset."""
+  """Tests for SystemEvaluator.token_efficiency() preset."""
 
   def test_zero_tokens(self):
-    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -508,7 +509,7 @@ class TestTokenEfficiencyPrebuilt:
     assert score.passed is True
 
   def test_under_budget(self):
-    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -520,7 +521,7 @@ class TestTokenEfficiencyPrebuilt:
     assert score.passed is True
 
   def test_over_budget(self):
-    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -531,7 +532,7 @@ class TestTokenEfficiencyPrebuilt:
     assert score.passed is False
 
   def test_exactly_at_budget(self):
-    evaluator = CodeEvaluator.token_efficiency(max_tokens=50000)
+    evaluator = SystemEvaluator.token_efficiency(max_tokens=50000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -544,10 +545,10 @@ class TestTokenEfficiencyPrebuilt:
 
 
 class TestContextCacheHitRatePrebuilt:
-  """Tests for CodeEvaluator.context_cache_hit_rate() preset."""
+  """Tests for SystemEvaluator.context_cache_hit_rate() preset."""
 
   def test_warm_cache_passes(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -567,7 +568,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "warm"
 
   def test_cold_cache_fails(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -583,7 +584,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "cold_start"
 
   def test_partial_cache_at_threshold_passes(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -598,7 +599,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "partial"
 
   def test_missing_cache_telemetry_passes_by_default(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -614,7 +615,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "no_cache_telemetry"
 
   def test_missing_cache_telemetry_can_fail(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(
+    evaluator = SystemEvaluator.context_cache_hit_rate(
         min_hit_rate=0.5,
         fail_on_missing_telemetry=True,
     )
@@ -633,7 +634,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "no_cache_telemetry"
 
   def test_true_zero_cached_tokens_is_cold_start(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -649,7 +650,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "cold_start"
 
   def test_no_llm_input_passes(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -665,7 +666,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "no_llm_input"
 
   def test_cached_tokens_clamps_above_input_tokens(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -681,7 +682,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "warm"
 
   def test_non_numeric_cached_tokens_fall_back_to_zero(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -697,7 +698,7 @@ class TestContextCacheHitRatePrebuilt:
     assert detail["cache_state"] == "cold_start"
 
   def test_legacy_cached_tokens_without_telemetry_count_is_observed(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate=0.5)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -713,21 +714,21 @@ class TestContextCacheHitRatePrebuilt:
 
   def test_invalid_cache_state_thresholds_raise(self):
     with pytest.raises(ValueError, match="cold_start_rate"):
-      CodeEvaluator.context_cache_hit_rate(
+      SystemEvaluator.context_cache_hit_rate(
           cold_start_rate=0.9,
           warm_rate=0.1,
       )
 
   def test_invalid_min_hit_rate_negative_raises(self):
     with pytest.raises(ValueError, match="min_hit_rate"):
-      CodeEvaluator.context_cache_hit_rate(min_hit_rate=-0.1)
+      SystemEvaluator.context_cache_hit_rate(min_hit_rate=-0.1)
 
   def test_invalid_min_hit_rate_above_one_raises(self):
     with pytest.raises(ValueError, match="min_hit_rate"):
-      CodeEvaluator.context_cache_hit_rate(min_hit_rate=1.1)
+      SystemEvaluator.context_cache_hit_rate(min_hit_rate=1.1)
 
   def test_string_min_hit_rate_is_coerced(self):
-    evaluator = CodeEvaluator.context_cache_hit_rate(min_hit_rate="0.5")
+    evaluator = SystemEvaluator.context_cache_hit_rate(min_hit_rate="0.5")
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -743,10 +744,10 @@ class TestContextCacheHitRatePrebuilt:
 
 
 class TestCostPerSessionPrebuilt:
-  """Tests for CodeEvaluator.cost_per_session() preset."""
+  """Tests for SystemEvaluator.cost_per_session() preset."""
 
   def test_zero_tokens(self):
-    evaluator = CodeEvaluator.cost_per_session(max_cost_usd=1.0)
+    evaluator = SystemEvaluator.cost_per_session(max_cost_usd=1.0)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -758,7 +759,7 @@ class TestCostPerSessionPrebuilt:
     assert score.passed is True
 
   def test_under_budget(self):
-    evaluator = CodeEvaluator.cost_per_session(
+    evaluator = SystemEvaluator.cost_per_session(
         max_cost_usd=1.0,
         input_cost_per_1k=0.001,
         output_cost_per_1k=0.002,
@@ -775,7 +776,7 @@ class TestCostPerSessionPrebuilt:
     assert score.passed is True
 
   def test_over_budget(self):
-    evaluator = CodeEvaluator.cost_per_session(
+    evaluator = SystemEvaluator.cost_per_session(
         max_cost_usd=0.01,
         input_cost_per_1k=1.0,
         output_cost_per_1k=1.0,
@@ -792,7 +793,7 @@ class TestCostPerSessionPrebuilt:
     assert score.passed is False
 
   def test_missing_tokens_defaults_to_zero(self):
-    evaluator = CodeEvaluator.cost_per_session(max_cost_usd=1.0)
+    evaluator = SystemEvaluator.cost_per_session(max_cost_usd=1.0)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -802,10 +803,10 @@ class TestCostPerSessionPrebuilt:
 
 
 class TestTTFTPrebuilt:
-  """Tests for CodeEvaluator.ttft() preset."""
+  """Tests for SystemEvaluator.ttft() preset."""
 
   def test_zero_ttft(self):
-    evaluator = CodeEvaluator.ttft(threshold_ms=1000)
+    evaluator = SystemEvaluator.ttft(threshold_ms=1000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -816,7 +817,7 @@ class TestTTFTPrebuilt:
     assert score.passed is True
 
   def test_under_threshold(self):
-    evaluator = CodeEvaluator.ttft(threshold_ms=1000)
+    evaluator = SystemEvaluator.ttft(threshold_ms=1000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -827,7 +828,7 @@ class TestTTFTPrebuilt:
     assert score.passed is True
 
   def test_over_threshold(self):
-    evaluator = CodeEvaluator.ttft(threshold_ms=500)
+    evaluator = SystemEvaluator.ttft(threshold_ms=500)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -838,7 +839,7 @@ class TestTTFTPrebuilt:
     assert score.passed is False
 
   def test_none_ttft_defaults_to_zero(self):
-    evaluator = CodeEvaluator.ttft(threshold_ms=1000)
+    evaluator = SystemEvaluator.ttft(threshold_ms=1000)
     score = evaluator.evaluate_session(
         {
             "session_id": "s1",
@@ -848,7 +849,7 @@ class TestTTFTPrebuilt:
     assert score.scores["ttft"] == 1.0
 
   def test_evaluator_name(self):
-    evaluator = CodeEvaluator.ttft()
+    evaluator = SystemEvaluator.ttft()
     assert evaluator.name == "ttft_evaluator"
 
 
@@ -863,3 +864,18 @@ class TestSessionSummaryQueryTTFT:
 
   def test_contains_time_to_first_token(self):
     assert "time_to_first_token_ms" in SESSION_SUMMARY_QUERY
+
+
+class TestCodeEvaluatorAlias:
+  """Regression tests for CodeEvaluator alias behavior."""
+
+  def test_alias_identity(self):
+    assert CodeEvaluator is SystemEvaluator
+
+  def test_default_name(self):
+    assert CodeEvaluator().name == "system_evaluator"
+    assert SystemEvaluator().name == "system_evaluator"
+
+  def test_prebuilt_isinstance(self):
+    evaluator = CodeEvaluator.latency()
+    assert isinstance(evaluator, CodeEvaluator)

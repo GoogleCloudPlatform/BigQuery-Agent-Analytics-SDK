@@ -25,8 +25,8 @@ from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluation
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
 from bigquery_agent_analytics.client import Client
-from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import EvaluationReport
+from bigquery_agent_analytics.evaluators import SystemEvaluator
 from bigquery_agent_analytics.trace import TraceFilter
 
 
@@ -300,7 +300,7 @@ class TestClientEvaluate:
         bq_client=mock_bq,
     )
 
-    evaluator = CodeEvaluator.latency(threshold_ms=5000)
+    evaluator = SystemEvaluator.latency(threshold_ms=5000)
     report = client.evaluate(evaluator=evaluator)
 
     assert isinstance(report, EvaluationReport)

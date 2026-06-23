@@ -45,9 +45,9 @@ from bigquery_agent_analytics.client import _apply_strict_mode
 from bigquery_agent_analytics.client import _merge_criterion_reports
 from bigquery_agent_analytics.client import _run_sync
 from bigquery_agent_analytics.client import Client
-from bigquery_agent_analytics.evaluators import CodeEvaluator
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import SessionScore
+from bigquery_agent_analytics.evaluators import SystemEvaluator
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceFilter
