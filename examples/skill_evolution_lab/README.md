@@ -49,6 +49,7 @@ skill_evolution_lab/
   analyze_and_evolve.py # scored report -> evolve_skill() -> V1 (+ registry)
   compare_runs.py       # V0 vs V1 golden-grounded correctness + parroting
   registry_cli.py       # create/update/delete/inspect registry revisions
+  print_rate.py         # one-line golden-rate printer (used by run_e2e_demo.sh)
   run_e2e_demo.sh       # the whole cycle, one command
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
   sample_run/           # a committed end-to-end run (scored reports, evolved
