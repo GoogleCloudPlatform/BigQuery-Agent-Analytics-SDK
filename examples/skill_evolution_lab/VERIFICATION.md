@@ -2,9 +2,19 @@
 
 A full `./run_e2e_demo.sh` run of this example, captured so the result is
 reproducible and the numbers reported in the companion blog post are backed by an
-actual run (not aspirational). Measured on a **55-question held-out set** (50
-single-turn + 5 multi-turn anti-parroting), and swept across four models with
+actual run (not aspirational). Measured on a **65-question held-out set** (50
+single-turn + 15 multi-turn anti-parroting), and swept across four models with
 **3 seeds each** to show the (real) run-to-run variance.
+
+> **What this proves — and what it doesn't.** The contribution is the **closed
+> loop**: trace → golden-grounded score → evolve → re-score, all attributable
+> because only the skill file changes. The large V0→V1 *delta* is an
+> *illustration* of that loop on a deliberately **crippled** V0 (it's told to
+> ignore a tool that already holds every answer), so most of the lift is the
+> engine learning one rule — "use the tool, don't deflect to HR." Read the delta
+> as "the loop reliably finds and fixes a real skill defect," not as "+80pp from
+> any starting point." A fair, plausibly-written baseline would show a smaller
+> (still real) gain.
 
 ## Configuration
 

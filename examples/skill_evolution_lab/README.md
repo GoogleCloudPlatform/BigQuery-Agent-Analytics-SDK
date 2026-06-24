@@ -7,6 +7,12 @@ engine reads the failing trajectories and produces a small, tool-first V1 skill.
 The skill is versioned in the **Gemini Enterprise Agent Platform Skill
 Registry** (V0 = revision 1, V1 = revision 2).
 
+The point of the example is the **closed loop** — trace → golden-grounded score →
+evolve → re-score, all attributable because only the skill file changes. V0 is
+deliberately crippled (told to ignore a tool that already has the answers), so
+the large V0→V1 delta *illustrates* the loop finding and fixing a real defect; a
+plausibly-written baseline would gain less. See [`VERIFICATION.md`](VERIFICATION.md#what-this-proves--and-what-it-doesnt).
+
 This is the runnable companion to the blog post *"Your Agent Can Write Its Own
 Skill"* (BigQuery Agent Analytics Series). See
 [`VERIFICATION.md`](VERIFICATION.md) for a recorded end-to-end run.

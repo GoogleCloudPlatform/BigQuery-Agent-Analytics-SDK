@@ -590,6 +590,52 @@ def _make_client(project, location):
   )
 
 
+def select_candidate(
+    viable: list,
+    current_skill: str,
+    score_fn: Optional[Callable[[str], float]] = None,
+    min_improvement: float = 0.5,
+) -> str:
+  """Pick which evolved candidate to ship (pure; no model calls).
+
+  - No viable candidate -> keep the base skill.
+  - No ``score_fn`` -> return the median-size viable candidate.
+  - With ``score_fn`` -> return the highest-scoring candidate ONLY if it beats
+    the incumbent by at least ``min_improvement``; otherwise keep the base skill.
+
+  The last rule is the restraint property of a self-modifying system: when
+  nothing clearly improves, leave the already-good skill alone.
+  """
+  if not viable:
+    logger.warning("No viable candidate passed guardrails; keeping base skill.")
+    return current_skill
+
+  if score_fn is None:
+    ordered = sorted(viable, key=len)
+    selected = ordered[len(ordered) // 2]
+    logger.info("Selected median-size candidate (%d chars).", len(selected))
+    return selected
+
+  incumbent = score_fn(current_skill)
+  best, best_score = None, float("-inf")
+  for cand in viable:
+    score = score_fn(cand)
+    logger.info("Candidate scored %.3f (incumbent %.3f).", score, incumbent)
+    if score > best_score:
+      best, best_score = cand, score
+  if best_score < incumbent + min_improvement:
+    logger.info(
+        "Best candidate %.3f does not beat incumbent %.3f + %.3f margin;"
+        " keeping base skill.",
+        best_score,
+        incumbent,
+        min_improvement,
+    )
+    return current_skill
+  logger.info("Selected best candidate by score: %.3f.", best_score)
+  return best
+
+
 def evolve_skill(
     report,
     current_skill: str,
@@ -679,34 +725,7 @@ def evolve_skill(
     c = sanitize_adk_vars(c)
     if not validate_evolved_skill(c, current_skill):
       viable.append(c)
-  if not viable:
-    logger.warning("No viable candidate passed guardrails; keeping base skill.")
-    return current_skill
-
-  if score_fn is None:
-    viable.sort(key=len)
-    selected = viable[len(viable) // 2]
-    logger.info("Selected median-size candidate (%d chars).", len(selected))
-    return selected
-
-  incumbent = score_fn(current_skill)
-  best, best_score = None, float("-inf")
-  for cand in viable:
-    score = score_fn(cand)
-    logger.info("Candidate scored %.3f (incumbent %.3f).", score, incumbent)
-    if score > best_score:
-      best, best_score = cand, score
-  if best_score < incumbent + min_improvement:
-    logger.info(
-        "Best candidate %.3f does not beat incumbent %.3f + %.3f margin;"
-        " keeping base skill.",
-        best_score,
-        incumbent,
-        min_improvement,
-    )
-    return current_skill
-  logger.info("Selected best candidate by score: %.3f.", best_score)
-  return best
+  return select_candidate(viable, current_skill, score_fn, min_improvement)
 
 
 # ---------------------------------------------------------------------------

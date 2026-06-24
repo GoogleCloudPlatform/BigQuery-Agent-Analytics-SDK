@@ -184,7 +184,12 @@ class SkillRegistry:
     resp = requests.get(
         f"{self.base}/skills/{skill_id}", headers=self._headers(), timeout=60
     )
-    return resp.status_code == 200
+    if resp.status_code == 404:
+      return False
+    # Anything else non-2xx (401/403/5xx) is a real error, not "missing" --
+    # surface it instead of silently treating it as absent.
+    resp.raise_for_status()
+    return True
 
   def delete(self, skill_id: str) -> dict:
     """DeleteSkill (LRO). The skill_id is reserved for 24h afterward."""

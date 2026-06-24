@@ -30,6 +30,7 @@ from skill_evolution import format_trajectory
 from skill_evolution import partition_trajectories
 from skill_evolution import passes_quality_gate
 from skill_evolution import sanitize_adk_vars
+from skill_evolution import select_candidate
 from skill_evolution import strip_code_fences
 from skill_evolution import validate_evolved_skill
 
@@ -240,3 +241,33 @@ def test_validate_flags_unescaped_adk_var():
   assert any(
       "context-variable" in i for i in validate_evolved_skill(evolved, _BASE)
   )
+
+
+# --- select_candidate (best-of-N + incumbent gate) --------------------------
+
+
+def test_select_candidate_empty_keeps_base():
+  assert select_candidate([], "BASE") == "BASE"
+
+
+def test_select_candidate_median_without_score_fn():
+  # No score_fn -> the median-size viable candidate.
+  assert select_candidate(["a", "abc", "abcde"], "BASE") == "abc"
+
+
+def test_select_candidate_keeps_base_when_no_improvement():
+  # Negative control: the best candidate does NOT beat incumbent + margin, so
+  # the engine must leave the already-good base skill unchanged (restraint).
+  scores = {"BASE": 0.90, "cand1": 0.91, "cand2": 0.88}
+  out = select_candidate(
+      ["cand1", "cand2"], "BASE", score_fn=scores.get, min_improvement=0.5
+  )
+  assert out == "BASE"
+
+
+def test_select_candidate_picks_better_when_it_clears_margin():
+  scores = {"BASE": 0.40, "cand1": 0.95, "cand2": 0.60}
+  out = select_candidate(
+      ["cand1", "cand2"], "BASE", score_fn=scores.get, min_improvement=0.5
+  )
+  assert out == "cand1"
