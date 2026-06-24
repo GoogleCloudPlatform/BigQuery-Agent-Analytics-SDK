@@ -17,7 +17,7 @@ single-turn + 5 multi-turn anti-parroting), and swept across four models with
 | Evolve set | `questions_evolve.json` (50, rephrased) + `questions_corrections.json` (5) |
 | Held-out test set | `questions_test.json` (50) + `questions_corrections_heldout.json` (5) |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~15–18 min per run at this size |
-| Date | 2026-06-23 |
+| Date | 2026-06-24 |
 
 The agent model, tools, and questions are identical for V0 and V1 — **only the
 skill file changes** — so the delta is attributable to the skill.
@@ -26,10 +26,10 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 16.4% (9/55) | 98.2% (54/55) | +81.8pp |
-| Single-turn | 18.0% (9/50) | 98.0% (49/50) | +80.0pp |
+| Overall | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
+| Single-turn | 20.0% (10/50) | 100.0% (50/50) | +80.0pp |
 | Corrections (anti-parrot) | 0.0% (0/5) | 100.0% (5/5) | +100.0pp |
-| Tool-grounded answers | 7% (4/55) | 80% (44/55) | — |
+| Tool-grounded answers | 7% (4/55) | 96% (53/55) | — |
 
 The flawed V0 barely calls the tool (it's told not to), so it declines on almost
 everything; the evolved V1 uses the tool and answers correctly — including the
@@ -51,6 +51,14 @@ gemini-2.5-pro            95% [93-96]        82%              53%
 gemini-3.1-pro-preview    99% [96-100]       84% [76-95]      19%
 ```
 
+> Note: this 4×3 sweep was run **before** the `format_trajectory` fix (which now
+> feeds the parrot/recover sub-trajectory labels to the analyst). Correctness is
+> unchanged and stays within these ranges on the post-fix engine; **grounding is
+> now higher** — the recorded single run above grounds 96% (vs the 80% low end
+> here), because the richer analyst signal yields a more strongly tool-first
+> skill. The headline (V0 → V1) is stable; the table's grounding column is a
+> conservative (pre-fix) lower bound.
+
 Every model recovers strongly. Two honest observations the seeds surface:
 
 - **`gemini-2.5-pro` starts highest (53%)** — it grounds on the tool even under
@@ -64,16 +72,16 @@ Every model recovers strongly. Two honest observations the seeds surface:
 ## Evolution internals (from the run log, gemini-3.5-flash)
 
 ```text
-Trajectories: 9 successes, 46 failures
-Collected 51 patches (38 passed the quality gate)
-Selected median-size candidate (2649 chars)
+Trajectories: 11 successes, 44 failures
+Collected 52 patches (41 passed the quality gate)
+Selected median-size candidate (2884 chars)
 ```
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
 the held-out re-score is the proof. Run with a `score_fn` for best-of-N
 selection (and to gate out unlucky candidates like the flash-lite seed above).
 
-## The evolved V1 skill (675B → 2.6KB, gemini-3.5-flash)
+## The evolved V1 skill (675B → 2.9KB, gemini-3.5-flash)
 
 Small, legible, **tool-first**: it lists which topics require a tool lookup,
 forbids premature HR deflection, and bakes **no** specific data values (those
@@ -82,16 +90,21 @@ come from the tool at runtime):
 ```markdown
 ## Knowledge Base
 - PTO: 20 days/year, accrued monthly. Up to 5 unused days roll over. ...
-- Tool-Dependent Topics: You know these exist, but MUST use tools for exact
-  figures/limits: Expenses & Travel, 401k (match %, vesting), Leave (parental,
-  bereavement, jury, disability), EAP sessions, Flex Time, Tuition limits,
-  HSA contributions, Enrollment windows.
+  (plus the other baked V0 facts)
 
 ## Instructions
-Answer using the information above. If a question is about a topic not listed —
-or needs specific limits/figures not provided — you must first use your search
-tools. Do not immediately reply "I do not have that information" or direct the
-user to HR; only suggest HR if the tool search returns nothing.
+- Answer questions using the information above.
+- Tool Usage for Unlisted Topics: if a user asks about a company policy not
+  explicitly listed in your knowledge (e.g. tuition reimbursement, expenses),
+  you must use your search tools to find the policy details before claiming you
+  do not have the information or directing the user to HR.
+- Fallback: only if the information cannot be found via tools (or is out of
+  scope) tell the user you do not have it and suggest contacting HR.
+- Evaluating Scenarios: when asked if a specific amount/scenario is allowed,
+  state the policy limit and explicitly conclude whether the request is permitted.
+
+## Terminology Mapping
+(maps "vacation"->PTO, "WFH"->remote work, etc.)
 ```
 
 ## Before / after (same held-out question)

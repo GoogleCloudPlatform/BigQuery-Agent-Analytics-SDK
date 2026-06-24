@@ -7,8 +7,8 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 16.4% → V1 98.2%** (54/55), grounding (tool-call share) **7% → 80%**,
-evolved skill **2.6 KB**. (Held-out set: 50 single-turn + 5 anti-parroting.)
+**V0 18.2% → V1 100%** (55/55), grounding (tool-call share) **7% → 96%**,
+evolved skill **2.9 KB**. (Held-out set: 50 single-turn + 5 anti-parroting.)
 
 ## The workflow, and what each file is
 
@@ -56,10 +56,11 @@ Q: "How much does the company contribute to my HSA for family coverage?"
 
 V0:  category=unhelpful   tool_calls=0   golden_matched=true
   "I do not have that information. Please contact HR for details regarding
-   HSA contributions and family coverage."
+   HSA contributions."
 
 V1:  category=meaningful  tool_calls=1   golden_matched=true
-  "For family coverage, the company contributes $1,500 per year to your HSA."
+  "For family coverage, the company contributes $1,500 per year to your
+   Health Savings Account (HSA)."
 ```
 
 ## Reproduce

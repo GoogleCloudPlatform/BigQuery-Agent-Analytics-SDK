@@ -92,13 +92,13 @@ seconds. The first run also does a one-time `uv` dependency sync.
 
 ```text
 [V0] traffic + score ...
-     V0 test:   16.4% (9/55 golden-matched)
+     V0 test:   18.2% (10/55 golden-matched)
 [evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
 [V1] traffic + score ...
-     V1 test:   98.2% (54/55 golden-matched)
+     V1 test:   100.0% (55/55 golden-matched)
 
-| Metric                    | V0 (flawed)  | V1 (evolved)   | Delta   |
-| Overall                   | 16.4% (9/55) | 98.2% (54/55)  | +81.8pp |
+| Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
+| Overall                   | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is

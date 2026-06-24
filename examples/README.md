@@ -93,8 +93,8 @@ cd skill_evolution_lab
 ```
 
 A verified run (gemini-3.5-flash, golden-grounded, 55-question held-out set):
-**V0 16.4% → V1 98.2%** overall; corrections (anti-parroting) **0% → 100%**;
-evolved skill 2.6KB. Across four models × 3 seeds, mean V1 correctness is 90–99%
+**V0 18.2% → V1 100%** overall; corrections (anti-parroting) **0% → 100%**;
+evolved skill 2.9KB. Across four models × 3 seeds, mean V1 correctness is 90–99%
 per model (V0 16–53%). See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
