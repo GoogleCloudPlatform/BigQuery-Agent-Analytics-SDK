@@ -56,7 +56,9 @@ skill_evolution_lab/
   compare_runs.py       # V0 vs V1 golden-grounded correctness + parroting
   registry_cli.py       # create/update/delete/inspect registry revisions
   print_rate.py         # one-line golden-rate printer (used by run_e2e_demo.sh)
-  run_e2e_demo.sh       # the whole cycle, one command
+  run_e2e_demo.sh       # the whole cycle, one command (one model)
+  run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
+  aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
   sample_run/           # a committed end-to-end run (scored reports, evolved
                         #   skill, RESULT) + README explaining each artifact

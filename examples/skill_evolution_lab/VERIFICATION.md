@@ -134,13 +134,16 @@ V1:  category=meaningful  tool_calls=1
 ```bash
 cd examples/skill_evolution_lab
 ./setup.sh YOUR_PROJECT_ID us-central1   # ~5s
-./run_e2e_demo.sh                        # ~15-18 min; first run also does a one-time uv sync
+./run_e2e_demo.sh                        # one model, ~15-18 min (first run also does a one-time uv sync)
+
+# Reproduce the whole multi-model table (4 models x 3 seeds, ~3-4 h):
+./run_sweep.sh                           # writes runs/SWEEP_<ts>.md (mean [range] per model)
 ```
 
-This was run from a clean checkout on **2026-06-23**, and the four-model × 3-seed
-sweep above was produced by re-running with `AGENT_MODEL=<model>`. The V0 skill
-is auto-restored on exit. Exact numbers vary run-to-run (LLM nondeterminism,
-stochastic consolidation) — which is why the table reports ranges — but the
-direction is stable: the flawed V0 defers/declines on topics it has a tool for,
-and the evolved V1 uses the tool and answers correctly, including when the user
-asserts a wrong "correction".
+The four-model × 3-seed table above is produced by `run_sweep.sh` (which loops
+`run_e2e_demo.sh` over `AGENT_MODEL` and seeds, then calls `aggregate_sweep.py`).
+The V0 skill is auto-restored after each run. Exact numbers vary run-to-run (LLM
+nondeterminism, stochastic consolidation) — which is why the table reports ranges
+— but the direction is stable: the flawed V0 defers/declines on topics it has a
+tool for, and the evolved V1 uses the tool and answers correctly, including when
+the user asserts a wrong "correction".
