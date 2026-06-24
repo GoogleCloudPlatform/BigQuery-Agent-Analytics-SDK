@@ -69,7 +69,12 @@ def main():
   parser.add_argument(
       "--model",
       default="gemini-3.1-pro-preview",
-      help="Analyst/consolidator model (default: gemini-3.1-pro-preview)",
+      help=(
+          "Analyst/consolidator model. Defaults to gemini-3.1-pro-preview"
+          " rather than the engine's generic gemini-2.5-pro default because, on"
+          " this task, gemini-2.5-pro baked specific (and wrong) figures into"
+          " the skill; 3.1-pro-preview produces clean, tool-first skills."
+      ),
   )
   parser.add_argument("--candidates", type=int, default=3)
   parser.add_argument("--max-chars", type=int, default=3500)
@@ -114,6 +119,9 @@ def main():
       max_workers=args.max_workers,
   )
 
+  # Normalize trailing whitespace / EOF so the committed artifact stays clean
+  # (model output can carry stray trailing spaces).
+  evolved = "\n".join(line.rstrip() for line in evolved.splitlines()) + "\n"
   with open(args.out, "w") as f:
     f.write(evolved)
   changed = evolved.strip() != current_skill.strip()

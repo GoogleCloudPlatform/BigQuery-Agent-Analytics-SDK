@@ -49,26 +49,36 @@ _API = "https://{loc}-aiplatform.googleapis.com/v1beta1"
 class SkillRegistry:
   """Thin REST wrapper for create / get / update / revisions / delete."""
 
+  # Access tokens are valid ~1h; cache for 50 min so a multi-minute LRO poll
+  # doesn't spawn a `gcloud print-access-token` subprocess every 3 seconds.
+  _TOKEN_TTL = 3000
+
   def __init__(self, project: str, location: str = DEFAULT_LOCATION):
     self.project = project
     self.location = location
     self.base = (
         f"{_API.format(loc=location)}/projects/{project}/locations/{location}"
     )
+    self._cached_token = None
+    self._token_expiry = 0.0
 
   # -- auth ---------------------------------------------------------------
 
   def _token(self) -> str:
-    token = os.environ.get("SKILL_REGISTRY_TOKEN")
-    if token:
-      return token
+    env_token = os.environ.get("SKILL_REGISTRY_TOKEN")
+    if env_token:
+      return env_token
+    if self._cached_token and time.monotonic() < self._token_expiry:
+      return self._cached_token
     out = subprocess.run(
         ["gcloud", "auth", "application-default", "print-access-token"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return out.stdout.strip()
+    self._cached_token = out.stdout.strip()
+    self._token_expiry = time.monotonic() + self._TOKEN_TTL
+    return self._cached_token
 
   def _headers(self) -> dict:
     return {

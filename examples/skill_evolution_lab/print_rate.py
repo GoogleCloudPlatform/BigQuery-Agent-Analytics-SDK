@@ -17,7 +17,8 @@
 import json
 import sys
 
-g = json.load(open(sys.argv[1]))["summary"].get("golden_eval_summary", {})
+with open(sys.argv[1]) as f:
+  g = json.load(f)["summary"].get("golden_eval_summary", {})
 print(
     f"{g.get('matched_meaningful_rate')}% "
     f"({g.get('matched_meaningful')}/{g.get('matched')} golden-matched)"

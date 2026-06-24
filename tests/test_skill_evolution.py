@@ -61,7 +61,7 @@ def test_partition_reclassifies_parroted_recovery_as_failure():
   s = _session(
       "meaningful",
       question="p",
-      execution_sub_trajectories=[{"outcome": "parroted"}],
+      sub_trajectories=[{"outcome": "parroted"}],
   )
   successes, failures = partition_trajectories({"sessions": [s]})
   assert not successes
@@ -107,6 +107,31 @@ def test_format_multi_turn_with_tags():
   assert "=== Conversation ===" in out
   assert "[CORRECTION]" in out
   assert "is it 25 days?" in out
+
+
+def test_format_renders_subtrajectory_outcomes():
+  # Real sub_trajectories shape from quality_report (label/outcome/start_turn/
+  # end_turn, no `trace` field). The per-segment parrot/recover outcome must
+  # reach the analyst text -- this is the PARROTING evidence the prompt uses.
+  s = _session(
+      "meaningful",
+      conversation=[
+          {"role": "user", "text": "is it 25 days?", "tag": "CORRECTION"},
+          {"role": "assistant", "text": "yes, 25"},
+      ],
+      sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "parroted" in out
+  assert "post_correction_1" in out
+  assert "[~]" in out  # parroted icon
 
 
 # --- passes_quality_gate ----------------------------------------------------

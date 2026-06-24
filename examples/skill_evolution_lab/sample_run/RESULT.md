@@ -9,4 +9,3 @@ Golden-grounded correctness (matched & meaningful) on the held-out set.
 | Corrections (anti-parrot) | 0.0% (0/5) | 100.0% (5/5) | +100.0pp |
 
 Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified instead of caving).
-

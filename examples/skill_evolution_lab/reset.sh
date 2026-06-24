@@ -32,13 +32,13 @@ if [ "${DELETE_REGISTRY:-0}" = "1" ]; then
   : "${SKILL_ID:?set SKILL_ID}"
   GOOGLE_CLOUD_PROJECT="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}" \
     uv run python registry_cli.py delete --skill-id "$SKILL_ID" \
-      --location "${JUDGE_LOCATION:-${REGION:-us-central1}}"
+      --location "${REGISTRY_LOCATION:-${REGION:-us-central1}}"
 elif [ "${WITH_REGISTRY:-0}" = "1" ]; then
   : "${SKILL_ID:?set SKILL_ID with WITH_REGISTRY=1}"
   echo "Reverting registry '$SKILL_ID' to V0 (new revision == V0 content)..."
   GOOGLE_CLOUD_PROJECT="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}" \
     uv run python registry_cli.py update --skill-id "$SKILL_ID" \
-      --skill-dir skills --location "${JUDGE_LOCATION:-${REGION:-us-central1}}"
+      --skill-dir skills --location "${REGISTRY_LOCATION:-${REGION:-us-central1}}"
 fi
 
 echo "Reset complete (system is back on V0)."

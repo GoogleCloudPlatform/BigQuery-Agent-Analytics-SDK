@@ -190,10 +190,9 @@ version number and metadata.
 
 def _has_parroted_recovery(session: dict) -> bool:
   """True if the session has a parroted sub-trajectory outcome."""
-  for key in ("sub_trajectories", "execution_sub_trajectories"):
-    for st in session.get(key, []) or []:
-      if st.get("outcome") == "parroted":
-        return True
+  for st in session.get("sub_trajectories", []) or []:
+    if st.get("outcome") == "parroted":
+      return True
   return False
 
 
@@ -259,16 +258,22 @@ def format_trajectory(session: dict) -> str:
             f"{dim}: {score_data.get('score', '?')}/2 -"
             f" {score_data.get('reason', '')}\n"
         )
-    for seg in session.get("execution_sub_trajectories", []) or []:
-      outcome = seg.get("outcome", "")
-      icon = {"recovered": "+", "parroted": "~"}.get(outcome, "-")
-      result += (
-          f"\n--- [{icon}] {seg.get('label')} -> {outcome} ---\n"
-          f"{seg.get('trace', '')}\n"
-      )
-    exec_trace = session.get("execution_trace", "")
-    if exec_trace and not session.get("execution_sub_trajectories"):
-      result += f"\n=== Execution Trace ===\n{exec_trace}\n"
+    # Surface the per-segment correction outcomes the turn tagger emits
+    # (quality_report writes these as ``sub_trajectories``). This is the
+    # parrot/recover evidence the Error Analyst is told to use.
+    subtraj = session.get("sub_trajectories", []) or []
+    if subtraj:
+      result += "\n=== Correction sub-trajectories ===\n"
+      for seg in subtraj:
+        outcome = seg.get("outcome", "")
+        icon = {"recovered": "+", "parroted": "~"}.get(outcome, "-")
+        span = ""
+        if (
+            seg.get("start_turn") is not None
+            and seg.get("end_turn") is not None
+        ):
+          span = f" (turns {seg['start_turn']}-{seg['end_turn']})"
+        result += f"[{icon}] {seg.get('label', '')}{span} -> {outcome}\n"
     return result
 
   return (
@@ -664,13 +669,16 @@ def evolve_skill(
       except Exception as e:  # noqa: BLE001
         logger.warning("Candidate consolidation failed: %s", e)
 
-  viable = [
-      sanitize_adk_vars(c)
-      for c in cands
-      if c
-      and c != current_skill
-      and not validate_evolved_skill(c, current_skill)
-  ]
+  # Sanitize first, then validate the sanitized text -- otherwise a candidate
+  # whose only flaw is an unescaped {context_var} (exactly what sanitize_adk_vars
+  # fixes) gets rejected by validate before it can be cleaned.
+  viable = []
+  for c in cands:
+    if not c or c == current_skill:
+      continue
+    c = sanitize_adk_vars(c)
+    if not validate_evolved_skill(c, current_skill):
+      viable.append(c)
   if not viable:
     logger.warning("No viable candidate passed guardrails; keeping base skill.")
     return current_skill

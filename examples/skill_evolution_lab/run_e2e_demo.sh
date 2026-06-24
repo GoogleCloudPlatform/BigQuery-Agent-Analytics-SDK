@@ -21,7 +21,9 @@
 #      a small, tool-first V1 skill (also learns to re-verify user "corrections"
 #      instead of parroting them).
 #   3. V1: deploy the evolved skill; re-score the held-out test set.
-#   4. Compare V0 vs V1 (overall, single-turn, anti-parroting); restore V0.
+#   4. Compare V0 vs V1 (overall, single-turn, anti-parroting); restore the
+#      local V0 working copy (the Skill Registry, if used, is reverted by
+#      ./reset.sh, not here).
 #
 # The model, tools, and questions are fixed across V0 and V1 -- only the skill
 # file changes -- so any quality delta is attributable to the skill.
@@ -48,6 +50,9 @@ AGENT_MODEL="${_cli_AGENT_MODEL:-${AGENT_MODEL:-gemini-3.5-flash}}"
 ANALYST_MODEL="${_cli_ANALYST_MODEL:-${ANALYST_MODEL:-gemini-3.1-pro-preview}}"
 JUDGE_MODEL="${_cli_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
 JUDGE_LOCATION="${_cli_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
+# Skill Registry region is independent of the judge region (the registry only
+# supports us-central1 / europe-west4 / us-east5); default it to REGION (.env).
+REGISTRY_LOCATION="${REGISTRY_LOCATION:-${REGION:-us-central1}}"
 CONC="${_cli_CONCURRENCY:-${CONCURRENCY:-3}}"
 
 SKILL=skills/SKILL.md
@@ -64,7 +69,9 @@ mkdir -p "$RUN"
 echo "== Skill lab E2E  agent=$AGENT_MODEL  analyst=$ANALYST_MODEL  judge=$JUDGE_MODEL"
 echo "   run=$RUN   log=$RUN/run.log"
 
-# Always leave the working copy on V0 (repo sits at V0).
+# Always leave the LOCAL working copy on V0 (repo sits at V0). Note: with
+# WITH_REGISTRY=1 this does NOT revert the remote Skill Registry to V0 -- run
+# `./reset.sh` (WITH_REGISTRY=1) for that.
 restore() { cp "$V0" "$SKILL"; }
 trap restore EXIT
 
@@ -73,7 +80,7 @@ run_agent() {  # run_agent <skill> <out> <qfile...>
   local qargs=(); local q
   for q in "$@"; do qargs+=(--questions "$q"); done
   uv run python run_agent.py --skill "$skill" "${qargs[@]}" \
-    --model "$AGENT_MODEL" --concurrency 6 -o "$out" >>"$RUN/run.log" 2>&1
+    --model "$AGENT_MODEL" --concurrency "$CONC" -o "$out" >>"$RUN/run.log" 2>&1
 }
 
 score() {  # score <traffic> <report>   (golden-grounded; primary dims = cheaper)
@@ -102,7 +109,7 @@ echo "     V0 test:   $(rate "$RUN/v0_test_report.json")"
 echo "[evolve] analyst=$ANALYST_MODEL (this is the slow step) ..."
 REG_ARGS=()
 if [ "${WITH_REGISTRY:-0}" = "1" ]; then
-  REG_ARGS=(--registry-update --skill-id "${SKILL_ID:?set SKILL_ID with WITH_REGISTRY=1}" --location "$JUDGE_LOCATION")
+  REG_ARGS=(--registry-update --skill-id "${SKILL_ID:?set SKILL_ID with WITH_REGISTRY=1}" --location "$REGISTRY_LOCATION")
 fi
 uv run python analyze_and_evolve.py \
   --report "$RUN/v0_evolve_report.json" --skill "$SKILL" \

@@ -115,7 +115,7 @@ def main():
   print(out)
   if args.out:
     with open(args.out, "w") as f:
-      f.write(out + "\n")
+      f.write(out.rstrip() + "\n")
     json_path = args.out.rsplit(".", 1)[0] + ".json"
     with open(json_path, "w") as f:
       json.dump({"v0": v0, "v1": v1}, f, indent=2)
