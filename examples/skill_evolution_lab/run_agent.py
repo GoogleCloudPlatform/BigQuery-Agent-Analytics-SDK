@@ -40,6 +40,33 @@ import logging
 import os
 import sys
 import time
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# authlib forces simplefilter("always") at import time; neutralise early.
+try:
+  import authlib.deprecate
+
+  warnings.filterwarnings(
+      "ignore", category=authlib.deprecate.AuthlibDeprecationWarning
+  )
+except ImportError:
+  pass
+
+# Suppress noisy SDK loggers before any google imports ("AFC is enabled",
+# "...will take precedence", "HTTP Request: POST ...").
+for _noisy in (
+    "google.genai",
+    "google_genai",
+    "google.auth",
+    "google_auth",
+    "google.adk",
+    "google_adk",
+    "httpx",
+    "httpcore",
+):
+  logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
