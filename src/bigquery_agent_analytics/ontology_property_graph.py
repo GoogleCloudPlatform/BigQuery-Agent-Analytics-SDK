@@ -128,9 +128,9 @@ def compile_node_table_clause(
       f"    `{table_ref}` AS {entity.name}\n"
       f"      KEY ({key_cols})\n"
       f"      {label_lines}\n"
-      f"      PROPERTIES (\n"
+      "      PROPERTIES (\n"
       f"        {props_str}\n"
-      f"      )"
+      "      )"
   )
 
 
@@ -285,9 +285,9 @@ def compile_edge_table_clause(
       f"      DESTINATION KEY ({dst_key_str}) "
       f"REFERENCES {rel.to_entity} ({dst_ref_str})\n"
       f"      LABEL {rel.name}\n"
-      f"      PROPERTIES (\n"
+      "      PROPERTIES (\n"
       f"        {props_str}\n"
-      f"      )"
+      "      )"
   )
 
 
@@ -338,8 +338,10 @@ def compile_property_graph_ddl(
     )
 
   parts = [
-      f"CREATE OR REPLACE PROPERTY GRAPH `{graph_ref}`\n"
-      f"  NODE TABLES (\n{nodes_block}\n  )",
+      (
+          f"CREATE OR REPLACE PROPERTY GRAPH `{graph_ref}`\n"
+          f"  NODE TABLES (\n{nodes_block}\n  )"
+      ),
   ]
   if edge_clauses:
     edges_block = ",\n".join(edge_clauses)
@@ -562,7 +564,7 @@ def compile_ddl_via_upstream(
           or r.to_session_column is not None
       ]
       reasons.append(
-          f"relationships use session column overrides: " f"{rels_with_lineage}"
+          f"relationships use session column overrides: {rels_with_lineage}"
       )
     raise ValueError(
         "Spec is not compatible with the upstream v0 compiler: "

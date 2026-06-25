@@ -150,16 +150,14 @@ async def _run_all() -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
           timeout=PER_SESSION_TIMEOUT_S,
       )
       if error_reason is None:
-        succeeded.append(
-            {
-                "session_id": session_id,
-                "campaign": brief.campaign,
-                "brand": brief.campaign.split()[0],
-                "brief": brief.brief,
-                "run_order": idx,
-                "event_count": event_count,
-            }
-        )
+        succeeded.append({
+            "session_id": session_id,
+            "campaign": brief.campaign,
+            "brand": brief.campaign.split()[0],
+            "brief": brief.brief,
+            "run_order": idx,
+            "event_count": event_count,
+        })
       else:
         failures.append((brief.campaign, error_reason))
     except asyncio.TimeoutError:

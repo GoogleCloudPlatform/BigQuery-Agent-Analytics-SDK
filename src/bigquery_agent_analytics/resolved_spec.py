@@ -243,10 +243,10 @@ def resolve(
 
   Args:
       ontology: A validated ``bigquery_ontology.Ontology``.
-      binding: A validated ``bigquery_ontology.Binding`` referencing
-          this ontology.
+      binding: A validated ``bigquery_ontology.Binding`` referencing this
+        ontology.
       lineage_config: Optional dict mapping relationship names to
-          ``LineageEdgeConfig`` for cross-session lineage edges.
+        ``LineageEdgeConfig`` for cross-session lineage edges.
 
   Returns:
       A frozen ``ResolvedGraph`` ready for consumption by SDK runtime.
@@ -283,12 +283,12 @@ def resolve(
     abstract_count = len(ontology.entities)
     raise ValueError(
         f"Ontology {ontology.ontology!r} has {abstract_count} abstract "
-        f"entities but no concrete entities. The SDK runtime requires "
-        f"at least one concrete (bindable) entity. Abstract entities "
-        f"typically come from SKOS-only concepts or ontologies that "
-        f"declare structure without physical realization; drop "
-        f"``abstract: true`` and give at least one entity keys + a "
-        f"binding to use the SDK."
+        "entities but no concrete entities. The SDK runtime requires "
+        "at least one concrete (bindable) entity. Abstract entities "
+        "typically come from SKOS-only concepts or ontologies that "
+        "declare structure without physical realization; drop "
+        "``abstract: true`` and give at least one entity keys + a "
+        "binding to use the SDK."
     )
 
   ont_entity_map = {e.name: e for e in ontology.entities}
@@ -301,7 +301,7 @@ def resolve(
       raise ValueError(
           f"Binding references entity {eb.name!r} which is not "
           f"defined in ontology {ontology.ontology!r} (or is declared "
-          f"abstract and therefore not bindable)."
+          "abstract and therefore not bindable)."
       )
     ont_entity = ont_entity_map[eb.name]
 
@@ -312,7 +312,7 @@ def resolve(
     if eff_keys is None or eff_keys.primary is None:
       raise ValueError(
           f"Entity {eb.name!r} has no effective primary key defined "
-          f"(checked own keys and ancestor chain)."
+          "(checked own keys and ancestor chain)."
       )
     key_columns = tuple(col_map.get(k, k) for k in eff_keys.primary)
 
@@ -330,9 +330,9 @@ def resolve(
         raise ValueError(
             f"Property {prop.name!r} on entity {ont_entity.name!r} has "
             f"a derived expression (expr={prop.expr!r}). The SDK "
-            f"runtime does not support derived properties; they would "
-            f"be treated as stored columns. Remove the expr or handle "
-            f"it before conversion."
+            "runtime does not support derived properties; they would "
+            "be treated as stored columns. Remove the expr or handle "
+            "it before conversion."
         )
       sdk_type = _PROPERTY_TYPE_TO_SDK.get(prop.type.value, "string")
       properties.append(
@@ -377,7 +377,7 @@ def resolve(
         raise ValueError(
             f"Property {prop.name!r} on relationship {ont_rel.name!r} "
             f"has a derived expression (expr={prop.expr!r}). The SDK "
-            f"runtime does not support derived properties."
+            "runtime does not support derived properties."
         )
       sdk_type = _PROPERTY_TYPE_TO_SDK.get(prop.type.value, "string")
       properties.append(

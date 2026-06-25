@@ -458,8 +458,8 @@ class OntologyMaterializer:
       bq_client: Optional pre-configured BigQuery client.
       location: BigQuery location.
       write_mode: Write strategy — ``'streaming'`` (default) uses
-          ``insert_rows_json``; ``'batch_load'`` uses
-          ``load_table_from_json`` with a staging table.
+        ``insert_rows_json``; ``'batch_load'`` uses ``load_table_from_json``
+        with a staging table.
   """
 
   def __init__(
@@ -473,8 +473,7 @@ class OntologyMaterializer:
   ) -> None:
     if write_mode not in ("streaming", "batch_load"):
       raise ValueError(
-          f"write_mode must be 'streaming' or 'batch_load', "
-          f"got {write_mode!r}."
+          f"write_mode must be 'streaming' or 'batch_load', got {write_mode!r}."
       )
     self.project_id = project_id
     self.dataset_id = dataset_id
@@ -892,8 +891,8 @@ class OntologyMaterializer:
 
     Args:
         graph: The extracted graph to persist.
-        session_ids: Sessions being materialized (scopes the
-            delete for idempotency).
+        session_ids: Sessions being materialized (scopes the delete for
+          idempotency).
 
     Returns:
         Dict mapping entity/relationship name to row count inserted.
@@ -913,8 +912,8 @@ class OntologyMaterializer:
 
     Args:
         graph: The extracted graph to persist.
-        session_ids: Sessions being materialized (scopes the
-            delete for idempotency).
+        session_ids: Sessions being materialized (scopes the delete for
+          idempotency).
 
     Returns:
         A ``MaterializationResult`` containing row counts and

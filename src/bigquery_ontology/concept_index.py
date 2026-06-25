@@ -132,12 +132,12 @@ def build_rows(
 
   Args:
       ontology: Validated upstream ``Ontology``.
-      binding: Validated upstream ``Binding`` referencing this ontology.
-          Used only to decide which concrete entities are bindable;
-          abstract entities are always included regardless of binding.
+      binding: Validated upstream ``Binding`` referencing this ontology. Used
+        only to decide which concrete entities are bindable; abstract entities
+        are always included regardless of binding.
       compiler_version: Caller-supplied version string flowed into
-          ``compile_fingerprint`` so semver bumps with behavior
-          changes invalidate older meta rows.
+        ``compile_fingerprint`` so semver bumps with behavior changes invalidate
+        older meta rows.
 
   Returns:
       A sorted list of ``ConceptIndexRow``. Empty list is legal
@@ -164,6 +164,7 @@ def build_rows(
 
 def _dedup_rows(rows: list[ConceptIndexRow]) -> list[ConceptIndexRow]:
   """Collapse rows that share the contract tuple
+
   ``(entity_name, label, label_kind, language, scheme)`` into one.
 
   Duplicate inputs (e.g. ``synonyms=["Acct", "Acct"]`` or an
@@ -209,6 +210,7 @@ def _rows_for_entity_in_scheme(
     cfp: str,
 ) -> list[ConceptIndexRow]:
   """Emit one row per (label, label_kind, language) tuple for the
+
   given (entity, scheme) pair. Plus one notation row per notation
   value if any are declared.
   """
@@ -262,9 +264,10 @@ def _rows_for_entity_in_scheme(
 
 
 def _entity_notation(entity: Entity) -> Optional[str]:
-  """Return the notation value to repeat in the per-row ``notation``
-  column. If multiple notations are declared, the lexicographically
-  smallest is chosen so the column value is deterministic.
+  """Return the notation value to repeat in the per-row ``notation`` column.
+
+  If multiple notations are declared, the lexicographically smallest is chosen
+  so the column value is deterministic.
   """
   ann = (entity.annotations or {}).get("skos:notation")
   values = _as_list(ann)
@@ -272,8 +275,10 @@ def _entity_notation(entity: Entity) -> Optional[str]:
 
 
 def _entity_schemes(entity: Entity) -> list[Optional[str]]:
-  """Return the scheme membership list. Never empty: an entity not in
-  any scheme yields ``[None]`` so a single set of rows is emitted.
+  """Return the scheme membership list.
+
+  Never empty: an entity not in any scheme yields ``[None]`` so a single set of
+  rows is emitted.
 
   Both ``skos:inScheme`` and ``skos:topConceptOf`` are treated as
   scheme membership: a top concept of a scheme is still a member of
@@ -292,6 +297,7 @@ def _entity_schemes(entity: Entity) -> list[Optional[str]]:
 
 def _as_list(value) -> list[str]:
   """Normalize an ``AnnotationValue`` (str | list[str] | None) to a
+
   list of strings, dropping empties.
   """
   if value is None:
@@ -305,6 +311,7 @@ def _as_list(value) -> list[str]:
 
 def _split_lang_suffix(key: str) -> tuple[str, Optional[str]]:
   """Split ``"skos:prefLabel@fr"`` → ``("skos:prefLabel", "fr")``.
+
   Plain ``"skos:prefLabel"`` → ``("skos:prefLabel", None)``.
   """
   if "@" not in key:
@@ -317,6 +324,7 @@ def _split_lang_suffix(key: str) -> tuple[str, Optional[str]]:
 
 def _sort_key(row: ConceptIndexRow) -> tuple:
   """Total order over rows: ``(scheme, entity_name, label_kind,
+
   language, label, notation, is_abstract)`` with ``None`` last via a
   per-field ``(is_none, value)`` pair so Python's tuple compare
   cannot blow up on heterogeneous types.

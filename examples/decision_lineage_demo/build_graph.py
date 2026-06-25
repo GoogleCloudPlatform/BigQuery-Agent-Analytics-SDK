@@ -50,11 +50,10 @@ from __future__ import annotations
 import os
 import sys
 
-from dotenv import load_dotenv
-from google.cloud import bigquery
-
 from bigquery_agent_analytics.context_graph import ContextGraphConfig
 from bigquery_agent_analytics.context_graph import ContextGraphManager
+from dotenv import load_dotenv
+from google.cloud import bigquery
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _env_path = os.path.join(_SCRIPT_DIR, ".env")
@@ -107,7 +106,7 @@ def main() -> int:
     sessions = _fetch_sessions(client)
   except Exception as exc:  # pylint: disable=broad-except
     print(
-        f"ERROR: could not list sessions in "
+        "ERROR: could not list sessions in "
         f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}: {exc}",
         file=sys.stderr,
     )
@@ -196,7 +195,7 @@ def main() -> int:
         f"WARNING: AI.GENERATE returned {decisions} decision points "
         f"across {len(session_ids)} sessions (target ~"
         f"{expected_decisions}). Graph will look thin; consider "
-        f"re-running build_graph.py.",
+        "re-running build_graph.py.",
         file=sys.stderr,
     )
   elif decisions < expected_decisions:
@@ -205,8 +204,8 @@ def main() -> int:
         f"NOTE: AI.GENERATE extracted {decisions} decision points "
         f"across {len(session_ids)} sessions (target ~"
         f"{expected_decisions}, 5 per agent run). This is normal "
-        f"model variance; the demo narration is written to be "
-        f"count-agnostic.",
+        "model variance; the demo narration is written to be "
+        "count-agnostic.",
         file=sys.stderr,
     )
 

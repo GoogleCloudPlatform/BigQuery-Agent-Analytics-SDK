@@ -275,11 +275,10 @@ def ttl_import(
 
   Args:
       ttl_path: Path to the ``.ttl`` or ``.owl`` file.
-      include_namespaces: IRI prefix strings. Only classes and
-          properties whose IRI starts with one of these prefixes
-          are imported.
-      dataset_template: Template for the dataset portion of
-          BigQuery table bindings. Defaults to ``{{ env }}``.
+      include_namespaces: IRI prefix strings. Only classes and properties whose
+        IRI starts with one of these prefixes are imported.
+      dataset_template: Template for the dataset portion of BigQuery table
+        bindings. Defaults to ``{{ env }}``.
 
   Returns:
       A ``TTLImportResult`` with the generated YAML text and a
@@ -365,7 +364,7 @@ def ttl_import(
               location=f'entities[{name}].extends',
               reason=(
                   f'Multiple parents found: {parents}. '
-                  f'GraphSpec supports single inheritance only.'
+                  'GraphSpec supports single inheritance only.'
               ),
           )
       )
@@ -586,9 +585,9 @@ def ttl_import(
   ontology_import_meta: dict[str, Any] = {
       'status': 'unresolved',
       'source_file': str(path.resolve()),
-      'import_timestamp': datetime.datetime.now(
-          tz=datetime.timezone.utc
-      ).isoformat(),
+      'import_timestamp': (
+          datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+      ),
       'placeholders_remaining': len(report.placeholders),
   }
 
@@ -621,14 +620,13 @@ def ttl_resolve(
   """Resolve FILL_IN placeholders and produce clean GraphSpec YAML.
 
   Args:
-      import_yaml_path: Path to the ``*.import.yaml`` artifact
-          produced by ``ttl_import``.
-      defaults: Optional mapping of dotted-path locations to
-          replacement values. Paths use the same format as
-          ``PlaceholderInfo.location``, e.g.
-          ``'entities[Foo].keys.primary'`` maps to a list value
-          like ``'["foo_id"]'``.  Scalar values are used as-is;
-          list values should be passed as Python lists.
+      import_yaml_path: Path to the ``*.import.yaml`` artifact produced by
+        ``ttl_import``.
+      defaults: Optional mapping of dotted-path locations to replacement values.
+        Paths use the same format as ``PlaceholderInfo.location``, e.g.
+        ``'entities[Foo].keys.primary'`` maps to a list value like
+        ``'["foo_id"]'``.  Scalar values are used as-is; list values should be
+        passed as Python lists.
 
   Returns:
       A clean GraphSpec YAML string (without the
@@ -669,7 +667,7 @@ def ttl_resolve(
     locations_str = ', '.join(remaining)
     raise ValueError(
         f'Unresolved FILL_IN placeholders remain at: {locations_str}. '
-        f'Provide values via the defaults parameter.'
+        'Provide values via the defaults parameter.'
     )
 
   # Validate against GraphSpec.
@@ -797,8 +795,8 @@ def import_owl_to_ontology(
   Args:
       sources: Paths to OWL source files (Turtle or RDF/XML).
       include_namespaces: IRI prefixes to include.
-      ontology_name: Name for the output ontology. If ``None``,
-          derived from the first namespace.
+      ontology_name: Name for the output ontology. If ``None``, derived from the
+        first namespace.
 
   Returns:
       A ``(ontology_yaml, drop_summary)`` tuple. The YAML is a valid
@@ -872,8 +870,8 @@ def import_owl_to_graph_spec(
     ]
     raise ValueError(
         f'Upstream OWL import produced {len(fill_in_lines)} unresolved '
-        f'FILL_IN placeholder(s). Resolve them in the ontology YAML '
-        f'before converting to GraphSpec:\n' + '\n'.join(fill_in_lines)
+        'FILL_IN placeholder(s). Resolve them in the ontology YAML '
+        'before converting to GraphSpec:\n' + '\n'.join(fill_in_lines)
     )
 
   ontology = load_ontology_from_string(ontology_yaml)

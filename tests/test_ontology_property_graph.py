@@ -444,7 +444,7 @@ class TestCompileEdgeTableClause:
     spec = ResolvedGraph(name="g", entities=(src, tgt), relationships=(rel,))
     clause = compile_edge_table_clause(rel, spec, "proj", "ds")
     assert (
-        "SOURCE KEY (k1, k2, session_id) " "REFERENCES Src (k1, k2, session_id)"
+        "SOURCE KEY (k1, k2, session_id) REFERENCES Src (k1, k2, session_id)"
     ) in clause
 
 

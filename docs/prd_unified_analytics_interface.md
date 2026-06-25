@@ -32,7 +32,7 @@ import the library. This creates three gaps:
 │  Client.insights()       Client.drift_detection()│
 │  Client.doctor()         Client.deep_analysis()  │
 │  Client.hitl_metrics()   Client.context_graph()  │
-│  ViewManager             BigQueryTraceEvaluator   │
+│  ViewManager             PerformanceEvaluator     │
 │  TrialRunner             GraderPipeline           │
 │  EvalSuite               EvalValidator            │
 │  BigQueryMemoryService   BigQueryAIClient         │
@@ -110,7 +110,7 @@ All operations go through a single multiplexed function:
 |-----------|-----------|---------------------|--------|
 | `analyze` | `Client.get_session_trace()` + metrics | `session_id` | JSON with span count, error count, latency, tool calls |
 | `evaluate` | `SystemEvaluator` | `session_id`, `metric`, `threshold` | JSON with passed, score, details |
-| `judge` | `LLMAsJudge` | `session_id`, `criterion` | JSON with score, feedback |
+| `judge` | `PerformanceEvaluator` | `session_id`, `criterion` | JSON with score, feedback |
 | `insights` | Facet extraction | `session_id` | JSON with intent, outcome, friction |
 | `drift` | Drift detection | `golden_dataset`, `agent_filter`, `start_date`, `end_date` | JSON with coverage, gaps |
 
@@ -443,7 +443,7 @@ import functions_framework
 import json
 import os
 from flask import jsonify
-from bigquery_agent_analytics import Client, SystemEvaluator, LLMAsJudge, TraceFilter
+from bigquery_agent_analytics import Client, SystemEvaluator, PerformanceEvaluator, TraceFilter
 
 # Initialized once per cold start. Config comes from userDefinedContext
 # (forwarded by BigQuery) or environment variables as fallback.
@@ -495,8 +495,8 @@ def _dispatch(client, operation, params):
             filters=TraceFilter(session_ids=[params["session_id"]]))
         return report.details[0] if report.details else {}
     elif operation == "judge":
-        judge = getattr(LLMAsJudge, params["criterion"])()
-        report = client.evaluate(evaluator=judge,
+        performance_evaluator = PerformanceEvaluator()
+        report = client.evaluate(evaluator=performance_evaluator,
             filters=TraceFilter(session_ids=[params["session_id"]]))
         return report.details[0] if report.details else {}
     elif operation == "drift":

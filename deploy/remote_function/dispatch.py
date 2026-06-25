@@ -68,15 +68,13 @@ def process_calls(
       result["_version"] = "1.0"
       replies.append(result)
     except Exception as e:
-      replies.append(
-          {
-              "_error": {
-                  "code": type(e).__name__,
-                  "message": str(e),
-              },
-              "_version": "1.0",
-          }
-      )
+      replies.append({
+          "_error": {
+              "code": type(e).__name__,
+              "message": str(e),
+          },
+          "_version": "1.0",
+      })
   return replies
 
 

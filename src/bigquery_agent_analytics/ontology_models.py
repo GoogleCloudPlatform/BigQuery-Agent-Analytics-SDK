@@ -235,7 +235,7 @@ def _validate_graph_spec(spec: GraphSpec) -> None:
       if key_col not in prop_names:
         raise ValueError(
             f"Entity {entity.name!r}: key column {key_col!r} "
-            f"not found in properties."
+            "not found in properties."
         )
 
   # Relationship endpoint validation.
@@ -257,7 +257,7 @@ def _validate_graph_spec(spec: GraphSpec) -> None:
     if has_from != has_to:
       raise ValueError(
           f"Relationship {rel.name!r}: from_columns and to_columns "
-          f"must both be present or both be absent."
+          "must both be present or both be absent."
       )
 
     if has_from and has_to:
@@ -292,7 +292,7 @@ def _validate_graph_spec(spec: GraphSpec) -> None:
     if has_from_session != has_to_session:
       raise ValueError(
           f"Relationship {rel.name!r}: from_session_column and "
-          f"to_session_column must both be present or both be absent."
+          "to_session_column must both be present or both be absent."
       )
 
     if has_from_session:
@@ -301,13 +301,13 @@ def _validate_graph_spec(spec: GraphSpec) -> None:
         raise ValueError(
             f"Relationship {rel.name!r}: from_session_column "
             f"{rel.binding.from_session_column!r} not found in "
-            f"relationship properties."
+            "relationship properties."
         )
       if rel.binding.to_session_column not in rel_prop_names:
         raise ValueError(
             f"Relationship {rel.name!r}: to_session_column "
             f"{rel.binding.to_session_column!r} not found in "
-            f"relationship properties."
+            "relationship properties."
         )
 
 
@@ -319,9 +319,8 @@ def load_graph_spec_from_string(
 
   Args:
       yaml_string: Raw YAML content.
-      env: If provided, replaces ``{{ env }}`` placeholders in all
-          binding source references. Simple regex substitution — no
-          Jinja2 dependency.
+      env: If provided, replaces ``{{ env }}`` placeholders in all binding
+        source references. Simple regex substitution — no Jinja2 dependency.
 
   Returns:
       A validated ``GraphSpec`` with inheritance resolved.
@@ -378,7 +377,7 @@ def load_from_ontology_binding(
       ontology_path: Path to a ``*.ontology.yaml`` file.
       binding_path: Path to a ``*.binding.yaml`` file.
       lineage_config: Optional dict mapping relationship names to
-          ``LineageEdgeConfig`` for SDK-specific cross-session lineage.
+        ``LineageEdgeConfig`` for SDK-specific cross-session lineage.
 
   Returns:
       A validated ``GraphSpec`` with inheritance resolved.

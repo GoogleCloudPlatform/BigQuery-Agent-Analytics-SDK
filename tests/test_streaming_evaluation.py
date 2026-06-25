@@ -485,7 +485,8 @@ class TestWorker:
     assert status == 200
     assert response["ignored_rows"] == 1
     assert caplog.messages == [
-        "Ignoring malformed trigger row: Missing required trigger fields: event_type, trigger_kind"
+        "Ignoring malformed trigger row: Missing required trigger fields:"
+        " event_type, trigger_kind"
     ]
     client.evaluate.assert_not_called()
 
@@ -769,7 +770,8 @@ class TestWorker:
 
     assert config.overlap == timedelta(minutes=15)
     assert caplog.messages == [
-        "Invalid integer value for BQ_AGENT_OVERLAP_MINUTES='fifteen'; using default 15"
+        "Invalid integer value for BQ_AGENT_OVERLAP_MINUTES='fifteen'; using"
+        " default 15"
     ]
 
 

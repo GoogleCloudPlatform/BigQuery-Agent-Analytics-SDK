@@ -65,11 +65,7 @@ __all__.extend(
 # --- SDK Client & Core ---
 try:
   from .client import Client
-  from .evaluators import CodeEvaluator
-  from .evaluators import EvaluationReport
   from .evaluators import LLMAsJudge
-  from .evaluators import SessionScore
-  from .evaluators import SystemEvaluator
   from .feedback import AnalysisConfig
   from .feedback import DriftReport
   from .feedback import QuestionDistribution
@@ -78,6 +74,10 @@ try:
   from .insights import InsightsReport
   from .insights import SessionFacet
   from .serialization import serialize
+  from .system_evaluator import CodeEvaluator
+  from .system_evaluator import EvaluationReport
+  from .system_evaluator import SessionScore
+  from .system_evaluator import SystemEvaluator
   from .trace import ContentPart
   from .trace import EventType
   from .trace import ObjectRef
@@ -120,14 +120,16 @@ except ImportError as e:
 
 # Trace Evaluator
 try:
-  from .trace_evaluator import BigQueryTraceEvaluator
-  from .trace_evaluator import EvaluationResult
-  from .trace_evaluator import TraceReplayRunner
-  from .trace_evaluator import TrajectoryMetrics
+  from .performance_evaluator import BigQueryTraceEvaluator
+  from .performance_evaluator import EvaluationResult
+  from .performance_evaluator import PerformanceEvaluator
+  from .performance_evaluator import TraceReplayRunner
+  from .performance_evaluator import TrajectoryMetrics
 
   __all__.extend(
       [
           "BigQueryTraceEvaluator",
+          "PerformanceEvaluator",
           "EvaluationResult",
           "TraceReplayRunner",
           "TrajectoryMetrics",
@@ -190,13 +192,15 @@ except ImportError as e:
 
 # Multi-Trial
 try:
-  from .multi_trial import MultiTrialReport
-  from .multi_trial import TrialResult
-  from .multi_trial import TrialRunner
+  from .multi_trial_performance_evaluator import MultiTrialPerformanceEvaluator
+  from .multi_trial_performance_evaluator import MultiTrialReport
+  from .multi_trial_performance_evaluator import TrialResult
+  from .multi_trial_performance_evaluator import TrialRunner
 
   __all__.extend(
       [
           "TrialRunner",
+          "MultiTrialPerformanceEvaluator",
           "TrialResult",
           "MultiTrialReport",
       ]
@@ -210,18 +214,20 @@ except ImportError as e:
 
 # Grader Pipeline
 try:
-  from .grader_pipeline import AggregateVerdict
-  from .grader_pipeline import BinaryStrategy
-  from .grader_pipeline import GraderPipeline
-  from .grader_pipeline import GraderResult
-  from .grader_pipeline import MajorityStrategy
-  from .grader_pipeline import ScoringStrategy
-  from .grader_pipeline import WeightedStrategy
+  from .aggregate_grader import AggregateGrader
+  from .aggregate_grader import AggregateVerdict
+  from .aggregate_grader import BinaryStrategy
+  from .aggregate_grader import GraderPipeline
+  from .aggregate_grader import GraderResult
+  from .aggregate_grader import MajorityStrategy
+  from .aggregate_grader import ScoringStrategy
+  from .aggregate_grader import WeightedStrategy
 
   __all__.extend(
       [
           "AggregateVerdict",
           "BinaryStrategy",
+          "AggregateGrader",
           "GraderPipeline",
           "GraderResult",
           "MajorityStrategy",

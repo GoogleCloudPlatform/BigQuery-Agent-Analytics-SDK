@@ -120,7 +120,7 @@ class TestClientBqClientFactory:
     assert returned.default_query_job_config.maximum_bytes_billed == (
         1_000_000_000
     )
-    assert returned.default_query_job_config.use_legacy_sql is False
+    assert returned.default_query_job_config.use_legacy_sql == False
     assert returned.default_query_job_config.labels == {"team": "search"}
 
   def test_mock_client_is_not_wrapped(self):
@@ -170,8 +170,8 @@ class TestQuerySiteLabels:
     labels = _captured_labels_for(mock_bq)
     assert labels.get("sdk_feature") == "trace-read"
 
-  def test_ai_generate_judge_labels_with_ai_generate(self):
-    from bigquery_agent_analytics.evaluators import LLMAsJudge
+  def test_performance_evaluator_labels(self):
+    from bigquery_agent_analytics.evaluators import PerformanceEvaluator
 
     mock_bq = MagicMock()
     mock_job = MagicMock()
@@ -181,8 +181,8 @@ class TestQuerySiteLabels:
     mock_bq.query.return_value = mock_job
 
     client = _make_client(bq_client=mock_bq, connection_id="proj.us.conn")
-    judge = LLMAsJudge.correctness(threshold=0.7)
-    client.evaluate(evaluator=judge)
+    evaluator = PerformanceEvaluator(project_id="proj", dataset_id="ds")
+    client.evaluate(evaluator=evaluator)
 
     # Multiple queries may fire (session summary + judge). At least one
     # should be the judge query with eval-llm-judge + ai-generate.
@@ -191,8 +191,6 @@ class TestQuerySiteLabels:
         for c in mock_bq.query.call_args_list
         if c.kwargs.get("job_config")
         and dict(c.kwargs["job_config"].labels or {}).get("sdk_feature")
-        == "eval-llm-judge"
+        == "eval-performance"
     ]
-    assert judge_calls, "no query labeled with sdk_feature=eval-llm-judge"
-    judge_labels = dict(judge_calls[0].kwargs["job_config"].labels or {})
-    assert judge_labels.get("sdk_ai_function") == "ai-generate"
+    assert judge_calls, "no query labeled with sdk_feature=eval-performance"

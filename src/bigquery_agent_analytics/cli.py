@@ -376,7 +376,7 @@ def evaluate(
     ),
     criterion: str = typer.Option(
         "correctness",
-        help=("LLM judge criterion: " "correctness|hallucination|sentiment."),
+        help="LLM judge criterion: correctness|hallucination|sentiment.",
     ),
     agent_id: Optional[str] = typer.Option(None, help="Filter by agent name."),
     last: Optional[str] = typer.Option(
@@ -523,7 +523,7 @@ def _emit_evaluate_failures(
   One line per (session_id, metric_name) that failed its threshold.
   Prefers the raw observed + budget pair (``SystemEvaluator`` prebuilts);
   falls back to score + threshold when the metric didn't declare
-  observed/budget (custom ``add_metric`` users, ``LLMAsJudge``
+  observed/budget (custom ``add_metric`` users, ``PerformanceEvaluator``
   criteria). For LLM-judge failures the line also carries a bounded
   ``feedback="…"`` snippet drawn from ``SessionScore.llm_feedback``
   so CI logs explain *why* the judge said the session failed without
@@ -611,7 +611,7 @@ def _emit_evaluate_failures(
   if len(failed) > len(shown):
     typer.echo(
         f"  ... {len(failed) - len(shown)} more failing session(s) "
-        f"(raise --limit or see --format=json for full list)",
+        "(raise --limit or see --format=json for full list)",
         err=True,
     )
 

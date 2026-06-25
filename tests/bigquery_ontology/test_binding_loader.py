@@ -456,7 +456,8 @@ def test_property_bound_twice_is_error():
   """
   _assert_value_error(
       binding_yaml,
-      "Entity binding 'Account': property 'account_id' is bound more than once.",
+      "Entity binding 'Account': property 'account_id' is bound more than"
+      " once.",
   )
 
 

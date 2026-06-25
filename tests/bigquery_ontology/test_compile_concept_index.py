@@ -154,6 +154,7 @@ class TestOutputShape:
 
   def test_uses_inline_unnest_path(self):
     """Default emission path is atomic per-statement
+
     ``CREATE OR REPLACE TABLE ... AS SELECT * FROM UNNEST(...)``.
     """
     sql = _compile()
@@ -218,6 +219,7 @@ class TestDeterminism:
 
   def test_byte_identical_for_complex_ontology(self):
     """Multi-entity, multi-scheme, multi-label ontology is also
+
     byte-deterministic.
     """
     entities = [
@@ -256,6 +258,7 @@ class TestValueRendering:
 
   def test_booleans_render_as_uppercase_true_false(self):
     """BigQuery convention; also keeps the byte-identical contract
+
     stable across runs.
     """
     entities = [
@@ -272,6 +275,7 @@ class TestValueRendering:
 
   def test_string_with_single_quote_is_backslash_escaped(self):
     """GoogleSQL escapes single quotes as ``\\'`` inside single-quoted
+
     literals, **not** as ``''``. ANSI SQL (and PostgreSQL) accept the
     quote-doubling form, but GoogleSQL rejects it: ``'O''Brien'``
     parses as two concatenated literals (``'O'`` and ``'Brien'``)
@@ -290,6 +294,7 @@ class TestValueRendering:
 
   def test_backslash_is_escaped(self):
     """GoogleSQL **does** treat ``\\`` as an escape character inside
+
     single-quoted strings. ``'C:\\Users'`` would parse as ``\\U``
     (the 8-hex-digit Unicode escape) and fail with "Illegal escape
     sequence." The emitter must double backslashes so the source
@@ -301,9 +306,10 @@ class TestValueRendering:
     assert "'C:\\\\Users'" in sql
 
   def test_unrecognized_escape_in_input_is_safely_doubled(self):
-    """``\\q`` is not a valid GoogleSQL escape. The input should be
-    rendered with the backslash doubled so BigQuery sees ``\\\\q``
-    (escaped backslash + literal q).
+    """``\\q`` is not a valid GoogleSQL escape.
+
+    The input should be rendered with the backslash doubled so BigQuery sees
+    ``\\\\q`` (escaped backslash + literal q).
     """
     entities = [_account_entity(synonyms=["foo\\qbar"])]
     sql = _compile(entities=entities)
@@ -311,6 +317,7 @@ class TestValueRendering:
 
   def test_literal_newline_is_escaped(self):
     """A literal newline character inside a string would otherwise
+
     split the SQL across two lines and break the literal. Must be
     escaped as ``\\n``.
     """
@@ -340,6 +347,7 @@ class TestScopeAndNotation:
 
   def test_unbound_concrete_entity_does_not_appear_in_sql(self):
     """D3: concrete unbound entities are filtered by build_rows;
+
     their names should not appear in the emitted SQL.
     """
     entities = [
@@ -365,6 +373,7 @@ class TestScopeAndNotation:
 
   def test_notation_value_appears_as_label_kind_notation_row(self):
     """D5: ``skos:notation`` value '807' gets a row where
+
     ``label_kind = 'notation'`` and ``label = '807'``.
     """
     entities = [
@@ -383,6 +392,7 @@ class TestScopeAndNotation:
 
 class TestOutputTableValidation:
   """Reject inputs that would produce malformed SQL once
+
   backtick-wrapped by the emitter.
   """
 
@@ -422,6 +432,7 @@ class TestOutputTableValidation:
 
   def test_accepts_valid_three_segment_path(self):
     """Project IDs may contain hyphens (BigQuery convention); dataset
+
     and table identifiers may use underscores. Both must be accepted.
     """
     sql = self._compile_with_table("my-proj-123.my_dataset.my_table_v2")
@@ -432,6 +443,7 @@ class TestEmptyRows:
 
   def test_zero_concrete_zero_abstract_raises(self):
     """An ontology with no abstract entities and a binding that
+
     references no concrete entities yields zero rows in the main
     index. The emitter should reject this with a clear error
     rather than emit a typeless empty array (which would lose the
@@ -458,6 +470,7 @@ class TestPublicSurface:
 
   def test_compile_concept_index_re_exported_at_package_root(self):
     """Per the implementation plan, ``compile_concept_index`` is
+
     public and re-exported alongside ``compile_graph``.
     """
     import bigquery_ontology
@@ -466,6 +479,7 @@ class TestPublicSurface:
 
   def test_compile_graph_unchanged(self):
     """The existing ``compile_graph`` byte-identical contract is
+
     preserved by this PR — sanity check by importing it.
     """
     from bigquery_ontology import compile_graph

@@ -17,8 +17,10 @@
 The contract is pinned in `docs/implementation_plan_concept_index_runtime.md`
 (W1/W2) and in the issue #58 body under "Fingerprint algorithm":
 
-- Input: `BaseModel.model_dump(mode="json", by_alias=False, exclude_none=False)`.
-- Canonical JSON: `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=False)`.
+- Input: `BaseModel.model_dump(mode="json", by_alias=False,
+exclude_none=False)`.
+- Canonical JSON: `json.dumps(..., sort_keys=True, separators=(",", ":"),
+ensure_ascii=False)`.
 - ``fingerprint_model``: SHA-256, returned as ``"sha256:"`` + 64 hex chars.
 - ``compile_fingerprint``: full 64-hex SHA-256 over
   ``ontology_fingerprint || binding_fingerprint || compiler_version``.
@@ -109,6 +111,7 @@ class TestFingerprintModel:
 
   def test_non_semantic_yaml_edits_produce_identical_fingerprint(self):
     """Whitespace, comments, and key-ordering changes must not shift the
+
     fingerprint. This is the entire justification for fingerprinting at
     the validated-model layer rather than over raw YAML text.
     """
@@ -149,6 +152,7 @@ class TestFingerprintModel:
 
   def test_binding_fingerprint_reflects_target_dataset(self):
     """A binding repointed at a different dataset must fingerprint
+
     differently — the binding's identity includes its physical target.
     """
     ont = load_ontology_from_string(_SIMPLE_ONTOLOGY_YAML)
@@ -161,6 +165,7 @@ class TestFingerprintModel:
 
   def test_ontology_and_binding_fingerprints_differ(self):
     """Two different model types from the same source file namespace
+
     must fingerprint to different values. (A trivial check, but it
     catches implementations that fingerprint only on a shared subset
     of fields.)
@@ -171,6 +176,7 @@ class TestFingerprintModel:
 
   def test_list_order_is_semantic(self):
     """Key columns are declaration-ordered in the ontology model;
+
     reordering them is a semantic change. Fingerprint must reflect
     that (lists are preserved in declaration order, not sorted).
     """
@@ -241,6 +247,7 @@ class TestCompileFingerprint:
 
   def test_changes_with_compiler_version(self):
     """Compiler version changes must shift the fingerprint even when
+
     both input fingerprints are unchanged — otherwise a semver bump
     to the compiler with behavior changes would fail to invalidate
     old meta.
@@ -304,6 +311,7 @@ class TestCompileId:
 
   def test_changes_with_compiler_version(self):
     """Compiler version changes must shift the compile_id even when
+
     both fingerprints are unchanged — otherwise a semver bump to the
     compiler with behavior changes would fail to invalidate old meta.
     """
@@ -319,6 +327,7 @@ class TestCompileId:
 
 class TestCompileIdFingerprintInvariant:
   """The short display token must be a structural truncation of the
+
   full integrity key — never its own hash. This prevents the two
   provenance columns in the concept index from drifting out of sync.
 
@@ -345,6 +354,7 @@ class TestCompileIdFingerprintInvariant:
 
   def test_compile_id_never_computes_its_own_hash(self):
     """Regression guard: if someone re-implements ``compile_id`` to
+
     hash a different payload (e.g. a subset of inputs, or a different
     separator), the invariant breaks and this test catches it.
     """
@@ -364,8 +374,9 @@ class TestCompileIdFingerprintInvariant:
 
 
 class TestPrivateSurface:
-  """``_fingerprint`` is an internal module — not part of the package
-  API. Catch accidental re-export from ``bigquery_ontology/__init__.py``.
+  """``_fingerprint`` is an internal module — not part of the package API.
+
+  Catch accidental re-export from ``bigquery_ontology/__init__.py``.
   """
 
   def test_not_exported_from_package_root(self):
@@ -377,6 +388,7 @@ class TestPrivateSurface:
 
   def test_importable_via_absolute_path(self):
     """Both packages import via ``from bigquery_ontology._fingerprint
+
     import ...``. Make sure that path continues to work.
     """
     from bigquery_ontology._fingerprint import compile_fingerprint as _cfp

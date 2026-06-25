@@ -73,8 +73,7 @@ class BigFramesEvaluator:
       project_id: Google Cloud project ID.
       dataset_id: BigQuery dataset ID.
       table_id: Events table name.
-      endpoint: AI.GENERATE endpoint (default
-          ``gemini-2.5-flash``).
+      endpoint: AI.GENERATE endpoint (default ``gemini-2.5-flash``).
       connection_id: Optional BigQuery connection resource ID.
   """
 
@@ -106,8 +105,8 @@ class BigFramesEvaluator:
 
     Args:
         max_sessions: Maximum sessions to evaluate.
-        judge_prompt: Custom judge prompt prefix.  Defaults to
-            a built-in quality evaluation prompt.
+        judge_prompt: Custom judge prompt prefix.  Defaults to a built-in
+          quality evaluation prompt.
 
     Returns:
         A ``bigframes.dataframe.DataFrame`` with columns
@@ -157,10 +156,9 @@ class BigFramesEvaluator:
     facet columns directly in the returned DataFrame.
 
     Args:
-        session_ids: Optional list of session IDs.  If ``None``,
-            the most recent *max_sessions* are used.
-        max_sessions: Maximum sessions when *session_ids* is
-            ``None``.
+        session_ids: Optional list of session IDs.  If ``None``, the most recent
+          *max_sessions* are used.
+        max_sessions: Maximum sessions when *session_ids* is ``None``.
 
     Returns:
         A ``bigframes.dataframe.DataFrame`` with typed facet

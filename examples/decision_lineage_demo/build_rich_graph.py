@@ -213,9 +213,7 @@ def _campaign_runs_has_rows(client: bigquery.Client) -> bool:
 SELECT COUNT(*) AS n
 FROM `{project}.{dataset}.INFORMATION_SCHEMA.TABLES`
 WHERE table_name = 'campaign_runs'
-""".format(
-      project=PROJECT_ID, dataset=DATASET_ID
-  )
+""".format(project=PROJECT_ID, dataset=DATASET_ID)
   rows = list(client.query(query).result())
   if not rows or not rows[0].n:
     return False
@@ -223,9 +221,7 @@ WHERE table_name = 'campaign_runs'
   count_query = """\
 SELECT COUNT(*) AS n
 FROM `{project}.{dataset}.campaign_runs`
-""".format(
-      project=PROJECT_ID, dataset=DATASET_ID
-  )
+""".format(project=PROJECT_ID, dataset=DATASET_ID)
   count_rows = list(client.query(count_query).result())
   return bool(count_rows and count_rows[0].n)
 
@@ -235,16 +231,14 @@ def _campaign_rows(sessions: list[tuple[str, int]]) -> list[dict[str, object]]:
   for idx, (session_id, event_count) in enumerate(sessions):
     brief = CAMPAIGN_BRIEFS[idx % len(CAMPAIGN_BRIEFS)]
     brand = brief.campaign.split()[0]
-    rows.append(
-        {
-            "session_id": session_id,
-            "campaign": brief.campaign,
-            "brand": brand,
-            "brief": brief.brief,
-            "run_order": idx + 1,
-            "event_count": event_count,
-        }
-    )
+    rows.append({
+        "session_id": session_id,
+        "campaign": brief.campaign,
+        "brand": brand,
+        "brief": brief.brief,
+        "run_order": idx + 1,
+        "event_count": event_count,
+    })
   return rows
 
 

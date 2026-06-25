@@ -67,7 +67,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 from pydantic import Field
 
-from bigquery_agent_analytics.evaluators import strip_markdown_fences
+from bigquery_agent_analytics.utils import strip_markdown_fences
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -576,8 +576,10 @@ def build_categorical_prompt(
   """
   lines = [
       "You are classifying an agent conversation session.",
-      "For each metric below, choose exactly one category from the"
-      " allowed set.",
+      (
+          "For each metric below, choose exactly one category from the"
+          " allowed set."
+      ),
       "Do not invent categories or return free-form labels.",
       "",
   ]
@@ -765,8 +767,8 @@ def parse_categorical_row(
 
   Args:
       session_id: The session ID.
-      row: Dict from ``dict(bigquery_row)`` containing at least
-          a ``classifications`` STRING column.
+      row: Dict from ``dict(bigquery_row)`` containing at least a
+        ``classifications`` STRING column.
       config: Evaluation config with metric definitions.
 
   Returns:

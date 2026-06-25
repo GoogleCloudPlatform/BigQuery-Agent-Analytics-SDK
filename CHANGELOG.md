@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `SystemEvaluator` as the preferred name for deterministic/code-defined metrics.
+- Kept `CodeEvaluator` as a backward-compatible alias. Note that calling `CodeEvaluator()` now emits `evaluator_name="system_evaluator"`.
+
+### Changed
+
+- **Unified One-Sided & Side-by-Side Performance Metrics** in the `PerformanceEvaluator`:
+  - Purged legacy one-sided/side-by-side evaluator distinction.
+  - Decoupled code-defined metrics (now in `SystemEvaluator`) from LLM-judge metrics (now in `PerformanceEvaluator`).
+  - Overrode the backwards-compatible `LLMAsJudge` subclass to route legacy evaluations.
+    - Removed `_JudgeCriterion` from public access.
+
+#### Migration Story
+
+- Users should no longer construct `_JudgeCriterion` or its sub-criteria. Construct `PerformanceEvaluator` or use `SystemEvaluator` factory methods instead.
+- `Client.evaluate(LLMAsJudge)` is deprecated but remains supported as a backward-compatible fallback that routes legacy evaluations per-session. New code should prefer `Client.evaluate()` with the new `SystemEvaluator` or `PerformanceEvaluator` instances.
+- The BigQuery-side `AI.GENERATE` batch SQL path has been migrated to use `PerformanceEvaluator`.
+
 ## [0.4.0] - 2026-06-18
 
 ### Release highlights

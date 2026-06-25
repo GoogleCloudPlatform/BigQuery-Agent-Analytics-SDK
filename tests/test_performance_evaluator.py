@@ -22,15 +22,15 @@ from unittest.mock import patch
 
 import pytest
 
-from bigquery_agent_analytics.trace_evaluator import BigQueryTraceEvaluator
-from bigquery_agent_analytics.trace_evaluator import EvalStatus
-from bigquery_agent_analytics.trace_evaluator import MatchType
-from bigquery_agent_analytics.trace_evaluator import ReplayContext
-from bigquery_agent_analytics.trace_evaluator import SessionTrace
-from bigquery_agent_analytics.trace_evaluator import ToolCall
-from bigquery_agent_analytics.trace_evaluator import TraceEvent
-from bigquery_agent_analytics.trace_evaluator import TraceReplayRunner
-from bigquery_agent_analytics.trace_evaluator import TrajectoryMetrics
+from bigquery_agent_analytics.performance_evaluator import EvalStatus
+from bigquery_agent_analytics.performance_evaluator import MatchType
+from bigquery_agent_analytics.performance_evaluator import PerformanceEvaluator
+from bigquery_agent_analytics.performance_evaluator import ReplayContext
+from bigquery_agent_analytics.performance_evaluator import SessionTrace
+from bigquery_agent_analytics.performance_evaluator import ToolCall
+from bigquery_agent_analytics.performance_evaluator import TraceEvent
+from bigquery_agent_analytics.performance_evaluator import TraceReplayRunner
+from bigquery_agent_analytics.performance_evaluator import TrajectoryMetrics
 
 
 class TestTraceEvent:
@@ -335,8 +335,8 @@ class TestTrajectoryMetrics:
     assert score == 0.5
 
 
-class TestBigQueryTraceEvaluator:
-  """Tests for BigQueryTraceEvaluator class."""
+class TestPerformanceEvaluator:
+  """Tests for PerformanceEvaluator class."""
 
   @pytest.fixture
   def mock_client(self):
@@ -346,7 +346,7 @@ class TestBigQueryTraceEvaluator:
   @pytest.fixture
   def evaluator(self, mock_client):
     """Create evaluator with mock client."""
-    return BigQueryTraceEvaluator(
+    return PerformanceEvaluator(
         project_id="test-project",
         dataset_id="test-dataset",
         table_id="test-table",
@@ -429,7 +429,7 @@ class TestBigQueryTraceEvaluator:
     vanilla = bigquery.Client(
         project="test-project", credentials=AnonymousCredentials()
     )
-    evaluator = BigQueryTraceEvaluator(
+    evaluator = PerformanceEvaluator(
         project_id="test-project",
         dataset_id="test-dataset",
         client=vanilla,
@@ -496,32 +496,62 @@ class TestBigQueryTraceEvaluator:
     assert result.eval_status == EvalStatus.PASSED
     assert "trajectory_exact_match" in result.scores
     assert result.scores["trajectory_exact_match"] == 1.0
-    assert "response_match" in result.scores
-    assert result.scores["response_match"] == 1.0
+    assert result.overall_score == 1.0
 
-  def test_compute_response_match_exact(self, evaluator):
-    """Test exact response matching."""
-    score = evaluator._compute_response_match(
-        "Hello world",
-        "Hello world",
+  def test_evaluate_deterministic_trajectory(self, evaluator):
+    """Test evaluate_deterministic_trajectory directly."""
+    actual = [
+        ToolCall(tool_name="search", args={"q": "weather"}),
+    ]
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id=None,
+        events=[],
+        tool_calls=actual,
     )
-    assert score == 1.0
+    golden = [{"tool_name": "search", "args": {"q": "weather"}}]
+    scores = evaluator.evaluate_deterministic_trajectory(
+        trace=trace,
+        golden_trajectory=golden,
+        match_type=MatchType.EXACT,
+    )
 
-  def test_compute_response_match_partial(self, evaluator):
-    """Test partial response matching."""
-    score = evaluator._compute_response_match(
-        "Hello world today",
-        "Hello world",
-    )
-    assert score == 1.0  # All expected words present
+    assert scores["trajectory_exact_match"] == 1.0
+    assert scores["step_efficiency"] == 1.0
 
-  def test_compute_response_match_different(self, evaluator):
-    """Test different responses."""
-    score = evaluator._compute_response_match(
-        "Goodbye moon",
-        "Hello world",
+  @pytest.mark.asyncio
+  async def test_llm_judge_evaluate_one_sided(self, evaluator):
+    """Test llm_judge_evaluate directly for one-sided evaluation."""
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id=None,
+        events=[],
+        tool_calls=[],
+        final_response="Hello Seattle!",
     )
-    assert score == 0.0
+
+    # Mock genai.Client and generate_content
+    mock_response = MagicMock()
+    mock_response.text = (
+        '{"sentiment": 8, "hallucination": 10, "justification": "Sunny tone"}'
+    )
+
+    mock_client_instance = MagicMock()
+    mock_client_instance.aio.models.generate_content = AsyncMock(
+        return_value=mock_response
+    )
+
+    with patch("google.genai.Client", return_value=mock_client_instance):
+      scores, feedback = await evaluator.llm_judge_evaluate(
+          trace=trace,
+          task_description="Support weather greeting.",
+          expected_trajectory=None,
+          golden_response=None,
+      )
+
+      assert scores["llm_judge_sentiment"] == 0.8
+      assert scores["llm_judge_hallucination"] == 1.0
+      assert "Sunny tone" in feedback
 
 
 class TestReplayContext:
@@ -554,7 +584,7 @@ class TestTraceReplayRunner:
   @pytest.fixture
   def mock_evaluator(self):
     """Create mock evaluator."""
-    evaluator = MagicMock(spec=BigQueryTraceEvaluator)
+    evaluator = MagicMock(spec=PerformanceEvaluator)
     return evaluator
 
   @pytest.fixture

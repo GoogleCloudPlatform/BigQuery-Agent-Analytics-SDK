@@ -33,7 +33,7 @@ Example usage::
 
     # Run evaluation
     from bigquery_agent_analytics import (
-        SystemEvaluator, LLMAsJudge, TraceFilter,
+        SystemEvaluator, TraceFilter,
     )
     report = client.evaluate(
         filters=TraceFilter(agent_id="my_agent"),
@@ -71,17 +71,7 @@ from .categorical_evaluator import DEFAULT_RESULTS_TABLE
 from .categorical_evaluator import flatten_results_to_rows
 from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
-from .evaluators import _parse_json_from_text
-from .evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
-from .evaluators import DEFAULT_ENDPOINT
-from .evaluators import EvaluationReport
-from .evaluators import LLM_JUDGE_BATCH_QUERY
 from .evaluators import LLMAsJudge
-from .evaluators import render_ai_generate_judge_query
-from .evaluators import SESSION_SUMMARY_QUERY
-from .evaluators import SessionScore
-from .evaluators import split_judge_prompt_template
-from .evaluators import SystemEvaluator
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -104,11 +94,20 @@ from .insights import parse_facet_response
 from .insights import run_analysis_prompt
 from .insights import SessionFacet
 from .insights import SessionMetadata
+from .performance_evaluator import EvalStatus
+from .performance_evaluator import PerformanceEvaluator
+from .system_evaluator import CodeEvaluator
+from .system_evaluator import EvaluationReport
+from .system_evaluator import SESSION_SUMMARY_QUERY
+from .system_evaluator import SessionScore
+from .system_evaluator import SystemEvaluator
 from .trace import Span
 from .trace import Trace
 from .trace import TraceFilter
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
+
+DEFAULT_ENDPOINT = "gemini-2.5-flash"
 
 
 # ------------------------------------------------------------------ #
@@ -301,26 +300,22 @@ class Client:
   Args:
       project_id: Google Cloud project ID.
       dataset_id: BigQuery dataset containing agent events.
-      table_id: Table name for agent events. Pass ``"auto"``
-          to auto-detect (tries ``agent_events`` first, then
-          ``agent_events_v2``).
-      location: BigQuery dataset location. When *None* (default),
-          the BigQuery client uses its own default (typically ``US``).
+      table_id: Table name for agent events. Pass ``"auto"`` to auto-detect
+        (tries ``agent_events`` first, then ``agent_events_v2``).
+      location: BigQuery dataset location. When *None* (default), the BigQuery
+        client uses its own default (typically ``US``).
       gcs_bucket_name: Optional GCS bucket name (reserved for future
-          GCS-offloaded payload resolution; not yet implemented).
+        GCS-offloaded payload resolution; not yet implemented).
       verify_schema: Whether to verify the table schema on init.
-      endpoint: AI.GENERATE endpoint (default gemini-2.5-flash).
-          Pass a fully-qualified BQ ML model reference
-          (``project.dataset.model``) to use legacy
-          ``ML.GENERATE_TEXT`` instead.
-      connection_id: Optional BigQuery connection resource ID
-          for AI.GENERATE.
-      sdk_surface: Label value stamped on the ``sdk_surface``
-          dimension of every job this Client dispatches. Defaults to
-          ``"python"``. The CLI sets ``"cli"`` and the deployed
-          remote-function runtime sets ``"remote-function"``. Lets
-          operators attribute spend and usage back to the entry-point
-          surface in ``INFORMATION_SCHEMA.JOBS_BY_PROJECT``.
+      endpoint: AI.GENERATE endpoint (default gemini-2.5-flash). Pass a
+        fully-qualified BQ ML model reference (``project.dataset.model``) to use
+        legacy ``ML.GENERATE_TEXT`` instead.
+      connection_id: Optional BigQuery connection resource ID for AI.GENERATE.
+      sdk_surface: Label value stamped on the ``sdk_surface`` dimension of every
+        job this Client dispatches. Defaults to ``"python"``. The CLI sets
+        ``"cli"`` and the deployed remote-function runtime sets
+        ``"remote-function"``. Lets operators attribute spend and usage back to
+        the entry-point surface in ``INFORMATION_SCHEMA.JOBS_BY_PROJECT``.
   """
 
   def __init__(
@@ -468,7 +463,7 @@ class Client:
           return candidate
 
       raise ValueError(
-          f"No events table found in "
+          "No events table found in "
           f"{self.project_id}.{self.dataset_id}. "
           f"Expected one of: {_AUTO_DETECT_TABLES}"
       )
@@ -476,7 +471,7 @@ class Client:
       if isinstance(e, ValueError):
         raise
       logger.warning(
-          "Table auto-detection failed: %s. " "Falling back to 'agent_events'.",
+          "Table auto-detection failed: %s. Falling back to 'agent_events'.",
           e,
       )
       return "agent_events"
@@ -840,8 +835,8 @@ class Client:
     """Lists traces matching the given filter criteria.
 
     Args:
-        filter_criteria: Optional filter. If None, returns
-            recent traces (default limit 100).
+        filter_criteria: Optional filter. If None, returns recent traces
+          (default limit 100).
 
     Returns:
         List of Trace objects, one per session.
@@ -869,29 +864,28 @@ class Client:
 
   def evaluate(
       self,
-      evaluator: SystemEvaluator | LLMAsJudge,
+      evaluator: SystemEvaluator | PerformanceEvaluator | LLMAsJudge,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
       strict: bool = False,
   ) -> EvaluationReport:
     """Runs batch evaluation over traces.
 
-    Uses BigQuery native execution for scalable assessment.
+    Uses BigQuery native execution for scalable assessment of system metrics,
+    and Gemini API (via google-genai) per session for performance evaluation.
     ``SystemEvaluator`` metrics are computed from session
-    aggregates. ``LLMAsJudge`` metrics use BQML's
-    ``ML.GENERATE_TEXT`` for zero-ETL evaluation.
+    aggregates. ``PerformanceEvaluator`` metrics use the Gemini API
+    to evaluate trace correctness, efficiency, and other rubrics.
 
     Args:
-        evaluator: A SystemEvaluator or LLMAsJudge instance.
+        evaluator: A SystemEvaluator, PerformanceEvaluator, or LLMAsJudge instance.
         filters: Optional trace filters.
         dataset: Optional table name override.
-        strict: When ``True``, sessions with unparseable or
-            empty judge output are marked as failed instead of
-            silently passing.  Affected sessions get
-            ``parse_error: True`` in their per-session details,
-            and report-level ``details`` includes
-            ``parse_errors`` (int) and ``parse_error_rate``
-            (float) — separate from ``aggregate_scores``.
+        strict: When ``True``, sessions with unparseable or empty judge output
+          are marked as failed instead of silently passing.  Affected sessions
+          get ``parse_error: True`` in their per-session details, and
+          report-level ``details`` includes ``parse_errors`` (int) and
+          ``parse_error_rate`` (float) — separate from ``aggregate_scores``.
 
     Returns:
         EvaluationReport with per-session and aggregate scores.
@@ -907,17 +901,20 @@ class Client:
           where,
           params,
       )
-    elif isinstance(evaluator, LLMAsJudge):
-      report = self._evaluate_llm_judge(
+    elif isinstance(evaluator, PerformanceEvaluator):
+      return self._evaluate_performance(
           evaluator,
           table,
           where,
           params,
-          filt,
       )
-      if strict:
-        report = _apply_strict_mode(report)
-      return report
+    elif isinstance(evaluator, LLMAsJudge):
+      return self._evaluate_legacy_judge(
+          evaluator,
+          table,
+          where,
+          params,
+      )
     else:
       raise TypeError(f"Unsupported evaluator type: {type(evaluator)}")
 
@@ -954,275 +951,83 @@ class Client:
         session_scores=session_scores,
     )
 
-  @staticmethod
-  def _is_legacy_model_ref(ref: str) -> bool:
-    """Returns True when *ref* looks like a BQ ML model reference.
+  def _evaluate_performance(
+      self,
+      evaluator: PerformanceEvaluator,
+      table: str,
+      where: str,
+      params: list,
+  ) -> EvaluationReport:
+    """Runs performance evaluation using the folded PerformanceEvaluator."""
+    import asyncio
 
-    Legacy model references have the form
-    ``project.dataset.model_name`` (two or more dots).
-    """
-    return ref.count(".") >= 2
+    query = SESSION_SUMMARY_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=table,
+        where=where,
+    )
+    job_config = with_sdk_labels(
+        bigquery.QueryJobConfig(query_parameters=params),
+        feature="eval-performance",
+    )
+    results = list(self.bq_client.query(query, job_config=job_config).result())
+    session_ids = [
+        row.get("session_id") for row in results if row.get("session_id")
+    ]
 
-  def _evaluate_llm_judge(
+    async def evaluate_all():
+      tasks = []
+      for sid in session_ids:
+        tasks.append(
+            evaluator.evaluate_session(
+                session_id=sid,
+                use_llm_judge=True,
+            )
+        )
+      return await asyncio.gather(*tasks)
+
+    eval_results = _run_sync(evaluate_all())
+
+    session_scores = []
+    passed_count = 0
+    for er in eval_results:
+      score = SessionScore(
+          session_id=er.session_id,
+          scores=er.scores,
+          passed=(er.eval_status == EvalStatus.PASSED),
+          llm_feedback=er.llm_judge_feedback,
+      )
+      session_scores.append(score)
+      if score.passed:
+        passed_count += 1
+
+    report = EvaluationReport(
+        dataset=f"{self._table_ref} WHERE {where}",
+        evaluator_name=evaluator.name,
+        total_sessions=len(session_scores),
+        passed_sessions=passed_count,
+        failed_sessions=len(session_scores) - passed_count,
+    )
+    report.session_scores = session_scores
+    report.details = {"execution_mode": "performance_evaluator"}
+    return report
+
+  def _evaluate_legacy_judge(
       self,
       evaluator: LLMAsJudge,
       table: str,
       where: str,
       params: list,
-      trace_filter: Optional[TraceFilter] = None,
   ) -> EvaluationReport:
-    """Runs LLM-as-judge evaluation over ALL criteria.
-
-    Attempts AI.GENERATE first, then legacy ML.GENERATE_TEXT,
-    then falls back to the Gemini API.  Each path evaluates
-    every criterion in the evaluator and merges the per-session
-    scores into a single report.
-
-    Stamps ``report.details["execution_mode"]`` with one of
-    ``ai_generate``, ``ml_generate_text``, ``api_fallback`` so the
-    caller (and CI gates) can audit which path actually ran.
-    When an earlier tier raised before a later tier succeeded,
-    ``report.details["fallback_reason"]`` carries the chained
-    exception messages in attempt order. (The naming mirrors the
-    categorical evaluator's ``execution_mode`` value space for
-    consistency.)
-    """
-    criteria = evaluator._criteria
-    if not criteria:
-      report = _build_report(
-          evaluator_name=evaluator.name,
-          dataset=f"{self._table_ref} WHERE {where}",
-          session_scores=[],
-      )
-      report.details["execution_mode"] = "no_op"
-      return report
-
-    fallback_reasons: list[str] = []
-
-    # Try AI.GENERATE (new path) when endpoint is not a legacy ref
-    if not self._is_legacy_model_ref(self.endpoint):
-      try:
-        criterion_reports = []
-        for criterion in criteria:
-          report = self._ai_generate_judge(
-              evaluator,
-              criterion,
-              table,
-              where,
-              params,
-          )
-          criterion_reports.append((criterion, report))
-        merged = _merge_criterion_reports(
-            evaluator.name,
-            f"{self._table_ref} WHERE {where}",
-            criteria,
-            criterion_reports,
-        )
-        merged.details["execution_mode"] = "ai_generate"
-        return merged
-      except Exception as e:
-        logger.debug(
-            "AI.GENERATE judge failed, trying legacy: %s",
-            e,
-        )
-        fallback_reasons.append(f"ai_generate: {e}")
-
-    # Try legacy BQML batch evaluation
-    text_model = (
-        self.endpoint
-        if self._is_legacy_model_ref(self.endpoint)
-        else (f"{self.project_id}.{self.dataset_id}.gemini_text_model")
-    )
-
-    try:
-      criterion_reports = []
-      for criterion in criteria:
-        report = self._bqml_judge(
-            evaluator,
-            criterion,
-            table,
-            where,
-            params,
-            text_model,
-        )
-        criterion_reports.append((criterion, report))
-      merged = _merge_criterion_reports(
-          evaluator.name,
-          f"{self._table_ref} WHERE {where}",
-          criteria,
-          criterion_reports,
-      )
-      merged.details["execution_mode"] = "ml_generate_text"
-      if fallback_reasons:
-        merged.details["fallback_reason"] = "; ".join(fallback_reasons)
-      return merged
-    except Exception as e:
-      logger.debug(
-          "BQML judge failed, falling back to API: %s",
-          e,
-      )
-      fallback_reasons.append(f"ml_generate_text: {e}")
-
-    # Fallback: fetch traces using same table/filter, evaluate via API
-    api_report = self._api_judge(evaluator, table, where, params)
-    api_report.details["execution_mode"] = "api_fallback"
-    if fallback_reasons:
-      api_report.details["fallback_reason"] = "; ".join(fallback_reasons)
-    return api_report
-
-  def _ai_generate_judge(
-      self,
-      evaluator,
-      criterion,
-      table,
-      where,
-      params,
-  ) -> EvaluationReport:
-    """Evaluates using BigQuery AI.GENERATE with typed output."""
-    from google.cloud import bigquery as bq
-
-    prefix, middle, suffix = split_judge_prompt_template(
-        criterion.prompt_template
-    )
-    judge_params = list(params) + [
-        bq.ScalarQueryParameter("judge_prompt_prefix", "STRING", prefix),
-        bq.ScalarQueryParameter("judge_prompt_middle", "STRING", middle),
-        bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
-    ]
-
-    query = render_ai_generate_judge_query(
-        project=self.project_id,
-        dataset=self.dataset_id,
-        table=table,
-        where=where,
-        endpoint=self.endpoint,
-        connection_id=self.connection_id,
-    )
-    job_config = bq.QueryJobConfig(
-        query_parameters=judge_params,
-    )
-    job_config = with_sdk_labels(
-        job_config, feature="eval-llm-judge", ai_function="ai-generate"
-    )
-
-    results = list(self.bq_client.query(query, job_config=job_config).result())
-
-    session_scores = []
-    for row in results:
-      sid = row.get("session_id", "unknown")
-      raw_score = row.get("score")
-      justification = row.get("justification", "")
-
-      scores: dict[str, float] = {}
-      if raw_score is not None:
-        scores[criterion.name] = max(
-            0.0,
-            min(1.0, float(raw_score) / 10.0),
-        )
-
-      passed = bool(scores) and all(
-          s >= criterion.threshold for s in scores.values()
-      )
-      session_scores.append(
-          SessionScore(
-              session_id=sid,
-              scores=scores,
-              passed=passed,
-              llm_feedback=justification,
-          )
-      )
-
-    return _build_report(
-        evaluator_name=evaluator.name,
-        dataset=f"{self._table_ref} WHERE {where}",
-        session_scores=session_scores,
-    )
-
-  def _bqml_judge(
-      self,
-      evaluator,
-      criterion,
-      table,
-      where,
-      params,
-      text_model,
-  ) -> EvaluationReport:
-    """Evaluates using BigQuery ML.GENERATE_TEXT."""
-    from google.cloud import bigquery as bq
-
-    prefix, middle, suffix = split_judge_prompt_template(
-        criterion.prompt_template
-    )
-    judge_params = list(params) + [
-        bq.ScalarQueryParameter("judge_prompt_prefix", "STRING", prefix),
-        bq.ScalarQueryParameter("judge_prompt_middle", "STRING", middle),
-        bq.ScalarQueryParameter("judge_prompt_suffix", "STRING", suffix),
-    ]
-
-    query = LLM_JUDGE_BATCH_QUERY.format(
-        project=self.project_id,
-        dataset=self.dataset_id,
-        table=table,
-        where=where,
-        model=text_model,
-    )
-    job_config = bq.QueryJobConfig(
-        query_parameters=judge_params,
-    )
-    job_config = with_sdk_labels(
-        job_config, feature="eval-llm-judge", ai_function="ml-generate-text"
-    )
-
-    results = list(self.bq_client.query(query, job_config=job_config).result())
-
-    session_scores = []
-    for row in results:
-      sid = row.get("session_id", "unknown")
-      eval_text = row.get("evaluation", "")
-      parsed = _parse_json_from_text(eval_text or "")
-
-      scores: dict[str, float] = {}
-      if parsed and criterion.score_key in parsed:
-        raw = float(parsed[criterion.score_key])
-        scores[criterion.name] = raw / 10.0
-      elif parsed:
-        for k, v in parsed.items():
-          if isinstance(v, (int, float)):
-            scores[k] = float(v) / 10.0
-
-      passed = bool(scores) and all(
-          s >= criterion.threshold for s in scores.values()
-      )
-      session_scores.append(
-          SessionScore(
-              session_id=sid,
-              scores=scores,
-              passed=passed,
-              llm_feedback=(
-                  parsed.get("justification", "") if parsed else eval_text
-              ),
-          )
-      )
-
-    return _build_report(
-        evaluator_name=evaluator.name,
-        dataset=f"{self._table_ref} WHERE {where}",
-        session_scores=session_scores,
-    )
-
-  def _api_judge(
-      self,
-      evaluator,
-      table,
-      where,
-      params,
-  ) -> EvaluationReport:
-    """Evaluates using the Gemini API (fallback).
+    """Evaluates using the legacy LLMAsJudge (fallback).
 
     Fetches traces from the same table and filter as the BQ
     evaluation paths, then evaluates each session via the
     Gemini API.
     """
+    import asyncio
+
     query = _LIST_TRACES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -1236,36 +1041,48 @@ class Client:
     results = list(self.bq_client.query(query, job_config=job_config).result())
     traces = _build_traces_from_rows(results)
 
-    session_scores = _run_sync(self._run_api_judge(evaluator, traces))
+    async def evaluate_all():
+      tasks = []
+      for trace in traces:
+        trace_lines = []
+        for span in trace.spans:
+          trace_lines.append(f"{span.event_type}: {span.summary}")
+        trace_text = "\n".join(trace_lines)
+        final = trace.final_response or ""
 
-    return _build_report(
-        evaluator_name=evaluator.name,
+        # Use a wrapper to preserve session_id in the returned SessionScore
+        async def eval_one(t=trace, tt=trace_text, f=final):
+          score = await evaluator.evaluate_session(tt, f)
+          score.session_id = t.session_id
+          return score
+
+        tasks.append(eval_one())
+      return await asyncio.gather(*tasks)
+
+    session_scores = _run_sync(evaluate_all())
+
+    # Calculate overall pass rate
+    passed_count = sum(1 for s in session_scores if s.passed)
+
+    report = EvaluationReport(
         dataset=f"{self._table_ref} WHERE {where}",
-        session_scores=session_scores,
+        evaluator_name=evaluator.name,
+        total_sessions=len(session_scores),
+        passed_sessions=passed_count,
+        failed_sessions=len(session_scores) - passed_count,
     )
+    report.session_scores = session_scores
+    report.details = {"execution_mode": "legacy_llm_judge"}
+    return report
 
-  async def _run_api_judge(
-      self,
-      evaluator: LLMAsJudge,
-      traces: list[Trace],
-  ) -> list[SessionScore]:
-    """Runs LLM judge via API for each trace."""
-    scores = []
-    for trace in traces:
-      trace_lines = []
-      for span in trace.spans:
-        trace_lines.append(f"{span.event_type}: {span.summary}")
-      trace_text = "\n".join(trace_lines)
-      final = trace.final_response or ""
+  @staticmethod
+  def _is_legacy_model_ref(ref: str) -> bool:
+    """Returns True when *ref* looks like a BQ ML model reference.
 
-      score = await evaluator.evaluate_session(
-          trace_text,
-          final,
-      )
-      score.session_id = trace.session_id
-      scores.append(score)
-
-    return scores
+    Legacy model references have the form
+    ``project.dataset.model_name`` (two or more dots).
+    """
+    return ref.count(".") >= 2
 
   # -------------------------------------------------------------- #
   # Categorical Evaluation                                            #
@@ -1287,8 +1104,8 @@ class Client:
       AI.GENERATE → Gemini API
 
     Args:
-        config: Categorical evaluation configuration with metric
-            definitions and allowed categories.
+        config: Categorical evaluation configuration with metric definitions and
+          allowed categories.
         filters: Optional trace filters.
         dataset: Optional table name override.
 
@@ -1341,8 +1158,7 @@ class Client:
         return report
       except Exception as e:
         logger.debug(
-            "AI.CLASSIFY categorical failed, falling back to "
-            "AI.GENERATE: %s",
+            "AI.CLASSIFY categorical failed, falling back to AI.GENERATE: %s",
             e,
         )
         classify_fallback_reason = str(e)
@@ -1736,8 +1552,7 @@ class Client:
     base view and aggregated dashboard views.
 
     Args:
-        results_table: Results table name. Defaults to
-            ``categorical_results``.
+        results_table: Results table name. Defaults to ``categorical_results``.
         view_prefix: Optional prefix for view names.
 
     Returns:
@@ -1772,8 +1587,8 @@ class Client:
     determine coverage percentage and identify gaps.
 
     Args:
-        golden_dataset: Table name containing golden questions
-            (must have a ``question`` column).
+        golden_dataset: Table name containing golden questions (must have a
+          ``question`` column).
         filters: Optional filters for production traces.
         dataset: Optional events table override.
         embedding_model: Optional model for semantic matching.
@@ -1820,8 +1635,8 @@ class Client:
 
     Args:
         filters: Optional trace filters.
-        config: Insights configuration. Defaults to
-            analyzing up to 50 recent sessions.
+        config: Insights configuration. Defaults to analyzing up to 50 recent
+          sessions.
         dataset: Optional events table override.
         text_model: Optional BQML text model.
 
@@ -2180,7 +1995,7 @@ class Client:
     Args:
         filters: Optional filters for production traces.
         configuration: Analysis configuration. Defaults to
-            ``auto_group_using_semantics``.
+          ``auto_group_using_semantics``.
         dataset: Optional events table override.
         text_model: Optional BQML text model for classification.
 
@@ -2289,8 +2104,8 @@ class Client:
     world-change detection.
 
     Args:
-        config: Optional :class:`ContextGraphConfig`. When *None*,
-            default settings are used.
+        config: Optional :class:`ContextGraphConfig`. When *None*, default
+          settings are used.
 
     Returns:
         A :class:`ContextGraphManager` instance.
@@ -2442,59 +2257,6 @@ def _build_report(
       passed_sessions=passed,
       failed_sessions=failed,
       aggregate_scores=aggregate,
-      session_scores=session_scores,
-  )
-
-
-def _merge_criterion_reports(
-    evaluator_name: str,
-    dataset: str,
-    criteria: list,
-    criterion_reports: list[tuple],
-) -> EvaluationReport:
-  """Merges single-criterion reports into a multi-criterion report.
-
-  Each entry in *criterion_reports* is a ``(criterion, report)``
-  pair.  Scores from all criteria are combined per session, and
-  ``passed`` is recalculated requiring every criterion to meet
-  its threshold.
-  """
-  session_data: dict[str, dict[str, Any]] = {}
-
-  for criterion, report in criterion_reports:
-    for ss in report.session_scores:
-      if ss.session_id not in session_data:
-        session_data[ss.session_id] = {
-            "scores": {},
-            "feedback": [],
-        }
-      session_data[ss.session_id]["scores"].update(ss.scores)
-      if ss.llm_feedback:
-        session_data[ss.session_id]["feedback"].append(ss.llm_feedback)
-
-  # Build threshold lookup from criteria
-  thresholds = {c.name: c.threshold for c in criteria}
-
-  session_scores = []
-  for sid, data in session_data.items():
-    scores = data["scores"]
-    # Must have at least one score AND all criteria above threshold.
-    # Missing criteria default to 0.0 (guaranteed fail).
-    passed = bool(scores) and all(
-        scores.get(c.name, 0.0) >= thresholds.get(c.name, 0.5) for c in criteria
-    )
-    session_scores.append(
-        SessionScore(
-            session_id=sid,
-            scores=scores,
-            passed=passed,
-            llm_feedback="\n".join(data["feedback"]) or None,
-        )
-    )
-
-  return _build_report(
-      evaluator_name=evaluator_name,
-      dataset=dataset,
       session_scores=session_scores,
   )
 

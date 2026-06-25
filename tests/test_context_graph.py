@@ -323,6 +323,7 @@ class TestContextGraphManager:
 
   def test_store_biz_nodes_dedupes_by_biz_node_id_and_uses_load_job(self):
     """The BizNode KEY in the property graph is biz_node_id, so the
+
     backing table must have at most one row per id. ``store_biz_nodes``
     dedupes (last-wins) before insert AND writes via a load job, not
     via the streaming-insert API.
@@ -378,6 +379,7 @@ class TestContextGraphManager:
 
   def test_store_biz_nodes_is_rerun_idempotent_via_session_delete(self):
     """Calling store_biz_nodes twice with the same nodes must not
+
     duplicate biz_node_id rows.
 
     The append-only load-job path is not idempotent on its own —
@@ -579,6 +581,7 @@ class TestContextGraphManager:
 
   def test_extract_query_uses_prompt_only_extraction(self):
     """Biz-node extraction relies on prompt-shaped JSON output, not on
+
     AI.GENERATE's ``output_schema`` parameter.
 
     Background: the current BigQuery AI.GENERATE parser rejects the
@@ -970,6 +973,7 @@ class TestDecisionSemantics:
 
   def test_store_decision_points_dedupes_by_id_and_uses_load_job(self):
     """The DecisionPoint and CandidateNode KEYs in the property
+
     graph are decision_id and candidate_id; the backing tables must
     have at most one row per id. ``store_decision_points`` dedupes
     (last-wins) before insert AND writes via load jobs, not via the
@@ -1808,7 +1812,9 @@ class TestDecisionSemantics:
 
   def test_decision_ddl_edge_source_dest_types(self):
     """MadeDecision: TechNode->DecisionPoint,
-    CandidateEdge: DecisionPoint->CandidateNode."""
+
+    CandidateEdge: DecisionPoint->CandidateNode.
+    """
     mgr = self._make_manager()
     ddl = mgr.get_decision_property_graph_ddl()
     # MadeDecision edge: source=TechNode, dest=DecisionPoint

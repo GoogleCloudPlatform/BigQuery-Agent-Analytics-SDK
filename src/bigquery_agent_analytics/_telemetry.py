@@ -69,7 +69,7 @@ def _validate_label_value(name, value):
   if not _LABEL_VALUE_RE.fullmatch(value):
     raise ValueError(
         f"SDK label {name}={value!r} violates BigQuery label format "
-        f"[a-z0-9_-]{{1,63}}. Reserve labels for stable, non-PII dimensions."
+        "[a-z0-9_-]{1,63}. Reserve labels for stable, non-PII dimensions."
     )
 
 
@@ -115,14 +115,13 @@ def with_sdk_labels(cfg, *, feature, ai_function=None):
   Args:
     cfg: The job config to enrich. Required (not ``None``) — pass a
       ``bigquery.QueryJobConfig`` for query sites or a
-      ``bigquery.LoadJobConfig`` for load sites. The caller owns the
-      type so labels always land on a config matching the job about
-      to be submitted.
-    feature: Stable identifier for the SDK subsystem emitting the job
-      (for example ``"trace-read"``, ``"eval-llm-judge"``). Must match
+      ``bigquery.LoadJobConfig`` for load sites. The caller owns the type so
+      labels always land on a config matching the job about to be submitted.
+    feature: Stable identifier for the SDK subsystem emitting the job (for
+      example ``"trace-read"``, ``"eval-llm-judge"``). Must match
       ``[a-z0-9_-]{1,63}``.
-    ai_function: Optional AI/ML function dimension, for queries that
-      invoke ``AI.GENERATE`` / ``AI.EMBED`` / etc.
+    ai_function: Optional AI/ML function dimension, for queries that invoke
+      ``AI.GENERATE`` / ``AI.EMBED`` / etc.
 
   Returns:
     The same ``cfg`` with ``sdk_feature`` (and optionally
@@ -190,8 +189,8 @@ def make_bq_client(project, location=None, sdk_surface="python", **kwargs):
     project: GCP project ID.
     location: Optional BigQuery location.
     sdk_surface: Which SDK entry point is constructing this client. One of
-      ``"python"``, ``"cli"``, ``"remote-function"``. Drives the
-      ``sdk_surface`` label on every job this client submits.
+      ``"python"``, ``"cli"``, ``"remote-function"``. Drives the ``sdk_surface``
+      label on every job this client submits.
     **kwargs: Forwarded to ``bigquery.Client`` (e.g. ``credentials``).
 
   Returns:

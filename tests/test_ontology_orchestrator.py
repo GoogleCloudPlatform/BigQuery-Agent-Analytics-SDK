@@ -552,7 +552,9 @@ class TestBuildOntologyGraph:
       self, mock_mgr_cls, mock_mat_cls, mock_pg_cls
   ):
     """Default flow where create_property_graph returns False reports
-    'failed' (distinct from 'skipped:user_requested')."""
+
+    'failed' (distinct from 'skipped:user_requested').
+    """
     mock_mgr_cls.return_value.extract_graph.return_value = ExtractedGraph(
         name="test"
     )

@@ -557,13 +557,12 @@ async def _semantic_drift(
       golden_table: Golden questions table.
       where_clause: SQL WHERE clause for filtering.
       query_params: BigQuery query parameters.
-      embedding_model: Vertex AI endpoint (e.g. ``text-embedding-005``)
-          or legacy BQ ML model reference (e.g.
-          ``project.dataset.embedding_model``).
+      embedding_model: Vertex AI endpoint (e.g. ``text-embedding-005``) or
+        legacy BQ ML model reference (e.g. ``project.dataset.embedding_model``).
       golden_questions: Pre-loaded golden questions.
       prod_questions: Pre-loaded production questions.
-      similarity_threshold: Cosine distance threshold below which a
-          golden question is considered "covered". Default 0.3.
+      similarity_threshold: Cosine distance threshold below which a golden
+        question is considered "covered". Default 0.3.
 
   Returns:
       DriftReport with semantic coverage metrics.

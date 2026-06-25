@@ -195,7 +195,8 @@ def print_comparison(
   """Print a before/after comparison table."""
   print("")
   print(
-      f"  {'Metric':<18} {'':>4}  {before_label:>14}  {after_label:>14}  {'Budget':>14}  {'Status':>8}"
+      f"  {'Metric':<18} {'':>4}  {before_label:>14}  {after_label:>14} "
+      f" {'Budget':>14}  {'Status':>8}"
   )
   print(f"  {'─' * 18} {'':>4}  {'─' * 14}  {'─' * 14}  {'─' * 14}  {'─' * 8}")
 
@@ -228,7 +229,8 @@ def print_comparison(
     t_str = f"{threshold} {unit}"
 
     print(
-        f"  {label:<18} {direction:>4}  {b_str:>14}  {a_str:>14}  {t_str:>14}  {status:>8}"
+        f"  {label:<18} {direction:>4}  {b_str:>14}  {a_str:>14}  {t_str:>14} "
+        f" {status:>8}"
     )
 
   print("")
@@ -242,7 +244,9 @@ def print_comparison(
 
 def main():
   parser = argparse.ArgumentParser(
-      description="Run operational metrics: baseline or before/after comparison."
+      description=(
+          "Run operational metrics: baseline or before/after comparison."
+      )
   )
   # Baseline mode
   parser.add_argument(
@@ -294,7 +298,8 @@ def main():
   # Comparison mode: before/after
   if not args.before_sessions or not args.after_sessions:
     parser.error(
-        "Provide --sessions (baseline) or both --before-sessions and --after-sessions (comparison)."
+        "Provide --sessions (baseline) or both --before-sessions and"
+        " --after-sessions (comparison)."
     )
 
   before_ids = _load_session_ids(args.before_sessions)

@@ -24,7 +24,8 @@ ensures retries and overlapping micro-batch runs do not inflate counts.
 
 Example usage::
 
-    from bigquery_agent_analytics.categorical_views import CategoricalViewManager
+    from bigquery_agent_analytics.categorical_views import
+    CategoricalViewManager
 
     vm = CategoricalViewManager(
         project_id="my-project",
@@ -56,7 +57,8 @@ logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 # created first; all others reference it.
 
 _CATEGORICAL_VIEW_DEFS: dict[str, str] = {
-    "categorical_results_latest": """\
+    "categorical_results_latest": (
+        """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_results_latest` AS
 WITH ranked AS (
   SELECT *,
@@ -67,8 +69,10 @@ WITH ranked AS (
   FROM `{project}.{dataset}.{results_table}`
 )
 SELECT * EXCEPT(_rn) FROM ranked WHERE _rn = 1
-""",
-    "categorical_daily_counts": """\
+"""
+    ),
+    "categorical_daily_counts": (
+        """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_daily_counts` AS
 SELECT
   DATE(created_at) AS eval_date,
@@ -78,8 +82,10 @@ SELECT
   COUNT(*) AS session_count
 FROM `{project}.{dataset}.{prefix}categorical_results_latest`
 GROUP BY 1, 2, 3, 4
-""",
-    "categorical_hourly_counts": """\
+"""
+    ),
+    "categorical_hourly_counts": (
+        """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_hourly_counts` AS
 SELECT
   TIMESTAMP_TRUNC(created_at, HOUR) AS eval_hour,
@@ -88,8 +94,10 @@ SELECT
   COUNT(*) AS session_count
 FROM `{project}.{dataset}.{prefix}categorical_results_latest`
 GROUP BY 1, 2, 3
-""",
-    "categorical_operational_metrics": """\
+"""
+    ),
+    "categorical_operational_metrics": (
+        """\
 CREATE OR REPLACE VIEW `{project}.{dataset}.{prefix}categorical_operational_metrics` AS
 SELECT
   DATE(created_at) AS eval_date,
@@ -103,7 +111,8 @@ SELECT
   SAFE_DIVIDE(COUNTIF(execution_mode = 'api_fallback'), COUNT(*)) AS fallback_rate
 FROM `{project}.{dataset}.{prefix}categorical_results_latest`
 GROUP BY 1, 2, 3
-""",
+"""
+    ),
 }
 
 # Creation order matters: base view first, then dependents.
@@ -185,7 +194,7 @@ class CategoricalViewManager:
     """
     if view_name not in _CATEGORICAL_VIEW_DEFS:
       raise KeyError(
-          f"Unknown view '{view_name}'. " f"Available: {self.available_views()}"
+          f"Unknown view '{view_name}'. Available: {self.available_views()}"
       )
     template = _CATEGORICAL_VIEW_DEFS[view_name]
     return template.format(

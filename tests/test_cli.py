@@ -426,6 +426,7 @@ class TestEvaluate:
       self, mock_build
   ):
     """LLM-judge failures expose ``SessionScore.llm_feedback`` in the
+
     FAIL line as a bounded ``feedback="..."`` snippet.
 
     Without this, post #2's deterministic FAIL output story carries

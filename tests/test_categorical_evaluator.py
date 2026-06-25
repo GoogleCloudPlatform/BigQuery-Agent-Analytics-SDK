@@ -427,63 +427,63 @@ class TestStripMarkdownFences:
   """Tests for the shared strip_markdown_fences helper."""
 
   def test_json_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
 
   def test_plain_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```\n[1, 2]\n```") == "[1, 2]"
 
   def test_no_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('{"a": 1}') == '{"a": 1}'
 
   def test_empty(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("") == ""
 
   def test_none(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences(None) is None
 
   def test_no_newline_after_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json{"a": 1}```') == '{"a": 1}'
 
   def test_whitespace_around(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     result = strip_markdown_fences('  ```json\n  {"a": 1}  \n```  ')
     assert '"a": 1' in result
 
   def test_sql_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```sql\nSELECT 1\n```") == "SELECT 1"
 
   def test_uppercase_language_tag(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```JSON\n{"a": 1}\n```') == '{"a": 1}'
 
   def test_unknown_language_tag(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```python\nprint('hi')\n```") == "print('hi')"
 
   def test_truncated_fence_no_closing(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences('```json\n{"a": 1}') == '{"a": 1}'
 
   def test_trailing_content_after_fence(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     result = strip_markdown_fences(
         '```json\n{"score": 1}\n```\nHere\'s my analysis...'
@@ -491,7 +491,7 @@ class TestStripMarkdownFences:
     assert result == '{"score": 1}'
 
   def test_language_tag_with_digits(self):
-    from bigquery_agent_analytics.evaluators import strip_markdown_fences
+    from bigquery_agent_analytics.utils import strip_markdown_fences
 
     assert strip_markdown_fences("```json5\n{}\n```") == "{}"
 
@@ -657,7 +657,9 @@ class TestCategoricalAIGenerateQuery:
 
   def test_scalar_function_shape(self):
     """AI.GENERATE is a scalar function — prompt is a positional arg,
-    result is accessed via .classifications on the returned STRUCT."""
+
+    result is accessed via .classifications on the returned STRUCT.
+    """
     assert ")).classifications" in CATEGORICAL_AI_GENERATE_QUERY
 
   def test_generation_config_format(self):
@@ -666,8 +668,10 @@ class TestCategoricalAIGenerateQuery:
     assert "maxOutputTokens" in CATEGORICAL_AI_GENERATE_QUERY
 
   def test_not_table_valued(self):
-    """Must NOT use the table-valued FROM ... AI.GENERATE(...) AS result
-    syntax — that form does not exist in BigQuery."""
+    """Must NOT use the table-valued FROM ...
+
+    AI.GENERATE(...) AS result syntax — that form does not exist in BigQuery.
+    """
     assert "FROM session_transcripts," not in CATEGORICAL_AI_GENERATE_QUERY
     assert ") AS result" not in CATEGORICAL_AI_GENERATE_QUERY
 
@@ -806,7 +810,9 @@ class TestClassifySessionsViaApi:
 
   def test_api_exception_per_session(self):
     """API failure for one session should produce parse errors for that
-    session but not crash the whole run."""
+
+    session but not crash the whole run.
+    """
     config = _make_config()
     transcripts = {"s1": "transcript1", "s2": "transcript2"}
 
@@ -833,7 +839,9 @@ class TestClassifySessionsViaApi:
 
   def test_import_error_propagates(self):
     """When google-genai is not installed, ImportError should propagate
-    so the caller can set the correct execution mode."""
+
+    so the caller can set the correct execution mode.
+    """
     config = _make_config()
     transcripts = {"s1": "transcript1"}
 
@@ -1515,7 +1523,9 @@ class TestMaxOutputTokens:
 
   def test_api_uses_config_value(self):
     """classify_sessions_via_api should pass config.max_output_tokens
-    to the Gemini API GenerateContentConfig."""
+
+    to the Gemini API GenerateContentConfig.
+    """
     import sys
 
     config = _make_config()
@@ -1563,7 +1573,9 @@ class TestFinishReasonLogging:
 
   def test_parse_error_logs_finish_reason(self):
     """When the API returns unparseable text, finish_reason should
-    be logged as a warning."""
+
+    be logged as a warning.
+    """
     config = _make_config()
     transcripts = {"s1": "USER: Hello"}
 
@@ -1721,7 +1733,9 @@ class TestRetryFailedSessions:
 
   def test_retry_partial_success(self):
     """When some sessions succeed and some fail, only the successful
-    ones should be returned."""
+
+    ones should be returned.
+    """
     client = self._make_client()
     config = _make_config()
     transcripts = {"s1": "text1", "s2": "text2"}
@@ -1774,7 +1788,9 @@ class TestRetryFailedSessions:
 
   def test_ai_generate_detects_null_classifications(self):
     """_categorical_ai_generate should detect NULL classifications
-    and trigger retry."""
+
+    and trigger retry.
+    """
     client = self._make_client()
     config = _make_config()
 

@@ -86,8 +86,10 @@ def _all_feature_labels(mock_bq):
 
 class TestExtractBizNodesLabels:
   """Extraction runs multiple queries — the CREATE TABLE DDL and the
+
   extract step itself. AI.GENERATE path carries sdk_ai_function; the
-  client-side fallback path does not."""
+  client-side fallback path does not.
+  """
 
   def test_ai_generate_extract_labels_ai_generate(self):
     mock_bq = _mock_bq_client()
@@ -240,6 +242,7 @@ class TestWorldChangeLabels:
 
 class TestSharedConfigLoopsKeepLabels:
   """Three methods dispatch multiple queries that share a single
+
   `job_config` across a loop or sequence:
 
   - `create_cross_links`: DELETE then INSERT, both reusing one config.
@@ -253,7 +256,8 @@ class TestSharedConfigLoopsKeepLabels:
   loop without also labeling the new one — OR strips labels after
   construction in some future refactor — at least one iteration's
   query will lose its label. Assert every query carries
-  sdk_feature=context-graph."""
+  sdk_feature=context-graph.
+  """
 
   def test_create_cross_links_delete_insert_keep_labels(self):
     mock_bq = _mock_bq_client()
@@ -262,9 +266,10 @@ class TestSharedConfigLoopsKeepLabels:
     # Expect 3 queries: CREATE TABLE DDL (fresh config), DELETE
     # (shared config), INSERT (same shared config).
     features = _all_feature_labels(mock_bq)
-    assert (
-        len(features) >= 2
-    ), f"expected ≥2 labeled queries (delete+insert share a config); got {features}"
+    assert len(features) >= 2, (
+        "expected ≥2 labeled queries (delete+insert share a config); got"
+        f" {features}"
+    )
     for f in features:
       assert f == "context-graph"
 
@@ -289,9 +294,10 @@ class TestSharedConfigLoopsKeepLabels:
     mgr = _make_manager(mock_bq)
     mgr.create_decision_edges(["sess-1"])
     features = _all_feature_labels(mock_bq)
-    assert (
-        len(features) >= 8
-    ), f"expected ≥8 queries (4 DDLs + 2 DELETEs + 2 INSERTs); got {len(features)}"
+    assert len(features) >= 8, (
+        "expected ≥8 queries (4 DDLs + 2 DELETEs + 2 INSERTs); got"
+        f" {len(features)}"
+    )
     for f in features:
       assert f == "context-graph"
 

@@ -292,7 +292,7 @@ import functions_framework
 from flask import jsonify
 
 from bigquery_agent_analytics import Client, serialize
-from bigquery_agent_analytics import SystemEvaluator, LLMAsJudge
+from bigquery_agent_analytics import SystemEvaluator, PerformanceEvaluator
 from bigquery_agent_analytics import TraceFilter
 
 
@@ -433,18 +433,12 @@ def _build_evaluator(params):
 
 
 def _build_judge(params):
-    """Build LLMAsJudge from params dict."""
-    criterion = params.get("criterion", "correctness")
-    threshold = params.get("threshold", 0.5)
-    factories = {
-        "correctness": lambda t: LLMAsJudge.correctness(threshold=t),
-        "hallucination": lambda t: LLMAsJudge.hallucination(threshold=t),
-        "sentiment": lambda t: LLMAsJudge.sentiment(threshold=t),
-    }
-    factory = factories.get(criterion)
-    if not factory:
-        raise ValueError(f"Unknown criterion: {criterion}")
-    return factory(threshold)
+    """Build PerformanceEvaluator from params dict."""
+    return PerformanceEvaluator(
+        project_id=params.get("project_id"),
+        dataset_id=params.get("dataset_id"),
+        llm_judge_model=params.get("model"),
+    )
 ```
 
 **Key design decisions:**
@@ -613,7 +607,7 @@ Complete mapping from interface operations to current SDK code:
 |-----------|-----------|-----------|-------------|----------------------|
 | `analyze` | `Client.get_session_trace()` | `client.py` | `Trace` (dataclass) | `serialize()` → recursive `.to_dict()` |
 | `evaluate` | `Client.evaluate(SystemEvaluator)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
-| `judge` | `Client.evaluate(LLMAsJudge)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
+| `judge` | `Client.evaluate(PerformanceEvaluator)` | `client.py` | `EvaluationReport` (Pydantic) | `.model_dump(mode="json")` |
 | `insights` | `Client.insights()` | `client.py` | `InsightsReport` (Pydantic) | `.model_dump(mode="json")` |
 | `drift` | `Client.drift_detection()` | `client.py` | `DriftReport` (Pydantic) | `.model_dump(mode="json")` |
 | `distribution` | `Client.deep_analysis()` | `client.py` | `QuestionDistribution` (Pydantic) | `.model_dump(mode="json")` |
@@ -639,9 +633,9 @@ Complete mapping from interface operations to current SDK code:
 | SDK Feature | Class | Potential Operation |
 |-------------|-------|-------------------|
 | Context Graph | `ContextGraphManager` | `context_graph` |
-| Trajectory Evaluation | `BigQueryTraceEvaluator` | `trajectory` |
-| Multi-Trial | `TrialRunner` | `multi_trial` |
-| Grader Pipeline | `GraderPipeline` | `grade` |
+| Trajectory Evaluation | `PerformanceEvaluator` | `trajectory` |
+| Multi-Trial | `MultiTrialPerformanceEvaluator` | `multi_trial` |
+| Grader Pipeline | `AggregateGrader` | `grade` |
 | Memory Service | `BigQueryMemoryService` | (separate interface) |
 | Anomaly Detection & Forecasting | `AnomalyDetector` | `anomaly`, `forecast` |
 
@@ -652,7 +646,7 @@ Complete mapping from interface operations to current SDK code:
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
 | Cloud Function cold start > 3s | Medium | Latency SLO breach | `--min-instances=1` for production |
-| `LLMAsJudge` timeout in batch | Medium | Partial failure | Per-row error handling; `max_batching_rows=10` for judge |
+| `PerformanceEvaluator` timeout in batch | Medium | Partial failure | Per-row error handling; `max_batching_rows=10` for judge |
 | `typer` version conflict with user deps | Low | CLI install failure | Optional `[cli]` extra isolates dependency |
 | `Trace.to_dict()` missing edge cases | Medium | Serialization crash | Comprehensive test matrix in Phase 1 |
 | `datetime` serialization regression | Medium | Silent JSON errors | CI test: `json.dumps(serialize(x))` for all types |

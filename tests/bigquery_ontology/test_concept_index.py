@@ -115,6 +115,7 @@ class TestRowShape:
 
   def test_notation_emits_first_class_row_and_column(self):
     """D5: every entity with skos:notation gets a row with
+
     ``label_kind='notation'`` and ``label = notation_value``. The
     ``notation`` column on EVERY row of that entity also carries the
     notation value (per-entity display, repeats across rows).
@@ -309,8 +310,9 @@ class TestMultiScheme:
     assert schemes == {"BankingTaxonomy"}
 
   def test_multi_scheme_membership(self):
-    """A concept in 2 schemes × 1 name label = 2 name rows. The
-    name + a synonym in 2 schemes = 4 rows total.
+    """A concept in 2 schemes × 1 name label = 2 name rows.
+
+    The name + a synonym in 2 schemes = 4 rows total.
     """
     ontology = Ontology(
         ontology="test",
@@ -346,6 +348,7 @@ class TestMultiScheme:
 
   def test_top_concept_of_contributes_scheme_membership(self):
     """A concept declared as the top of a scheme via
+
     ``skos:topConceptOf`` is still a member of that scheme. Without
     this, queries like ``WHERE ci.scheme = 'Banking'`` miss the
     scheme's top concepts.
@@ -368,6 +371,7 @@ class TestMultiScheme:
 
   def test_in_scheme_and_top_concept_of_unioned_and_deduped(self):
     """If both annotations name the same scheme, only one set of
+
     rows should be emitted for that scheme. If they name different
     schemes, both should be present.
     """
@@ -404,6 +408,7 @@ class TestMultiScheme:
 
 class TestRowDedup:
   """Per the contract: one row per
+
   ``(entity_name, label, label_kind, language, scheme)`` tuple.
   Duplicate input values for the same tuple must collapse to one row;
   the same value via different sources (different ``label_kind``) is
@@ -426,6 +431,7 @@ class TestRowDedup:
 
   def test_duplicate_annotation_values_collapse(self):
     """If the same annotation value appears twice in the source list,
+
     the index emits a single row.
     """
     ontology = Ontology(
@@ -447,6 +453,7 @@ class TestRowDedup:
 
   def test_same_value_different_kinds_keeps_both_rows(self):
     """``"Acct"`` as both ``Entity.synonyms`` and
+
     ``annotations["skos:altLabel"]`` is two different tuples (kinds
     differ), so both rows are kept. This is the resolver's job to
     rank, not the row builder's job to dedupe.
@@ -498,10 +505,10 @@ class TestDeterminism:
     assert rows1 == rows2
 
   def test_sort_order_is_total(self):
-    """For deterministic SQL emission, the row list must be in a
-    total order. Building the same ontology twice (constructed
-    identically) must produce the exact same sequence — including
-    when there are ties on early sort keys.
+    """For deterministic SQL emission, the row list must be in a total order.
+
+    Building the same ontology twice (constructed identically) must produce the
+    exact same sequence — including when there are ties on early sort keys.
     """
     ontology = Ontology(
         ontology="test",
@@ -540,6 +547,7 @@ class TestPublicSurface:
 
   def test_concept_index_module_not_re_exported_at_root(self):
     """v1 keeps `concept_index` out of `bigquery_ontology/__init__.py`
+
     per the implementation plan ("Package-level re-export can be added
     later if a concrete caller appears"). Importable directly via
     absolute path.

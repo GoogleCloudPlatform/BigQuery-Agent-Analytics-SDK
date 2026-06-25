@@ -42,7 +42,6 @@ from unittest.mock import patch
 import pytest
 
 from bigquery_agent_analytics.client import _apply_strict_mode
-from bigquery_agent_analytics.client import _merge_criterion_reports
 from bigquery_agent_analytics.client import _run_sync
 from bigquery_agent_analytics.client import Client
 from bigquery_agent_analytics.evaluators import EvaluationReport
@@ -139,125 +138,7 @@ class TestHitlMetricsGlobalSessions:
 
 
 # ================================================================== #
-# Issue 2 (P0): Multi-criterion merge missing criteria                 #
-# ================================================================== #
-
-
-class TestMergeCriterionMissingCriteria:
-  """Missing criteria default to 0.0 and should fail."""
-
-  def test_missing_criterion_fails_session(self):
-    from bigquery_agent_analytics.evaluators import _JudgeCriterion
-
-    c1 = _JudgeCriterion(
-        name="correctness",
-        prompt_template="",
-        score_key="correctness",
-        threshold=0.5,
-    )
-    c2 = _JudgeCriterion(
-        name="helpfulness",
-        prompt_template="",
-        score_key="helpfulness",
-        threshold=0.5,
-    )
-
-    # Only c1 produced scores for session s1
-    report1 = EvaluationReport(
-        dataset="test",
-        evaluator_name="judge",
-        total_sessions=1,
-        passed_sessions=1,
-        failed_sessions=0,
-        session_scores=[
-            SessionScore(
-                session_id="s1",
-                scores={"correctness": 0.8},
-                passed=True,
-            )
-        ],
-    )
-    # c2 produced no scores for s1 (empty report)
-    report2 = EvaluationReport(
-        dataset="test",
-        evaluator_name="judge",
-        total_sessions=0,
-        passed_sessions=0,
-        failed_sessions=0,
-        session_scores=[],
-    )
-
-    merged = _merge_criterion_reports(
-        "judge",
-        "test",
-        [c1, c2],
-        [(c1, report1), (c2, report2)],
-    )
-
-    # s1 should FAIL because helpfulness is missing (defaults to 0.0)
-    assert merged.total_sessions == 1
-    assert merged.session_scores[0].passed is False
-
-  def test_all_criteria_present_passes(self):
-    from bigquery_agent_analytics.evaluators import _JudgeCriterion
-
-    c1 = _JudgeCriterion(
-        name="correctness",
-        prompt_template="",
-        score_key="correctness",
-        threshold=0.5,
-    )
-    c2 = _JudgeCriterion(
-        name="helpfulness",
-        prompt_template="",
-        score_key="helpfulness",
-        threshold=0.5,
-    )
-
-    report1 = EvaluationReport(
-        dataset="test",
-        evaluator_name="judge",
-        total_sessions=1,
-        passed_sessions=1,
-        failed_sessions=0,
-        session_scores=[
-            SessionScore(
-                session_id="s1",
-                scores={"correctness": 0.8},
-                passed=True,
-            )
-        ],
-    )
-    report2 = EvaluationReport(
-        dataset="test",
-        evaluator_name="judge",
-        total_sessions=1,
-        passed_sessions=1,
-        failed_sessions=0,
-        session_scores=[
-            SessionScore(
-                session_id="s1",
-                scores={"helpfulness": 0.7},
-                passed=True,
-            )
-        ],
-    )
-
-    merged = _merge_criterion_reports(
-        "judge",
-        "test",
-        [c1, c2],
-        [(c1, report1), (c2, report2)],
-    )
-
-    assert merged.total_sessions == 1
-    assert merged.session_scores[0].passed is True
-    assert merged.session_scores[0].scores["correctness"] == 0.8
-    assert merged.session_scores[0].scores["helpfulness"] == 0.7
-
-
-# ================================================================== #
-# Issue 3 (P0): _run_sync() works in and out of event loops           #
+# Issue 2 (P0): _run_sync() works in and out of event loops           #
 # ================================================================== #
 
 
@@ -287,7 +168,7 @@ class TestRunSync:
 
 
 # ================================================================== #
-# Issue 4 (P1): Canonical error predicates                             #
+# Issue 3 (P1): Canonical error predicates                             #
 # ================================================================== #
 
 
@@ -373,7 +254,7 @@ class TestCanonicalErrorPredicates:
 
   def test_evaluator_query_uses_canonical_predicate(self):
     """SESSION_SUMMARY_QUERY should use canonical error predicate."""
-    from bigquery_agent_analytics.evaluators import SESSION_SUMMARY_QUERY
+    from bigquery_agent_analytics.system_evaluator import SESSION_SUMMARY_QUERY
 
     assert "ENDS_WITH(event_type, '_ERROR')" in SESSION_SUMMARY_QUERY
 
@@ -392,7 +273,7 @@ class TestCanonicalErrorPredicates:
 
 
 # ================================================================== #
-# Issue 5 (P1): Response-source logic (LLM_RESPONSE first)            #
+# Issue 4 (P1): Response-source logic (LLM_RESPONSE first)            #
 # ================================================================== #
 
 
@@ -463,7 +344,7 @@ class TestResponseSourceOrder:
 
 
 # ================================================================== #
-# Issue 6/Feature 3: Semantic drift implementation                     #
+# Issue 5/Feature 3: Semantic drift implementation                     #
 # ================================================================== #
 
 
@@ -537,7 +418,7 @@ class TestSemanticDrift:
 
 
 # ================================================================== #
-# Issue 7 (P2): get_trace uses trace_id in docs                       #
+# Issue 6 (P2): get_trace uses trace_id in docs                       #
 # ================================================================== #
 
 
@@ -563,7 +444,7 @@ class TestGetTraceDocsUseTraceId:
 
 
 # ================================================================== #
-# Issue 8 (P2): Strict-mode parse_errors aggregate                     #
+# Issue 7 (P2): Strict-mode parse_errors aggregate                     #
 # ================================================================== #
 
 
@@ -628,7 +509,7 @@ class TestStrictModeParseErrors:
 
 
 # ================================================================== #
-# Issue 9 (P2): GCS offload docstring                                 #
+# Issue 8 (P2): GCS offload docstring                                 #
 # ================================================================== #
 
 

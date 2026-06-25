@@ -575,7 +575,8 @@ Required fields:
 ANALYSIS_PROMPTS = {
     "task_areas": {
         "title": "Task Areas",
-        "prompt": """\
+        "prompt": (
+            """\
 You are analyzing aggregated data from {total} agent conversation \
 sessions. Based on the following data, write a concise analysis of \
 what tasks users are bringing to the agent.
@@ -585,11 +586,13 @@ Top topics: {top_topics}
 Session types: {session_type_dist}
 
 Write 3-5 bullet points about the key task areas and patterns. \
-Be specific about what users need help with.""",
+Be specific about what users need help with."""
+        ),
     },
     "interaction_patterns": {
         "title": "Interaction Patterns",
-        "prompt": """\
+        "prompt": (
+            """\
 Analyze how users interact with the agent based on these metrics:
 
 Sessions: {total}
@@ -600,11 +603,13 @@ Top tools used: {top_tools}
 Top agents: {top_agents}
 
 Write 3-5 bullet points about interaction patterns, including \
-session length, tool usage, and multi-agent patterns.""",
+session length, tool usage, and multi-agent patterns."""
+        ),
     },
     "what_works_well": {
         "title": "What Works Well",
-        "prompt": """\
+        "prompt": (
+            """\
 Analyze what the agent does well based on these metrics:
 
 Success rate: {success_rate:.0%}
@@ -613,11 +618,13 @@ Outcome distribution: {outcome_dist}
 Satisfaction distribution: {satisfaction_dist}
 Top goals with high success: {successful_goals}
 
-Write 3-5 bullet points highlighting agent strengths.""",
+Write 3-5 bullet points highlighting agent strengths."""
+        ),
     },
     "friction_analysis": {
         "title": "Friction Analysis",
-        "prompt": """\
+        "prompt": (
+            """\
 Analyze friction points users encounter with the agent:
 
 Error rate: {error_rate:.1%}
@@ -627,11 +634,13 @@ Failed session topics: {failed_topics}
 Avg latency: {avg_latency:.0f}ms
 
 Write 3-5 bullet points about key friction areas and their \
-likely root causes.""",
+likely root causes."""
+        ),
     },
     "tool_usage": {
         "title": "Tool Usage Patterns",
-        "prompt": """\
+        "prompt": (
+            """\
 Analyze tool usage patterns across agent sessions:
 
 Total sessions: {total}
@@ -641,11 +650,13 @@ Top tools: {top_tools}
 Tools in failed sessions: {error_tools}
 
 Write 3-5 bullet points about tool utilization, reliability, \
-and optimization opportunities.""",
+and optimization opportunities."""
+        ),
     },
     "suggestions": {
         "title": "Improvement Suggestions",
-        "prompt": """\
+        "prompt": (
+            """\
 Based on the full agent analytics data, suggest improvements:
 
 Success rate: {success_rate:.0%}
@@ -656,11 +667,13 @@ Avg effectiveness: {avg_effectiveness:.1f}/10
 Goal categories with low success: {low_success_goals}
 
 Write 3-5 specific, actionable improvement suggestions \
-prioritized by potential impact.""",
+prioritized by potential impact."""
+        ),
     },
     "trends": {
         "title": "Trends & Anomalies",
-        "prompt": """\
+        "prompt": (
+            """\
 Identify trends and anomalies in the agent analytics data:
 
 Total sessions: {total}
@@ -671,7 +684,8 @@ Error rate: {error_rate:.1%}
 Top topics: {top_topics}
 
 Write 3-5 bullet points about emerging trends, seasonal \
-patterns, or anomalies that warrant attention.""",
+patterns, or anomalies that warrant attention."""
+        ),
     },
 }
 
