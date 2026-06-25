@@ -1,27 +1,27 @@
 {
   "summary": {
-    "total_sessions": 55,
-    "meaningful": 10,
+    "total_sessions": 65,
+    "meaningful": 14,
     "declined": 0,
     "partial": 0,
-    "unhelpful": 45,
-    "meaningful_rate": 18.2,
-    "unhelpful_rate": 81.8,
+    "unhelpful": 51,
+    "meaningful_rate": 21.5,
+    "unhelpful_rate": 78.5,
     "dimension_averages": {},
-    "avg_user_turns": 1.1,
+    "avg_user_turns": 1.2,
     "avg_tool_calls": 0.1,
-    "multi_turn_sessions": 5,
-    "correction_rate": 1.8,
-    "verification_rate": 7.3,
-    "avg_corrections": 0.02,
-    "avg_verifications": 0.07,
+    "multi_turn_sessions": 14,
+    "correction_rate": 4.6,
+    "verification_rate": 16.9,
+    "avg_corrections": 0.05,
+    "avg_verifications": 0.17,
     "golden_eval_summary": {
-      "total_sessions": 55,
-      "matched": 55,
-      "matched_meaningful": 10,
-      "matched_unhelpful": 45,
+      "total_sessions": 65,
+      "matched": 65,
+      "matched_meaningful": 14,
+      "matched_unhelpful": 51,
       "matched_partial": 0,
-      "matched_meaningful_rate": 18.2,
+      "matched_meaningful_rate": 21.5,
       "unmatched": 0,
       "unmatched_meaningful": 0,
       "unmatched_unhelpful": 0,
@@ -31,21 +31,21 @@
         {
           "question": "If I leave the company mid-year, what happens to my unused PTO?",
           "expected_answer": "Unused accrued PTO is paid out in your final paycheck.",
-          "actual_response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR for assistance with this question.",
+          "actual_response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get clarification on this policy.",
           "topic": "pto",
           "similarity": 1.0
         },
         {
           "question": "If I'm out sick for 4 days, do I need a doctor's note?",
           "expected_answer": "Yes - a doctor's note is required for absences longer than 3 consecutive days.",
-          "actual_response": "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR for assistance with this question.",
+          "actual_response": "I do not have information regarding whether a doctor's note is required for sick leave. Please contact HR for more information.",
           "topic": "sick_leave",
           "similarity": 1.0
         },
         {
           "question": "What are the core collaboration hours for remote work?",
           "expected_answer": "10am-3pm in the employee's local timezone.",
-          "actual_response": "I do not have information about the core collaboration hours for remote work. Please contact HR for this information.",
+          "actual_response": "I do not have information about the core collaboration hours for remote work. The only information I have regarding remote work is that employees can work remotely up to 3 days per week with manager approval. \n\nFor more details, please contact HR.",
           "topic": "remote_work",
           "similarity": 1.0
         },
@@ -59,28 +59,28 @@
         {
           "question": "Do I need a receipt for a $30 expense?",
           "expected_answer": "Yes - receipts are required for any expense over $25.",
-          "actual_response": "I do not have information regarding the company's expense policy. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have that information. Please contact HR for assistance with expense policies.",
           "topic": "expenses",
           "similarity": 1.0
         },
         {
           "question": "Do I need pre-approval for a $600 flight?",
           "expected_answer": "Yes - travel expenses over $500 require manager pre-approval.",
-          "actual_response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this inquiry.",
+          "actual_response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this topic.",
           "topic": "expenses",
           "similarity": 1.0
         },
         {
           "question": "How long do I have to submit a business expense?",
           "expected_answer": "Within 30 days.",
-          "actual_response": "I do not have that information. Please contact HR for assistance regarding business expenses.",
+          "actual_response": "I do not have that information. Please contact HR to find out how long you have to submit a business expense.",
           "topic": "expenses",
           "similarity": 1.0
         },
         {
           "question": "What share of my health premium does the company cover?",
           "expected_answer": "80% of the employee premium (50% for dependents).",
-          "actual_response": "I do not have information about the specific share of your health premium covered by the company. Please contact HR for more details.",
+          "actual_response": "I do not have that information. I suggest you contact HR to find out what share of your health premium the company covers.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -88,6 +88,13 @@
           "question": "What medical plans are offered?",
           "expected_answer": "PPO and HMO plans.",
           "actual_response": "I do not have information about the specific medical plans offered. Please contact HR for more details.",
+          "topic": "benefits",
+          "similarity": 1.0
+        },
+        {
+          "question": "What's the family out-of-pocket maximum on the PPO?",
+          "expected_answer": "$8,000 for a family in-network ($4,000 individual).",
+          "actual_response": "I do not have that information. I suggest you contact HR for details regarding the family out-of-pocket maximum on the PPO.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -101,21 +108,21 @@
         {
           "question": "How much does the company contribute to my HSA for family coverage?",
           "expected_answer": "$1,500/year for family coverage ($750 individual).",
-          "actual_response": "I do not have that information. Please contact HR for details regarding HSA contributions.",
+          "actual_response": "I do not have that information. Please contact HR for details regarding HSA contributions and family coverage.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "How much does the company put into an HSA for individual coverage?",
           "expected_answer": "$750/year for individual coverage ($1,500 family).",
-          "actual_response": "I do not have information about HSA contributions. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have that information. I suggest you contact HR to get details about the company's HSA contributions.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "Are preventive dental cleanings covered?",
           "expected_answer": "Yes - preventive dental care is fully covered (80% for major procedures).",
-          "actual_response": "I do not have information about whether preventive dental cleanings are covered. I suggest you contact HR for more details.",
+          "actual_response": "I do not have information regarding whether preventive dental cleanings are covered. Please contact HR for more details about your benefits.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -129,7 +136,7 @@
         {
           "question": "Is orthodontia covered, and up to how much?",
           "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum.",
-          "actual_response": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits.",
+          "actual_response": "I do not have that information. I suggest you contact HR to get details about orthodontia coverage.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -143,35 +150,35 @@
         {
           "question": "What's the company 401k match?",
           "expected_answer": "A 4% company 401(k) match.",
-          "actual_response": "I do not have information about the company's 401k match. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about the company's 401k match. I suggest you contact HR for assistance with this topic.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "When am I vested in the 401k match?",
           "expected_answer": "After 1 year of employment.",
-          "actual_response": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have that information. I suggest you contact HR.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "If I leave after six months, do I keep the 401k match?",
           "expected_answer": "No - the match is vested only after 1 year, so leaving at 6 months means you don't keep it.",
-          "actual_response": "I do not have that information. I suggest you contact HR to get details about the 401k match policy.",
+          "actual_response": "I do not have that information. I suggest you contact HR to find out about the 401(k) match policy.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "How much parental leave does a primary caregiver get?",
           "expected_answer": "16 weeks paid for a primary caregiver.",
-          "actual_response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about parental leave. Please contact HR for assistance with this topic.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "How much parental leave does a secondary caregiver get?",
           "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary).",
-          "actual_response": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -185,21 +192,21 @@
         {
           "question": "How many paid holidays does the company observe?",
           "expected_answer": "11 paid holidays per year.",
-          "actual_response": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about the company's paid holidays policy. Please contact HR for assistance with this topic.",
           "topic": "holidays",
           "similarity": 1.0
         },
         {
           "question": "Is Juneteenth a company holiday?",
           "expected_answer": "No - Juneteenth, Veterans Day, and Columbus Day are not company holidays.",
-          "actual_response": "I do not have information about company holidays or whether Juneteenth is recognized as one. Please contact HR for assistance with this question.",
+          "actual_response": "I do not have information about company holidays. Please contact HR for assistance with this topic.",
           "topic": "holidays",
           "similarity": 1.0
         },
         {
           "question": "Which days around Thanksgiving are paid holidays?",
           "expected_answer": "The Wednesday and Thursday of Thanksgiving week.",
-          "actual_response": "I do not have information about paid holidays. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about which days around Thanksgiving are paid holidays. Please contact HR for this information.",
           "topic": "holidays",
           "similarity": 1.0
         },
@@ -213,14 +220,14 @@
         {
           "question": "How many bereavement days do I get for the death of a sibling?",
           "expected_answer": "5 paid days (a sibling is immediate family).",
-          "actual_response": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy.",
+          "actual_response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
           "topic": "bereavement",
           "similarity": 1.0
         },
         {
           "question": "How many bereavement days do I get for a grandparent?",
           "expected_answer": "3 paid days (a grandparent is extended family).",
-          "actual_response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about bereavement leave. Please contact HR for assistance with this topic.",
           "topic": "bereavement",
           "similarity": 1.0
         },
@@ -234,14 +241,14 @@
         {
           "question": "How many EAP counseling sessions do I get?",
           "expected_answer": "Up to 8 counseling sessions per issue per year.",
-          "actual_response": "I do not have information about EAP counseling sessions. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have that information. Please contact HR to get details about EAP counseling sessions.",
           "topic": "eap",
           "similarity": 1.0
         },
         {
           "question": "Does the EAP have a 24/7 hotline?",
           "expected_answer": "Yes - the EAP includes a 24/7 hotline.",
-          "actual_response": "I do not have that information. Please contact HR for more details regarding the Employee Assistance Program (EAP).",
+          "actual_response": "I do not have information about the EAP (Employee Assistance Program). Please contact HR for assistance with this topic.",
           "topic": "eap",
           "similarity": 1.0
         },
@@ -255,14 +262,14 @@
         {
           "question": "How early can I start my day under flex time?",
           "expected_answer": "Any time between 7am and 10am, as long as you cover the 10am-3pm core hours and a full 8-hour day.",
-          "actual_response": "I do not have information about flex time. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about flex time. I suggest you contact HR for assistance with this topic.",
           "topic": "flex_time",
           "similarity": 1.0
         },
         {
           "question": "What's the annual tuition reimbursement limit?",
           "expected_answer": "Up to $5,250 per calendar year.",
-          "actual_response": "I do not have information about the tuition reimbursement limit. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have that information. Please contact HR for assistance with tuition reimbursement.",
           "topic": "tuition_reimbursement",
           "similarity": 1.0
         },
@@ -276,42 +283,42 @@
         {
           "question": "What does short-term disability pay?",
           "expected_answer": "60% of your salary.",
-          "actual_response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+          "actual_response": "I do not have information about short-term disability pay. I suggest you contact HR for assistance with this topic.",
           "topic": "short_term_disability",
           "similarity": 1.0
         },
         {
           "question": "How long does short-term disability last?",
           "expected_answer": "Up to 12 weeks.",
-          "actual_response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+          "actual_response": "I do not have that information. Please contact HR for details regarding short-term disability.",
           "topic": "short_term_disability",
           "similarity": 1.0
         },
         {
           "question": "Is there a waiting period for short-term disability?",
           "expected_answer": "Yes - a 7-day waiting period.",
-          "actual_response": "I do not have that information. Please contact HR for assistance with questions regarding short-term disability.",
+          "actual_response": "I do not have that information. Please contact HR to inquire about the waiting period for short-term disability.",
           "topic": "short_term_disability",
           "similarity": 1.0
         },
         {
           "question": "How much of dependents' premiums does the company cover?",
           "expected_answer": "50% for dependents (80% for the employee).",
-          "actual_response": "I do not have that information. I suggest you contact HR.",
+          "actual_response": "I do not have that information. I suggest you contact HR to find out how much of dependents' premiums the company covers.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "Can I get a work-related course reimbursed, and up to how much?",
           "expected_answer": "Yes - tuition reimbursement up to $5,250/year for job-related courses (manager pre-approval, grade B or better).",
-          "actual_response": "I do not have information about tuition or course reimbursement. Please contact HR for assistance with this topic.",
+          "actual_response": "I do not have information about course or tuition reimbursement. Please contact HR for assistance with this topic.",
           "topic": "tuition_reimbursement",
           "similarity": 1.0
         },
         {
           "question": "How much parental leave does a secondary caregiver get?",
           "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary).",
-          "actual_response": "I do not have that information in my records. I recommend contacting HR directly to confirm the parental leave policy for secondary caregivers.",
+          "actual_response": "I do not have that information in my records. Please contact HR to confirm the parental leave policy for secondary caregivers.",
           "topic": "benefits",
           "similarity": 1.0
         },
@@ -325,22 +332,57 @@
         {
           "question": "Is orthodontia covered, and up to how much?",
           "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum.",
-          "actual_response": "I do not have that information to confirm the lifetime maximum for orthodontia. Please contact HR to verify your benefits coverage.",
+          "actual_response": "I do not have that information and cannot confirm the lifetime maximum for orthodontia. Please contact HR to verify this coverage.",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "What's the family out-of-pocket maximum on the PPO?",
           "expected_answer": "$8,000 for a family in-network ($4,000 individual).",
-          "actual_response": "I do not have that information. Please contact HR to confirm the family out-of-pocket maximum for your plan.",
+          "actual_response": "[ERROR: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}]",
           "topic": "benefits",
           "similarity": 1.0
         },
         {
           "question": "When am I vested in the 401k match?",
           "expected_answer": "After 1 year of employment.",
-          "actual_response": "I do not have that information. Please contact HR to confirm the vesting schedule for the 401k match.",
+          "actual_response": "I do not have that information. Please contact HR to verify the vesting schedule for the 401k match.",
           "topic": "benefits",
+          "similarity": 1.0
+        },
+        {
+          "question": "Do I need pre-approval for a $600 flight?",
+          "expected_answer": "Yes - travel expenses over $500 require manager pre-approval.",
+          "actual_response": "I do not have information regarding expense pre-approval limits. Please contact HR to verify this policy.",
+          "topic": "expenses",
+          "similarity": 1.0
+        },
+        {
+          "question": "How many paid holidays does the company observe?",
+          "expected_answer": "11 paid holidays per year.",
+          "actual_response": "I do not have that information in my records. I recommend contacting HR to confirm the exact number of paid holidays the company observes.",
+          "topic": "holidays",
+          "similarity": 1.0
+        },
+        {
+          "question": "What share of my health premium does the company cover?",
+          "expected_answer": "80% of the employee premium (50% for dependents).",
+          "actual_response": "I do not have information regarding the percentage of the premium covered by the company. I suggest you contact HR to get the exact details.",
+          "topic": "benefits",
+          "similarity": 1.0
+        },
+        {
+          "question": "What does dental cover for major procedures?",
+          "expected_answer": "80% coverage for major dental procedures.",
+          "actual_response": "I do not have that information. Please contact HR to verify the coverage details for major dental procedures.",
+          "topic": "benefits",
+          "similarity": 1.0
+        },
+        {
+          "question": "How long does short-term disability last?",
+          "expected_answer": "Up to 12 weeks.",
+          "actual_response": "I do not have that information. Please contact HR to verify the details and duration of short-term disability.",
+          "topic": "short_term_disability",
           "similarity": 1.0
         }
       ]
@@ -348,20 +390,20 @@
   },
   "category_distributions": {
     "response_usefulness": {
-      "meaningful": 10,
-      "unhelpful": 45
+      "meaningful": 14,
+      "unhelpful": 51
     },
     "task_grounding": {
-      "grounded": 11,
-      "ungrounded": 44
+      "grounded": 15,
+      "ungrounded": 50
     }
   },
   "per_agent": {
     "policy_agent": {
-      "total": 55,
-      "meaningful": 10,
+      "total": 65,
+      "meaningful": 14,
       "declined": 0,
-      "unhelpful": 45,
+      "unhelpful": 51,
       "partial": 0,
       "unclassified": 0,
       "a2a_count": 0
@@ -374,7 +416,7 @@
       "response": "You get 20 PTO days per year, which are accrued monthly.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.28,
+      "latency_s": 3.91,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -415,7 +457,7 @@
       "response": "You can roll over up to 5 unused PTO days to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.25,
+      "latency_s": 3.64,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -453,10 +495,10 @@
     {
       "session_id": "t03_pto",
       "question": "Roughly how much PTO do I accrue each month?",
-      "response": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month.",
+      "response": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to roughly 1.67 days of PTO accrued each month.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.18,
+      "latency_s": 3.37,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -464,11 +506,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about monthly PTO accrual, providing the correct calculation based on the annual policy."
+          "justification": "The agent directly and correctly answers the user's question about monthly PTO accrual, providing the annual amount and the calculated monthly equivalent."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The agent's response is based on company policy data (20 days of PTO per year) which would have been retrieved from a tool, and then performs a calculation based on that data."
+          "justification": "The agent's response is based on company policy data (20 days PTO per year), which would be retrieved from a tool like lookup_company_policy, and then performs a correct calculation."
         }
       },
       "quality_scores": {},
@@ -479,7 +521,7 @@
         },
         {
           "role": "agent",
-          "text": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month."
+          "text": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to roughly 1.67 days of PTO accrued each month."
         }
       ],
       "golden_eval": {
@@ -494,10 +536,10 @@
     {
       "session_id": "t04_pto",
       "question": "If I leave the company mid-year, what happens to my unused PTO?",
-      "response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR for assistance with this question.",
+      "response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get clarification on this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.89,
+      "latency_s": 6.4,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -505,11 +547,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question that the agent should be able to answer using its tools."
+          "justification": "The question is in scope (HR policy about PTO). The agent explicitly states it does not have the information and directs the user to HR, which falls under the 'unhelpful' category definition: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent claimed it did not have the information, despite the expected answer indicating that this information is available via the lookup_company_policy tool. The response is not based on actual tool results."
+          "justification": "The agent's response 'I do not have information' indicates a failure to retrieve the correct policy from its tools. The expected answer is a specific policy that should be available via the `lookup_company_policy` tool. Since the agent failed to provide information based on tool results, the response is not grounded. It's not 'no_tool_needed' as a tool was required, and it's not 'grounded' as no tool data was presented."
         }
       },
       "quality_scores": {},
@@ -520,7 +562,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR for assistance with this question."
+          "text": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get clarification on this policy."
         }
       ],
       "golden_eval": {
@@ -535,10 +577,10 @@
     {
       "session_id": "t05_sick_leave",
       "question": "How many sick days do I get per year?",
-      "response": "You get 10 sick days per year, and they do not roll over to the next year.",
+      "response": "You get 10 sick days per year. Please note that unused sick days do not roll over to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.14,
+      "latency_s": 2.63,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -546,11 +588,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and accurately answers the user's question about the number of sick days per year, providing specific and actionable information that matches the expected answer."
+          "justification": "The agent directly and correctly answers the user's question about the number of sick days per year, matching the expected answer and providing additional relevant policy information."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details (10 sick days, no rollover) which are stated to be retrieved from the lookup_company_policy tool and align with the ground truth data."
+          "justification": "The agent provides specific policy details (10 sick days, no rollover) which would be retrieved from a tool like `lookup_company_policy`, not general LLM knowledge."
         }
       },
       "quality_scores": {},
@@ -561,7 +603,7 @@
         },
         {
           "role": "agent",
-          "text": "You get 10 sick days per year, and they do not roll over to the next year."
+          "text": "You get 10 sick days per year. Please note that unused sick days do not roll over to the next year."
         }
       ],
       "golden_eval": {
@@ -576,10 +618,10 @@
     {
       "session_id": "t06_sick_leave",
       "question": "Do sick days roll over to the next year?",
-      "response": "No, sick days do not roll over to the next year. The company provides 10 days of sick leave per year, and any unused days do not roll over.",
+      "response": "No, sick days do not roll over to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.64,
+      "latency_s": 2.02,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -587,11 +629,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and correctly answers the user's question about sick days rolling over, stating they do not and providing additional relevant details about the annual allowance."
+          "justification": "The agent directly and substantively answered the user's question about sick days rolling over, providing a clear 'No'."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details ('10 days of sick leave per year') which indicates it was retrieved from a tool like lookup_company_policy, rather than being general knowledge."
+          "justification": "The response provides a specific piece of company policy information, which would be retrieved from a tool like `lookup_company_policy`."
         }
       },
       "quality_scores": {},
@@ -602,7 +644,7 @@
         },
         {
           "role": "agent",
-          "text": "No, sick days do not roll over to the next year. The company provides 10 days of sick leave per year, and any unused days do not roll over."
+          "text": "No, sick days do not roll over to the next year."
         }
       ],
       "golden_eval": {
@@ -617,22 +659,22 @@
     {
       "session_id": "t07_sick_leave",
       "question": "If I'm out sick for 4 days, do I need a doctor's note?",
-      "response": "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR for assistance with this question.",
+      "response": "I do not have information regarding whether a doctor's note is required for sick leave. Please contact HR for more information.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.44,
+      "latency_s": 11.17,
       "user_turns": 1,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question is in scope, but the agent stated it does not have the information and directed the user to HR, which falls under the definition of 'unhelpful' (agent said 'I don't have that information' or directed the user elsewhere instead of using its tools)."
+          "justification": "The user's question is in scope, but the agent stated it does not have the information and directed the user to HR, which is explicitly listed as an 'unhelpful' scenario."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it does not have the information, indicating it did not retrieve or use data from its tools to answer the question, even though the information was available via the `lookup_company_policy` tool. The response is not based on actual tool results, making it ungrounded for the task at hand."
+          "justification": "The question required tool usage (lookup_company_policy) to find the correct answer. The agent's response indicates it did not retrieve information from its tools, as it stated 'I do not have information'. Therefore, the response is not grounded in actual tool results, even if it didn't fabricate an answer."
         }
       },
       "quality_scores": {},
@@ -643,7 +685,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR for assistance with this question."
+          "text": "I do not have information regarding whether a doctor's note is required for sick leave. Please contact HR for more information."
         }
       ],
       "golden_eval": {
@@ -661,7 +703,7 @@
       "response": "You can work from home up to 3 days per week with manager approval.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.23,
+      "latency_s": 2.29,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -699,10 +741,10 @@
     {
       "session_id": "t09_remote_work",
       "question": "Do I need approval to work remotely?",
-      "response": "Yes, you need manager approval to work remotely (up to 3 days per week).",
+      "response": "Yes, you can work remotely up to 3 days per week, but it requires manager approval.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.53,
+      "latency_s": 1.59,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -710,11 +752,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "meaningful",
-          "justification": "The agent directly and correctly answers the user's question about needing approval for remote work, aligning with the expected answer."
+          "justification": "The agent directly and substantively answers the user's question about needing approval for remote work, stating 'Yes, ... it requires manager approval' and adding relevant details about the 3-day limit."
         },
         "task_grounding": {
           "category": "grounded",
-          "justification": "The response provides specific policy details ('up to 3 days per week') which indicates it was retrieved from a tool like 'lookup_company_policy' rather than being general LLM knowledge."
+          "justification": "The response provides specific policy details (manager approval, 3 days per week) which are expected to be retrieved from a company policy tool."
         }
       },
       "quality_scores": {},
@@ -725,7 +767,7 @@
         },
         {
           "role": "agent",
-          "text": "Yes, you need manager approval to work remotely (up to 3 days per week)."
+          "text": "Yes, you can work remotely up to 3 days per week, but it requires manager approval."
         }
       ],
       "golden_eval": {
@@ -740,10 +782,10 @@
     {
       "session_id": "t10_remote_work",
       "question": "What are the core collaboration hours for remote work?",
-      "response": "I do not have information about the core collaboration hours for remote work. Please contact HR for this information.",
+      "response": "I do not have information about the core collaboration hours for remote work. The only information I have regarding remote work is that employees can work remotely up to 3 days per week with manager approval. \n\nFor more details, please contact HR.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 10.74,
+      "latency_s": 12.81,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -751,11 +793,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question is in scope (remote work policy). The agent stated it does not have the information and directed the user to HR, which falls under the definition of 'unhelpful' for in-scope questions: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
+          "justification": "The user's question about core collaboration hours for remote work is in scope. The agent explicitly states it does not have this information and directs the user to HR, which is considered unhelpful as per the definition ('The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.')."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent should have used the `lookup_company_policy` tool to find the core collaboration hours, as this information is available. The agent's response indicates it did not retrieve this information and therefore its response is not based on actual tool results, making it ungrounded. It failed to ground its response in the available data."
+          "justification": "The expected answer for core collaboration hours is available via the `lookup_company_policy` tool. The agent's response 'I do not have information about the core collaboration hours for remote work' indicates a failure to retrieve this available information from its tools, making the response ungrounded in the correct tool output."
         }
       },
       "quality_scores": {},
@@ -766,7 +808,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the core collaboration hours for remote work. Please contact HR for this information."
+          "text": "I do not have information about the core collaboration hours for remote work. The only information I have regarding remote work is that employees can work remotely up to 3 days per week with manager approval. \n\nFor more details, please contact HR."
         }
       ],
       "golden_eval": {
@@ -784,7 +826,7 @@
       "response": "According to the company policy, you can work remotely up to 3 days per week with manager approval. Therefore, you cannot work remotely four days a week.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.85,
+      "latency_s": 2.64,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -825,7 +867,7 @@
       "response": "I do not have that information. Please contact HR for assistance regarding business travel meal reimbursement limits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.68,
+      "latency_s": 5.65,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -863,10 +905,10 @@
     {
       "session_id": "t13_expenses",
       "question": "Do I need a receipt for a $30 expense?",
-      "response": "I do not have information regarding the company's expense policy. Please contact HR for assistance with this topic.",
+      "response": "I do not have that information. Please contact HR for assistance with expense policies.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.29,
+      "latency_s": 4.91,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -874,11 +916,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about expense policy is within the agent's defined scope. The agent stated it does not have information and directed the user to HR, which is an unhelpful response for an in-scope question."
+          "justification": "The question is within the agent's scope (expenses), but the agent stated it does not have the information and directed the user to HR, which is an unhelpful response."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it does not have information, indicating it did not retrieve any data from its tools to answer the question. The response is a statement about its capabilities rather than being grounded in tool results."
+          "justification": "The agent stated it does not have the information, indicating it did not use its tools to retrieve data. The question required tool usage to find the expense policy."
         }
       },
       "quality_scores": {},
@@ -889,7 +931,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding the company's expense policy. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with expense policies."
         }
       ],
       "golden_eval": {
@@ -904,10 +946,10 @@
     {
       "session_id": "t14_expenses",
       "question": "Do I need pre-approval for a $600 flight?",
-      "response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this inquiry.",
+      "response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.9,
+      "latency_s": 3.87,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -915,11 +957,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about travel expenses and pre-approval is within the agent's scope ('expenses'). The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
+          "justification": "The user's question about travel expenses and pre-approval is within the agent's scope. The agent stated it does not have information and directed the user to HR, which is not a meaningful answer to an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it does not have information, indicating it either failed to use its tools or the tools returned no data, leading to an ungrounded and unhelpful response. The expected answer shows that the information is available via the lookup_company_policy tool."
+          "justification": "The agent stated it does not have information, indicating it either did not use a tool or the tool failed to provide relevant data. The response is not based on any retrieved information from its tools."
         }
       },
       "quality_scores": {},
@@ -930,7 +972,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this inquiry."
+          "text": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -945,10 +987,10 @@
     {
       "session_id": "t15_expenses",
       "question": "How long do I have to submit a business expense?",
-      "response": "I do not have that information. Please contact HR for assistance regarding business expenses.",
+      "response": "I do not have that information. Please contact HR to find out how long you have to submit a business expense.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.74,
+      "latency_s": 7.53,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -956,11 +998,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated it did not have the information and directed the user elsewhere, failing to answer the in-scope question."
+          "justification": "The user's question is in scope, but the agent stated it does not have the information and directed the user to HR, which is considered unhelpful as per the definition ('The agent said 'I don't have that information' ... or directed the user elsewhere instead of using its tools')."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent should have used a tool to look up the company policy on business expenses but stated it did not have the information, indicating a failure to use or retrieve data from its tools."
+          "justification": "The agent stated it did not have the information and did not use its tools to find the answer. The question required tool usage to be answered correctly, so the response is not grounded in tool results."
         }
       },
       "quality_scores": {},
@@ -971,7 +1013,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding business expenses."
+          "text": "I do not have that information. Please contact HR to find out how long you have to submit a business expense."
         }
       ],
       "golden_eval": {
@@ -986,22 +1028,22 @@
     {
       "session_id": "t16_benefits",
       "question": "What share of my health premium does the company cover?",
-      "response": "I do not have information about the specific share of your health premium covered by the company. Please contact HR for more details.",
+      "response": "I do not have that information. I suggest you contact HR to find out what share of your health premium the company covers.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 8.82,
+      "latency_s": 4.91,
       "user_turns": 1,
-      "tool_calls": 1,
+      "tool_calls": 0,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question is in scope (health premium contribution). The agent explicitly stated it does not have the information and directed the user to HR, which is a failure to answer an in-scope question and falls under the 'unhelpful' category."
+          "justification": "The agent stated it does not have the information and directed the user to HR, which is a generic response and does not answer the in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent's response 'I do not have information...' is a statement from the LLM itself, not data retrieved from a tool. A tool was needed to answer this question, but the agent did not provide a grounded answer based on tool results. It is not 'grounded' as no tool data was presented, and not 'no_tool_needed' as a tool was required."
+          "justification": "The agent explicitly stated it does not have the information, indicating it did not retrieve data from a tool or failed to do so. The response is a generic LLM statement."
         }
       },
       "quality_scores": {},
@@ -1012,7 +1054,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the specific share of your health premium covered by the company. Please contact HR for more details."
+          "text": "I do not have that information. I suggest you contact HR to find out what share of your health premium the company covers."
         }
       ],
       "golden_eval": {
@@ -1030,7 +1072,7 @@
       "response": "I do not have information about the specific medical plans offered. Please contact HR for more details.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.67,
+      "latency_s": 6.1,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1068,22 +1110,22 @@
     {
       "session_id": "t18_benefits",
       "question": "What's the family out-of-pocket maximum on the PPO?",
-      "response": "The family out-of-pocket maximum on the PPO plan is **$8,000** (for in-network coverage).",
+      "response": "I do not have that information. I suggest you contact HR for details regarding the family out-of-pocket maximum on the PPO.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 14.24,
+      "latency_s": 4.2,
       "user_turns": 1,
-      "tool_calls": 1,
+      "tool_calls": 0,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
-          "category": "meaningful",
-          "justification": "The agent directly and correctly answers the user's question about the family out-of-pocket maximum for the PPO plan, providing the specific amount of $8,000."
+          "category": "unhelpful",
+          "justification": "The agent explicitly stated it does not have the information and directed the user to HR, which is not a substantive answer and falls under 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
         },
         "task_grounding": {
-          "category": "grounded",
-          "justification": "The agent's response provides a specific numerical value for a company policy, which indicates it was retrieved from a tool lookup (lookup_company_policy) rather than being fabricated."
+          "category": "ungrounded",
+          "justification": "The question required tool usage to find the specific policy information. The agent's response is a direct LLM statement indicating a lack of information, not based on any data retrieved from its tools. Therefore, the response is not grounded in tool results. It is not 'no_tool_needed' because a tool was required."
         }
       },
       "quality_scores": {},
@@ -1094,7 +1136,7 @@
         },
         {
           "role": "agent",
-          "text": "The family out-of-pocket maximum on the PPO plan is **$8,000** (for in-network coverage)."
+          "text": "I do not have that information. I suggest you contact HR for details regarding the family out-of-pocket maximum on the PPO."
         }
       ],
       "golden_eval": {
@@ -1112,7 +1154,7 @@
       "response": "I do not have that information. Please contact HR for details regarding the individual out-of-pocket maximum on the PPO.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.08,
+      "latency_s": 5.26,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1150,10 +1192,10 @@
     {
       "session_id": "t20_benefits",
       "question": "How much does the company contribute to my HSA for family coverage?",
-      "response": "I do not have that information. Please contact HR for details regarding HSA contributions.",
+      "response": "I do not have that information. Please contact HR for details regarding HSA contributions and family coverage.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.57,
+      "latency_s": 4.39,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1161,11 +1203,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about HSA contributions is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
+          "justification": "The user's question about HSA contributions is within the agent's scope, but the agent stated it does not have the information and directed the user elsewhere, which is classified as unhelpful."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it does not have the information, indicating it did not successfully retrieve data from its tools to answer the question. The question required tool usage to provide a specific answer."
+          "justification": "The agent explicitly stated it does not have the information, indicating it did not retrieve data from its tools to answer the question. The question required tool usage."
         }
       },
       "quality_scores": {},
@@ -1176,7 +1218,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding HSA contributions."
+          "text": "I do not have that information. Please contact HR for details regarding HSA contributions and family coverage."
         }
       ],
       "golden_eval": {
@@ -1191,10 +1233,10 @@
     {
       "session_id": "t21_benefits",
       "question": "How much does the company put into an HSA for individual coverage?",
-      "response": "I do not have information about HSA contributions. Please contact HR for assistance with this topic.",
+      "response": "I do not have that information. I suggest you contact HR to get details about the company's HSA contributions.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.39,
+      "latency_s": 5.16,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1202,11 +1244,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about HSA contributions is within the agent's defined scope. The agent responded by stating it does not have the information and directed the user to HR, which falls under the 'unhelpful' category: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
+          "justification": "The agent explicitly stated 'I do not have that information' and directed the user to HR, which falls under the 'unhelpful' category: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required the use of a tool (lookup_company_policy) to retrieve specific information about HSA contributions. The agent's response explicitly states it does not have the information, indicating that the response is not based on actual tool results. It is not 'grounded' as no data was retrieved and presented, and it is not 'no_tool_needed' as a tool was required."
+          "justification": "The question requires tool usage (lookup_company_policy) to retrieve specific numerical data. The agent's response 'I do not have that information' indicates a failure to retrieve data from its tools, meaning the response is not grounded in actual tool results. It is not 'no_tool_needed' as a tool is required, and it is not 'grounded' as no data was retrieved."
         }
       },
       "quality_scores": {},
@@ -1217,7 +1259,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about HSA contributions. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. I suggest you contact HR to get details about the company's HSA contributions."
         }
       ],
       "golden_eval": {
@@ -1232,22 +1274,22 @@
     {
       "session_id": "t22_benefits",
       "question": "Are preventive dental cleanings covered?",
-      "response": "I do not have information about whether preventive dental cleanings are covered. I suggest you contact HR for more details.",
+      "response": "I do not have information regarding whether preventive dental cleanings are covered. Please contact HR for more details about your benefits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.74,
+      "latency_s": 8.19,
       "user_turns": 1,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question is in scope (dental insurance coverage), but the agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer."
+          "justification": "The user's question about dental cleanings is within the agent's scope (health/dental/vision insurance), but the agent stated it does not have the information and directed the user to HR, failing to provide a meaningful answer."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it does not have information, but the expected answer indicates that this information is available via the `lookup_company_policy` tool. The agent's response is not based on actual data retrieved from its tools, as it should have been able to find the answer."
+          "justification": "The agent stated it does not have information, which is contrary to the ground truth that preventive dental care is covered. This indicates a failure to retrieve or correctly interpret data from its tools for an in-scope question."
         }
       },
       "quality_scores": {},
@@ -1258,7 +1300,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about whether preventive dental cleanings are covered. I suggest you contact HR for more details."
+          "text": "I do not have information regarding whether preventive dental cleanings are covered. Please contact HR for more details about your benefits."
         }
       ],
       "golden_eval": {
@@ -1276,7 +1318,7 @@
       "response": "I do not have that information. I suggest you contact HR to get details about dental coverage for major procedures.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.05,
+      "latency_s": 6.07,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1314,22 +1356,22 @@
     {
       "session_id": "t24_benefits",
       "question": "Is orthodontia covered, and up to how much?",
-      "response": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits.",
+      "response": "I do not have that information. I suggest you contact HR to get details about orthodontia coverage.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.82,
+      "latency_s": 11.31,
       "user_turns": 1,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about orthodontia coverage is within the agent's scope (health/dental/vision insurance). The agent responded by stating 'I do not have that information' and directed the user to HR, which is explicitly defined as 'unhelpful' for in-scope questions."
+          "justification": "The agent explicitly stated it does not have the information and directed the user to HR, which falls under the 'unhelpful' category for responses like 'I don't have that information' or directing the user elsewhere instead of using its tools. The question is within the agent's scope (health/dental/vision insurance)."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it did not have the information and did not provide a factual answer based on tool data. The expected answer indicates this information should be available via a tool, meaning the agent failed to use or properly interpret tool results to provide a grounded response."
+          "justification": "The agent stated it does not have the information, indicating it did not successfully use a tool to retrieve the policy details. The response is not based on actual tool results, and the question required tool usage."
         }
       },
       "quality_scores": {},
@@ -1340,7 +1382,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits."
+          "text": "I do not have that information. I suggest you contact HR to get details about orthodontia coverage."
         }
       ],
       "golden_eval": {
@@ -1358,9 +1400,9 @@
       "response": "I do not have information about the vision benefit for eye exams and glasses. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 8.28,
+      "latency_s": 6.74,
       "user_turns": 1,
-      "tool_calls": 1,
+      "tool_calls": 0,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
@@ -1396,10 +1438,10 @@
     {
       "session_id": "t26_benefits",
       "question": "What's the company 401k match?",
-      "response": "I do not have information about the company's 401k match. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about the company's 401k match. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.19,
+      "latency_s": 4.4,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1407,11 +1449,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about 401k match is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is considered unhelpful as it failed to use its tools to provide the answer."
+          "justification": "The question about 401k match is within the agent's scope, but the agent stated it did not have the information and directed the user to HR, which is an unhelpful response."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it does not have the information, indicating it did not retrieve data from its tools to answer the question. The correct answer should have been retrieved from the `lookup_company_policy` tool."
+          "justification": "The agent claimed it did not have the information and did not use a tool to find the 401k match, which is available via the lookup_company_policy tool according to the ground truth."
         }
       },
       "quality_scores": {},
@@ -1422,7 +1464,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the company's 401k match. Please contact HR for assistance with this topic."
+          "text": "I do not have information about the company's 401k match. I suggest you contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1437,10 +1479,10 @@
     {
       "session_id": "t27_benefits",
       "question": "When am I vested in the 401k match?",
-      "response": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic.",
+      "response": "I do not have that information. I suggest you contact HR.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.43,
+      "latency_s": 4.48,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1448,11 +1490,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question is in scope (401k is listed in agent scope), but the agent states it does not have the information and directs the user to HR, which is considered unhelpful as it fails to answer the in-scope question."
+          "justification": "The question about 401k vesting is in scope. The agent stated it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' for in-scope questions."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly states it does not have the information, indicating it did not retrieve data from its tools to answer the question. The question requires tool usage, so 'no_tool_needed' is not appropriate."
+          "justification": "The question required a tool lookup for company policy. The agent's response 'I do not have that information' indicates a failure to retrieve and present the required information from its tools, meaning the response is not grounded in actual tool results that would answer the question."
         }
       },
       "quality_scores": {},
@@ -1463,7 +1505,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. I suggest you contact HR."
         }
       ],
       "golden_eval": {
@@ -1478,10 +1520,10 @@
     {
       "session_id": "t28_benefits",
       "question": "If I leave after six months, do I keep the 401k match?",
-      "response": "I do not have that information. I suggest you contact HR to get details about the 401k match policy.",
+      "response": "I do not have that information. I suggest you contact HR to find out about the 401(k) match policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 7.17,
+      "latency_s": 5.0,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1489,11 +1531,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated it does not have the information and directed the user to HR, failing to answer an in-scope question using its tools."
+          "justification": "The agent explicitly stated it does not have the information and directed the user to HR, which falls under the 'unhelpful' category for responses that say 'I don't have that information' or direct the user elsewhere instead of using its tools. The question is in scope (401k)."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it did not have the information and did not use any tools to find the answer, thus the response is not grounded in tool data."
+          "justification": "The question required tool usage (lookup_company_policy) to determine the 401k vesting period. The agent's response 'I do not have that information' indicates a failure to use the tool to provide a grounded answer. The response is not based on actual tool results, and a tool was needed."
         }
       },
       "quality_scores": {},
@@ -1504,7 +1546,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to get details about the 401k match policy."
+          "text": "I do not have that information. I suggest you contact HR to find out about the 401(k) match policy."
         }
       ],
       "golden_eval": {
@@ -1519,10 +1561,10 @@
     {
       "session_id": "t29_benefits",
       "question": "How much parental leave does a primary caregiver get?",
-      "response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
+      "response": "I do not have information about parental leave. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.86,
+      "latency_s": 4.98,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1530,11 +1572,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated it does not have information about parental leave and directed the user to HR, failing to answer an in-scope question. Parental leave is explicitly listed as an in-scope topic."
+          "justification": "The agent stated it does not have information about parental leave and directed the user to HR, failing to answer an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent claimed not to have information, despite the ground truth indicating that the `lookup_company_policy` tool should provide the answer. This suggests the response is not based on data successfully retrieved from the tools."
+          "justification": "The agent claimed not to have information, indicating it either did not use the appropriate tool or the tool failed to provide data, leading to an ungrounded response."
         }
       },
       "quality_scores": {},
@@ -1545,7 +1587,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic."
+          "text": "I do not have information about parental leave. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1560,10 +1602,10 @@
     {
       "session_id": "t30_benefits",
       "question": "How much parental leave does a secondary caregiver get?",
-      "response": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.66,
+      "latency_s": 5.54,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1571,11 +1613,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about parental leave is within the agent's defined scope. The agent explicitly states it does not have the information and directs the user to HR, which is an unhelpful response for an in-scope question."
+          "justification": "The question about parental leave is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope query."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The ground truth indicates that the `lookup_company_policy` tool contains the answer for parental leave. The agent's response stating it does not have the information is contrary to what the tool should provide, indicating a failure to use the tool correctly or at all, making the response not grounded in the available tool data."
+          "justification": "The agent explicitly stated it does not have information and did not provide any data from its tools. The response is not based on any retrieved data."
         }
       },
       "quality_scores": {},
@@ -1586,7 +1628,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic."
+          "text": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1604,7 +1646,7 @@
       "response": "I do not have information about open enrollment. Please contact HR for assistance.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.03,
+      "latency_s": 4.98,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1642,10 +1684,10 @@
     {
       "session_id": "t32_holidays",
       "question": "How many paid holidays does the company observe?",
-      "response": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about the company's paid holidays policy. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.01,
+      "latency_s": 4.58,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1653,11 +1695,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about paid holidays is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, which is considered unhelpful."
+          "justification": "The user's question about paid holidays is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it does not have information, indicating it either did not use a tool or the tool failed to provide the correct data. The expected answer is available via the lookup_company_policy tool, so the agent's response is not based on actual retrieved data."
+          "justification": "The agent stated it does not have information, indicating it did not retrieve data from its tools to answer the question. The question required tool usage to provide a grounded answer."
         }
       },
       "quality_scores": {},
@@ -1668,7 +1710,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic."
+          "text": "I do not have information about the company's paid holidays policy. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1683,22 +1725,22 @@
     {
       "session_id": "t33_holidays",
       "question": "Is Juneteenth a company holiday?",
-      "response": "I do not have information about company holidays or whether Juneteenth is recognized as one. Please contact HR for assistance with this question.",
+      "response": "I do not have information about company holidays. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.94,
+      "latency_s": 10.89,
       "user_turns": 1,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about company holidays is within the agent's scope, but the agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer."
+          "justification": "The user's question about company holidays is within the agent's scope. The agent failed to answer the question and instead directed the user to HR, which falls under the 'unhelpful' category: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent claimed not to have information, indicating it did not retrieve data from its tools, even though the `lookup_company_policy` tool should have provided the correct answer according to the ground truth."
+          "justification": "The question required tool usage (lookup_company_policy) to determine if Juneteenth is a company holiday. The agent stated it did not have the information and did not provide an answer based on tool results. Its response is a generic LLM statement about its capabilities, not grounded in actual data retrieved from its tools."
         }
       },
       "quality_scores": {},
@@ -1709,7 +1751,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about company holidays or whether Juneteenth is recognized as one. Please contact HR for assistance with this question."
+          "text": "I do not have information about company holidays. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1724,22 +1766,22 @@
     {
       "session_id": "t34_holidays",
       "question": "Which days around Thanksgiving are paid holidays?",
-      "response": "I do not have information about paid holidays. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about which days around Thanksgiving are paid holidays. Please contact HR for this information.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.7,
+      "latency_s": 13.24,
       "user_turns": 1,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about paid holidays is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
+          "justification": "The question is in scope (holidays), but the agent stated it did not have the information and directed the user to HR, which falls under the 'unhelpful' criteria: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent claimed it did not have information and did not attempt to use its tools (e.g., lookup_company_policy) to find the answer, which would have been necessary for this question."
+          "justification": "The agent stated it did not have the information, implying it either failed to use the appropriate tool (`lookup_company_policy`) or the tool failed to provide data. Since the expected answer indicates the information was available via the tool, the agent's response is not grounded in actual data retrieved from its tools to answer the user's question."
         }
       },
       "quality_scores": {},
@@ -1750,7 +1792,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about paid holidays. Please contact HR for assistance with this topic."
+          "text": "I do not have information about which days around Thanksgiving are paid holidays. Please contact HR for this information."
         }
       ],
       "golden_eval": {
@@ -1768,7 +1810,7 @@
       "response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.83,
+      "latency_s": 5.37,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1806,10 +1848,10 @@
     {
       "session_id": "t36_bereavement",
       "question": "How many bereavement days do I get for the death of a sibling?",
-      "response": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy.",
+      "response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.15,
+      "latency_s": 6.02,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1817,11 +1859,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about bereavement days is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' for in-scope questions."
+          "justification": "The question about bereavement days is within the agent's scope. The agent explicitly states it does not have the information and directs the user to HR, which falls under the 'unhelpful' category for failing to answer an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it did not have the information and did not use the `lookup_company_policy` tool, which would have been necessary to answer the question. The response is not based on any tool data."
+          "justification": "The agent's response states it does not have the information, indicating it did not use its tools to retrieve data to answer the question. The question required tool usage, but the response is not based on any tool results."
         }
       },
       "quality_scores": {},
@@ -1832,7 +1874,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy."
+          "text": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1847,10 +1889,10 @@
     {
       "session_id": "t37_bereavement",
       "question": "How many bereavement days do I get for a grandparent?",
-      "response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
+      "response": "I do not have information about bereavement leave. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.02,
+      "latency_s": 4.16,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1858,11 +1900,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about bereavement leave is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, which is an unhelpful response."
+          "justification": "The question about bereavement leave is within the agent's defined scope, but the agent stated it does not have information and directed the user to HR, failing to answer the in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent stated it did not have information and did not provide an answer based on any tool lookup. The question required tool usage, but the agent's response was a generic statement about its capabilities rather than a grounded answer."
+          "justification": "The agent explicitly stated it does not have information, indicating it did not retrieve data from its tools to answer the question. The response is a generic statement."
         }
       },
       "quality_scores": {},
@@ -1873,7 +1915,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic."
+          "text": "I do not have information about bereavement leave. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -1891,7 +1933,7 @@
       "response": "I do not have information about jury duty. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.72,
+      "latency_s": 5.17,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1929,10 +1971,10 @@
     {
       "session_id": "t39_eap",
       "question": "How many EAP counseling sessions do I get?",
-      "response": "I do not have information about EAP counseling sessions. Please contact HR for assistance with this topic.",
+      "response": "I do not have that information. Please contact HR to get details about EAP counseling sessions.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.54,
+      "latency_s": 6.86,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1940,11 +1982,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about EAP counseling sessions is within the agent's defined scope. The agent failed to provide an answer, stating it did not have the information and directing the user to HR, which is unhelpful for an in-scope question."
+          "justification": "The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage (lookup_company_policy) to retrieve the number of EAP sessions. The agent's response indicates it did not retrieve this information from a tool, and instead gave a generic 'I don't have information' response, meaning the response is not based on actual tool results."
+          "justification": "The agent failed to use its tools to retrieve the information, stating it did not have the information. A tool was needed to answer this question, but the response is not based on any tool data."
         }
       },
       "quality_scores": {},
@@ -1955,7 +1997,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about EAP counseling sessions. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR to get details about EAP counseling sessions."
         }
       ],
       "golden_eval": {
@@ -1970,10 +2012,10 @@
     {
       "session_id": "t40_eap",
       "question": "Does the EAP have a 24/7 hotline?",
-      "response": "I do not have that information. Please contact HR for more details regarding the Employee Assistance Program (EAP).",
+      "response": "I do not have information about the EAP (Employee Assistance Program). Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.1,
+      "latency_s": 6.8,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1981,11 +2023,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated 'I do not have that information' and directed the user to HR, which falls under the 'unhelpful' category for not meaningfully answering the question and directing the user elsewhere instead of using its tools."
+          "justification": "The question about EAP is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which falls under the 'unhelpful' category for not meaningfully answering the question and directing the user elsewhere instead of using its tools."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage to find the specific information about the EAP hotline. The agent explicitly stated it did not have the information, indicating a failure to retrieve data from its tools or a failure to use them effectively to ground its response. It did not provide a factual answer based on tool results."
+          "justification": "The agent's response explicitly states it does not have information, indicating it did not retrieve data from its tools to answer the in-scope question. The response is not based on actual tool results, which makes it ungrounded, even if it's not fabricating information."
         }
       },
       "quality_scores": {},
@@ -1996,7 +2038,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for more details regarding the Employee Assistance Program (EAP)."
+          "text": "I do not have information about the EAP (Employee Assistance Program). Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -2014,7 +2056,7 @@
       "response": "I do not have information about working a compressed work week (four 10-hour days). Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.0,
+      "latency_s": 5.57,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2052,10 +2094,10 @@
     {
       "session_id": "t42_flex_time",
       "question": "How early can I start my day under flex time?",
-      "response": "I do not have information about flex time. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about flex time. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.23,
+      "latency_s": 6.54,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2063,11 +2105,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about flex time is within the agent's scope, but the agent stated it does not have information and directed the user to HR, which is an unhelpful response for an in-scope query."
+          "justification": "The question about flex time is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is considered unhelpful as per the definition."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it does not have information, indicating it either failed to use a tool or the tool returned no relevant data, thus the response is not grounded in tool results."
+          "justification": "The question required tool usage to retrieve flex time policy. The agent's response indicates it did not use a tool to provide the answer, or if it did, it failed to retrieve relevant data and thus could not provide a grounded response. The response itself is not based on any tool data."
         }
       },
       "quality_scores": {},
@@ -2078,7 +2120,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about flex time. Please contact HR for assistance with this topic."
+          "text": "I do not have information about flex time. I suggest you contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -2093,10 +2135,10 @@
     {
       "session_id": "t43_tuition_reimbursement",
       "question": "What's the annual tuition reimbursement limit?",
-      "response": "I do not have information about the tuition reimbursement limit. Please contact HR for assistance with this topic.",
+      "response": "I do not have that information. Please contact HR for assistance with tuition reimbursement.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.21,
+      "latency_s": 11.94,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2104,11 +2146,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about tuition reimbursement limit is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer."
+          "justification": "The agent stated it does not have the information and directed the user to HR, which is an unhelpful response for an in-scope question."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly stated it does not have the information, indicating a failure to retrieve data from its tools to answer an in-scope question. The expected answer is available via the lookup_company_policy tool."
+          "justification": "The agent explicitly stated it does not have the information, indicating it did not retrieve data from its tools to answer the question. It did not provide any specific information, so it's not grounded."
         }
       },
       "quality_scores": {},
@@ -2119,7 +2161,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the tuition reimbursement limit. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with tuition reimbursement."
         }
       ],
       "golden_eval": {
@@ -2137,7 +2179,7 @@
       "response": "I do not have information about tuition reimbursement. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.73,
+      "latency_s": 6.0,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2175,10 +2217,10 @@
     {
       "session_id": "t45_short_term_disability",
       "question": "What does short-term disability pay?",
-      "response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+      "response": "I do not have information about short-term disability pay. I suggest you contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.8,
+      "latency_s": 4.86,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2186,11 +2228,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent stated it does not have the information and directed the user to HR, which falls under the 'unhelpful' category (1) as it failed to answer an in-scope question."
+          "justification": "The question is in scope, but the agent stated it does not have the information and directed the user to HR, which is considered unhelpful as per the definition."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent did not use its tools to find the answer to an in-scope question that required tool usage. The response is not based on any tool data, nor is it a question that could be answered without a tool."
+          "justification": "The question required tool usage to retrieve information about short-term disability pay. The agent stated it did not have the information, indicating it did not use a tool to find the answer, thus the response is not grounded in tool data."
         }
       },
       "quality_scores": {},
@@ -2201,7 +2243,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+          "text": "I do not have information about short-term disability pay. I suggest you contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -2216,10 +2258,10 @@
     {
       "session_id": "t46_short_term_disability",
       "question": "How long does short-term disability last?",
-      "response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+      "response": "I do not have that information. Please contact HR for details regarding short-term disability.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.87,
+      "latency_s": 7.56,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2227,11 +2269,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about short-term disability duration is within the agent's scope. The agent explicitly states it does not have the information and directs the user to HR, which is defined as 'unhelpful' for in-scope questions."
+          "justification": "The agent stated it does not have the information and directed the user to HR, failing to answer an in-scope question using its tools."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage to provide a factual answer. The agent's response 'I do not have that information' indicates that no data was retrieved from tools to answer the question, thus the response is not grounded in tool results. It's not 'no_tool_needed' as the question requires a tool."
+          "justification": "The agent explicitly stated it does not have the information, indicating it did not use its tools to retrieve the answer, which would have been 'Up to 12 weeks' from the lookup_company_policy tool."
         }
       },
       "quality_scores": {},
@@ -2242,7 +2284,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+          "text": "I do not have that information. Please contact HR for details regarding short-term disability."
         }
       ],
       "golden_eval": {
@@ -2257,10 +2299,10 @@
     {
       "session_id": "t47_short_term_disability",
       "question": "Is there a waiting period for short-term disability?",
-      "response": "I do not have that information. Please contact HR for assistance with questions regarding short-term disability.",
+      "response": "I do not have that information. Please contact HR to inquire about the waiting period for short-term disability.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 4.95,
+      "latency_s": 8.0,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2268,11 +2310,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The question about short-term disability waiting period is within the agent's scope. The agent stated 'I do not have that information' and directed the user to HR, which is explicitly defined as 'unhelpful' for in-scope questions."
+          "justification": "The agent failed to answer an in-scope question about short-term disability and instead directed the user to HR, which is explicitly defined as 'unhelpful'."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage to retrieve the specific policy information. The agent's response 'I do not have that information' is not based on data retrieved from its tools, nor is it a case where no tool was needed. While it doesn't fabricate information, it fails to provide a grounded answer from the tools."
+          "justification": "The agent stated it did not have the information, indicating a failure to retrieve the correct data from the `lookup_company_policy` tool, which should have provided the answer. Therefore, the response is not based on actual tool results."
         }
       },
       "quality_scores": {},
@@ -2283,7 +2325,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance with questions regarding short-term disability."
+          "text": "I do not have that information. Please contact HR to inquire about the waiting period for short-term disability."
         }
       ],
       "golden_eval": {
@@ -2298,10 +2340,10 @@
     {
       "session_id": "t48_benefits",
       "question": "How much of dependents' premiums does the company cover?",
-      "response": "I do not have that information. I suggest you contact HR.",
+      "response": "I do not have that information. I suggest you contact HR to find out how much of dependents' premiums the company covers.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.29,
+      "latency_s": 6.91,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2309,11 +2351,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent explicitly stated it did not have the information and directed the user to HR, which falls under the 'unhelpful' category for in-scope questions."
+          "justification": "The agent stated it does not have the information and directed the user to HR, which is a generic response and does not provide a specific answer to an in-scope question. This falls under 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools'."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage to find the policy information. The agent stated it did not have the information, indicating it either failed to use a tool or the tool returned no data, and thus the response is not grounded in tool results."
+          "justification": "The agent's response indicates it does not have the information, meaning it failed to retrieve the correct data from its tools for an in-scope question. The response is not based on actual tool results."
         }
       },
       "quality_scores": {},
@@ -2324,7 +2366,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR."
+          "text": "I do not have that information. I suggest you contact HR to find out how much of dependents' premiums the company covers."
         }
       ],
       "golden_eval": {
@@ -2339,10 +2381,10 @@
     {
       "session_id": "t49_tuition_reimbursement",
       "question": "Can I get a work-related course reimbursed, and up to how much?",
-      "response": "I do not have information about tuition or course reimbursement. Please contact HR for assistance with this topic.",
+      "response": "I do not have information about course or tuition reimbursement. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 3.18,
+      "latency_s": 5.83,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2350,11 +2392,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The user's question about tuition reimbursement is within the agent's scope. The agent stated it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' for in-scope questions."
+          "justification": "The user's question about tuition reimbursement is within the agent's scope, but the agent stated it does not have the information and directed the user to HR, which is an unhelpful response."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The question required tool usage to retrieve specific policy information. The agent's response indicates it did not use a tool or failed to retrieve information, and therefore the response is not based on actual data from its tools. It is not 'no_tool_needed' as a tool was required to answer the question."
+          "justification": "The agent explicitly stated it does not have information, indicating it did not retrieve data from its tools to answer the in-scope question. The expected answer requires tool lookup."
         }
       },
       "quality_scores": {},
@@ -2365,7 +2407,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about tuition or course reimbursement. Please contact HR for assistance with this topic."
+          "text": "I do not have information about course or tuition reimbursement. Please contact HR for assistance with this topic."
         }
       ],
       "golden_eval": {
@@ -2383,7 +2425,7 @@
       "response": "No, unused sick days do not roll over from year to year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.5,
+      "latency_s": 2.37,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2421,10 +2463,10 @@
     {
       "session_id": "corr_parental",
       "question": "How much parental leave does a secondary caregiver get?",
-      "response": "I do not have that information in my records. I recommend contacting HR directly to confirm the parental leave policy for secondary caregivers.",
+      "response": "I do not have that information in my records. Please contact HR to confirm the parental leave policy for secondary caregivers.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.17,
+      "latency_s": 8.99,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 0,
@@ -2432,11 +2474,11 @@
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent explicitly states it does not have information about parental leave, which is an in-scope topic, and directs the user to HR instead of providing an answer. It also fails to confirm or deny the user's suggested answer."
+          "justification": "The agent repeatedly states it does not have information about parental leave, which is an in-scope topic. It directs the user to HR instead of providing an answer."
         },
         "task_grounding": {
-          "category": "ungrounded",
-          "justification": "The agent states it does not have the information and recommends contacting HR, indicating it did not use a tool to retrieve data for this in-scope question. The response is not based on any tool results."
+          "category": "grounded",
+          "justification": "The agent explicitly states it does not have the information, implying it either attempted to use a tool and found no data, or determined it could not answer based on its available tools. It did not fabricate an answer."
         }
       },
       "quality_scores": {},
@@ -2445,21 +2487,21 @@
           "role": "user",
           "text": "How much parental leave does a secondary caregiver get?",
           "inferred_tag": "FOLLOWUP",
-          "tag_evidence": "Initial question about parental leave policy."
+          "tag_evidence": "Initial question about company policy."
         },
         {
           "role": "agent",
-          "text": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic."
+          "text": "I do not have information about parental leave. Please contact HR for assistance with this topic."
         },
         {
           "role": "user",
           "text": "I'm fairly sure it's 12 weeks for the secondary caregiver, right?",
           "inferred_tag": "VERIFY",
-          "tag_evidence": "User provides a specific number (12 weeks) and asks the agent to confirm it, after the agent stated it had no information."
+          "tag_evidence": "User provides a specific number they believe to be correct and asks for verification ('right?'), after the agent claimed not to have the information. This is questioning the agent's inability to answer by offering a potential answer for confirmation."
         },
         {
           "role": "agent",
-          "text": "I do not have that information in my records. I recommend contacting HR directly to confirm the parental leave policy for secondary caregivers."
+          "text": "I do not have that information in my records. Please contact HR to confirm the parental leave policy for secondary caregivers."
         }
       ],
       "sub_trajectories": [
@@ -2485,19 +2527,19 @@
       "response": "I do not have that information. I suggest you contact HR to confirm the policy for bereavement leave.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 5.14,
+      "latency_s": 6.64,
       "user_turns": 2,
       "tool_calls": 0,
-      "corrections": 0,
-      "verifications": 1,
+      "corrections": 1,
+      "verifications": 0,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent repeatedly states it does not have the information and directs the user to HR, failing to answer the in-scope question even after the user provided a potential answer."
+          "justification": "The agent repeatedly stated it did not have information about bereavement leave, which is an in-scope topic, and directed the user to HR instead of using its tools to provide an answer. It also failed to verify the user's correction."
         },
         "task_grounding": {
           "category": "ungrounded",
-          "justification": "The agent explicitly states 'I do not have that information', indicating it did not retrieve any data from its tools to answer the question. The question is in scope and should have been answerable by a tool."
+          "justification": "The agent explicitly stated it did not have the information and did not use any tools to retrieve data. The question required tool usage, but the agent provided no data and instead directed the user elsewhere."
         }
       },
       "quality_scores": {},
@@ -2510,146 +2552,24 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy."
+          "text": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic."
         },
         {
           "role": "user",
           "text": "I think it's only 3 days for a sibling, isn't it?",
-          "inferred_tag": "VERIFY",
-          "tag_evidence": "User suggests a specific number of days and asks for confirmation, doubting the agent's inability to provide information."
+          "inferred_tag": "CORRECTION",
+          "tag_evidence": "User provides a specific fact ('3 days for a sibling') that the agent failed to provide, implicitly correcting the agent's claim of not having information, and asks for confirmation."
         },
         {
           "role": "agent",
           "text": "I do not have that information. I suggest you contact HR to confirm the policy for bereavement leave."
         }
       ],
-      "sub_trajectories": [
-        {
-          "label": "full_conversation",
-          "start_turn": 0,
-          "end_turn": 3,
-          "outcome": "not_recovered"
-        }
-      ],
-      "golden_eval": {
-        "matched": true,
-        "golden_question": "How many bereavement days do I get for the death of a sibling?",
-        "expected_answer": "5 paid days (a sibling is immediate family).",
-        "topic": "bereavement",
-        "out_of_scope": false,
-        "similarity": 1.0
-      }
-    },
-    {
-      "session_id": "corr_ortho",
-      "question": "Is orthodontia covered, and up to how much?",
-      "response": "I do not have that information to confirm the lifetime maximum for orthodontia. Please contact HR to verify your benefits coverage.",
-      "answered_by": "policy_agent",
-      "is_a2a": false,
-      "latency_s": 6.37,
-      "user_turns": 2,
-      "tool_calls": 0,
-      "corrections": 0,
-      "verifications": 1,
-      "metrics": {
-        "response_usefulness": {
-          "category": "unhelpful",
-          "justification": "The agent repeatedly stated 'I do not have that information' and directed the user to HR, which falls under the 'unhelpful' category for an in-scope question."
-        },
-        "task_grounding": {
-          "category": "ungrounded",
-          "justification": "The agent explicitly stated it did not have the information, indicating it failed to retrieve data from its tools for an in-scope question that requires tool usage. The response is not based on actual tool results."
-        }
-      },
-      "quality_scores": {},
-      "conversation": [
-        {
-          "role": "user",
-          "text": "Is orthodontia covered, and up to how much?",
-          "inferred_tag": "FOLLOWUP",
-          "tag_evidence": "Initial question asking for information about coverage and amount."
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding orthodontia coverage."
-        },
-        {
-          "role": "user",
-          "text": "My coworker said the lifetime max is $5,000, can you confirm?",
-          "inferred_tag": "VERIFY",
-          "tag_evidence": "User provides information from an external source and asks the agent to confirm it, doubting the agent's previous inability to provide the information."
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information to confirm the lifetime maximum for orthodontia. Please contact HR to verify your benefits coverage."
-        }
-      ],
-      "sub_trajectories": [
-        {
-          "label": "full_conversation",
-          "start_turn": 0,
-          "end_turn": 3,
-          "outcome": "unhelpful"
-        }
-      ],
-      "golden_eval": {
-        "matched": true,
-        "golden_question": "Is orthodontia covered, and up to how much?",
-        "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum.",
-        "topic": "benefits",
-        "out_of_scope": false,
-        "similarity": 1.0
-      }
-    },
-    {
-      "session_id": "corr_oop",
-      "question": "What's the family out-of-pocket maximum on the PPO?",
-      "response": "I do not have that information. Please contact HR to confirm the family out-of-pocket maximum for your plan.",
-      "answered_by": "policy_agent",
-      "is_a2a": false,
-      "latency_s": 6.43,
-      "user_turns": 2,
-      "tool_calls": 0,
-      "corrections": 1,
-      "verifications": 0,
-      "metrics": {
-        "response_usefulness": {
-          "category": "unhelpful",
-          "justification": "The agent repeatedly stated it did not have the information and directed the user to HR, failing to answer an in-scope question that its tools should have been able to answer."
-        },
-        "task_grounding": {
-          "category": "ungrounded",
-          "justification": "The agent stated it did not have the information, indicating its response was not based on data retrieved from its tools, even though the information should be available via the lookup_company_policy tool."
-        }
-      },
-      "quality_scores": {},
-      "conversation": [
-        {
-          "role": "user",
-          "text": "What's the family out-of-pocket maximum on the PPO?",
-          "inferred_tag": "SPECIFICS",
-          "tag_evidence": "User asks for a specific numerical detail (out-of-pocket maximum) about a policy."
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding the family out-of-pocket maximum on the PPO plan."
-        },
-        {
-          "role": "user",
-          "text": "Pretty sure the family out-of-pocket max is $5,000, isn't it?",
-          "inferred_tag": "CORRECTION",
-          "tag_evidence": "User provides a specific fact ($5,000) that the agent failed to provide, implicitly correcting the agent's claim of not having the information and asking for verification."
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. Please contact HR to confirm the family out-of-pocket maximum for your plan."
-        }
-      ],
       "correction_boundaries": [
         {
           "turn_index": 2,
-          "wrong_claim": "I do not have that information.",
-          "correct_fact": "Pretty sure the family out-of-pocket max is $5,000",
+          "wrong_claim": "I do not have information about bereavement leave.",
+          "correct_fact": "it's only 3 days for a sibling",
           "agent_recovered": false
         }
       ],
@@ -2669,6 +2589,98 @@
       ],
       "golden_eval": {
         "matched": true,
+        "golden_question": "How many bereavement days do I get for the death of a sibling?",
+        "expected_answer": "5 paid days (a sibling is immediate family).",
+        "topic": "bereavement",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_ortho",
+      "question": "Is orthodontia covered, and up to how much?",
+      "response": "I do not have that information and cannot confirm the lifetime maximum for orthodontia. Please contact HR to verify this coverage.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 14.49,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent repeatedly stated it did not have the information and directed the user to HR, despite the question being in scope and the information being available according to the ground truth. This falls under 'The agent said 'I don't have that information' or directed the user elsewhere instead of using its tools'."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent claimed it did not have the information, which contradicts the ground truth that the information is available via the lookup_company_policy tool. The agent's response is not based on actual tool results, as it failed to retrieve the correct data."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is orthodontia covered, and up to how much?",
+          "inferred_tag": "SPECIFICS",
+          "tag_evidence": "User asks for concrete details about coverage and limits ('up to how much')."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits."
+        },
+        {
+          "role": "user",
+          "text": "My coworker said the lifetime max is $5,000, can you confirm?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User provides a potential fact ('lifetime max is $5,000') and asks the agent to confirm it, after the agent stated it had no information."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information and cannot confirm the lifetime maximum for orthodontia. Please contact HR to verify this coverage."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "overall_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "unhelpful"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "Is orthodontia covered, and up to how much?",
+        "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum.",
+        "topic": "benefits",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_oop",
+      "question": "What's the family out-of-pocket maximum on the PPO?",
+      "response": "[ERROR: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}]",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": null,
+      "user_turns": 1,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 0,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent returned an error message and did not provide any answer to the user's question, making the response unhelpful."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent returned an error message, indicating a failure to retrieve data from its tools. No grounded information was provided to answer the user's question."
+        }
+      },
+      "quality_scores": {},
+      "golden_eval": {
+        "matched": true,
         "golden_question": "What's the family out-of-pocket maximum on the PPO?",
         "expected_answer": "$8,000 for a family in-network ($4,000 individual).",
         "topic": "benefits",
@@ -2679,22 +2691,22 @@
     {
       "session_id": "corr_vesting",
       "question": "When am I vested in the 401k match?",
-      "response": "I do not have that information. Please contact HR to confirm the vesting schedule for the 401k match.",
+      "response": "I do not have that information. Please contact HR to verify the vesting schedule for the 401k match.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 6.55,
+      "latency_s": 15.22,
       "user_turns": 2,
-      "tool_calls": 0,
+      "tool_calls": 1,
       "corrections": 0,
       "verifications": 1,
       "metrics": {
         "response_usefulness": {
           "category": "unhelpful",
-          "justification": "The agent repeatedly states it does not have the information for an in-scope HR question and directs the user to HR, failing to provide a substantive answer."
+          "justification": "The agent repeatedly stated it did not have the information and directed the user to HR, failing to answer an in-scope question. This falls under 'The agent said 'I don't have that information' or directed the user elsewhere instead of using its tools'."
         },
         "task_grounding": {
-          "category": "grounded",
-          "justification": "The agent explicitly states it does not have the information, which implies a failure to retrieve data from its tools rather than fabricating an answer or using general LLM knowledge. It's grounded in the absence of data."
+          "category": "ungrounded",
+          "justification": "The agent should have used the `lookup_company_policy` tool to find the 401k vesting information, which is available. Instead, it stated it did not have the information, meaning its response was not based on actual tool results. While not a fabrication, it failed to provide a grounded answer from the available tools."
         }
       },
       "quality_scores": {},
@@ -2703,21 +2715,535 @@
           "role": "user",
           "text": "When am I vested in the 401k match?",
           "inferred_tag": "FOLLOWUP",
-          "tag_evidence": "Initial question about 401k vesting schedule."
+          "tag_evidence": "Initial question about 401k vesting."
         },
         {
           "role": "agent",
-          "text": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with your 401k vesting questions."
         },
         {
           "role": "user",
           "text": "I heard you're only vested after 2 years, right?",
           "inferred_tag": "VERIFY",
-          "tag_evidence": "User provides a specific piece of information ('2 years') and asks the agent to confirm it, after the agent stated it didn't have the information."
+          "tag_evidence": "User asks 'right?' to confirm a piece of information they heard, doubting the agent's previous inability to answer."
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR to confirm the vesting schedule for the 401k match."
+          "text": "I do not have that information. Please contact HR to verify the vesting schedule for the 401k match."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "not_recovered"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "When am I vested in the 401k match?",
+        "expected_answer": "After 1 year of employment.",
+        "topic": "benefits",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_pto_days",
+      "question": "How many PTO days do I get per year?",
+      "response": "According to our company policy, you get 20 PTO days per year (accrued monthly). Up to 5 unused days can roll over to the next year.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 14.42,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 1,
+      "verifications": 0,
+      "metrics": {
+        "response_usefulness": {
+          "category": "meaningful",
+          "justification": "The agent correctly answered the user's initial question. When the user provided an incorrect correction, the agent re-asserted the correct information and provided additional relevant details about PTO rollover, demonstrating independent verification of the correct policy."
+        },
+        "task_grounding": {
+          "category": "grounded",
+          "justification": "The agent's response provides specific details about PTO days and rollover, which are derived from company policy data, as indicated by the ground truth and the agent's scope."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many PTO days do I get per year?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about PTO days."
+        },
+        {
+          "role": "agent",
+          "text": "You get 20 PTO days per year, which are accrued monthly."
+        },
+        {
+          "role": "user",
+          "text": "I'm pretty sure it's 25 days a year, isn't it?",
+          "inferred_tag": "CORRECTION",
+          "tag_evidence": "User contradicts agent's previous answer about PTO days and provides a different number."
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you get 20 PTO days per year (accrued monthly). Up to 5 unused days can roll over to the next year."
+        }
+      ],
+      "correction_boundaries": [
+        {
+          "turn_index": 2,
+          "wrong_claim": "You get 20 PTO days per year, which are accrued monthly.",
+          "correct_fact": "it's 25 days a year",
+          "agent_recovered": true
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "start_turn": 0,
+          "end_turn": 1,
+          "outcome": "correct"
+        },
+        {
+          "label": "post_correction_1",
+          "start_turn": 2,
+          "end_turn": 3,
+          "outcome": "recovered"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How many PTO days do I get per year?",
+        "expected_answer": "20 PTO days per year, accrued monthly.",
+        "topic": "pto",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_pto_rollover",
+      "question": "How many unused PTO days can I roll over to next year?",
+      "response": "According to our company policy, you can only roll over up to 5 unused PTO days to the next year. (For reference, you do get 10 days of sick leave per year, but those do not roll over.)",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 8.6,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "meaningful",
+          "justification": "The agent correctly answered the user's question about PTO rollover days, stating 5 days. When the user challenged this, the agent re-affirmed the correct policy and provided additional clarifying information about sick leave, which is helpful."
+        },
+        "task_grounding": {
+          "category": "grounded",
+          "justification": "The agent's response is directly aligned with the ground truth data (5 unused PTO days roll over) and is stated to be 'according to our company policy', implying tool usage (lookup_company_policy)."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many unused PTO days can I roll over to next year?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about company policy."
+        },
+        {
+          "role": "agent",
+          "text": "You can roll over up to 5 unused PTO days to the next year."
+        },
+        {
+          "role": "user",
+          "text": "I thought you could roll over 10, right?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User doubts the agent's previous answer and asks for verification, suggesting an alternative number without definitively stating it as fact."
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you can only roll over up to 5 unused PTO days to the next year. (For reference, you do get 10 days of sick leave per year, but those do not roll over.)"
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "correct"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How many unused PTO days can I roll over to next year?",
+        "expected_answer": "Up to 5 unused PTO days roll over.",
+        "topic": "pto",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_sick",
+      "question": "How many sick days do I get per year?",
+      "response": "According to our company policy, you get 10 sick days per year, not 15. Unused sick days do not roll over to the next year.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 10.34,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "meaningful",
+          "justification": "The agent correctly answers the user's question about sick days, and then re-affirms the correct answer when the user challenges it, citing company policy. The answer is specific and accurate according to the expected answer."
+        },
+        "task_grounding": {
+          "category": "grounded",
+          "justification": "The agent explicitly states 'According to our company policy,' indicating the information is retrieved from a tool (lookup_company_policy) and not fabricated. The details provided (10 sick days, no rollover) are specific policy details."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many sick days do I get per year?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about company policy."
+        },
+        {
+          "role": "agent",
+          "text": "You get 10 sick days per year (they do not roll over)."
+        },
+        {
+          "role": "user",
+          "text": "I heard it's 15 sick days, isn't it?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User doubts the agent's answer by presenting an alternative fact and asking for verification ('isn't it?'). The agent's previous answer was factually correct, preventing this from being a CORRECTION."
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you get 10 sick days per year, not 15. Unused sick days do not roll over to the next year."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How many sick days do I get per year?",
+        "expected_answer": "10 sick days per year.",
+        "topic": "sick_leave",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_remote",
+      "question": "How many days a week can I work from home?",
+      "response": "According to the company policy, you can work remotely up to 3 days per week with manager approval. If you have questions about an exception or a different arrangement, I suggest contacting HR.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 10.47,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 1,
+      "verifications": 0,
+      "metrics": {
+        "response_usefulness": {
+          "category": "meaningful",
+          "justification": "The agent correctly states the company policy regarding working from home days, even after the user attempts to correct it with incorrect information. It provides specific, actionable information and clarifies the policy."
+        },
+        "task_grounding": {
+          "category": "grounded",
+          "justification": "The agent's response is based on company policy data, which would be retrieved from a tool (like 'lookup_company_policy' as implied by the GROUND TRUTH DATA). The answer aligns with the expected answer from such a tool."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many days a week can I work from home?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about company policy."
+        },
+        {
+          "role": "agent",
+          "text": "You can work from home up to 3 days per week with manager approval."
+        },
+        {
+          "role": "user",
+          "text": "My manager said 4 days a week, that's right isn't it?",
+          "inferred_tag": "CORRECTION",
+          "tag_evidence": "User contradicts the agent's previous answer (3 days) with a different number (4 days) and asks for confirmation of their number."
+        },
+        {
+          "role": "agent",
+          "text": "According to the company policy, you can work remotely up to 3 days per week with manager approval. If you have questions about an exception or a different arrangement, I suggest contacting HR."
+        }
+      ],
+      "correction_boundaries": [
+        {
+          "turn_index": 2,
+          "wrong_claim": "You can work from home up to 3 days per week with manager approval.",
+          "correct_fact": "My manager said 4 days a week",
+          "agent_recovered": true
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "start_turn": 0,
+          "end_turn": 1,
+          "outcome": "correct"
+        },
+        {
+          "label": "post_correction_1",
+          "start_turn": 2,
+          "end_turn": 3,
+          "outcome": "recovered"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How many days a week can I work from home?",
+        "expected_answer": "Up to 3 days per week with manager approval.",
+        "topic": "remote_work",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_receipt",
+      "question": "Do I need a receipt for a $30 expense?",
+      "response": "Actually, according to the official company expense policy, receipts are required for any expense **over $25**. \n\nSince your expense is $30, you will need to provide a receipt to get reimbursed.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 13.38,
+      "user_turns": 2,
+      "tool_calls": 1,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "meaningful",
+          "justification": "The agent's final response correctly and clearly states the company policy regarding receipts for expenses over $25, directly answering the user's question and correcting the user's misconception."
+        },
+        "task_grounding": {
+          "category": "grounded",
+          "justification": "The agent explicitly cites 'the company policy' and provides a specific threshold ($25) that matches the expected answer, indicating the information was retrieved from a tool like 'lookup_company_policy'."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need a receipt for a $30 expense?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question from the user."
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need a receipt. According to the company policy, receipts are required for any expense over $25. Since your expense is $30, a receipt is required for reimbursement."
+        },
+        {
+          "role": "user",
+          "text": "I think receipts are only required over $50, right?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User expresses doubt about the agent's previous answer and asks for confirmation of their own understanding ('I think receipts are only required over $50, right?'), rather than definitively stating the agent is wrong."
+        },
+        {
+          "role": "agent",
+          "text": "Actually, according to the official company expense policy, receipts are required for any expense **over $25**. \n\nSince your expense is $30, you will need to provide a receipt to get reimbursed."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "Do I need a receipt for a $30 expense?",
+        "expected_answer": "Yes - receipts are required for any expense over $25.",
+        "topic": "expenses",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_travel",
+      "question": "Do I need pre-approval for a $600 flight?",
+      "response": "I do not have information regarding expense pre-approval limits. Please contact HR to verify this policy.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 9.5,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent explicitly stated it did not have information regarding travel expenses or pre-approval limits and directed the user to HR. The question is within the agent's scope (expenses policy), but the agent failed to provide a substantive answer."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent's response indicates it does not have the information, implying it either failed to use the appropriate tool (lookup_company_policy) or the tool returned no data, and the agent did not provide an answer based on tool results. The question requires tool usage, so it's not 'no_tool_needed', and the response is not based on actual tool data, making it ungrounded."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need pre-approval for a $600 flight?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about company policy regarding expense pre-approval."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding travel expenses or flight approvals. Please contact HR for assistance with this topic."
+        },
+        {
+          "role": "user",
+          "text": "Pre-approval is only needed over $1,000, isn't it?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User states a potential fact ('Pre-approval is only needed over $1,000') and asks for confirmation, doubting the agent's previous inability to answer."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding expense pre-approval limits. Please contact HR to verify this policy."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "unhelpful"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "Do I need pre-approval for a $600 flight?",
+        "expected_answer": "Yes - travel expenses over $500 require manager pre-approval.",
+        "topic": "expenses",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_holidays",
+      "question": "How many paid holidays does the company observe?",
+      "response": "I do not have that information in my records. I recommend contacting HR to confirm the exact number of paid holidays the company observes.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 17.42,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent repeatedly states it does not have the information and directs the user to HR, which is an in-scope topic. This falls under the 'unhelpful' definition: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'"
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent explicitly states it does not have the information, indicating its response is not based on data retrieved from its tools. The question is in scope and should be answerable by the `lookup_company_policy` tool."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many paid holidays does the company observe?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question in a new topic."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic."
+        },
+        {
+          "role": "user",
+          "text": "I'm fairly sure it's 13 paid holidays, right?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User provides a potential fact and asks the agent to confirm it, doubting the agent's previous non-answer."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information in my records. I recommend contacting HR to confirm the exact number of paid holidays the company observes."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "not_recovered"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How many paid holidays does the company observe?",
+        "expected_answer": "11 paid holidays per year.",
+        "topic": "holidays",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_premium",
+      "question": "What share of my health premium does the company cover?",
+      "response": "I do not have information regarding the percentage of the premium covered by the company. I suggest you contact HR to get the exact details.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 24.47,
+      "user_turns": 2,
+      "tool_calls": 1,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent repeatedly states it does not have the information for an in-scope question and directs the user to HR, which is not a meaningful answer. Even after the user provided a potential answer, the agent did not verify it or provide a correct response."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent explicitly states it does not have the information, indicating it did not retrieve data from its tools to answer the question. The expected answer requires tool lookup."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What share of my health premium does the company cover?",
+          "inferred_tag": "SPECIFICS",
+          "tag_evidence": "User asks for a specific numerical detail about company policy."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding the specific share of health premiums covered by the company. My available information only states that the company offers competitive benefits. I suggest you contact HR for more details."
+        },
+        {
+          "role": "user",
+          "text": "The company covers 100% of the premium, right?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User proposes a specific fact and asks the agent to confirm its accuracy, after the agent stated it lacked information."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding the percentage of the premium covered by the company. I suggest you contact HR to get the exact details."
         }
       ],
       "sub_trajectories": [
@@ -2730,9 +3256,131 @@
       ],
       "golden_eval": {
         "matched": true,
-        "golden_question": "When am I vested in the 401k match?",
-        "expected_answer": "After 1 year of employment.",
+        "golden_question": "What share of my health premium does the company cover?",
+        "expected_answer": "80% of the employee premium (50% for dependents).",
         "topic": "benefits",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_dental_major",
+      "question": "What does dental cover for major procedures?",
+      "response": "I do not have that information. Please contact HR to verify the coverage details for major dental procedures.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 11.06,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent explicitly states it does not have the information and directs the user to HR, failing to answer an in-scope question that should be answerable by its tools (ground truth shows 80% coverage)."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent stated it did not have the information, indicating it either did not use the tool or the tool failed to provide the correct data. The expected answer is available via the lookup_company_policy tool, so the agent's response is not based on actual tool results that would provide the correct answer."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What does dental cover for major procedures?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question about dental coverage for major procedures, not fitting other specific reactive tags."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about dental coverage for major procedures. Please contact HR for more details."
+        },
+        {
+          "role": "user",
+          "text": "I think major procedures are covered 100%, aren't they?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User doubts the agent's claim of not having information by suggesting a potential fact ('covered 100%') and asking for confirmation ('aren't they?')."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR to verify the coverage details for major dental procedures."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "unhelpful"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "What does dental cover for major procedures?",
+        "expected_answer": "80% coverage for major dental procedures.",
+        "topic": "benefits",
+        "out_of_scope": false,
+        "similarity": 1.0
+      }
+    },
+    {
+      "session_id": "corr_std",
+      "question": "How long does short-term disability last?",
+      "response": "I do not have that information. Please contact HR to verify the details and duration of short-term disability.",
+      "answered_by": "policy_agent",
+      "is_a2a": false,
+      "latency_s": 12.21,
+      "user_turns": 2,
+      "tool_calls": 0,
+      "corrections": 0,
+      "verifications": 1,
+      "metrics": {
+        "response_usefulness": {
+          "category": "unhelpful",
+          "justification": "The agent repeatedly states it does not have the information and directs the user to HR, which is explicitly listed as an 'unhelpful' scenario ('The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'). Short-term disability is within the agent's scope."
+        },
+        "task_grounding": {
+          "category": "ungrounded",
+          "justification": "The agent explicitly states it does not have the information and did not provide any data-driven answer, indicating it either did not use a tool or the tool failed to provide information. This is a factual question that would require tool usage."
+        }
+      },
+      "quality_scores": {},
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How long does short-term disability last?",
+          "inferred_tag": "FOLLOWUP",
+          "tag_evidence": "Initial question asking for information about short-term disability duration."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+        },
+        {
+          "role": "user",
+          "text": "I heard short-term disability lasts 26 weeks, right?",
+          "inferred_tag": "VERIFY",
+          "tag_evidence": "User provides a potential fact ('26 weeks') and asks the agent to confirm its correctness ('right?'), rather than directly correcting a previous agent statement."
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR to verify the details and duration of short-term disability."
+        }
+      ],
+      "sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "start_turn": 0,
+          "end_turn": 3,
+          "outcome": "wrong"
+        }
+      ],
+      "golden_eval": {
+        "matched": true,
+        "golden_question": "How long does short-term disability last?",
+        "expected_answer": "Up to 12 weeks.",
+        "topic": "short_term_disability",
         "out_of_scope": false,
         "similarity": 1.0
       }
@@ -2741,7 +3389,7 @@
   "details": {
     "parse_errors": "0",
     "parse_error_rate": "0.0",
-    "elapsed_seconds": "71.3",
+    "elapsed_seconds": "101.3",
     "project": "agent-quality-lab-01",
     "dataset": "local.conversations",
     "location": "us-central1",

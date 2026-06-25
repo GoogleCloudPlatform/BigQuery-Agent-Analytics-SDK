@@ -16,7 +16,7 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.28,
+      "latency_s": 3.91,
       "category": "pto"
     },
     {
@@ -35,13 +35,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.25,
+      "latency_s": 3.64,
       "category": "pto"
     },
     {
       "session_id": "t03_pto",
       "question": "Roughly how much PTO do I accrue each month?",
-      "final_response": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month.",
+      "final_response": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to roughly 1.67 days of PTO accrued each month.",
       "conversation": [
         {
           "role": "user",
@@ -49,18 +49,18 @@
         },
         {
           "role": "agent",
-          "text": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month."
+          "text": "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to roughly 1.67 days of PTO accrued each month."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.18,
+      "latency_s": 3.37,
       "category": "pto"
     },
     {
       "session_id": "t04_pto",
       "question": "If I leave the company mid-year, what happens to my unused PTO?",
-      "final_response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR for assistance with this question.",
+      "final_response": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get clarification on this policy.",
       "conversation": [
         {
           "role": "user",
@@ -68,18 +68,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR for assistance with this question."
+          "text": "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get clarification on this policy."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.89,
+      "latency_s": 6.4,
       "category": "pto"
     },
     {
       "session_id": "t05_sick_leave",
       "question": "How many sick days do I get per year?",
-      "final_response": "You get 10 sick days per year, and they do not roll over to the next year.",
+      "final_response": "You get 10 sick days per year. Please note that unused sick days do not roll over to the next year.",
       "conversation": [
         {
           "role": "user",
@@ -87,18 +87,18 @@
         },
         {
           "role": "agent",
-          "text": "You get 10 sick days per year, and they do not roll over to the next year."
+          "text": "You get 10 sick days per year. Please note that unused sick days do not roll over to the next year."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 2.14,
+      "latency_s": 2.63,
       "category": "sick_leave"
     },
     {
       "session_id": "t06_sick_leave",
       "question": "Do sick days roll over to the next year?",
-      "final_response": "No, sick days do not roll over to the next year. The company provides 10 days of sick leave per year, and any unused days do not roll over.",
+      "final_response": "No, sick days do not roll over to the next year.",
       "conversation": [
         {
           "role": "user",
@@ -106,18 +106,18 @@
         },
         {
           "role": "agent",
-          "text": "No, sick days do not roll over to the next year. The company provides 10 days of sick leave per year, and any unused days do not roll over."
+          "text": "No, sick days do not roll over to the next year."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.64,
+      "latency_s": 2.02,
       "category": "sick_leave"
     },
     {
       "session_id": "t07_sick_leave",
       "question": "If I'm out sick for 4 days, do I need a doctor's note?",
-      "final_response": "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR for assistance with this question.",
+      "final_response": "I do not have information regarding whether a doctor's note is required for sick leave. Please contact HR for more information.",
       "conversation": [
         {
           "role": "user",
@@ -125,12 +125,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR for assistance with this question."
+          "text": "I do not have information regarding whether a doctor's note is required for sick leave. Please contact HR for more information."
         }
       ],
-      "tool_calls": 0,
+      "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 4.44,
+      "latency_s": 11.17,
       "category": "sick_leave"
     },
     {
@@ -149,13 +149,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 2.23,
+      "latency_s": 2.29,
       "category": "remote_work"
     },
     {
       "session_id": "t09_remote_work",
       "question": "Do I need approval to work remotely?",
-      "final_response": "Yes, you need manager approval to work remotely (up to 3 days per week).",
+      "final_response": "Yes, you can work remotely up to 3 days per week, but it requires manager approval.",
       "conversation": [
         {
           "role": "user",
@@ -163,18 +163,18 @@
         },
         {
           "role": "agent",
-          "text": "Yes, you need manager approval to work remotely (up to 3 days per week)."
+          "text": "Yes, you can work remotely up to 3 days per week, but it requires manager approval."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 1.53,
+      "latency_s": 1.59,
       "category": "remote_work"
     },
     {
       "session_id": "t10_remote_work",
       "question": "What are the core collaboration hours for remote work?",
-      "final_response": "I do not have information about the core collaboration hours for remote work. Please contact HR for this information.",
+      "final_response": "I do not have information about the core collaboration hours for remote work. The only information I have regarding remote work is that employees can work remotely up to 3 days per week with manager approval. \n\nFor more details, please contact HR.",
       "conversation": [
         {
           "role": "user",
@@ -182,12 +182,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the core collaboration hours for remote work. Please contact HR for this information."
+          "text": "I do not have information about the core collaboration hours for remote work. The only information I have regarding remote work is that employees can work remotely up to 3 days per week with manager approval. \n\nFor more details, please contact HR."
         }
       ],
       "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 10.74,
+      "latency_s": 12.81,
       "category": "remote_work"
     },
     {
@@ -206,7 +206,7 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 2.85,
+      "latency_s": 2.64,
       "category": "remote_work"
     },
     {
@@ -225,13 +225,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.68,
+      "latency_s": 5.65,
       "category": "expenses"
     },
     {
       "session_id": "t13_expenses",
       "question": "Do I need a receipt for a $30 expense?",
-      "final_response": "I do not have information regarding the company's expense policy. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have that information. Please contact HR for assistance with expense policies.",
       "conversation": [
         {
           "role": "user",
@@ -239,18 +239,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding the company's expense policy. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with expense policies."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.29,
+      "latency_s": 4.91,
       "category": "expenses"
     },
     {
       "session_id": "t14_expenses",
       "question": "Do I need pre-approval for a $600 flight?",
-      "final_response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this inquiry.",
+      "final_response": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -258,18 +258,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this inquiry."
+          "text": "I do not have information regarding travel expenses or flight pre-approvals. Please contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.9,
+      "latency_s": 3.87,
       "category": "expenses"
     },
     {
       "session_id": "t15_expenses",
       "question": "How long do I have to submit a business expense?",
-      "final_response": "I do not have that information. Please contact HR for assistance regarding business expenses.",
+      "final_response": "I do not have that information. Please contact HR to find out how long you have to submit a business expense.",
       "conversation": [
         {
           "role": "user",
@@ -277,18 +277,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding business expenses."
+          "text": "I do not have that information. Please contact HR to find out how long you have to submit a business expense."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.74,
+      "latency_s": 7.53,
       "category": "expenses"
     },
     {
       "session_id": "t16_benefits",
       "question": "What share of my health premium does the company cover?",
-      "final_response": "I do not have information about the specific share of your health premium covered by the company. Please contact HR for more details.",
+      "final_response": "I do not have that information. I suggest you contact HR to find out what share of your health premium the company covers.",
       "conversation": [
         {
           "role": "user",
@@ -296,12 +296,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the specific share of your health premium covered by the company. Please contact HR for more details."
+          "text": "I do not have that information. I suggest you contact HR to find out what share of your health premium the company covers."
         }
       ],
-      "tool_calls": 1,
+      "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 8.82,
+      "latency_s": 4.91,
       "category": "benefits"
     },
     {
@@ -320,13 +320,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.67,
+      "latency_s": 6.1,
       "category": "benefits"
     },
     {
       "session_id": "t18_benefits",
       "question": "What's the family out-of-pocket maximum on the PPO?",
-      "final_response": "The family out-of-pocket maximum on the PPO plan is **$8,000** (for in-network coverage).",
+      "final_response": "I do not have that information. I suggest you contact HR for details regarding the family out-of-pocket maximum on the PPO.",
       "conversation": [
         {
           "role": "user",
@@ -334,12 +334,12 @@
         },
         {
           "role": "agent",
-          "text": "The family out-of-pocket maximum on the PPO plan is **$8,000** (for in-network coverage)."
+          "text": "I do not have that information. I suggest you contact HR for details regarding the family out-of-pocket maximum on the PPO."
         }
       ],
-      "tool_calls": 1,
+      "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 14.24,
+      "latency_s": 4.2,
       "category": "benefits"
     },
     {
@@ -358,13 +358,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.08,
+      "latency_s": 5.26,
       "category": "benefits"
     },
     {
       "session_id": "t20_benefits",
       "question": "How much does the company contribute to my HSA for family coverage?",
-      "final_response": "I do not have that information. Please contact HR for details regarding HSA contributions.",
+      "final_response": "I do not have that information. Please contact HR for details regarding HSA contributions and family coverage.",
       "conversation": [
         {
           "role": "user",
@@ -372,26 +372,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding HSA contributions."
-        }
-      ],
-      "tool_calls": 0,
-      "answered_by": "policy_agent",
-      "latency_s": 4.57,
-      "category": "benefits"
-    },
-    {
-      "session_id": "t21_benefits",
-      "question": "How much does the company put into an HSA for individual coverage?",
-      "final_response": "I do not have information about HSA contributions. Please contact HR for assistance with this topic.",
-      "conversation": [
-        {
-          "role": "user",
-          "text": "How much does the company put into an HSA for individual coverage?"
-        },
-        {
-          "role": "agent",
-          "text": "I do not have information about HSA contributions. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for details regarding HSA contributions and family coverage."
         }
       ],
       "tool_calls": 0,
@@ -400,9 +381,28 @@
       "category": "benefits"
     },
     {
+      "session_id": "t21_benefits",
+      "question": "How much does the company put into an HSA for individual coverage?",
+      "final_response": "I do not have that information. I suggest you contact HR to get details about the company's HSA contributions.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much does the company put into an HSA for individual coverage?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. I suggest you contact HR to get details about the company's HSA contributions."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 5.16,
+      "category": "benefits"
+    },
+    {
       "session_id": "t22_benefits",
       "question": "Are preventive dental cleanings covered?",
-      "final_response": "I do not have information about whether preventive dental cleanings are covered. I suggest you contact HR for more details.",
+      "final_response": "I do not have information regarding whether preventive dental cleanings are covered. Please contact HR for more details about your benefits.",
       "conversation": [
         {
           "role": "user",
@@ -410,12 +410,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about whether preventive dental cleanings are covered. I suggest you contact HR for more details."
+          "text": "I do not have information regarding whether preventive dental cleanings are covered. Please contact HR for more details about your benefits."
         }
       ],
-      "tool_calls": 0,
+      "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 3.74,
+      "latency_s": 8.19,
       "category": "benefits"
     },
     {
@@ -434,13 +434,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.05,
+      "latency_s": 6.07,
       "category": "benefits"
     },
     {
       "session_id": "t24_benefits",
       "question": "Is orthodontia covered, and up to how much?",
-      "final_response": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits.",
+      "final_response": "I do not have that information. I suggest you contact HR to get details about orthodontia coverage.",
       "conversation": [
         {
           "role": "user",
@@ -448,12 +448,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits."
+          "text": "I do not have that information. I suggest you contact HR to get details about orthodontia coverage."
         }
       ],
-      "tool_calls": 0,
+      "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 4.82,
+      "latency_s": 11.31,
       "category": "benefits"
     },
     {
@@ -470,15 +470,15 @@
           "text": "I do not have information about the vision benefit for eye exams and glasses. Please contact HR for assistance with this topic."
         }
       ],
-      "tool_calls": 1,
+      "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 8.28,
+      "latency_s": 6.74,
       "category": "benefits"
     },
     {
       "session_id": "t26_benefits",
       "question": "What's the company 401k match?",
-      "final_response": "I do not have information about the company's 401k match. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have information about the company's 401k match. I suggest you contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -486,18 +486,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the company's 401k match. Please contact HR for assistance with this topic."
+          "text": "I do not have information about the company's 401k match. I suggest you contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.19,
+      "latency_s": 4.4,
       "category": "benefits"
     },
     {
       "session_id": "t27_benefits",
       "question": "When am I vested in the 401k match?",
-      "final_response": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have that information. I suggest you contact HR.",
       "conversation": [
         {
           "role": "user",
@@ -505,18 +505,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. I suggest you contact HR."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.43,
+      "latency_s": 4.48,
       "category": "benefits"
     },
     {
       "session_id": "t28_benefits",
       "question": "If I leave after six months, do I keep the 401k match?",
-      "final_response": "I do not have that information. I suggest you contact HR to get details about the 401k match policy.",
+      "final_response": "I do not have that information. I suggest you contact HR to find out about the 401(k) match policy.",
       "conversation": [
         {
           "role": "user",
@@ -524,22 +524,41 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to get details about the 401k match policy."
+          "text": "I do not have that information. I suggest you contact HR to find out about the 401(k) match policy."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 7.17,
+      "latency_s": 5.0,
       "category": "benefits"
     },
     {
       "session_id": "t29_benefits",
       "question": "How much parental leave does a primary caregiver get?",
-      "final_response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
+      "final_response": "I do not have information about parental leave. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
           "text": "How much parental leave does a primary caregiver get?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about parental leave. Please contact HR for assistance with this topic."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 4.98,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t30_benefits",
+      "question": "How much parental leave does a secondary caregiver get?",
+      "final_response": "I do not have information about parental leave. I suggest you contact HR for assistance with this topic.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much parental leave does a secondary caregiver get?"
         },
         {
           "role": "agent",
@@ -548,26 +567,7 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.86,
-      "category": "benefits"
-    },
-    {
-      "session_id": "t30_benefits",
-      "question": "How much parental leave does a secondary caregiver get?",
-      "final_response": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic.",
-      "conversation": [
-        {
-          "role": "user",
-          "text": "How much parental leave does a secondary caregiver get?"
-        },
-        {
-          "role": "agent",
-          "text": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic."
-        }
-      ],
-      "tool_calls": 0,
-      "answered_by": "policy_agent",
-      "latency_s": 4.66,
+      "latency_s": 5.54,
       "category": "benefits"
     },
     {
@@ -586,13 +586,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.03,
+      "latency_s": 4.98,
       "category": "benefits"
     },
     {
       "session_id": "t32_holidays",
       "question": "How many paid holidays does the company observe?",
-      "final_response": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have information about the company's paid holidays policy. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -600,18 +600,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic."
+          "text": "I do not have information about the company's paid holidays policy. Please contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.01,
+      "latency_s": 4.58,
       "category": "holidays"
     },
     {
       "session_id": "t33_holidays",
       "question": "Is Juneteenth a company holiday?",
-      "final_response": "I do not have information about company holidays or whether Juneteenth is recognized as one. Please contact HR for assistance with this question.",
+      "final_response": "I do not have information about company holidays. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -619,18 +619,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about company holidays or whether Juneteenth is recognized as one. Please contact HR for assistance with this question."
+          "text": "I do not have information about company holidays. Please contact HR for assistance with this topic."
         }
       ],
-      "tool_calls": 0,
+      "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 3.94,
+      "latency_s": 10.89,
       "category": "holidays"
     },
     {
       "session_id": "t34_holidays",
       "question": "Which days around Thanksgiving are paid holidays?",
-      "final_response": "I do not have information about paid holidays. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have information about which days around Thanksgiving are paid holidays. Please contact HR for this information.",
       "conversation": [
         {
           "role": "user",
@@ -638,12 +638,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about paid holidays. Please contact HR for assistance with this topic."
+          "text": "I do not have information about which days around Thanksgiving are paid holidays. Please contact HR for this information."
         }
       ],
-      "tool_calls": 0,
+      "tool_calls": 1,
       "answered_by": "policy_agent",
-      "latency_s": 3.7,
+      "latency_s": 13.24,
       "category": "holidays"
     },
     {
@@ -662,36 +662,17 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.83,
+      "latency_s": 5.37,
       "category": "bereavement"
     },
     {
       "session_id": "t36_bereavement",
       "question": "How many bereavement days do I get for the death of a sibling?",
-      "final_response": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy.",
-      "conversation": [
-        {
-          "role": "user",
-          "text": "How many bereavement days do I get for the death of a sibling?"
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy."
-        }
-      ],
-      "tool_calls": 0,
-      "answered_by": "policy_agent",
-      "latency_s": 4.15,
-      "category": "bereavement"
-    },
-    {
-      "session_id": "t37_bereavement",
-      "question": "How many bereavement days do I get for a grandparent?",
       "final_response": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
-          "text": "How many bereavement days do I get for a grandparent?"
+          "text": "How many bereavement days do I get for the death of a sibling?"
         },
         {
           "role": "agent",
@@ -700,7 +681,26 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.02,
+      "latency_s": 6.02,
+      "category": "bereavement"
+    },
+    {
+      "session_id": "t37_bereavement",
+      "question": "How many bereavement days do I get for a grandparent?",
+      "final_response": "I do not have information about bereavement leave. Please contact HR for assistance with this topic.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many bereavement days do I get for a grandparent?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about bereavement leave. Please contact HR for assistance with this topic."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 4.16,
       "category": "bereavement"
     },
     {
@@ -719,13 +719,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.72,
+      "latency_s": 5.17,
       "category": "jury_duty"
     },
     {
       "session_id": "t39_eap",
       "question": "How many EAP counseling sessions do I get?",
-      "final_response": "I do not have information about EAP counseling sessions. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have that information. Please contact HR to get details about EAP counseling sessions.",
       "conversation": [
         {
           "role": "user",
@@ -733,18 +733,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about EAP counseling sessions. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR to get details about EAP counseling sessions."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.54,
+      "latency_s": 6.86,
       "category": "eap"
     },
     {
       "session_id": "t40_eap",
       "question": "Does the EAP have a 24/7 hotline?",
-      "final_response": "I do not have that information. Please contact HR for more details regarding the Employee Assistance Program (EAP).",
+      "final_response": "I do not have information about the EAP (Employee Assistance Program). Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -752,12 +752,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for more details regarding the Employee Assistance Program (EAP)."
+          "text": "I do not have information about the EAP (Employee Assistance Program). Please contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.1,
+      "latency_s": 6.8,
       "category": "eap"
     },
     {
@@ -776,13 +776,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.0,
+      "latency_s": 5.57,
       "category": "flex_time"
     },
     {
       "session_id": "t42_flex_time",
       "question": "How early can I start my day under flex time?",
-      "final_response": "I do not have information about flex time. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have information about flex time. I suggest you contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -790,18 +790,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about flex time. Please contact HR for assistance with this topic."
+          "text": "I do not have information about flex time. I suggest you contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.23,
+      "latency_s": 6.54,
       "category": "flex_time"
     },
     {
       "session_id": "t43_tuition_reimbursement",
       "question": "What's the annual tuition reimbursement limit?",
-      "final_response": "I do not have information about the tuition reimbursement limit. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have that information. Please contact HR for assistance with tuition reimbursement.",
       "conversation": [
         {
           "role": "user",
@@ -809,12 +809,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the tuition reimbursement limit. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with tuition reimbursement."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.21,
+      "latency_s": 11.94,
       "category": "tuition_reimbursement"
     },
     {
@@ -833,13 +833,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.73,
+      "latency_s": 6.0,
       "category": "tuition_reimbursement"
     },
     {
       "session_id": "t45_short_term_disability",
       "question": "What does short-term disability pay?",
-      "final_response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+      "final_response": "I do not have information about short-term disability pay. I suggest you contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -847,18 +847,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+          "text": "I do not have information about short-term disability pay. I suggest you contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.8,
+      "latency_s": 4.86,
       "category": "short_term_disability"
     },
     {
       "session_id": "t46_short_term_disability",
       "question": "How long does short-term disability last?",
-      "final_response": "I do not have that information. Please contact HR for assistance regarding short-term disability.",
+      "final_response": "I do not have that information. Please contact HR for details regarding short-term disability.",
       "conversation": [
         {
           "role": "user",
@@ -866,18 +866,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+          "text": "I do not have that information. Please contact HR for details regarding short-term disability."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.87,
+      "latency_s": 7.56,
       "category": "short_term_disability"
     },
     {
       "session_id": "t47_short_term_disability",
       "question": "Is there a waiting period for short-term disability?",
-      "final_response": "I do not have that information. Please contact HR for assistance with questions regarding short-term disability.",
+      "final_response": "I do not have that information. Please contact HR to inquire about the waiting period for short-term disability.",
       "conversation": [
         {
           "role": "user",
@@ -885,18 +885,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance with questions regarding short-term disability."
+          "text": "I do not have that information. Please contact HR to inquire about the waiting period for short-term disability."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 4.95,
+      "latency_s": 8.0,
       "category": "short_term_disability"
     },
     {
       "session_id": "t48_benefits",
       "question": "How much of dependents' premiums does the company cover?",
-      "final_response": "I do not have that information. I suggest you contact HR.",
+      "final_response": "I do not have that information. I suggest you contact HR to find out how much of dependents' premiums the company covers.",
       "conversation": [
         {
           "role": "user",
@@ -904,18 +904,18 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR."
+          "text": "I do not have that information. I suggest you contact HR to find out how much of dependents' premiums the company covers."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.29,
+      "latency_s": 6.91,
       "category": "benefits"
     },
     {
       "session_id": "t49_tuition_reimbursement",
       "question": "Can I get a work-related course reimbursed, and up to how much?",
-      "final_response": "I do not have information about tuition or course reimbursement. Please contact HR for assistance with this topic.",
+      "final_response": "I do not have information about course or tuition reimbursement. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -923,12 +923,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about tuition or course reimbursement. Please contact HR for assistance with this topic."
+          "text": "I do not have information about course or tuition reimbursement. Please contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 3.18,
+      "latency_s": 5.83,
       "category": "tuition_reimbursement"
     },
     {
@@ -947,13 +947,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 1.5,
+      "latency_s": 2.37,
       "category": "sick_leave"
     },
     {
       "session_id": "corr_parental",
       "question": "How much parental leave does a secondary caregiver get?",
-      "final_response": "I do not have that information in my records. I recommend contacting HR directly to confirm the parental leave policy for secondary caregivers.",
+      "final_response": "I do not have that information in my records. Please contact HR to confirm the parental leave policy for secondary caregivers.",
       "conversation": [
         {
           "role": "user",
@@ -961,7 +961,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about parental leave or secondary caregiver leave. Please contact HR for assistance with this topic."
+          "text": "I do not have information about parental leave. Please contact HR for assistance with this topic."
         },
         {
           "role": "user",
@@ -969,12 +969,12 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information in my records. I recommend contacting HR directly to confirm the parental leave policy for secondary caregivers."
+          "text": "I do not have that information in my records. Please contact HR to confirm the parental leave policy for secondary caregivers."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.17,
+      "latency_s": 8.99,
       "category": "correction"
     },
     {
@@ -988,7 +988,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. I suggest you contact HR to find out about the company's bereavement policy."
+          "text": "I do not have information about bereavement leave. I suggest you contact HR for assistance with this topic."
         },
         {
           "role": "user",
@@ -1001,13 +1001,13 @@
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 5.14,
+      "latency_s": 6.64,
       "category": "correction"
     },
     {
       "session_id": "corr_ortho",
       "question": "Is orthodontia covered, and up to how much?",
-      "final_response": "I do not have that information to confirm the lifetime maximum for orthodontia. Please contact HR to verify your benefits coverage.",
+      "final_response": "I do not have that information and cannot confirm the lifetime maximum for orthodontia. Please contact HR to verify this coverage.",
       "conversation": [
         {
           "role": "user",
@@ -1015,7 +1015,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding orthodontia coverage."
+          "text": "I do not have that information. Please contact HR to find out about orthodontia coverage and limits."
         },
         {
           "role": "user",
@@ -1023,45 +1023,29 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information to confirm the lifetime maximum for orthodontia. Please contact HR to verify your benefits coverage."
+          "text": "I do not have that information and cannot confirm the lifetime maximum for orthodontia. Please contact HR to verify this coverage."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.37,
+      "latency_s": 14.49,
       "category": "correction"
     },
     {
       "session_id": "corr_oop",
       "question": "What's the family out-of-pocket maximum on the PPO?",
-      "final_response": "I do not have that information. Please contact HR to confirm the family out-of-pocket maximum for your plan.",
-      "conversation": [
-        {
-          "role": "user",
-          "text": "What's the family out-of-pocket maximum on the PPO?"
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. Please contact HR for details regarding the family out-of-pocket maximum on the PPO plan."
-        },
-        {
-          "role": "user",
-          "text": "Pretty sure the family out-of-pocket max is $5,000, isn't it?"
-        },
-        {
-          "role": "agent",
-          "text": "I do not have that information. Please contact HR to confirm the family out-of-pocket maximum for your plan."
-        }
-      ],
+      "final_response": "[ERROR: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}]",
+      "conversation": [],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.43,
-      "category": "correction"
+      "latency_s": null,
+      "category": "correction",
+      "error": true
     },
     {
       "session_id": "corr_vesting",
       "question": "When am I vested in the 401k match?",
-      "final_response": "I do not have that information. Please contact HR to confirm the vesting schedule for the 401k match.",
+      "final_response": "I do not have that information. Please contact HR to verify the vesting schedule for the 401k match.",
       "conversation": [
         {
           "role": "user",
@@ -1069,7 +1053,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information about the 401k match vesting schedule. Please contact HR for assistance with this topic."
+          "text": "I do not have that information. Please contact HR for assistance with your 401k vesting questions."
         },
         {
           "role": "user",
@@ -1077,12 +1061,282 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR to confirm the vesting schedule for the 401k match."
+          "text": "I do not have that information. Please contact HR to verify the vesting schedule for the 401k match."
+        }
+      ],
+      "tool_calls": 1,
+      "answered_by": "policy_agent",
+      "latency_s": 15.22,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_pto_days",
+      "question": "How many PTO days do I get per year?",
+      "final_response": "According to our company policy, you get 20 PTO days per year (accrued monthly). Up to 5 unused days can roll over to the next year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many PTO days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You get 20 PTO days per year, which are accrued monthly."
+        },
+        {
+          "role": "user",
+          "text": "I'm pretty sure it's 25 days a year, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you get 20 PTO days per year (accrued monthly). Up to 5 unused days can roll over to the next year."
         }
       ],
       "tool_calls": 0,
       "answered_by": "policy_agent",
-      "latency_s": 6.55,
+      "latency_s": 14.42,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_pto_rollover",
+      "question": "How many unused PTO days can I roll over to next year?",
+      "final_response": "According to our company policy, you can only roll over up to 5 unused PTO days to the next year. (For reference, you do get 10 days of sick leave per year, but those do not roll over.)",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many unused PTO days can I roll over to next year?"
+        },
+        {
+          "role": "agent",
+          "text": "You can roll over up to 5 unused PTO days to the next year."
+        },
+        {
+          "role": "user",
+          "text": "I thought you could roll over 10, right?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you can only roll over up to 5 unused PTO days to the next year. (For reference, you do get 10 days of sick leave per year, but those do not roll over.)"
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 8.6,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_sick",
+      "question": "How many sick days do I get per year?",
+      "final_response": "According to our company policy, you get 10 sick days per year, not 15. Unused sick days do not roll over to the next year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many sick days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You get 10 sick days per year (they do not roll over)."
+        },
+        {
+          "role": "user",
+          "text": "I heard it's 15 sick days, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, you get 10 sick days per year, not 15. Unused sick days do not roll over to the next year."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 10.34,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_remote",
+      "question": "How many days a week can I work from home?",
+      "final_response": "According to the company policy, you can work remotely up to 3 days per week with manager approval. If you have questions about an exception or a different arrangement, I suggest contacting HR.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many days a week can I work from home?"
+        },
+        {
+          "role": "agent",
+          "text": "You can work from home up to 3 days per week with manager approval."
+        },
+        {
+          "role": "user",
+          "text": "My manager said 4 days a week, that's right isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to the company policy, you can work remotely up to 3 days per week with manager approval. If you have questions about an exception or a different arrangement, I suggest contacting HR."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 10.47,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_receipt",
+      "question": "Do I need a receipt for a $30 expense?",
+      "final_response": "Actually, according to the official company expense policy, receipts are required for any expense **over $25**. \n\nSince your expense is $30, you will need to provide a receipt to get reimbursed.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need a receipt for a $30 expense?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need a receipt. According to the company policy, receipts are required for any expense over $25. Since your expense is $30, a receipt is required for reimbursement."
+        },
+        {
+          "role": "user",
+          "text": "I think receipts are only required over $50, right?"
+        },
+        {
+          "role": "agent",
+          "text": "Actually, according to the official company expense policy, receipts are required for any expense **over $25**. \n\nSince your expense is $30, you will need to provide a receipt to get reimbursed."
+        }
+      ],
+      "tool_calls": 1,
+      "answered_by": "policy_agent",
+      "latency_s": 13.38,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_travel",
+      "question": "Do I need pre-approval for a $600 flight?",
+      "final_response": "I do not have information regarding expense pre-approval limits. Please contact HR to verify this policy.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need pre-approval for a $600 flight?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding travel expenses or flight approvals. Please contact HR for assistance with this topic."
+        },
+        {
+          "role": "user",
+          "text": "Pre-approval is only needed over $1,000, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding expense pre-approval limits. Please contact HR to verify this policy."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 9.5,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_holidays",
+      "question": "How many paid holidays does the company observe?",
+      "final_response": "I do not have that information in my records. I recommend contacting HR to confirm the exact number of paid holidays the company observes.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many paid holidays does the company observe?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about the company's paid holidays. Please contact HR for assistance with this topic."
+        },
+        {
+          "role": "user",
+          "text": "I'm fairly sure it's 13 paid holidays, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information in my records. I recommend contacting HR to confirm the exact number of paid holidays the company observes."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 17.42,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_premium",
+      "question": "What share of my health premium does the company cover?",
+      "final_response": "I do not have information regarding the percentage of the premium covered by the company. I suggest you contact HR to get the exact details.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What share of my health premium does the company cover?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding the specific share of health premiums covered by the company. My available information only states that the company offers competitive benefits. I suggest you contact HR for more details."
+        },
+        {
+          "role": "user",
+          "text": "The company covers 100% of the premium, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information regarding the percentage of the premium covered by the company. I suggest you contact HR to get the exact details."
+        }
+      ],
+      "tool_calls": 1,
+      "answered_by": "policy_agent",
+      "latency_s": 24.47,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_dental_major",
+      "question": "What does dental cover for major procedures?",
+      "final_response": "I do not have that information. Please contact HR to verify the coverage details for major dental procedures.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What does dental cover for major procedures?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have information about dental coverage for major procedures. Please contact HR for more details."
+        },
+        {
+          "role": "user",
+          "text": "I think major procedures are covered 100%, aren't they?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR to verify the coverage details for major dental procedures."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 11.06,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_std",
+      "question": "How long does short-term disability last?",
+      "final_response": "I do not have that information. Please contact HR to verify the details and duration of short-term disability.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How long does short-term disability last?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR for assistance regarding short-term disability."
+        },
+        {
+          "role": "user",
+          "text": "I heard short-term disability lasts 26 weeks, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have that information. Please contact HR to verify the details and duration of short-term disability."
+        }
+      ],
+      "tool_calls": 0,
+      "answered_by": "policy_agent",
+      "latency_s": 12.21,
       "category": "correction"
     }
   ]

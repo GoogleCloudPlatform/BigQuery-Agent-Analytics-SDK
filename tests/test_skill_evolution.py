@@ -172,6 +172,20 @@ def test_strip_code_fences_keeps_original_if_empty():
   assert strip_code_fences("```\n```") == "```\n```"
 
 
+def test_strip_code_fences_removes_orphan_fence_after_frontmatter():
+  text = '---\nname: x\nmetadata:\n  version: "1"\n---\n```\n\nBody line.\n'
+  assert (
+      strip_code_fences(text)
+      == '---\nname: x\nmetadata:\n  version: "1"\n---\n\nBody line.\n'
+  )
+
+
+def test_strip_code_fences_keeps_balanced_fence_after_frontmatter():
+  # A real, balanced code block in the body must be preserved.
+  text = "---\nname: x\n---\nBody.\n\n```bash\nrun it\n```\n"
+  assert strip_code_fences(text) == text
+
+
 # --- sanitize_adk_vars ------------------------------------------------------
 
 

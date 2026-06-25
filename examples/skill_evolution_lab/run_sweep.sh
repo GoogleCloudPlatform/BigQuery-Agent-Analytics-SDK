@@ -13,17 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Reproduce the multi-model table in VERIFICATION.md: run the full e2e
-# (run_e2e_demo.sh) for each model x seed, then aggregate mean [min-max]
-# correctness + grounding per model. Each run restores V0 on exit.
-#
-# Usage:
-#   ./run_sweep.sh
-#   MODELS="gemini-3.5-flash gemini-2.5-pro" SEEDS=3 ./run_sweep.sh
+# Long-running multi-model sweep: run the full e2e (run_e2e_demo.sh) for each
+# model x seed, then aggregate mean [min-max] correctness + grounding per model
+# into the table reported in VERIFICATION.md. Each run restores V0 on exit.
 #
 # This is SLOW: at the default size (~65 held-out questions) each run is
 # ~15-20 min, so the default 4 models x 3 seeds = ~3-4 hours. Run setup.sh first.
-set -euo pipefail
+# The script self-logs to runs/SWEEP_<ts>.log, so it is safe to detach and read
+# the results later:
+#
+#   # foreground (prints progress + final table):
+#   ./run_sweep.sh
+#
+#   # background (survives logout); watch progress, then read the table at the end:
+#   nohup ./run_sweep.sh >/dev/null 2>&1 &
+#   tail -f runs/SWEEP_*.log          # live progress
+#   cat runs/SWEEP_*.md               # final mean [range] table when done
+#
+#   # subset / fewer seeds:
+#   MODELS="gemini-3.5-flash gemini-2.5-pro" SEEDS=2 ./run_sweep.sh
+#
+# A single failed run (API blip, quota) is logged and skipped; the sweep keeps
+# going and still aggregates whatever completed. To re-read a finished sweep
+# without re-running, point aggregate_sweep.py at its manifest:
+#   uv run python aggregate_sweep.py --manifest runs/sweep_<ts>.tsv
+set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MODELS="${MODELS:-gemini-3.5-flash gemini-3.1-flash-lite gemini-2.5-pro gemini-3.1-pro-preview}"
@@ -31,19 +45,41 @@ SEEDS="${SEEDS:-3}"
 TS="$(date +%Y%m%d_%H%M%S)"
 mkdir -p runs
 MANIFEST="runs/sweep_${TS}.tsv"
+SUMMARY="runs/SWEEP_${TS}.md"
+LOG="runs/SWEEP_${TS}.log"
 : > "$MANIFEST"
 
-echo "== Sweep: models=[$MODELS] seeds=$SEEDS  manifest=$MANIFEST"
+# Mirror all output to the log so a detached run can be tailed / read later.
+exec > >(tee "$LOG") 2>&1
+
+echo "== Sweep start $(date)  models=[$MODELS]  seeds=$SEEDS"
+echo "== log=$LOG  manifest=$MANIFEST  summary=$SUMMARY"
+
+ok=0
+fail=0
 for M in $MODELS; do
   for S in $(seq 1 "$SEEDS"); do
     echo "############### $M  seed=$S  ($(date +%H:%M:%S)) ###############"
-    AGENT_MODEL="$M" ./run_e2e_demo.sh
-    # Record the run dir that run_e2e_demo.sh just created (newest under runs/).
-    printf '%s\t%s\n' "$M" "$(ls -dt runs/*/ | head -1)" >> "$MANIFEST"
+    if AGENT_MODEL="$M" ./run_e2e_demo.sh; then
+      # Record the run dir run_e2e_demo.sh just created (newest under runs/).
+      printf '%s\t%s\n' "$M" "$(ls -dt runs/*/ | head -1)" >> "$MANIFEST"
+      ok=$((ok + 1))
+    else
+      echo "!!! run FAILED: $M seed=$S -- skipping, sweep continues !!!"
+      fail=$((fail + 1))
+    fi
   done
 done
 
 echo ""
-echo "================ SWEEP SUMMARY (mean [min-max] per model) ================"
-uv run python aggregate_sweep.py --manifest "$MANIFEST" -o "runs/SWEEP_${TS}.md"
-echo "Aggregated table: runs/SWEEP_${TS}.md   (per-run artifacts under runs/)"
+echo "== Sweep done $(date):  $ok ok, $fail failed"
+if [ "$ok" -gt 0 ]; then
+  echo "================ SWEEP SUMMARY (mean [min-max] per model) ================"
+  uv run python aggregate_sweep.py --manifest "$MANIFEST" -o "$SUMMARY"
+  echo ""
+  echo "Aggregated table: $SUMMARY"
+  echo "Full log:         $LOG   (per-run artifacts under runs/, git-ignored)"
+else
+  echo "No runs completed -- nothing to aggregate. See $LOG."
+  exit 1
+fi

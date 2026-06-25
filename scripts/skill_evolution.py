@@ -348,12 +348,27 @@ def passes_quality_gate(patch: str) -> bool:
 
 
 def strip_code_fences(text: str) -> str:
-  """Strip a wrapping markdown code fence if the model added one."""
+  """Strip a wrapping markdown code fence if the model added one.
+
+  Handles two shapes:
+  1. A fence wrapping the whole response (```markdown\\n...\\n```).
+  2. An orphan opening fence the model inserts right after YAML frontmatter
+     (``---\\n...\\n---\\n```\\n<body>``). The matching close is usually lost, so
+     the unbalanced fence would otherwise render verbatim in the deployed skill.
+  """
   if text.startswith("```"):
     lines = text.split("\n")
     lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
     stripped = "\n".join(lines).strip()
     return stripped or text
+  # Orphan fence right after a YAML frontmatter block, with no matching close.
+  match = re.match(r"(---\n.*?\n---\n)(.*)", text, re.DOTALL)
+  if match:
+    body = match.group(2)
+    if body.count("```") % 2 == 1:
+      new_body = re.sub(r"^\n*```[^\n]*\n", "", body, count=1)
+      if new_body != body:
+        return match.group(1) + new_body
   return text
 
 

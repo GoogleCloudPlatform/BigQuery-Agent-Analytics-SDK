@@ -93,20 +93,20 @@ prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
 **Runtime:** about **15–18 minutes** end-to-end at the default size (55 evolve +
-55 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
+65 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
 seconds. The first run also does a one-time `uv` dependency sync.
 
 **What you'll see** — a per-step progress trace ending in the comparison table:
 
 ```text
 [V0] traffic + score ...
-     V0 test:   18.2% (10/55 golden-matched)
+     V0 test:   21.5% (14/65 golden-matched)
 [evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
 [V1] traffic + score ...
-     V1 test:   100.0% (55/55 golden-matched)
+     V1 test:   100.0% (65/65 golden-matched)
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
-| Overall                   | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
+| Overall                   | 21.5% (14/65) | 100.0% (65/65) | +78.5pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
@@ -135,6 +135,32 @@ AGENT_MODEL=gemini-2.5-pro ./run_e2e_demo.sh
 analysts/consolidator; `JUDGE_MODEL` (default `gemini-2.5-flash`, regional)
 scores. The model, tools, and questions are fixed across V0 and V1 — only the
 skill changes — so any delta is attributable to the skill.
+
+### Multi-model sweep (long-running job)
+
+`run_sweep.sh` runs the whole e2e for every model × seed and aggregates the
+result into the **mean [min–max] table in [`VERIFICATION.md`](VERIFICATION.md)**
+— so one unlucky run can't masquerade as the headline. At the default size (4
+models × 3 seeds) it takes **~3–4 hours**, so it self-logs to
+`runs/SWEEP_<ts>.log` and is safe to detach:
+
+```bash
+# Foreground (prints live progress, then the final table):
+./run_sweep.sh
+
+# Background (survives logout); tail progress, read the table when done:
+nohup ./run_sweep.sh >/dev/null 2>&1 &
+tail -f runs/SWEEP_*.log     # live progress
+cat  runs/SWEEP_*.md         # final mean [range] table per model
+
+# Subset / fewer seeds:
+MODELS="gemini-3.5-flash gemini-2.5-pro" SEEDS=2 ./run_sweep.sh
+```
+
+A single failed run (API blip, quota) is logged and skipped — the sweep keeps
+going and still aggregates whatever completed. To re-read a finished sweep
+without re-running, point the aggregator at its manifest:
+`uv run python aggregate_sweep.py --manifest runs/sweep_<ts>.tsv`.
 
 ## How it relates to the research
 

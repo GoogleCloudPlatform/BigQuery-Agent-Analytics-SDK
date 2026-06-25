@@ -25,7 +25,7 @@ single-turn + 15 multi-turn anti-parroting), and swept across four models with
 | Judge (scoring) | `gemini-2.5-flash` (`us-central1`) |
 | Ground truth | `eval/eval_spec.json` — 50 golden Q&A (matched at cosine ≥ 0.92) |
 | Evolve set | `questions_evolve.json` (50, rephrased) + `questions_corrections.json` (5) |
-| Held-out test set | `questions_test.json` (50) + `questions_corrections_heldout.json` (5) |
+| Held-out test set | `questions_test.json` (50) + `questions_corrections_heldout.json` (15) |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~15–18 min per run at this size |
 | Date | 2026-06-24 |
 
@@ -36,10 +36,10 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
-| Single-turn | 20.0% (10/50) | 100.0% (50/50) | +80.0pp |
-| Corrections (anti-parrot) | 0.0% (0/5) | 100.0% (5/5) | +100.0pp |
-| Tool-grounded answers | 7% (4/55) | 96% (53/55) | — |
+| Overall | 21.5% (14/65) | 100.0% (65/65) | +78.5pp |
+| Single-turn | 18.0% (9/50) | 100.0% (50/50) | +82.0pp |
+| Corrections (anti-parrot) | 33.3% (5/15) | 100.0% (15/15) | +66.7pp |
+| Tool-grounded answers | 14% (9/65) | 100% (65/65) | — |
 
 The flawed V0 barely calls the tool (it's told not to), so it declines on almost
 everything; the evolved V1 uses the tool and answers correctly — including the
@@ -55,36 +55,33 @@ fixed):
 Model                     Correctness V1     Grounding V1     V0 baseline
                           mean [range]       mean [range]     (corr)
 -----------------------   ----------------   --------------   -----------
-gemini-3.5-flash          99% [98-100]       91% [80-100]     17%
-gemini-3.1-flash-lite     90% [71-100]       74% [56-84]      16%
-gemini-2.5-pro            95% [93-96]        82%              53%
-gemini-3.1-pro-preview    99% [96-100]       84% [76-95]      19%
+gemini-3.5-flash          100% [100-100]     96% [89-100]     21%
+gemini-3.1-flash-lite     97% [95-98]        78% [74-83]      20%
+gemini-2.5-pro            93% [92-94]        82% [82-83]      55%
+gemini-3.1-pro-preview    100% [98-100]      84% [80-91]      21%
 ```
 
-> Note: this 4×3 sweep was run **before** the `format_trajectory` fix (which now
-> feeds the parrot/recover sub-trajectory labels to the analyst). Correctness is
-> unchanged and stays within these ranges on the post-fix engine; **grounding is
-> now higher** — the recorded single run above grounds 96% (vs the 80% low end
-> here), because the richer analyst signal yields a more strongly tool-first
-> skill. The headline (V0 → V1) is stable; the table's grounding column is a
-> conservative (pre-fix) lower bound.
+This sweep was run on the **post-`format_trajectory`-fix** engine (the analyst now
+sees the parrot/recover sub-trajectory labels). Grounding tightened markedly versus
+the pre-fix engine — `gemini-3.1-flash-lite`'s correctness spread collapsed from a
+prior 71–100% to **95–98%**, because the richer analyst signal yields a more
+reliably tool-first skill.
 
 Every model recovers strongly. Two honest observations the seeds surface:
 
-- **`gemini-2.5-pro` starts highest (53%)** — it grounds on the tool even under
-  the flawed prompt (43% V0 grounding), so it has the least headroom, yet still
-  reaches ~95%.
-- **`gemini-3.1-flash-lite` has the widest spread (71–100%)** — one of its three
-  seeds got an unlucky consolidation. That variance is exactly why we report a
-  range and why best-of-N (and a `score_fn` gate) matter; a single run can
-  mislead.
+- **`gemini-2.5-pro` starts highest (55%)** — it grounds on the tool even under
+  the flawed prompt, so it has the least headroom, yet still reaches ~93%.
+- **The flash/lite models start near the floor (~20%)** and have the most to gain;
+  they recover to 97–100%. Reporting a range (not a single run) is what keeps this
+  honest — and is why best-of-N (and a `score_fn` gate) matter when a single
+  consolidation gets unlucky.
 
 ## Evolution internals (from the run log, gemini-3.5-flash)
 
 ```text
 Trajectories: 11 successes, 44 failures
-Collected 52 patches (41 passed the quality gate)
-Selected median-size candidate (2884 chars)
+Collected 51 patches (35 passed the quality gate)
+Selected median-size candidate (2942 chars)
 ```
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
@@ -136,8 +133,11 @@ cd examples/skill_evolution_lab
 ./setup.sh YOUR_PROJECT_ID us-central1   # ~5s
 ./run_e2e_demo.sh                        # one model, ~15-18 min (first run also does a one-time uv sync)
 
-# Reproduce the whole multi-model table (4 models x 3 seeds, ~3-4 h):
-./run_sweep.sh                           # writes runs/SWEEP_<ts>.md (mean [range] per model)
+# Reproduce the whole multi-model table (4 models x 3 seeds, ~3-4 h).
+# Self-logs to runs/SWEEP_<ts>.log, so it can be detached and read later:
+nohup ./run_sweep.sh >/dev/null 2>&1 &   # background; survives logout
+tail -f runs/SWEEP_*.log                 # live progress
+cat  runs/SWEEP_*.md                      # final mean [range] table when done
 ```
 
 The four-model × 3-seed table above is produced by `run_sweep.sh` (which loops

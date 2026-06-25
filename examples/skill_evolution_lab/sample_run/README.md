@@ -7,8 +7,8 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 18.2% → V1 100%** (55/55), grounding (tool-call share) **7% → 96%**,
-evolved skill **2.9 KB**. (Held-out set: 50 single-turn + 5 anti-parroting.)
+**V0 21.5% → V1 100%** (65/65), grounding (tool-call share) **14% → 100%**,
+evolved skill **2.9 KB**. (Held-out set: 50 single-turn + 15 anti-parroting.)
 
 ## The workflow, and what each file is
 
