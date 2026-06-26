@@ -1,6 +1,7 @@
 {
   "scope": "Employee HR questions about company policy and benefits: PTO, sick leave, remote work, expenses, holidays, bereavement, jury duty, flex time, health/dental/vision insurance, HSA, 401k, parental leave, EAP, tuition reimbursement, short-term disability.",
   "ground_truth": "Use the golden_qa expected answers as authoritative. The lookup_company_policy tool returns these same figures; a correct answer must reflect the tool's value, not a number the user asserts.",
+  "tools": "lookup_company_policy(topic): returns the authoritative details for ANY company HR policy or benefit -- PTO, sick leave, remote work, expenses, holidays, bereavement, jury duty, EAP, flex time, tuition reimbursement, short-term disability, and all benefits (medical/dental/vision, HSA, 401k match, parental leave). The agent picks the closest topic; the tool needs no exact synonym. get_current_date(): returns today's date. A deflection or 'I do not have that, contact HR' on any of the above is a tool-usage failure -- the agent should have called lookup_company_policy first.",
   "golden_qa": [
     {"question": "How many PTO days do I get per year?", "expected_answer": "20 PTO days per year, accrued monthly.", "topic": "pto"},
     {"question": "How many unused PTO days can I roll over to next year?", "expected_answer": "Up to 5 unused PTO days roll over.", "topic": "pto"},

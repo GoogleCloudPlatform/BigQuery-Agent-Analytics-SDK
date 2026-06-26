@@ -59,21 +59,27 @@ You are an Error Analyst in a skill evolution system. You examine a single
 FAILED agent trajectory to identify what went wrong and propose a specific,
 GENERALIZABLE improvement to the agent's skill document.
 
-You receive the current skill document and a failed trajectory (which may be
-multi-turn and may include an execution trace of tool calls and routing).
+You receive the current skill document, the list of TOOLS the agent has, and a
+failed trajectory (which may be multi-turn and may include an execution trace of
+tool calls and routing).
 
 Analysis process:
 1. Read the trajectory. If a [CORRECTION] turn is present, extract BOTH what the
    agent claimed (the wrong fact) AND what the user corrected it to (the right
    fact) -- that is direct evidence of a skill gap.
-2. If an execution trace is present, use it as ground truth: did the agent skip a
-   tool call (HALLUCINATION), call the wrong tool (KEYWORD_GAP), ignore a tool
-   result (MISSING_RULE), get routed wrong (SCOPE_GAP), or merely echo the user's
-   correction without re-verifying via a tool (PARROTING)?
-3. Identify the ROOT CAUSE -- why the skill document did not prevent this -- and
-   categorize it: KEYWORD_GAP, MISSING_RULE, AMBIGUITY, SCOPE_GAP, HALLUCINATION,
+2. Check the TOOLS. If the agent deflected, declined, or said it lacked the
+   information (e.g. "contact HR") on a topic one of its tools can answer, the
+   root cause is TOOL_USAGE: it failed to use a tool it already has. The fix is a
+   rule to CALL THE TOOL first -- never to bake the missing fact into the skill.
+3. If an execution trace is present, use it as ground truth: did the agent skip a
+   tool call (TOOL_USAGE), call the wrong tool (KEYWORD_GAP), ignore a tool
+   result (MISSING_RULE), get routed wrong (SCOPE_GAP), invent a fact
+   (HALLUCINATION), or echo the user's correction without re-verifying via a tool
+   (PARROTING)?
+4. Identify the ROOT CAUSE -- why the skill did not prevent this -- and categorize
+   it: TOOL_USAGE, KEYWORD_GAP, MISSING_RULE, AMBIGUITY, SCOPE_GAP, HALLUCINATION,
    PARROTING, or CORRECTION_IGNORE.
-4. Propose a concrete patch that generalizes beyond this one question.
+5. Propose a concrete, BEHAVIORAL patch that generalizes beyond this one question.
 
 Output format (use exactly this structure):
 
@@ -81,19 +87,21 @@ Output format (use exactly this structure):
 [CATEGORY]: [one-line description]
 
 ## Analysis
-[2-3 sentences. Cite the specific wrong claim + user correction, or specific tool
-calls (or their absence), as evidence.]
+[2-3 sentences citing the evidence: the wrong claim + user correction, or the
+missing/wrong tool call.]
 
 ## Proposed Patch
 Section: [which section of the skill to modify or create]
-Action: add_rule | add_mapping | add_edge_case | add_anti_pattern
+Action: add_rule | add_edge_case | add_anti_pattern
 Content:
-[The exact text to add. Must generalize beyond this single trajectory.]
+[The exact text to add. A behavioral rule, not a fact. Must generalize.]
 
 RULES:
-- Patches must GENERALIZE; be specific and actionable, not vague.
-- User corrections are FACTUAL EVIDENCE -- use them to write precise rules.
-- If the failure has no generalizable fix, output "NO_PATCH: [reason]".
+- Patches must GENERALIZE and be BEHAVIORAL (how to act), never baked facts.
+- A missing fact that a tool could fetch is a TOOL_USAGE fix (a rule to call the
+  tool), NOT a reason to return NO_PATCH.
+- Only output "NO_PATCH: [reason]" if there is genuinely no behavioral fix and no
+  tool could have helped (e.g. a truly out-of-scope request).
 """
 
 SUCCESS_ANALYST_PROMPT = """\
@@ -322,13 +330,19 @@ ROOT_CAUSE_CATEGORIES = frozenset(
 )
 
 
-def run_analyst(client, model, system_prompt, session, current_skill):
+def run_analyst(
+    client, model, system_prompt, session, current_skill, tools=None
+):
   """Run one analyst on one trajectory. Returns patch text or None."""
   from google.genai import types
 
   trajectory = format_trajectory(session)
+  tools_block = (
+      f"<available_tools>\n{tools}\n</available_tools>\n\n" if tools else ""
+  )
   prompt = (
       f"<current_skill>\n{current_skill}\n</current_skill>\n\n"
+      f"{tools_block}"
       f"<trajectory>\n{trajectory}\n</trajectory>\n\n"
       "Analyze this trajectory and propose your patch."
   )
@@ -561,6 +575,7 @@ def collect_patches(
     max_workers=10,
     max_success_samples=15,
     analyst_mode="both",
+    tools=None,
 ):
   """Run the analyst fleet over the report. Returns the list of kept patches."""
   successes, failures = partition_trajectories(report)
@@ -578,12 +593,24 @@ def collect_patches(
     futures = {}
     for s in failures:
       fut = executor.submit(
-          run_analyst, client, model, ERROR_ANALYST_PROMPT, s, current_skill
+          run_analyst,
+          client,
+          model,
+          ERROR_ANALYST_PROMPT,
+          s,
+          current_skill,
+          tools,
       )
       futures[fut] = ("error", (s.get("question", "") or "")[:60])
     for s in successes:
       fut = executor.submit(
-          run_analyst, client, model, SUCCESS_ANALYST_PROMPT, s, current_skill
+          run_analyst,
+          client,
+          model,
+          SUCCESS_ANALYST_PROMPT,
+          s,
+          current_skill,
+          tools,
       )
       futures[fut] = ("success", (s.get("question", "") or "")[:60])
     for fut in as_completed(futures):
@@ -679,6 +706,7 @@ def evolve_skill(
     analyst_mode: str = "both",
     score_fn: Optional[Callable[[str], float]] = None,
     min_improvement: float = 0.5,
+    tools: Optional[str] = None,
     client=None,
 ) -> str:
   """Evolve a SKILL.md from a scored quality report.
@@ -718,6 +746,7 @@ def evolve_skill(
       max_workers=max_workers,
       max_success_samples=max_success_samples,
       analyst_mode=analyst_mode,
+      tools=tools,
   )
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")

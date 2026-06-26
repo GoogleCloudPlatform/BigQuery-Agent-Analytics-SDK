@@ -273,7 +273,7 @@ if [[ "$WITH_REGISTRY" == "1" ]]; then
 fi
 echo -e "  ${DIM}[$(ts)] Analysts proposing patches, consolidating candidates...${RESET}"
 $PY analyze_and_evolve.py \
-  --report "$REPORTS_DIR/v0_evolve_report.json" --skill "$SKILL" \
+  --report "$REPORTS_DIR/v0_evolve_report.json" --skill "$SKILL" --eval-spec "$SPEC" \
   -o "$REPORTS_DIR/v1_skill.md" --model "$ANALYST_MODEL" \
   --candidates 3 --max-chars 3500 --write-working-copy "${REG_ARGS[@]}"
 

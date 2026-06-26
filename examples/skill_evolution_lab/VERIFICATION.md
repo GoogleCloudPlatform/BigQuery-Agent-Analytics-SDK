@@ -36,10 +36,10 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 20.0% (13/65) | 100.0% (65/65) | +80.0pp |
-| Single-turn | 18.0% (9/50) | 100.0% (50/50) | +82.0pp |
+| Overall | 18.5% (12/65) | 100.0% (65/65) | +81.5pp |
+| Single-turn | 16.0% (8/50) | 100.0% (50/50) | +84.0pp |
 | Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
-| Tool-grounded answers | 9% (6/65) | 100% (65/65) | — |
+| Tool-grounded answers | 13% (9/65) | 90% (59/65) | — |
 
 The flawed V0 barely calls the tool (it's told not to), so it declines on almost
 everything; the evolved V1 uses the tool and answers correctly — including the
@@ -79,16 +79,16 @@ Every model recovers strongly. Two honest observations the seeds surface:
 ## Evolution internals (from the run log, gemini-3.5-flash)
 
 ```text
-Trajectories: 10 successes, 45 failures
-Collected 49 patches (34 passed the quality gate)
-Selected median-size candidate (2385 chars)
+Trajectories: 12 successes, 43 failures
+Collected 46 patches (46 passed the quality gate)
+Selected median-size candidate (1475 chars)
 ```
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
 the held-out re-score is the proof. Run with a `score_fn` for best-of-N
 selection (and to gate out unlucky candidates like the flash-lite seed above).
 
-## The evolved V1 skill (675B → 2.4KB, gemini-3.5-flash)
+## The evolved V1 skill (675B → 1.5KB, gemini-3.5-flash)
 
 Small, legible, **tool-first**, and **generalized**: it keeps V0's four baked facts,
 generalizes scope to *all* policies, forbids premature HR deflection, and adds no new
@@ -103,19 +103,23 @@ You have the following knowledge about company policies:
 - Remote work: Up to 3 days per week with manager approval.
 - Benefits: The company offers competitive benefits.
 
-Your scope includes all company policies, not just the ones hardcoded above. If a
-user asks about a policy not in your immediate knowledge, you must first use the
-`lookup_company_policy` tool; only say you do not have it (and suggest HR) if the
-tool search yields no results.
+## Instructions
+- Tool-First Lookup: always call the `lookup_company_policy` tool for ANY company
+  policy or benefit question not explicitly in the knowledge above (medical plans,
+  401k, expenses, holidays, leave, etc.).
+- Fallback to HR: only say you lack the information and suggest contacting HR AFTER
+  the tool has returned no relevant results.
 
-## Tool Usage
-- Always use `lookup_company_policy` for any policy question not in the hardcoded base.
-- Do not default to directing the user to HR without first attempting a tool search.
-
-## Response Guidelines
-- Proactive Completeness: include related conditions (accrual, rollover, approval).
-- Explicit Confirmation/Denial: state whether a specific request is allowed or denied.
+## Anti-Patterns
+- Premature Deflection: never deflect to HR for an unlisted policy without trying
+  the tool first.
+- Knowledge Restriction: do not restrict answers to the hardcoded knowledge -- the
+  tool retrieves any other HR topic.
 ```
+
+This is the skill the **tool-aware** analysts produced: every one of the 46 patches
+passed the quality gate (previously the deflection failures returned NO_PATCH because
+the analysts couldn't see that a tool existed).
 
 ## Before / after (same held-out question)
 

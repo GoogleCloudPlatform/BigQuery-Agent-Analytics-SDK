@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -119,6 +120,14 @@ def main():
   parser.add_argument("--skill-id", default=None)
   parser.add_argument("--location", default=None, help="Skill Registry region")
   parser.add_argument("--project", default=None)
+  parser.add_argument(
+      "--eval-spec",
+      default=None,
+      help=(
+          "eval_spec.json; its `tools` field is shown to the analysts so they"
+          " can propose 'use the tool' rules instead of NO_PATCH on deflections"
+      ),
+  )
   args = parser.parse_args()
 
   project = (
@@ -128,6 +137,11 @@ def main():
   )
   with open(args.skill) as f:
     current_skill = f.read()
+
+  tools = None
+  if args.eval_spec and os.path.exists(args.eval_spec):
+    with open(args.eval_spec) as f:
+      tools = (json.load(f) or {}).get("tools") or None
 
   logger.info(
       "Evolving %s from %s (analyst=%s)...",
@@ -144,6 +158,7 @@ def main():
       candidates=args.candidates,
       max_chars=args.max_chars,
       max_workers=args.max_workers,
+      tools=tools,
   )
 
   # Normalize trailing whitespace / EOF so the committed artifact stays clean
