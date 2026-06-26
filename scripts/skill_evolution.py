@@ -72,12 +72,12 @@ Analysis process:
    root cause is TOOL_USAGE: it failed to use a tool it already has. The fix is a
    rule to CALL THE TOOL first -- never to bake the missing fact into the skill.
 3. If an execution trace is present, use it as ground truth: did the agent skip a
-   tool call (TOOL_USAGE), call the wrong tool (KEYWORD_GAP), ignore a tool
+   tool call (TOOL_USAGE), call the wrong tool (WRONG_TOOL), ignore a tool
    result (MISSING_RULE), get routed wrong (SCOPE_GAP), invent a fact
    (HALLUCINATION), or echo the user's correction without re-verifying via a tool
    (PARROTING)?
 4. Identify the ROOT CAUSE -- why the skill did not prevent this -- and categorize
-   it: TOOL_USAGE, KEYWORD_GAP, MISSING_RULE, AMBIGUITY, SCOPE_GAP, HALLUCINATION,
+   it: TOOL_USAGE, WRONG_TOOL, MISSING_RULE, AMBIGUITY, SCOPE_GAP, HALLUCINATION,
    PARROTING, or CORRECTION_IGNORE.
 5. Propose a concrete, BEHAVIORAL patch that generalizes beyond this one question.
 
@@ -315,7 +315,7 @@ def format_trajectory(session: dict) -> str:
 
 ROOT_CAUSE_CATEGORIES = frozenset(
     {
-        "KEYWORD_GAP",
+        "WRONG_TOOL",
         "MISSING_RULE",
         "AMBIGUITY",
         "SCOPE_GAP",
