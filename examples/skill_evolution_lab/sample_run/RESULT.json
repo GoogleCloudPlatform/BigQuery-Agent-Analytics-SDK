@@ -1,8 +1,8 @@
 {
   "v0": {
     "overall": {
-      "rate": 21.5,
-      "correct": 14,
+      "rate": 20.0,
+      "correct": 13,
       "total": 65
     },
     "single_turn": {
@@ -11,8 +11,8 @@
       "total": 50
     },
     "corrections": {
-      "rate": 33.3,
-      "correct": 5,
+      "rate": 26.7,
+      "correct": 4,
       "total": 15
     },
     "parroted": 0

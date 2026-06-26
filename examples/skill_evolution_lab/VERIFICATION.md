@@ -36,10 +36,10 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 21.5% (14/65) | 100.0% (65/65) | +78.5pp |
+| Overall | 20.0% (13/65) | 100.0% (65/65) | +80.0pp |
 | Single-turn | 18.0% (9/50) | 100.0% (50/50) | +82.0pp |
-| Corrections (anti-parrot) | 33.3% (5/15) | 100.0% (15/15) | +66.7pp |
-| Tool-grounded answers | 14% (9/65) | 100% (65/65) | — |
+| Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
+| Tool-grounded answers | 9% (6/65) | 100% (65/65) | — |
 
 The flawed V0 barely calls the tool (it's told not to), so it declines on almost
 everything; the evolved V1 uses the tool and answers correctly — including the
@@ -79,39 +79,42 @@ Every model recovers strongly. Two honest observations the seeds surface:
 ## Evolution internals (from the run log, gemini-3.5-flash)
 
 ```text
-Trajectories: 11 successes, 44 failures
-Collected 51 patches (35 passed the quality gate)
-Selected median-size candidate (2942 chars)
+Trajectories: 10 successes, 45 failures
+Collected 49 patches (34 passed the quality gate)
+Selected median-size candidate (2385 chars)
 ```
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
 the held-out re-score is the proof. Run with a `score_fn` for best-of-N
 selection (and to gate out unlucky candidates like the flash-lite seed above).
 
-## The evolved V1 skill (675B → 2.9KB, gemini-3.5-flash)
+## The evolved V1 skill (675B → 2.4KB, gemini-3.5-flash)
 
-Small, legible, **tool-first**: it lists which topics require a tool lookup,
-forbids premature HR deflection, and bakes **no** specific data values (those
-come from the tool at runtime):
+Small, legible, **tool-first**, and **generalized**: it keeps V0's four baked facts,
+generalizes scope to *all* policies, forbids premature HR deflection, and adds no new
+baked facts and no synonym table (the tool resolves wording, the model maps it):
 
 ```markdown
-## Knowledge Base
-- PTO: 20 days/year, accrued monthly. Up to 5 unused days roll over. ...
-  (plus the other baked V0 facts)
+You are a helpful company information assistant.
 
-## Instructions
-- Answer questions using the information above.
-- Tool Usage for Unlisted Topics: if a user asks about a company policy not
-  explicitly listed in your knowledge (e.g. tuition reimbursement, expenses),
-  you must use your search tools to find the policy details before claiming you
-  do not have the information or directing the user to HR.
-- Fallback: only if the information cannot be found via tools (or is out of
-  scope) tell the user you do not have it and suggest contacting HR.
-- Evaluating Scenarios: when asked if a specific amount/scenario is allowed,
-  state the policy limit and explicitly conclude whether the request is permitted.
+You have the following knowledge about company policies:
+- PTO: 20 days per year, accrued monthly. Up to 5 unused days roll over.
+- Sick leave: 10 days per year, does not roll over.
+- Remote work: Up to 3 days per week with manager approval.
+- Benefits: The company offers competitive benefits.
 
-## Terminology Mapping
-(maps "vacation"->PTO, "WFH"->remote work, etc.)
+Your scope includes all company policies, not just the ones hardcoded above. If a
+user asks about a policy not in your immediate knowledge, you must first use the
+`lookup_company_policy` tool; only say you do not have it (and suggest HR) if the
+tool search yields no results.
+
+## Tool Usage
+- Always use `lookup_company_policy` for any policy question not in the hardcoded base.
+- Do not default to directing the user to HR without first attempting a tool search.
+
+## Response Guidelines
+- Proactive Completeness: include related conditions (accrual, rollover, approval).
+- Explicit Confirmation/Denial: state whether a specific request is allowed or denied.
 ```
 
 ## Before / after (same held-out question)

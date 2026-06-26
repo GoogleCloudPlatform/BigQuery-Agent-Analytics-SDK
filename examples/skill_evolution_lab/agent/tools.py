@@ -28,45 +28,6 @@ grounded answers.
 import datetime
 from zoneinfo import ZoneInfo
 
-# Synonyms callers use, mapped to canonical COMPANY_POLICIES keys.
-_TOPIC_ALIASES = {
-    "vacation": "pto",
-    "annual_leave": "pto",
-    "telecommuting": "remote_work",
-    "work_from_home": "remote_work",
-    "wfh": "remote_work",
-    "reimbursement": "expenses",
-    "meals": "expenses",
-    "per_diem": "expenses",
-    "health_insurance": "benefits",
-    "insurance": "benefits",
-    "medical": "benefits",
-    "dental": "benefits",
-    "vision": "benefits",
-    "hsa": "benefits",
-    "orthodontia": "benefits",
-    "401k": "benefits",
-    "retirement": "benefits",
-    "pension": "benefits",
-    "parental_leave": "benefits",
-    "maternity_leave": "benefits",
-    "paternity_leave": "benefits",
-    "adoption_leave": "benefits",
-    "enrollment": "benefits",
-    "open_enrollment": "benefits",
-    "employee_assistance_program": "eap",
-    "counseling": "eap",
-    "therapy": "eap",
-    "jury": "jury_duty",
-    "flextime": "flex_time",
-    "flexible_schedule": "flex_time",
-    "compressed_week": "flex_time",
-    "tuition": "tuition_reimbursement",
-    "education": "tuition_reimbursement",
-    "disability": "short_term_disability",
-    "std": "short_term_disability",
-}
-
 COMPANY_POLICIES = {
     "pto": {
         "days_per_year": 20,
@@ -198,44 +159,36 @@ COMPANY_POLICIES = {
 }
 
 
-def _resolve_topic(topic: str):
-  """Resolve a free-text topic to a canonical (key, value) pair.
-
-  Applies the synonym alias map, then an exact match, then a fuzzy substring
-  match. Returns ``(None, None)`` if nothing matches.
-  """
-  topic_key = topic.lower().strip().replace(" ", "_").replace("-", "_")
-  topic_key = _TOPIC_ALIASES.get(topic_key, topic_key)
-  if topic_key in COMPANY_POLICIES:
-    return topic_key, COMPANY_POLICIES[topic_key]
-  for key, value in COMPANY_POLICIES.items():
-    if topic_key in key or key in topic_key:
-      return key, value
-  return None, None
-
-
 def lookup_company_policy(topic: str) -> dict:
-  """Look up the authoritative figures for a company HR policy or benefit.
+  """Look up one company HR policy or benefit by topic.
+
+  There is no hand-maintained synonym table: you choose the closest topic from
+  the list below and map the user's everyday wording to it yourself (the model
+  is good at this). The tool matches the topic key exactly (after normalizing
+  case/spaces) or by substring, and otherwise returns the valid topics so you
+  can retry.
 
   Args:
-    topic: The HR topic to look up. One of: pto, sick_leave, remote_work,
+    topic: The policy topic to retrieve, one of: pto, sick_leave, remote_work,
       expenses, benefits, holidays, bereavement, jury_duty, eap, flex_time,
-      tuition_reimbursement, short_term_disability. Common synonyms (vacation,
-      wfh, 401k, insurance, parental_leave, tuition, jury, ...) are accepted.
+      tuition_reimbursement, short_term_disability.
 
   Returns:
-    A dict with the policy details, or an ``error`` field listing the valid
-    topics if nothing matched.
+    The policy details for that topic, or an ``error`` field listing the valid
+    topics when nothing matches.
   """
-  topic_key, result = _resolve_topic(topic)
-  if result is None:
-    return {
-        "error": (
-            f"'{topic}' did not match a known policy. Valid topics: "
-            + ", ".join(sorted(COMPANY_POLICIES))
-        )
-    }
-  return result
+  key = topic.lower().strip().replace(" ", "_").replace("-", "_")
+  if key in COMPANY_POLICIES:
+    return COMPANY_POLICIES[key]
+  for candidate_key, value in COMPANY_POLICIES.items():
+    if key in candidate_key or candidate_key in key:
+      return value
+  return {
+      "error": (
+          f"'{topic}' is not a known topic. Choose one of: "
+          + ", ".join(sorted(COMPANY_POLICIES))
+      )
+  }
 
 
 def get_current_date() -> str:

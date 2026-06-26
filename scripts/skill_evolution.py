@@ -110,8 +110,10 @@ user's correction without re-querying a tool (a [~] parroted segment), output
 
 Analysis process:
 1. Identify what the agent did RIGHT that is NOT already explicit in the skill.
-2. Focus on transferable patterns: KEYWORD_MAPPING, RESPONSE_PATTERN,
-   DISAMBIGUATION, TOOL_USAGE, or CORRECTION_RECOVERY.
+2. Focus on transferable patterns: RESPONSE_PATTERN, DISAMBIGUATION,
+   TOOL_USAGE, or CORRECTION_RECOVERY. Do NOT propose keyword or synonym
+   mappings -- the lookup tool resolves the user's wording itself, so a synonym
+   table in the skill is redundant.
 
 Output format (use exactly this structure):
 
@@ -123,7 +125,7 @@ Output format (use exactly this structure):
 
 ## Proposed Patch
 Section: [which section of the skill to modify or create]
-Action: reinforce_pattern | add_mapping | add_example
+Action: reinforce_pattern | add_rule | add_example
 Content:
 [The exact text to add. Must generalize beyond this one question.]
 
@@ -143,8 +145,11 @@ preserves capability identity).
 Merge rules (follow ALL):
 1. Preserve identity: keep the same name, purpose, and overall structure.
 2. Never drop existing content. Every section, rule, and table row in the BASE
-   MUST appear in your output unless a patch explicitly corrects it (then update
-   that rule in place). Dropping an existing section is a failure.
+   MUST appear in your output unless a patch corrects it (then update it in
+   place). Exception: if the BASE tells the agent to refuse, decline, or deflect
+   (e.g. "contact HR") on a topic its tools CAN answer, that is the defect to
+   fix -- rewrite it into a tool-first rule. Overriding such a deflection is
+   required, not a failure.
 3. Semantic union, not concatenation: integrate each patch into the right section.
 4. Prevalence: insights from many independent analysts are systematic -- integrate
    confidently; 1-2 analyst one-offs only if clearly general.
@@ -152,20 +157,30 @@ Merge rules (follow ALL):
 6. Import only reusable, non-conflicting additions; strip case-specific entities
    and analyst scratch notes ("NO_PATCH", "Root Cause:").
 7. Do not invent figures or policies absent from the base or a patch.
-8. A skill is BEHAVIORAL: do NOT bake specific data values (numbers, dates,
-   dollar amounts, limits) into it -- those must come from tools at runtime, and
-   copies go stale or wrong. Keep rules and tool-usage guidance; never paste
-   tool-result facts pulled from a trajectory. (Preserve any data already in the
-   base verbatim, but add no new specific values.)
+8. A skill is BEHAVIORAL, not a knowledge base. Do NOT add facts of any kind --
+   not numbers/dates/limits, and not qualitative facts ("PTO is paid out on
+   resignation", "a doctor's note is required"). The skill says HOW to behave;
+   the TOOL supplies WHAT. Never paste tool-result facts from a trajectory into
+   the skill. Preserve facts already in the base verbatim, but add no new ones --
+   if the agent needs a fact, the rule is "look it up".
 9. On conflict, keep the better-evidenced patch.
+10. Do NOT add a Keyword Mapping or Terminology Mapping section. The lookup tool
+   resolves the user's own wording itself; capture behavior as rules, never as
+   synonym tables.
+11. Be tool-first: the merged skill must tell the agent to use its tools for any
+   in-scope question BEFORE answering, and to say it lacks the information only
+   after a tool search comes up empty -- never to deflect to HR first.
+12. Generalize, do not enumerate: prefer ONE rule ("look up any company-policy
+   question with your tools") over a long list of specific topics. Collapse
+   per-topic lists from the patches into that general rule.
 
 Output the COMPLETE merged SKILL.md (frontmatter + full body):
 - YAML frontmatter between --- delimiters: keep name/description; set
   metadata.version = base version + 1 ("0"->"1"); metadata.author =
   skill-evolution; metadata.evolved_from = base version.
-- The full body = every base section (verbatim or refined in place) plus new
-  sections motivated by patches (e.g. Keyword Mappings, Edge Cases, Anti-Patterns,
-  Out-of-Scope Handling).
+- The full body = every base section (refined in place) plus new sections
+  motivated by patches (e.g. Tool Usage, Anti-Patterns, Response Rules). Do NOT
+  add a Keyword/Terminology Mapping section.
 
 Self-check before output: does every "## " heading from the base still appear? If
 not, add it back.
@@ -176,8 +191,8 @@ You are a Skill Compactor. Distill an evolved skill that grew too large to under
 {max_chars} characters while preserving effectiveness.
 
 Keep all mandatory tool-use rules and anti-hallucination directives verbatim.
-Merge redundant rules (keep the most specific), compress obvious keyword mappings,
-remove filler, and preserve section headings and numbered lists.
+Merge redundant rules (keep the most specific), drop baked facts the tool can
+supply, remove filler, and preserve section headings and numbered lists.
 
 Output the COMPLETE compacted SKILL.md including YAML frontmatter. Keep the same
 version number and metadata.
@@ -299,7 +314,6 @@ ROOT_CAUSE_CATEGORIES = frozenset(
         "HALLUCINATION",
         "PARROTING",
         "CORRECTION_IGNORE",
-        "KEYWORD_MAPPING",
         "RESPONSE_PATTERN",
         "DISAMBIGUATION",
         "TOOL_USAGE",
