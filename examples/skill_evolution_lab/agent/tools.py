@@ -191,6 +191,44 @@ def lookup_company_policy(topic: str) -> dict:
   }
 
 
+# Short-term-disability policy parameters (used by the calculator below).
+_STD_INCOME_REPLACEMENT = 0.60  # STD replaces 60% of salary
+_STD_MAX_WEEKS = 12
+_STD_WAITING_DAYS = 7
+
+
+def calculate_disability_pay(annual_salary: float, weeks_out: int) -> dict:
+  """Compute short-term-disability (STD) pay for a given salary and leave length.
+
+  This is a CALCULATION, not a lookup: STD replaces 60% of salary for up to 12
+  weeks after a 7-day waiting period, so the dollar payout depends on the
+  employee's salary and how many weeks they are out. Use this whenever the user
+  asks "how much would short-term disability pay me" with a specific salary
+  and/or duration -- ``lookup_company_policy`` only returns the 60%/12-week
+  policy, never the dollar amount.
+
+  Args:
+    annual_salary: The employee's gross annual salary in dollars.
+    weeks_out: Number of weeks the employee expects to be on disability.
+
+  Returns:
+    A dict with the weekly and total STD benefit, the covered weeks (capped at
+    the 12-week maximum), and the policy parameters used.
+  """
+  covered_weeks = min(weeks_out, _STD_MAX_WEEKS)
+  weekly_benefit = (annual_salary / 52.0) * _STD_INCOME_REPLACEMENT
+  return {
+      "annual_salary": annual_salary,
+      "weeks_requested": weeks_out,
+      "covered_weeks": covered_weeks,
+      "capped_at_max": weeks_out > _STD_MAX_WEEKS,
+      "weekly_benefit": round(weekly_benefit, 2),
+      "total_benefit": round(weekly_benefit * covered_weeks, 2),
+      "income_replacement": _STD_INCOME_REPLACEMENT,
+      "waiting_period_days": _STD_WAITING_DAYS,
+  }
+
+
 def get_current_date() -> str:
   """Get the current date and day of the week (US Pacific time).
 
@@ -201,5 +239,11 @@ def get_current_date() -> str:
   return f"Today is {now.strftime('%A, %B %d, %Y')} (Pacific Time)"
 
 
-# Single tool list, reused by the agent factory and any callers.
-AGENT_TOOLS = [lookup_company_policy, get_current_date]
+# Single tool list, reused by the agent factory and any callers. Two tools the
+# agent must CHOOSE between: lookup_company_policy (facts) vs
+# calculate_disability_pay (a computed, personalized figure).
+AGENT_TOOLS = [
+    lookup_company_policy,
+    calculate_disability_pay,
+    get_current_date,
+]

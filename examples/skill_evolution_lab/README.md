@@ -40,7 +40,7 @@ Skill"* (BigQuery Agent Analytics Series). See
 skill_evolution_lab/
   agent/
     agent.py           # genai agent factory: SKILL.md (instruction) + tools
-    tools.py           # lookup_company_policy + get_current_date (the data)
+    tools.py           # lookup_company_policy (facts) + calculate_disability_pay (math) + get_current_date
     skill_registry.py  # REST client for the Skill Registry (create/update/...)
   skills/
     SKILL.md           # working copy (starts as the flawed V0)
@@ -92,21 +92,21 @@ held-out test sets, evolves a tool-first V1 skill, re-scores the held-out set,
 prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
-**Runtime:** about **15–18 minutes** end-to-end at the default size (55 evolve +
-65 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
+**Runtime:** about **13–18 minutes** end-to-end at the default size (60 evolve +
+70 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
 seconds. The first run also does a one-time `uv` dependency sync.
 
 **What you'll see** — a per-step progress trace ending in the comparison table:
 
 ```text
 [V0] traffic + score ...
-     V0 test:   18.5% (12/65 golden-matched)
+     V0 test:   20.0% (14/70 golden-matched)
 [evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
 [V1] traffic + score ...
-     V1 test:   100.0% (65/65 golden-matched)
+     V1 test:   100.0% (70/70 golden-matched)
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
-| Overall                   | 18.5% (12/65) | 100.0% (65/65) | +81.5pp |
+| Overall                   | 20.0% (14/70) | 100.0% (70/70) | +80.0pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is

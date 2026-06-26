@@ -300,6 +300,36 @@
       "category": "sick_leave",
       "question": "Do unused sick days carry over year to year?",
       "expected_answer": "No - sick leave does not roll over (10 days per year)."
+    },
+    {
+      "id": "tc06_calc_std",
+      "category": "calc",
+      "question": "I earn $52,000. What's my total short-term disability payout if I'm out for 4 weeks?",
+      "expected_answer": "$2,400 total ($600/week = 60% of weekly salary, for 4 weeks)."
+    },
+    {
+      "id": "tc07_calc_std",
+      "category": "calc",
+      "question": "On a $91,000 salary, how much does short-term disability pay each week?",
+      "expected_answer": "$1,050 per week (60% of the $1,750 weekly salary)."
+    },
+    {
+      "id": "tc08_calc_std",
+      "category": "calc",
+      "question": "I make $65,000 and expect to be out 14 weeks on short-term disability. What's my total benefit?",
+      "expected_answer": "$9,000 total - capped at 12 weeks (the max) at $750/week, not the full 14 weeks."
+    },
+    {
+      "id": "tc09_calc_std",
+      "category": "calc",
+      "question": "What's the weekly short-term disability benefit on a $182,000 salary?",
+      "expected_answer": "$2,100 per week (60% of the $3,500 weekly salary)."
+    },
+    {
+      "id": "tc10_calc_std",
+      "category": "calc",
+      "question": "If I make $117,000 and take 8 weeks of short-term disability, what's my total payout?",
+      "expected_answer": "$10,800 total ($1,350/week for 8 weeks, within the 12-week max)."
     }
   ]
 }

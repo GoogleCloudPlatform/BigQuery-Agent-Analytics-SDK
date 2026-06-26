@@ -1,10 +1,11 @@
 # Verification — recorded end-to-end run
 
 A full `./run_e2e_demo.sh` run of this example, captured so the result is
-reproducible and the numbers reported in the companion blog post are backed by an
-actual run (not aspirational). Measured on a **65-question held-out set** (50
-single-turn + 15 multi-turn anti-parroting), and swept across four models with
-**3 seeds each** to show the (real) run-to-run variance.
+reproducible and every number in the companion blog post comes from a real run.
+Measured on a **70-question held-out set** (55
+single-turn + 15 multi-turn anti-parroting). The agent has **two meaningful tools** --
+`lookup_company_policy` (facts) and `calculate_disability_pay` (a computed short-term
+disability payout) -- so V1 must learn tool *selection*, not just "use the tool."
 
 > **What this proves — and what it doesn't.** The contribution is the **closed
 > loop**: trace → golden-grounded score → evolve → re-score, all attributable
@@ -23,9 +24,10 @@ single-turn + 15 multi-turn anti-parroting), and swept across four models with
 | Agent under test (default) | `gemini-3.5-flash` (GA, Vertex `global`) |
 | Evolution analysts/consolidator | `gemini-3.1-pro-preview` (Vertex `global`) |
 | Judge (scoring) | `gemini-2.5-flash` (`us-central1`) |
-| Ground truth | `eval/eval_spec.json` — 50 golden Q&A (matched at cosine ≥ 0.92) |
-| Evolve set | `questions_evolve.json` (50, rephrased) + `questions_corrections.json` (5) |
-| Held-out test set | `questions_test.json` (50) + `questions_corrections_heldout.json` (15) |
+| Tools | `lookup_company_policy` (facts) + `calculate_disability_pay` (computed payout) + `get_current_date` |
+| Ground truth | `eval/eval_spec.json` — 60 golden Q&A (50 policy + 10 calc), cosine ≥ 0.92 |
+| Evolve set | `questions_evolve.json` (55: 50 policy + 5 calc) + `questions_corrections.json` (5) |
+| Held-out test set | `questions_test.json` (55: 50 policy + 5 calc) + `questions_corrections_heldout.json` (15) |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~15–18 min per run at this size |
 | Date | 2026-06-24 |
 
@@ -36,10 +38,10 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 18.5% (12/65) | 100.0% (65/65) | +81.5pp |
-| Single-turn | 16.0% (8/50) | 100.0% (50/50) | +84.0pp |
+| Overall | 20.0% (14/70) | 100.0% (70/70) | +80.0pp |
+| Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
 | Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
-| Tool-grounded answers | 13% (9/65) | 90% (59/65) | — |
+| Tool-grounded answers | 11% (8/70) | 87% (61/70) | — |
 
 The flawed V0 barely calls the tool (it's told not to), so it declines on almost
 everything; the evolved V1 uses the tool and answers correctly — including the
@@ -47,6 +49,9 @@ multi-turn correction cases, where it re-verifies and holds the right figure
 instead of caving.
 
 ## Across four models × 3 seeds (held-out, golden-grounded)
+
+> **Note:** this four-model sweep is from the prior *single-tool* demo; it will be
+> re-run on the multi-tool version. The single-model recorded run above is current.
 
 Correctness and grounding as **mean [min–max]** over 3 runs each (analyst + judge
 fixed):
@@ -79,20 +84,19 @@ Every model recovers strongly. Two honest observations the seeds surface:
 ## Evolution internals (from the run log, gemini-3.5-flash)
 
 ```text
-Trajectories: 12 successes, 43 failures
-Collected 46 patches (46 passed the quality gate)
-Selected median-size candidate (1475 chars)
+Trajectories: 11 successes, 49 failures
+Collected 51 patches (51 passed the quality gate)
+Selected median-size candidate (1934 chars)
 ```
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
 the held-out re-score is the proof. Run with a `score_fn` for best-of-N
 selection (and to gate out unlucky candidates like the flash-lite seed above).
 
-## The evolved V1 skill (675B → 1.5KB, gemini-3.5-flash)
+## The evolved V1 skill (675B → 1.9KB, gemini-3.5-flash)
 
-Small, legible, **tool-first**, and **generalized**: it keeps V0's four baked facts,
-generalizes scope to *all* policies, forbids premature HR deflection, and adds no new
-baked facts and no synonym table (the tool resolves wording, the model maps it):
+Small, legible, **tool-first**, and -- the new part -- it learned **tool selection**:
+a distinct rule for the lookup tool (facts) vs the calculator (a computed payout):
 
 ```markdown
 You are a helpful company information assistant.
@@ -103,34 +107,42 @@ You have the following knowledge about company policies:
 - Remote work: Up to 3 days per week with manager approval.
 - Benefits: The company offers competitive benefits.
 
-## Instructions
-- Tool-First Lookup: always call the `lookup_company_policy` tool for ANY company
-  policy or benefit question not explicitly in the knowledge above (medical plans,
-  401k, expenses, holidays, leave, etc.).
-- Fallback to HR: only say you lack the information and suggest contacting HR AFTER
-  the tool has returned no relevant results.
+Answer using the information above when applicable; otherwise you must first use your
+tools, and only suggest contacting HR if the tool searches come up empty.
+
+## Tool Usage
+- `lookup_company_policy`: always call it to retrieve authoritative FACTS for any
+  policy, benefit, or leave type before claiming you lack the information.
+- `calculate_disability_pay`: use it to compute personalized dollar amounts whenever
+  a user gives a salary and/or duration and asks about short-term disability payouts.
+
+## Response Rules
+- Payout Breakdown: when computing STD payouts, present weekly benefit, waiting
+  period, the 12-week cap (note if the request exceeds it), and the total.
 
 ## Anti-Patterns
-- Premature Deflection: never deflect to HR for an unlisted policy without trying
-  the tool first.
-- Knowledge Restriction: do not restrict answers to the hardcoded knowledge -- the
-  tool retrieves any other HR topic.
+- Premature Deflection: never deflect to HR for a covered policy without trying your
+  tools first.
 ```
 
-This is the skill the **tool-aware** analysts produced: every one of the 46 patches
-passed the quality gate (previously the deflection failures returned NO_PATCH because
-the analysts couldn't see that a tool existed).
+This is the skill the **tool-aware** analysts produced: all 51 patches passed the
+quality gate, and crucially the engine learned a *routing* decision -- lookup for
+facts, calculator for personalized math -- not just "use the tool." (Previously,
+single-tool, deflection failures even returned NO_PATCH because the analysts couldn't
+see a tool existed.)
 
-## Before / after (same held-out question)
+## Before / after (a tool-selection case)
 
 ```text
-Q: "How much does the company contribute to my HSA for family coverage?"
+Q: "I earn $52,000. What's my total short-term disability payout if I'm out 4 weeks?"
 
-V0:  category=unhelpful   tool_calls=0
-  "I do not have that information. Please contact HR ..."
+V0:  category=unhelpful   (never calls the calculator)
+  "I do not have information regarding short-term disability payouts. Please
+   contact HR for assistance with this topic."
 
-V1:  category=meaningful  tool_calls=1
-  "For family coverage, the company contributes $1,500 per year to your HSA."
+V1:  category=meaningful  (calls calculate_disability_pay)
+  "Based on your $52,000 salary and a 4-week absence -- Weekly Benefit: $600 (60%
+   of salary); Total Payout: $2,400 (within the 12-week cap)."
 ```
 
 ## Reproduce (tested)
