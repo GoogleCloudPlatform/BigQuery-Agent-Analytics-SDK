@@ -14,15 +14,18 @@
 
 """Tools for the skill-evolution lab's company-policy agent.
 
-A single ``lookup_company_policy`` tool returns the authoritative figures for
-every HR topic (PTO, sick leave, remote work, expenses, benefits, holidays,
-bereavement, jury duty, EAP, flex time, tuition reimbursement, short-term
-disability). ``get_current_date`` returns today's date.
+Two meaningful tools the agent must CHOOSE between:
+- ``lookup_company_policy(topic)`` returns the authoritative figures for every HR
+  topic (PTO, sick leave, remote work, expenses, benefits, holidays, bereavement,
+  jury duty, EAP, flex time, tuition reimbursement, short-term disability).
+- ``calculate_disability_pay(annual_salary, weeks_out)`` *computes* a personalized
+  short-term-disability payout the lookup can't produce.
+Plus ``get_current_date``.
 
-The point of the demo is that the *tool already has the right answers* -- the
-deliberately flawed V0 skill just tells the model not to call it. Evolution
-rewrites the skill to be tool-first, and the same tool then produces correct,
-grounded answers.
+The point of the demo is that the *tools already have the right answers* -- the
+deliberately flawed V0 skill just tells the model not to call them. Evolution
+rewrites the skill to be tool-first and to route to the right tool, and the same
+tools then produce correct, grounded answers.
 """
 
 import datetime
