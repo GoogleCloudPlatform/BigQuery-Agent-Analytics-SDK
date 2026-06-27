@@ -51,6 +51,15 @@ export PYTHONWARNINGS="ignore"
 export LOGLEVEL="${LOGLEVEL:-WARNING}"
 PY="uv run python -W ignore"
 
+# Capture env-passed overrides BEFORE sourcing .env, so a caller's env var
+# (e.g. `AGENT_MODEL=gemini-2.5-pro ./run_e2e_demo.sh`, or run_sweep.sh) wins
+# over the value baked into .env. Precedence: CLI flag > env > .env > default.
+_ENV_AGENT_MODEL="${AGENT_MODEL:-}"
+_ENV_ANALYST_MODEL="${ANALYST_MODEL:-}"
+_ENV_JUDGE_MODEL="${JUDGE_MODEL:-}"
+_ENV_JUDGE_LOCATION="${JUDGE_LOCATION:-}"
+_ENV_CONCURRENCY="${CONCURRENCY:-}"
+
 # Load .env from the demo directory so all scripts see the same config.
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
   set -a
@@ -61,12 +70,13 @@ fi
 export GOOGLE_GENAI_USE_VERTEXAI=True
 export GOOGLE_CLOUD_PROJECT="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}"
 
-# Defaults (env vars are honored as fallbacks; CLI flags below take precedence)
-AGENT_MODEL="${AGENT_MODEL:-gemini-3.5-flash}"
-ANALYST_MODEL="${ANALYST_MODEL:-gemini-3.1-pro-preview}"
-JUDGE_MODEL="${JUDGE_MODEL:-gemini-2.5-flash}"
-JUDGE_LOCATION="${JUDGE_LOCATION:-us-central1}"
-CONCURRENCY="${CONCURRENCY:-3}"
+# Defaults: env override (captured above) > .env value > built-in default.
+# CLI flags below still take precedence over all of these.
+AGENT_MODEL="${_ENV_AGENT_MODEL:-${AGENT_MODEL:-gemini-3.5-flash}}"
+ANALYST_MODEL="${_ENV_ANALYST_MODEL:-${ANALYST_MODEL:-gemini-3.1-pro-preview}}"
+JUDGE_MODEL="${_ENV_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
+JUDGE_LOCATION="${_ENV_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
+CONCURRENCY="${_ENV_CONCURRENCY:-${CONCURRENCY:-3}}"
 WITH_REGISTRY="${WITH_REGISTRY:-0}"
 SKILL_ID="${SKILL_ID:-}"
 # Skill Registry region is independent of the judge region (the registry only

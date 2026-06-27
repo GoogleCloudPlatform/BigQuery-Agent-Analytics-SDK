@@ -29,7 +29,7 @@ disability payout) -- so V1 must learn tool *selection*, not just "use the tool.
 | Evolve set | `questions_evolve.json` (55: 50 policy + 5 calc) + `questions_corrections.json` (5) |
 | Held-out test set | `questions_test.json` (55: 50 policy + 5 calc) + `questions_corrections_heldout.json` (15) |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~15–18 min per run at this size |
-| Date | 2026-06-24 |
+| Date | 2026-06-26 |
 
 The agent model, tools, and questions are identical for V0 and V1 — **only the
 skill file changes** — so the delta is attributable to the skill.
@@ -50,35 +50,30 @@ instead of caving.
 
 ## Across four models × 3 seeds (held-out, golden-grounded)
 
-> **Note:** this four-model sweep is from the prior *single-tool* demo; it will be
-> re-run on the multi-tool version. The single-model recorded run above is current.
-
 Correctness and grounding as **mean [min–max]** over 3 runs each (analyst + judge
-fixed):
+fixed), on the current **multi-tool** demo:
 
 ```text
 Model                     Correctness V1     Grounding V1     V0 baseline
                           mean [range]       mean [range]     (corr)
 -----------------------   ----------------   --------------   -----------
-gemini-3.5-flash          100% [100-100]     96% [89-100]     21%
-gemini-3.1-flash-lite     97% [95-98]        78% [74-83]      20%
-gemini-2.5-pro            93% [92-94]        82% [82-83]      55%
-gemini-3.1-pro-preview    100% [98-100]      84% [80-91]      21%
+gemini-3.5-flash          100% [100-100]     89% [81-96]      21%
+gemini-3.1-flash-lite     98% [96-100]       89% [83-100]     34%
+gemini-2.5-pro            93% [89-97]        84% [83-84]      51%
+gemini-3.1-pro-preview    100% [100-100]     83% [81-86]      47%
 ```
 
-This sweep was run on the **post-`format_trajectory`-fix** engine (the analyst now
-sees the parrot/recover sub-trajectory labels). Grounding tightened markedly versus
-the pre-fix engine — `gemini-3.1-flash-lite`'s correctness spread collapsed from a
-prior 71–100% to **95–98%**, because the richer analyst signal yields a more
-reliably tool-first skill.
+Every model recovers strongly (V1 93–100%), and the V0 column surfaces an honest
+observation about **how the same flawed skill lands differently on different models:**
 
-Every model recovers strongly. Two honest observations the seeds surface:
-
-- **`gemini-2.5-pro` starts highest (55%)** — it grounds on the tool even under
-  the flawed prompt, so it has the least headroom, yet still reaches ~93%.
-- **The flash/lite models start near the floor (~20%)** and have the most to gain;
-  they recover to 97–100%. Reporting a range (not a single run) is what keeps this
-  honest — and is why best-of-N (and a `score_fn` gate) matter when a single
+- **The stronger (pro) models reach for the tool even when told not to.** Under the
+  "answer only from the summary, else contact HR" skill, `gemini-2.5-pro` and
+  `gemini-3.1-pro-preview` still ground 41% / 32% of the time and start highest
+  (51% / 47%), where the flash models obey the restriction (16–19% grounding) and
+  start lower (21% / 34%). `gemini-2.5-pro` starts highest, so it has the least
+  headroom and lands lowest (~93%). The evolved tool-first skill closes the gap —
+  every model ends up at 93–100%. Reporting a range (not a single run) is what keeps
+  this honest, and is why best-of-N (and a `score_fn` gate) matter when a
   consolidation gets unlucky.
 
 ## Evolution internals (from the run log, gemini-3.5-flash)

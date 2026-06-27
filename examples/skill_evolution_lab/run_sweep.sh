@@ -60,7 +60,7 @@ fail=0
 for M in $MODELS; do
   for S in $(seq 1 "$SEEDS"); do
     echo "############### $M  seed=$S  ($(date +%H:%M:%S)) ###############"
-    if AGENT_MODEL="$M" ./run_e2e_demo.sh; then
+    if ./run_e2e_demo.sh --agent-model "$M"; then
       # Record the run dir run_e2e_demo.sh just created (newest under runs/).
       printf '%s\t%s\n' "$M" "$(ls -dt runs/*/ | head -1)" >> "$MANIFEST"
       ok=$((ok + 1))

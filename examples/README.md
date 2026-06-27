@@ -92,10 +92,10 @@ cd skill_evolution_lab
 ./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
 ```
 
-A verified run (gemini-3.5-flash, golden-grounded, 65-question held-out set):
-**V0 21.5% → V1 100%** overall; corrections (anti-parroting) **33% → 100%**;
-evolved skill 2.9KB. Across four models × 3 seeds, mean V1 correctness is 93–100%
-per model (V0 20–55%). See the example's
+A verified run (gemini-3.5-flash, golden-grounded, 70-question held-out set):
+**V0 20% → V1 100%** overall; corrections (anti-parroting) **27% → 100%**;
+evolved skill ~1.9KB. Across four models × 3 seeds, V1 correctness is **93–100%**
+per model (V0 21–51%). See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 
