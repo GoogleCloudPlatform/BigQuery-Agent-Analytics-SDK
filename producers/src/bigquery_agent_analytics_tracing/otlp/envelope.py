@@ -229,6 +229,24 @@ def make_envelope(
   }
 
 
+def dead_letter_key(
+    stage: str,
+    source_position: SourcePosition | None = None,
+    raw_otlp_request_hash: str | None = None,
+) -> str:
+  """Deterministic key for a dead-letter / replay row.
+
+  Decode failed, so there is no canonical record *content* to hash. Key from
+  ``source_position`` (which carries the original request hash + indices) where
+  decode got that far; otherwise from ``raw_otlp_request_hash + stage`` for
+  whole-request failures (auth, undecodable request). This lets DLQ rows be
+  deduped and lets a replay worker recognize a re-failed message.
+  """
+  if source_position is not None:
+    return _sha([source_position.canonical(), stage])
+  return _sha([raw_otlp_request_hash or "", stage])
+
+
 def dead_letter_envelope(
     *,
     source_product: str,
@@ -238,16 +256,22 @@ def dead_letter_envelope(
     raw_b64: str | None,
     received_at: str,
     source_position: SourcePosition | None = None,
+    raw_otlp_request_hash: str | None = None,
 ) -> dict[str, Any]:
   """Envelope for a record that could not be decoded/written.
 
   Routed to ``otlp_dead_letter`` + the DLQ topic, never to the analytics tables.
-  ``source_position`` is carried where decode got far enough; a whole-request
-  failure leaves it ``None`` (keyed downstream from request hash + stage).
+  ``raw_b64`` must be the **replayable** original OTLP request payload (so a
+  replay worker can republish it to ``/v1/logs`` / ``/v1/metrics``), not a
+  re-serialized subrecord. ``source_position`` is carried where decode got far
+  enough; a whole-request failure leaves it ``None`` and keys from
+  ``raw_otlp_request_hash + stage``.
   """
   return {
       "envelope_version": ENVELOPE_VERSION,
-      "idempotency_key": None,
+      "idempotency_key": dead_letter_key(
+          stage, source_position, raw_otlp_request_hash
+      ),
       "ingest_time": received_at,
       "source": {"product": source_product, "signal": source_signal},
       "source_position": (

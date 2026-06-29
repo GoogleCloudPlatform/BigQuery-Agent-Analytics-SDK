@@ -42,13 +42,6 @@ _METRIC_KINDS = {
 }
 
 
-def _b64_canonical(obj: Any) -> str:
-  """Base64 of the canonical JSON of a (sub)record — for dead-letter payloads."""
-  return base64.b64encode(env.canonical_json(obj).encode("utf-8")).decode(
-      "ascii"
-  )
-
-
 def _metric_kind(metric: dict[str, Any]) -> str | None:
   """The OTLP ``oneof`` member present on a metric, or ``None`` if unrecognized."""
   for member in _METRIC_KINDS:
@@ -61,10 +54,17 @@ def decode_logs_request(
     request: dict[str, Any],
     *,
     source_product: str,
-    raw_request_hash: str,
+    raw_request: bytes,
     ingest_time: str,
 ) -> list[dict[str, Any]]:
-  """Decode an ``ExportLogsServiceRequest`` dict into log envelopes."""
+  """Decode an ``ExportLogsServiceRequest`` into log envelopes.
+
+  ``request`` is the decoded dict; ``raw_request`` is the original wire payload
+  (protobuf or OTLP/HTTP JSON bytes), which is the source of both
+  ``raw_otlp_request_hash`` and the **replayable** dead-letter ``raw_b64``.
+  """
+  raw_hash = env.request_hash(raw_request)
+  raw_b64 = base64.b64encode(raw_request).decode("ascii")
   envelopes: list[dict[str, Any]] = []
   for i, resource_logs in enumerate(request.get("resourceLogs", [])):
     resource_attrs = env.otlp_attrs_to_dict(
@@ -73,7 +73,7 @@ def decode_logs_request(
     for j, scope_logs in enumerate(resource_logs.get("scopeLogs", [])):
       scope = scope_logs.get("scope", {})
       for k, record in enumerate(scope_logs.get("logRecords", [])):
-        position = env.SourcePosition(raw_request_hash, i, j, record_index=k)
+        position = env.SourcePosition(raw_hash, i, j, record_index=k)
         try:
           key = env.log_idempotency_key(record, resource_attrs, scope, position)
           envelopes.append(
@@ -95,9 +95,10 @@ def decode_logs_request(
                   source_signal="log",
                   stage="otlp_decode",
                   reason=repr(exc),
-                  raw_b64=_b64_canonical(record),
+                  raw_b64=raw_b64,
                   received_at=ingest_time,
                   source_position=position,
+                  raw_otlp_request_hash=raw_hash,
               )
           )
   return envelopes
@@ -125,14 +126,17 @@ def decode_metrics_request(
     request: dict[str, Any],
     *,
     source_product: str,
-    raw_request_hash: str,
+    raw_request: bytes,
     ingest_time: str,
 ) -> list[dict[str, Any]]:
-  """Decode an ``ExportMetricsServiceRequest`` dict into metric envelopes.
+  """Decode an ``ExportMetricsServiceRequest`` into metric envelopes.
 
   Handles all five OTLP point types (Sum/Gauge/Histogram/ExponentialHistogram/
   Summary). A metric with no recognized type yields a single dead-letter.
+  ``raw_request`` is the original wire payload (see ``decode_logs_request``).
   """
+  raw_hash = env.request_hash(raw_request)
+  raw_b64 = base64.b64encode(raw_request).decode("ascii")
   envelopes: list[dict[str, Any]] = []
   for i, resource_metrics in enumerate(request.get("resourceMetrics", [])):
     resource_attrs = env.otlp_attrs_to_dict(
@@ -152,11 +156,12 @@ def decode_metrics_request(
                       f"metric {metric.get('name')!r} has no recognized point"
                       " type"
                   ),
-                  raw_b64=_b64_canonical(metric),
+                  raw_b64=raw_b64,
                   received_at=ingest_time,
                   source_position=env.SourcePosition(
-                      raw_request_hash, i, j, metric_index=m
+                      raw_hash, i, j, metric_index=m
                   ),
+                  raw_otlp_request_hash=raw_hash,
               )
           )
           continue
@@ -164,7 +169,7 @@ def decode_metrics_request(
         temporality = body.get("aggregationTemporality")
         for p, point in enumerate(body.get("dataPoints", [])):
           position = env.SourcePosition(
-              raw_request_hash, i, j, metric_index=m, data_point_index=p
+              raw_hash, i, j, metric_index=m, data_point_index=p
           )
           try:
             key = env.metric_idempotency_key(
@@ -194,9 +199,10 @@ def decode_metrics_request(
                     source_signal="metric",
                     stage="otlp_decode",
                     reason=repr(exc),
-                    raw_b64=_b64_canonical(point),
+                    raw_b64=raw_b64,
                     received_at=ingest_time,
                     source_position=position,
+                    raw_otlp_request_hash=raw_hash,
                 )
             )
   return envelopes

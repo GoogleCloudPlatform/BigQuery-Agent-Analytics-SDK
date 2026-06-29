@@ -29,6 +29,7 @@ from bigquery_agent_analytics_tracing.otlp.decode import decode_logs_request
 from bigquery_agent_analytics_tracing.otlp.decode import decode_metrics_request
 from bigquery_agent_analytics_tracing.otlp.envelope import canonical_json
 from bigquery_agent_analytics_tracing.otlp.envelope import dead_letter_envelope
+from bigquery_agent_analytics_tracing.otlp.envelope import dead_letter_key
 from bigquery_agent_analytics_tracing.otlp.envelope import ENVELOPE_VERSION
 from bigquery_agent_analytics_tracing.otlp.envelope import log_idempotency_key
 from bigquery_agent_analytics_tracing.otlp.envelope import make_envelope
@@ -69,6 +70,7 @@ __all__ = [
     "raw_preservation",
     "make_envelope",
     "dead_letter_envelope",
+    "dead_letter_key",
     "decode_logs_request",
     "decode_metrics_request",
 ]

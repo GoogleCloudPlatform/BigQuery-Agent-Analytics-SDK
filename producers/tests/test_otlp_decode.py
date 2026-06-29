@@ -17,14 +17,37 @@
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
 from bigquery_agent_analytics_tracing.otlp import decode
 from bigquery_agent_analytics_tracing.otlp import envelope as env
 
-HASH = "req-hash-abc"
 INGEST = "2026-06-29T00:00:00Z"
+
+
+def _raw(request: dict) -> bytes:
+  """Original wire payload for a request (OTLP/HTTP JSON bytes here)."""
+  return json.dumps(request).encode("utf-8")
+
+
+def _decode_logs(request, ingest_time=INGEST):
+  return decode.decode_logs_request(
+      request,
+      source_product="claude_code",
+      raw_request=_raw(request),
+      ingest_time=ingest_time,
+  )
+
+
+def _decode_metrics(request, ingest_time=INGEST):
+  return decode.decode_metrics_request(
+      request,
+      source_product="claude_code",
+      raw_request=_raw(request),
+      ingest_time=ingest_time,
+  )
 
 
 def _logs_request(log_records):
@@ -145,18 +168,16 @@ _METRIC_BODIES = {
 
 
 def test_decode_one_log_record_into_one_envelope():
-  envs = decode.decode_logs_request(
-      _logs_request([_A_LOG]),
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )
+  req = _logs_request([_A_LOG])
+  envs = _decode_logs(req)
   assert len(envs) == 1
   e = envs[0]
   assert e["envelope_version"] == "1"
   assert e["otel_schema_version"] == env.otel_schema.OTEL_SCHEMA_VERSION
   assert e["source"] == {"product": "claude_code", "signal": "log"}
-  assert e["source_position"]["raw_otlp_request_hash"] == HASH
+  assert e["source_position"]["raw_otlp_request_hash"] == env.request_hash(
+      _raw(req)
+  )
   assert e["source_position"]["record_index"] == 0
   assert e["otlp"]["resource_attributes"] == {"service.name": "claude-code"}
   assert len(e["idempotency_key"]) == 64  # sha256 hex
@@ -179,12 +200,7 @@ def test_decode_one_log_record_into_one_envelope():
     ],
 )
 def test_decode_each_metric_point_type(kind, expected_point_kind):
-  envs = decode.decode_metrics_request(
-      _metrics_request(kind, _METRIC_BODIES[kind]),
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )
+  envs = _decode_metrics(_metrics_request(kind, _METRIC_BODIES[kind]))
   assert len(envs) == 1
   e = envs[0]
   assert e["source"]["signal"] == "metric"
@@ -195,12 +211,7 @@ def test_decode_each_metric_point_type(kind, expected_point_kind):
 
 
 def test_sum_preserves_temporality_and_monotonicity_in_record():
-  e = decode.decode_metrics_request(
-      _metrics_request("sum", _METRIC_BODIES["sum"]),
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )[0]
+  e = _decode_metrics(_metrics_request("sum", _METRIC_BODIES["sum"]))[0]
   assert e["record"]["aggregation_temporality"] == 1
   assert e["record"]["is_monotonic"] is True
 
@@ -212,47 +223,27 @@ def test_sum_preserves_temporality_and_monotonicity_in_record():
 
 def test_idempotency_key_is_stable_across_decodes():
   req = _logs_request([_A_LOG])
-  k1 = decode.decode_logs_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )[0]["idempotency_key"]
-  k2 = decode.decode_logs_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )[0]["idempotency_key"]
-  assert k1 == k2
+  assert (
+      _decode_logs(req)[0]["idempotency_key"]
+      == _decode_logs(req)[0]["idempotency_key"]
+  )
 
 
 def test_idempotency_key_ignores_ingest_time_so_replay_collapses():
   req = _logs_request([_A_LOG])
-  k1 = decode.decode_logs_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time="2026-06-29T00:00:00Z",
-  )[0]["idempotency_key"]
-  k2 = decode.decode_logs_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time="2026-06-29T11:11:11Z",  # later replay
-  )[0]["idempotency_key"]
+  k1 = _decode_logs(req, ingest_time="2026-06-29T00:00:00Z")[0][
+      "idempotency_key"
+  ]
+  k2 = _decode_logs(req, ingest_time="2026-06-29T11:11:11Z")[0][
+      "idempotency_key"
+  ]
   assert k1 == k2
 
 
 def test_two_identical_records_in_one_request_get_distinct_keys():
   # Same content twice -> source_position.record_index distinguishes them, so
   # the dedup view will not collapse two legitimate records.
-  envs = decode.decode_logs_request(
-      _logs_request([dict(_A_LOG), dict(_A_LOG)]),
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )
+  envs = _decode_logs(_logs_request([dict(_A_LOG), dict(_A_LOG)]))
   assert len(envs) == 2
   assert envs[0]["idempotency_key"] != envs[1]["idempotency_key"]
   assert envs[0]["source_position"]["record_index"] == 0
@@ -266,28 +257,19 @@ def test_distinct_data_points_get_distinct_keys():
           {"asDouble": 1.0, "timeUnixNano": "100"},  # identical value
       ]
   }
-  envs = decode.decode_metrics_request(
-      _metrics_request("gauge", body),
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )
+  envs = _decode_metrics(_metrics_request("gauge", body))
   assert len(envs) == 2
   assert envs[0]["idempotency_key"] != envs[1]["idempotency_key"]
 
 
 # --------------------------------------------------------------------------
-# Malformed -> dead letter
+# Malformed -> dead letter (replayable + keyed, per #316 contract)
 # --------------------------------------------------------------------------
 
 
 def test_metric_with_unrecognized_type_becomes_dead_letter():
-  req = _metrics_request("notARealType", {"dataPoints": []}, name="bad")
-  envs = decode.decode_metrics_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
+  envs = _decode_metrics(
+      _metrics_request("notARealType", {"dataPoints": []}, name="bad")
   )
   assert len(envs) == 1
   e = envs[0]
@@ -295,6 +277,38 @@ def test_metric_with_unrecognized_type_becomes_dead_letter():
   assert e["delivery"]["dlq"] is True
   assert e["parse_error"]["stage"] == "otlp_decode"
   assert e["source_position"]["metric_index"] == 0
+
+
+def test_dead_letter_raw_b64_is_the_replayable_original_request():
+  req = _metrics_request("notARealType", {"dataPoints": []}, name="bad")
+  e = _decode_metrics(req)[0]
+  # raw_b64 round-trips to the ORIGINAL request bytes (republishable to
+  # /v1/metrics), not a re-serialized subrecord.
+  assert base64.b64decode(e["raw_preservation"]["raw_b64"]) == _raw(req)
+  assert base64.b64decode(e["parse_error"]["raw_b64"]) == _raw(req)
+  # and the request hash is reproducible from that payload.
+  assert e["source_position"]["raw_otlp_request_hash"] == env.request_hash(
+      _raw(req)
+  )
+
+
+def test_dead_letter_is_keyed_from_source_position():
+  req = _metrics_request("notARealType", {"dataPoints": []}, name="bad")
+  e = _decode_metrics(req)[0]
+  raw_hash = env.request_hash(_raw(req))
+  expected = env.dead_letter_key(
+      "otlp_decode", env.SourcePosition(raw_hash, 0, 0, metric_index=0)
+  )
+  assert e["idempotency_key"] == expected
+  assert e["idempotency_key"] is not None
+
+
+def test_dead_letter_key_falls_back_to_request_hash_and_stage():
+  # Whole-request failure (no source_position): key from request hash + stage.
+  k_auth = env.dead_letter_key("auth", None, "req-hash")
+  k_decode = env.dead_letter_key("otlp_decode", None, "req-hash")
+  assert len(k_auth) == 64
+  assert k_auth != k_decode  # stage participates in the key
 
 
 def test_one_bad_metric_does_not_drop_the_good_one():
@@ -314,12 +328,7 @@ def test_one_bad_metric_does_not_drop_the_good_one():
           }
       ]
   }
-  envs = decode.decode_metrics_request(
-      req,
-      source_product="claude_code",
-      raw_request_hash=HASH,
-      ingest_time=INGEST,
-  )
+  envs = _decode_metrics(req)
   assert len(envs) == 2
   assert envs[0]["parse_error"]["stage"] == "otlp_decode"
   assert envs[1]["record"]["metric_name"] == "good"
