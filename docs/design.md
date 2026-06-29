@@ -150,7 +150,7 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
 
 **Phase 2 — Evaluation:**
 1. `Client.get_trace()` retrieves all events for a session
-2. `CodeEvaluator` preset factories assess latency, turn count, error rate, token efficiency
+2. `SystemEvaluator` preset factories assess latency, turn count, error rate, token efficiency
 3. `LLMAsJudge.correctness()` performs semantic evaluation via BigQuery `AI.GENERATE`
 4. `BigQueryTraceEvaluator.evaluate_session()` performs trajectory matching against golden tool sequences
 
@@ -204,11 +204,11 @@ As demonstrated in the [e2e demo](../examples/e2e_demo.py):
    └──────────────────┘  └───────────────────┘  │ world-change detect) │
                                                 └──────────────────────┘
 
-   ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
+   ┌──────────────────────┐  ┌───────────────────────┐  ┌──────────────────┐
    │ categorical_evaluator│  │ ontology_* (6 modules)│  │      cli         │
    │ categorical_views    │  │ (YAML → AI.GENERATE → │  │ (Typer commands) │
    │ (label evaluation)   │  │  tables → PG → GQL)   │  │                  │
-   └──────────────────────┘  └──────────────────────┘  └──────────────────┘
+   └──────────────────────┘  └───────────────────────┘  └──────────────────┘
 
    ┌──────────────────┐  ┌───────────────────┐
    │ udf_kernels      │  │ serialization     │
@@ -248,7 +248,7 @@ Aggregations, filtering, joins, and even LLM evaluation (via `AI.GENERATE`) are 
 LLM-based evaluation can run via (1) BigQuery `AI.GENERATE`, (2) legacy BigQuery ML `ML.GENERATE_TEXT`, or (3) the Gemini API directly. This maximizes compatibility across different GCP configurations.
 
 **Decision 4: Composition over inheritance.**
-The `GraderPipeline` composes `CodeEvaluator`, `LLMAsJudge`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
+The `GraderPipeline` composes `SystemEvaluator`, `LLMAsJudge`, and custom functions via a builder pattern rather than requiring them to share a common base class. The `BigQueryMemoryService` composes four internal services rather than extending a single monolithic class.
 
 ---
 
@@ -396,7 +396,7 @@ Each field generates a separate `AND` condition with a corresponding `bigquery.S
 
 This module contains two evaluator classes and the SQL templates that power batch evaluation.
 
-#### 4.3.1 `CodeEvaluator`
+#### 4.3.1 `SystemEvaluator`
 
 Deterministic evaluation using code-defined metric functions.
 
@@ -641,7 +641,7 @@ Combines heterogeneous evaluators into a unified verdict using a strategy patter
                              │
               ┌──────────────┼──────────────┐
               ▼              ▼              ▼
-        CodeEvaluator   LLMAsJudge    Custom Fn
+       SystemEvaluator   LLMAsJudge    Custom Fn
         (sync)          (async)        (sync)
               │              │              │
               ▼              ▼              ▼
@@ -1273,7 +1273,7 @@ results = client.query(formatted, job_config=job_config)
 
 ```
 Evaluation
-├── Deterministic (CodeEvaluator)
+├── Deterministic (SystemEvaluator)
 │   ├── Latency
 │   ├── Turn count
 │   ├── Error rate
@@ -1321,7 +1321,7 @@ All evaluation scores in the SDK are normalized to `[0.0, 1.0]`:
 
 | Mode | Evaluator | Where Computation Runs |
 |------|-----------|----------------------|
-| Single session (sync) | `CodeEvaluator.evaluate_session()` | Python |
+| Single session (sync) | `SystemEvaluator.evaluate_session()` | Python |
 | Single session (async) | `LLMAsJudge.evaluate_session()` | Gemini API |
 | Batch via Client | `Client.evaluate()` | BigQuery (SQL + AI.GENERATE) |
 | Trajectory matching | `BigQueryTraceEvaluator.evaluate_session()` | BigQuery (fetch) + Python (matching) |
@@ -1420,7 +1420,7 @@ Synchronous (user-facing):
 ├── Client.drift_detection()
 ├── Client.insights()
 ├── Client.deep_analysis()
-├── CodeEvaluator.evaluate_session()
+├── SystemEvaluator.evaluate_session()
 ├── EvalSuite.*
 ├── EvalValidator.*
 └── BigFramesEvaluator.*
@@ -1480,10 +1480,10 @@ results = await asyncio.gather(*[_run_one(t) for t in tasks])
 
 ## 10. Extensibility & Plugin Points
 
-### 10.1 Custom Metrics (CodeEvaluator)
+### 10.1 Custom Metrics (SystemEvaluator)
 
 ```python
-evaluator = CodeEvaluator(name="custom").add_metric(
+evaluator = SystemEvaluator(name="custom").add_metric(
     name="business_metric",
     fn=lambda session: your_scoring_logic(session),
     threshold=0.7,
@@ -1586,7 +1586,7 @@ All tests mock BigQuery — no GCP credentials or live BigQuery access is needed
 ```
 tests/
 ├── test_sdk_client.py              # Client integration tests
-├── test_sdk_evaluators.py          # CodeEvaluator + LLMAsJudge
+├── test_sdk_evaluators.py          # SystemEvaluator + LLMAsJudge
 ├── test_sdk_trace.py               # Trace/Span reconstruction
 ├── test_sdk_feedback.py            # Drift detection
 ├── test_sdk_insights.py            # Insights pipeline

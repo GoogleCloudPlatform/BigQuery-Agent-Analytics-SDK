@@ -106,7 +106,7 @@ def run_metrics(session_ids: list[str]) -> dict:
   passed, failed, pass_rate, avg_observed}.
   """
   from bigquery_agent_analytics import Client
-  from bigquery_agent_analytics.evaluators import CodeEvaluator
+  from bigquery_agent_analytics.evaluators import SystemEvaluator
   from bigquery_agent_analytics.trace import TraceFilter
 
   client = Client(
@@ -119,13 +119,13 @@ def run_metrics(session_ids: list[str]) -> dict:
   results = {}
   for metric_name, cfg in METRICS.items():
     if metric_name == "latency":
-      evaluator = CodeEvaluator.latency(threshold_ms=cfg["threshold"])
+      evaluator = SystemEvaluator.latency(threshold_ms=cfg["threshold"])
     elif metric_name == "token_efficiency":
-      evaluator = CodeEvaluator.token_efficiency(max_tokens=cfg["threshold"])
+      evaluator = SystemEvaluator.token_efficiency(max_tokens=cfg["threshold"])
     elif metric_name == "turn_count":
-      evaluator = CodeEvaluator.turn_count(max_turns=cfg["threshold"])
+      evaluator = SystemEvaluator.turn_count(max_turns=cfg["threshold"])
     elif metric_name == "error_rate":
-      evaluator = CodeEvaluator.error_rate(max_error_rate=cfg["threshold"])
+      evaluator = SystemEvaluator.error_rate(max_error_rate=cfg["threshold"])
     else:
       continue
 
