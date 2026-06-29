@@ -24,6 +24,8 @@ examples/*/reports/
 examples/*/trials_*/
 scripts/**/*.log
 examples/**/*.log
+# ...but keep the curated console log committed with the recorded sample run.
+!examples/skill_evolution_lab/sample_run/run.log
 
 # Local workspace metadata
 .code*/
