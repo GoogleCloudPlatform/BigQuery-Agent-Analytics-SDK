@@ -60,12 +60,12 @@ skill_evolution_lab/
   run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
-  sample_run/           # a committed end-to-end run (scored reports, evolved
-                        #   skill, RESULT) + README explaining each artifact
+  sample_run/           # a committed end-to-end run (scored reports, V0 +
+                        #   evolved skills, RESULT) + README explaining each file
 ```
 
 A complete recorded run lives in [`sample_run/`](sample_run/) — the scored V0/V1
-reports, the evolved skill, and `RESULT.md` — so you can read the exact inputs and
+reports, the V0 and evolved skills, and `RESULT.md` — so you can read the exact inputs and
 outputs (and what each file means) without running anything. Live runs write to
 `runs/<timestamp>/` (git-ignored).
 

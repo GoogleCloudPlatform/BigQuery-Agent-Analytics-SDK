@@ -7,8 +7,8 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 21.5% → V1 100%** (65/65), grounding (tool-call share) **14% → 100%**,
-evolved skill **2.9 KB**. (Held-out set: 50 single-turn + 15 anti-parroting.)
+**V0 20.0% → V1 100%** (70/70), grounding (tool-call share) **11% → 87%**,
+evolved skill **~1.9 KB**. (Held-out set: 55 single-turn + 15 anti-parroting.)
 
 ## The workflow, and what each file is
 
@@ -16,6 +16,8 @@ The loop runs in five steps. The model, tool, and questions are identical for V0
 and V1 — only the `SKILL.md` changes — so any delta is attributable to the skill.
 
 1. **V0 traffic (evolve set).** The flawed V0 skill answers the evolve questions.
+   → `v0_skill.md` — the flawed V0 baseline deployed for this run, saved so the run
+   is self-contained and you can diff V0 against the evolved `v1_skill.md`.
    → `v0_evolve_traffic.json` — raw conversations, one per session:
    `{session_id, question, conversation[], final_response, tool_calls, ...}`,
    the schema `quality_report.py --conversations-file` consumes.

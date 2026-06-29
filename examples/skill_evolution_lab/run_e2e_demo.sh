@@ -253,6 +253,9 @@ echo ""
 step_start
 
 cp "$V0" "$SKILL"
+# Save the V0 baseline into the run dir too, so each run is self-contained
+# (the flawed starting skill next to the evolved v1_skill.md for diffing).
+cp "$V0" "$REPORTS_DIR/v0_skill.md"
 echo -e "  ${DIM}[$(ts)] Running + scoring the evolve set...${RESET}"
 run_agent "$SKILL" "$REPORTS_DIR/v0_evolve_traffic.json" "$EVOLVE" "$CORR"
 score     "$REPORTS_DIR/v0_evolve_traffic.json" "$REPORTS_DIR/v0_evolve_report.json"
