@@ -39,16 +39,20 @@ from typing import Any
 OTEL_SCHEMA_VERSION = "1"
 
 
-def _source_position(bigquery: Any) -> Any:
+def _source_position(bigquery: Any, mode: str = "NULLABLE") -> Any:
   """Stable, replay-invariant position of a record within its OTLP request.
 
   Required input to the log/metric idempotency keys (§4.1 of the design doc):
   it distinguishes two legitimately identical records/points in the same
-  request, and survives DLQ/replay unchanged.
+  request, and survives DLQ/replay unchanged. The nested index fields stay
+  nullable (a log has no ``data_point_index``; a whole-request dead-letter may
+  have none), but ``mode`` controls whether the top-level RECORD is required —
+  it is on native analytics tables, nullable on the dead-letter table.
   """
   return bigquery.SchemaField(
       "source_position",
       "RECORD",
+      mode=mode,
       fields=[
           bigquery.SchemaField("raw_otlp_request_hash", "STRING"),
           bigquery.SchemaField("resource_index", "INTEGER"),
@@ -61,13 +65,23 @@ def _source_position(bigquery: Any) -> Any:
 
 
 def _receiver_metadata(bigquery: Any) -> list[Any]:
-  """Receiver-added columns present on every native OTel table."""
+  """Receiver-added columns on every native **analytics** table.
+
+  The dedup-identity fields are ``REQUIRED``: the ``*_dedup`` views partition on
+  ``idempotency_key``, so a null key would collapse unrelated rows into one.
+  The dead-letter table (``otlp_dead_letter_schema``) deliberately keeps these
+  nullable, since a whole-request failure may lack a full ``source_position``.
+  """
   return [
-      bigquery.SchemaField("source_product", "STRING"),  # claude_code | codex
-      bigquery.SchemaField("source_signal", "STRING"),  # log | metric | span
-      bigquery.SchemaField("idempotency_key", "STRING"),
-      _source_position(bigquery),
-      bigquery.SchemaField("ingest_time", "TIMESTAMP"),
+      bigquery.SchemaField(
+          "source_product", "STRING", mode="REQUIRED"
+      ),  # claude_code | codex
+      bigquery.SchemaField(
+          "source_signal", "STRING", mode="REQUIRED"
+      ),  # log | metric | span
+      bigquery.SchemaField("idempotency_key", "STRING", mode="REQUIRED"),
+      _source_position(bigquery, mode="REQUIRED"),
+      bigquery.SchemaField("ingest_time", "TIMESTAMP", mode="REQUIRED"),
       bigquery.SchemaField(
           "raw_preservation",
           "RECORD",
@@ -76,7 +90,7 @@ def _receiver_metadata(bigquery: Any) -> list[Any]:
               bigquery.SchemaField("raw_b64", "STRING"),
           ],
       ),
-      bigquery.SchemaField("otel_schema_version", "STRING"),
+      bigquery.SchemaField("otel_schema_version", "STRING", mode="REQUIRED"),
   ]
 
 

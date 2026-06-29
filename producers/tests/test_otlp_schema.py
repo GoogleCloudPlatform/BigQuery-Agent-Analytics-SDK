@@ -103,6 +103,32 @@ def test_every_native_table_carries_source_position_and_idempotency_key():
     assert {"resource_index", "scope_index", "record_index"} <= sp_fields, name
 
 
+def test_native_analytics_tables_require_dedup_identity_fields():
+  # idempotency_key/source_position/ingest_time/otel_schema_version are REQUIRED
+  # on analytics tables: the *_dedup views partition on idempotency_key, so a
+  # null key would collapse unrelated rows.
+  for name in schema.NATIVE_TABLES:
+    if name == "otlp_dead_letter":
+      continue
+    fields = _by_name(schema.NATIVE_TABLES[name][0](BQ))
+    for col in (
+        "idempotency_key",
+        "source_position",
+        "ingest_time",
+        "otel_schema_version",
+        "source_product",
+        "source_signal",
+    ):
+      assert fields[col].mode == "REQUIRED", (name, col)
+
+
+def test_dead_letter_keeps_identity_nullable_for_partial_failures():
+  # A whole-request decode failure may lack idempotency_key / source_position.
+  fields = _by_name(schema.otlp_dead_letter_schema(BQ))
+  assert fields["idempotency_key"].mode == "NULLABLE"
+  assert fields["source_position"].mode == "NULLABLE"
+
+
 def test_otel_schema_version_is_stamped_on_rows_and_labels():
   logs = _by_name(schema.otel_logs_schema(BQ))
   assert "otel_schema_version" in logs
@@ -244,7 +270,9 @@ def test_dedup_view_sql_dedupes_on_idempotency_key():
   assert "CREATE OR REPLACE VIEW `ds.otel_logs_dedup`" in sql
   assert "FROM `ds.otel_logs`" in sql
   assert "ROW_NUMBER() OVER (" in sql
-  assert "PARTITION BY idempotency_key" in sql
+  # Newest-write-wins, matching docs/otlp_receiver_design.md (so a replayed or
+  # repaired row supersedes the older one).
+  assert "PARTITION BY idempotency_key ORDER BY ingest_time DESC" in sql
 
 
 def test_dedup_view_sql_rejects_dead_letter():
@@ -272,3 +300,30 @@ def test_projection_adds_provenance_beyond_agent_events():
       "source_event_name",
       "crosswalk_version",
   } <= proj
+
+
+def test_parity_check_is_recursive_into_nested_records():
+  # The parity signature includes nested record paths, so drift *inside*
+  # content_parts / object_ref is caught — not only top-level columns.
+  flat = set(projection._flatten(projection.agent_events_otlp_columns(BQ)))
+  assert "content_parts:RECORD:REPEATED" in flat
+  assert "content_parts.object_ref:RECORD:NULLABLE" in flat
+  assert "content_parts.object_ref.details:JSON:NULLABLE" in flat
+
+
+def test_parity_fails_when_a_nested_agent_events_field_is_unmatched(
+    monkeypatch,
+):
+  # Simulate agent_events growing a nested field the projection lacks: the
+  # parity check must report it (proves the recursion actually guards drift).
+  real = projection.agent_events_otlp_columns
+
+  def _drop_object_ref(bigquery):
+    fields = real(bigquery)
+    return [f for f in fields if f.name != "content_parts"] + [
+        bigquery.SchemaField("content_parts", "RECORD", mode="REPEATED")
+    ]
+
+  monkeypatch.setattr(projection, "agent_events_otlp_columns", _drop_object_ref)
+  missing = projection.missing_agent_events_columns(BQ)
+  assert any("content_parts.object_ref" in sig for sig in missing)

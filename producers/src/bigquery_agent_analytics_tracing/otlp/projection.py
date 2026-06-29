@@ -96,18 +96,31 @@ def agent_events_otlp_columns(bigquery: Any) -> list[Any]:
   ]
 
 
-def _key(field: Any) -> tuple[str, str, str]:
-  return (field.name, field.field_type, field.mode)
+def _flatten(fields: list[Any], prefix: str = "") -> list[str]:
+  """``path:type:mode`` signatures for every field, recursing into RECORDs.
 
-
-def missing_agent_events_columns(bigquery: Any) -> list[tuple[str, str, str]]:
-  """``agent_events`` columns not covered by the projection.
-
-  Empty list == the projection is a faithful superset of ``agent_events``.
-  Drives the schema-parity contract test.
+  Recursion is what lets the parity check catch drift *inside* nested records
+  (e.g. ``content_parts.object_ref.details``), not only at the top level.
   """
-  projected = {_key(f) for f in agent_events_otlp_columns(bigquery)}
-  return [_key(f) for f in bq_schema(bigquery) if _key(f) not in projected]
+  out: list[str] = []
+  for f in fields:
+    path = f"{prefix}{f.name}"
+    out.append(f"{path}:{f.field_type}:{f.mode}")
+    if f.fields:
+      out.extend(_flatten(list(f.fields), prefix=f"{path}."))
+  return out
+
+
+def missing_agent_events_columns(bigquery: Any) -> list[str]:
+  """``agent_events`` field signatures not covered by the projection.
+
+  Empty list == the projection is a faithful superset of ``agent_events``,
+  recursively (nested ``content_parts`` / ``object_ref`` fields included), so a
+  change inside a nested record fails the parity test too. Drives the
+  schema-parity contract test.
+  """
+  projected = set(_flatten(agent_events_otlp_columns(bigquery)))
+  return [sig for sig in _flatten(bq_schema(bigquery)) if sig not in projected]
 
 
 # Native tables that get a read-time dedup view (every otel_* analytics table;
@@ -131,6 +144,6 @@ def dedup_view_sql(table_name: str, dataset: str = "${dataset}") -> str:
       f"CREATE OR REPLACE VIEW `{dataset}.{table_name}_dedup` AS\n"
       f"SELECT * FROM `{dataset}.{table_name}`\n"
       f"QUALIFY ROW_NUMBER() OVER (\n"
-      f"  PARTITION BY idempotency_key ORDER BY ingest_time\n"
+      f"  PARTITION BY idempotency_key ORDER BY ingest_time DESC\n"
       f") = 1;"
   )
