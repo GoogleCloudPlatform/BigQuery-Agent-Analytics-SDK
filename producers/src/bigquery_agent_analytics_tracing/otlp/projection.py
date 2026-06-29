@@ -133,7 +133,8 @@ DEDUP_TABLES = tuple(
 def dedup_view_sql(table_name: str, dataset: str = "${dataset}") -> str:
   """SQL for a plain read-time dedup view over an append-only native table.
 
-  Exactly-once-at-read on ``idempotency_key`` (keep earliest ``ingest_time``).
+  Exactly-once-at-read on ``idempotency_key`` (keep the latest ``ingest_time``,
+  i.e. newest-write-wins, so a replayed/repaired row supersedes the older one).
   A plain logical view, not a materialized view: BigQuery MVs forbid window
   functions, so ``QUALIFY ROW_NUMBER()`` cannot live in an incremental MV.
   ``dataset`` defaults to a deploy-time placeholder.
