@@ -12,15 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OTel-native OTLP receiver storage layer for BQAA (issue #316).
+"""OTel-native OTLP receiver storage + decode layer for BQAA (issue #316).
 
-PR 1 of the receiver: the BigQuery schema package — native ``otel_*`` tables as
-source of truth, BQAA ``agent_events_otlp`` projection contract, and read-time
-dedup views. See ``docs/otlp_receiver_design.md``.
+- PR 1: BigQuery schema package — native ``otel_*`` tables, ``agent_events_otlp``
+  projection contract, read-time dedup views (``schema`` / ``projection``).
+- PR 2: OTLP decode + envelope library — decoded OTLP logs/metrics to envelope
+  v1, ``source_position``, per-signal idempotency, dead-letter envelopes
+  (``envelope`` / ``decode``).
+
+See ``docs/otlp_receiver_design.md``.
 """
 
 from __future__ import annotations
 
+from bigquery_agent_analytics_tracing.otlp.decode import decode_logs_request
+from bigquery_agent_analytics_tracing.otlp.decode import decode_metrics_request
+from bigquery_agent_analytics_tracing.otlp.envelope import canonical_json
+from bigquery_agent_analytics_tracing.otlp.envelope import dead_letter_envelope
+from bigquery_agent_analytics_tracing.otlp.envelope import ENVELOPE_VERSION
+from bigquery_agent_analytics_tracing.otlp.envelope import log_idempotency_key
+from bigquery_agent_analytics_tracing.otlp.envelope import make_envelope
+from bigquery_agent_analytics_tracing.otlp.envelope import metric_idempotency_key
+from bigquery_agent_analytics_tracing.otlp.envelope import otlp_attrs_to_dict
+from bigquery_agent_analytics_tracing.otlp.envelope import raw_preservation
+from bigquery_agent_analytics_tracing.otlp.envelope import request_hash
+from bigquery_agent_analytics_tracing.otlp.envelope import SourcePosition
+from bigquery_agent_analytics_tracing.otlp.envelope import span_idempotency_key
 from bigquery_agent_analytics_tracing.otlp.projection import agent_events_otlp_columns
 from bigquery_agent_analytics_tracing.otlp.projection import DEDUP_TABLES
 from bigquery_agent_analytics_tracing.otlp.projection import dedup_view_sql
@@ -31,6 +48,7 @@ from bigquery_agent_analytics_tracing.otlp.schema import OTEL_SCHEMA_VERSION
 from bigquery_agent_analytics_tracing.otlp.schema import table_labels
 
 __all__ = [
+    # schema (PR 1)
     "OTEL_SCHEMA_VERSION",
     "NATIVE_TABLES",
     "METRIC_TABLES",
@@ -39,4 +57,18 @@ __all__ = [
     "missing_agent_events_columns",
     "dedup_view_sql",
     "DEDUP_TABLES",
+    # envelope + decode (PR 2)
+    "ENVELOPE_VERSION",
+    "SourcePosition",
+    "request_hash",
+    "canonical_json",
+    "otlp_attrs_to_dict",
+    "log_idempotency_key",
+    "metric_idempotency_key",
+    "span_idempotency_key",
+    "raw_preservation",
+    "make_envelope",
+    "dead_letter_envelope",
+    "decode_logs_request",
+    "decode_metrics_request",
 ]
