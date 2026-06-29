@@ -159,6 +159,7 @@ def main():
       max_chars=args.max_chars,
       max_workers=args.max_workers,
       tools=tools,
+      artifacts_dir=os.path.dirname(os.path.abspath(args.out)),
   )
 
   # Normalize trailing whitespace / EOF so the committed artifact stays clean

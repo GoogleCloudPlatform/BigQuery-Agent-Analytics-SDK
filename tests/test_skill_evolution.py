@@ -19,12 +19,14 @@ consolidation guardrails, and fence/var sanitization. They do not make any
 network calls (the google-genai import is lazy, inside the API functions).
 """
 
+import json
 import os
 import sys
 
 # Make scripts/ importable.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from skill_evolution import _has_parroted_recovery  # noqa: E402
+from skill_evolution import _write_evolution_artifacts
 from skill_evolution import compute_prevalence_summary
 from skill_evolution import format_trajectory
 from skill_evolution import partition_trajectories
@@ -285,3 +287,40 @@ def test_select_candidate_picks_better_when_it_clears_margin():
       ["cand1", "cand2"], "BASE", score_fn=scores.get, min_improvement=0.5
   )
   assert out == "cand1"
+
+
+# --- _write_evolution_artifacts --------------------------------------------
+
+
+def test_write_evolution_artifacts(tmp_path):
+  patches = [
+      "## Root Cause\nTOOL_USAGE: deflected instead of calling the tool.\n",
+      "## Root Cause\nTOOL_USAGE: same again.\n",
+      "## Pattern\nRESPONSE_PATTERN: bridged the term.\n",
+  ]
+  base = "BASE SKILL"
+  candidates = ["CAND ONE", "CAND TWO", base, ""]  # base + empty are dropped
+  selected = "CAND TWO"
+
+  out = str(tmp_path)
+  _write_evolution_artifacts(out, patches, candidates, selected, base)
+
+  # Patches: one record per patch, with parsed category.
+  records = json.load(open(os.path.join(out, "v1_patches.json")))
+  assert len(records) == 3
+  assert records[0]["category"] == "TOOL_USAGE"
+  assert records[2]["category"] == "RESPONSE_PATTERN"
+  assert records[0]["patch"] == patches[0]
+
+  # Candidates: base/empty filtered; selected one tagged.
+  cand_dir = os.path.join(out, "v1_candidates")
+  files = sorted(os.listdir(cand_dir))
+  assert files == ["candidate_1.md", "candidate_2_SELECTED.md"]
+  assert (
+      open(os.path.join(cand_dir, "candidate_2_SELECTED.md")).read().strip()
+      == "CAND TWO"
+  )
+
+  # Prevalence summary written.
+  prevalence = open(os.path.join(out, "v1_prevalence.txt")).read()
+  assert "TOOL_USAGE: 2/3" in prevalence

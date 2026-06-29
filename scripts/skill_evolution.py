@@ -434,6 +434,57 @@ def compute_prevalence_summary(patches: list[str]) -> str:
   return "\n".join(lines)
 
 
+def _write_evolution_artifacts(
+    artifacts_dir, patches, candidates, selected, current_skill
+):
+  """Persist the engine's intermediate reasoning for inspection/audit.
+
+  When ``evolve_skill`` is given ``artifacts_dir`` it writes, under that dir:
+    - ``v1_patches.json``   -- every analyst patch (root-cause category + text)
+    - ``v1_candidates/``    -- each best-of-N consolidation candidate (the chosen
+                               one tagged ``_SELECTED``)
+    - ``v1_prevalence.txt`` -- root-cause category tally across the patches
+  """
+  os.makedirs(artifacts_dir, exist_ok=True)
+
+  records = []
+  for i, patch in enumerate(patches):
+    match = re.search(r"## Root Cause\s*\n\s*\[?(\w+)\]?", patch) or re.search(
+        r"## Pattern\s*\n\s*\[?(\w+)\]?", patch
+    )
+    records.append(
+        {
+            "index": i + 1,
+            "category": match.group(1) if match else None,
+            "patch": patch,
+        }
+    )
+  with open(os.path.join(artifacts_dir, "v1_patches.json"), "w") as f:
+    json.dump(records, f, indent=2)
+    f.write("\n")
+
+  cand_dir = os.path.join(artifacts_dir, "v1_candidates")
+  os.makedirs(cand_dir, exist_ok=True)
+  kept = [c for c in candidates if c and c != current_skill]
+  for i, cand in enumerate(kept):
+    tag = "_SELECTED" if cand == selected else ""
+    path = os.path.join(cand_dir, f"candidate_{i + 1}{tag}.md")
+    with open(path, "w") as f:
+      f.write(cand if cand.endswith("\n") else cand + "\n")
+
+  prevalence = compute_prevalence_summary(patches)
+  if prevalence:
+    with open(os.path.join(artifacts_dir, "v1_prevalence.txt"), "w") as f:
+      f.write(prevalence + "\n")
+
+  logger.info(
+      "Wrote evolution artifacts to %s (%d patches, %d candidates).",
+      artifacts_dir,
+      len(records),
+      len(kept),
+  )
+
+
 def validate_evolved_skill(evolved: str, current_skill: str) -> list[str]:
   """Structural guardrails (Trace2Skill). Empty list = valid."""
   issues = []
@@ -707,6 +758,7 @@ def evolve_skill(
     score_fn: Optional[Callable[[str], float]] = None,
     min_improvement: float = 0.5,
     tools: Optional[str] = None,
+    artifacts_dir: Optional[str] = None,
     client=None,
 ) -> str:
   """Evolve a SKILL.md from a scored quality report.
@@ -726,6 +778,8 @@ def evolve_skill(
       median-size viable candidate is returned (avoids truncated runts/bloat).
     min_improvement: A candidate must beat the incumbent score by at least this
       margin (in score_fn units) to be selected; otherwise the base is kept.
+    artifacts_dir: If set, write the analyst patches, the best-of-N candidates,
+      and a prevalence summary here (for inspection/audit) before returning.
     client: Optional pre-built google-genai Client (else one is created).
 
   Returns:
@@ -783,7 +837,12 @@ def evolve_skill(
     c = sanitize_adk_vars(c)
     if not validate_evolved_skill(c, current_skill):
       viable.append(c)
-  return select_candidate(viable, current_skill, score_fn, min_improvement)
+  selected = select_candidate(viable, current_skill, score_fn, min_improvement)
+  if artifacts_dir:
+    _write_evolution_artifacts(
+        artifacts_dir, patches, cands, selected, current_skill
+    )
+  return selected
 
 
 # ---------------------------------------------------------------------------
