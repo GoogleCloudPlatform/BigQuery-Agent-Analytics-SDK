@@ -7,8 +7,8 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 20.0% → V1 100%** (70/70), grounding (tool-call share) **11% → 87%**,
-evolved skill **~1.9 KB**. (Held-out set: 55 single-turn + 15 anti-parroting.)
+**V0 18.6% → V1 100%** (70/70), evolved skill **~2.0 KB**. (Held-out set: 55 single-turn
++ 15 anti-parroting.)
 
 The complete console log of this run — every stage banner, per-step timing, and the
 final comparison — is in [`run.log`](run.log) (the same file every live run writes
@@ -45,6 +45,13 @@ and V1 — only the `SKILL.md` changes — so any delta is attributable to the s
    → `v1_skill.md` — the evolved skill (`version: "1"`, `evolved_from: "0"`),
    tool-first: it lists which topics to look up with tools and forbids premature
    HR deflection (and bakes no specific data values).
+   → `v1_patches.json` — every analyst patch the fleet produced (one record per
+   trajectory: root-cause `category` + the proposed rule) — the engine's reasoning,
+   not just its final output.
+   → `v1_candidates/` — the best-of-N consolidation candidates (the chosen one tagged
+   `_SELECTED`; `v1_skill.md` is a copy of it).
+   → `v1_prevalence.txt` — the root-cause category tally across the patches (how
+   systematic each finding was).
 
 5. **V1 result + compare (held-out).** Deploy V1, re-run the held-out set, score,
    and compare.

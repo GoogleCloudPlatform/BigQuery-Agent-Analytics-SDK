@@ -1,0 +1,257 @@
+[
+  {
+    "index": 1,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available policy lookup tool.\n\n## Analysis\nThe user asked about the doctor's note requirement for sick leave. The agent claimed it lacked the information and deflected to HR because the topic was not in its hardcoded knowledge list. However, the agent has the `lookup_company_policy` tool which covers sick leave policies and should have been called to retrieve the missing fact.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nWhen asked about a company policy, rule, or benefit that is not explicitly listed in your immediate knowledge, you must call the `lookup_company_policy` tool to retrieve the information. Never state you lack the information or deflect to HR without first querying the tool."
+  },
+  {
+    "index": 2,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the `lookup_company_policy` tool to retrieve information about health plans.\n\n## Analysis\nThe user asked about available health plan types. The agent replied that it did not have the information and deflected to HR. The agent has access to the `lookup_company_policy` tool, which explicitly covers medical benefits, but failed to use it because the current skill document instructs it to deflect for any topic not in its hardcoded list.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nNever deflect to HR for questions about company policies or benefits (e.g., health plans, expenses, holidays, etc.). Always use the `lookup_company_policy` tool to retrieve the authoritative facts for any policy or benefit topic before answering."
+  },
+  {
+    "index": 3,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool for an unlisted policy.\n\n## Analysis\nThe user asked about the deadline to file an expense report. The agent deflected and told the user to contact HR because its current instructions explicitly tell it to do so for any topic not hardcoded in its prompt. However, the agent has the `lookup_company_policy` tool which covers expenses and other policies, meaning it failed to utilize its tools to find the answer.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nDo not deflect to HR for policies that are not explicitly listed in your initial knowledge. You must always use the lookup_company_policy tool to search for information on any company HR policy or benefit (such as expenses, holidays, bereavement, etc.) before claiming you do not have the information."
+  },
+  {
+    "index": 4,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected an in-scope question to HR instead of using its available lookup tool.\n\n## Analysis\nThe user asked about medical premium coverage, and the agent deflected by saying it lacked the information and suggesting they contact HR. The agent has the `lookup_company_policy` tool which explicitly covers medical benefits, but the current skill document wrongly instructs the agent to deflect to HR for any topic not in its hardcoded list, causing it to skip tool usage entirely.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nNever deflect a policy or benefit question to HR without first using the `lookup_company_policy` tool to search for the requested information. You must actively query the tool for topics like medical premiums, expenses, or holidays, and only suggest contacting HR if the tool returns no relevant information."
+  },
+  {
+    "index": 5,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool for an in-scope benefit because the skill explicitly instructed it to do so.\n\n## Analysis\nThe user asked about the employer HSA contribution, and the agent deflected to HR, claiming it lacked the information. This occurred because the current skill document explicitly instructs the agent to deflect for any topic not hardcoded in its prompt, causing it to completely ignore the `lookup_company_policy` tool which is specifically designed to fetch details about benefits like HSAs.\n\n## Proposed Patch\nSection: Instructions\nAction: add_anti_pattern\nContent:\nNever deflect to HR or claim you lack information for company policies or benefits (e.g., HSA, medical, expenses, holidays) just because they are not listed in your immediate knowledge. You must always call the `lookup_company_policy` tool first to retrieve the authoritative facts before answering."
+  },
+  {
+    "index": 6,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available policy lookup tool because the skill explicitly instructed it to rely only on baked-in knowledge.\n\n## Analysis\nThe user asked about required overlap hours for remote staff. The agent claimed it lacked the information and deflected to HR, following the skill's instruction to do so for topics not explicitly listed in its prompt. However, the agent has the `lookup_company_policy` tool which covers remote work policies and should have been called to retrieve the authoritative facts.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nNever deflect to HR or state that you lack information about a company policy or benefit without first calling the `lookup_company_policy` tool to search for the requested topic. Do not rely solely on your provided summary knowledge; always use the tool to fetch specific details (like overlap hours, expense rules, or specific benefit terms)."
+  },
+  {
+    "index": 7,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its policy lookup tool because the skill document explicitly instructed it to only use hardcoded facts.\n\n## Analysis\nThe user asked about the per-diem for meals while traveling, and the agent claimed it did not have the information and deflected to HR. The agent has the `lookup_company_policy` tool which explicitly covers \"expenses,\" but it failed to use it because the current skill document instructs the agent to answer using *only* the hardcoded list of facts and to deflect all other topics. \n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nWhen asked about any company policy, benefit, or expense rule not explicitly listed in your knowledge, you must first call the `lookup_company_policy` tool to retrieve the authoritative facts. Never deflect to HR or claim you lack the information without querying this tool first."
+  },
+  {
+    "index": 8,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool to find the requested benefit information.\n\n## Analysis\nThe user asked about the individual in-network out-of-pocket cap, which is a medical benefit covered by the agent's tools. The agent deflected to HR because its current instructions tell it to only use hardcoded facts and deflect otherwise. The agent failed to use the `lookup_company_policy` tool to retrieve the specific medical benefit details.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_anti_pattern\nContent:\nDo not deflect to HR for questions about company policies or benefits (including medical, dental, vision, out-of-pocket caps, etc.) just because the information is not in your initial knowledge list. You must always use the `lookup_company_policy` tool to search for the requested policy or benefit details before concluding you do not have the information."
+  },
+  {
+    "index": 9,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool for a benefits question.\n\n## Analysis\nThe user asked about family out-of-pocket maximums, and the agent deflected to HR because the topic wasn't in its hardcoded list of facts. The current skill explicitly instructs the agent to deflect to HR for unlisted topics, causing it to ignore the `lookup_company_policy` tool, which is fully capable of retrieving medical benefit details. \n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for answers regarding company policies and benefits (such as medical coverage, out-of-pocket costs, etc.) before telling the user you do not have the information or deflecting to HR. Do not rely solely on the hardcoded knowledge."
+  },
+  {
+    "index": 10,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected a policy question to HR instead of using its available lookup tool.\n\n## Analysis\nThe user asked if unused PTO is paid out upon resignation. Because this specific detail was not hardcoded in the agent's prompt, the agent followed its instruction to deflect to HR. However, the agent has the `lookup_company_policy` tool which can fetch authoritative facts for any HR policy, meaning it should have queried the tool before giving up.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nBefore deflecting to HR or stating you lack information on a policy topic (such as PTO, leave, or benefits), you must first call the `lookup_company_policy` tool to search for the answer. Do not rely solely on your hardcoded knowledge."
+  },
+  {
+    "index": 11,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its policy lookup tool because the skill instructed it to deflect for any topic not in its hardcoded list.\n\n## Analysis\nThe user asked about the company's 401k match percentage. The agent claimed it did not have the information and deflected to HR. However, the `lookup_company_policy` tool explicitly covers 401k match and other benefits, which the agent failed to call due to restrictive instructions in its skill document.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to fetch authoritative information about company policies and benefits (e.g., 401k match, medical, expenses, holidays) before answering. Never deflect to HR or claim you lack information without first querying this tool."
+  },
+  {
+    "index": 12,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tool to look up benefits information.\n\n## Analysis\nThe user asked about coverage and caps for braces, and the agent deflected by saying it lacked the information and suggesting they contact HR. The agent has the `lookup_company_policy` tool which explicitly covers all benefits including medical, dental, and vision, and should have called this tool to retrieve the facts rather than relying on its hardcoded list.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent: Always call the `lookup_company_policy` tool to retrieve authoritative facts for any company policy or benefit question (including medical, dental, and vision coverage) before claiming you do not have the information or directing the user to HR."
+  },
+  {
+    "index": 13,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the `lookup_company_policy` tool to find the requested information.\n\n## Analysis\nThe user asked about parental leave, which is a topic covered by the `lookup_company_policy` tool. Because the current skill explicitly instructs the agent to deflect to HR for any topic not listed in its hardcoded knowledge, the agent followed the instruction and failed to use its available tool to retrieve the answer.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nIf a user asks about a company policy or benefit that is not explicitly listed in your immediate knowledge, you must call the `lookup_company_policy` tool to retrieve the facts before telling the user you do not have the information or deflecting to HR."
+  },
+  {
+    "index": 14,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool because the prompt instructed it to rely only on hardcoded facts.\n\n## Analysis\nThe user asked about vision coverage (eye exams and frames), and the agent deflected by saying it lacked the information and suggesting they contact HR. The agent has the `lookup_company_policy` tool which explicitly covers medical/dental/vision benefits, but it failed to use it because the current skill document explicitly instructs the agent to answer using *only* the hardcoded list of policies and to deflect anything else.\n\n## Proposed Patch\nSection: Tool Usage Rules\nAction: add_rule\nContent:\nBefore stating you lack information or deflecting to HR for any company policy or benefit question (including medical, dental, vision, expenses, etc.), you must first call the lookup_company_policy tool to retrieve the authoritative facts. Do not rely solely on hardcoded knowledge."
+  },
+  {
+    "index": 15,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its lookup tool for a covered benefits topic.\n\n## Analysis\nThe user asked about coverage for a major dental procedure. The agent deflected, stating it lacked the information and suggesting the user contact HR. This occurred because the current skill explicitly instructs the agent to deflect to HR for any topic not hardcoded in its prompt, completely ignoring the available `lookup_company_policy` tool which explicitly covers dental benefits.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nWhen asked about a company policy or benefit that is not explicitly listed in your immediate knowledge (such as dental, medical, vision, expenses, or other HR topics), you must use the `lookup_company_policy` tool to retrieve the authoritative facts. Never deflect to HR or claim you lack the information before querying this tool."
+  },
+  {
+    "index": 16,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool for an unlisted policy.\n\n## Analysis\nThe user asked about HSA contributions, and the agent immediately deflected to HR, stating it did not have the information. The agent has the `lookup_company_policy` tool which explicitly covers HSA and other benefits, but the current skill document incorrectly instructs the agent to deflect to HR for any topic not hardcoded in its prompt. \n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nIf a user asks about a company policy or benefit that is not explicitly listed in your knowledge (such as HSA, 401k, expenses, etc.), you must call the `lookup_company_policy` tool to retrieve the authoritative facts before ever stating you lack the information or suggesting they contact HR."
+  },
+  {
+    "index": 17,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool for a benefits question.\n\n## Analysis\nThe user asked if a routine dental cleaning is covered, and the agent deflected by saying it lacked the information and suggesting they contact HR. The agent failed to use the `lookup_company_policy` tool, which explicitly covers dental benefits and should have been called to retrieve the authoritative facts before giving up.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nNever immediately deflect questions about company policies or benefits to HR. If a user asks about a topic not in your immediate knowledge (such as dental, medical, vision, or other benefits), you must first call the `lookup_company_policy` tool to retrieve the facts. Only direct the user to HR if the tool explicitly returns no information."
+  },
+  {
+    "index": 18,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool to retrieve policy information.\n\n## Analysis\nThe user asked about primary caregiver leave, and the agent responded that it did not have the information and deflected to HR. This occurred because the skill's current instructions tell the agent to deflect for any topic not explicitly listed in its hardcoded knowledge, causing it to ignore the `lookup_company_policy` tool which explicitly covers parental leave and other benefits.\n\n## Proposed Patch\nSection: Anti-patterns\nAction: add_anti_pattern\nContent:\nDo not deflect to HR when asked about a policy or benefit not listed in your immediate knowledge. You must always use the `lookup_company_policy` tool to search for the requested topic (e.g., parental leave, expenses, holidays) before concluding you lack the information."
+  },
+  {
+    "index": 19,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool because the skill explicitly instructs it to deflect for any topic not hardcoded in the prompt.\n\n## Analysis\nThe user asked about the vesting schedule for the company match (401k). The agent deflected to HR, stating it did not have the information. This occurred because the current skill document hardcodes a small list of policies and explicitly instructs the agent to deflect to HR for anything else, causing the agent to ignore its `lookup_company_policy` tool which contains the authoritative facts for the 401k match and other benefits.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for answers regarding company policies and benefits (such as 401k match, expenses, or holidays). Never deflect to HR or claim you lack the information without first querying this tool."
+  },
+  {
+    "index": 20,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the `lookup_company_policy` tool to find the requested information.\n\n## Analysis\nThe user asked about keeping the employer match (401k) if they quit before a year. The agent deflected to HR because the topic wasn't in its hardcoded knowledge list, strictly following a flawed instruction in its prompt. It failed to use the `lookup_company_policy` tool, which explicitly covers 401k match and other benefits.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways use the lookup_company_policy tool to search for information regarding company policies and benefits (such as 401k match, expenses, holidays, etc.). Never deflect to HR or claim you lack the information without first querying this tool."
+  },
+  {
+    "index": 21,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its lookup tool because the skill explicitly instructed it to deflect for topics not listed in its hardcoded knowledge.\n\n## Analysis\nThe user asked about company-paid holidays, and the agent claimed it did not have the information and suggested contacting HR. This is a tool usage failure because the agent possesses the `lookup_company_policy` tool, which explicitly covers holidays, but the skill's instructions incorrectly told it to deflect rather than search.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent: Always use the `lookup_company_policy` tool to search for information on company policies or benefits (e.g., holidays, expenses, bereavement) before stating you do not have the information or deflecting to HR. Only deflect to HR if the tool returns no information."
+  },
+  {
+    "index": 22,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool to find the missing information.\n\n## Analysis\nThe user asked about the annual benefits enrollment period, and the agent replied that it did not have the information and told the user to contact HR. The agent did this because its current instructions tell it to deflect if a topic isn't explicitly listed in its prompt, completely ignoring the `lookup_company_policy` tool which is designed to fetch authoritative facts for all benefits and HR policies.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for answers to employee questions about policies or benefits (e.g., enrollment dates, expenses, holidays) before claiming you lack the information. Never deflect to HR without first attempting to retrieve the information using this tool."
+  },
+  {
+    "index": 23,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tool to look up the requested policy.\n\n## Analysis\nThe user asked if the Wednesday before Thanksgiving is a paid day off. The agent deflected to HR because \"holidays\" were not in its hardcoded list of known policies, directly following a flawed instruction in its prompt. However, the agent has access to the `lookup_company_policy` tool, which explicitly covers company holidays and should have been called to retrieve the answer.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nWhen asked about a company policy, benefit, or holiday that is not explicitly listed in your immediate knowledge, you must use the lookup_company_policy tool to retrieve the authoritative facts. Never deflect to HR or claim you lack the information without first attempting to look it up using this tool."
+  },
+  {
+    "index": 24,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool for an in-scope policy.\n\n## Analysis\nThe user asked about the bereavement allowance for a grandparent. The agent deflected to HR because bereavement was not listed in its hardcoded knowledge, ignoring the `lookup_company_policy` tool which explicitly covers bereavement. The agent needs a rule to query the tool for unlisted policies before deflecting.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent: Always use the lookup_company_policy tool to search for information on any HR policy or benefit (e.g., bereavement, expenses, holidays) before telling the user you do not have the information or suggesting they contact HR."
+  },
+  {
+    "index": 25,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool for a covered topic.\n\n## Analysis\nThe agent deflected a question about a company holiday (Juneteenth) to HR, claiming it did not have the information. This occurred because the skill document explicitly instructed the agent to only use its hardcoded facts and deflect anything else, causing it to ignore its `lookup_company_policy` tool which can fetch authoritative facts on holidays and other unlisted policies.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nDo not immediately deflect to HR for topics not listed in your initial knowledge. You must always use the `lookup_company_policy` tool to search for information regarding any company HR policy, benefit, or holiday before stating you do not have the information."
+  },
+  {
+    "index": 26,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool for a covered topic.\n\n## Analysis\nThe user asked about EAP counseling visits, and the agent deflected to HR because EAP was not in its hardcoded list of policies. The agent failed to use the `lookup_company_policy` tool, which can retrieve authoritative facts for EAP and other benefits, because the skill explicitly instructed it to deflect for unlisted topics.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways call the `lookup_company_policy` tool to retrieve information for any company policy or benefit question (e.g., EAP, holidays, expenses) before claiming you lack the information or directing the user to HR. Do not restrict yourself to answering only about the policies explicitly listed in your knowledge base."
+  },
+  {
+    "index": 27,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool for an unlisted policy.\n\n## Analysis\nThe user asked about bereavement leave, and the agent deflected to HR because bereavement was not in its hardcoded list of policies. The agent failed to use the `lookup_company_policy` tool, which explicitly covers bereavement and other HR policies, because the current skill incorrectly instructs it to deflect for any unlisted topic rather than searching for it.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nNever deflect to HR for policy or benefit questions without first calling the `lookup_company_policy` tool. If a user asks about a topic not explicitly listed in your knowledge (e.g., bereavement, holidays, expenses), you must use the tool to retrieve the authoritative facts before answering."
+  },
+  {
+    "index": 28,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected a covered topic to HR because the skill explicitly instructed it to do so for unlisted topics instead of using its lookup tool.\n\n## Analysis\nThe user asked about bereavement leave, and the agent immediately deflected to HR, claiming it did not have the information. The `lookup_company_policy` tool explicitly covers bereavement and other HR policies, but the agent failed to use it because the current skill document instructs it to deflect any topic not hardcoded in its prompt. \n\n## Proposed Patch\nSection: Instructions\nAction: add_anti_pattern\nContent:\nDo not deflect to HR for company policy or benefit questions (e.g., bereavement, holidays, expenses) just because they are not in your initial knowledge list. You must always query the lookup_company_policy tool to search for the requested policy before claiming you lack the information."
+  },
+  {
+    "index": 29,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the available lookup tool because the skill incorrectly instructs it to deflect for any topic not hardcoded in the prompt.\n\n## Analysis\nThe user asked about jury duty pay, and the agent deflected by saying it lacked the information and suggesting they contact HR. However, the agent has access to the `lookup_company_policy` tool, which explicitly covers jury duty and other HR policies. The failure occurred because the agent followed a restrictive prompt instruction to deflect rather than utilizing its tools to fetch the missing information.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for information on any HR policy or benefit (such as jury duty, expenses, holidays, or bereavement) before telling the user you do not have the information or deflecting to HR. Do not rely solely on the hardcoded list of policies."
+  },
+  {
+    "index": 30,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tool to look up the requested policy.\n\n## Analysis\nThe user asked about an Employee Assistance Program (EAP) support line. Because EAP was not in the agent's hardcoded list of known policies, it immediately deflected to HR. However, the agent has access to the `lookup_company_policy` tool which explicitly covers EAP, meaning it failed to use its tools to retrieve the missing information.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nNever immediately deflect to HR for company policy or benefit questions (e.g., EAP, holidays, expenses) just because they are not in your immediate knowledge list. You must first use the lookup_company_policy tool to search for the requested topic before concluding you do not have the information."
+  },
+  {
+    "index": 31,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool for an unlisted policy.\n\n## Analysis\nThe agent claimed it did not have information about compressed schedules (flex time) and told the user to contact HR. This occurred because the skill's instructions tell the agent to deflect if a topic isn't in its hardcoded list, ignoring the fact that the agent has the `lookup_company_policy` tool which explicitly covers flex time and other HR policies. \n\n## Proposed Patch\nSection: main\nAction: add_rule\nContent:\nIf a user asks about a company policy or benefit that is not explicitly listed in your immediate knowledge (such as flex time, holidays, or expenses), you must call the lookup_company_policy tool to retrieve the authoritative facts. Do not deflect to HR unless you have queried the tool and it returns no information."
+  },
+  {
+    "index": 32,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup_company_policy tool for an unlisted topic.\n\n## Analysis\nThe agent claimed it lacked information on tuition reimbursement and deflected to HR because the topic was not in its hardcoded list of policies. It failed to recognize that it has the `lookup_company_policy` tool, which is explicitly designed to retrieve authoritative facts for company policies and benefits (including tuition reimbursement) that are not memorized in the prompt.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nBefore stating you lack information or deflecting to HR for an unlisted policy or benefit, you MUST call the `lookup_company_policy` tool to search for the topic. Only deflect to HR if the tool explicitly returns no results."
+  },
+  {
+    "index": 33,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR for an in-scope topic instead of using the `lookup_company_policy` tool.\n\n## Analysis\nThe user asked about flexible hours, and the agent immediately deflected to HR because the topic was not in its hardcoded list of policies. However, the agent has access to the `lookup_company_policy` tool, which explicitly covers \"flex time\" and many other policies. The current skill instructions incorrectly tell the agent to deflect if a topic isn't listed, causing it to ignore its available tools.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nDo not immediately deflect to HR for policy topics that are not in your hardcoded list. You MUST first use the `lookup_company_policy` tool to search for the requested policy (e.g., flex time, holidays, expenses, bereavement). Only suggest contacting HR if the tool explicitly returns no information."
+  },
+  {
+    "index": 34,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available lookup tool for an in-scope policy question.\n\n## Analysis\nThe agent claimed it did not have information about short-term disability and deflected the user to HR. This happened because the skill document explicitly instructs the agent to deflect if a topic is not in its hardcoded list, causing it to ignore the `lookup_company_policy` tool which is designed to fetch this exact information.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent: Always use the `lookup_company_policy` tool to retrieve authoritative facts for any company HR policy or benefit (including short-term disability, expenses, holidays, etc.) before claiming you lack the information or deflecting to HR. Do not rely solely on hardcoded knowledge."
+  },
+  {
+    "index": 35,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup_company_policy tool for a covered topic.\n\n## Analysis\nThe user asked about short-term disability pay replacement, and the agent deflected to HR, stating it lacked the information. This occurred because the current skill document explicitly instructs the agent to deflect to HR for any topic not hardcoded in its prompt, causing it to ignore the `lookup_company_policy` tool which explicitly covers short-term disability and other benefits.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nWhen asked about a company policy or benefit not explicitly listed in your knowledge (such as short-term disability, expenses, or holidays), you must first call the lookup_company_policy tool to retrieve the authoritative facts. Do not deflect to HR unless the tool returns no information."
+  },
+  {
+    "index": 36,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the `lookup_company_policy` tool due to restrictive instructions in the skill.\n\n## Analysis\nThe user asked about the grade required for tuition reimbursement. The agent deflected to HR, stating it did not have the information. This occurred because the current skill explicitly instructs the agent to only use hardcoded facts and deflect to HR for anything else, causing the agent to ignore its `lookup_company_policy` tool which explicitly covers tuition reimbursement.\n\n## Proposed Patch\nSection: Core Instructions\nAction: add_rule\nContent:\nNever deflect to HR for company policies or benefits not listed in your initial knowledge. You must always use the `lookup_company_policy` tool to retrieve authoritative facts for any unlisted HR policy or benefit (e.g., tuition reimbursement, holidays, expenses) to answer the user's question."
+  },
+  {
+    "index": 37,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool for an unlisted policy topic.\n\n## Analysis\nThe user asked about tuition reimbursement for a job-related class, and the agent deflected to HR, claiming it lacked the information. The agent has the `lookup_company_policy` tool which explicitly covers tuition reimbursement, but failed to use it because the skill document instructed it to deflect for any topic not listed in its static knowledge.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for information on any company policy or benefit (such as tuition reimbursement, expenses, etc.) that is not explicitly listed in your static knowledge. Never deflect to HR without first querying the tool for the requested topic."
+  },
+  {
+    "index": 38,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using the lookup tool for a covered benefits topic.\n\n## Analysis\nThe user asked about the fraction of dependent premiums covered by the employer. The agent deflected to HR because the topic was not in its hardcoded list of policies, following the prompt's instruction to deflect if a topic is unlisted. However, the agent has the `lookup_company_policy` tool which explicitly covers all benefits (medical/dental/vision), and it failed to use it.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nAlways call the lookup_company_policy tool to search for answers regarding company policies or benefits (including medical, dental, vision, and premiums) before telling the user you do not have the information or deflecting to HR. Never deflect to HR without querying the tool first."
+  },
+  {
+    "index": 39,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using an available tool to look up the requested policy.\n\n## Analysis\nThe user asked about the maximum duration of short-term disability. The agent deflected, stating it did not have the information and told the user to contact HR, because short-term disability was not in its hardcoded list of policies. However, the agent has the `lookup_company_policy` tool which explicitly covers short-term disability and other benefits, and it failed to call it.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nBefore deflecting to HR for any company policy or benefit question that is not in your immediate knowledge, you MUST call the `lookup_company_policy` tool to retrieve the authoritative facts. Never claim you lack information on a policy without first querying this tool."
+  },
+  {
+    "index": 40,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tools to calculate the requested payout.\n\n## Analysis\nThe agent claimed it did not have information about short-term disability payouts and told the user to contact HR. This occurred because the skill's static instructions tell the agent to deflect on unlisted topics, causing it to ignore the `calculate_disability_pay` tool which is explicitly designed to compute personalized payouts based on salary and weeks out. \n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nNever deflect to HR for topics not listed in your static knowledge without first attempting to use your tools. If a user asks about a company policy, use the `lookup_company_policy` tool. If a user provides their salary and duration of absence to ask about a specific dollar amount or payout (e.g., short-term disability), you must use the `calculate_disability_pay` tool to compute the exact figure."
+  },
+  {
+    "index": 41,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tools to answer the user's question.\n\n## Analysis\nThe agent claimed it did not have information regarding short-term disability benefits and told the user to contact HR. However, the agent has the `calculate_disability_pay` tool specifically designed to compute personalized payouts based on salary and duration, which it failed to invoke because the skill's static instructions told it to deflect on unlisted topics.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nNever deflect to HR for policy or benefit questions without first using your tools. You must use `lookup_company_policy` to retrieve facts for policies not listed in your static knowledge, and you must use `calculate_disability_pay` to compute personalized short-term disability payouts when the user provides their salary and duration."
+  },
+  {
+    "index": 42,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its policy lookup tool for a covered topic.\n\n## Analysis\nThe agent repeatedly told the user to contact HR for information about the 401k match, claiming it did not have the information. However, the agent has the `lookup_company_policy` tool which explicitly covers the 401k match. The current skill document instructs the agent to deflect any topic not in its hardcoded list, causing it to ignore its available tools.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent: Always use the `lookup_company_policy` tool to search for policy or benefit details (e.g., 401k match, medical, expenses) before claiming you lack the information or deflecting to HR. Do not restrict your answers only to the hardcoded list of policies."
+  },
+  {
+    "index": 43,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tools due to a restrictive instruction in its prompt.\n\n## Analysis\nThe user asked for a specific weekly short-term disability payout based on a $130,000 salary. The agent deflected to HR because its current skill explicitly instructs it to do so for any topic not in its hardcoded list. Consequently, the agent failed to use the `calculate_disability_pay` tool, which is explicitly provided to compute personalized payouts.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nNever deflect to HR for policy, benefit, or compensation questions without first attempting to use your tools. If a topic is not in your immediate knowledge, use `lookup_company_policy` to retrieve the facts. If the user provides a salary and asks for a specific dollar amount for short-term disability, you must use the `calculate_disability_pay` tool."
+  },
+  {
+    "index": 44,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its available tools to answer an in-scope question.\n\n## Analysis\nThe user asked for a weekly short-term disability check calculation based on a $156,000 salary. The agent deflected to HR because the topic was not in its hardcoded knowledge list, completely ignoring the `calculate_disability_pay` tool which is specifically designed to compute this exact personalized payout.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nNever deflect to HR for topics covered by your tools. If a user asks for a short-term disability payout calculation based on a salary or duration, you must use the `calculate_disability_pay` tool to compute the exact amount. For other policy details not listed in your knowledge, use `lookup_company_policy`."
+  },
+  {
+    "index": 45,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: Agent deflected to HR instead of using the lookup_company_policy tool.\n\n## Analysis\nThe agent claimed it did not have information about HSA contributions and deflected to HR, even after the user provided a potential correction. This occurred because the agent followed its instruction to rely only on a hardcoded list of policies instead of calling the `lookup_company_policy` tool, which explicitly covers HSA benefits.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nWhen asked about company policies or benefits (including HSA, medical, 401k, etc.), you must use the `lookup_company_policy` tool to retrieve the authoritative facts. Never deflect to HR or claim you lack the information without first querying this tool."
+  },
+  {
+    "index": 46,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected an in-scope question to HR instead of using the `lookup_company_policy` tool.\n\n## Analysis\nThe user asked about the tuition reimbursement limit, and the agent deflected to HR because the topic was not in its hardcoded list of policies. The agent failed to use the `lookup_company_policy` tool, which explicitly covers tuition reimbursement and other benefits, due to a restrictive prompt instruction that told it to answer using only hardcoded information.\n\n## Proposed Patch\nSection: Rules\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for information on company policies or benefits (e.g., tuition reimbursement, expenses, holidays) before telling the user you do not have the information or directing them to HR. Do not restrict your answers only to the hardcoded knowledge."
+  },
+  {
+    "index": 47,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected to HR instead of using its lookup tool for an unlisted policy.\n\n## Analysis\nThe agent claimed it lacked information on meal reimbursement limits and deflected to HR, even after the user suggested the limit was $100. The agent has the `lookup_company_policy` tool which covers expenses, but the current skill document explicitly instructs the agent to deflect to HR for any topic not hardcoded in its prompt, preventing it from utilizing its tools.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nDo not immediately deflect to HR for topics not listed in your initial knowledge. You MUST first use the `lookup_company_policy` tool to search for the requested policy, benefit, or expense rule. If a user suggests a specific policy detail or correction, you must also use the tool to verify their claim before responding."
+  },
+  {
+    "index": 48,
+    "category": "TOOL_USAGE",
+    "patch": "## Root Cause\nTOOL_USAGE: The agent deflected an in-scope question to HR because the skill explicitly instructed it to rely only on hardcoded facts instead of using its lookup tool.\n\n## Analysis\nThe user asked about EAP counseling sessions, and the agent deflected to HR. Even after the user provided a correction (\"I heard it's 12 sessions a year\"), the agent deflected again. The agent failed to use the `lookup_company_policy` tool, which explicitly covers EAP and other benefits, because the current skill document wrongly restricts it to only use hardcoded information and deflect everything else.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\nAlways use the `lookup_company_policy` tool to search for answers regarding company policies or benefits (such as EAP, holidays, or expenses) that are not explicitly listed in your hardcoded knowledge. Never deflect to HR or claim you do not have the information without first querying this tool."
+  },
+  {
+    "index": 49,
+    "category": "TOOL_USAGE",
+    "patch": "## Pattern\nTOOL_USAGE: Querying the lookup tool for unlisted policies instead of deflecting to HR.\n\n## Analysis\nThe agent successfully answered a question about the expense policy, which is not listed in its base knowledge. The current skill document incorrectly instructs the agent to immediately deflect to HR for unlisted topics. This success demonstrates that the agent should first use the `lookup_company_policy` tool to find authoritative facts on topics like expenses, holidays, and other benefits before falling back to HR.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\nDo not immediately deflect to HR for topics not listed in your base knowledge. Instead, always use the `lookup_company_policy` tool to retrieve authoritative facts for any company HR policy or benefit (e.g., expenses, holidays, bereavement, etc.). Only suggest contacting HR if the tool yields no information."
+  },
+  {
+    "index": 50,
+    "category": "TOOL_USAGE",
+    "patch": "## Pattern\nTOOL_USAGE: Utilizing calculation tools for personalized policy payouts.\n\n## Analysis\nThe agent successfully provided a personalized short-term disability payout calculation based on the user's salary and duration. However, the current skill document restricts the agent to a static list of policies and encourages deflecting to HR for unlisted topics. Adding explicit instructions to use the available tools (`calculate_disability_pay` and `lookup_company_policy`) will reinforce this successful behavior and prevent unnecessary HR deflections.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\n- Use the `calculate_disability_pay` tool to compute personalized short-term disability payouts when the user provides their salary and/or duration.\n- Use the `lookup_company_policy` tool to retrieve authoritative facts for any company HR policy or benefit not listed in your immediate knowledge. Do not deflect to HR if the information can be retrieved or calculated using these tools."
+  },
+  {
+    "index": 51,
+    "category": "TOOL_USAGE",
+    "patch": "## Pattern\nTOOL_USAGE: Using policy lookup tools for unlisted topics instead of deflecting to HR.\n\n## Analysis\nThe agent successfully answered a question about a policy (expenses) that was not in its hardcoded knowledge base. The current skill incorrectly instructs the agent to deflect to HR for unlisted topics; this should be updated to instruct the agent to use the `lookup_company_policy` tool to find authoritative facts for any policy not explicitly listed before giving up.\n\n## Proposed Patch\nSection: Instructions\nAction: add_rule\nContent:\n- Do not immediately deflect to HR for topics not listed in your hardcoded knowledge. Instead, use the `lookup_company_policy(topic)` tool to retrieve authoritative facts for company policies and benefits (e.g., expenses, holidays, bereavement, etc.). Only suggest contacting HR if the tool yields no information."
+  }
+]

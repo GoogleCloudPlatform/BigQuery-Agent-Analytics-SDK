@@ -8,7 +8,7 @@
   Judge:      gemini-2.5-flash  (@ us-central1)
   Concurrency:3
   Registry:   off
-  Output dir: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash
+  Output dir: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -23,21 +23,21 @@
   Method:  Deploy SKILL.v0.md, run traffic, score vs the golden Q&A
   Sets:    evolve (study) + held-out (test), each with corrections
 
-  [16:43:46] Running + scoring the evolve set...
+  [21:53:56] Running + scoring the evolve set...
 Running 60 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v0_evolve_traffic.json
+Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v0_evolve_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 49)
+  UNHELPFUL Sessions (showing 10 of 48)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     e04_pto  → policy_agent
   Question:    Is my unused PTO paid out if I resign?
-  Response:    "I do not have information about whether unused PTO is paid out upon resignation. I suggest you contact HR to get clarification on this policy."
+  Response:    "I do not have information regarding whether unused PTO is paid out if you resign. I suggest you contact HR to get clarification on this policy."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about PTO payout upon resignation is within the agent's scope. The agent stated it did not have the information and directed the user to HR, which is considered unhelpful as it failed to use its tools to answer an in-scope question.
+  Reason:        The user's question about PTO payout upon resignation is within the agent's scope (PTO is listed). The agent explicitly states it does not have the information and directs the user to HR, which is categorized as 'unhelpful' for in-scope questions.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating that it did not successfully use its `lookup_company_policy` tool to retrieve data for this in-scope question. Therefore, the response is not grounded in tool results.
+  Reason:        The agent did not use any tools to attempt to answer the in-scope question. Instead, it provided a generic LLM response stating it lacked information and suggested contacting HR, which is not grounded in tool results.
 
   Session:     e07_sick  → policy_agent
   Question:    After how many days out sick is a doctor's note required?
@@ -57,35 +57,19 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     e12_expenses  → policy_agent
   Question:    What's the per-diem for meals while traveling for work?
-  Response:    "I do not have that information. I suggest you contact HR."
+  Response:    "I do not have that information. I suggest you contact HR for assistance with travel expenses and per-diem rates."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about per-diem for meals is an in-scope topic (expenses), but the agent stated it did not have the information and directed the user to HR, which is considered unhelpful.
+  Reason:        The user's question about per-diem for travel expenses is within the agent's scope ('expenses'). The agent responded by stating it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' (agent said 'I don't have that information' or directed the user elsewhere instead of using its tools).
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information and did not use its lookup_company_policy tool to retrieve the relevant data for an in-scope question.
-
-  Session:     e13_expenses  → policy_agent
-  Question:    Is a receipt needed for a $40 purchase?
-  Response:    "I do not have that information. I suggest you contact HR to ask about the company's expense and receipt policies."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about expense receipts is within the agent's scope (expenses policy). The agent stated it did not have the information and directed the user to HR, which is considered unhelpful as it failed to use its available tools for an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information and did not use any tools to retrieve a policy. The response is based on the agent's inability to answer, not on tool data.
-
-  Session:     e14_expenses  → policy_agent
-  Question:    Does booking a $700 flight need approval first?
-  Response:    "I do not have that information. I suggest you contact HR."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about flight approval falls under 'expenses' which is within the agent's scope. The agent responded by saying it does not have the information and directed the user to HR, which is explicitly defined as an 'unhelpful' response.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to answer the question, despite the question being in scope and requiring a tool lookup (lookup_company_policy for 'expenses'). The response is a generic LLM statement.
+  Reason:        The agent did not use any tools to attempt to answer the question, which was in scope and required tool usage (lookup_company_policy). The response is a generic LLM statement of inability to help, not based on any tool results.
 
   Session:     e15_expenses  → policy_agent
   Question:    What's the deadline to file an expense report?
-  Response:    "I do not have information about the deadline to file expense reports. Please contact HR for assistance with this topic."
+  Response:    "I do not have that information. Please contact HR for assistance with expense report deadlines."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about expense report deadlines is within the agent's scope ('expenses'). The agent explicitly states it does not have the information and directs the user to HR, which is considered unhelpful as per the definition: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.'
+  Reason:        The user's question about expense report deadlines is within the agent's scope ('expenses'). The agent responded by stating it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' (category 1: 'The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools').
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent's response indicates it does not have the information, meaning it did not retrieve any data from its tools to answer the question. The question is in scope for the `lookup_company_policy` tool, but the response is not based on any retrieved tool results.
+  Reason:        The agent did not use any tools to answer the question. The `lookup_company_policy` tool covers 'expenses' and should have been used. The agent's response 'I do not have that information' is a direct LLM statement not based on any tool results, making it ungrounded as it failed to leverage available tools for an in-scope query.
 
   Session:     e16_benefits  → policy_agent
   Question:    What percentage of my medical premium does the employer pay?
@@ -111,8 +95,24 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Grounding:     ❌ NOT GROUNDED
   Reason:        The agent's response 'I do not have that information' is a generic LLM deflection and not based on data retrieved from its tools. The agent should have used the `lookup_company_policy` tool to find this information, but it either failed to use the tool or the tool failed to provide data, leading to a non-tool-based response.
 
+  Session:     e19_benefits  → policy_agent
+  Question:    What's the individual in-network out-of-pocket cap?
+  Response:    "I do not have that information. Please contact HR for details regarding the individual in-network out-of-pocket cap."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The question about health insurance out-of-pocket cap is within the agent's scope. The agent stated it did not have the information and directed the user to HR, which is explicitly defined as 'unhelpful'.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated 'I do not have that information', indicating it did not retrieve data from its tools to answer the question. The information should have been available via the `lookup_company_policy` tool.
+
+  Session:     e20_benefits  → policy_agent
+  Question:    What's the employer HSA contribution for family coverage?
+  Response:    "I do not have information about the employer HSA contribution for family coverage. Please contact HR for assistance with this topic."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The question is in scope (HSA is a benefit). The agent states it does not have the information and directs the user to HR, which is explicitly defined as unhelpful for in-scope questions.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent's response states it does not have the information. The expected answer indicates this information is available via the `lookup_company_policy` tool. The agent failed to retrieve and provide the correct, grounded information from its tools.
+
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 11)
+  MEANINGFUL Sessions (showing 3 of 12)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     e01_pto  → policy_agent
@@ -145,22 +145,22 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     60       🔴      11 (18%)      49 (82%)        0       0      100%      100%
+  policy_agent                     60       🔴      12 (20%)      48 (80%)        0       0      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              49  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              48  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 60
-  Meaningful               : 11
+  Meaningful               : 12
   Declined (out-of-scope)  : 0
   Partial                  : 0
-  Unhelpful                : 49
-  Unhelpful rate           : 81.7%
+  Unhelpful                : 48
+  Unhelpful rate           : 80.0%
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.1
@@ -172,65 +172,73 @@ QUALITY SUMMARY
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   49  ( 81.7%) ########################################
-    ✅ HELPFUL         :   11  ( 18.3%) #########
+    ❌ NOT HELPFUL     :   48  ( 80.0%) ########################################
+    ✅ HELPFUL         :   12  ( 20.0%) ##########
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   49  ( 81.7%) ########################################
-    ✅ GROUNDED        :   11  ( 18.3%) #########
+    ❌ NOT GROUNDED    :   48  ( 80.0%) ########################################
+    ✅ GROUNDED        :   12  ( 20.0%) ##########
 
   Execution Details:
-    elapsed_seconds: 76.2
+    elapsed_seconds: 81.1
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-26T16:47:32.759145+00:00
+    created_at: 2026-06-29T21:57:21.481410+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (81.7%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (80.0%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v0_evolve_report.json
-  [16:47:33] Running + scoring the held-out test set...
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v0_evolve_report.json
+  [21:57:22] Running + scoring the held-out test set...
 Running 70 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v0_test_traffic.json
+Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v0_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 56)
+  UNHELPFUL Sessions (showing 10 of 57)
 ──────────────────────────────────────────────────────────────────────
+
+  Session:     t04_pto  → policy_agent
+  Question:    If I leave the company mid-year, what happens to my unused PTO?
+  Response:    "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get more details on this topic."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The question is in scope (PTO policy), but the agent stated it did not have the information and directed the user to HR, which is explicitly defined as unhelpful.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent failed to use the `lookup_company_policy` tool to retrieve the correct information, instead claiming it did not have the information. The response is therefore not grounded in tool results.
 
   Session:     t07_sick_leave  → policy_agent
   Question:    If I'm out sick for 4 days, do I need a doctor's note?
-  Response:    "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR to get more details on this policy."
+  Response:    "I do not have information regarding whether a doctor's note is required for taking sick leave. Please contact HR to get more details on this policy."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about a doctor's note for sick leave is within the agent's scope (sick leave policy). The agent explicitly states it does not have the information and directs the user to HR, which is considered unhelpful for an in-scope question.
+  Reason:        The agent stated it does not have the information and directed the user to HR, which falls under 'unhelpful' as it failed to answer an in-scope question using its tools.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it does not have the information, indicating it did not successfully retrieve data from its tools to answer the question. The question required tool usage (lookup_company_policy), but the response is not based on any tool results.
+  Reason:        The agent explicitly stated it does not have the information, indicating it did not successfully retrieve data from its tools to answer the question. The question required tool usage (lookup_company_policy) to provide a grounded answer.
 
   Session:     t10_remote_work  → policy_agent
   Question:    What are the core collaboration hours for remote work?
-  Response:    "I do not have information about the core collaboration hours for remote work. I suggest you contact HR for assistance with this topic."
+  Response:    "I do not have information about the core collaboration hours for remote work. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The question is within the agent's scope (remote work policy). The agent stated it did not have the information and directed the user to HR, which is explicitly defined as unhelpful behavior for in-scope questions.
+  Reason:        The question about remote work hours is within the agent's scope. The agent failed to provide an answer and instead directed the user to HR, which is explicitly defined as unhelpful.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent failed to use the `lookup_company_policy` tool, which it should have used for this in-scope question. Its response 'I do not have information...' is not based on any tool results, making it ungrounded as it did not attempt to retrieve data from its tools.
+  Reason:        The agent's response is a direct LLM statement indicating it does not have the information, rather than being based on data retrieved from its tools. A tool (lookup_company_policy) was available and should have been used for this in-scope question.
 
   Session:     t12_expenses  → policy_agent
   Question:    What's the daily meal reimbursement limit on business travel?
-  Response:    "I do not have that information. I suggest you contact HR."
+  Response:    "I do not have that information. Please contact HR for assistance with business travel and meal reimbursement policies."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The question about meal reimbursement is within the agent's scope (expenses), but the agent stated it did not have the information and directed the user to HR, which is explicitly defined as unhelpful.
+  Reason:        The question about meal reimbursement is within the agent's scope (expenses). The agent responded by saying it does not have the information and directed the user to HR, which is explicitly defined as 'unhelpful' ('The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.').
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to answer the question, which required a lookup_company_policy call. The response was based on the LLM's inability to answer rather than tool results.
+  Reason:        The question required the use of the `lookup_company_policy` tool to retrieve the meal reimbursement limit. The agent stated it did not have the information, indicating it either failed to use the tool or the tool returned no data, and thus the response is not based on actual tool results. It is not 'grounded' as no tool data was used to form the response, and it is not 'no_tool_needed' as a tool was required.
 
   Session:     t13_expenses  → policy_agent
   Question:    Do I need a receipt for a $30 expense?
-  Response:    "I do not have information regarding the company's expense or receipt policy. Please contact HR for assistance with this question."
+  Response:    "I do not have information about expenses. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The user's question about expense policy is within the agent's scope, but the agent stated it does not have the information and directed the user to HR instead of using its available tools.
+  Reason:        The user's question about expense receipts is within the agent's scope ('expenses'), but the agent stated it does not have information and directed the user to HR, failing to use its available tools to answer the in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it does not have information and directed the user to HR, indicating it did not use its `lookup_company_policy` tool to retrieve the relevant data, which was available for 'expenses'.
+  Reason:        The agent did not use any tools to answer the question, instead stating it lacked information. A tool (`lookup_company_policy`) was available and necessary to answer the question.
 
   Session:     t14_expenses  → policy_agent
   Question:    Do I need pre-approval for a $600 flight?
@@ -242,11 +250,11 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t15_expenses  → policy_agent
   Question:    How long do I have to submit a business expense?
-  Response:    "I do not have information regarding business expenses. Please contact HR for assistance with this topic."
+  Response:    "I do not have that information. Please contact HR for assistance with business expenses."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The question about business expenses is within the agent's scope, but the agent stated it does not have information and directed the user to HR, which is an unhelpful deflection for an in-scope topic.
+  Reason:        The agent stated it does not have the information and directed the user to HR, which is explicitly listed as an 'unhelpful' response for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent claimed it did not have information, indicating it either failed to use the `lookup_company_policy` tool or the tool failed to return data, despite the topic being in scope and having a known answer. The response is not based on tool results.
+  Reason:        The agent stated it did not have the information and did not use its tools to retrieve the correct policy, thus the response is not grounded in tool data.
 
   Session:     t16_benefits  → policy_agent
   Question:    What share of my health premium does the company cover?
@@ -258,11 +266,11 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t17_benefits  → policy_agent
   Question:    What medical plans are offered?
-  Response:    "I do not have information about the specific medical plans offered. Please contact HR for more details."
+  Response:    "I do not have information about the specific medical plans offered. I suggest you contact HR for this information."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The question about medical plans is within the agent's scope (health/dental/vision insurance), but the agent stated it does not have the information and directed the user to HR, failing to provide a meaningful answer.
+  Reason:        The user's question about medical plans is within the agent's scope (health insurance). The agent failed to provide an answer and instead directed the user to HR, which is considered unhelpful for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it does not have the information, indicating it failed to retrieve the correct data from its tools, which should have provided the answer (PPO and HMO plans) via the `lookup_company_policy` tool. The response is not based on actual tool results.
+  Reason:        The agent should have used the `lookup_company_policy` tool to find the medical plans offered. The ground truth indicates this information is available. The agent's response 'I do not have information' is not based on the actual data that should have been retrieved from the tool, making it ungrounded.
 
   Session:     t18_benefits  → policy_agent
   Question:    What's the family out-of-pocket maximum on the PPO?
@@ -272,16 +280,8 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Grounding:     ❌ NOT GROUNDED
   Reason:        The agent did not use any tools to answer the question, despite the information being available via the `lookup_company_policy` tool. The response is not based on any tool results.
 
-  Session:     t19_benefits  → policy_agent
-  Question:    What's the individual out-of-pocket maximum on the PPO?
-  Response:    "I do not have that information. I suggest you contact HR for details regarding the individual out-of-pocket maximum on the PPO plan."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The question is in scope (health insurance benefit). The agent explicitly states it does not have the information and directs the user to HR, which is defined as unhelpful ('The agent said 'I don't have that information', gave generic advice, or directed the user elsewhere instead of using its tools.').
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to answer the question, which required a tool lookup (lookup_company_policy). The response is not based on any tool results, making it ungrounded. The agent should have used a tool but failed to do so.
-
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 14)
+  MEANINGFUL Sessions (showing 3 of 13)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t01_pto  → policy_agent
@@ -302,11 +302,11 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month."
+  Response:    "Based on the company policy, you receive 20 days of PTO per year, which is accrued monthly. This works out to approximately **1.67 days** (or about 1 and 2/3 days) of PTO accrued each month."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct and correct answer to the user's question about PTO accrual per month, including the calculation based on the annual policy.
+  Reason:        The agent directly and accurately answers the user's question about monthly PTO accrual, providing the correct calculation based on the annual policy.
   Grounding:     ✅ GROUNDED
-  Reason:        The agent's response is based on company policy data (20 days/year, accrued monthly) which would be retrieved using the `lookup_company_policy` tool.
+  Reason:        The agent's response is based on company policy data (20 days of PTO per year, accrued monthly) which would be retrieved using the lookup_company_policy tool.
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -314,58 +314,58 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     70       🔴      14 (20%)      56 (80%)        0       0      100%      100%
+  policy_agent                     70       🔴      13 (19%)      57 (81%)        0       0      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              56  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              57  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 70
-  Meaningful               : 14
+  Meaningful               : 13
   Declined (out-of-scope)  : 0
   Partial                  : 0
-  Unhelpful                : 56
-  Unhelpful rate           : 80.0%
+  Unhelpful                : 57
+  Unhelpful rate           : 81.4%
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
     Avg tool calls       : 0.1
     Multi-turn sessions  : 15
-    Correction rate      : 10.0%
-    Verification rate    : 11.4%
+    Correction rate      : 7.1%
+    Verification rate    : 14.3%
 
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   56  ( 80.0%) ########################################
-    ✅ HELPFUL         :   14  ( 20.0%) ##########
+    ❌ NOT HELPFUL     :   57  ( 81.4%) ########################################
+    ✅ HELPFUL         :   13  ( 18.6%) #########
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   56  ( 80.0%) ########################################
-    ✅ GROUNDED        :   14  ( 20.0%) ##########
+    ❌ NOT GROUNDED    :   57  ( 81.4%) ########################################
+    ✅ GROUNDED        :   13  ( 18.6%) #########
 
   Execution Details:
-    elapsed_seconds: 92.1
+    elapsed_seconds: 93.0
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-26T16:51:38.385788+00:00
+    created_at: 2026-06-29T22:01:24.621203+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (80.0%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (81.4%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v0_test_report.json
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v0_test_report.json
 
   V0 evolve: 23.1% (6/26 golden-matched)
-  V0 test:   20.0% (14/70 golden-matched)
+  V0 test:   18.6% (13/70 golden-matched)
 
-  ✔ V0 baseline completed in 473s.
+  ✔ V0 baseline completed in 449s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -375,18 +375,19 @@ QUALITY SUMMARY
   Method:  Analyst fleet reads the scored evolve set; best-of-3 candidates
   Model:   analyst=gemini-3.1-pro-preview  (this is the slow step)
 
-  [16:51:39] Analysts proposing patches, consolidating candidates...
+  [22:01:25] Analysts proposing patches, consolidating candidates...
 Evolving SKILL.md from v0_evolve_report.json (analyst=gemini-3.1-pro-preview)...
-Trajectories: 11 successes, 49 failures
+Trajectories: 12 successes, 48 failures
 Collected 51 patches (51 passed the quality gate).
 Generating 3 candidate(s)...
-Selected median-size candidate (1934 chars).
-Wrote evolved skill -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v1_skill.md (1935B, changed)
+Selected median-size candidate (2014 chars).
+Wrote evolution artifacts to /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash (51 patches, 3 candidates).
+Wrote evolved skill -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v1_skill.md (2014B, changed)
 Updated working copy: skills/SKILL.md
 
-  V1 skill: 1935B  (V0 was 675B)
+  V1 skill: 2014B  (V0 was 675B)
 
-  ✔ Evolution completed in 92s.
+  ✔ Evolution completed in 82s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -395,9 +396,9 @@ Updated working copy: skills/SKILL.md
   Goal:    Score the evolved skill on the SAME held-out set V0 was judged on
   Method:  Deploy V1, run held-out traffic, score vs the golden Q&A
 
-  [16:53:11] Running + scoring the held-out test set with V1...
+  [22:02:47] Running + scoring the held-out test set with V1...
 Running 70 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v1_test_traffic.json
+Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v1_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
   MEANINGFUL Sessions (showing 3 of 70)
@@ -421,11 +422,11 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "Based on our company policy, you accrue **20 days of PTO per year**, which is accrued monthly. This breaks down to approximately **1.67 days of PTO accrued each month** (20 days divided by 12 months)."
+  Response:    "You accrue 20 days of PTO per year. Since this is accrued monthly, you accrue approximately **1.67 days of PTO each month** (20 days divided by 12 months)."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent directly and accurately answers the user's question about monthly PTO accrual, providing the correct calculation based on the annual policy.
+  Reason:        The agent correctly calculates and provides the monthly PTO accrual based on the annual policy, directly answering the user's question.
   Grounding:     ✅ GROUNDED
-  Reason:        The response is based on company policy data (20 days of PTO per year) which would be retrieved from the 'lookup_company_policy' tool, and then a simple calculation is performed.
+  Reason:        The agent's response about PTO accrual (20 days/year) is based on data that would be retrieved from the `lookup_company_policy` tool, and the monthly calculation is derived from this grounded information.
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -447,10 +448,10 @@ QUALITY SUMMARY
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
-    Avg tool calls       : 0.9
+    Avg tool calls       : 1.0
     Multi-turn sessions  : 15
-    Correction rate      : 11.4%
-    Verification rate    : 10.0%
+    Correction rate      : 14.3%
+    Verification rate    : 7.1%
 
   Category Distributions:
 
@@ -461,22 +462,22 @@ QUALITY SUMMARY
     ✅ GROUNDED        :   70  (100.0%) ##################################################
 
   Execution Details:
-    elapsed_seconds: 141.5
+    elapsed_seconds: 126.6
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-26T16:57:04.819574+00:00
+    created_at: 2026-06-29T22:06:39.867252+00:00
 ======================================================================
 
   All responses were meaningful.
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/v1_test_report.json
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/v1_test_report.json
 
   V1 test:   100.0% (70/70 golden-matched)
 
-  ✔ V1 measurement completed in 234s.
+  ✔ V1 measurement completed in 233s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -491,8 +492,8 @@ Golden-grounded correctness (matched & meaningful) on the held-out set.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 20.0% (14/70) | 100.0% (70/70) | +80.0pp |
-| Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
+| Overall | 18.6% (13/70) | 100.0% (70/70) | +81.4pp |
+| Single-turn | 16.4% (9/55) | 100.0% (55/55) | +83.6pp |
 | Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
 
 Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified instead of caving).
@@ -502,9 +503,9 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  DONE  (total wall time: 13m 19s)
+  DONE  (total wall time: 12m 44s)
 
-  Result table:   /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260626_164346_gemini_3_5_flash/RESULT.md
+  Result table:   /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260629_215355_gemini_3_5_flash/RESULT.md
 
   Artifacts (runs/):
     RESULT.json
@@ -513,8 +514,12 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
     run.log
     v0_evolve_report.json
     v0_evolve_traffic.json
+    v0_skill.md
     v0_test_report.json
     v0_test_traffic.json
+    v1_candidates
+    v1_patches.json
+    v1_prevalence.txt
     v1_skill.md
     v1_test_report.json
     v1_test_traffic.json
@@ -525,5 +530,5 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Total wall time: 13m 19s
+  Total wall time: 12m 44s
 

@@ -1,13 +1,13 @@
 {
   "v0": {
     "overall": {
-      "rate": 20.0,
-      "correct": 14,
+      "rate": 18.6,
+      "correct": 13,
       "total": 70
     },
     "single_turn": {
-      "rate": 18.2,
-      "correct": 10,
+      "rate": 16.4,
+      "correct": 9,
       "total": 55
     },
     "corrections": {
