@@ -1,0 +1,305 @@
+{
+  "description": "Single-agent skill lab - HELD-OUT TEST set (disjoint from the evolve set by phrasing). Mirrors the golden_qa answer key so every question is golden-matched. All answerable via lookup_company_policy.",
+  "questions": [
+    {
+      "id": "t01_pto",
+      "category": "pto",
+      "question": "How many PTO days do I get per year?",
+      "expected_answer": "20 PTO days per year, accrued monthly."
+    },
+    {
+      "id": "t02_pto",
+      "category": "pto",
+      "question": "How many unused PTO days can I roll over to next year?",
+      "expected_answer": "Up to 5 unused PTO days roll over."
+    },
+    {
+      "id": "t03_pto",
+      "category": "pto",
+      "question": "Roughly how much PTO do I accrue each month?",
+      "expected_answer": "About 1.67 days per month (20 days/year, accrued monthly)."
+    },
+    {
+      "id": "t04_pto",
+      "category": "pto",
+      "question": "If I leave the company mid-year, what happens to my unused PTO?",
+      "expected_answer": "Unused accrued PTO is paid out in your final paycheck."
+    },
+    {
+      "id": "t05_sick_leave",
+      "category": "sick_leave",
+      "question": "How many sick days do I get per year?",
+      "expected_answer": "10 sick days per year."
+    },
+    {
+      "id": "t06_sick_leave",
+      "category": "sick_leave",
+      "question": "Do sick days roll over to the next year?",
+      "expected_answer": "No, sick leave does not roll over."
+    },
+    {
+      "id": "t07_sick_leave",
+      "category": "sick_leave",
+      "question": "If I'm out sick for 4 days, do I need a doctor's note?",
+      "expected_answer": "Yes - a doctor's note is required for absences longer than 3 consecutive days."
+    },
+    {
+      "id": "t08_remote_work",
+      "category": "remote_work",
+      "question": "How many days a week can I work from home?",
+      "expected_answer": "Up to 3 days per week with manager approval."
+    },
+    {
+      "id": "t09_remote_work",
+      "category": "remote_work",
+      "question": "Do I need approval to work remotely?",
+      "expected_answer": "Yes, manager approval is required for remote work."
+    },
+    {
+      "id": "t10_remote_work",
+      "category": "remote_work",
+      "question": "What are the core collaboration hours for remote work?",
+      "expected_answer": "10am-3pm in the employee's local timezone."
+    },
+    {
+      "id": "t11_remote_work",
+      "category": "remote_work",
+      "question": "Can I work remotely four days a week?",
+      "expected_answer": "No - the maximum is 3 days per week with manager approval."
+    },
+    {
+      "id": "t12_expenses",
+      "category": "expenses",
+      "question": "What's the daily meal reimbursement limit on business travel?",
+      "expected_answer": "$75/day for meals on business travel."
+    },
+    {
+      "id": "t13_expenses",
+      "category": "expenses",
+      "question": "Do I need a receipt for a $30 expense?",
+      "expected_answer": "Yes - receipts are required for any expense over $25."
+    },
+    {
+      "id": "t14_expenses",
+      "category": "expenses",
+      "question": "Do I need pre-approval for a $600 flight?",
+      "expected_answer": "Yes - travel expenses over $500 require manager pre-approval."
+    },
+    {
+      "id": "t15_expenses",
+      "category": "expenses",
+      "question": "How long do I have to submit a business expense?",
+      "expected_answer": "Within 30 days."
+    },
+    {
+      "id": "t16_benefits",
+      "category": "benefits",
+      "question": "What share of my health premium does the company cover?",
+      "expected_answer": "80% of the employee premium (50% for dependents)."
+    },
+    {
+      "id": "t17_benefits",
+      "category": "benefits",
+      "question": "What medical plans are offered?",
+      "expected_answer": "PPO and HMO plans."
+    },
+    {
+      "id": "t18_benefits",
+      "category": "benefits",
+      "question": "What's the family out-of-pocket maximum on the PPO?",
+      "expected_answer": "$8,000 for a family in-network ($4,000 individual)."
+    },
+    {
+      "id": "t19_benefits",
+      "category": "benefits",
+      "question": "What's the individual out-of-pocket maximum on the PPO?",
+      "expected_answer": "$4,000 individual in-network ($8,000 family)."
+    },
+    {
+      "id": "t20_benefits",
+      "category": "benefits",
+      "question": "How much does the company contribute to my HSA for family coverage?",
+      "expected_answer": "$1,500/year for family coverage ($750 individual)."
+    },
+    {
+      "id": "t21_benefits",
+      "category": "benefits",
+      "question": "How much does the company put into an HSA for individual coverage?",
+      "expected_answer": "$750/year for individual coverage ($1,500 family)."
+    },
+    {
+      "id": "t22_benefits",
+      "category": "benefits",
+      "question": "Are preventive dental cleanings covered?",
+      "expected_answer": "Yes - preventive dental care is fully covered (80% for major procedures)."
+    },
+    {
+      "id": "t23_benefits",
+      "category": "benefits",
+      "question": "What does dental cover for major procedures?",
+      "expected_answer": "80% coverage for major dental procedures."
+    },
+    {
+      "id": "t24_benefits",
+      "category": "benefits",
+      "question": "Is orthodontia covered, and up to how much?",
+      "expected_answer": "Orthodontia is covered at 50% up to a $2,000 lifetime maximum."
+    },
+    {
+      "id": "t25_benefits",
+      "category": "benefits",
+      "question": "What's the vision benefit for eye exams and glasses?",
+      "expected_answer": "Annual eye exam covered; $200 frame allowance every 2 years."
+    },
+    {
+      "id": "t26_benefits",
+      "category": "benefits",
+      "question": "What's the company 401k match?",
+      "expected_answer": "A 4% company 401(k) match."
+    },
+    {
+      "id": "t27_benefits",
+      "category": "benefits",
+      "question": "When am I vested in the 401k match?",
+      "expected_answer": "After 1 year of employment."
+    },
+    {
+      "id": "t28_benefits",
+      "category": "benefits",
+      "question": "If I leave after six months, do I keep the 401k match?",
+      "expected_answer": "No - the match is vested only after 1 year, so leaving at 6 months means you don't keep it."
+    },
+    {
+      "id": "t29_benefits",
+      "category": "benefits",
+      "question": "How much parental leave does a primary caregiver get?",
+      "expected_answer": "16 weeks paid for a primary caregiver."
+    },
+    {
+      "id": "t30_benefits",
+      "category": "benefits",
+      "question": "How much parental leave does a secondary caregiver get?",
+      "expected_answer": "8 weeks for a secondary caregiver (16 weeks for primary)."
+    },
+    {
+      "id": "t31_benefits",
+      "category": "benefits",
+      "question": "When is open enrollment?",
+      "expected_answer": "Every November; new hires enroll within 30 days of their start date."
+    },
+    {
+      "id": "t32_holidays",
+      "category": "holidays",
+      "question": "How many paid holidays does the company observe?",
+      "expected_answer": "11 paid holidays per year."
+    },
+    {
+      "id": "t33_holidays",
+      "category": "holidays",
+      "question": "Is Juneteenth a company holiday?",
+      "expected_answer": "No - Juneteenth, Veterans Day, and Columbus Day are not company holidays."
+    },
+    {
+      "id": "t34_holidays",
+      "category": "holidays",
+      "question": "Which days around Thanksgiving are paid holidays?",
+      "expected_answer": "The Wednesday and Thursday of Thanksgiving week."
+    },
+    {
+      "id": "t35_bereavement",
+      "category": "bereavement",
+      "question": "How many bereavement days do I get for an immediate family member?",
+      "expected_answer": "5 paid days for an immediate family member."
+    },
+    {
+      "id": "t36_bereavement",
+      "category": "bereavement",
+      "question": "How many bereavement days do I get for the death of a sibling?",
+      "expected_answer": "5 paid days (a sibling is immediate family)."
+    },
+    {
+      "id": "t37_bereavement",
+      "category": "bereavement",
+      "question": "How many bereavement days do I get for a grandparent?",
+      "expected_answer": "3 paid days (a grandparent is extended family)."
+    },
+    {
+      "id": "t38_jury_duty",
+      "category": "jury_duty",
+      "question": "Is jury duty paid, and for how long?",
+      "expected_answer": "Fully paid for the entire duration of service, with no day cap."
+    },
+    {
+      "id": "t39_eap",
+      "category": "eap",
+      "question": "How many EAP counseling sessions do I get?",
+      "expected_answer": "Up to 8 counseling sessions per issue per year."
+    },
+    {
+      "id": "t40_eap",
+      "category": "eap",
+      "question": "Does the EAP have a 24/7 hotline?",
+      "expected_answer": "Yes - the EAP includes a 24/7 hotline."
+    },
+    {
+      "id": "t41_flex_time",
+      "category": "flex_time",
+      "question": "Can I work four 10-hour days instead of five 8-hour days?",
+      "expected_answer": "Yes - compressed work weeks like four 10-hour days are allowed with manager approval."
+    },
+    {
+      "id": "t42_flex_time",
+      "category": "flex_time",
+      "question": "How early can I start my day under flex time?",
+      "expected_answer": "Any time between 7am and 10am, as long as you cover the 10am-3pm core hours and a full 8-hour day."
+    },
+    {
+      "id": "t43_tuition_reimbursement",
+      "category": "tuition_reimbursement",
+      "question": "What's the annual tuition reimbursement limit?",
+      "expected_answer": "Up to $5,250 per calendar year."
+    },
+    {
+      "id": "t44_tuition_reimbursement",
+      "category": "tuition_reimbursement",
+      "question": "What grade do I need for tuition reimbursement?",
+      "expected_answer": "A grade of B or better (manager pre-approval required)."
+    },
+    {
+      "id": "t45_short_term_disability",
+      "category": "short_term_disability",
+      "question": "What does short-term disability pay?",
+      "expected_answer": "60% of your salary."
+    },
+    {
+      "id": "t46_short_term_disability",
+      "category": "short_term_disability",
+      "question": "How long does short-term disability last?",
+      "expected_answer": "Up to 12 weeks."
+    },
+    {
+      "id": "t47_short_term_disability",
+      "category": "short_term_disability",
+      "question": "Is there a waiting period for short-term disability?",
+      "expected_answer": "Yes - a 7-day waiting period."
+    },
+    {
+      "id": "t48_benefits",
+      "category": "benefits",
+      "question": "How much of dependents' premiums does the company cover?",
+      "expected_answer": "50% for dependents (80% for the employee)."
+    },
+    {
+      "id": "t49_tuition_reimbursement",
+      "category": "tuition_reimbursement",
+      "question": "Can I get a work-related course reimbursed, and up to how much?",
+      "expected_answer": "Yes - tuition reimbursement up to $5,250/year for job-related courses (manager pre-approval, grade B or better)."
+    },
+    {
+      "id": "t50_sick_leave",
+      "category": "sick_leave",
+      "question": "Do unused sick days carry over year to year?",
+      "expected_answer": "No - sick leave does not roll over (10 days per year)."
+    }
+  ]
+}

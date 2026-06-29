@@ -165,7 +165,7 @@ Work: `bigquery_ontology/contrib/advertising/` stub with Yahoo's resolver (if co
 - `src/bigquery_ontology/graph_ddl_compiler.py` — add `compile_concept_index(ontology, binding, *, output_table) -> str`. Preserve `compile_graph()` contract byte-identically. No changes to existing function bodies.
 - `src/bigquery_ontology/cli.py:299` — `compile` command gains `--emit-concept-index` and `--concept-index-table` flags. When absent, behavior is byte-identical to today.
 - `src/bigquery_ontology/__init__.py` — add `from .graph_ddl_compiler import compile_concept_index` so the new public function is importable as `from bigquery_ontology import compile_concept_index`, matching the existing pattern for `compile_graph` (`__init__.py:50` today).
-- `src/bigquery_agent_analytics/__init__.py` — add the new public surface to the try/except re-export block (same pattern as `Client`, `CodeEvaluator`, etc.):
+- `src/bigquery_agent_analytics/__init__.py` — add the new public surface to the try/except re-export block (same pattern as `Client`, `SystemEvaluator`, etc.):
   - `OntologyRuntime` from `.ontology_runtime`
   - `EntityResolver`, `ExactMatchResolver`, `SynonymResolver`, `Candidate`, `ResolveResult` from `.entity_resolver`
   - `ConceptIndexMismatchError`, `ConceptIndexProvenanceMissing`, `ConceptIndexInconsistentPair`, `ConceptIndexRefreshed` from `.ontology_runtime`

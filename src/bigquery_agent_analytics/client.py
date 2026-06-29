@@ -33,11 +33,11 @@ Example usage::
 
     # Run evaluation
     from bigquery_agent_analytics import (
-        CodeEvaluator, LLMAsJudge, TraceFilter,
+        SystemEvaluator, LLMAsJudge, TraceFilter,
     )
     report = client.evaluate(
         filters=TraceFilter(agent_id="my_agent"),
-        evaluator=CodeEvaluator.latency(threshold_ms=3000),
+        evaluator=SystemEvaluator.latency(threshold_ms=3000),
     )
     print(report.summary())
 """
@@ -73,7 +73,6 @@ from .categorical_evaluator import parse_categorical_row
 from .categorical_evaluator import parse_classify_row
 from .evaluators import _parse_json_from_text
 from .evaluators import AI_GENERATE_JUDGE_BATCH_QUERY
-from .evaluators import CodeEvaluator
 from .evaluators import DEFAULT_ENDPOINT
 from .evaluators import EvaluationReport
 from .evaluators import LLM_JUDGE_BATCH_QUERY
@@ -82,6 +81,7 @@ from .evaluators import render_ai_generate_judge_query
 from .evaluators import SESSION_SUMMARY_QUERY
 from .evaluators import SessionScore
 from .evaluators import split_judge_prompt_template
+from .evaluators import SystemEvaluator
 from .feedback import AnalysisConfig
 from .feedback import compute_drift
 from .feedback import compute_question_distribution
@@ -869,7 +869,7 @@ class Client:
 
   def evaluate(
       self,
-      evaluator: CodeEvaluator | LLMAsJudge,
+      evaluator: SystemEvaluator | LLMAsJudge,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
       strict: bool = False,
@@ -877,12 +877,12 @@ class Client:
     """Runs batch evaluation over traces.
 
     Uses BigQuery native execution for scalable assessment.
-    ``CodeEvaluator`` metrics are computed from session
+    ``SystemEvaluator`` metrics are computed from session
     aggregates. ``LLMAsJudge`` metrics use BQML's
     ``ML.GENERATE_TEXT`` for zero-ETL evaluation.
 
     Args:
-        evaluator: A CodeEvaluator or LLMAsJudge instance.
+        evaluator: A SystemEvaluator or LLMAsJudge instance.
         filters: Optional trace filters.
         dataset: Optional table name override.
         strict: When ``True``, sessions with unparseable or
@@ -900,7 +900,7 @@ class Client:
     filt = filters or TraceFilter()
     where, params = filt.to_sql_conditions()
 
-    if isinstance(evaluator, CodeEvaluator):
+    if isinstance(evaluator, SystemEvaluator):
       return self._evaluate_code(
           evaluator,
           table,
@@ -923,7 +923,7 @@ class Client:
 
   def _evaluate_code(
       self,
-      evaluator: CodeEvaluator,
+      evaluator: SystemEvaluator,
       table: str,
       where: str,
       params: list,

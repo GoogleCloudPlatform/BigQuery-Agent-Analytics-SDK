@@ -22,7 +22,7 @@ Tests are organized in two sections:
    and intentionally keeps the normalized ``1.0 - (observed / budget)``
    score for BigQuery SQL compatibility.
 2. **Prebuilt divergence tests** — document that the Python
-   ``CodeEvaluator.{latency, error_rate, ...}`` prebuilts *no longer*
+   ``SystemEvaluator.{latency, error_rate, ...}`` prebuilts *no longer*
    mirror the SQL kernel scores. They return a binary 1.0/0.0 gate
    against the raw observed value instead, so the same input yields
    different numeric scores via the two paths while the pass/fail
@@ -31,7 +31,7 @@ Tests are organized in two sections:
 
 import pytest
 
-from bigquery_agent_analytics.evaluators import CodeEvaluator
+from bigquery_agent_analytics.evaluators import SystemEvaluator
 from bigquery_agent_analytics.udf_kernels import extract_response_text
 from bigquery_agent_analytics.udf_kernels import is_error_event
 from bigquery_agent_analytics.udf_kernels import score_cost
@@ -264,7 +264,7 @@ class TestScoreCost:
 
 
 # ------------------------------------------------------------------ #
-# Prebuilt divergence: CodeEvaluator prebuilts are binary gates,
+# Prebuilt divergence: SystemEvaluator prebuilts are binary gates,
 # ``udf_kernels`` stays on the normalized ``1.0 - observed/budget``.
 # These two paths now intentionally disagree on the numeric score;
 # they still agree on the user-intent boundary (observed <= budget).
@@ -272,7 +272,7 @@ class TestScoreCost:
 
 
 class TestPrebuiltBinaryLatency:
-  """CodeEvaluator.latency returns 1.0/0.0 against the raw budget."""
+  """SystemEvaluator.latency returns 1.0/0.0 against the raw budget."""
 
   @pytest.mark.parametrize(
       "avg,threshold,expected_score,expected_pass",
@@ -285,7 +285,7 @@ class TestPrebuiltBinaryLatency:
       ],
   )
   def test_binary(self, avg, threshold, expected_score, expected_pass):
-    ev = CodeEvaluator.latency(threshold_ms=threshold)
+    ev = SystemEvaluator.latency(threshold_ms=threshold)
     result = ev.evaluate_session({"session_id": "s1", "avg_latency_ms": avg})
     assert result.scores["latency"] == pytest.approx(expected_score)
     assert result.passed is expected_pass
@@ -310,7 +310,7 @@ class TestPrebuiltBinaryErrorRate:
       ],
   )
   def test_binary(self, calls, errors, max_rate, expected_score, expected_pass):
-    ev = CodeEvaluator.error_rate(max_error_rate=max_rate)
+    ev = SystemEvaluator.error_rate(max_error_rate=max_rate)
     result = ev.evaluate_session(
         {"session_id": "s1", "tool_calls": calls, "tool_errors": errors}
     )
@@ -331,7 +331,7 @@ class TestPrebuiltBinaryTurnCount:
       ],
   )
   def test_binary(self, turns, max_t, expected_score, expected_pass):
-    ev = CodeEvaluator.turn_count(max_turns=max_t)
+    ev = SystemEvaluator.turn_count(max_turns=max_t)
     result = ev.evaluate_session({"session_id": "s1", "turn_count": turns})
     assert result.scores["turn_count"] == pytest.approx(expected_score)
     assert result.passed is expected_pass
@@ -350,7 +350,7 @@ class TestPrebuiltBinaryTokenEfficiency:
       ],
   )
   def test_binary(self, tokens, max_t, expected_score, expected_pass):
-    ev = CodeEvaluator.token_efficiency(max_tokens=max_t)
+    ev = SystemEvaluator.token_efficiency(max_tokens=max_t)
     result = ev.evaluate_session({"session_id": "s1", "total_tokens": tokens})
     assert result.scores["token_efficiency"] == pytest.approx(expected_score)
     assert result.passed is expected_pass
@@ -369,7 +369,7 @@ class TestPrebuiltBinaryTtft:
       ],
   )
   def test_binary(self, avg, threshold, expected_score, expected_pass):
-    ev = CodeEvaluator.ttft(threshold_ms=threshold)
+    ev = SystemEvaluator.ttft(threshold_ms=threshold)
     result = ev.evaluate_session({"session_id": "s1", "avg_ttft_ms": avg})
     assert result.scores["ttft"] == pytest.approx(expected_score)
     assert result.passed is expected_pass
@@ -402,7 +402,7 @@ class TestPrebuiltBinaryCost:
       expected_score,
       expected_pass,
   ):
-    ev = CodeEvaluator.cost_per_session(
+    ev = SystemEvaluator.cost_per_session(
         max_cost_usd=max_c,
         input_cost_per_1k=inp_rate,
         output_cost_per_1k=out_rate,

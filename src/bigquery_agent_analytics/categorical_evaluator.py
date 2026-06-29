@@ -16,7 +16,7 @@
 
 Classifies agent sessions into user-defined categories using BigQuery's
 native ``AI.GENERATE``, with Gemini API fallback when BigQuery-native
-execution is unavailable. Unlike the numeric ``CodeEvaluator`` and
+execution is unavailable. Unlike the numeric ``SystemEvaluator`` and
 ``LLMAsJudge`` report paths, this module returns label-valued results
 with strict category validation.
 

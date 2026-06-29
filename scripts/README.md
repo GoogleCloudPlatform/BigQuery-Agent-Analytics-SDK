@@ -5,6 +5,7 @@ Standalone scripts for the BigQuery Agent Analytics SDK.
 | Script | Description |
 |--------|-------------|
 | [quality_report](#quality-report) | LLM-as-a-judge evaluation over agent sessions |
+| [skill_evolution](#skill-evolution) | Turn a scored quality report into an improved, versioned `SKILL.md` |
 | [latency_report](#latency-report-1) | Timing tree and waterfall for agent traces with A2A stitching |
 
 ## Quality Report
@@ -531,6 +532,115 @@ The script automatically detects and resolves responses from remote A2A
 
 - [Sample quality report](sample_quality_report.md) — full multi-session report
 - [Sample single-session report](sample_quality_report_session.md) — verbose single-session output
+
+---
+
+## Skill Evolution
+
+Turns a **scored quality report** (the output of `quality_report.py`) and an
+agent's current `SKILL.md` into an improved, versioned `SKILL.md` — with **no
+teacher model**. A fleet of parallel, independent LLM "analysts" each reads one
+trajectory on a *frozen* copy of the skill and proposes a patch; an **inductive
+consolidator** keeps the rules that recur across many analysts and drops the
+one-offs. This implements the core of **Trace2Skill** (arXiv:2603.25158 —
+parallel analysts + inductive consolidation) and **AutoSkill**
+(arXiv:2603.01145 — content-preserving `P_merge`).
+
+The engine is **standalone**: it consumes a report *dict* and returns skill
+text, with no agent / traffic / registry dependencies, so it composes with the
+scorer without importing it. For a complete, runnable V0 → V1 walkthrough see
+[`examples/skill_evolution_lab/`](../examples/skill_evolution_lab/).
+
+### Prerequisites
+
+- Python 3.11+
+- Vertex AI access via the `google-genai` client
+- `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` set (or pass `--project` /
+  `--location`), authenticated with ADC (`gcloud auth application-default login`)
+
+### How it works
+
+```text
+Quality report (scored conversations)
+   │
+   ▼
+Partition: successes (meaningful/declined) vs failures (unhelpful/partial)
+   │   (a "meaningful" session with a PARROTED correction is moved to failures)
+   ├── Error analysts   (one per failure):  root cause + "what rule prevents it?"
+   └── Success analysts (sampled, max 15):  "what pattern worked? reinforce it?"
+   │        (each analyst sees ONE trajectory on a FROZEN copy of the skill)
+   ▼
+Quality gate (drop weak / category-less patches)
+   │
+   ▼
+Consolidator (prevalence-weighted semantic union) × N candidates (best-of-N)
+   │   guardrails reject any candidate that drops a base section or truncates
+   ▼
+Compaction if over --max-chars
+   │
+   ▼
+Evolved SKILL.md (version bumped, evolved_from recorded)
+```
+
+### Usage
+
+```bash
+# From the repo root:
+python scripts/skill_evolution.py \
+  --report report.json \         # scored quality report (quality_report.py --output-json)
+  --skill path/to/SKILL.md \     # the current skill (the base to merge into)
+  -o path/to/SKILL.v1.md         # where to write the evolved skill
+
+# Useful flags:
+python scripts/skill_evolution.py --report r.json --skill SKILL.md -o V1.md \
+  --candidates 3 \               # best-of-N consolidation (default 3)
+  --max-chars 4000 \             # compact a bloated skill to fit (default: no cap)
+  --analyst-mode both \          # both | error-only | success-only (default: both)
+  --model gemini-2.5-pro \       # analyst + consolidator model (default)
+  --project my-gcp-project --location global
+```
+
+The report passed to `--report` must contain `sessions` with
+`metrics.response_usefulness.category` and either a `conversation` or
+`question`/`response` per session — exactly what `quality_report.py
+--output-json` writes. Grounding the score with `--eval-spec` (golden Q&A) and
+`--tag-turns` produces the most reliable signal for evolution.
+
+### Python API
+
+```python
+import sys
+sys.path.insert(0, "scripts")   # make the SDK's scripts/ importable (no copy)
+import skill_evolution
+
+new_skill = skill_evolution.evolve_skill(
+    report,                 # report dict (or path to its JSON)
+    current_skill,          # current SKILL.md contents (str)
+    candidates=3,           # best-of-N consolidation
+    max_chars=4000,         # optional size cap (compaction)
+    analyst_mode="both",    # both | error-only | success-only
+    score_fn=my_scorer,     # optional (skill_text) -> float; picks best + gates incumbent
+    min_improvement=0.5,    # incumbent gate: ship V1 only if it beats V0 by this margin
+)
+```
+
+(`examples/skill_evolution_lab/analyze_and_evolve.py` imports it exactly this
+way — adding `scripts/` to `sys.path`, then `import skill_evolution`.)
+
+`evolve_skill()` returns the evolved skill as a string (or the unchanged input
+when nothing beat the incumbent). Key knobs: `candidates` (best-of-N),
+`max_chars` (size cap), `analyst_mode`, `max_success_samples`, `max_workers`
+(analyst concurrency), and `score_fn` / `min_improvement` (incumbent guard). The
+skill is kept **behavioral** — the consolidator is instructed not to bake
+specific data values (numbers, dates, dollar amounts) into the skill; those must
+come from tools at runtime.
+
+### Output
+
+The evolved `SKILL.md` keeps the base's YAML frontmatter with the **version
+bumped** and `evolved_from` recorded, so each version is a reviewable diff. A
+typical run logs its internals — trajectory partition, patches collected vs.
+passed the quality gate, candidates generated, and which one was selected.
 
 ---
 
