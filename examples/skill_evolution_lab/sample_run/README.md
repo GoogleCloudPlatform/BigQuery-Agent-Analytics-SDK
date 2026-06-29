@@ -10,6 +10,10 @@ The headline result for this run (see `RESULT.md`): held-out correctness
 **V0 20.0% → V1 100%** (70/70), grounding (tool-call share) **11% → 87%**,
 evolved skill **~1.9 KB**. (Held-out set: 55 single-turn + 15 anti-parroting.)
 
+The complete console log of this run — every stage banner, per-step timing, and the
+final comparison — is in [`run.log`](run.log) (the same file every live run writes
+to its `runs/<timestamp>/` directory).
+
 ## The workflow, and what each file is
 
 The loop runs in five steps. The model, tool, and questions are identical for V0
