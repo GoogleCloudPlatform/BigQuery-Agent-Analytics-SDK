@@ -19,13 +19,13 @@
   },
   "v1": {
     "overall": {
-      "rate": 100.0,
-      "correct": 70,
+      "rate": 98.6,
+      "correct": 69,
       "total": 70
     },
     "single_turn": {
-      "rate": 100.0,
-      "correct": 55,
+      "rate": 98.2,
+      "correct": 54,
       "total": 55
     },
     "corrections": {
@@ -34,5 +34,19 @@
       "total": 15
     },
     "parroted": 0
+  },
+  "v0_dimensions": {
+    "correctness": 0.38,
+    "tool_usage": 0.38,
+    "specificity": 0.38,
+    "scope_compliance": 0.38,
+    "first_time_right": 0.38
+  },
+  "v1_dimensions": {
+    "correctness": 2.0,
+    "tool_usage": 2.0,
+    "specificity": 2.0,
+    "scope_compliance": 2.0,
+    "first_time_right": 2.0
   }
 }

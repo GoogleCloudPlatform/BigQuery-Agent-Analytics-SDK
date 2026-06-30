@@ -82,6 +82,30 @@ def _row(label, v0, v1):
   )
 
 
+# Fine-grained quality dimensions (0-2), in report order, with display labels.
+_DIM_LABELS = [
+    ("correctness", "Correctness"),
+    ("tool_usage", "Tool use"),
+    ("specificity", "Specificity"),
+    ("scope_compliance", "Scope compliance"),
+    ("first_time_right", "First-time-right"),
+]
+
+
+def _dim_rows(v0_dims: dict, v1_dims: dict) -> list:
+  """Build the per-dimension V0-vs-V1 rows (empty if dimensions weren't scored)."""
+  rows = []
+  for key, label in _DIM_LABELS:
+    if key not in v0_dims and key not in v1_dims:
+      continue
+    a = float(v0_dims.get(key, 0))
+    b = float(v1_dims.get(key, 0))
+    delta = round(b - a, 2)
+    sign = "+" if delta >= 0 else ""
+    rows.append(f"| {label} | {a:.2f} | {b:.2f} | {sign}{delta} |")
+  return rows
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--v0", required=True, help="V0 report JSON")
@@ -91,9 +115,13 @@ def main():
   args = parser.parse_args()
 
   with open(args.v0) as f:
-    v0 = _summarize(json.load(f))
+    v0_report = json.load(f)
   with open(args.v1) as f:
-    v1 = _summarize(json.load(f))
+    v1_report = json.load(f)
+  v0 = _summarize(v0_report)
+  v1 = _summarize(v1_report)
+  v0_dims = v0_report.get("summary", {}).get("dimension_averages", {}) or {}
+  v1_dims = v1_report.get("summary", {}).get("dimension_averages", {}) or {}
 
   hdr = f" ({args.model})" if args.model else ""
   lines = [
@@ -111,6 +139,16 @@ def main():
       "(lower is better -- the agent re-verified instead of caving).",
       "",
   ]
+  dim_rows = _dim_rows(v0_dims, v1_dims)
+  if dim_rows:
+    lines += [
+        "## Quality dimensions (average 0-2, held-out set)",
+        "",
+        "| Dimension | V0 | V1 | Delta |",
+        "| --- | --- | --- | --- |",
+        *dim_rows,
+        "",
+    ]
   out = "\n".join(lines)
   print(out)
   if args.out:
@@ -118,7 +156,16 @@ def main():
       f.write(out.rstrip() + "\n")
     json_path = args.out.rsplit(".", 1)[0] + ".json"
     with open(json_path, "w") as f:
-      json.dump({"v0": v0, "v1": v1}, f, indent=2)
+      json.dump(
+          {
+              "v0": v0,
+              "v1": v1,
+              "v0_dimensions": v0_dims,
+              "v1_dimensions": v1_dims,
+          },
+          f,
+          indent=2,
+      )
 
 
 if __name__ == "__main__":

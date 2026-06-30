@@ -1,2 +1,3 @@
 Prevalence across 51 independent analyst patches:
-  TOOL_USAGE: 51/51 (100%) -- STRONG
+  TOOL_USAGE: 50/51 (98%) -- STRONG
+  RESPONSE_PATTERN: 1/51 (2%) -- weak

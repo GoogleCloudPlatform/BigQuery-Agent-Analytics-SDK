@@ -7,7 +7,7 @@ exact inputs and outputs of the skill-evolution loop without running anything.
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): held-out correctness
-**V0 18.6% → V1 100%** (70/70), evolved skill **~2.0 KB**. (Held-out set: 55 single-turn
+**V0 18.6% → V1 98.6%** (69/70), evolved skill **~1.9 KB**. (Held-out set: 55 single-turn
 + 15 anti-parroting.)
 
 The complete console log of this run — every stage banner, per-step timing, and the

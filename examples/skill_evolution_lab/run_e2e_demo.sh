@@ -204,11 +204,12 @@ run_agent() {
     --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out"
 }
 
-# score <traffic> <report>  -- golden-grounded LLM judge (primary dims = cheaper).
+# score <traffic> <report>  -- golden-grounded LLM judge. Full dimensions: the two
+# primary metrics (verdict + grounding) plus the five 0-2 quality dimensions.
 score() {
   GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
     $PY "$REPO_ROOT/scripts/quality_report.py" \
-      --conversations-file "$1" --eval-spec "$SPEC" --dimensions primary \
+      --conversations-file "$1" --eval-spec "$SPEC" --dimensions full \
       --tag-turns --concurrency "$CONCURRENCY" --output-json "$2"
 }
 
