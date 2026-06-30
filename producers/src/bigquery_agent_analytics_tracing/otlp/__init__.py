@@ -21,6 +21,8 @@
   (``envelope`` / ``decode``).
 - PR 3: receiver request handling — auth, decode dispatch, Pub/Sub + DLQ
   routing (``receiver``); WSGI entrypoint in ``app``.
+- PR 4: BigQuery writer + projection SQL — envelope v1 to native rows
+  (``writer``), scheduled MERGE + ``bqaa_metrics`` view (``sql``).
 
 See ``docs/otlp_receiver_design.md``.
 """
@@ -58,6 +60,15 @@ from bigquery_agent_analytics_tracing.otlp.schema import METRIC_TABLES
 from bigquery_agent_analytics_tracing.otlp.schema import NATIVE_TABLES
 from bigquery_agent_analytics_tracing.otlp.schema import OTEL_SCHEMA_VERSION
 from bigquery_agent_analytics_tracing.otlp.schema import table_labels
+from bigquery_agent_analytics_tracing.otlp.sql import agent_events_otlp_merge_sql
+from bigquery_agent_analytics_tracing.otlp.sql import bqaa_metrics_view_sql
+from bigquery_agent_analytics_tracing.otlp.sql import CROSSWALK_VERSION
+from bigquery_agent_analytics_tracing.otlp.writer import append_envelope
+from bigquery_agent_analytics_tracing.otlp.writer import BigQueryWriter
+from bigquery_agent_analytics_tracing.otlp.writer import envelope_to_row
+from bigquery_agent_analytics_tracing.otlp.writer import handle_message
+from bigquery_agent_analytics_tracing.otlp.writer import TableWriteError
+from bigquery_agent_analytics_tracing.otlp.writer import target_table
 
 __all__ = [
     # schema (PR 1)
@@ -94,4 +105,14 @@ __all__ = [
     "route_envelopes",
     "handle_export",
     "SIGNAL_PATHS",
+    # writer + projection SQL (PR 4)
+    "BigQueryWriter",
+    "TableWriteError",
+    "envelope_to_row",
+    "target_table",
+    "append_envelope",
+    "handle_message",
+    "agent_events_otlp_merge_sql",
+    "bqaa_metrics_view_sql",
+    "CROSSWALK_VERSION",
 ]
