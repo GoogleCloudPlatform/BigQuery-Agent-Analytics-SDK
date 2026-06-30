@@ -244,7 +244,12 @@ def dead_letter_key(
   """
   if source_position is not None:
     return _sha([source_position.canonical(), stage])
-  return _sha([raw_otlp_request_hash or "", stage])
+  if not raw_otlp_request_hash:
+    raise ValueError(
+        "dead_letter_key requires source_position or raw_otlp_request_hash; a"
+        " stage-only key would collapse unrelated whole-request failures"
+    )
+  return _sha([raw_otlp_request_hash, stage])
 
 
 def dead_letter_envelope(

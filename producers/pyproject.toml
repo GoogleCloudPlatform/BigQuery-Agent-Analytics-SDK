@@ -53,6 +53,11 @@ openai-agents = [
 claude-sdk = [
   "claude-agent-sdk>=0.1.0",
 ]
+receiver = [
+  "google-cloud-pubsub>=2.18.0",
+  "opentelemetry-proto>=1.20.0",
+  "gunicorn>=21.0",
+]
 dev = [
   "pytest>=7.0",
   "pytest-asyncio>=0.21",
