@@ -159,20 +159,41 @@ def handle_export(
   signal = SIGNAL_PATHS.get(path)
   if signal is None:
     return ReceiverResult(404, message=f"unknown path {path!r}")
+
+  # Authenticate every known OTLP endpoint *before* any gate or decode, so auth
+  # failures are always 401 and the trace gate state never leaks to
+  # unauthenticated callers.
+  if not authenticate(auth_header, config.expected_token):
+    return ReceiverResult(401, message="unauthenticated")
+
   if signal == "trace":
     if not config.enable_traces:
       return ReceiverResult(404, message="traces not enabled")
     # Receiver wiring exists behind the flag, but span landing is deferred to
     # the trace work (design doc); accept-but-not-implemented.
     return ReceiverResult(501, message="trace landing not implemented")
-  if not authenticate(auth_header, config.expected_token):
-    return ReceiverResult(401, message="unauthenticated")
 
+  # Decode the body AND walk its structure under one guard: any malformed
+  # request — bad bytes (DecodeError) or valid JSON with the wrong OTLP shape
+  # (e.g. ``{"resourceLogs":[null]}`` raising inside the decode library) —
+  # becomes a keyed, replayable whole-request dead letter, never a 500.
   try:
     request = decode_body(signal, content_type, body)
-  except DecodeError as exc:
-    # Whole-request failure: one dead letter, keyed from request hash + stage
-    # (raw_otlp_request_hash always set so the key never collapses).
+    if signal == "log":
+      envelopes = decode.decode_logs_request(
+          request,
+          source_product=config.source_product,
+          raw_request=body,
+          ingest_time=ingest_time,
+      )
+    else:
+      envelopes = decode.decode_metrics_request(
+          request,
+          source_product=config.source_product,
+          raw_request=body,
+          ingest_time=ingest_time,
+      )
+  except Exception as exc:  # noqa: BLE001 - malformed request -> dead letter
     dead_letter = env.dead_letter_envelope(
         source_product=config.source_product,
         source_signal=signal,
@@ -183,21 +204,9 @@ def handle_export(
         raw_otlp_request_hash=env.request_hash(body),
     )
     publisher.publish(config.dlq_topic, _encode(dead_letter))
-    return ReceiverResult(400, dead_lettered=1, message="otlp decode failed")
+    return ReceiverResult(
+        400, dead_lettered=1, message="malformed otlp request"
+    )
 
-  if signal == "log":
-    envelopes = decode.decode_logs_request(
-        request,
-        source_product=config.source_product,
-        raw_request=body,
-        ingest_time=ingest_time,
-    )
-  else:
-    envelopes = decode.decode_metrics_request(
-        request,
-        source_product=config.source_product,
-        raw_request=body,
-        ingest_time=ingest_time,
-    )
   published, dead = route_envelopes(envelopes, publisher, config)
   return ReceiverResult(200, published=published, dead_lettered=dead)

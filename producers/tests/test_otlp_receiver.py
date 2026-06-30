@@ -186,6 +186,19 @@ def test_undecodable_body_is_dead_lettered_with_keyed_replayable_payload():
   assert base64.b64decode(dl["raw_preservation"]["raw_b64"]) == body
 
 
+def test_valid_json_with_wrong_otlp_shape_is_dead_lettered_not_500():
+  # Valid JSON, malformed OTLP structure: the decode library raises inside the
+  # receiver's guard; it must dead-letter (keyed + replayable), never crash.
+  body = json.dumps({"resourceLogs": [None]}).encode("utf-8")
+  result, pub = _call("/v1/logs", body)
+  assert result.status == 400
+  assert result.dead_lettered == 1
+  dl = pub.to("proj/dlq")[0]
+  assert dl["parse_error"]["stage"] == "otlp_decode"
+  assert dl["idempotency_key"] is not None
+  assert base64.b64decode(dl["raw_preservation"]["raw_b64"]) == body
+
+
 # --------------------------------------------------------------------------
 # Traces signal-tier gate (#324)
 # --------------------------------------------------------------------------
@@ -201,6 +214,20 @@ def test_traces_path_is_501_when_enabled_landing_deferred():
   result, pub = _call("/v1/traces", b"{}", config=_config(enable_traces=True))
   assert result.status == 501
   assert pub.calls == []
+
+
+def test_traces_requires_auth_before_revealing_gate_state():
+  # Unauthenticated callers must get 401 on /v1/traces regardless of the gate,
+  # so 404-vs-501 never leaks to them.
+  for enabled in (False, True):
+    result, pub = _call(
+        "/v1/traces",
+        b"{}",
+        token="wrong",
+        config=_config(enable_traces=enabled),
+    )
+    assert result.status == 401
+    assert pub.calls == []
 
 
 # --------------------------------------------------------------------------
