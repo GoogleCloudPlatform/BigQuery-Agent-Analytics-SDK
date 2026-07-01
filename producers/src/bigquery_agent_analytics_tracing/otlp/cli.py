@@ -25,6 +25,7 @@ import argparse
 import pathlib
 import sys
 
+from . import bootstrap as bootstrap_mod
 from . import config_artifacts
 
 
@@ -117,6 +118,83 @@ def _build_parser() -> argparse.ArgumentParser:
       default=pathlib.Path("."),
       help="Directory to write artifacts into (default: current directory).",
   )
+
+  boot = sub.add_parser(
+      "bootstrap",
+      help=(
+          "Deploy the full OTel->BigQuery pipeline: schema + views, Pub/Sub"
+          " + DLQ, bearer-token secret, Cloud Run receiver + consumer,"
+          " scheduled MERGE, and telemetry-source config artifacts. Default"
+          " is plan mode; pass --execute to apply."
+      ),
+  )
+  boot.add_argument("--project", required=True, help="GCP project id.")
+  boot.add_argument(
+      "--dataset", default="agent_analytics", help="BigQuery dataset id."
+  )
+  boot.add_argument(
+      "--region", default="us-central1", help="Cloud Run / Artifact Registry"
+  )
+  boot.add_argument(
+      "--bq-location", default="US", help="BigQuery dataset location."
+  )
+  boot.add_argument(
+      "--source",
+      default="claude-code",
+      help=(
+          "Comma-separated telemetry sources:"
+          f" {','.join(config_artifacts.SOURCES)}"
+      ),
+  )
+  boot.add_argument(
+      "--signals",
+      default="logs,metrics",
+      help="Signal tier: 'logs,metrics' (default) or 'logs,metrics,traces'.",
+  )
+  boot.add_argument(
+      "--privacy",
+      default="baseline",
+      choices=config_artifacts.PRIVACY_TIERS,
+      help=(
+          "Privacy tier. 'baseline' (default) captures no prompt/tool"
+          " content; 'replay' requires --i-understand-content-logging."
+      ),
+  )
+  boot.add_argument(
+      "--source-product",
+      default="claude_code",
+      help=(
+          "source_product stamped on ingested rows by the receiver"
+          " (BQAA_OTLP_SOURCE_PRODUCT)."
+      ),
+  )
+  boot.add_argument(
+      "--resource-attributes",
+      type=_parse_kv,
+      default=None,
+      metavar="K=V[,K=V...]",
+      help="OTEL_RESOURCE_ATTRIBUTES to stamp, e.g. department=engineering.",
+  )
+  boot.add_argument(
+      "--i-understand-content-logging",
+      action="store_true",
+      dest="ack_content_logging",
+      help=(
+          "Required with --privacy replay: acknowledges prompt text (which"
+          " can contain full conversation history) will be exported."
+      ),
+  )
+  boot.add_argument(
+      "--out",
+      type=pathlib.Path,
+      default=pathlib.Path("."),
+      help="Directory to write config artifacts into after the deploy.",
+  )
+  boot.add_argument(
+      "--execute",
+      action="store_true",
+      help="Apply the plan (default: print the commands and exit).",
+  )
   return parser
 
 
@@ -175,10 +253,46 @@ def _cmd_config(args: argparse.Namespace) -> int:
   return 0
 
 
+def _cmd_bootstrap(args: argparse.Namespace) -> int:
+  try:
+    settings = bootstrap_mod.BootstrapSettings(
+        project=args.project,
+        dataset=args.dataset,
+        region=args.region,
+        bq_location=args.bq_location,
+        signals=tuple(s for s in args.signals.split(",") if s),
+        privacy=args.privacy,
+        sources=tuple(s for s in args.source.split(",") if s),
+        source_product=args.source_product,
+        resource_attributes=args.resource_attributes,
+        acknowledge_content_logging=args.ack_content_logging,
+        out_dir=args.out,
+    )
+  except ValueError as exc:
+    print(f"bqaa-otel: error: {exc}", file=sys.stderr)
+    if "acknowledge_content_logging" in str(exc):
+      print(
+          "bqaa-otel: --privacy replay exports prompt text; pass"
+          " --i-understand-content-logging only if that is acceptable"
+          " in your environment.",
+          file=sys.stderr,
+      )
+    return 2
+
+  if not args.execute:
+    print(bootstrap_mod.render_plan(settings))
+    return 0
+
+  bootstrap_mod.run_bootstrap(settings, bootstrap_mod.SubprocessRunner())
+  return 0
+
+
 def main(argv: list[str] | None = None) -> int:
   args = _build_parser().parse_args(argv)
   if args.command == "config":
     return _cmd_config(args)
+  if args.command == "bootstrap":
+    return _cmd_bootstrap(args)
   raise AssertionError(f"unhandled command {args.command!r}")
 
 

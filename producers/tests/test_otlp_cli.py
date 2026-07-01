@@ -158,3 +158,76 @@ def test_console_script_is_registered():
   assert (
       scripts["bqaa-otel"] == "bigquery_agent_analytics_tracing.otlp.cli:main"
   )
+
+
+# --------------------------------------------------------------------------
+# bootstrap subcommand (PR2)
+# --------------------------------------------------------------------------
+
+
+def test_bootstrap_default_is_plan_mode(tmp_path, capsys, monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import bootstrap
+
+  def _boom(*a, **k):
+    raise AssertionError("plan mode must not execute")
+
+  monkeypatch.setattr(bootstrap.SubprocessRunner, "run", _boom)
+  rc = _run(
+      [
+          "bootstrap",
+          "--project",
+          "my-proj",
+          "--out",
+          str(tmp_path),
+      ]
+  )
+  assert rc == 0
+  out = capsys.readouterr().out
+  assert "--execute" in out
+  assert "gcloud run deploy bqaa-otlp-receiver" in out
+
+
+def test_bootstrap_execute_invokes_run_bootstrap(tmp_path, monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import bootstrap
+
+  seen = {}
+
+  def _fake_run_bootstrap(settings, runner, **kw):
+    seen["settings"] = settings
+    seen["runner"] = runner
+    return bootstrap.BootstrapResult("https://r", "https://c", ())
+
+  monkeypatch.setattr(bootstrap, "run_bootstrap", _fake_run_bootstrap)
+  rc = _run(
+      [
+          "bootstrap",
+          "--project",
+          "my-proj",
+          "--dataset",
+          "ds1",
+          "--signals",
+          "logs,metrics,traces",
+          "--out",
+          str(tmp_path),
+          "--execute",
+      ]
+  )
+  assert rc == 0
+  assert seen["settings"].project == "my-proj"
+  assert seen["settings"].dataset == "ds1"
+  assert seen["settings"].enable_spans is True
+  assert isinstance(seen["runner"], bootstrap.SubprocessRunner)
+
+
+def test_bootstrap_replay_requires_ack_flag(capsys):
+  rc = _run(
+      [
+          "bootstrap",
+          "--project",
+          "my-proj",
+          "--privacy",
+          "replay",
+      ]
+  )
+  assert rc != 0
+  assert "--i-understand-content-logging" in capsys.readouterr().err

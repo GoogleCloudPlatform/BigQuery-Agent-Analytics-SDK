@@ -13,15 +13,28 @@ Claude Code / Codex --OTLP--> Cloud Run receiver --> Pub/Sub --> consumer --> Bi
 ## Deploy
 
 ```bash
-PROJECT=my-proj DATASET=agent_analytics REGION=us-central1 \
-  bash deploy/otlp_receiver/setup.sh
+# Print the plan (runs nothing):
+PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
+  bootstrap --project my-proj --dataset agent_analytics --region us-central1
+
+# Apply it:
+PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
+  bootstrap --project my-proj --dataset agent_analytics --region us-central1 --execute
 ```
 
+(`bqaa-otel bootstrap ...` once the producers package is installed;
+`setup.sh` is a thin wrapper over the same command with the historical
+env-var interface: `PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
+
 This creates: the native tables + `*_dedup` views + `agent_events_otlp` +
-`bqaa_metrics` (DDL generated from the schema package via `gen_schema_sql.py`),
-Pub/Sub topics/subscription + DLQ, a Secret Manager bearer token, the Cloud Run
-receiver + consumer, and the scheduled `MERGE`. It prints the receiver URL and
-how to read the token.
+`bqaa_metrics` (DDL generated from the schema package; `gen_schema_sql.py`
+prints the same bundle standalone), Pub/Sub topics/subscription + DLQ, a
+Secret Manager bearer token, the Cloud Run receiver + consumer, and the
+scheduled `MERGE`. It prints the receiver URL, how to read the token, and
+writes the ready-to-distribute Claude Code / Codex config artifacts
+(`--source claude-code,codex --signals ... --privacy ...` — see
+`bqaa-otel config --help` for generating artifacts against an existing
+deployment).
 
 - **Endpoints:** `<url>/v1/logs`, `<url>/v1/metrics` (`/v1/traces` is gated —
   set `ENABLE_SPANS=1` to wire it; span landing is deferred).
