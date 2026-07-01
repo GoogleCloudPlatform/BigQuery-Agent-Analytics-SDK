@@ -106,7 +106,6 @@ images: ['${IMAGE}']
 EOF
 
 MAIN_TOPIC_PATH="projects/${PROJECT}/topics/${MAIN_TOPIC}"
-DLQ_TOPIC_PATH="projects/${PROJECT}/topics/${DLQ_TOPIC}"
 
 echo "==> Deploying the OTLP receiver (Cloud Run)"
 gcloud run deploy "$RECEIVER_SVC" --project "$PROJECT" --region "$REGION" \

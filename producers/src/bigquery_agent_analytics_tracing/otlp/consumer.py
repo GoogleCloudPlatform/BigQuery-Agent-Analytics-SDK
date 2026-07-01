@@ -76,8 +76,10 @@ def make_push_app(
 
   A Cloud Run service must serve ``$PORT``, so the consumer runs as an HTTP
   service that receives push messages rather than blocking on streaming pull.
-  Returns ``204`` on success (ack); ``500`` on failure so Pub/Sub retries and,
-  after ``maxDeliveryAttempts``, dead-letters to ``otlp_dead_letter``.
+  Returns ``204`` on success (ack) — including application dead letters
+  (``delivery.dlq=true``), which are written to ``otlp_dead_letter`` like any
+  other row. Returns ``500`` on a write failure so Pub/Sub retries and, after
+  ``maxDeliveryAttempts``, forwards the message to the transport DLQ topic.
   """
 
   def app(environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:

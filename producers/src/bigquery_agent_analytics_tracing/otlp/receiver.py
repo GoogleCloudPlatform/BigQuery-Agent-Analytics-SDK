@@ -15,10 +15,11 @@
 """OTLP receiver request handling (issue #316, PR 3).
 
 The transport-agnostic core: authenticate, decode an OTLP export body, run it
-through the PR-2 decode library, and route the resulting envelopes to the main
-Pub/Sub topic (success) or the DLQ topic (dead letters). The HTTP/WSGI
-entrypoint (``app.py``) and the real Pub/Sub publisher wrap this; tests drive it
-directly with local fixtures and a fake publisher — no network needed.
+through the PR-2 decode library, and publish the resulting envelopes to the main
+ingest topic — success rows and dead letters alike (dead letters carry
+``delivery.dlq=true``; the consumer routes those to ``otlp_dead_letter``). The
+HTTP/WSGI entrypoint (``app.py``) and the real Pub/Sub publisher wrap this;
+tests drive it directly with local fixtures and a fake publisher — no network.
 
 The original request bytes (``body``) are threaded into the decode layer so
 dead-letter envelopes carry a replayable payload and a reproducible request
