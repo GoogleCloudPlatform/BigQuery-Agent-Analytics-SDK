@@ -23,12 +23,14 @@ smoke (PR 3) lands next in the stack.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import subprocess
 import sys
 
 from . import bootstrap as bootstrap_mod
 from . import config_artifacts
+from . import verify as verify_mod
 
 
 def _parse_kv(pairs: str) -> dict[str, str]:
@@ -199,6 +201,46 @@ def _build_parser() -> argparse.ArgumentParser:
       action="store_true",
       help="Apply the plan (default: print the commands and exit).",
   )
+
+  ver = sub.add_parser(
+      "verify",
+      help=(
+          "Check a deployment: endpoint reachability + auth enforcement,"
+          " table/view existence, recent rows, dead-letter health."
+          " --smoke additionally sends synthetic OTLP logs+metrics and"
+          " follows them into BigQuery and the projection."
+      ),
+  )
+  ver.add_argument("--endpoint", required=True, help="Receiver base URL.")
+  ver.add_argument(
+      "--token",
+      default=None,
+      help="Bearer token (default: the BQAA_OTLP_TOKEN env var).",
+  )
+  ver.add_argument("--project", required=True, help="GCP project id.")
+  ver.add_argument("--dataset", required=True, help="BigQuery dataset id.")
+  ver.add_argument(
+      "--signals",
+      default="logs,metrics",
+      help="Signal tier the deployment was bootstrapped with.",
+  )
+  ver.add_argument(
+      "--recent-hours",
+      type=int,
+      default=24,
+      help="Freshness window for recent-row / dead-letter checks.",
+  )
+  ver.add_argument(
+      "--smoke",
+      action="store_true",
+      help="Also exercise the write path with synthetic telemetry.",
+  )
+  ver.add_argument(
+      "--timeout",
+      type=float,
+      default=150,
+      help="Seconds to wait for smoke rows to land.",
+  )
   return parser
 
 
@@ -312,12 +354,63 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
   return 0
 
 
+def _cmd_verify(args: argparse.Namespace) -> int:
+  token = args.token or os.environ.get("BQAA_OTLP_TOKEN", "")
+  if not token:
+    print(
+        "bqaa-otel: error: no bearer token — pass --token or set"
+        " BQAA_OTLP_TOKEN",
+        file=sys.stderr,
+    )
+    return 2
+  settings = verify_mod.VerifySettings(
+      endpoint=args.endpoint,
+      token=token,
+      project=args.project,
+      dataset=args.dataset,
+      signals=tuple(s for s in args.signals.split(",") if s),
+      recent_hours=args.recent_hours,
+  )
+  query_rows = verify_mod.make_query_rows(args.project)
+  results = verify_mod.run_verify(
+      settings,
+      http_post=verify_mod.default_http_post,
+      query_rows=query_rows,
+  )
+  if args.smoke:
+    results += verify_mod.run_smoke(
+        settings,
+        http_post=verify_mod.default_http_post,
+        query_rows=query_rows,
+        timeout_s=args.timeout,
+    )
+
+  failures = 0
+  for r in results:
+    if r.ok:
+      status = "OK  "
+    elif r.warning:
+      status = "WARN"
+    else:
+      status = "FAIL"
+      failures += 1
+    print(f"{status}  {r.name}: {r.detail}")
+  print()
+  if failures:
+    print(f"{failures} check(s) failed.")
+    return 1
+  print("All checks passed.")
+  return 0
+
+
 def main(argv: list[str] | None = None) -> int:
   args = _build_parser().parse_args(argv)
   if args.command == "config":
     return _cmd_config(args)
   if args.command == "bootstrap":
     return _cmd_bootstrap(args)
+  if args.command == "verify":
+    return _cmd_verify(args)
   raise AssertionError(f"unhandled command {args.command!r}")
 
 

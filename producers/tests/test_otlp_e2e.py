@@ -36,6 +36,7 @@ import uuid
 import pytest
 
 from bigquery_agent_analytics_tracing.otlp import sql as otel_sql
+from bigquery_agent_analytics_tracing.otlp import verify as otel_verify
 
 ENDPOINT = os.environ.get("BQAA_OTLP_ENDPOINT")
 TOKEN = os.environ.get("BQAA_OTLP_TOKEN")
@@ -83,71 +84,12 @@ def _wait_count(query: str, timeout=150) -> int:
 def test_logs_and_metrics_land_and_project():
   run_id = uuid.uuid4().hex
 
-  logs = {
-      "resourceLogs": [
-          {
-              "resource": {
-                  "attributes": [
-                      {
-                          "key": "service.name",
-                          "value": {"stringValue": "claude-code"},
-                      },
-                  ]
-              },
-              "scopeLogs": [
-                  {
-                      "scope": {"name": "e2e"},
-                      "logRecords": [
-                          {
-                              "timeUnixNano": str(int(time.time() * 1e9)),
-                              "body": {"stringValue": "e2e"},
-                              "eventName": "claude_code.user_prompt",
-                              "attributes": [
-                                  {
-                                      "key": "bqaa.run_id",
-                                      "value": {"stringValue": run_id},
-                                  },
-                                  {
-                                      "key": "session.id",
-                                      "value": {"stringValue": run_id},
-                                  },
-                              ],
-                          }
-                      ],
-                  }
-              ],
-          }
-      ]
-  }
+  # Payload builders are shared with `bqaa-otel verify --smoke` (#324 PR3)
+  # so the CLI smoke and this live e2e exercise the identical shapes.
+  now_nanos = int(time.time() * 1e9)
+  logs = otel_verify.synthetic_logs_payload(run_id, now_nanos)
   metric_name = f"bqaa_e2e_{run_id}"
-  metrics = {
-      "resourceMetrics": [
-          {
-              "resource": {"attributes": []},
-              "scopeMetrics": [
-                  {
-                      "scope": {"name": "e2e"},
-                      "metrics": [
-                          {
-                              "name": metric_name,
-                              "unit": "1",
-                              "gauge": {
-                                  "dataPoints": [
-                                      {
-                                          "asDouble": 1.0,
-                                          "timeUnixNano": str(
-                                              int(time.time() * 1e9)
-                                          ),
-                                      }
-                                  ]
-                              },
-                          }
-                      ],
-                  }
-              ],
-          }
-      ]
-  }
+  metrics = otel_verify.synthetic_gauge_payload(run_id, now_nanos)
   assert _post("/v1/logs", logs).status_code == 200
   assert _post("/v1/metrics", metrics).status_code == 200
 

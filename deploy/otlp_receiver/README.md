@@ -108,11 +108,21 @@ traces (`otel.trace_exporter`) are observability only.
 ## Verify
 
 ```bash
+# Read-only health checks: endpoint reachability + auth enforcement,
+# table/view existence, recent rows, dead-letter health.
+BQAA_OTLP_TOKEN=<token> PYTHONPATH=producers/src python3 -m \
+  bigquery_agent_analytics_tracing.otlp.cli verify \
+  --endpoint <url> --project <proj> --dataset <dataset>
+
+# Add --smoke to also send synthetic OTLP logs+metrics and follow them into
+# the native tables, dedup views, and the agent_events_otlp projection.
+```
+
+The full pytest e2e (same payloads as `--smoke`, plus protobuf-path and
+dead-letter round-trips) remains available:
+
+```bash
 BQAA_OTLP_ENDPOINT=<url> BQAA_OTLP_TOKEN=<token> \
   BQAA_PROJECT=<proj> BQAA_DATASET=<dataset> \
   python -m pytest producers/tests/test_otlp_e2e.py -v
 ```
-
-The smoke test sends OTLP logs + metrics, confirms rows in the native tables,
-`*_dedup` views, `agent_events_otlp`, and `bqaa_metrics`, and that a malformed
-request lands in `otlp_dead_letter` with a replayable `raw_b64`.

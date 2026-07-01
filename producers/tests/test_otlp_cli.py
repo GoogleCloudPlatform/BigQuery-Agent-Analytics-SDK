@@ -278,3 +278,118 @@ def test_bootstrap_rejects_bogus_source(capsys):
   rc = _run(["bootstrap", "--project", "p", "--source", "cursor"])
   assert rc == 2
   assert "source" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
+# verify subcommand (PR3)
+# --------------------------------------------------------------------------
+
+
+def _fake_results(*, fail=False, warn=False):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  results = [verify.CheckResult("endpoint reachable", True, "200")]
+  if warn:
+    results.append(
+        verify.CheckResult("recent rows in otel_logs", False, "0", True)
+    )
+  if fail:
+    results.append(verify.CheckResult("tables and views exist", False, "gone"))
+  return results
+
+
+def test_verify_green_exits_zero(capsys, monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  monkeypatch.setattr(
+      verify, "run_verify", lambda *a, **k: _fake_results(warn=True)
+  )
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "https://r",
+          "--token",
+          "tok",
+          "--project",
+          "p",
+          "--dataset",
+          "ds",
+      ]
+  )
+  assert rc == 0
+  out = capsys.readouterr().out
+  assert "OK" in out and "WARN" in out
+
+
+def test_verify_failure_exits_nonzero(capsys, monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  monkeypatch.setattr(
+      verify, "run_verify", lambda *a, **k: _fake_results(fail=True)
+  )
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "https://r",
+          "--token",
+          "tok",
+          "--project",
+          "p",
+          "--dataset",
+          "ds",
+      ]
+  )
+  assert rc == 1
+  assert "FAIL" in capsys.readouterr().out
+
+
+def test_verify_smoke_flag_also_runs_smoke(monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  called = {}
+  monkeypatch.setattr(verify, "run_verify", lambda *a, **k: _fake_results())
+  monkeypatch.setattr(
+      verify,
+      "run_smoke",
+      lambda *a, **k: called.setdefault("smoke", True) and _fake_results(),
+  )
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "https://r",
+          "--token",
+          "tok",
+          "--project",
+          "p",
+          "--dataset",
+          "ds",
+          "--smoke",
+      ]
+  )
+  assert rc == 0
+  assert called.get("smoke")
+
+
+def test_verify_token_falls_back_to_env(monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  seen = {}
+
+  def _record(settings, **kw):
+    seen["token"] = settings.token
+    return _fake_results()
+
+  monkeypatch.setattr(verify, "run_verify", _record)
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "env-tok")
+  rc = _run(
+      ["verify", "--endpoint", "https://r", "--project", "p", "--dataset", "ds"]
+  )
+  assert rc == 0
+  assert seen["token"] == "env-tok"
