@@ -1,0 +1,2 @@
+# OTLP receiver + consumer runtime (issue #316, PR 5).
+bigquery-agent-analytics-tracing[receiver]

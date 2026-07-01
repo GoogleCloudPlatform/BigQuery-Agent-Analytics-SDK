@@ -23,12 +23,17 @@
   routing (``receiver``); WSGI entrypoint in ``app``.
 - PR 4: BigQuery writer + projection SQL — envelope v1 to native rows
   (``writer``), scheduled MERGE + ``bqaa_metrics`` view (``sql``).
+- PR 5: deployment — ``CREATE TABLE``/view DDL from the schema package
+  (``ddl``); ``deploy/otlp_receiver/`` gcloud scripts + live smoke test.
 
 See ``docs/otlp_receiver_design.md``.
 """
 
 from __future__ import annotations
 
+from bigquery_agent_analytics_tracing.otlp.ddl import agent_events_otlp_table_sql
+from bigquery_agent_analytics_tracing.otlp.ddl import create_all_sql
+from bigquery_agent_analytics_tracing.otlp.ddl import create_table_sql
 from bigquery_agent_analytics_tracing.otlp.decode import decode_logs_request
 from bigquery_agent_analytics_tracing.otlp.decode import decode_metrics_request
 from bigquery_agent_analytics_tracing.otlp.envelope import canonical_json
@@ -115,4 +120,8 @@ __all__ = [
     "agent_events_otlp_merge_sql",
     "bqaa_metrics_view_sql",
     "CROSSWALK_VERSION",
+    # deployment DDL (PR 5)
+    "create_table_sql",
+    "agent_events_otlp_table_sql",
+    "create_all_sql",
 ]
