@@ -23,7 +23,10 @@ message redelivers (and ultimately hits the subscription's dead-letter policy).
 
 from __future__ import annotations
 
-from typing import Any
+import base64
+import json
+import os
+from typing import Any, Callable, Iterable
 
 from bigquery_agent_analytics_tracing.otlp import writer
 
@@ -58,6 +61,57 @@ def make_callback(
       message.nack()
 
   return callback
+
+
+def _writer_from_env() -> BigQueryAppendWriter:
+  return BigQueryAppendWriter(
+      project=os.environ["BQAA_PROJECT"], dataset=os.environ["BQAA_DATASET"]
+  )
+
+
+def make_push_app(
+    bq_writer: writer.BigQueryWriter, *, enable_spans: bool = False
+) -> Callable[[dict[str, Any], Callable], Iterable[bytes]]:
+  """WSGI app for a Pub/Sub **push** subscription (the Cloud Run deploy path).
+
+  A Cloud Run service must serve ``$PORT``, so the consumer runs as an HTTP
+  service that receives push messages rather than blocking on streaming pull.
+  Returns ``204`` on success (ack); ``500`` on failure so Pub/Sub retries and,
+  after ``maxDeliveryAttempts``, dead-letters to ``otlp_dead_letter``.
+  """
+
+  def app(environ: dict[str, Any], start_response: Callable) -> Iterable[bytes]:
+    if environ.get("PATH_INFO") == "/healthz":
+      start_response("200 OK", [("Content-Type", "text/plain")])
+      return [b"ok"]
+    try:
+      length = int(environ.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+      length = 0
+    body = environ["wsgi.input"].read(length) if length else b""
+    try:
+      push = json.loads(body)
+      data = base64.b64decode(push["message"]["data"])
+      writer.handle_message(data, bq_writer, enable_spans=enable_spans)
+      start_response("204 No Content", [])
+      return [b""]
+    except Exception:  # noqa: BLE001 - 5xx -> Pub/Sub retry -> DLQ
+      start_response(
+          "500 Internal Server Error", [("Content-Type", "text/plain")]
+      )
+      return [b"consumer error"]
+
+  return app
+
+
+def make_push_app_from_env() -> (
+    Callable[[dict[str, Any], Callable], Iterable[bytes]]
+):
+  """App factory for gunicorn: ``consumer:make_push_app_from_env``."""
+  return make_push_app(
+      _writer_from_env(),
+      enable_spans=os.environ.get("BQAA_OTLP_ENABLE_TRACES", "0") == "1",
+  )
 
 
 def run_subscriber(

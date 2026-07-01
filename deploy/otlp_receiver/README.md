@@ -52,14 +52,16 @@ content:
 
 ### Codex (user-level `~/.codex/config.toml`)
 
-`[otel]` is ignored in project-local config, so set it at user level. **Metrics
-default to `statsig`** — you must set `metrics_exporter` explicitly:
+`[otel]` is ignored in project-local config, so set it at user level. **Logs-only
+until [#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317)
+verifies the metrics config shape** (Codex metrics default to `statsig`, and the
+exact `metrics_exporter` endpoint block is version-specific):
 
 ```toml
 [otel]
 environment = "prod"
 exporter = "otlp-http"
-metrics_exporter = "otlp-http"
+metrics_exporter = "none"    # PENDING #317: enable once the metrics shape is verified
 trace_exporter = "none"
 log_user_prompt = false
 
@@ -69,9 +71,11 @@ protocol = "binary"
 headers = { "Authorization" = "Bearer ${BQAA_OTLP_TOKEN}" }
 ```
 
-> The exact `otel.metrics_exporter` endpoint block is verified per Codex version
-> as part of [#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317);
-> full guided config generation is [#324](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/324).
+> Do not set `metrics_exporter = "otlp-http"` from this doc: the endpoint block
+> shape for metrics is verified per Codex version in
+> [#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317).
+> Full guided config generation is
+> [#324](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/324).
 
 ## Privacy tiers
 

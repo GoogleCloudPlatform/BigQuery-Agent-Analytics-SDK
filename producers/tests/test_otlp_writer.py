@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 
 import pytest
@@ -426,3 +428,53 @@ def test_consumer_callback_nacks_on_failure():
   callback(msg)
   assert msg.nacked is True
   assert w.rows == []
+
+
+# --------------------------------------------------------------------------
+# Push consumer WSGI app (the Cloud Run deploy path) — no Pub/Sub needed
+# --------------------------------------------------------------------------
+
+
+def _push_wsgi(app, body, path="/"):
+  environ = {
+      "PATH_INFO": path,
+      "CONTENT_LENGTH": str(len(body)),
+      "wsgi.input": io.BytesIO(body),
+  }
+  captured: dict = {}
+
+  def start_response(status, headers):
+    captured["status"] = status
+
+  out = b"".join(app(environ, start_response))
+  return captured["status"], out
+
+
+def _push_body(envelope):
+  data = base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("ascii")
+  return json.dumps({"message": {"data": data}}).encode("utf-8")
+
+
+def test_push_app_writes_and_acks_with_204():
+  w = FakeWriter()
+  app = consumer.make_push_app(w)
+  status, _ = _push_wsgi(app, _push_body(_log_envelope()))
+  assert status.startswith("204")
+  assert w.rows[0][0] == "otel_logs"
+
+
+def test_push_app_returns_500_on_bad_message():
+  w = FakeWriter()
+  app = consumer.make_push_app(w)
+  status, _ = _push_wsgi(app, b"garbage")
+  assert status.startswith("500")  # -> Pub/Sub retry -> DLQ
+  assert w.rows == []
+
+
+def test_push_app_healthz_serves_port():
+  # A Cloud Run service must answer on its port; /healthz proves the app binds.
+  status, out = _push_wsgi(
+      consumer.make_push_app(FakeWriter()), b"", "/healthz"
+  )
+  assert status.startswith("200")
+  assert out == b"ok"

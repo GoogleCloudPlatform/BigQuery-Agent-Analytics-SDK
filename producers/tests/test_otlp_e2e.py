@@ -192,6 +192,54 @@ def test_logs_and_metrics_land_and_project():
   )
 
 
+def test_protobuf_logs_land_via_recommended_http_protobuf_path():
+  # Exercise the documented enterprise default (OTLP/HTTP protobuf), so the
+  # deployed image's opentelemetry-proto decode path is actually covered.
+  logs_service_pb2 = pytest.importorskip(
+      "opentelemetry.proto.collector.logs.v1.logs_service_pb2"
+  )
+  from opentelemetry.proto.common.v1 import common_pb2
+  from opentelemetry.proto.logs.v1 import logs_pb2
+  from opentelemetry.proto.resource.v1 import resource_pb2
+
+  run_id = uuid.uuid4().hex
+
+  def _kv(key, val):
+    return common_pb2.KeyValue(
+        key=key, value=common_pb2.AnyValue(string_value=val)
+    )
+
+  record = logs_pb2.LogRecord(
+      time_unix_nano=int(time.time() * 1e9),
+      body=common_pb2.AnyValue(string_value="e2e-proto"),
+      event_name="claude_code.user_prompt",
+      attributes=[_kv("bqaa.run_id", run_id)],
+  )
+  request = logs_service_pb2.ExportLogsServiceRequest(
+      resource_logs=[
+          logs_pb2.ResourceLogs(
+              resource=resource_pb2.Resource(
+                  attributes=[_kv("service.name", "claude-code")]
+              ),
+              scope_logs=[logs_pb2.ScopeLogs(log_records=[record])],
+          )
+      ]
+  )
+  resp = _post(
+      "/v1/logs",
+      request.SerializeToString(),
+      content_type="application/x-protobuf",
+  )
+  assert resp.status_code == 200
+  assert (
+      _wait_count(
+          f"SELECT COUNT(*) FROM `{_QUALIFIED}.otel_logs`"
+          f" WHERE JSON_VALUE(log_attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
+      )
+      >= 1
+  )
+
+
 def test_malformed_request_lands_in_dead_letter_with_replayable_body():
   run_id = uuid.uuid4().hex
   body = f"not-otlp-{run_id}".encode("utf-8")

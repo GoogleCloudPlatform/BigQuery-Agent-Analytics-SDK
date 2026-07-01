@@ -2,9 +2,10 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License").
 #
-# One image, two Cloud Run roles (issue #316, PR 5):
-#   - receiver (default CMD): OTLP HTTP endpoint via gunicorn
-#   - consumer (override CMD): Pub/Sub -> BigQuery subscriber
+# One image, two Cloud Run HTTP-service roles (issue #316, PR 5) — both serve
+# $PORT, per the Cloud Run container contract:
+#   - receiver (default CMD): OTLP HTTP endpoint (app:make_app)
+#   - consumer (override CMD): Pub/Sub *push* handler (consumer:make_push_app_from_env)
 # Build with the repository root as the build context:
 #   docker build -f deploy/otlp_receiver/Dockerfile -t <image> .
 
@@ -17,12 +18,11 @@ WORKDIR /app
 COPY producers /src/producers
 RUN pip install --no-cache-dir "/src/producers[receiver]"
 
-COPY deploy/otlp_receiver/run_consumer.py ./run_consumer.py
-
 ENV PORT=8080
 
-# Default role: OTLP receiver. Override CMD to run the consumer:
-#   CMD ["python", "run_consumer.py"]
+# Default role: OTLP receiver. Consumer role overrides CMD to:
+#   gunicorn --factory --bind :$PORT \
+#     bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env
 CMD exec gunicorn --factory --bind ":${PORT}" --workers 2 --threads 8 \
     --access-logfile - \
     bigquery_agent_analytics_tracing.otlp.app:make_app
