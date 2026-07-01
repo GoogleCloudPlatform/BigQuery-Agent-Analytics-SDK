@@ -15,14 +15,17 @@
 #
 # Setup for the skill-evolution lab:
 #   1. Resolve the GCP project + region and write .env.
-#   2. (Optional) register the V0 skill in the Skill Registry.
+#   2. Enable the required API (aiplatform.googleapis.com -- Vertex AI).
+#   3. Reset the working skill to V0.
+#   4. (Optional) register the V0 skill in the Skill Registry.
 #
 # Usage:
 #   ./setup.sh [PROJECT_ID] [REGION]
 #   WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./setup.sh   # also create V0 skill
 #
-# Required IAM: roles/aiplatform.user (Gemini + Skill Registry). Authenticate
-# with: gcloud auth application-default login
+# Required IAM: roles/aiplatform.user (Gemini + Skill Registry), plus rights to
+# enable services (roles/serviceusage.serviceUsageAdmin) on first run.
+# Authenticate with: gcloud auth application-default login
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
@@ -50,6 +53,19 @@ JUDGE_MODEL="gemini-2.5-flash"
 JUDGE_LOCATION="$REGION"
 EOF
 echo "Wrote .env (project=$PROJECT_ID region=$REGION)."
+
+# Enable the one API this example needs: Vertex AI. It serves Gemini
+# generateContent (agent, analysts, judge), the text-embedding model used for
+# golden-Q&A matching, AND the Skill Registry (hosted at
+# {region}-aiplatform.googleapis.com). No BigQuery is required -- scoring runs
+# offline via --conversations-file.
+echo "Enabling required GCP API: aiplatform.googleapis.com ..."
+if gcloud services enable aiplatform.googleapis.com --project "$PROJECT_ID"; then
+  echo "  aiplatform.googleapis.com enabled."
+else
+  echo "  WARN: could not enable aiplatform.googleapis.com automatically." >&2
+  echo "        Enable 'Vertex AI API' on $PROJECT_ID before running the demo." >&2
+fi
 
 # Ensure the working copy starts at the flawed V0.
 cp skills/SKILL.v0.md skills/SKILL.md

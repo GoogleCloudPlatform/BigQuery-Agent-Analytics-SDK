@@ -71,7 +71,8 @@ outputs (and what each file means) without running anything. Live runs write to
 
 ## Prerequisites
 
-- A GCP project with Vertex AI enabled; `roles/aiplatform.user`.
+- A GCP project; `roles/aiplatform.user` (plus rights to enable services on the
+  first run — `setup.sh` enables the **Vertex AI API** for you).
 - `gcloud auth application-default login`.
 - [`uv`](https://github.com/astral-sh/uv) — the scripts run via `uv run`, which
   installs the repo's dependencies from the root `pyproject.toml` automatically
@@ -169,3 +170,33 @@ analysts + inductive consolidation, held-out validation) and
 [AutoSkill](https://arxiv.org/abs/2603.01145) (versioned skill evolution as a
 semantic merge). It is the same `evolve_skill()` the knowledge-supervisor
 quality lab imports from this SDK.
+
+Here's how each paper's design maps to what this lab actually builds:
+
+| Dimension | Trace2Skill | AutoSkill | This lab |
+| --- | --- | --- | --- |
+| Learning signal | Execution trajectories | User-dialogue turns | Scored conversation traces -- wins and misses, logged to BigQuery by the Agent Analytics plugin |
+| When it learns | Batch (consolidate a pool) | Online (after each interaction) | Batch, once per round (`V0 -> V1 -> V2`) |
+| Analysts | Multi-turn agentic (ReAct) loops with file access | -- (background skill extraction, no analyst fleet) | One single-pass LLM call per trajectory, on a frozen copy of the skill |
+| Consolidation / merge | Hierarchical tree merge | `P_merge` semantic merge, per observation | Flat, prevalence-weighted, best-of-N; an accumulative semantic union that never drops a section |
+| Validation | Held-out; evolve/test disjoint (§2.1) | Online evaluation | Golden-Q&A-grounded score on a disjoint held-back set |
+| Scale & models | 200+ trajectories, cross-model transfer, multi-domain; Qwen, self-hosted | 22K+ real conversations (WildChat-1M) | 68 study + 80 held-out, one domain; Gemini 3.x, Gemini 2.5 Pro |
+
+Full accumulative `P_merge` across rounds and online skill retrieval are future work.
+
+### What we add on top of both
+
+- **Golden-Q&A grounding.** Every answer is graded against a verified golden answer, so the
+  loop's fitness function is real correctness -- not an LLM judge's "sounds helpful," which
+  happily rewards confident, wrong answers.
+- **Anti-parroting, detect-then-learn.** The scorer works from the run's trace: a recovery
+  counts as genuine only when the agent actually called a tool to re-check the fact. Echo the
+  user's correction back with no tool call and it is flagged as parroting and reclassified
+  from success to failure, so the engine never reinforces a fake win.
+- **Best-of-N with an incumbent guard.** Consolidation is stochastic, so each round generates
+  several candidate skills. With a `score_fn`, the engine keeps the best-scoring one only if
+  it beats the current skill, so an unlucky round falls back instead of shipping a regression.
+  (The default run skips scoring and takes the median-size candidate.)
+- **Compaction.** Evolved skills are distilled back down when they grow too large -- the skill
+  is loaded into the agent's context whenever it is relevant, so an ever-growing manual costs
+  tokens on every call and buries the rules that matter under ones that don't.
