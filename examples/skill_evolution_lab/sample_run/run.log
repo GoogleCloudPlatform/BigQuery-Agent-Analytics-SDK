@@ -8,7 +8,7 @@
   Judge:      gemini-2.5-flash  (@ us-central1)
   Concurrency:3
   Registry:   off
-  Output dir: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash
+  Output dir: runs/20260701_192502_gemini_3_5_flash
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -25,7 +25,7 @@
 
   [19:25:02] Running + scoring the evolve set...
 Running 68 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 68 conversation(s) (68 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_evolve_traffic.json
+Wrote 68 conversation(s) (68 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_evolve_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
   UNHELPFUL Sessions (showing 10 of 51)
@@ -251,10 +251,10 @@ QUALITY SUMMARY
 
   WARNING: Unhelpful rate (75.0%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_evolve_report.json
+  JSON report: runs/20260701_192502_gemini_3_5_flash/v0_evolve_report.json
   [19:29:37] Running + scoring the held-out test set...
 Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_test_traffic.json
+Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
   UNHELPFUL Sessions (showing 10 of 57)
@@ -480,7 +480,7 @@ QUALITY SUMMARY
 
   WARNING: Unhelpful rate (71.2%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_test_report.json
+  JSON report: runs/20260701_192502_gemini_3_5_flash/v0_test_report.json
 
   V0 evolve: 23.1% (6/26 golden-matched)
   V0 test:   20.0% (14/70 golden-matched)
@@ -501,8 +501,8 @@ Trajectories: 17 successes, 51 failures
 Collected 53 patches (53 passed the quality gate).
 Generating 3 candidate(s)...
 Selected median-size candidate (2230 chars).
-Wrote evolution artifacts to /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash (53 patches, 3 candidates).
-Wrote evolved skill -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_skill.md (2231B, changed)
+Wrote evolution artifacts to runs/20260701_192502_gemini_3_5_flash (53 patches, 3 candidates).
+Wrote evolved skill -> runs/20260701_192502_gemini_3_5_flash/v1_skill.md (2231B, changed)
 Updated working copy: skills/SKILL.md
 
   V1 skill: 2231B  (V0 was 675B)
@@ -518,7 +518,7 @@ Updated working copy: skills/SKILL.md
 
   [19:36:08] Running + scoring the held-out test set with V1...
 Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_test_traffic.json
+Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v1_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
   DECLINED (out-of-scope) Sessions (showing 3 of 10)
@@ -641,7 +641,7 @@ QUALITY SUMMARY
 
   All responses were meaningful.
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_test_report.json
+  JSON report: runs/20260701_192502_gemini_3_5_flash/v1_test_report.json
 
   V1 test:   100.0% (70/70 golden-matched)
 
@@ -684,7 +684,7 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
   DONE  (total wall time: 14m 45s)
 
-  Result table:   /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/RESULT.md
+  Result table:   runs/20260701_192502_gemini_3_5_flash/RESULT.md
 
   Artifacts (runs/):
     RESULT.json

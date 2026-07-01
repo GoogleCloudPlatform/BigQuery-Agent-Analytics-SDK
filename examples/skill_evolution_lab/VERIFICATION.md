@@ -43,7 +43,7 @@ skill file changes** — so the delta is attributable to the skill.
 | Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
 | Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
 | Out-of-scope (declined) | 90.0% (9/10) | 100.0% (10/10) | +10.0pp |
-| Tool-grounded answers | 18% (14/80) | 88% (70/80) | — |
+| Tool-grounded answers | 11% (9/80) | 79% (63/80) | — |
 
 The flawed V0 barely calls the tool on **in-scope** questions (it's told not to), so it
 declines on almost everything; the evolved V1 uses the tool and answers correctly —

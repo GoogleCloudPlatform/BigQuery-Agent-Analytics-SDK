@@ -222,10 +222,17 @@ rate() { $PY print_rate.py "$1"; }
 # Banner
 # ---------------------------------------------------------------------------
 
+if [[ -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+  echo "ERROR: PROJECT_ID is not set. Run ./setup.sh YOUR_PROJECT_ID REGION" \
+       "(or set PROJECT_ID in .env) before running the demo." >&2
+  exit 1
+fi
+
 separator
 echo ""
 echo -e "  ${BOLD}${CYAN}SKILL EVOLUTION LAB -- END-TO-END${RESET}"
 echo ""
+echo "  Project:    $GOOGLE_CLOUD_PROJECT"
 echo "  Agent:      $AGENT_MODEL"
 echo "  Analyst:    $ANALYST_MODEL"
 echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"

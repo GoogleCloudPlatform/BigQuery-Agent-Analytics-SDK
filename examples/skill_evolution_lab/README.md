@@ -30,6 +30,12 @@ Skill"* (BigQuery Agent Analytics Series). See
   correction. A good agent re-verifies with its tool and holds the right figure
   instead of caving. The engine detects parroting and learns a "re-verify, don't
   just agree" rule.
+- **Tool selection.** The agent has two meaningful tools —
+  `lookup_company_policy` (facts) and `calculate_disability_pay` (a computed
+  payout). The evolved skill learns *which* tool to reach for, not just "use a tool."
+- **Out-of-scope handling.** The held-out set includes out-of-scope questions
+  (IT, personal finance). The evolved skill learns to decline them deliberately
+  (route IT to IT) instead of reflexively deflecting everything to HR.
 - **Skill Registry versioning.** The evolved skill is mirrored to the registry
   as a new immutable revision; `reset.sh` reverts both the local copy and the
   registry to V0.
@@ -51,6 +57,8 @@ skill_evolution_lab/
     questions_test.json             # held-out questions for the V0->V1 number
     questions_corrections.json      # anti-parroting cases (teach)
     questions_corrections_heldout.json  # anti-parroting cases (held-out)
+    questions_oos.json                  # out-of-scope cases (teach)
+    questions_oos_heldout.json          # out-of-scope cases (held-out)
   run_agent.py          # runs questions through the agent -> conversations JSON
   analyze_and_evolve.py # scored report -> evolve_skill() -> V1 (+ registry)
   compare_runs.py       # V0 vs V1 golden-grounded correctness + parroting
@@ -93,21 +101,24 @@ held-out test sets, evolves a tool-first V1 skill, re-scores the held-out set,
 prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
-**Runtime:** about **13–18 minutes** end-to-end at the default size (60 evolve +
-70 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
+**Runtime:** about **13–18 minutes** end-to-end at the default size (68 evolve +
+80 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
 seconds. The first run also does a one-time `uv` dependency sync.
 
-**What you'll see** — a per-step progress trace ending in the comparison table:
+**What you'll see** — a per-step progress trace ending in the comparison table.
+The per-step rate is over the *in-scope* questions matched to the answer key (the
+out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
-[V0] traffic + score ...
-     V0 test:   20.0% (14/70 golden-matched)
-[evolve] analyst=gemini-3.1-pro-preview (this is the slow step) ...
-[V1] traffic + score ...
-     V1 test:   100.0% (70/70 golden-matched)
+  ▶ STEP 1/4: V0 BASELINE (flawed skill)
+     V0 test:   20.0% (14/70 matched to the answer key, of 80 total; 10 out-of-scope)
+  ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
+  ▶ STEP 3/4: MEASURE V1 (held-out)
+     V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+  ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
-| Overall                   | 20.0% (14/70) | 100.0% (70/70) | +80.0pp |
+| Overall                   | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
