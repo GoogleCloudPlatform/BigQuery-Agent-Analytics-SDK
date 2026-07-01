@@ -75,20 +75,22 @@ gcloud pubsub topics create "$MAIN_TOPIC" --project "$PROJECT" 2>/dev/null || tr
 gcloud pubsub topics create "$DLQ_TOPIC" --project "$PROJECT" 2>/dev/null || true
 
 echo "==> Granting least-privilege IAM"
-# Receiver: read the token secret + publish to main and DLQ topics.
+# Receiver: read the token secret + publish to the main ingest topic. (Parse/
+# decode dead letters travel the main topic with delivery.dlq=true and are
+# written to otlp_dead_letter by the consumer; the receiver never publishes to
+# the transport DLQ topic.)
 gcloud secrets add-iam-policy-binding "$SECRET" --project "$PROJECT" \
   --member "serviceAccount:${RECEIVER_SA}" \
   --role roles/secretmanager.secretAccessor >/dev/null
-for topic in "$MAIN_TOPIC" "$DLQ_TOPIC"; do
-  gcloud pubsub topics add-iam-policy-binding "$topic" --project "$PROJECT" \
-    --member "serviceAccount:${RECEIVER_SA}" --role roles/pubsub.publisher >/dev/null
-done
+gcloud pubsub topics add-iam-policy-binding "$MAIN_TOPIC" --project "$PROJECT" \
+  --member "serviceAccount:${RECEIVER_SA}" --role roles/pubsub.publisher >/dev/null
 # Consumer: write BigQuery.
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:${CONSUMER_SA}" --role roles/bigquery.dataEditor >/dev/null
 gcloud projects add-iam-policy-binding "$PROJECT" \
   --member "serviceAccount:${CONSUMER_SA}" --role roles/bigquery.jobUser >/dev/null
-# Pub/Sub service agent: publish to the DLQ (dead-lettering) + mint OIDC tokens.
+# Pub/Sub service agent: mint OIDC tokens for the push endpoint + publish to the
+# transport DLQ (the subscriber grant is added after the subscription exists).
 gcloud pubsub topics add-iam-policy-binding "$DLQ_TOPIC" --project "$PROJECT" \
   --member "serviceAccount:${PUBSUB_AGENT}" --role roles/pubsub.publisher >/dev/null
 gcloud iam service-accounts add-iam-policy-binding "$PUSH_SA" --project "$PROJECT" \
@@ -110,7 +112,7 @@ echo "==> Deploying the OTLP receiver (Cloud Run)"
 gcloud run deploy "$RECEIVER_SVC" --project "$PROJECT" --region "$REGION" \
   --image "$IMAGE" --allow-unauthenticated --service-account "$RECEIVER_SA" \
   --set-secrets "BQAA_OTLP_TOKEN=${SECRET}:latest" \
-  --set-env-vars "BQAA_OTLP_MAIN_TOPIC=${MAIN_TOPIC_PATH},BQAA_OTLP_DLQ_TOPIC=${DLQ_TOPIC_PATH},BQAA_OTLP_SOURCE_PRODUCT=${SOURCE_PRODUCT},BQAA_OTLP_ENABLE_TRACES=${ENABLE_SPANS}"
+  --set-env-vars "BQAA_OTLP_MAIN_TOPIC=${MAIN_TOPIC_PATH},BQAA_OTLP_SOURCE_PRODUCT=${SOURCE_PRODUCT},BQAA_OTLP_ENABLE_TRACES=${ENABLE_SPANS}"
 
 echo "==> Deploying the Pub/Sub push consumer (Cloud Run HTTP service)"
 gcloud run deploy "$CONSUMER_SVC" --project "$PROJECT" --region "$REGION" \
@@ -133,6 +135,11 @@ gcloud pubsub subscriptions create "$SUBSCRIPTION" --project "$PROJECT" \
   --ack-deadline 60 2>/dev/null || \
 gcloud pubsub subscriptions update "$SUBSCRIPTION" --project "$PROJECT" \
   --push-endpoint "${CONSUMER_URL}/" --push-auth-service-account "$PUSH_SA"
+
+# Dead-letter forwarding needs the Pub/Sub service agent to acknowledge on the
+# source subscription in addition to publishing to the DLQ topic.
+gcloud pubsub subscriptions add-iam-policy-binding "$SUBSCRIPTION" --project "$PROJECT" \
+  --member "serviceAccount:${PUBSUB_AGENT}" --role roles/pubsub.subscriber >/dev/null
 
 echo "==> Registering the scheduled MERGE into agent_events_otlp (every 15 min)"
 PYTHONPATH=producers/src python3 "${HERE}/gen_schema_sql.py" "$DATASET" --merge-only \

@@ -46,7 +46,6 @@ def _config(enable_traces=False):
   return receiver.ReceiverConfig(
       expected_token=TOKEN,
       main_topic="proj/main",
-      dlq_topic="proj/dlq",
       enable_traces=enable_traces,
   )
 
@@ -157,15 +156,18 @@ def test_unknown_path_is_404():
   assert pub.calls == []
 
 
-def test_bad_metric_routes_to_dlq_while_good_one_goes_to_main():
+def test_bad_metric_and_good_one_both_go_to_main_topic():
+  # Both success + dead-letter envelopes flow through the main topic; the
+  # consumer routes delivery.dlq=true to otlp_dead_letter.
   body = _metrics_body([{"name": "bad"}, _GOOD_GAUGE])
   result, pub = _call("/v1/metrics", body)
   assert result.status == 200
   assert result.published == 1
   assert result.dead_lettered == 1
-  assert len(pub.to("proj/main")) == 1
-  assert len(pub.to("proj/dlq")) == 1
-  assert pub.to("proj/dlq")[0]["delivery"]["dlq"] is True
+  main = pub.to("proj/main")
+  assert len(main) == 2
+  assert sum(1 for e in main if e.get("delivery", {}).get("dlq")) == 1
+  assert pub.to("proj/dlq") == []  # receiver never publishes to a DLQ topic
 
 
 # --------------------------------------------------------------------------
@@ -178,7 +180,8 @@ def test_undecodable_body_is_dead_lettered_with_keyed_replayable_payload():
   result, pub = _call("/v1/logs", body)
   assert result.status == 400
   assert result.dead_lettered == 1
-  dl = pub.to("proj/dlq")[0]
+  dl = pub.to("proj/main")[0]  # dead letter travels the main topic
+  assert dl["delivery"]["dlq"] is True
   assert dl["parse_error"]["stage"] == "otlp_decode"
   assert dl["source_position"] is None  # whole-request failure
   assert dl["idempotency_key"] is not None  # keyed from request hash + stage
@@ -193,7 +196,8 @@ def test_valid_json_with_wrong_otlp_shape_is_dead_lettered_not_500():
   result, pub = _call("/v1/logs", body)
   assert result.status == 400
   assert result.dead_lettered == 1
-  dl = pub.to("proj/dlq")[0]
+  dl = pub.to("proj/main")[0]  # dead letter travels the main topic
+  assert dl["delivery"]["dlq"] is True
   assert dl["parse_error"]["stage"] == "otlp_decode"
   assert dl["idempotency_key"] is not None
   assert base64.b64decode(dl["raw_preservation"]["raw_b64"]) == body
@@ -247,7 +251,7 @@ def test_dead_letter_key_guard_rejects_stage_only():
     env.dead_letter_key("otlp_decode", None, None)
 
 
-def test_route_envelopes_splits_main_and_dlq():
+def test_route_envelopes_sends_all_to_main_and_counts_dlq():
   pub = FakePublisher()
   envelopes = [
       {"delivery": {"dlq": False}},
@@ -256,8 +260,9 @@ def test_route_envelopes_splits_main_and_dlq():
   ]
   published, dead = receiver.route_envelopes(envelopes, pub, _config())
   assert (published, dead) == (2, 1)
-  assert len(pub.to("proj/main")) == 2
-  assert len(pub.to("proj/dlq")) == 1
+  # everything on the main topic; the consumer routes dlq=true to the table
+  assert len(pub.to("proj/main")) == 3
+  assert pub.to("proj/dlq") == []
 
 
 # --------------------------------------------------------------------------

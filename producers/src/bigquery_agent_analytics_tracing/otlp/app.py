@@ -49,7 +49,6 @@ def config_from_env() -> receiver.ReceiverConfig:
   return receiver.ReceiverConfig(
       expected_token=os.environ["BQAA_OTLP_TOKEN"],
       main_topic=os.environ["BQAA_OTLP_MAIN_TOPIC"],
-      dlq_topic=os.environ["BQAA_OTLP_DLQ_TOPIC"],
       enable_traces=os.environ.get("BQAA_OTLP_ENABLE_TRACES", "0") == "1",
       source_product=os.environ.get("BQAA_OTLP_SOURCE_PRODUCT", "claude_code"),
   )
