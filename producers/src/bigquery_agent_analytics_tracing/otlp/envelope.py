@@ -265,12 +265,14 @@ def dead_letter_envelope(
 ) -> dict[str, Any]:
   """Envelope for a record that could not be decoded/written.
 
-  Routed to ``otlp_dead_letter`` + the DLQ topic, never to the analytics tables.
-  ``raw_b64`` must be the **replayable** original OTLP request payload (so a
-  replay worker can republish it to ``/v1/logs`` / ``/v1/metrics``), not a
-  re-serialized subrecord. ``source_position`` is carried where decode got far
-  enough; a whole-request failure leaves it ``None`` and keys from
-  ``raw_otlp_request_hash + stage``.
+  Marked ``delivery.dlq=true`` and published on the **main ingest topic** like
+  any other envelope; the consumer routes it to ``otlp_dead_letter``, never to
+  the analytics tables. (The Pub/Sub transport DLQ topic is separate — it only
+  holds messages that repeatedly fail the consumer.) ``raw_b64`` must be the
+  **replayable** original OTLP request payload (so a replay worker can republish
+  it to ``/v1/logs`` / ``/v1/metrics``), not a re-serialized subrecord.
+  ``source_position`` is carried where decode got far enough; a whole-request
+  failure leaves it ``None`` and keys from ``raw_otlp_request_hash + stage``.
   """
   return {
       "envelope_version": ENVELOPE_VERSION,
