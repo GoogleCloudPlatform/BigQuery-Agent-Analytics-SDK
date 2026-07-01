@@ -152,6 +152,8 @@ EVOLVE="eval/questions_evolve.json"
 TEST="eval/questions_test.json"
 CORR="eval/questions_corrections.json"
 CORR_HO="eval/questions_corrections_heldout.json"
+OOS="eval/questions_oos.json"
+OOS_HO="eval/questions_oos_heldout.json"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -249,7 +251,7 @@ separator
 stage "STEP 1/4: V0 BASELINE (flawed skill)"
 echo "  Goal:    Measure the flawed starting skill before any evolution"
 echo "  Method:  Deploy SKILL.v0.md, run traffic, score vs the golden Q&A"
-echo "  Sets:    evolve (study) + held-out (test), each with corrections"
+echo "  Sets:    evolve (study) + held-out (test), each with corrections + out-of-scope"
 echo ""
 step_start
 
@@ -258,10 +260,10 @@ cp "$V0" "$SKILL"
 # (the flawed starting skill next to the evolved v1_skill.md for diffing).
 cp "$V0" "$REPORTS_DIR/v0_skill.md"
 echo -e "  ${DIM}[$(ts)] Running + scoring the evolve set...${RESET}"
-run_agent "$SKILL" "$REPORTS_DIR/v0_evolve_traffic.json" "$EVOLVE" "$CORR"
+run_agent "$SKILL" "$REPORTS_DIR/v0_evolve_traffic.json" "$EVOLVE" "$CORR" "$OOS"
 score     "$REPORTS_DIR/v0_evolve_traffic.json" "$REPORTS_DIR/v0_evolve_report.json"
 echo -e "  ${DIM}[$(ts)] Running + scoring the held-out test set...${RESET}"
-run_agent "$SKILL" "$REPORTS_DIR/v0_test_traffic.json" "$TEST" "$CORR_HO"
+run_agent "$SKILL" "$REPORTS_DIR/v0_test_traffic.json" "$TEST" "$CORR_HO" "$OOS_HO"
 score     "$REPORTS_DIR/v0_test_traffic.json" "$REPORTS_DIR/v0_test_report.json"
 
 echo ""
@@ -307,7 +309,7 @@ echo ""
 step_start
 
 echo -e "  ${DIM}[$(ts)] Running + scoring the held-out test set with V1...${RESET}"
-run_agent "$SKILL" "$REPORTS_DIR/v1_test_traffic.json" "$TEST" "$CORR_HO"
+run_agent "$SKILL" "$REPORTS_DIR/v1_test_traffic.json" "$TEST" "$CORR_HO" "$OOS_HO"
 score     "$REPORTS_DIR/v1_test_traffic.json" "$REPORTS_DIR/v1_test_report.json"
 
 echo ""

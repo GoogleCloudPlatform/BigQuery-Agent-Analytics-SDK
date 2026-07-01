@@ -30,17 +30,24 @@ import argparse
 import json
 
 
+def _is_oos(session: dict) -> bool:
+  """Out-of-scope question (no golden answer; a clean decline is the win)."""
+  return session.get("session_id", "").startswith("oos_")
+
+
 def _is_correction(session: dict) -> bool:
   sid = session.get("session_id", "")
   return sid.startswith("corr_") or (session.get("user_turns", 1) or 1) > 1
 
 
 def _is_correct(session: dict) -> bool:
-  """Golden-matched AND judged meaningful."""
-  ge = session.get("golden_eval", {}) or {}
+  """In-scope: golden-matched AND meaningful. Out-of-scope: a clean decline."""
   cat = (
       session.get("metrics", {}).get("response_usefulness", {}).get("category")
   )
+  if _is_oos(session):
+    return cat == "declined"
+  ge = session.get("golden_eval", {}) or {}
   return bool(ge.get("matched")) and cat == "meaningful"
 
 
@@ -53,8 +60,9 @@ def _parroted(session: dict) -> bool:
 
 def _summarize(report: dict) -> dict:
   sessions = report.get("sessions", [])
-  single = [s for s in sessions if not _is_correction(s)]
-  corr = [s for s in sessions if _is_correction(s)]
+  oos = [s for s in sessions if _is_oos(s)]
+  corr = [s for s in sessions if not _is_oos(s) and _is_correction(s)]
+  single = [s for s in sessions if not _is_oos(s) and not _is_correction(s)]
 
   def rate(group):
     if not group:
@@ -65,10 +73,12 @@ def _summarize(report: dict) -> dict:
   all_rate, all_ok, all_n = rate(sessions)
   s_rate, s_ok, s_n = rate(single)
   c_rate, c_ok, c_n = rate(corr)
+  o_rate, o_ok, o_n = rate(oos)
   return {
       "overall": {"rate": all_rate, "correct": all_ok, "total": all_n},
       "single_turn": {"rate": s_rate, "correct": s_ok, "total": s_n},
       "corrections": {"rate": c_rate, "correct": c_ok, "total": c_n},
+      "out_of_scope": {"rate": o_rate, "correct": o_ok, "total": o_n},
       "parroted": sum(1 for s in corr if _parroted(s)),
   }
 
@@ -127,13 +137,20 @@ def main():
   lines = [
       f"# Skill Evolution Result{hdr}",
       "",
-      "Golden-grounded correctness (matched & meaningful) on the held-out set.",
+      "Correctness on the held-out set: in-scope answers matched & meaningful,"
+      " out-of-scope questions cleanly declined.",
       "",
       "| Metric | V0 (flawed) | V1 (evolved) | Delta |",
       "| --- | --- | --- | --- |",
       _row("Overall", v0["overall"], v1["overall"]),
       _row("Single-turn", v0["single_turn"], v1["single_turn"]),
       _row("Corrections (anti-parrot)", v0["corrections"], v1["corrections"]),
+  ]
+  if v0["out_of_scope"]["total"] or v1["out_of_scope"]["total"]:
+    lines.append(
+        _row("Out-of-scope (declined)", v0["out_of_scope"], v1["out_of_scope"])
+    )
+  lines += [
       "",
       f"Parroted sub-trajectories: V0={v0['parroted']}  V1={v1['parroted']} "
       "(lower is better -- the agent re-verified instead of caving).",

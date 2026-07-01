@@ -1,13 +1,13 @@
 {
   "v0": {
     "overall": {
-      "rate": 18.6,
-      "correct": 13,
-      "total": 70
+      "rate": 28.7,
+      "correct": 23,
+      "total": 80
     },
     "single_turn": {
-      "rate": 16.4,
-      "correct": 9,
+      "rate": 18.2,
+      "correct": 10,
       "total": 55
     },
     "corrections": {
@@ -15,17 +15,22 @@
       "correct": 4,
       "total": 15
     },
+    "out_of_scope": {
+      "rate": 90.0,
+      "correct": 9,
+      "total": 10
+    },
     "parroted": 0
   },
   "v1": {
     "overall": {
-      "rate": 98.6,
-      "correct": 69,
-      "total": 70
+      "rate": 100.0,
+      "correct": 80,
+      "total": 80
     },
     "single_turn": {
-      "rate": 98.2,
-      "correct": 54,
+      "rate": 100.0,
+      "correct": 55,
       "total": 55
     },
     "corrections": {
@@ -33,14 +38,19 @@
       "correct": 15,
       "total": 15
     },
+    "out_of_scope": {
+      "rate": 100.0,
+      "correct": 10,
+      "total": 10
+    },
     "parroted": 0
   },
   "v0_dimensions": {
-    "correctness": 0.38,
-    "tool_usage": 0.38,
-    "specificity": 0.38,
-    "scope_compliance": 0.38,
-    "first_time_right": 0.38
+    "correctness": 0.6,
+    "tool_usage": 0.6,
+    "specificity": 0.53,
+    "scope_compliance": 0.6,
+    "first_time_right": 0.6
   },
   "v1_dimensions": {
     "correctness": 2.0,

@@ -8,7 +8,7 @@
   Judge:      gemini-2.5-flash  (@ us-central1)
   Concurrency:3
   Registry:   off
-  Output dir: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash
+  Output dir: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -21,51 +21,50 @@
 
   Goal:    Measure the flawed starting skill before any evolution
   Method:  Deploy SKILL.v0.md, run traffic, score vs the golden Q&A
-  Sets:    evolve (study) + held-out (test), each with corrections
+  Sets:    evolve (study) + held-out (test), each with corrections + out-of-scope
 
-  [19:54:23] Running + scoring the evolve set...
-Running 60 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v0_evolve_traffic.json
-19:58:00 [WARNING] Categorical API classification EXCEPTION for ec07_calc_std: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
+  [19:25:02] Running + scoring the evolve set...
+Running 68 question(s) on gemini-3.5-flash (skill=SKILL.md)...
+Wrote 68 conversation(s) (68 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_evolve_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 48)
+  UNHELPFUL Sessions (showing 10 of 51)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     e04_pto  → policy_agent
   Question:    Is my unused PTO paid out if I resign?
-  Response:    "I do not have information regarding whether unused PTO is paid out if you resign. I suggest you contact HR to get clarification on this policy."
+  Response:    "I do not have information regarding whether unused PTO is paid out upon resignation. I suggest you contact HR to get clarification on this policy."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a substantive answer to the user's question about PTO policy.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it does not have the information, indicating no tool was used to retrieve data for the answer.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+  Reason:        The agent's response is a statement about its own lack of information, not a fact derived from a tool. The question is in scope for the `lookup_company_policy` tool, which should contain this information. The agent did not provide any policy details, indicating it did not ground its response in tool data.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e07_sick  → policy_agent
   Question:    After how many days out sick is a doctor's note required?
-  Response:    "I do not have that information. I suggest you contact HR for details regarding when a doctor's note is required."
+  Response:    "I do not have information regarding when a doctor's note is required for sick leave. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
   Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to attempt to find the information, instead relying on a generic 'I don't have that information' response.
+  Reason:        The agent explicitly stated it did not have the information, indicating it did not retrieve data from its tools, even though the `lookup_company_policy` tool should cover sick leave policies.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e10_remote  → policy_agent
   Question:    When are the required overlap hours for remote staff?
-  Response:    "I do not have information about required overlap hours for remote staff. I suggest you contact HR for assistance with this topic."
+  Response:    "I do not have information about the required overlap hours for remote staff. I suggest you contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information for an in-scope topic and directed the user to HR, which is not a substantive answer.
+  Reason:        The agent stated it does not have the information and directed the user to HR, which is not a substantive answer to the user's question about remote staff overlap hours.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating it did not retrieve data from its tools to answer the question.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+  Reason:        The agent stated it does not have the information and did not provide any data from its tools. Since 'remote work' is an in-scope topic, the agent should have used a tool to find this information. Its response is not based on tool results.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e12_expenses  → policy_agent
   Question:    What's the per-diem for meals while traveling for work?
-  Response:    "I do not have that information. I suggest you contact HR."
+  Response:    "I do not have that information. I suggest you contact HR for assistance with travel expenses and per-diem rates."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, which is not a substantive answer to the user's question.
+  Reason:        The agent stated it did not have the information for an in-scope topic ('expenses') and directed the user to HR, which is not a useful answer.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information for an in-scope question, instead providing a generic 'I don't have that information' response.
+  Reason:        The agent did not use any tools to find the information, despite the question being in scope and a tool being available. Its response was based on its own lack of knowledge rather than tool results.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e14_expenses  → policy_agent
@@ -79,38 +78,38 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     e15_expenses  → policy_agent
   Question:    What's the deadline to file an expense report?
-  Response:    "I do not have that information. Please contact HR for assistance with expense report deadlines."
+  Response:    "I do not have information about the deadline to file expense reports. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to answer an in-scope question about expense report deadlines.
+  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a useful answer for an in-scope topic like expenses.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to find the information, despite 'expenses' being an in-scope topic for the lookup_company_policy tool.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+  Reason:        The agent stated it did not have the information, indicating no data was retrieved from tools to answer the question.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e16_benefits  → policy_agent
   Question:    What percentage of my medical premium does the employer pay?
-  Response:    "I do not have information about the percentage of medical premiums covered by the employer. Please contact HR for more details."
+  Response:    "I do not have information regarding the specific percentage of medical premiums that the employer covers. Our policy information states that the company offers competitive benefits, but for detailed information about medical premium contributions, please contact HR."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating no data was retrieved from its tools, even though a tool should have been used.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+  Reason:        The agent explicitly states it does not have the information and directs the user to HR, failing to provide a substantive answer to an in-scope question.
+  Grounding:     ✅ GROUNDED
+  Reason:        The agent states it does not have the information, which is a truthful reflection of its inability to find the specific data, and it does not fabricate an answer. The generic statement about 'competitive benefits' likely came from a tool lookup.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e17_benefits  → policy_agent
   Question:    Which health plan types can I choose from?
-  Response:    "I do not have information about the specific health plan types available. Please contact HR for more details."
+  Response:    "I do not have information about the specific health plan types available. I suggest you contact HR for more details."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent explicitly stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tool to retrieve information for an in-scope question, instead stating it lacked the information.
+  Reason:        The agent did not use any tool to retrieve information for an in-scope question, and therefore provided no grounded information. While it didn't fabricate, it failed to ground its response in tool data.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e18_benefits  → policy_agent
   Question:    What's the most a family pays out of pocket in-network?
-  Response:    "I do not have that information. I suggest you contact HR for details regarding the maximum out-of-pocket limits for family coverage."
+  Response:    "I do not have that information. I suggest you contact HR to get the specific details regarding the in-network out-of-pocket maximums for family coverage."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information, instead responding from general knowledge (or lack thereof) and deflecting to HR.
+  Reason:        The agent did not use any tools to retrieve information; its response was a generic statement about not having the information.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e19_benefits  → policy_agent
@@ -121,6 +120,37 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Grounding:     ❌ NOT GROUNDED
   Reason:        The agent did not use any tools to retrieve information, despite the question being in-scope and requiring a tool lookup.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 6)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_mgr_salary  → policy_agent
+  Question:    How much does my manager get paid?
+  Response:    "I do not have information about manager salaries. I suggest you contact HR for assistance with this question."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The question about a manager's salary is outside the agent's defined scope of company policies and benefits. The agent correctly and politely declined to answer.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent correctly identified that it did not have information for this out-of-scope question and thus did not need to use any tools.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_invest  → policy_agent
+  Question:    Which index funds are the best investment right now?
+  Response:    "I do not have that information. I suggest you contact HR for assistance with this topic."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The user's question about 'best index funds' is outside the agent's defined scope of HR policy and benefits. The agent correctly declined to provide information on this out-of-scope topic.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require tool usage. The agent's direct response was appropriate.
+  Dimensions:    Correctness: ⚠️  MOSTLY CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_layoffs  → policy_agent
+  Question:    Is my team on the list for the layoffs next quarter?
+  Response:    "I do not have that information. I suggest you contact HR regarding this matter."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The question about specific layoff lists is out of the agent's defined scope (company policy and benefits), and the agent correctly declined to answer by stating it does not have the information and directing the user to HR.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope, and the agent correctly declined to answer without needing to use any tools.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
   MEANINGFUL Sessions (showing 3 of 11)
@@ -146,25 +176,12 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     e03_pto  → policy_agent
   Question:    At what rate does my PTO accrue?
-  Response:    "Your PTO accrues monthly at a rate of 20 days per year."
+  Response:    "Your PTO accrues monthly, at a rate of 20 days per year."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent directly answers the user's question about PTO accrual rate with specific information.
+  Reason:        The agent provided a direct and specific answer to the user's question about PTO accrual rate.
   Grounding:     ✅ GROUNDED
-  Reason:        The information about PTO accrual rate would be retrieved from the lookup_company_policy tool.
+  Reason:        The agent's response provides specific policy details (20 days per year, monthly accrual) which would be retrieved from the lookup_company_policy tool.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
-
-──────────────────────────────────────────────────────────────────────
-  UNCLASSIFIED (parse errors) Sessions (showing 1 of 1)
-──────────────────────────────────────────────────────────────────────
-
-  Session:     ec07_calc_std  → policy_agent
-  Question:    I earn $78,000. If I need 15 weeks of short-term disability, how much do I get in total?
-  Response:    "I do not have information about short-term disability. I suggest you contact HR for assistance with this topic."
-  Usefulness:    ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Grounding:     ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -172,77 +189,75 @@ Wrote 60 conversation(s) (60 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     60       🔴      11 (19%)      48 (81%)        0       1      100%      100%
+  policy_agent                     68       🔴   11+6d (25%)      51 (75%)        0       0      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              48  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              51  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
-  Total sessions evaluated : 60
+  Total sessions evaluated : 68
   Meaningful               : 11
-  Declined (out-of-scope)  : 0
+  Declined (out-of-scope)  : 6
   Partial                  : 0
-  Unhelpful                : 48
-  Unhelpful rate           : 80.0%
-  Parse errors             : 1 session(s) (8 metric evals)
-  Failure causes           : skill=48 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 18.3%  (excludes 0 unaddressable gaps)
+  Unhelpful                : 51
+  Unhelpful rate           : 75.0%
+  Failure causes           : skill=51 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 25.0%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.44 / 2.00  ###########
+    Correctness         : 0.65 / 2.00  ################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.37 / 2.00  #########
+    Tool Usage          : 0.56 / 2.00  ##############
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.37 / 2.00  #########
+    Specificity         : 0.35 / 2.00  ########
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.37 / 2.00  #########
+    Scope               : 0.53 / 2.00  #############
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.37 / 2.00  #########
+    First-Time Right    : 0.53 / 2.00  #############
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.1
     Avg tool calls       : 0.2
     Multi-turn sessions  : 5
-    Correction rate      : 5.0%
-    Verification rate    : 3.3%
+    Correction rate      : 1.5%
+    Verification rate    : 5.9%
 
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   48  ( 81.4%) ########################################
-    ✅ HELPFUL         :   11  ( 18.6%) #########
+    ❌ NOT HELPFUL     :   51  ( 75.0%) #####################################
+    ✅ HELPFUL         :   11  ( 16.2%) ########
+    ✅ DECLINED (OK)   :    6  (  8.8%) ####
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   47  ( 79.7%) #######################################
-    ✅ GROUNDED        :   11  ( 18.6%) #########
-    ➖ NO TOOL NEEDED  :    1  (  1.7%) 
+    ❌ NOT GROUNDED    :   46  ( 67.6%) #################################
+    ✅ GROUNDED        :   12  ( 17.6%) ########
+    ➖ NO TOOL NEEDED  :   10  ( 14.7%) #######
 
   Execution Details:
-    elapsed_seconds: 103.0
+    elapsed_seconds: 138.4
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-30T19:58:12.205508+00:00
+    created_at: 2026-07-01T19:29:37.013147+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (80.0%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (75.0%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v0_evolve_report.json
-  [19:58:12] Running + scoring the held-out test set...
-Running 70 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v0_test_traffic.json
-20:01:45 [WARNING] Categorical API classification EXCEPTION for t41_flex_time: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
-20:02:07 [WARNING] Categorical API classification EXCEPTION for tc07_calc_std: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_evolve_report.json
+  [19:29:37] Running + scoring the held-out test set...
+Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
+Wrote 80 conversation(s) (80 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 55)
+  UNHELPFUL Sessions (showing 10 of 57)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t04_pto  → policy_agent
@@ -256,11 +271,11 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t07_sick_leave  → policy_agent
   Question:    If I'm out sick for 4 days, do I need a doctor's note?
-  Response:    "I do not have information regarding whether a doctor's note is required for taking sick leave. Please contact HR to get more details on this policy."
+  Response:    "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR to get more details on this policy."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly states it does not have the information and directs the user to HR, failing to answer an in-scope question.
+  Reason:        The agent stated it did not have information and directed the user to HR, failing to answer an in-scope question that its tools could address.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent's response is a direct LLM statement about not having information, not based on any tool lookup, even though a tool was available for this in-scope topic.
+  Reason:        The agent did not use any tool to retrieve information, instead stating it lacked the information, which is not grounded in tool results.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t10_remote_work  → policy_agent
@@ -274,25 +289,25 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t12_expenses  → policy_agent
   Question:    What's the daily meal reimbursement limit on business travel?
-  Response:    "I do not have that information. Please contact HR for assistance with business travel and meal reimbursement policies."
+  Response:    "I do not have information about the daily meal reimbursement limit on business travel. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent stated it does not have information and directed the user to HR, which is not a useful answer for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information and instead stated it did not have the information, which is not grounded in tool results.
+  Reason:        The agent did not retrieve any information from its tools; it merely stated it lacked information.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t13_expenses  → policy_agent
   Question:    Do I need a receipt for a $30 expense?
-  Response:    "I do not have that information. Please contact HR for assistance with expense policies."
+  Response:    "I do not have that information. I suggest you contact HR."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to answer an in-scope question about expense policy.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating no data was retrieved from tools.
+  Reason:        The agent explicitly stated 'I do not have that information', indicating no tool lookup was performed or successful.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t14_expenses  → policy_agent
   Question:    Do I need pre-approval for a $600 flight?
-  Response:    "I do not have that information. I suggest you contact HR."
+  Response:    "I do not have that information. Please contact HR for assistance regarding travel and expense policies."
   Usefulness:    ❌ NOT HELPFUL
   Reason:        The agent stated it did not have the information and directed the user to HR, which is not a useful answer for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
@@ -301,20 +316,20 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t15_expenses  → policy_agent
   Question:    How long do I have to submit a business expense?
-  Response:    "I do not have that information. Please contact HR for assistance with business expenses."
+  Response:    "I do not have that information. Please contact HR for assistance regarding business expenses."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to answer an in-scope question that its tools should cover.
+  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a useful answer for an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information; its response is a generic statement.
+  Reason:        The agent did not use any tools to find the information, and its response is a generic statement of inability rather than tool-derived data.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t16_benefits  → policy_agent
   Question:    What share of my health premium does the company cover?
-  Response:    "I do not have information about what share of your health premium the company covers. I suggest you contact HR for assistance with this topic."
+  Response:    "I do not have information about what share of your health premium the company covers. I suggest you contact HR for more details on this topic."
   Usefulness:    ❌ NOT HELPFUL
   Reason:        The agent stated it does not have the information and directed the user to HR, which is not a useful answer for an in-scope question.
-  Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent did not use any tools and stated it lacked the information, effectively responding from general knowledge (or lack thereof).
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent stated it did not have the information, indicating it did not retrieve data from its tools, even though the information should be available via `lookup_company_policy`.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t17_benefits  → policy_agent
@@ -336,7 +351,38 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 13)
+  DECLINED (out-of-scope) Sessions (showing 3 of 9)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_vpn  → policy_agent
+  Question:    My VPN keeps dropping at home -- how do I fix the connection?
+  Response:    "I do not have that information. I suggest you contact HR for assistance."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The user's question about VPN issues is outside the agent's defined scope of HR questions, and the agent correctly declined to provide an answer.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require any tool usage. The agent's response was based on its understanding of its limitations.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_peer_review  → policy_agent
+  Question:    What rating did my coworker Dana get on her last performance review?
+  Response:    "I do not have access to performance review ratings or individual employee records. I suggest you contact HR for assistance with this inquiry."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope (individual employee records) and politely declined to answer, directing the user to HR.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response was a statement about its own capabilities and scope, not requiring a tool lookup.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_stock  → policy_agent
+  Question:    What's our stock price today, and is it a good time to buy?
+  Response:    "I do not have information about the company's stock price. I suggest you contact HR or the appropriate financial department for assistance."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, suggesting an alternative contact.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope, so no tool usage was required. The agent correctly stated it did not have the information.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 14)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t01_pto  → policy_agent
@@ -359,34 +405,12 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "Based on the company policy, you receive 20 days of PTO per year, accrued monthly. This works out to approximately 1.67 days of PTO accrued each month."
+  Response:    "Based on the company policy, you receive 20 days of PTO per year, which is accrued monthly. This works out to approximately **1.67 days** (or about 1 and 2/3 days) of PTO accrued each month."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent directly and substantively answers the user's question about monthly PTO accrual with specific, actionable information.
+  Reason:        The agent directly answers the user's question about monthly PTO accrual with a specific number.
   Grounding:     ✅ GROUNDED
-  Reason:        The response is based on company policy data (20 days/year PTO), which would be retrieved from a tool, and a correct calculation.
+  Reason:        The agent states 'Based on the company policy' and provides a calculation derived from policy data, indicating tool usage for PTO policy lookup.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
-
-──────────────────────────────────────────────────────────────────────
-  UNCLASSIFIED (parse errors) Sessions (showing 2 of 2)
-──────────────────────────────────────────────────────────────────────
-
-  Session:     t41_flex_time  → policy_agent
-  Question:    Can I work four 10-hour days instead of five 8-hour days?
-  Response:    "I do not have information about working four 10-hour days (flex time). Please contact HR for assistance with this topic."
-  Usefulness:    ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Grounding:     ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
-
-  Session:     tc07_calc_std  → policy_agent
-  Question:    On a $91,000 salary, how much does short-term disability pay each week?
-  Response:    "I do not have information about short-term disability benefits. Please contact HR for assistance with this topic."
-  Usefulness:    ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Grounding:     ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -394,74 +418,74 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     70       🔴      13 (19%)      55 (81%)        0       2      100%      100%
+  policy_agent                     80       🔴   14+9d (29%)      57 (71%)        0       0      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              55  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              57  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
-  Total sessions evaluated : 70
-  Meaningful               : 13
-  Declined (out-of-scope)  : 0
+  Total sessions evaluated : 80
+  Meaningful               : 14
+  Declined (out-of-scope)  : 9
   Partial                  : 0
-  Unhelpful                : 55
-  Unhelpful rate           : 78.6%
-  Parse errors             : 2 session(s) (16 metric evals)
-  Failure causes           : skill=55 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 18.6%  (excludes 0 unaddressable gaps)
+  Unhelpful                : 57
+  Unhelpful rate           : 71.2%
+  Failure causes           : skill=57 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 28.7%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.38 / 2.00  #########
+    Correctness         : 0.60 / 2.00  ###############
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.38 / 2.00  #########
+    Tool Usage          : 0.60 / 2.00  ###############
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.38 / 2.00  #########
+    Specificity         : 0.53 / 2.00  #############
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.38 / 2.00  #########
+    Scope               : 0.60 / 2.00  ###############
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.38 / 2.00  #########
+    First-Time Right    : 0.60 / 2.00  ###############
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
     Avg tool calls       : 0.1
     Multi-turn sessions  : 15
-    Correction rate      : 8.6%
-    Verification rate    : 11.4%
+    Correction rate      : 5.0%
+    Verification rate    : 13.8%
 
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   55  ( 80.9%) ########################################
-    ✅ HELPFUL         :   13  ( 19.1%) #########
+    ❌ NOT HELPFUL     :   57  ( 71.2%) ###################################
+    ✅ HELPFUL         :   14  ( 17.5%) ########
+    ✅ DECLINED (OK)   :    9  ( 11.2%) #####
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   53  ( 77.9%) ######################################
-    ✅ GROUNDED        :   13  ( 19.1%) #########
-    ➖ NO TOOL NEEDED  :    2  (  2.9%) #
+    ❌ NOT GROUNDED    :   55  ( 68.8%) ##################################
+    ✅ GROUNDED        :   14  ( 17.5%) ########
+    ➖ NO TOOL NEEDED  :   11  ( 13.8%) ######
 
   Execution Details:
-    elapsed_seconds: 140.1
+    elapsed_seconds: 142.4
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-30T20:02:46.245302+00:00
+    created_at: 2026-07-01T19:34:27.180658+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (78.6%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (71.2%) exceeds 10% threshold!
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v0_test_report.json
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v0_test_report.json
 
   V0 evolve: 23.1% (6/26 golden-matched)
-  V0 test:   18.6% (13/70 golden-matched)
+  V0 test:   20.0% (14/70 golden-matched)
 
-  ✔ V0 baseline completed in 504s.
+  ✔ V0 baseline completed in 566s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -471,19 +495,19 @@ QUALITY SUMMARY
   Method:  Analyst fleet reads the scored evolve set; best-of-3 candidates
   Model:   analyst=gemini-3.1-pro-preview  (this is the slow step)
 
-  [20:02:47] Analysts proposing patches, consolidating candidates...
+  [19:34:28] Analysts proposing patches, consolidating candidates...
 Evolving SKILL.md from v0_evolve_report.json (analyst=gemini-3.1-pro-preview)...
-Trajectories: 11 successes, 48 failures
-Collected 51 patches (51 passed the quality gate).
+Trajectories: 17 successes, 51 failures
+Collected 53 patches (53 passed the quality gate).
 Generating 3 candidate(s)...
-Selected median-size candidate (1881 chars).
-Wrote evolution artifacts to /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash (51 patches, 3 candidates).
-Wrote evolved skill -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v1_skill.md (1881B, changed)
+Selected median-size candidate (2230 chars).
+Wrote evolution artifacts to /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash (53 patches, 3 candidates).
+Wrote evolved skill -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_skill.md (2231B, changed)
 Updated working copy: skills/SKILL.md
 
-  V1 skill: 1881B  (V0 was 675B)
+  V1 skill: 2231B  (V0 was 675B)
 
-  ✔ Evolution completed in 83s.
+  ✔ Evolution completed in 100s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -492,13 +516,43 @@ Updated working copy: skills/SKILL.md
   Goal:    Score the evolved skill on the SAME held-out set V0 was judged on
   Method:  Deploy V1, run held-out traffic, score vs the golden Q&A
 
-  [20:04:10] Running + scoring the held-out test set with V1...
-Running 70 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v1_test_traffic.json
-20:06:32 [WARNING] Categorical API classification EXCEPTION for t39_eap: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
+  [19:36:08] Running + scoring the held-out test set with V1...
+Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
+Wrote 80 conversation(s) (80 ok) -> /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 69)
+  DECLINED (out-of-scope) Sessions (showing 3 of 10)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_vpn  → policy_agent
+  Question:    My VPN keeps dropping at home -- how do I fix the connection?
+  Response:    "Please contact IT Support for assistance with your VPN and connection issues."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The user's question about VPN issues is outside the agent's HR scope. The agent correctly declined to answer and directed the user to the appropriate department (IT Support), which is a useful response for an out-of-scope query.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require tool usage. The agent's response was a direct LLM response based on general knowledge of appropriate departments.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_peer_review  → policy_agent
+  Question:    What rating did my coworker Dana get on her last performance review?
+  Response:    "I do not have access to individual employee records, performance reviews, or private personnel data. My resources are limited to general company policies and benefits."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, which is a useful response in this context.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is based on its inherent limitations and scope, not on data retrieved from tools. It's a direct LLM response about its capabilities.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_stock  → policy_agent
+  Question:    What's our stock price today, and is it a good time to buy?
+  Response:    "I cannot assist with tracking stock prices or providing investment advice."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined to assist, which is a useful response for an out-of-scope query.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope, so no tool usage was required or appropriate. The agent's response is based on its internal knowledge of its limitations.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 70)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t01_pto  → policy_agent
@@ -521,25 +575,12 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "You accrue approximately **1.67 days** of PTO each month (based on the policy of 20 days per year, accrued monthly)."
+  Response:    "You accrue roughly **1.67 days** of PTO each month (which is based on the annual rate of 20 days per year)."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct and specific answer to the user's question about PTO accrual.
+  Reason:        The agent provided a direct and specific answer to the user's question about monthly PTO accrual, including the calculation basis.
   Grounding:     ✅ GROUNDED
-  Reason:        The response is based on company policy data (20 days per year) which would be retrieved from a tool.
+  Reason:        The response provides specific numbers (1.67 days, 20 days/year) which would be derived from the lookup_company_policy tool for PTO.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
-
-──────────────────────────────────────────────────────────────────────
-  UNCLASSIFIED (parse errors) Sessions (showing 1 of 1)
-──────────────────────────────────────────────────────────────────────
-
-  Session:     t39_eap  → policy_agent
-  Question:    How many EAP counseling sessions do I get?
-  Response:    "You get up to 8 free, confidential counseling sessions per issue per year through the Employee Assistance Program (EAP). Additionally, the EAP provides a 24/7 hotline covering mental health, stress, legal, and financial matters."
-  Usefulness:    ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Grounding:     ?  [parse error]
-  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
-  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -547,18 +588,17 @@ Wrote 70 conversation(s) (70 ok) -> /home/admin_evekhm_altostrat_com/projects/Bi
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     70       🟢     69 (100%)        0 (0%)        0       1      100%        0%
+  policy_agent                     80       🟢  70+10d (100%)        0 (0%)        0       0      100%        0%
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
-  Total sessions evaluated : 70
-  Meaningful               : 69
-  Declined (out-of-scope)  : 0
+  Total sessions evaluated : 80
+  Meaningful               : 70
+  Declined (out-of-scope)  : 10
   Partial                  : 0
   Unhelpful                : 0
   Unhelpful rate           : 0.0%
-  Parse errors             : 1 session(s) (8 metric evals)
 
   Quality Dimensions (0-2 scale):
     Correctness         : 2.00 / 2.00  ##################################################
@@ -574,36 +614,38 @@ QUALITY SUMMARY
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
-    Avg tool calls       : 1.0
+    Avg tool calls       : 0.8
     Multi-turn sessions  : 15
-    Correction rate      : 15.7%
-    Verification rate    : 5.7%
+    Correction rate      : 8.8%
+    Verification rate    : 8.8%
 
   Category Distributions:
 
   [response_usefulness]
-    ✅ HELPFUL         :   69  (100.0%) ##################################################
+    ✅ HELPFUL         :   70  ( 87.5%) ###########################################
+    ✅ DECLINED (OK)   :   10  ( 12.5%) ######
 
   [task_grounding]
-    ✅ GROUNDED        :   69  (100.0%) ##################################################
+    ✅ GROUNDED        :   70  ( 87.5%) ###########################################
+    ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
 
   Execution Details:
-    elapsed_seconds: 121.7
+    elapsed_seconds: 136.5
     project: agent-quality-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-06-30T20:07:37.014853+00:00
+    created_at: 2026-07-01T19:39:46.394921+00:00
 ======================================================================
 
   All responses were meaningful.
 
-  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/v1_test_report.json
+  JSON report: /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/v1_test_report.json
 
-  V1 test:   98.6% (69/70 golden-matched)
+  V1 test:   100.0% (70/70 golden-matched)
 
-  ✔ V1 measurement completed in 207s.
+  ✔ V1 measurement completed in 219s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -614,13 +656,14 @@ QUALITY SUMMARY
 
 # Skill Evolution Result (gemini-3.5-flash)
 
-Golden-grounded correctness (matched & meaningful) on the held-out set.
+Correctness on the held-out set: in-scope answers matched & meaningful, out-of-scope questions cleanly declined.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 18.6% (13/70) | 98.6% (69/70) | +80.0pp |
-| Single-turn | 16.4% (9/55) | 98.2% (54/55) | +81.8pp |
+| Overall | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
+| Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
 | Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
+| Out-of-scope (declined) | 90.0% (9/10) | 100.0% (10/10) | +10.0pp |
 
 Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified instead of caving).
 
@@ -628,20 +671,20 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
 | Dimension | V0 | V1 | Delta |
 | --- | --- | --- | --- |
-| Correctness | 0.38 | 2.00 | +1.62 |
-| Tool use | 0.38 | 2.00 | +1.62 |
-| Specificity | 0.38 | 2.00 | +1.62 |
-| Scope compliance | 0.38 | 2.00 | +1.62 |
-| First-time-right | 0.38 | 2.00 | +1.62 |
+| Correctness | 0.60 | 2.00 | +1.4 |
+| Tool use | 0.60 | 2.00 | +1.4 |
+| Specificity | 0.53 | 2.00 | +1.47 |
+| Scope compliance | 0.60 | 2.00 | +1.4 |
+| First-time-right | 0.60 | 2.00 | +1.4 |
 
 
   ✔ Comparison completed in 0s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  DONE  (total wall time: 13m 14s)
+  DONE  (total wall time: 14m 45s)
 
-  Result table:   /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260630_195423_gemini_3_5_flash/RESULT.md
+  Result table:   /home/admin_evekhm_altostrat_com/projects/BigQuery-Agent-Analytics-SDK/examples/skill_evolution_lab/runs/20260701_192502_gemini_3_5_flash/RESULT.md
 
   Artifacts (runs/):
     RESULT.json
@@ -666,5 +709,5 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Total wall time: 13m 14s
+  Total wall time: 14m 45s
 
