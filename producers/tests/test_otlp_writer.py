@@ -351,6 +351,14 @@ def test_merge_sql_upserts_into_agent_events_otlp_on_idempotency_key():
     assert col in s
 
 
+def test_merge_crosswalk_reads_claude_event_name_and_identity_conventions():
+  # Validated against a real Claude Code session (PR 5 e2e): the event name and
+  # identity live in the log attributes, not the OTLP field / resource attrs.
+  s = sql.agent_events_otlp_merge_sql(dataset="ds")
+  assert "JSON_VALUE(log_attributes, '$.\"event.name\"')" in s
+  assert "JSON_VALUE(log_attributes, '$.\"user.id\"')" in s
+
+
 def test_merge_columns_are_within_projection_parity_contract():
   # Every column the MERGE writes must be a real agent_events_otlp column.
   import dataclasses

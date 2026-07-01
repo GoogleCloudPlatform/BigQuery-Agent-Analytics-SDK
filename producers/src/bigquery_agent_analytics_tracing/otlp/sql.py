@@ -36,13 +36,27 @@ CROSSWALK_VERSION = "1"
 
 # (agent_events column, SQL expression over a deduped otel_logs row).
 # content_parts is intentionally deferred to the raw-body fast-follow.
+#
+# Product convention (validated against a real Claude Code session, PR 5 e2e):
+# Claude Code carries the event name in the ``event.name`` *log attribute* (and
+# the body), not the OTLP ``LogRecord.event_name`` field, and puts identity
+# (``user.id``, ``session.id``, ``prompt.id``) in *log* attributes rather than
+# resource attributes. The crosswalk therefore prefers the log-attribute value
+# and falls back to the OTLP field / resource attribute.
+_EVENT_NAME = (
+    "COALESCE(JSON_VALUE(log_attributes, '$.\"event.name\"'), event_name)"
+)
 _LOG_CROSSWALK: tuple[tuple[str, str], ...] = (
     ("timestamp", "timestamp"),
-    ("event_type", "COALESCE(event_name, 'otlp.unknown')"),
+    ("event_type", f"COALESCE({_EVENT_NAME}, 'otlp.unknown')"),
     ("agent", "JSON_VALUE(log_attributes, '$.\"agent.name\"')"),
     ("session_id", "JSON_VALUE(log_attributes, '$.\"session.id\"')"),
     ("invocation_id", "JSON_VALUE(log_attributes, '$.\"prompt.id\"')"),
-    ("user_id", "JSON_VALUE(resource_attributes, '$.\"user.id\"')"),
+    (
+        "user_id",
+        "COALESCE(JSON_VALUE(log_attributes, '$.\"user.id\"'),"
+        " JSON_VALUE(resource_attributes, '$.\"user.id\"'))",
+    ),
     ("trace_id", "trace_id"),
     ("span_id", "span_id"),
     ("parent_span_id", "CAST(NULL AS STRING)"),
@@ -54,7 +68,7 @@ _LOG_CROSSWALK: tuple[tuple[str, str], ...] = (
     ("is_truncated", "FALSE"),
     ("source_product", "source_product"),
     ("source_signal", "source_signal"),
-    ("source_event_name", "event_name"),
+    ("source_event_name", _EVENT_NAME),
     ("crosswalk_version", f"'{CROSSWALK_VERSION}'"),
     ("idempotency_key", "idempotency_key"),
 )
