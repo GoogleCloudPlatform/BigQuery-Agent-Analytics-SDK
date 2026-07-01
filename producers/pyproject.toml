@@ -70,6 +70,7 @@ dev = [
 bqaa-drain = "bigquery_agent_analytics_tracing.drain:main"
 bqaa-claude-hook = "bigquery_agent_analytics_tracing.claude_code:main"
 bqaa-check-setup = "bigquery_agent_analytics_tracing.setup_check:main"
+bqaa-otel = "bigquery_agent_analytics_tracing.otlp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
