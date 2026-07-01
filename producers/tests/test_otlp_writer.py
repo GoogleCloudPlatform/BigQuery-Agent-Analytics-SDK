@@ -354,9 +354,19 @@ def test_merge_sql_upserts_into_agent_events_otlp_on_idempotency_key():
 def test_merge_crosswalk_reads_claude_event_name_and_identity_conventions():
   # Validated against a real Claude Code session (PR 5 e2e): the event name and
   # identity live in the log attributes, not the OTLP field / resource attrs.
+  # Pin the full expression-to-column bindings so a regression in any one
+  # column (e.g. event_type falling back to the bare OTLP field) fails even
+  # while the snippet survives elsewhere in the MERGE.
   s = sql.agent_events_otlp_merge_sql(dataset="ds")
-  assert "JSON_VALUE(log_attributes, '$.\"event.name\"')" in s
-  assert "JSON_VALUE(log_attributes, '$.\"user.id\"')" in s
+  event_name = (
+      "COALESCE(JSON_VALUE(log_attributes, '$.\"event.name\"'), event_name)"
+  )
+  assert f"COALESCE({event_name}, 'otlp.unknown') AS event_type" in s
+  assert f"{event_name} AS source_event_name" in s
+  assert (
+      "COALESCE(JSON_VALUE(log_attributes, '$.\"user.id\"'),"
+      " JSON_VALUE(resource_attributes, '$.\"user.id\"')) AS user_id" in s
+  )
 
 
 def test_merge_columns_are_within_projection_parity_contract():
