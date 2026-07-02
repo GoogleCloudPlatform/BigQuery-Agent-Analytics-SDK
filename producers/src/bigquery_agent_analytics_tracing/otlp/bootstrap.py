@@ -190,6 +190,30 @@ def _image(s: BootstrapSettings) -> str:
   return f"{s.region}-docker.pkg.dev/{s.project}/{AR_REPO}/otlp-receiver:latest"
 
 
+def _find_merge_config(listing: str | None, dataset: str) -> str | None:
+  """Resource name of this dataset's scheduled-MERGE config, if one exists.
+
+  Matches either the dataset-specific display name or a legacy
+  ``bqaa_agent_events_otlp_merge`` config whose query targets this dataset
+  (pre-#331 deployments used the unsuffixed name for every dataset).
+  """
+  if not listing:
+    return None
+  try:
+    configs = json.loads(listing)
+  except ValueError:
+    return None
+  for config in configs:
+    display = config.get("displayName", "")
+    query = (config.get("params") or {}).get("query", "")
+    if display == f"{MERGE_DISPLAY_NAME}_{dataset}" or (
+        display == MERGE_DISPLAY_NAME
+        and f"`{dataset}.agent_events_otlp`" in query
+    ):
+      return config.get("name")
+  return None
+
+
 def run_bootstrap(
     settings: BootstrapSettings,
     runner: Runner,
@@ -492,6 +516,8 @@ def run_bootstrap(
       )
       is None
   ):
+    # Repair path: converge every setting the create path applies, so a
+    # drifted or pre-DLQ subscription is brought back to spec.
     runner.run(
         [
             "gcloud",
@@ -504,6 +530,12 @@ def run_bootstrap(
             f"{consumer_url}/",
             "--push-auth-service-account",
             push_sa,
+            "--dead-letter-topic",
+            DLQ_TOPIC,
+            "--max-delivery-attempts",
+            "5",
+            "--ack-deadline",
+            "60",
         ]
     )
   runner.run(
@@ -522,22 +554,39 @@ def run_bootstrap(
   )
 
   echo("==> Registering the scheduled MERGE into agent_events_otlp")
-  existing = runner.try_run([*bq, "ls", "--transfer_config", "--format=json"])
-  if existing is None or MERGE_DISPLAY_NAME not in existing:
-    merge_sql = sql.agent_events_otlp_merge_sql(dataset=s.dataset)
+  merge_sql = sql.agent_events_otlp_merge_sql(dataset=s.dataset)
+  params = json.dumps({"query": merge_sql})
+  existing_name = _find_merge_config(
+      runner.try_run([*bq, "ls", "--transfer_config", "--format=json"]),
+      s.dataset,
+  )
+  if existing_name:
+    # Converge: refresh the SQL so re-runs after crosswalk/MERGE changes
+    # never leave a stale scheduled query behind.
+    runner.run(
+        [
+            *bq,
+            "update",
+            "--transfer_config",
+            f"--params={params}",
+            existing_name,
+        ]
+    )
+    echo("  scheduled query already exists — SQL refreshed")
+  else:
     runner.run(
         [
             *bq,
             "mk",
             "--transfer_config",
             "--data_source=scheduled_query",
-            f"--display_name={MERGE_DISPLAY_NAME}",
+            # Dataset-specific so several datasets in one project/location
+            # each keep their own projection job.
+            f"--display_name={MERGE_DISPLAY_NAME}_{s.dataset}",
             "--schedule=every 15 minutes",
-            f"--params={json.dumps({'query': merge_sql})}",
+            f"--params={params}",
         ]
     )
-  else:
-    echo("  scheduled query already exists — leaving it unchanged")
 
   receiver_url = runner.run(
       [

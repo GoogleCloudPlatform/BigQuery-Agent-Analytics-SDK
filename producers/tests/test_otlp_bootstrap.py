@@ -33,8 +33,10 @@ _CONSUMER_URL = "https://bqaa-otlp-consumer-x.run.app"
 class FakeRunner:
   """Records every command; answers describe/access with canned output."""
 
-  def __init__(self, existing=()):
+  def __init__(self, existing=(), transfer_listing=None, failing=()):
     self.existing = set(existing)  # resource kinds whose describe succeeds
+    self.transfer_listing = transfer_listing  # bq ls --transfer_config JSON
+    self.failing = tuple(failing)  # substrings whose try_run fails
     self.calls = []  # (argv tuple, input_text)
 
   def _canned(self, argv):
@@ -56,6 +58,10 @@ class FakeRunner:
   def try_run(self, argv, input_text=None):
     self.calls.append((tuple(argv), input_text))
     joined = " ".join(argv)
+    if any(f in joined for f in self.failing):
+      return None
+    if "--transfer_config" in joined and "ls" in argv:
+      return self.transfer_listing
     if "describe" in joined or " ls " in f" {joined} ":
       for kind in self.existing:
         if kind in joined:
@@ -163,6 +169,71 @@ def test_bootstrap_registers_scheduled_merge(tmp_path):
   joined = " ".join(argv)
   assert "scheduled_query" in joined
   assert "MERGE `agent_analytics.agent_events_otlp`" in joined
+  # Display name is dataset-specific so multiple datasets can coexist.
+  assert "agent_analytics" in [a for a in argv if "--display_name" in a][0]
+
+
+def test_bootstrap_refreshes_stale_merge_sql_instead_of_skipping(tmp_path):
+  # Re-running bootstrap after a crosswalk/MERGE change must converge the
+  # scheduled query to the current SQL, not leave the stale version.
+  listing = json.dumps(
+      [
+          {
+              "name": "projects/1/locations/us/transferConfigs/42",
+              "displayName": "bqaa_agent_events_otlp_merge",
+              "params": {
+                  "query": "MERGE `agent_analytics.agent_events_otlp` T -- OLD"
+              },
+          }
+      ]
+  )
+  r = FakeRunner(transfer_listing=listing)
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  assert not r.find("--transfer_config", "mk")
+  [(argv, _)] = r.find("--transfer_config", "update")
+  joined = " ".join(argv)
+  assert "projects/1/locations/us/transferConfigs/42" in joined
+  assert "MERGE `agent_analytics.agent_events_otlp`" in joined
+  assert "-- OLD" not in joined
+
+
+def test_bootstrap_second_dataset_gets_its_own_merge(tmp_path):
+  # A transfer config for another dataset must not swallow this dataset's
+  # projection job.
+  listing = json.dumps(
+      [
+          {
+              "name": "projects/1/locations/us/transferConfigs/42",
+              "displayName": "bqaa_agent_events_otlp_merge",
+              "params": {
+                  "query": "MERGE `agent_analytics.agent_events_otlp` T"
+              },
+          }
+      ]
+  )
+  r = FakeRunner(transfer_listing=listing)
+  bootstrap.run_bootstrap(
+      _settings(tmp_path, dataset="ds2"), r, echo=lambda *_: None
+  )
+  assert not r.find("--transfer_config", "update")
+  [(argv, _)] = r.find("--transfer_config", "mk")
+  joined = " ".join(argv)
+  assert "MERGE `ds2.agent_events_otlp`" in joined
+  assert "ds2" in [a for a in argv if "--display_name" in a][0]
+
+
+def test_bootstrap_repairs_existing_subscription_with_dlq_flags(tmp_path):
+  # An existing (possibly drifted / pre-DLQ) subscription must be updated
+  # with the same DLQ + deadline settings the create path uses.
+  r = FakeRunner(failing=("subscriptions create",))
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  [(argv, _)] = r.find("subscriptions update")
+  joined = " ".join(argv)
+  assert "--push-endpoint" in joined
+  assert "--push-auth-service-account" in joined
+  assert "--dead-letter-topic bqaa-otlp-dlq" in joined
+  assert "--max-delivery-attempts 5" in joined
+  assert "--ack-deadline 60" in joined
 
 
 def test_bootstrap_writes_artifacts_with_deployed_endpoint(tmp_path):
