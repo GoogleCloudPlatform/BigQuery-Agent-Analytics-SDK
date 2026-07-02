@@ -9,7 +9,7 @@ disability payout) -- so V1 must learn tool *selection*, not just "use the tool,
 it must also **decline** questions outside its scope.
 
 > **What this proves — and what it doesn't.** The contribution is the **closed
-> loop**: trace → golden-grounded score → evolve → re-score, all attributable
+> loop**: trace → golden-graded score → evolve → re-score, all attributable
 > because only the skill file changes. The large V0→V1 *delta* is an
 > *illustration* of that loop on a deliberately **crippled** V0 (it's told to
 > ignore a tool that already holds every answer), so most of the lift is the
@@ -53,7 +53,7 @@ instead of caving. Out-of-scope is the honest edge case: V0 already scores well 
 question), and V1 learns to decline those **deliberately** (routing IT questions to IT,
 refusing unrelated ones) rather than by reflex.
 
-## Across four models × 3 seeds (held-out, golden-grounded)
+## Across four models × 3 seeds (held-out, golden-graded)
 
 Correctness and grounding as **mean [min–max]** over 3 runs each (analyst + judge
 fixed), on the current **multi-tool** demo. (This sweep predates the out-of-scope

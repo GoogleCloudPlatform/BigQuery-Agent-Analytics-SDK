@@ -7,7 +7,7 @@ engine reads the failing trajectories and produces a small, tool-first V1 skill.
 The skill is versioned in the **Gemini Enterprise Agent Platform Skill
 Registry** (V0 = revision 1, V1 = revision 2).
 
-The point of the example is the **closed loop** — trace → golden-grounded score →
+The point of the example is the **closed loop** — trace → golden-graded score →
 evolve → re-score, all attributable because only the skill file changes. V0 is
 deliberately crippled (told to ignore a tool that already has the answers), so
 the large V0→V1 delta *illustrates* the loop finding and fixing a real defect; a
@@ -61,7 +61,7 @@ skill_evolution_lab/
     questions_oos_heldout.json          # out-of-scope cases (held-out)
   run_agent.py          # runs questions through the agent -> conversations JSON
   analyze_and_evolve.py # scored report -> evolve_skill() -> V1 (+ registry)
-  compare_runs.py       # V0 vs V1 golden-grounded correctness + parroting
+  compare_runs.py       # V0 vs V1 golden-graded correctness + parroting
   registry_cli.py       # create/update/delete/inspect registry revisions
   print_rate.py         # one-line golden-rate printer (used by run_e2e_demo.sh)
   run_e2e_demo.sh       # the whole cycle, one command (one model)
@@ -197,7 +197,7 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
 
 ### What we add on top of both
 
-- **Golden-Q&A grounding.** Every answer is graded against a verified golden answer, so the
+- **Golden-Q&A grading.** Every answer is graded against a verified golden answer, so the
   loop's fitness function is real correctness -- not an LLM judge's "sounds helpful," which
   happily rewards confident, wrong answers.
 - **Anti-parroting, detect-then-learn.** The scorer works from the run's trace: a recovery
