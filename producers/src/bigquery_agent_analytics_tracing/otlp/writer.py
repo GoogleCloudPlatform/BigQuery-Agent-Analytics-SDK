@@ -150,6 +150,67 @@ def log_row(envelope: dict[str, Any]) -> dict[str, Any]:
   return row
 
 
+def span_row(envelope: dict[str, Any]) -> dict[str, Any]:
+  record = envelope["record"]
+  resource = envelope["otlp"]["resource_attributes"]
+  scope = envelope["otlp"].get("scope") or {}
+  status = record.get("status") or {}
+  row = {
+      "timestamp": (
+          _nanos_to_iso(record.get("startTimeUnixNano"))
+          or envelope["ingest_time"]
+      ),
+      "end_timestamp": _nanos_to_iso(record.get("endTimeUnixNano")),
+      "trace_id": record.get("traceId"),
+      "span_id": record.get("spanId"),
+      "parent_span_id": record.get("parentSpanId"),
+      "trace_state": record.get("traceState"),
+      "span_name": record.get("name"),
+      # kind/status.code arrive as enum names via protobuf MessageToDict but
+      # may be bare ints on the raw JSON path; the column is STRING either way.
+      "span_kind": _str(record.get("kind")),
+      "service_name": resource.get("service.name"),
+      "status_code": _str(status.get("code")),
+      "status_message": status.get("message"),
+      "resource_attributes": _json(resource),
+      "scope_name": scope.get("name"),
+      "scope_version": scope.get("version"),
+      "scope_attributes": _json(
+          env.otlp_attrs_to_dict(scope.get("attributes"))
+      ),
+      "span_attributes": _json(
+          env.otlp_attrs_to_dict(record.get("attributes"))
+      ),
+      "events": [
+          {
+              "timestamp": _nanos_to_iso(event.get("timeUnixNano")),
+              "name": event.get("name"),
+              "attributes": _json(
+                  env.otlp_attrs_to_dict(event.get("attributes"))
+              ),
+          }
+          for event in record.get("events", []) or []
+      ],
+      "links": [
+          {
+              "trace_id": link.get("traceId"),
+              "span_id": link.get("spanId"),
+              "trace_state": link.get("traceState"),
+              "attributes": _json(
+                  env.otlp_attrs_to_dict(link.get("attributes"))
+              ),
+          }
+          for link in record.get("links", []) or []
+      ],
+  }
+  row.update(_receiver_metadata_row(envelope))
+  return row
+
+
+def _str(value: Any) -> str | None:
+  return None if value is None else str(value)
+
+
 def _metric_common_row(envelope: dict[str, Any]) -> dict[str, Any]:
   record = envelope["record"]
   point = record["point"]
@@ -268,6 +329,8 @@ def target_table(envelope: dict[str, Any]) -> str:
     if kind not in _METRIC_TABLE:
       raise TableWriteError(f"unknown metric point_kind {kind!r}")
     return _METRIC_TABLE[kind]
+  if signal == "span":
+    return "otel_spans"
   raise TableWriteError(f"no native table for signal {signal!r}")
 
 
@@ -280,6 +343,8 @@ def envelope_to_row(envelope: dict[str, Any]) -> dict[str, Any]:
     return log_row(envelope)
   if signal == "metric":
     return metric_row(envelope)
+  if signal == "span":
+    return span_row(envelope)
   raise TableWriteError(f"no row mapping for signal {signal!r}")
 
 

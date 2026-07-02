@@ -214,15 +214,41 @@ def test_traces_path_is_404_when_disabled():
   assert pub.calls == []
 
 
-def test_traces_path_is_501_when_enabled_landing_deferred():
-  result, pub = _call("/v1/traces", b"{}", config=_config(enable_traces=True))
-  assert result.status == 501
-  assert pub.calls == []
+def test_traces_path_decodes_and_publishes_spans_when_enabled():
+  request = {
+      "resourceSpans": [
+          {
+              "resource": {"attributes": []},
+              "scopeSpans": [
+                  {
+                      "scope": {"name": "s", "version": "1"},
+                      "spans": [
+                          {
+                              "traceId": "0123456789abcdef0123456789abcdef",
+                              "spanId": "0123456789abcdef",
+                              "name": "tool_use",
+                              "startTimeUnixNano": "1000000000",
+                          }
+                      ],
+                  }
+              ],
+          }
+      ]
+  }
+  result, pub = _call(
+      "/v1/traces",
+      json.dumps(request).encode("utf-8"),
+      config=_config(enable_traces=True),
+  )
+  assert result.status == 200
+  [envelope] = pub.to("proj/main")
+  assert envelope["source"]["signal"] == "span"
+  assert envelope["record"]["name"] == "tool_use"
 
 
 def test_traces_requires_auth_before_revealing_gate_state():
   # Unauthenticated callers must get 401 on /v1/traces regardless of the gate,
-  # so 404-vs-501 never leaks to them.
+  # so 404-vs-200 never leaks to them.
   for enabled in (False, True):
     result, pub = _call(
         "/v1/traces",

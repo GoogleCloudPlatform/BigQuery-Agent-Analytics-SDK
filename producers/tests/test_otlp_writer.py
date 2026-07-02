@@ -496,3 +496,100 @@ def test_push_app_healthz_serves_port():
   )
   assert status.startswith("200")
   assert out == b"ok"
+
+
+# --------------------------------------------------------------------------
+# Spans (#324 PR4 — otel_spans landing)
+# --------------------------------------------------------------------------
+
+
+def _span_envelope():
+  return {
+      "envelope_version": "1",
+      "otel_schema_version": "1",
+      "idempotency_key": "0123456789abcdef0123456789abcdef0123456789abcdef",
+      "ingest_time": "2026-06-29T00:00:00Z",
+      "source": {"product": "claude_code", "signal": "span"},
+      "source_position": {
+          "raw_otlp_request_hash": "h",
+          "resource_index": 0,
+          "scope_index": 0,
+          "record_index": 0,
+          "metric_index": None,
+          "data_point_index": None,
+      },
+      "otlp": {
+          "resource_attributes": {"service.name": "claude-code"},
+          "scope": {"name": "s", "version": "1"},
+      },
+      "record": {
+          "traceId": "0123456789abcdef0123456789abcdef",
+          "spanId": "0123456789abcdef",
+          "parentSpanId": "aaaabbbbccccdddd",
+          "traceState": "k=v",
+          "name": "tool_use",
+          "kind": "SPAN_KIND_INTERNAL",
+          "startTimeUnixNano": "1000000000",
+          "endTimeUnixNano": "2000000000",
+          "status": {"code": "STATUS_CODE_OK", "message": "fine"},
+          "attributes": [
+              {"key": "tool.name", "value": {"stringValue": "Bash"}}
+          ],
+          "events": [
+              {
+                  "timeUnixNano": "1500000000",
+                  "name": "retry",
+                  "attributes": [{"key": "n", "value": {"intValue": "1"}}],
+              }
+          ],
+          "links": [
+              {
+                  "traceId": "ffff0000ffff0000ffff0000ffff0000",
+                  "spanId": "ffff0000ffff0000",
+                  "traceState": "",
+                  "attributes": [],
+              }
+          ],
+      },
+      "raw_preservation": {"policy": "decoded_only", "raw_b64": None},
+      "parse_error": None,
+      "delivery": {"attempt": 1, "dlq": False},
+  }
+
+
+def test_span_row_maps_the_otel_spans_schema():
+  row = writer.span_row(_span_envelope())
+  assert row["timestamp"] == "1970-01-01T00:00:01Z"
+  assert row["end_timestamp"] == "1970-01-01T00:00:02Z"
+  assert row["trace_id"] == "0123456789abcdef0123456789abcdef"
+  assert row["span_id"] == "0123456789abcdef"
+  assert row["parent_span_id"] == "aaaabbbbccccdddd"
+  assert row["trace_state"] == "k=v"
+  assert row["span_name"] == "tool_use"
+  assert row["span_kind"] == "SPAN_KIND_INTERNAL"
+  assert row["service_name"] == "claude-code"
+  assert row["status_code"] == "STATUS_CODE_OK"
+  assert row["status_message"] == "fine"
+  assert json.loads(row["span_attributes"]) == {"tool.name": "Bash"}
+  assert row["events"][0]["name"] == "retry"
+  assert row["events"][0]["timestamp"] == "1970-01-01T00:00:01.500000Z"
+  assert row["links"][0]["trace_id"] == "ffff0000ffff0000ffff0000ffff0000"
+  assert row["scope_name"] == "s"
+  # Receiver metadata rides along like every native table.
+  assert row["source_signal"] == "span"
+  assert row["idempotency_key"]
+
+
+def test_span_envelope_lands_in_otel_spans_when_enabled():
+  w = FakeWriter()
+  assert writer.append_envelope(_span_envelope(), w, enable_spans=True) == (
+      "otel_spans"
+  )
+  assert w.rows[0][0] == "otel_spans"
+
+
+def test_span_defaults_missing_start_time_to_ingest_time():
+  envelope = _span_envelope()
+  del envelope["record"]["startTimeUnixNano"]
+  row = writer.span_row(envelope)
+  assert row["timestamp"] == "2026-06-29T00:00:00Z"

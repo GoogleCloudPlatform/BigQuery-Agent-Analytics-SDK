@@ -364,3 +364,91 @@ def test_span_idempotency_key_is_natural():
 def test_request_hash_is_deterministic_sha256():
   assert env.request_hash(b"abc") == env.request_hash(b"abc")
   assert len(env.request_hash(b"abc")) == 64
+
+
+# --------------------------------------------------------------------------
+# Traces (#324 PR4 — span landing)
+# --------------------------------------------------------------------------
+
+
+def _decode_traces(request, ingest_time=INGEST):
+  return decode.decode_traces_request(
+      request,
+      source_product="claude_code",
+      raw_request=_raw(request),
+      ingest_time=ingest_time,
+  )
+
+
+def _traces_request(spans):
+  return {
+      "resourceSpans": [
+          {
+              "resource": {
+                  "attributes": [
+                      {
+                          "key": "service.name",
+                          "value": {"stringValue": "claude-code"},
+                      }
+                  ]
+              },
+              "scopeSpans": [
+                  {"scope": {"name": "s", "version": "1"}, "spans": spans}
+              ],
+          }
+      ]
+  }
+
+
+def _span(**overrides):
+  span = {
+      "traceId": "0123456789abcdef0123456789abcdef",
+      "spanId": "0123456789abcdef",
+      "name": "tool_use",
+      "kind": "SPAN_KIND_INTERNAL",
+      "startTimeUnixNano": "1000000000",
+      "endTimeUnixNano": "2000000000",
+      "status": {"code": "STATUS_CODE_OK"},
+      "attributes": [{"key": "tool.name", "value": {"stringValue": "Bash"}}],
+  }
+  span.update(overrides)
+  return span
+
+
+def test_decode_one_span_into_one_envelope():
+  envelopes = _decode_traces(_traces_request([_span()]))
+  assert len(envelopes) == 1
+  e = envelopes[0]
+  assert e["source"]["signal"] == "span"
+  assert e["parse_error"] is None
+  assert e["record"]["name"] == "tool_use"
+  assert e["otlp"]["resource_attributes"]["service.name"] == "claude-code"
+  # Spans have a natural idempotency key: trace_id + span_id.
+  assert e["idempotency_key"] == env.span_idempotency_key(
+      "0123456789abcdef0123456789abcdef", "0123456789abcdef"
+  )
+
+
+def test_span_key_is_replay_invariant():
+  request = _traces_request([_span()])
+  a = _decode_traces(request, ingest_time="2026-06-29T00:00:00Z")[0]
+  b = _decode_traces(request, ingest_time="2026-06-30T09:09:09Z")[0]
+  assert a["idempotency_key"] == b["idempotency_key"]
+
+
+def test_span_missing_identity_becomes_dead_letter():
+  envelopes = _decode_traces(_traces_request([_span(spanId="")]))
+  assert len(envelopes) == 1
+  assert envelopes[0]["delivery"]["dlq"] is True
+  assert envelopes[0]["parse_error"]["stage"] == "otlp_decode"
+
+
+def test_two_spans_get_distinct_keys_and_positions():
+  spans = [_span(), _span(spanId="fedcba9876543210")]
+  envelopes = _decode_traces(_traces_request(spans))
+  assert len(envelopes) == 2
+  assert envelopes[0]["idempotency_key"] != envelopes[1]["idempotency_key"]
+  assert (
+      envelopes[0]["source_position"]["record_index"]
+      != envelopes[1]["source_position"]["record_index"]
+  )

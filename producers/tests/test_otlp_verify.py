@@ -229,18 +229,46 @@ def test_smoke_fails_when_rows_never_land():
   assert _failures(results)
 
 
-def test_smoke_traces_tier_reports_pending_span_landing():
+def test_smoke_traces_tier_sends_spans_and_verifies_otel_spans():
+  http = FakeHttp()
   results = verify.run_smoke(
       verify.VerifySettings(**_SETTINGS, signals=("logs", "metrics", "traces")),
-      http_post=FakeHttp(),
+      http_post=http,
+      query_rows=FakeBQ(
+          counts={
+              "otel_logs": 1,
+              "otel_metric_gauge": 1,
+              "bqaa_metrics": 1,
+              "otel_spans": 1,
+          }
+      ),
+      sleep=lambda _: None,
+  )
+  assert any(url.endswith("/v1/traces") for url, _, _ in http.posts)
+  spans = [r for r in results if "otel_spans" in r.name]
+  assert spans and spans[0].ok and not spans[0].warning
+
+
+def test_smoke_default_tier_does_not_send_traces():
+  http = FakeHttp()
+  verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=http,
       query_rows=FakeBQ(
           counts={"otel_logs": 1, "otel_metric_gauge": 1, "bqaa_metrics": 1}
       ),
       sleep=lambda _: None,
   )
-  traces = [r for r in results if "traces" in r.name]
-  assert traces and traces[0].warning
-  assert "span" in traces[0].detail.lower()
+  assert not any(url.endswith("/v1/traces") for url, _, _ in http.posts)
+
+
+def test_synthetic_span_payload_shape():
+  payload = verify.synthetic_span_payload("runid123", now_nanos=42)
+  span = payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+  assert span["name"] == "bqaa_smoke_span"
+  attrs = {a["key"]: a["value"]["stringValue"] for a in span["attributes"]}
+  assert attrs["bqaa.run_id"] == "runid123"
+  assert len(span["traceId"]) == 32 and len(span["spanId"]) == 16
 
 
 # --------------------------------------------------------------------------

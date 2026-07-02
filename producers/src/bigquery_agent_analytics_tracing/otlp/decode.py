@@ -21,7 +21,8 @@ data point. A record that cannot be decoded becomes a dead-letter envelope
 (``parse_error`` populated) rather than aborting the batch, so one bad record
 never drops a whole request.
 
-Spans are intentionally out of scope for PR 2 (trace-gated; see the design doc).
+Spans (``ExportTraceServiceRequest``) joined in #324 PR 4; landing stays
+gated behind the traces signal tier (``BQAA_OTLP_ENABLE_TRACES``).
 """
 
 from __future__ import annotations
@@ -93,6 +94,63 @@ def decode_logs_request(
               env.dead_letter_envelope(
                   source_product=source_product,
                   source_signal="log",
+                  stage="otlp_decode",
+                  reason=repr(exc),
+                  raw_b64=raw_b64,
+                  received_at=ingest_time,
+                  source_position=position,
+                  raw_otlp_request_hash=raw_hash,
+              )
+          )
+  return envelopes
+
+
+def decode_traces_request(
+    request: dict[str, Any],
+    *,
+    source_product: str,
+    raw_request: bytes,
+    ingest_time: str,
+) -> list[dict[str, Any]]:
+  """Decode an ``ExportTraceServiceRequest`` into span envelopes.
+
+  Spans carry a natural idempotency key (``trace_id + span_id``); a span
+  missing that identity becomes a dead letter. ``raw_request`` is the
+  original wire payload (see ``decode_logs_request``).
+  """
+  raw_hash = env.request_hash(raw_request)
+  raw_b64 = base64.b64encode(raw_request).decode("ascii")
+  envelopes: list[dict[str, Any]] = []
+  for i, resource_spans in enumerate(request.get("resourceSpans", [])):
+    resource_attrs = env.otlp_attrs_to_dict(
+        resource_spans.get("resource", {}).get("attributes")
+    )
+    for j, scope_spans in enumerate(resource_spans.get("scopeSpans", [])):
+      scope = scope_spans.get("scope", {})
+      for k, span in enumerate(scope_spans.get("spans", [])):
+        position = env.SourcePosition(raw_hash, i, j, record_index=k)
+        try:
+          trace_id = span.get("traceId") or ""
+          span_id = span.get("spanId") or ""
+          if not trace_id or not span_id:
+            raise ValueError("span missing traceId/spanId identity")
+          envelopes.append(
+              env.make_envelope(
+                  source_product=source_product,
+                  source_signal="span",
+                  record=span,
+                  resource_attributes=resource_attrs,
+                  scope=scope,
+                  source_position=position,
+                  idempotency_key=env.span_idempotency_key(trace_id, span_id),
+                  ingest_time=ingest_time,
+              )
+          )
+        except Exception as exc:  # noqa: BLE001 - malformed -> dead letter
+          envelopes.append(
+              env.dead_letter_envelope(
+                  source_product=source_product,
+                  source_signal="span",
                   stage="otlp_decode",
                   reason=repr(exc),
                   raw_b64=raw_b64,
