@@ -146,7 +146,11 @@ def test_config_prints_next_admin_action(tmp_path, capsys):
 
 def test_console_script_is_registered():
   import pathlib
-  import tomllib
+
+  try:
+    import tomllib
+  except ImportError:  # Python < 3.11 — the dev extra ships tomli
+    import tomli as tomllib
 
   # cli.py -> otlp -> bigquery_agent_analytics_tracing -> src -> producers
   pyproject = pathlib.Path(cli.__file__).parents[3] / "pyproject.toml"

@@ -42,6 +42,13 @@ import json
 
 PRIVACY_TIERS = ("baseline", "security-audit", "replay")
 SIGNALS = ("logs", "metrics", "traces")
+# Issue #324 defines exactly two signal tiers. Partial subsets are rejected
+# rather than partially honored (a "logs-only" config would still enable the
+# metrics exporter, which is worse than an early error).
+SIGNAL_TIERS = (
+    frozenset(("logs", "metrics")),
+    frozenset(("logs", "metrics", "traces")),
+)
 SOURCES = ("claude-code", "codex")
 
 _TOKEN_PLACEHOLDER = "<token>"
@@ -67,6 +74,11 @@ class BootstrapSpec:
     for s in self.signals:
       if s not in SIGNALS:
         raise ValueError(f"unknown signal {s!r}; expected one of {SIGNALS}")
+    if frozenset(self.signals) not in SIGNAL_TIERS:
+      raise ValueError(
+          f"unsupported signal tier {','.join(self.signals)!r}; expected"
+          " 'logs,metrics' or 'logs,metrics,traces'"
+      )
     if self.privacy == "replay" and not self.acknowledge_content_logging:
       raise ValueError(
           "privacy tier 'replay' enables prompt/content logging and"
@@ -90,7 +102,10 @@ def claude_code_managed_settings(spec: BootstrapSpec) -> dict:
       "OTEL_EXPORTER_OTLP_HEADERS": f"Authorization=Bearer {spec.bearer}",
   }
   if "traces" in spec.signals:
+    # Tracing needs the enhanced-telemetry beta flag in addition to the
+    # exporter; exporter-only config looks enabled but emits no spans.
     env["OTEL_TRACES_EXPORTER"] = "otlp"
+    env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"
   if spec.privacy in ("security-audit", "replay"):
     env["OTEL_LOG_TOOL_DETAILS"] = "1"
   if spec.privacy == "replay":

@@ -57,6 +57,20 @@ def test_spec_rejects_unknown_signal():
     _spec(signals=("logs", "vibes"))
 
 
+def test_spec_rejects_partial_signal_subsets():
+  # Issue #324 defines exactly two supported tiers; a logs-only config would
+  # silently still enable the metrics exporter, so reject it outright.
+  with pytest.raises(ValueError, match="signal tier"):
+    _spec(signals=("logs",))
+  with pytest.raises(ValueError, match="signal tier"):
+    _spec(signals=("logs", "traces"))
+
+
+def test_spec_accepts_both_supported_tiers_in_any_order():
+  assert _spec(signals=("metrics", "logs")).signals == ("metrics", "logs")
+  assert _spec(signals=("traces", "logs", "metrics")).privacy == "baseline"
+
+
 def test_replay_requires_explicit_acknowledgement():
   with pytest.raises(ValueError, match="acknowledge_content_logging"):
     _spec(privacy="replay")
@@ -87,6 +101,7 @@ def test_claude_baseline_never_enables_content():
   assert "OTEL_LOG_USER_PROMPTS" not in env
   assert "OTEL_LOG_TOOL_DETAILS" not in env
   assert "OTEL_TRACES_EXPORTER" not in env
+  assert "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA" not in env
 
 
 def test_claude_security_audit_adds_tool_details_only():
@@ -109,11 +124,15 @@ def test_claude_replay_adds_prompt_capture_and_tool_details():
   assert env["OTEL_LOG_TOOL_DETAILS"] == "1"
 
 
-def test_claude_traces_tier_enables_trace_exporter():
+def test_claude_traces_tier_enables_trace_exporter_and_beta_flag():
+  # Claude Code tracing needs the enhanced-telemetry beta flag in addition to
+  # the exporter (docs + receiver design doc); exporter-only config looks
+  # enabled but emits no spans.
   env = ca.claude_code_managed_settings(
       _spec(signals=("logs", "metrics", "traces"))
   )["env"]
   assert env["OTEL_TRACES_EXPORTER"] == "otlp"
+  assert env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] == "1"
 
 
 def test_claude_token_is_embedded_when_provided():
