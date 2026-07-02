@@ -189,6 +189,10 @@ def test_bootstrap_refreshes_stale_merge_sql_instead_of_skipping(tmp_path):
   )
   r = FakeRunner(transfer_listing=listing)
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  # Real bq rejects `ls --transfer_config` without --transfer_location; a
+  # failing listing would silently take the create path forever.
+  [(ls_argv, _)] = r.find("--transfer_config", "ls")
+  assert "--transfer_location=US" in ls_argv
   assert not r.find("--transfer_config", "mk")
   [(argv, _)] = r.find("--transfer_config", "update")
   joined = " ".join(argv)

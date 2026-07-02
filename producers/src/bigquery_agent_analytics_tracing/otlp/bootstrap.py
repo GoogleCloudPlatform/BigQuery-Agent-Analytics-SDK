@@ -556,8 +556,19 @@ def run_bootstrap(
   echo("==> Registering the scheduled MERGE into agent_events_otlp")
   merge_sql = sql.agent_events_otlp_merge_sql(dataset=s.dataset)
   params = json.dumps({"query": merge_sql})
+  # bq requires --transfer_location (the dataset location) for
+  # `ls --transfer_config`; without it the listing always fails and the
+  # convergence path would silently never trigger.
   existing_name = _find_merge_config(
-      runner.try_run([*bq, "ls", "--transfer_config", "--format=json"]),
+      runner.try_run(
+          [
+              *bq,
+              "ls",
+              "--transfer_config",
+              f"--transfer_location={s.bq_location}",
+              "--format=json",
+          ]
+      ),
       s.dataset,
   )
   if existing_name:
