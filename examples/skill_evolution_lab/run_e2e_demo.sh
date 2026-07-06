@@ -25,6 +25,8 @@
 #                             tool-first V1 (analyst fleet, best-of-N).
 #   Step 3  Measure V1        Deploy V1; re-score the held-out test set.
 #   Step 4  Compare V0 vs V1  Overall, single-turn, anti-parroting; restore V0.
+#   (opt)   Registry mirror   With --with-registry, V1 is pushed to the Skill
+#                             Registry ONLY if it beats V0 on the held-out set.
 #
 # The model, tools, and questions are fixed across V0 and V1 -- only the skill
 # file changes -- so any quality delta is attributable to the skill.
@@ -84,25 +86,38 @@ SKILL_ID="${SKILL_ID:-}"
 REGISTRY_LOCATION="${REGISTRY_LOCATION:-${REGION:-us-central1}}"
 
 # Parse arguments
+# need_val <flag> <next-arg-count>: readable usage error instead of a raw
+# `set -u` "unbound variable" crash when a flag is missing its value.
+need_val() {
+  if [[ "$2" -lt 2 ]]; then
+    echo "ERROR: $1 requires a value (see --help)" >&2
+    exit 1
+  fi
+}
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --agent-model)
+      need_val "$1" $#
       AGENT_MODEL="$2"
       shift 2
       ;;
     --analyst-model)
+      need_val "$1" $#
       ANALYST_MODEL="$2"
       shift 2
       ;;
     --judge-model)
+      need_val "$1" $#
       JUDGE_MODEL="$2"
       shift 2
       ;;
     --judge-location)
+      need_val "$1" $#
       JUDGE_LOCATION="$2"
       shift 2
       ;;
     --concurrency)
+      need_val "$1" $#
       CONCURRENCY="$2"
       shift 2
       ;;
@@ -111,6 +126,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --skill-id)
+      need_val "$1" $#
       SKILL_ID="$2"
       shift 2
       ;;
@@ -124,6 +140,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --judge-location R Vertex region (judge)  (default: us-central1)"
       echo "  --concurrency N    Parallel requests      (default: 3)"
       echo "  --with-registry    Mirror V1 to the Skill Registry as a new revision"
+      echo "                     (only after V1 beats V0 on the held-out set)"
       echo "  --skill-id ID      Skill Registry id (required with --with-registry)"
       echo "  -h, --help         Show this help message"
       exit 0
@@ -135,12 +152,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$WITH_REGISTRY" == "1" && -z "$SKILL_ID" ]]; then
+  echo "ERROR: --with-registry requires --skill-id" >&2
+  exit 1
+fi
+
 REPORTS_DIR="$SCRIPT_DIR/runs/${RUN_TIMESTAMP}_${AGENT_MODEL//[^a-zA-Z0-9]/_}"
 mkdir -p "$REPORTS_DIR"
 
-# Tee all output: terminal gets colour, log file gets plain text.
+# Tee all output: terminal gets colour, log file gets plain text. The $'...'
+# quoting makes bash produce the ESC byte itself -- BSD sed (macOS) does not
+# interpret \x1b, so an escape inside the sed pattern would not strip anything.
 RUN_LOG="$REPORTS_DIR/run.log"
-exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$RUN_LOG")) 2>&1
+exec > >(tee >(sed $'s/\033\[[0-9;]*m//g' >> "$RUN_LOG")) 2>&1
 
 # ---------------------------------------------------------------------------
 # Input files
@@ -290,15 +314,14 @@ echo "  Model:   analyst=$ANALYST_MODEL  (this is the slow step)"
 echo ""
 step_start
 
-REG_ARGS=()
-if [[ "$WITH_REGISTRY" == "1" ]]; then
-  REG_ARGS=(--registry-update --skill-id "${SKILL_ID:?--skill-id is required with --with-registry}" --location "$REGISTRY_LOCATION")
-fi
+# NOTE: the registry mirror deliberately does NOT happen here -- V1 has not
+# been measured yet. It runs after STEP 4, gated on V1 beating V0 (the loop's
+# "keep the new skill only when it wins" property).
 echo -e "  ${DIM}[$(ts)] Analysts proposing patches, consolidating candidates...${RESET}"
 $PY analyze_and_evolve.py \
   --report "$REPORTS_DIR/v0_evolve_report.json" --skill "$SKILL" --eval-spec "$SPEC" \
   -o "$REPORTS_DIR/v1_skill.md" --model "$ANALYST_MODEL" \
-  --candidates 3 --max-chars 3500 --write-working-copy "${REG_ARGS[@]}"
+  --candidates 3 --max-chars 3500 --write-working-copy
 
 echo ""
 echo "  V1 skill: $(wc -c <"$REPORTS_DIR/v1_skill.md")B  (V0 was $(wc -c <"$V0")B)"
@@ -334,13 +357,40 @@ echo "  Method:  Diff the two held-out scorecards into RESULT.md"
 echo ""
 step_start
 
+# --gate makes compare_runs exit 3 when V1 loses to V0 overall; the registry
+# mirror below keys off that so a losing V1 is never pushed as a new revision.
+V1_WINS=1
+GATE_RC=0
 $PY compare_runs.py \
   --v0 "$REPORTS_DIR/v0_test_report.json" \
   --v1 "$REPORTS_DIR/v1_test_report.json" \
-  --model "$AGENT_MODEL" \
-  -o "$REPORTS_DIR/RESULT.md" | tee "$REPORTS_DIR/RESULT.txt"
+  --model "$AGENT_MODEL" --gate \
+  -o "$REPORTS_DIR/RESULT.md" | tee "$REPORTS_DIR/RESULT.txt" || GATE_RC=$?
+if [[ "$GATE_RC" -eq 3 ]]; then
+  V1_WINS=0
+elif [[ "$GATE_RC" -ne 0 ]]; then
+  exit "$GATE_RC"
+fi
 
 step_end "Comparison"
+
+# =========================================================================
+# Registry mirror (optional) -- only a WINNING V1 becomes a new revision
+# =========================================================================
+if [[ "$WITH_REGISTRY" == "1" ]]; then
+  separator
+  stage "REGISTRY MIRROR (gated on the STEP 4 result)"
+  step_start
+  if [[ "$V1_WINS" == "1" ]]; then
+    echo -e "  ${DIM}[$(ts)] V1 beat V0 on the held-out set -- mirroring to the registry...${RESET}"
+    $PY analyze_and_evolve.py --registry-push-only \
+      --skill "$SKILL" --skill-id "$SKILL_ID" --location "$REGISTRY_LOCATION"
+  else
+    echo -e "  ${YELLOW}V1 did NOT beat V0 on the held-out set -- registry push skipped.${RESET}"
+    echo "  The registry keeps its current revision; the local copy is restored to V0."
+  fi
+  step_end "Registry mirror"
+fi
 
 # ---------------------------------------------------------------------------
 # Final summary

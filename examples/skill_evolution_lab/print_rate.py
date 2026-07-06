@@ -18,24 +18,41 @@ The denominator is the *in-scope* subset that matched the answer key -- NOT the
 full question set. Out-of-scope questions have no golden entry, so they are not
 counted here (they are scored separately as declines). We spell that out so
 "14/70" is never mistaken for a 70-question test.
+
+Out-of-scope is counted by the ``oos_`` session-id prefix (the same convention
+``compare_runs.py`` uses), NOT by assuming every unmatched session is
+out-of-scope: an in-scope question that fails the golden match is printed as
+"unmatched" so a matching failure is visible instead of silently dropped.
 """
 
 import json
 import sys
 
 with open(sys.argv[1]) as f:
-  g = json.load(f)["summary"].get("golden_eval_summary", {})
+  report = json.load(f)
+g = report["summary"].get("golden_eval_summary", {})
 
 rate = g.get("matched_meaningful_rate")
 matched_meaningful = g.get("matched_meaningful")
 matched = g.get("matched")
 total = g.get("total_sessions")
-out_of_scope = g.get("unmatched")
+
+# Split the unmatched sessions: oos_ ids are by-design golden-less; anything
+# else is an in-scope question the matcher failed to pair with the answer key.
+unmatched_ids = [
+    s.get("session_id", "")
+    for s in report.get("sessions", [])
+    if not (s.get("golden_eval") or {}).get("matched")
+]
+out_of_scope = sum(1 for sid in unmatched_ids if sid.startswith("oos_"))
+unmatched_other = len(unmatched_ids) - out_of_scope
 
 line = f"{rate}% ({matched_meaningful}/{matched} matched to the answer key"
 if total is not None:
   line += f", of {total} total"
 if out_of_scope:
   line += f"; {out_of_scope} out-of-scope"
+if unmatched_other:
+  line += f"; {unmatched_other} unmatched"
 line += ")"
 print(line)

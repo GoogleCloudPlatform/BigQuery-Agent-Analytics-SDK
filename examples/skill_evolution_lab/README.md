@@ -37,8 +37,9 @@ Skill"* (BigQuery Agent Analytics Series). See
   (IT, personal finance). The evolved skill learns to decline them deliberately
   (route IT to IT) instead of reflexively deflecting everything to HR.
 - **Skill Registry versioning.** The evolved skill is mirrored to the registry
-  as a new immutable revision; `reset.sh` reverts both the local copy and the
-  registry to V0.
+  as a new immutable revision — only after it beats V0 on the held-out
+  comparison (a losing V1 is never pushed); `reset.sh` reverts both the local
+  copy and the registry to V0.
 
 ## Layout
 
@@ -85,6 +86,8 @@ outputs (and what each file means) without running anything. Live runs write to
 - [`uv`](https://github.com/astral-sh/uv) — the scripts run via `uv run`, which
   installs the repo's dependencies from the root `pyproject.toml` automatically
   on first use, so there's no separate install step.
+- `jq` (optional) — only used for the golden-count banner in `run_e2e_demo.sh`;
+  without it the banner shows `?` and everything else works.
 - Gemini 3.x models are served from the Vertex `global` endpoint (handled
   automatically); the Skill Registry is regional (`us-central1` by default).
 
@@ -131,6 +134,10 @@ WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./setup.sh YOUR_PROJECT_ID us-central1
 WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./run_e2e_demo.sh
 WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./reset.sh   # revert local + registry
 ```
+
+The registry push happens *after* the held-out comparison (Step 4) and only
+when V1 beats V0 — the loop's "keep the new skill only when it wins" property
+is enforced, not just described.
 
 Inspect revisions any time: `uv run python registry_cli.py revisions
 --skill-id skill-lab-policy`.

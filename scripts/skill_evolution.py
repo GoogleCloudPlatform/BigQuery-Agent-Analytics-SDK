@@ -435,15 +435,24 @@ def compute_prevalence_summary(patches: list[str]) -> str:
 
 
 def _write_evolution_artifacts(
-    artifacts_dir, patches, candidates, selected, current_skill
+    artifacts_dir,
+    patches,
+    candidates,
+    selected,
+    current_skill,
+    version_label="v1",
+    selection_note=None,
 ):
   """Persist the engine's intermediate reasoning for inspection/audit.
 
-  When ``evolve_skill`` is given ``artifacts_dir`` it writes, under that dir:
-    - ``v1_patches.json``   -- every analyst patch (root-cause category + text)
-    - ``v1_candidates/``    -- each best-of-N consolidation candidate (the chosen
-                               one tagged ``_SELECTED``)
-    - ``v1_prevalence.txt`` -- root-cause category tally across the patches
+  When ``evolve_skill`` is given ``artifacts_dir`` it writes, under that dir
+  (``<label>`` is ``version_label``, so a V1->V2 round writes ``v2_*``):
+    - ``<label>_patches.json``  -- every analyst patch (root-cause category + text)
+    - ``<label>_candidates/``   -- each best-of-N consolidation candidate (the
+                                   chosen one tagged ``_SELECTED``)
+    - ``<label>_prevalence.txt``-- root-cause category tally across the patches
+    - ``<label>_selection.txt`` -- one-line record of WHY this outcome (which
+                                   candidate won, or why the incumbent was kept)
   """
   os.makedirs(artifacts_dir, exist_ok=True)
 
@@ -459,11 +468,12 @@ def _write_evolution_artifacts(
             "patch": patch,
         }
     )
-  with open(os.path.join(artifacts_dir, "v1_patches.json"), "w") as f:
+  patches_path = os.path.join(artifacts_dir, f"{version_label}_patches.json")
+  with open(patches_path, "w") as f:
     json.dump(records, f, indent=2)
     f.write("\n")
 
-  cand_dir = os.path.join(artifacts_dir, "v1_candidates")
+  cand_dir = os.path.join(artifacts_dir, f"{version_label}_candidates")
   os.makedirs(cand_dir, exist_ok=True)
   kept = [c for c in candidates if c and c != current_skill]
   for i, cand in enumerate(kept):
@@ -474,8 +484,20 @@ def _write_evolution_artifacts(
 
   prevalence = compute_prevalence_summary(patches)
   if prevalence:
-    with open(os.path.join(artifacts_dir, "v1_prevalence.txt"), "w") as f:
+    prevalence_path = os.path.join(
+        artifacts_dir, f"{version_label}_prevalence.txt"
+    )
+    with open(prevalence_path, "w") as f:
       f.write(prevalence + "\n")
+
+  # Audit trail of the selection outcome -- especially the incumbent guard
+  # firing ("kept incumbent: ..."), which otherwise leaves no artifact at all.
+  if selection_note:
+    selection_path = os.path.join(
+        artifacts_dir, f"{version_label}_selection.txt"
+    )
+    with open(selection_path, "w") as f:
+      f.write(selection_note + "\n")
 
   logger.info(
       "Wrote evolution artifacts to %s (%d patches, %d candidates).",
@@ -759,6 +781,7 @@ def evolve_skill(
     min_improvement: float = 0.5,
     tools: Optional[str] = None,
     artifacts_dir: Optional[str] = None,
+    version_label: str = "v1",
     client=None,
 ) -> str:
   """Evolve a SKILL.md from a scored quality report.
@@ -779,7 +802,11 @@ def evolve_skill(
     min_improvement: A candidate must beat the incumbent score by at least this
       margin (in score_fn units) to be selected; otherwise the base is kept.
     artifacts_dir: If set, write the analyst patches, the best-of-N candidates,
-      and a prevalence summary here (for inspection/audit) before returning.
+      a prevalence summary, and a one-line selection record here (for
+      inspection/audit) before returning.
+    version_label: Prefix for the artifact filenames (default ``"v1"``). Pass
+      the round being PRODUCED -- e.g. ``"v2"`` for a V1->V2 run -- so
+      successive rounds don't overwrite each other's artifacts.
     client: Optional pre-built google-genai Client (else one is created).
 
   Returns:
@@ -839,8 +866,34 @@ def evolve_skill(
       viable.append(c)
   selected = select_candidate(viable, current_skill, score_fn, min_improvement)
   if artifacts_dir:
+    # Reconstruct WHY this outcome, so the incumbent guard leaves an audit
+    # trail (selection.txt) instead of firing silently.
+    if selected == current_skill:
+      if not viable:
+        selection_note = (
+            "kept incumbent: no viable candidate passed the structural"
+            " guardrails"
+        )
+      else:
+        selection_note = (
+            f"kept incumbent: none of the {len(viable)} viable candidate(s)"
+            f" beat the incumbent score by the {min_improvement} margin"
+        )
+    else:
+      picked = viable.index(selected) + 1
+      selection_note = (
+          f"selected candidate {picked} of {len(viable)} viable"
+          f" ({len(selected)} chars,"
+          f" {'scored best' if score_fn else 'median size'})"
+      )
     _write_evolution_artifacts(
-        artifacts_dir, patches, cands, selected, current_skill
+        artifacts_dir,
+        patches,
+        cands,
+        selected,
+        current_skill,
+        version_label=version_label,
+        selection_note=selection_note,
     )
   return selected
 

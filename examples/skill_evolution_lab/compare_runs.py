@@ -28,6 +28,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+
+# Exit code for --gate when V1 loses to V0 (distinct from crash exit codes so
+# callers can tell "V1 regressed" apart from "comparison failed").
+GATE_EXIT_CODE = 3
 
 
 def _is_oos(session: dict) -> bool:
@@ -122,6 +127,14 @@ def main():
   parser.add_argument("--v1", required=True, help="V1 report JSON")
   parser.add_argument("-o", "--out", default=None, help="Markdown output path")
   parser.add_argument("--model", default="", help="Model label for the header")
+  parser.add_argument(
+      "--gate",
+      action="store_true",
+      help=(
+          "Exit with code 3 when V1's overall rate is below V0's -- lets the"
+          " demo gate the registry mirror on the held-out comparison"
+      ),
+  )
   args = parser.parse_args()
 
   with open(args.v0) as f:
@@ -183,6 +196,14 @@ def main():
           f,
           indent=2,
       )
+
+  if args.gate and v1["overall"]["rate"] < v0["overall"]["rate"]:
+    print(
+        f"GATE: V1 overall {v1['overall']['rate']}% < V0"
+        f" {v0['overall']['rate']}% -- V1 should not be kept.",
+        file=sys.stderr,
+    )
+    sys.exit(GATE_EXIT_CODE)
 
 
 if __name__ == "__main__":

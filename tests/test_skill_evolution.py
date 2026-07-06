@@ -324,3 +324,26 @@ def test_write_evolution_artifacts(tmp_path):
   # Prevalence summary written.
   prevalence = open(os.path.join(out, "v1_prevalence.txt")).read()
   assert "TOOL_USAGE: 2/3" in prevalence
+
+
+def test_write_evolution_artifacts_version_label_and_selection(tmp_path):
+  # A V1->V2 round writes v2_* names (no clobbering of the v1_* artifacts),
+  # and the selection note is persisted as the audit trail of the outcome.
+  patches = ["## Root Cause\nTOOL_USAGE: x.\n"]
+  base = "BASE SKILL"
+
+  out = str(tmp_path)
+  _write_evolution_artifacts(
+      out,
+      patches,
+      [base],  # every candidate == base -> incumbent kept, no candidate files
+      base,
+      base,
+      version_label="v2",
+      selection_note="kept incumbent: no viable candidate passed guardrails",
+  )
+
+  assert os.path.exists(os.path.join(out, "v2_patches.json"))
+  assert os.listdir(os.path.join(out, "v2_candidates")) == []
+  note = open(os.path.join(out, "v2_selection.txt")).read()
+  assert note.startswith("kept incumbent:")

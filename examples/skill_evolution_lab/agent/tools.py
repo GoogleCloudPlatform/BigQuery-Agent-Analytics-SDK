@@ -156,7 +156,9 @@ COMPANY_POLICIES = {
         "details": (
             "Short-term disability covers 60% of salary for up to 12 weeks"
             " after a 7-day waiting period, for a qualifying medical condition."
-            " A physician's certification is required."
+            " The waiting period is unpaid time before benefits begin; it does"
+            " NOT reduce the 12 payable weeks. A physician's certification is"
+            " required."
         ),
     },
 }
@@ -205,14 +207,18 @@ def calculate_disability_pay(annual_salary: float, weeks_out: int) -> dict:
 
   This is a CALCULATION, not a lookup: STD replaces 60% of salary for up to 12
   weeks after a 7-day waiting period, so the dollar payout depends on the
-  employee's salary and how many weeks they are out. Use this whenever the user
-  asks "how much would short-term disability pay me" with a specific salary
-  and/or duration -- ``lookup_company_policy`` only returns the 60%/12-week
-  policy, never the dollar amount.
+  employee's salary and how many weeks they are out. The 7-day waiting period
+  is unpaid time before benefits begin -- it does NOT reduce the number of
+  payable weeks, so ``weeks_out`` counts benefit weeks and every covered week
+  is paid. Use this whenever the user asks "how much would short-term
+  disability pay me" with a specific salary and/or duration --
+  ``lookup_company_policy`` only returns the 60%/12-week policy, never the
+  dollar amount.
 
   Args:
     annual_salary: The employee's gross annual salary in dollars.
-    weeks_out: Number of weeks the employee expects to be on disability.
+    weeks_out: Number of benefit weeks the employee expects to be on
+      disability (after the unpaid 7-day waiting period).
 
   Returns:
     A dict with the weekly and total STD benefit, the covered weeks (capped at
@@ -229,6 +235,10 @@ def calculate_disability_pay(annual_salary: float, weeks_out: int) -> dict:
       "total_benefit": round(weekly_benefit * covered_weeks, 2),
       "income_replacement": _STD_INCOME_REPLACEMENT,
       "waiting_period_days": _STD_WAITING_DAYS,
+      "waiting_period_note": (
+          f"The {_STD_WAITING_DAYS}-day waiting period is unpaid time before"
+          " benefits begin; it does not reduce the payable weeks above."
+      ),
   }
 
 

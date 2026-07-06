@@ -38,33 +38,8 @@ import logging
 import os
 import shutil
 import sys
-import warnings
 
-warnings.filterwarnings("ignore")
-
-# authlib forces simplefilter("always") at import time; neutralise early.
-try:
-  import authlib.deprecate
-
-  warnings.filterwarnings(
-      "ignore", category=authlib.deprecate.AuthlibDeprecationWarning
-  )
-except ImportError:
-  pass
-
-# Suppress noisy SDK loggers before any google imports ("AFC is enabled",
-# "...will take precedence", "HTTP Request: POST ...").
-for _noisy in (
-    "google.genai",
-    "google_genai",
-    "google.auth",
-    "google_auth",
-    "google.adk",
-    "google_adk",
-    "httpx",
-    "httpcore",
-):
-  logging.getLogger(_noisy).setLevel(logging.ERROR)
+import _quiet  # noqa: F401  -- mute noisy warnings/loggers before google imports
 
 # Import the reusable engine from the SDK's scripts/ (no copy).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -89,11 +64,30 @@ def _location_for(model: str) -> str:
   return os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 
+def _mirror_to_registry(project: str, skill_path: str, skill_id: str, location):
+  """Push the skill directory to the Skill Registry as a new revision."""
+  # Lazy import so the registry client (and gcloud) is only needed on demand.
+  sys.path.insert(0, os.path.join(_SCRIPT_DIR, "agent"))
+  from skill_registry import SkillRegistry  # noqa: E402
+
+  skill_dir = os.path.dirname(os.path.abspath(skill_path))
+  reg = SkillRegistry(project, location=location or "us-central1")
+  logger.info("Mirroring evolved skill to registry %s ...", skill_id)
+  reg.update(
+      skill_id,
+      skill_dir,
+      display_name="Skill Lab Policy Agent",
+      description="Evolved (V1) tool-first policy skill",
+  )
+  revs = reg.list_revisions(skill_id)
+  logger.info("Registry now has %d revision(s).", len(revs))
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--report", required=True, help="Scored V0 report JSON")
+  parser.add_argument("--report", help="Scored V0 report JSON")
   parser.add_argument("--skill", required=True, help="Current SKILL.md path")
-  parser.add_argument("-o", "--out", required=True, help="Evolved skill output")
+  parser.add_argument("-o", "--out", help="Evolved skill output")
   parser.add_argument(
       "--model",
       default="gemini-3.1-pro-preview",
@@ -117,6 +111,15 @@ def main():
       action="store_true",
       help="Mirror the evolved skill to the Skill Registry as a new revision",
   )
+  parser.add_argument(
+      "--registry-push-only",
+      action="store_true",
+      help=(
+          "Skip evolution entirely; just mirror --skill to the Skill Registry."
+          " Used by run_e2e_demo.sh to push V1 only AFTER it wins the held-out"
+          " comparison."
+      ),
+  )
   parser.add_argument("--skill-id", default=None)
   parser.add_argument("--location", default=None, help="Skill Registry region")
   parser.add_argument("--project", default=None)
@@ -135,6 +138,17 @@ def main():
       or os.getenv("GOOGLE_CLOUD_PROJECT")
       or os.getenv("PROJECT_ID")
   )
+
+  if args.registry_push_only:
+    if not args.skill_id:
+      parser.error("--registry-push-only requires --skill-id")
+    _mirror_to_registry(project, args.skill, args.skill_id, args.location)
+    return
+  if not args.report or not args.out:
+    parser.error(
+        "--report and -o/--out are required (unless --registry-push-only)"
+    )
+
   with open(args.skill) as f:
     current_skill = f.read()
 
@@ -182,21 +196,7 @@ def main():
   if args.registry_update:
     if not args.skill_id:
       parser.error("--registry-update requires --skill-id")
-    # Lazy import so the registry client (and gcloud) is only needed on demand.
-    sys.path.insert(0, os.path.join(_SCRIPT_DIR, "agent"))
-    from skill_registry import SkillRegistry  # noqa: E402
-
-    skill_dir = os.path.dirname(os.path.abspath(args.skill))
-    reg = SkillRegistry(project, location=args.location or "us-central1")
-    logger.info("Mirroring evolved skill to registry %s ...", args.skill_id)
-    reg.update(
-        args.skill_id,
-        skill_dir,
-        display_name="Skill Lab Policy Agent",
-        description="Evolved (V1) tool-first policy skill",
-    )
-    revs = reg.list_revisions(args.skill_id)
-    logger.info("Registry now has %d revision(s).", len(revs))
+    _mirror_to_registry(project, args.skill, args.skill_id, args.location)
 
 
 if __name__ == "__main__":

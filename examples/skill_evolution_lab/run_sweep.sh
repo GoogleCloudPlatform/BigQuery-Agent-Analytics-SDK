@@ -37,7 +37,11 @@
 # going and still aggregates whatever completed. To re-read a finished sweep
 # without re-running, point aggregate_sweep.py at its manifest:
 #   uv run python aggregate_sweep.py --manifest runs/sweep_<ts>.tsv
-set -uo pipefail
+# Full strict mode: the `if ./run_e2e_demo.sh ...` guard below already exempts
+# a failed demo run from -e (POSIX: -e is off inside an if condition), so the
+# sweep still continues past a single failed run -- while mkdir/cd/manifest
+# failures abort instead of being silently tolerated.
+set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MODELS="${MODELS:-gemini-3.5-flash gemini-3.1-flash-lite gemini-2.5-pro gemini-3.1-pro-preview}"
