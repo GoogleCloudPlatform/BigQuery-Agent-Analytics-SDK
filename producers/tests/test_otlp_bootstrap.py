@@ -196,7 +196,7 @@ def test_bootstrap_refreshes_stale_merge_sql_instead_of_skipping(tmp_path):
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
   # Real bq rejects `ls --transfer_config` without --transfer_location; a
   # failing listing would silently take the create path forever.
-  [(ls_argv, _)] = r.find("--transfer_config", "ls")
+  [(ls_argv, _)] = r.find("--transfer_config", " ls ")
   assert "--transfer_location=US" in ls_argv
   assert not r.find("--transfer_config", "mk")
   [(argv, _)] = r.find("--transfer_config", "update")
@@ -272,6 +272,10 @@ def test_scheduled_merge_update_also_pins_service_account(tmp_path):
   [(argv, _)] = r.find("--transfer_config", "update")
   sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
   assert f"--service_account_name={sa}" in argv
+  # bq only forwards service_account_name on update when update_credentials
+  # is set (checked in bq 2.1.28 source) — without it the existing config
+  # silently keeps the old admin OAuth credential.
+  assert "--update_credentials" in argv
 
 
 def test_bootstrap_creates_dlq_retention_subscription(tmp_path):
@@ -282,6 +286,51 @@ def test_bootstrap_creates_dlq_retention_subscription(tmp_path):
   [(argv, _)] = r.find("subscriptions create", "bqaa-otlp-dlq-sub")
   joined = " ".join(argv)
   assert "--topic bqaa-otlp-dlq" in joined
+  assert "--message-retention-duration" in joined
+  assert "--expiration-period never" in joined
+
+
+def test_bootstrap_scopes_data_editor_to_the_dataset(tmp_path):
+  # jobUser needs project scope, but dataEditor must be dataset-scoped: a
+  # project-wide grant lets a compromised consumer SA modify every dataset
+  # in the project.
+  r = FakeRunner()
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
+  # No project-level dataEditor grant.
+  assert not r.find("gcloud projects add-iam-policy-binding", "dataEditor")
+  # jobUser stays project-level.
+  [(job_argv, _)] = r.find("gcloud projects add-iam-policy-binding", "jobUser")
+  assert f"serviceAccount:{sa}" in " ".join(job_argv)
+  # dataEditor lands on the dataset via bq add-iam-policy-binding.
+  [(argv, _)] = r.find("add-iam-policy-binding", "dataEditor")
+  joined = " ".join(argv)
+  assert joined.startswith("bq ")
+  assert "--dataset" in argv
+  assert f"--member=serviceAccount:{sa}" in argv
+  assert "my-proj:agent_analytics" in argv
+
+
+def test_bootstrap_dlq_subscription_failure_is_not_swallowed(tmp_path):
+  # A DLQ retention subscription that fails to create must abort the run:
+  # silently continuing reports success while dead letters keep evaporating.
+  import subprocess
+
+  import pytest
+
+  r = FakeRunner(failing=("bqaa-otlp-dlq-sub",))
+  with pytest.raises(subprocess.CalledProcessError):
+    bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+
+
+def test_bootstrap_converges_existing_dlq_subscription(tmp_path):
+  # An existing DLQ subscription gets its retention/expiration converged
+  # rather than skipped (it may predate the retention settings).
+  r = FakeRunner(existing=("subscriptions describe bqaa-otlp-dlq-sub",))
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  assert not r.find("subscriptions create", "bqaa-otlp-dlq-sub")
+  [(argv, _)] = r.find("subscriptions update", "bqaa-otlp-dlq-sub")
+  joined = " ".join(argv)
   assert "--message-retention-duration" in joined
   assert "--expiration-period never" in joined
 
@@ -308,9 +357,9 @@ def test_bootstrap_rejects_unknown_or_empty_sources(tmp_path):
 def test_bootstrap_repairs_existing_subscription_with_dlq_flags(tmp_path):
   # An existing (possibly drifted / pre-DLQ) subscription must be updated
   # with the same DLQ + deadline settings the create path uses.
-  r = FakeRunner(failing=("subscriptions create",))
+  r = FakeRunner(failing=("subscriptions create bqaa-otlp-sub ",))
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
-  [(argv, _)] = r.find("subscriptions update")
+  [(argv, _)] = r.find("subscriptions update", "bqaa-otlp-sub ")
   joined = " ".join(argv)
   assert "--push-endpoint" in joined
   assert "--push-auth-service-account" in joined

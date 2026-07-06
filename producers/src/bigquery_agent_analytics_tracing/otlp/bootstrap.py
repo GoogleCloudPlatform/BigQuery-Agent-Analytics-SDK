@@ -347,23 +347,54 @@ def run_bootstrap(
   for topic in (MAIN_TOPIC, DLQ_TOPIC):
     runner.try_run(["gcloud", "pubsub", "topics", "create", topic, *proj])
   # Retain dead letters so they can be inspected and replayed; a topic with
-  # no subscription silently discards everything published to it.
-  runner.try_run(
-      [
-          "gcloud",
-          "pubsub",
-          "subscriptions",
-          "create",
-          DLQ_SUBSCRIPTION,
-          *proj,
-          "--topic",
-          DLQ_TOPIC,
-          "--message-retention-duration",
-          DLQ_RETENTION,
-          "--expiration-period",
-          "never",
-      ]
-  )
+  # no subscription silently discards everything published to it. Hard
+  # `run` on the mutation: a swallowed failure here would report success
+  # while dead letters keep evaporating.
+  dlq_retention_flags = [
+      "--message-retention-duration",
+      DLQ_RETENTION,
+      "--expiration-period",
+      "never",
+  ]
+  if (
+      runner.try_run(
+          [
+              "gcloud",
+              "pubsub",
+              "subscriptions",
+              "describe",
+              DLQ_SUBSCRIPTION,
+              *proj,
+          ]
+      )
+      is None
+  ):
+    runner.run(
+        [
+            "gcloud",
+            "pubsub",
+            "subscriptions",
+            "create",
+            DLQ_SUBSCRIPTION,
+            *proj,
+            "--topic",
+            DLQ_TOPIC,
+            *dlq_retention_flags,
+        ]
+    )
+  else:
+    # Converge retention/expiration on a pre-existing subscription.
+    runner.run(
+        [
+            "gcloud",
+            "pubsub",
+            "subscriptions",
+            "update",
+            DLQ_SUBSCRIPTION,
+            *proj,
+            *dlq_retention_flags,
+        ]
+    )
 
   echo("==> Granting least-privilege IAM")
   project_number = runner.run(
@@ -405,19 +436,32 @@ def run_bootstrap(
           "roles/pubsub.publisher",
       ]
   )
-  for role in ("roles/bigquery.dataEditor", "roles/bigquery.jobUser"):
-    runner.run(
-        [
-            "gcloud",
-            "projects",
-            "add-iam-policy-binding",
-            s.project,
-            "--member",
-            f"serviceAccount:{consumer_sa}",
-            "--role",
-            role,
-        ]
-    )
+  # jobUser needs project scope (query jobs), but dataEditor is scoped to
+  # the target dataset: a project-wide grant would let a compromised
+  # consumer SA modify every dataset in the project.
+  runner.run(
+      [
+          "gcloud",
+          "projects",
+          "add-iam-policy-binding",
+          s.project,
+          "--member",
+          f"serviceAccount:{consumer_sa}",
+          "--role",
+          "roles/bigquery.jobUser",
+      ]
+  )
+  runner.run(
+      [
+          "bq",
+          f"--project_id={s.project}",
+          "add-iam-policy-binding",
+          "--dataset",
+          f"--member=serviceAccount:{consumer_sa}",
+          "--role=roles/bigquery.dataEditor",
+          f"{s.project}:{s.dataset}",
+      ]
+  )
   runner.run(
       [
           "gcloud",
@@ -633,6 +677,10 @@ def run_bootstrap(
             "update",
             "--transfer_config",
             f"--params={params}",
+            # bq forwards service_account_name on update only when
+            # update_credentials is set (bq 2.1.28 frontend/command_update);
+            # without it the config silently keeps its old credential.
+            "--update_credentials",
             dts_sa,
             existing_name,
         ]
