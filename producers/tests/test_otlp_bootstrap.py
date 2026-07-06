@@ -47,12 +47,17 @@ class FakeRunner:
       return (
           _RECEIVER_URL if bootstrap.RECEIVER_SVC in joined else _CONSUMER_URL
       )
-    if "secrets versions access" in joined:
-      return "tok-from-secret"
     return ""
 
   def run(self, argv, input_text=None):
+    import subprocess
+
     self.calls.append((tuple(argv), input_text))
+    joined = " ".join(argv)
+    if any(f in joined for f in self.failing):
+      raise subprocess.CalledProcessError(1, list(argv), stderr="boom")
+    if "--transfer_config" in joined and "ls" in argv:
+      return self.transfer_listing or ""
     return self._canned(argv)
 
   def try_run(self, argv, input_text=None):
@@ -156,7 +161,7 @@ def test_bootstrap_existing_secret_is_not_recreated(tmp_path):
 def test_bootstrap_subscription_has_dlq_and_oidc_push(tmp_path):
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
-  sub = " ".join(r.find("subscriptions create")[0][0])
+  sub = " ".join(r.find("subscriptions create", "bqaa-otlp-sub ")[0][0])
   assert "--dead-letter-topic bqaa-otlp-dlq" in sub
   assert f"--push-endpoint {_CONSUMER_URL}/" in sub
   assert "--push-auth-service-account" in sub
@@ -224,6 +229,80 @@ def test_bootstrap_second_dataset_gets_its_own_merge(tmp_path):
   joined = " ".join(argv)
   assert "MERGE `ds2.agent_events_otlp`" in joined
   assert "ds2" in [a for a in argv if "--display_name" in a][0]
+
+
+def test_bootstrap_listing_failure_aborts_instead_of_duplicating(tmp_path):
+  # "Can't list" is not "doesn't exist": a transient bq ls failure must abort
+  # (visible error), never take the create path — DTS display names are not
+  # unique, so blind mk mints a duplicate scheduled MERGE on every flaky run.
+  import subprocess
+
+  import pytest
+
+  r = FakeRunner(failing=("--transfer_config",))
+  with pytest.raises(subprocess.CalledProcessError):
+    bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  assert not r.find("--transfer_config", "mk")
+
+
+def test_scheduled_merge_runs_as_consumer_service_account(tmp_path):
+  # Without --service_account_name, DTS pins the transfer config to the
+  # invoking admin's personal OAuth — the projection job dies when they leave.
+  r = FakeRunner()
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  [(argv, _)] = r.find("--transfer_config", "mk")
+  sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
+  assert f"--service_account_name={sa}" in argv
+
+
+def test_scheduled_merge_update_also_pins_service_account(tmp_path):
+  listing = json.dumps(
+      [
+          {
+              "name": "projects/1/locations/us/transferConfigs/42",
+              "displayName": "bqaa_agent_events_otlp_merge",
+              "params": {
+                  "query": "MERGE `agent_analytics.agent_events_otlp` T"
+              },
+          }
+      ]
+  )
+  r = FakeRunner(transfer_listing=listing)
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  [(argv, _)] = r.find("--transfer_config", "update")
+  sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
+  assert f"--service_account_name={sa}" in argv
+
+
+def test_bootstrap_creates_dlq_retention_subscription(tmp_path):
+  # Pub/Sub discards messages published to a topic with no subscription: the
+  # DLQ topic needs a retention subscription or dead letters evaporate.
+  r = FakeRunner()
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  [(argv, _)] = r.find("subscriptions create", "bqaa-otlp-dlq-sub")
+  joined = " ".join(argv)
+  assert "--topic bqaa-otlp-dlq" in joined
+  assert "--message-retention-duration" in joined
+  assert "--expiration-period never" in joined
+
+
+def test_find_merge_config_survives_garbage_listing():
+  assert bootstrap._find_merge_config("not json at all", "ds") is None
+  assert (
+      bootstrap._find_merge_config(
+          json.dumps([{"displayName": "x", "params": None}]), "ds"
+      )
+      is None
+  )
+
+
+def test_bootstrap_rejects_unknown_or_empty_sources(tmp_path):
+  import pytest
+
+  with pytest.raises(ValueError, match="source"):
+    _settings(tmp_path, sources=("cursor",))
+  with pytest.raises(ValueError, match="source"):
+    _settings(tmp_path, sources=())
 
 
 def test_bootstrap_repairs_existing_subscription_with_dlq_flags(tmp_path):
@@ -294,4 +373,49 @@ def test_render_plan_lists_commands_without_running(tmp_path):
 
 def test_render_plan_marks_capture_placeholders(tmp_path):
   plan = bootstrap.render_plan(_settings(tmp_path))
-  assert "<receiver-url>" in plan or "status.url" in plan
+  # Captured values that feed later commands render as placeholders.
+  assert "<consumer-url>" in plan
+  assert "<project-number>" in plan
+  # Args with spaces are shell-quoted so a copied plan line runs unchanged.
+  assert "'--schedule=every 15 minutes'" in plan
+
+
+# --------------------------------------------------------------------------
+# SubprocessRunner (the only code that touches real subprocesses)
+# --------------------------------------------------------------------------
+
+
+def test_subprocess_runner_returns_stripped_stdout_and_raises():
+  import subprocess
+
+  import pytest
+
+  r = bootstrap.SubprocessRunner(echo=lambda *_: None)
+  assert r.run(["python3", "-c", "print(' hi ')"]) == "hi"
+  with pytest.raises(subprocess.CalledProcessError):
+    r.run(["python3", "-c", "import sys; sys.exit(3)"])
+  assert r.try_run(["python3", "-c", "import sys; sys.exit(3)"]) is None
+
+
+def test_subprocess_runner_never_inherits_the_tty():
+  # A command that prompts must see EOF (devnull), not block on stdin while
+  # its prompt is invisible in the captured pipe.
+  r = bootstrap.SubprocessRunner(echo=lambda *_: None)
+  out = r.run(["python3", "-c", "import sys; print(repr(sys.stdin.read()))"])
+  assert out == "''"
+
+
+def test_hardened_argv_makes_clis_non_interactive():
+  assert bootstrap._hardened_argv(["gcloud", "x", "y"]) == [
+      "gcloud",
+      "x",
+      "y",
+      "--quiet",
+  ]
+  assert bootstrap._hardened_argv(["bq", "--project_id=p", "ls"]) == [
+      "bq",
+      "--headless",
+      "--project_id=p",
+      "ls",
+  ]
+  assert bootstrap._hardened_argv(["docker", "ps"]) == ["docker", "ps"]

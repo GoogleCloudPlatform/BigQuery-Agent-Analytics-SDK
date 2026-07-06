@@ -34,8 +34,9 @@ import dataclasses
 import json
 import pathlib
 import secrets as _secrets
+import shlex
 import subprocess
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 
 from . import config_artifacts
 from . import ddl
@@ -45,10 +46,17 @@ AR_REPO = "bqaa"
 MAIN_TOPIC = "bqaa-otlp"
 DLQ_TOPIC = "bqaa-otlp-dlq"
 SUBSCRIPTION = "bqaa-otlp-sub"
+# Retention subscription on the DLQ topic: Pub/Sub only retains messages for
+# subscriptions that exist at publish time, so without this every dead letter
+# forwarded after max delivery attempts would be permanently discarded.
+DLQ_SUBSCRIPTION = "bqaa-otlp-dlq-sub"
+DLQ_RETENTION = "7d"
 SECRET = "bqaa-otlp-token"
 RECEIVER_SVC = "bqaa-otlp-receiver"
 CONSUMER_SVC = "bqaa-otlp-consumer"
 MERGE_DISPLAY_NAME = "bqaa_agent_events_otlp_merge"
+MAX_DELIVERY_ATTEMPTS = "5"
+ACK_DEADLINE_SECONDS = "60"
 
 _APIS = (
     "run.googleapis.com",
@@ -79,6 +87,21 @@ class Runner(Protocol):
     """Run; return stdout, or ``None`` on failure (probe / idempotent)."""
 
 
+def _hardened_argv(argv: list[str]) -> list[str]:
+  """Make gcloud/bq non-interactive.
+
+  Output is captured, so an interactive prompt would be invisible while the
+  child blocks on the tty — the deploy would hang forever mid-sequence.
+  ``--quiet`` (gcloud) and ``--headless`` (bq, global flag: goes before the
+  command) turn prompts into fast visible failures instead.
+  """
+  if argv[0] == "gcloud" and "--quiet" not in argv:
+    return [*argv, "--quiet"]
+  if argv[0] == "bq" and "--headless" not in argv:
+    return [argv[0], "--headless", *argv[1:]]
+  return argv
+
+
 class SubprocessRunner:
   """Real runner: gcloud/bq via subprocess, echoing each command."""
 
@@ -86,13 +109,20 @@ class SubprocessRunner:
     self._echo = echo
 
   def run(self, argv: list[str], input_text: str | None = None) -> str:
-    self._echo(f"$ {' '.join(argv)}")
+    argv = _hardened_argv(argv)
+    self._echo(f"$ {shlex.join(argv)}")
+    # stdin is never the tty: a prompting child must see EOF, not hang.
+    stdin_kwargs = (
+        {"input": input_text}
+        if input_text is not None
+        else {"stdin": subprocess.DEVNULL}
+    )
     return subprocess.run(
         argv,
-        input=input_text,
         capture_output=True,
         text=True,
         check=True,
+        **stdin_kwargs,
     ).stdout.strip()
 
   def try_run(
@@ -111,7 +141,6 @@ class _PlanRunner:
       ("projects describe", "<project-number>"),
       (RECEIVER_SVC, "<receiver-url>"),
       (CONSUMER_SVC, "<consumer-url>"),
-      ("secrets versions access", "<token>"),
   )
 
   def __init__(self):
@@ -158,6 +187,11 @@ class BootstrapSettings:
     # Reuse the PR 1 tier validation (privacy/signals/replay ack) so the
     # gate can't drift between `config` and `bootstrap`.
     self._spec("<pending-deploy>")
+    if not self.sources:
+      raise ValueError(
+          "at least one telemetry source is required; expected one of"
+          f" {config_artifacts.SOURCES}"
+      )
     for source in self.sources:
       if source not in config_artifacts.SOURCES:
         raise ValueError(
@@ -277,7 +311,7 @@ def run_bootstrap(
       input_text=ddl.create_all_sql(s.dataset, enable_spans=s.enable_spans),
   )
 
-  echo("==> Creating the bearer token secret")
+  echo("==> Ensuring the bearer token secret exists")
   if runner.try_run(["gcloud", "secrets", "describe", SECRET, *proj]) is None:
     runner.run(
         [
@@ -292,7 +326,7 @@ def run_bootstrap(
         input_text=_secrets.token_hex(32),
     )
 
-  echo("==> Creating service accounts")
+  echo("==> Ensuring service accounts exist")
   for sa_id in (RECEIVER_SVC, CONSUMER_SVC, "bqaa-otlp-push"):
     if (
         runner.try_run(
@@ -309,9 +343,27 @@ def run_bootstrap(
     ):
       runner.run(["gcloud", "iam", "service-accounts", "create", sa_id, *proj])
 
-  echo("==> Creating Pub/Sub topics")
+  echo("==> Ensuring Pub/Sub topics + DLQ retention subscription exist")
   for topic in (MAIN_TOPIC, DLQ_TOPIC):
     runner.try_run(["gcloud", "pubsub", "topics", "create", topic, *proj])
+  # Retain dead letters so they can be inspected and replayed; a topic with
+  # no subscription silently discards everything published to it.
+  runner.try_run(
+      [
+          "gcloud",
+          "pubsub",
+          "subscriptions",
+          "create",
+          DLQ_SUBSCRIPTION,
+          *proj,
+          "--topic",
+          DLQ_TOPIC,
+          "--message-retention-duration",
+          DLQ_RETENTION,
+          "--expiration-period",
+          "never",
+      ]
+  )
 
   echo("==> Granting least-privilege IAM")
   project_number = runner.run(
@@ -490,7 +542,21 @@ def run_bootstrap(
       ]
   )
 
-  echo("==> Creating the push subscription (OIDC) with DLQ")
+  echo("==> Ensuring the push subscription (OIDC) with DLQ")
+  # One shared flag list for create AND the repair/update path, so the
+  # settings structurally cannot drift apart.
+  push_flags = [
+      "--push-endpoint",
+      f"{consumer_url}/",
+      "--push-auth-service-account",
+      push_sa,
+      "--dead-letter-topic",
+      DLQ_TOPIC,
+      "--max-delivery-attempts",
+      MAX_DELIVERY_ATTEMPTS,
+      "--ack-deadline",
+      ACK_DEADLINE_SECONDS,
+  ]
   if (
       runner.try_run(
           [
@@ -502,22 +568,11 @@ def run_bootstrap(
               *proj,
               "--topic",
               MAIN_TOPIC,
-              "--push-endpoint",
-              f"{consumer_url}/",
-              "--push-auth-service-account",
-              push_sa,
-              "--dead-letter-topic",
-              DLQ_TOPIC,
-              "--max-delivery-attempts",
-              "5",
-              "--ack-deadline",
-              "60",
+              *push_flags,
           ]
       )
       is None
   ):
-    # Repair path: converge every setting the create path applies, so a
-    # drifted or pre-DLQ subscription is brought back to spec.
     runner.run(
         [
             "gcloud",
@@ -526,16 +581,7 @@ def run_bootstrap(
             "update",
             SUBSCRIPTION,
             *proj,
-            "--push-endpoint",
-            f"{consumer_url}/",
-            "--push-auth-service-account",
-            push_sa,
-            "--dead-letter-topic",
-            DLQ_TOPIC,
-            "--max-delivery-attempts",
-            "5",
-            "--ack-deadline",
-            "60",
+            *push_flags,
         ]
     )
   runner.run(
@@ -556,11 +602,12 @@ def run_bootstrap(
   echo("==> Registering the scheduled MERGE into agent_events_otlp")
   merge_sql = sql.agent_events_otlp_merge_sql(dataset=s.dataset)
   params = json.dumps({"query": merge_sql})
-  # bq requires --transfer_location (the dataset location) for
-  # `ls --transfer_config`; without it the listing always fails and the
-  # convergence path would silently never trigger.
+  # The listing is a hard `run`, not `try_run`: "can't list" is NOT "doesn't
+  # exist". DTS display names are not unique, so treating a transient listing
+  # failure as absence would mint a duplicate scheduled MERGE on every flaky
+  # re-run. bq requires --transfer_location (the dataset location) here.
   existing_name = _find_merge_config(
-      runner.try_run(
+      runner.run(
           [
               *bq,
               "ls",
@@ -571,6 +618,12 @@ def run_bootstrap(
       ),
       s.dataset,
   )
+  # --service_account_name pins the transfer config to the consumer SA
+  # (which already holds the BigQuery roles). Without it DTS runs the MERGE
+  # on the invoking admin's personal OAuth — the projection job silently
+  # dies when that admin loses access or leaves. The admin needs
+  # iam.serviceAccounts.actAs on the consumer SA for this call.
+  dts_sa = f"--service_account_name={consumer_sa}"
   if existing_name:
     # Converge: refresh the SQL so re-runs after crosswalk/MERGE changes
     # never leave a stale scheduled query behind.
@@ -580,6 +633,7 @@ def run_bootstrap(
             "update",
             "--transfer_config",
             f"--params={params}",
+            dts_sa,
             existing_name,
         ]
     )
@@ -594,6 +648,7 @@ def run_bootstrap(
             # Dataset-specific so several datasets in one project/location
             # each keep their own projection job.
             f"--display_name={MERGE_DISPLAY_NAME}_{s.dataset}",
+            dts_sa,
             "--schedule=every 15 minutes",
             f"--params={params}",
         ]
@@ -673,6 +728,7 @@ def render_plan(settings: BootstrapSettings) -> str:
 
 
 def _display_arg(arg: str) -> str:
+  """Shell-quoted (so a copied plan line runs unchanged), long args elided."""
   if len(arg) > 100:
-    return arg[:97] + "..."
-  return arg
+    return shlex.quote(arg[:97]) + "...[truncated]"
+  return shlex.quote(arg)

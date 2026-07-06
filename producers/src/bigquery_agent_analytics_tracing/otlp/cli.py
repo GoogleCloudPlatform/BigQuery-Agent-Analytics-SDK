@@ -14,15 +14,17 @@
 
 """``bqaa-otel`` — enterprise admin CLI for OTel -> BigQuery (issue #324).
 
-PR 1 ships ``config`` (generate deployable telemetry-source artifacts from
-an already-deployed receiver's coordinates). ``bootstrap`` (infra
-orchestration, PR 2) and ``verify`` / smoke (PR 3) land next in the stack.
+``config`` (PR 1) generates deployable telemetry-source artifacts from an
+already-deployed receiver's coordinates; ``bootstrap`` (PR 2) deploys the
+full pipeline (plan mode by default, ``--execute`` applies). ``verify`` /
+smoke (PR 3) lands next in the stack.
 """
 
 from __future__ import annotations
 
 import argparse
 import pathlib
+import subprocess
 import sys
 
 from . import bootstrap as bootstrap_mod
@@ -133,7 +135,9 @@ def _build_parser() -> argparse.ArgumentParser:
       "--dataset", default="agent_analytics", help="BigQuery dataset id."
   )
   boot.add_argument(
-      "--region", default="us-central1", help="Cloud Run / Artifact Registry"
+      "--region",
+      default="us-central1",
+      help="Cloud Run / Artifact Registry region.",
   )
   boot.add_argument(
       "--bq-location", default="US", help="BigQuery dataset location."
@@ -198,6 +202,19 @@ def _build_parser() -> argparse.ArgumentParser:
   return parser
 
 
+def _report_settings_error(exc: ValueError) -> int:
+  """Print a tier/settings ValueError (shared by config and bootstrap)."""
+  print(f"bqaa-otel: error: {exc}", file=sys.stderr)
+  if "acknowledge_content_logging" in str(exc):
+    print(
+        "bqaa-otel: --privacy replay exports prompt text; pass"
+        " --i-understand-content-logging only if that is acceptable"
+        " in your environment.",
+        file=sys.stderr,
+    )
+  return 2
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
   try:
     spec = config_artifacts.BootstrapSpec(
@@ -212,15 +229,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         spec, sources=tuple(s for s in args.source.split(",") if s)
     )
   except ValueError as exc:
-    print(f"bqaa-otel: error: {exc}", file=sys.stderr)
-    if "acknowledge_content_logging" in str(exc):
-      print(
-          "bqaa-otel: --privacy replay exports prompt text; pass"
-          " --i-understand-content-logging only if that is acceptable"
-          " in your environment.",
-          file=sys.stderr,
-      )
-    return 2
+    return _report_settings_error(exc)
 
   if spec.privacy == "replay":
     print(
@@ -269,21 +278,37 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         out_dir=args.out,
     )
   except ValueError as exc:
-    print(f"bqaa-otel: error: {exc}", file=sys.stderr)
-    if "acknowledge_content_logging" in str(exc):
-      print(
-          "bqaa-otel: --privacy replay exports prompt text; pass"
-          " --i-understand-content-logging only if that is acceptable"
-          " in your environment.",
-          file=sys.stderr,
-      )
-    return 2
+    return _report_settings_error(exc)
 
   if not args.execute:
     print(bootstrap_mod.render_plan(settings))
     return 0
 
-  bootstrap_mod.run_bootstrap(settings, bootstrap_mod.SubprocessRunner())
+  # The Cloud Build step uploads the *current directory* as the build
+  # context; refuse to mutate anything unless we are at the repo root.
+  if not pathlib.Path("deploy/otlp_receiver/Dockerfile").is_file():
+    print(
+        "bqaa-otel: error: deploy/otlp_receiver/Dockerfile not found —"
+        " run --execute from the repository root (the Cloud Build step"
+        " uploads the current directory as the build context).",
+        file=sys.stderr,
+    )
+    return 2
+
+  try:
+    bootstrap_mod.run_bootstrap(settings, bootstrap_mod.SubprocessRunner())
+  except subprocess.CalledProcessError as exc:
+    cmd = exc.cmd if isinstance(exc.cmd, str) else " ".join(exc.cmd)
+    print(f"bqaa-otel: deploy step failed: {cmd}", file=sys.stderr)
+    for stream in (exc.stderr, exc.stdout):
+      if stream and stream.strip():
+        print(stream.strip(), file=sys.stderr)
+    print(
+        "bqaa-otel: fix the underlying error and re-run — every step is"
+        " idempotent/convergent, so a re-run resumes safely.",
+        file=sys.stderr,
+    )
+    return 1
   return 0
 
 
