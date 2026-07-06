@@ -211,3 +211,16 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
 - **Compaction.** Evolved skills are distilled back down when they grow too large -- the skill
   is loaded into the agent's context whenever it is relevant, so an ever-growing manual costs
   tokens on every call and buries the rules that matter under ones that don't.
+
+The anti-bloat rules are enforced by the consolidator prompt in `scripts/skill_evolution.py`,
+before compaction ever runs -- which is why an evolved skill stays behavioral (~2.2KB) rather
+than a pile of baked facts:
+
+```text
+8.  A skill is BEHAVIORAL, not a knowledge base. Do NOT add facts of any kind --
+    the skill says HOW to behave; the TOOL supplies WHAT. If the agent needs a
+    fact, the rule is "look it up".
+10. Do NOT add a Keyword / Terminology Mapping section -- the lookup tool resolves
+    the user's own wording itself.
+12. Generalize, do not enumerate: prefer ONE rule over a long list of specific topics.
+```
