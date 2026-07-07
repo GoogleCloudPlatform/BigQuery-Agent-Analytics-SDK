@@ -383,7 +383,7 @@ def append_envelope(
   ``enable_spans`` (the traces signal tier, BQAA_OTLP_ENABLE_TRACES).
   """
   if envelope["source"]["signal"] == "span" and not enable_spans:
-    return ""  # span landing deferred
+    return ""  # traces tier disabled on this consumer
   table = target_table(envelope)
   writer.append(table, envelope_to_row(envelope))
   return table
