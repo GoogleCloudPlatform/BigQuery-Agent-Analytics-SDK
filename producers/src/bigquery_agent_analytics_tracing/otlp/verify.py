@@ -516,23 +516,34 @@ def default_http_post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
   connection refused, TLS, timeout) return status 0 with the error text —
   the one condition a reachability check must report gracefully.
   """
-  request = urllib.request.Request(url, data=body, headers=headers)
   try:
+    # Request() itself raises ValueError on malformed/schemeless URLs, so
+    # it lives inside the guard to keep the never-raises contract.
+    request = urllib.request.Request(url, data=body, headers=headers)
     with _NO_REDIRECT_OPENER.open(request, timeout=_HTTP_TIMEOUT_S) as resp:
       return resp.status, resp.read().decode("utf-8", "replace")
   except urllib.error.HTTPError as exc:
     return exc.code, exc.read().decode("utf-8", "replace")
-  except (urllib.error.URLError, OSError) as exc:
+  except (urllib.error.URLError, OSError, ValueError) as exc:
     return 0, str(exc)
 
 
 def make_query_rows(project: str) -> QueryRows:
-  """A QueryRows backed by google-cloud-bigquery."""
-  from google.cloud import bigquery
+  """A QueryRows backed by google-cloud-bigquery.
 
-  client = bigquery.Client(project=project)
+  The client is constructed lazily on first use so factory-time failures
+  (missing ADC, import problems) surface through the guarded per-check
+  calls as ``query failed: ...`` rows instead of crashing the CLI before
+  the first check runs.
+  """
+  client = None
 
   def query_rows(query: str) -> list:
+    nonlocal client
+    if client is None:
+      from google.cloud import bigquery
+
+      client = bigquery.Client(project=project)
     return [tuple(row) for row in client.query(query).result()]
 
   return query_rows

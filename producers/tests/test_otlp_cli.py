@@ -522,3 +522,20 @@ def test_verify_plumbs_settings_and_timeout(monkeypatch):
   assert seen["settings"].signals == ("logs", "metrics", "traces")
   assert seen["settings"].recent_hours == 6
   assert seen["timeout_s"] == 9
+
+
+def test_verify_rejects_schemeless_endpoint(monkeypatch, capsys):
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "receiver.example.com",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+      ]
+  )
+  assert rc == 2
+  assert "http" in capsys.readouterr().err.lower()

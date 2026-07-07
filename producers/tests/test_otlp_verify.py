@@ -503,3 +503,36 @@ def test_smoke_survives_failing_landing_query():
   assert "permission denied" in logs_check[0].detail
   # The projection step must not run when a landing check failed.
   assert not any("projected" in r.name for r in results)
+
+
+def test_make_query_rows_is_lazy_so_credential_errors_become_check_failures(
+    monkeypatch,
+):
+  # Missing ADC / client construction failure must surface through the
+  # guarded per-check calls ("query failed: ..."), not crash the CLI
+  # before the first check runs.
+  import google.cloud.bigquery as bigquery
+
+  def boom(project):
+    raise RuntimeError("Could not automatically determine credentials")
+
+  monkeypatch.setattr(bigquery, "Client", boom)
+  query_rows = verify.make_query_rows("p")  # must NOT raise here
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=query_rows,
+  )
+  exist = [r for r in results if "exist" in r.name]
+  assert exist and not exist[0].ok
+  assert "credentials" in exist[0].detail
+
+
+def test_default_http_post_never_raises_on_malformed_url():
+  # Docstring contract: (status, body), never raises — including a
+  # schemeless endpoint that makes urllib's Request constructor throw.
+  status, detail = verify.default_http_post(
+      "receiver.example.com/v1/logs", b"{}", {}
+  )
+  assert status == 0
+  assert detail

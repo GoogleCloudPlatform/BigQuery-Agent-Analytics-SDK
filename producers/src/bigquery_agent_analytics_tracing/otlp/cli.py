@@ -373,7 +373,15 @@ def _cmd_verify(args: argparse.Namespace) -> int:
   # Schemes are case-insensitive (HTTP:// must not bypass the guard).
   split = urllib.parse.urlsplit(args.endpoint)
   host = split.hostname or ""
-  if split.scheme.lower() == "http" and host not in (
+  scheme = split.scheme.lower()
+  if scheme not in ("http", "https"):
+    print(
+        f"bqaa-otel: error: --endpoint {args.endpoint!r} is not an http(s)"
+        " URL — expected e.g. https://<receiver>.run.app",
+        file=sys.stderr,
+    )
+    return 2
+  if scheme == "http" and host not in (
       "localhost",
       "127.0.0.1",
       "::1",
