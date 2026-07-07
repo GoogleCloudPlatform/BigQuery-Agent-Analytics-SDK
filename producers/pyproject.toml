@@ -53,6 +53,11 @@ openai-agents = [
 claude-sdk = [
   "claude-agent-sdk>=0.1.0",
 ]
+receiver = [
+  "google-cloud-pubsub>=2.18.0",
+  "opentelemetry-proto>=1.20.0",
+  "gunicorn>=21.0",
+]
 dev = [
   "pytest>=7.0",
   "pytest-asyncio>=0.21",
@@ -65,6 +70,7 @@ dev = [
 bqaa-drain = "bigquery_agent_analytics_tracing.drain:main"
 bqaa-claude-hook = "bigquery_agent_analytics_tracing.claude_code:main"
 bqaa-check-setup = "bigquery_agent_analytics_tracing.setup_check:main"
+bqaa-otel = "bigquery_agent_analytics_tracing.otlp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"

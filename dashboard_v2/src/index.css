@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-brand-primary: #ef4444; /* Modern red similar to the prompt images */
+  --color-brand-bg: #09090b;
+  --color-brand-card: #18181b;
+  --color-brand-border: #27272a;
+}
+
+@layer base {
+  body {
+    @apply bg-brand-bg text-zinc-100 font-sans antialiased;
+  }
+
+  /* Custom Scrollbar for Mission Control feel */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-brand-bg;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-zinc-800 rounded-full hover:bg-zinc-700;
+  }
+}
