@@ -75,7 +75,7 @@ skill_evolution_lab/
   registry_cli.py       # create/update/delete/inspect registry revisions
   print_rate.py         # one-line golden-rate printer (used by run_e2e_demo.sh)
   run_e2e_demo.sh       # the whole cycle, one command (one model)
-  run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
+  run_sweep.sh          # run_e2e across models x runs -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
   sample_run/           # a committed end-to-end run (scored reports, V0 +
@@ -123,14 +123,14 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   20.0% (14/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   31.4% (22/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
-     V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V1 test:   95.7% (67/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
-| Overall                   | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
+| Overall                   | 38.8% (31/80) | 96.2% (77/80)  | +57.4pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
@@ -154,8 +154,8 @@ Inspect revisions any time: `uv run python registry_cli.py revisions
 ### Model overrides
 
 ```bash
-# Default agent is gemini-3.5-flash; try other GA models:
-AGENT_MODEL=gemini-3.1-flash-lite ./run_e2e_demo.sh
+# Default agent is gemini-3.1-flash-lite; try other GA models:
+AGENT_MODEL=gemini-3.5-flash ./run_e2e_demo.sh
 AGENT_MODEL=gemini-2.5-pro ./run_e2e_demo.sh
 ```
 
@@ -169,7 +169,7 @@ skill changes — so any delta is attributable to the skill.
 `run_sweep.sh` runs the whole e2e for every model × seed and aggregates the
 result into the **mean [min–max] table in [`VERIFICATION.md`](VERIFICATION.md)**
 — so one unlucky run can't masquerade as the headline. At the default size (4
-models × 3 seeds) it takes **~3–4 hours**, so it self-logs to
+models × 3 runs) it takes **~3–4 hours**, so it self-logs to
 `runs/SWEEP_<ts>.log` and is safe to detach:
 
 ```bash
@@ -181,8 +181,8 @@ nohup ./run_sweep.sh >/dev/null 2>&1 &
 tail -f runs/SWEEP_*.log     # live progress
 cat  runs/SWEEP_*.md         # final mean [range] table per model
 
-# Subset / fewer seeds:
-MODELS="gemini-3.5-flash gemini-2.5-pro" SEEDS=2 ./run_sweep.sh
+# Subset / fewer runs:
+MODELS="gemini-3.5-flash gemini-2.5-pro" RUNS=2 ./run_sweep.sh
 ```
 
 A single failed run (API blip, quota) is logged and skipped — the sweep keeps
@@ -248,7 +248,7 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
   tokens on every call and buries the rules that matter under ones that don't.
 
 The anti-bloat rules are enforced by the consolidator prompt in `scripts/skill_evolution.py`,
-before compaction ever runs -- which is why an evolved skill stays behavioral (~2.2KB) rather
+before compaction ever runs -- which is why an evolved skill stays behavioral (~2.4KB) rather
 than a pile of baked facts:
 
 ```text

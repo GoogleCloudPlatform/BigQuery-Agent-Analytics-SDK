@@ -1,16 +1,16 @@
 # sample_run — a committed end-to-end run
 
 This folder is a complete, recorded run of `./run_e2e_demo.sh` on
-`gemini-3.5-flash` (the default agent model), committed so you can inspect the
+`gemini-3.1-flash-lite` (the default agent model), committed so you can inspect the
 exact inputs and outputs of the skill-evolution loop without running anything.
 (Live runs go to `runs/<timestamp>/`, which is git-ignored; this is a curated
 copy of one.)
 
 The headline result for this run (see `RESULT.md`): on the 80-question held-out set,
-overall correctness **V0 28.7% → V1 100%** (in-scope questions answered correctly,
-out-of-scope questions cleanly declined). In-scope single-turn goes **18.2% → 100%**;
-the evolved skill is **~2.2 KB**. (Held-out set: 55 single-turn + 15 anti-parroting +
-10 out-of-scope.)
+overall correctness **V0 38.8% → V1 96.2%** (in-scope questions answered correctly,
+out-of-scope questions cleanly declined). In-scope single-turn goes **30.9% → 96.4%**,
+and out-of-scope declines *improve* **90% → 100%**; the evolved skill is **~2.4 KB**.
+(Held-out set: 55 single-turn + 15 anti-parroting + 10 out-of-scope.)
 
 The complete console log of this run — every stage banner, per-step timing, and the
 final comparison — is in [`run.log`](run.log) (the same file every live run writes
@@ -67,15 +67,14 @@ The same held-out question, V0 vs V1 (from `v0_test_report.json` and
 `v1_test_report.json`):
 
 ```text
-Q: "How much does the company put into an HSA for individual coverage?"
+Q: "How much does the company contribute to my HSA for family coverage?"
 
 V0:  category=unhelpful   tool_calls=0   golden_matched=true
-  "I do not have that information. Please contact HR for details regarding
-   HSA contributions."
+  "I do not have information regarding HSA contributions. Please contact HR
+   for details."
 
 V1:  category=meaningful  tool_calls=1   golden_matched=true
-  "The company contributes $750 per year to your Health Savings Account (HSA)
-   for individual coverage ($1,500 for family)."
+  "The company contributes $1,500 per year to your HSA for family coverage."
 ```
 
 And an out-of-scope example (V1 learned to decline cleanly instead of deflecting to HR):
@@ -84,7 +83,8 @@ And an out-of-scope example (V1 learned to decline cleanly instead of deflecting
 Q: "My VPN keeps dropping at home -- how do I fix the connection?"
 
 V0:  category=declined    -- deflects everything, so it happens to decline correctly
-V1:  category=declined    -- declines deliberately: "that's an IT question, not HR"
+V1:  category=declined    -- declines deliberately: "I only handle HR policies;
+                             that's an IT question"
 ```
 
 ## Reproduce

@@ -14,7 +14,7 @@ it must also **decline** questions outside its scope.
 > *illustration* of that loop on a deliberately **crippled** V0 (it's told to
 > ignore a tool that already holds every answer), so most of the lift is the
 > engine learning one rule — "use the tool, don't deflect to HR." Read the delta
-> as "the loop reliably finds and fixes a real skill defect," not as "+80pp from
+> as "the loop reliably finds and fixes a real skill defect," not as "+65pp from
 > any starting point." A fair, plausibly-written baseline would show a smaller
 > (still real) gain.
 
@@ -22,7 +22,7 @@ it must also **decline** questions outside its scope.
 
 | Setting | Value |
 | --- | --- |
-| Agent under test (default) | `gemini-3.5-flash` (GA, Vertex `global`) |
+| Agent under test (default) | `gemini-3.1-flash-lite` (GA, Vertex `global`) |
 | Evolution analysts/consolidator | `gemini-3.1-pro-preview` (Vertex `global`) |
 | Judge (scoring) | `gemini-2.5-flash` (`us-central1`) |
 | Tools | `lookup_company_policy` (facts) + `calculate_disability_pay` (computed payout) + `get_current_date` |
@@ -30,28 +30,27 @@ it must also **decline** questions outside its scope.
 | Evolve set | `questions_evolve.json` (55: 50 policy + 5 calc) + `questions_corrections.json` (5) + `questions_oos.json` (8 out-of-scope) |
 | Held-out test set | `questions_test.json` (55: 50 policy + 5 calc) + `questions_corrections_heldout.json` (15) + `questions_oos_heldout.json` (10 out-of-scope) |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~15–18 min per run at this size |
-| Date | 2026-07-01 |
+| Date | 2026-07-07 |
 
 The agent model, tools, and questions are identical for V0 and V1 — **only the
 skill file changes** — so the delta is attributable to the skill.
 
-## Result (recorded run, gemini-3.5-flash, held-out)
+## Result (recorded run, gemini-3.1-flash-lite, held-out)
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
-| Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
-| Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
+| Overall | 38.8% (31/80) | 96.2% (77/80) | +57.4pp |
+| Single-turn | 30.9% (17/55) | 96.4% (53/55) | +65.5pp |
+| Corrections (anti-parrot) | 33.3% (5/15) | 93.3% (14/15) | +60.0pp |
 | Out-of-scope (declined) | 90.0% (9/10) | 100.0% (10/10) | +10.0pp |
-| Tool-grounded answers | 11% (9/80) | 79% (63/80) | — |
+| Tool-grounded answers | 13% (10/80) | 73% (58/80) | — |
 
 The flawed V0 barely calls the tool on **in-scope** questions (it's told not to), so it
-declines on almost everything; the evolved V1 uses the tool and answers correctly —
-including the multi-turn correction cases, where it re-verifies and holds the right figure
-instead of caving. Out-of-scope is the honest edge case: V0 already scores well there
-(deflecting *everything* happens to be the right call for a genuinely out-of-scope
-question), and V1 learns to decline those **deliberately** (routing IT questions to IT,
-refusing unrelated ones) rather than by reflex.
+declines on most of them; the evolved V1 uses the tool and answers correctly — including the
+multi-turn correction cases, where it re-verifies and holds the right figure instead of caving.
+Out-of-scope is the honest edge case, and here V1 *improves* it: V0 cleanly declines 9/10 while
+V1 declines all 10 **deliberately** (routing IT questions to IT, refusing unrelated ones) rather
+than by reflex.
 
 ## Across four models × 3 runs (held-out, golden-graded)
 
@@ -64,38 +63,39 @@ reference run above is the one that includes out-of-scope declines.)
 Model                     Correctness V1     Grounding V1     V0 baseline
                           mean [range]       mean [range]     (corr)
 -----------------------   ----------------   --------------   -----------
-gemini-3.5-flash          100% [100-100]     89% [81-96]      21%
-gemini-3.1-flash-lite     98% [96-100]       89% [83-100]     34%
-gemini-2.5-pro            93% [89-97]        84% [83-84]      51%
-gemini-3.1-pro-preview    100% [100-100]     83% [81-86]      47%
+gemini-3.5-flash          100% [100-100]     90% [81-95]      63%
+gemini-3.1-flash-lite      97% [94-100]      74% [72-76]      31%
+gemini-2.5-pro             94% [91-96]       81% [72-85]      52%
+gemini-3.1-pro-preview    100% [100-100]     79% [72-89]      52%
 ```
 
-Every model recovers strongly (V1 93–100%), and the V0 column surfaces an honest
-observation about **how the same flawed skill lands differently on different models:**
+Every model recovers strongly (V1 94–100%), and the V0 column surfaces an honest
+observation about **how the same flawed skill lands very differently across models:**
 
-- **The stronger (pro) models reach for the tool even when told not to.** Under the
-  "answer only from the summary, else contact HR" skill, `gemini-2.5-pro` and
-  `gemini-3.1-pro-preview` still ground 41% / 32% of the time and start highest
-  (51% / 47%), where the flash models obey the restriction (16–19% grounding) and
-  start lower (21% / 34%). `gemini-2.5-pro` starts highest, so it has the least
-  headroom and lands lowest (~93%). The evolved tool-first skill closes the gap —
-  every model ends up at 93–100%. Reporting a range (not a single run) is what keeps
-  this honest, and is why best-of-N (and a `score_fn` gate) matter when a
-  consolidation gets unlucky.
+- **`gemini-3.5-flash` now largely ignores the "don't use the tool" instruction** and
+  grounds anyway, so it starts highest (63%) with the least headroom. **`gemini-3.1-flash-lite`
+  follows the restriction most literally**, deflects the most, and starts lowest (31%) — the
+  biggest, cleanest gain (→97%). The pro models sit in between (~52%). The evolved tool-first
+  skill closes the gap: every model ends at 94–100%. Reporting a range (not a single run) keeps
+  this honest, and is why best-of-N (and a `score_fn` gate) matter when a consolidation gets
+  unlucky. (Model behavior drifts over time — this sweep was recorded 2026-07-07; an earlier
+  run had `gemini-3.5-flash` starting near 21%, which is why the featured reference run above
+  now uses the more consistently-crippled `gemini-3.1-flash-lite`.)
 
-## Evolution internals (from the run log, gemini-3.5-flash)
+## Evolution internals (from the run log, gemini-3.1-flash-lite)
 
 ```text
-Trajectories: 17 successes, 51 failures
-Collected 53 patches (53 passed the quality gate)
-Selected median-size candidate (2230 chars)
+Trajectories: 24 successes, 43 failures
+Collected 52 patches (52 passed the quality gate)
+Selected median-size candidate (2445 chars)
 ```
 
-No `score_fn` was used; the engine returns the median-size viable candidate and
-the held-out re-score is the proof. Run with a `score_fn` for best-of-N
-selection (and to gate out unlucky candidates like the flash-lite run above).
+Prevalence across the 52 patches: `TOOL_USAGE` 49/52 (94%), with single `MISSING_RULE`,
+`RESPONSE_PATTERN`, and `SCOPE_GAP` patches. No `score_fn` was used; the engine returns the
+median-size viable candidate and the held-out re-score is the proof. Run with a `score_fn` for
+best-of-N selection (and to gate out unlucky candidates like the low `gemini-2.5-pro` run above).
 
-## The evolved V1 skill (675B → 2.2KB, gemini-3.5-flash)
+## The evolved V1 skill (675B → 2.4KB, gemini-3.1-flash-lite)
 
 Small, legible, **tool-first**, and -- the new parts -- it learned both **tool selection**
 (lookup for facts vs. calculator for a computed payout) and **out-of-scope handling**
@@ -110,47 +110,50 @@ You have the following knowledge about company policies:
 - Remote work: Up to 3 days per week with manager approval.
 - Benefits: The company offers competitive benefits.
 
-## Instructions
-- Answer questions using the information above when applicable.
-- **Do not restrict your answers only to the hardcoded information above.** If a question
-  is about a company policy, procedure, or benefit not explicitly listed, you MUST use
-  your tools to retrieve the authoritative facts.
-- Never immediately deflect to HR or claim you lack information for unlisted topics
-  without first querying your tools.
+Answer questions using the information above or by utilizing your available tools. Do not
+restrict your answers only to the initially provided knowledge.
 
 ## Tool Usage
-- **`lookup_company_policy`**: Always call this for any company policy, benefit, or HR
-  topic not in your initial knowledge (medical/dental/vision, HSA, 401k, expenses,
-  holidays, bereavement, parental leave, tuition, EAP, flex time, short-term disability).
-- **`calculate_disability_pay`**: If a user provides salary and duration and asks for a
-  specific payout, use this tool to compute the exact amount.
+- **Policy Lookup:** When asked about any company policy, benefit, or procedure (e.g.,
+  expenses, holidays, medical, dental, vision, 401k, leave) that is not explicitly detailed
+  in your initial knowledge, you MUST call the `lookup_company_policy` tool. Never deflect to
+  HR or claim you lack information without first querying this tool.
+- **Disability Calculation:** Use the `calculate_disability_pay` tool whenever a user provides
+  salary and/or duration of leave to ask for a specific personalized payout. Do not calculate
+  it manually or rely on the lookup tool for personalized amounts.
 
-## Out-of-Scope Handling & Deflections
-- **HR Deflection**: Only suggest contacting HR after `lookup_company_policy` returns
-  nothing for an HR/policy topic.
-- **IT Support**: Direct technical, password, or hardware issues to IT Support, not HR.
-- **Unrelated Topics**: If a request is completely unrelated to company policy or benefits
-  (writing code, general trivia), state that you cannot assist. Do not suggest HR.
+## Rules & Response Guidelines
+- **Policy Maximums:** If a user asks about a quantity that exceeds a stated policy maximum
+  (e.g., 4 days of remote work when the limit is "up to 3"), state it is not allowed because
+  it exceeds the limit. Do not treat it as an unknown topic and do not deflect to HR.
+- **Proactive Details:** When answering about a specific policy, proactively include related
+  details (accrual rates, rollover limits) for a complete answer.
+
+## Out of Scope Handling
+- **HR Deflection:** Only suggest contacting HR after `lookup_company_policy` confirms the
+  information is unavailable for an HR topic.
+- **IT Issues:** For non-HR topics (Wi-Fi, hardware, software), clarify you only handle HR
+  policies and suggest IT Support, not HR.
 ```
 
-This is the skill the **tool-aware, scope-aware** analysts produced: all 53 patches
-passed the quality gate. The engine learned a *routing* decision (lookup for facts,
-calculator for personalized math) **and** an out-of-scope policy -- not just "use the
-tool." (Previously, single-tool deflection failures even returned NO_PATCH because the
-analysts couldn't see a tool existed.)
+This is the skill the **tool-aware, scope-aware** analysts produced: all 52 patches passed the
+quality gate. The engine learned a *routing* decision (lookup for facts, calculator for
+personalized math), a policy-maximum rule, **and** an out-of-scope policy -- not just "use the
+tool." (Previously, single-tool deflection failures even returned NO_PATCH because the analysts
+couldn't see a tool existed.)
 
-## Before / after (a tool-selection case)
+## Before / after (a lookup case)
 
 ```text
-Q: "I earn $52,000. What's my total short-term disability payout if I'm out 4 weeks?"
+Q: "If I leave the company mid-year, what happens to my unused PTO?"
 
-V0:  category=unhelpful   (never calls the calculator)
-  "I do not have information regarding short-term disability payouts. Please
-   contact HR for assistance with this topic."
+V0:  category=unhelpful   (no tool call)
+  "I do not have information regarding what happens to unused PTO if you leave the
+   company mid-year. Please contact HR for assistance."
 
-V1:  category=meaningful  (calls calculate_disability_pay)
-  "Based on your $52,000 salary and a 4-week absence -- Weekly Benefit: $600 (60%
-   of salary); Total Payout: $2,400 (within the 12-week cap)."
+V1:  category=meaningful  (calls lookup_company_policy)
+  "If you leave the company mid-year, any unused accrued PTO will be paid out to you
+   in your final paycheck."
 ```
 
 ## Reproduce (tested)
