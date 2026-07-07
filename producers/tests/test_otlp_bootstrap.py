@@ -154,6 +154,18 @@ def test_bootstrap_traces_signal_enables_spans_everywhere(tmp_path):
   assert "BQAA_OTLP_ENABLE_TRACES=1" in consumer
 
 
+def test_consumer_gunicorn_args_use_factory_call_syntax(tmp_path):
+  # '--factory' is a uvicorn flag, not gunicorn: the consumer container
+  # exits 2 on startup with "unrecognized arguments: --factory" (hit live
+  # during the #324 e2e — first real Cloud Run deploy of this image).
+  # gunicorn >= 20.1 calls factories via the 'module:callable()' syntax.
+  r = FakeRunner()
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  consumer = " ".join(r.find("run deploy", "consumer")[0][0])
+  assert "--factory" not in consumer
+  assert "make_push_app_from_env()" in consumer
+
+
 def test_bootstrap_default_signals_keep_traces_off(tmp_path):
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
@@ -359,6 +371,23 @@ def test_find_merge_config_survives_garbage_listing():
       )
       is None
   )
+
+
+def test_bootstrap_rejects_non_identifier_project_and_dataset(tmp_path):
+  # project/dataset feed backtick-quoted SQL identifiers (DDL, the DCL
+  # GRANT, the scheduled MERGE) run under admin credentials: a
+  # backtick-bearing value breaks out of the quoting and appends SQL.
+  import pytest
+
+  with pytest.raises(ValueError, match="dataset"):
+    _settings(tmp_path, dataset="ds` ; DROP TABLE x;--")
+  with pytest.raises(ValueError, match="project"):
+    _settings(tmp_path, project="p`.hax")
+  # Legitimate ids pass, incl. legacy domain-scoped projects.
+  ok = _settings(
+      tmp_path, project="domain.com:my-proj-1", dataset="agent_analytics_2"
+  )
+  assert ok.dataset == "agent_analytics_2"
 
 
 def test_bootstrap_rejects_unknown_or_empty_sources(tmp_path):

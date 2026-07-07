@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+import re
 import secrets as _secrets
 import shlex
 import subprocess
@@ -69,9 +70,12 @@ _APIS = (
     "iam.googleapis.com",
 )
 
+# gunicorn calls app factories via the 'module:callable()' syntax;
+# '--factory' is a uvicorn flag and makes the container exit 2 on startup
+# (hit live during the #324 e2e — first real Cloud Run deploy).
 _CONSUMER_GUNICORN_ARGS = (
-    "--factory,--bind,0.0.0.0:8080,--workers,2,--threads,8,"
-    "bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env"
+    "--bind,0.0.0.0:8080,--workers,2,--threads,8,"
+    "bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env()"
 )
 
 
@@ -187,6 +191,14 @@ class BootstrapSettings:
     # Reuse the PR 1 tier validation (privacy/signals/replay ack) so the
     # gate can't drift between `config` and `bootstrap`.
     self._spec("<pending-deploy>")
+    # Both feed backtick-quoted SQL identifiers (DDL, the DCL GRANT, the
+    # scheduled MERGE) run under admin credentials: a backtick-bearing
+    # value breaks out of the quoting and appends arbitrary SQL. Same
+    # validation as VerifySettings.
+    if not re.fullmatch(r"[a-z0-9.:-]+", self.project, re.IGNORECASE):
+      raise ValueError(f"invalid GCP project id {self.project!r}")
+    if not re.fullmatch(r"\w+", self.dataset, re.ASCII):
+      raise ValueError(f"invalid BigQuery dataset id {self.dataset!r}")
     if not self.sources:
       raise ValueError(
           "at least one telemetry source is required; expected one of"
