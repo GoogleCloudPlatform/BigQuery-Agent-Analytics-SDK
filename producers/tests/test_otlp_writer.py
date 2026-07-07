@@ -625,3 +625,42 @@ def test_span_envelope_dropped_without_traces_tier():
   w = FakeWriter()
   assert writer.append_envelope(_span_envelope(), w) == ""
   assert w.rows == []
+
+
+# --------------------------------------------------------------------------
+# Enum-name normalization (#317 live e2e: real protobuf exports DLQ'd)
+# --------------------------------------------------------------------------
+
+
+def test_log_severity_number_accepts_protobuf_enum_names():
+  # Codex sends severityNumber as the enum NAME ("SEVERITY_NUMBER_INFO");
+  # _int() crashed on it and every real Codex log envelope dead-lettered.
+  envelope = _log_envelope()
+  envelope["record"]["severityNumber"] = "SEVERITY_NUMBER_INFO"
+  assert writer.log_row(envelope)["severity_number"] == 9
+  envelope["record"]["severityNumber"] = "SEVERITY_NUMBER_ERROR"
+  assert writer.log_row(envelope)["severity_number"] == 17
+  envelope["record"]["severityNumber"] = 13  # int passthrough
+  assert writer.log_row(envelope)["severity_number"] == 13
+  envelope["record"]["severityNumber"] = "SEVERITY_NUMBER_SOMETHING_NEW"
+  assert writer.log_row(envelope)["severity_number"] is None  # never crash
+
+
+def test_metric_temporality_accepts_protobuf_enum_names():
+  # Real Claude Code metric exports carry aggregationTemporality as
+  # "AGGREGATION_TEMPORALITY_DELTA"; the column is INTEGER, so every real
+  # metric row failed the BigQuery insert and dead-lettered — synthetic
+  # test payloads used ints and masked it.
+  envelope = _metric_envelope("sum")
+  envelope["record"][
+      "aggregation_temporality"
+  ] = "AGGREGATION_TEMPORALITY_DELTA"
+  assert writer.metric_row(envelope)["aggregation_temporality"] == 1
+  envelope["record"][
+      "aggregation_temporality"
+  ] = "AGGREGATION_TEMPORALITY_CUMULATIVE"
+  assert writer.metric_row(envelope)["aggregation_temporality"] == 2
+  envelope["record"]["aggregation_temporality"] = 2  # int passthrough
+  assert writer.metric_row(envelope)["aggregation_temporality"] == 2
+  envelope["record"]["aggregation_temporality"] = None
+  assert writer.metric_row(envelope)["aggregation_temporality"] is None

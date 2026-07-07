@@ -134,20 +134,23 @@ def codex_config_toml(spec: BootstrapSpec) -> str:
         "# no supported raw request/response body path, so prompt capture",
         "# stays off.",
     ]
+  exporter = (
+      "{ otlp-http = { "
+      f'endpoint = "{spec.endpoint}/v1/logs", protocol = "binary", '
+      'headers = { "Authorization" = "Bearer ${BQAA_OTLP_TOKEN}" } } }'
+  )
   lines += [
       "[otel]",
       'environment = "prod"',
-      'exporter = "otlp-http"',
+      "# Inline-table exporter shape verified against real codex 0.142.5",
+      "# (#317 e2e); the string+section form is invalid TOML.",
+      f"exporter = {exporter}",
       '# PENDING #317: metrics_exporter/trace_exporter stay "none" until the',
-      "# version-specific Codex config shape is pinned and verified.",
+      "# version-pinned fixtures land (shapes verified live, same inline",
+      "# form with /v1/metrics and /v1/traces endpoints).",
       'metrics_exporter = "none"',
       'trace_exporter = "none"',
       "log_user_prompt = false",
-      "",
-      '[otel.exporter."otlp-http"]',
-      f'endpoint = "{spec.endpoint}/v1/logs"',
-      'protocol = "binary"',
-      'headers = { "Authorization" = "Bearer ${BQAA_OTLP_TOKEN}" }',
   ]
   return "\n".join(lines) + "\n"
 

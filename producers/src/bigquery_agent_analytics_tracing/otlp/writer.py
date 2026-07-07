@@ -119,6 +119,38 @@ def _enum_name(value: Any, names: dict[int, str]) -> str | None:
   return str(value)
 
 
+# The reverse direction, for INTEGER columns: protobuf MessageToDict emits
+# enum NAMES ("SEVERITY_NUMBER_INFO", "AGGREGATION_TEMPORALITY_DELTA") where
+# OTLP/JSON carries ints. Found live in the #317 e2e: every real metric
+# export and every Codex log envelope dead-lettered on these two fields.
+_SEVERITY_NUMBER_VALUES = {"SEVERITY_NUMBER_UNSPECIFIED": 0} | {
+    f"SEVERITY_NUMBER_{level}{n if n > 1 else ''}": base + n - 1
+    for base, level in (
+        (1, "TRACE"),
+        (5, "DEBUG"),
+        (9, "INFO"),
+        (13, "WARN"),
+        (17, "ERROR"),
+        (21, "FATAL"),
+    )
+    for n in (1, 2, 3, 4)
+}
+_AGGREGATION_TEMPORALITY_VALUES = {
+    "AGGREGATION_TEMPORALITY_UNSPECIFIED": 0,
+    "AGGREGATION_TEMPORALITY_DELTA": 1,
+    "AGGREGATION_TEMPORALITY_CUMULATIVE": 2,
+}
+
+
+def _enum_int(value: Any, values: dict[str, int]) -> int | None:
+  """Int for an INTEGER column from either enum encoding; never raises."""
+  if value in (None, ""):
+    return None
+  if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+    return int(value)
+  return values.get(str(value))
+
+
 def _receiver_metadata_row(envelope: dict[str, Any]) -> dict[str, Any]:
   return {
       "source_product": envelope["source"]["product"],
@@ -163,7 +195,9 @@ def log_row(envelope: dict[str, Any]) -> dict[str, Any]:
       "span_id": record.get("spanId"),
       "trace_flags": _int(record.get("flags")),
       "severity_text": record.get("severityText"),
-      "severity_number": _int(record.get("severityNumber")),
+      "severity_number": _enum_int(
+          record.get("severityNumber"), _SEVERITY_NUMBER_VALUES
+      ),
       "service_name": resource.get("service.name"),
       "body": _json(record.get("body")),
       "resource_attributes": _json(resource),
@@ -274,7 +308,9 @@ def metric_row(envelope: dict[str, Any]) -> dict[str, Any]:
   point = record["point"]
   kind = record["point_kind"]
   row = _metric_common_row(envelope)
-  temporality = record.get("aggregation_temporality")
+  temporality = _enum_int(
+      record.get("aggregation_temporality"), _AGGREGATION_TEMPORALITY_VALUES
+  )
   if kind in ("sum", "gauge"):
     row["value"] = _num(point)
     row["exemplars"] = _exemplars_rows(point)

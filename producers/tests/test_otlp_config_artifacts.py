@@ -160,22 +160,33 @@ def test_claude_resource_attributes_rendered_as_kv_pairs():
 # --------------------------------------------------------------------------
 
 
-def test_codex_baseline_matches_issue_324_contract():
+def test_codex_config_is_valid_toml_in_the_verified_shape():
+  # The old template mixed 'exporter = "otlp-http"' (string) with an
+  # [otel.exporter."otlp-http"] table — invalid TOML that never parsed.
+  # The verified shape (real codex 0.142.5, #317 e2e) is the inline table.
+  import tomllib
+
   toml = ca.codex_config_toml(_spec())
-  assert 'exporter = "otlp-http"' in toml
-  assert 'metrics_exporter = "none"' in toml  # gated on #317
-  assert 'trace_exporter = "none"' in toml
-  assert "log_user_prompt = false" in toml
-  assert f'endpoint = "{_ENDPOINT}/v1/logs"' in toml
-  assert 'protocol = "binary"' in toml
-  assert '"Authorization" = "Bearer ${BQAA_OTLP_TOKEN}"' in toml
+  parsed = tomllib.loads(toml)
+  otel = parsed["otel"]
+  assert otel["exporter"]["otlp-http"]["endpoint"] == f"{_ENDPOINT}/v1/logs"
+  assert otel["exporter"]["otlp-http"]["protocol"] == "binary"
+  assert (
+      otel["exporter"]["otlp-http"]["headers"]["Authorization"]
+      == "Bearer ${BQAA_OTLP_TOKEN}"
+  )
+  assert otel["metrics_exporter"] == "none"  # gated on #317 fixtures PR
+  assert otel["trace_exporter"] == "none"
+  assert otel["log_user_prompt"] is False
 
 
 def test_codex_metrics_stay_gated_pending_317():
   # Metrics stay off with a pointer at the gate even when metrics is a
   # selected signal — the config shape is verified per Codex version in #317.
+  import tomllib
+
   toml = ca.codex_config_toml(_spec(signals=("logs", "metrics")))
-  assert 'metrics_exporter = "none"' in toml
+  assert tomllib.loads(toml)["otel"]["metrics_exporter"] == "none"
   assert "#317" in toml
 
 
