@@ -436,7 +436,7 @@ def run_bootstrap(
           "roles/pubsub.publisher",
       ]
   )
-  # jobUser needs project scope (query jobs), but dataEditor is scoped to
+  # jobUser needs project scope (query jobs), but write access is scoped to
   # the target dataset: a project-wide grant would let a compromised
   # consumer SA modify every dataset in the project.
   runner.run(
@@ -451,16 +451,19 @@ def run_bootstrap(
           "roles/bigquery.jobUser",
       ]
   )
+  # Dataset-scoped write access via GA BigQuery DCL, piped over the same
+  # bq query stdin path the DDL uses. The obvious alternatives both fail
+  # live: `bq add-iam-policy-binding --dataset` needs an allowlisted
+  # preview API ("This feature requires allowlisting"), and `bq update
+  # --source /dev/stdin` rejects stdin ("Source path is not a file" — bq
+  # requires a regular file). GRANT is idempotent, so re-runs converge.
   runner.run(
-      [
-          "bq",
-          f"--project_id={s.project}",
-          "add-iam-policy-binding",
-          "--dataset",
-          f"--member=serviceAccount:{consumer_sa}",
-          "--role=roles/bigquery.dataEditor",
-          f"{s.project}:{s.dataset}",
-      ]
+      [*bq, "query", "--use_legacy_sql=false"],
+      input_text=(
+          "GRANT `roles/bigquery.dataEditor` ON SCHEMA"
+          f" `{s.project}.{s.dataset}`"
+          f' TO "serviceAccount:{consumer_sa}";'
+      ),
   )
   runner.run(
       [

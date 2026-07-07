@@ -125,7 +125,12 @@ def test_bootstrap_runs_the_full_deploy_sequence(tmp_path):
 def test_bootstrap_creates_schema_from_ddl_module(tmp_path):
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
-  [(argv, ddl_sql)] = r.find("bq", "query", "--use_legacy_sql=false")
+  ddl_calls = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and "CREATE TABLE" in inp
+  ]
+  [ddl_sql] = ddl_calls
   assert "CREATE TABLE IF NOT EXISTS `agent_analytics.otel_logs`" in ddl_sql
   assert "otel_spans" not in ddl_sql  # spans gated off by default
 
@@ -137,7 +142,11 @@ def test_bootstrap_traces_signal_enables_spans_everywhere(tmp_path):
       r,
       echo=lambda *_: None,
   )
-  [(_, ddl_sql)] = r.find("bq", "query", "--use_legacy_sql=false")
+  [ddl_sql] = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and "CREATE TABLE" in inp
+  ]
   assert "otel_spans" in ddl_sql
   receiver = " ".join(r.find("run deploy", "receiver")[0][0])
   consumer = " ".join(r.find("run deploy", "consumer")[0][0])
@@ -291,24 +300,31 @@ def test_bootstrap_creates_dlq_retention_subscription(tmp_path):
 
 
 def test_bootstrap_scopes_data_editor_to_the_dataset(tmp_path):
-  # jobUser needs project scope, but dataEditor must be dataset-scoped: a
+  # jobUser needs project scope, but write access must be dataset-scoped: a
   # project-wide grant lets a compromised consumer SA modify every dataset
-  # in the project.
+  # in the project. The GA mechanism is a WRITER entry in the dataset access
+  # list — `bq add-iam-policy-binding --dataset` requires allowlisting and
+  # fails on normal projects (hit live during the #324 e2e).
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
   sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
-  # No project-level dataEditor grant.
+  # No project-level dataEditor grant, no allowlisted preview API.
   assert not r.find("gcloud projects add-iam-policy-binding", "dataEditor")
+  assert not r.find("add-iam-policy-binding", "--dataset")
   # jobUser stays project-level.
   [(job_argv, _)] = r.find("gcloud projects add-iam-policy-binding", "jobUser")
   assert f"serviceAccount:{sa}" in " ".join(job_argv)
-  # dataEditor lands on the dataset via bq add-iam-policy-binding.
-  [(argv, _)] = r.find("add-iam-policy-binding", "dataEditor")
-  joined = " ".join(argv)
-  assert joined.startswith("bq ")
-  assert "--dataset" in argv
-  assert f"--member=serviceAccount:{sa}" in argv
-  assert "my-proj:agent_analytics" in argv
+  # dataEditor lands via GA BigQuery DCL (GRANT is idempotent), piped over
+  # the same bq query stdin path the DDL uses ('bq update --source
+  # /dev/stdin' fails too: bq requires a regular file, stdin is a pipe).
+  [grant_sql] = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and inp.lstrip().startswith("GRANT")
+  ]
+  assert "`roles/bigquery.dataEditor`" in grant_sql
+  assert "ON SCHEMA `my-proj.agent_analytics`" in grant_sql
+  assert f'"serviceAccount:{sa}"' in grant_sql
 
 
 def test_bootstrap_dlq_subscription_failure_is_not_swallowed(tmp_path):
