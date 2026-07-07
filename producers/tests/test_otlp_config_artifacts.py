@@ -164,7 +164,10 @@ def test_codex_config_is_valid_toml_in_the_verified_shape():
   # The old template mixed 'exporter = "otlp-http"' (string) with an
   # [otel.exporter."otlp-http"] table — invalid TOML that never parsed.
   # The verified shape (real codex 0.142.5, #317 e2e) is the inline table.
-  import tomllib
+  try:
+    import tomllib
+  except ImportError:  # Python < 3.11 — the dev extra ships tomli
+    import tomli as tomllib
 
   toml = ca.codex_config_toml(_spec())
   parsed = tomllib.loads(toml)
@@ -183,7 +186,10 @@ def test_codex_config_is_valid_toml_in_the_verified_shape():
 def test_codex_metrics_stay_gated_pending_317():
   # Metrics stay off with a pointer at the gate even when metrics is a
   # selected signal — the config shape is verified per Codex version in #317.
-  import tomllib
+  try:
+    import tomllib
+  except ImportError:  # Python < 3.11 — the dev extra ships tomli
+    import tomli as tomllib
 
   toml = ca.codex_config_toml(_spec(signals=("logs", "metrics")))
   assert tomllib.loads(toml)["otel"]["metrics_exporter"] == "none"
