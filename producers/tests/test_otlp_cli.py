@@ -544,7 +544,15 @@ def test_verify_rejects_schemeless_endpoint(monkeypatch, capsys):
 def test_verify_malformed_ipv6_endpoint_exits_cleanly(monkeypatch, capsys):
   monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
   rc = _run(
-      ["verify", "--endpoint", "http://[::1", "--project", "p", "--dataset", "d"]
+      [
+          "verify",
+          "--endpoint",
+          "http://[::1",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+      ]
   )
   assert rc == 2
   assert "endpoint" in capsys.readouterr().err.lower()
