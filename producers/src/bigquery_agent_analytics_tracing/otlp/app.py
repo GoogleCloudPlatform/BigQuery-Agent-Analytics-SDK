@@ -14,9 +14,10 @@
 
 """WSGI entrypoint for the OTLP receiver on Cloud Run (issue #316, PR 3).
 
-Deploy with gunicorn using the app factory::
+Deploy with gunicorn using the factory-call syntax (``--factory`` is a
+uvicorn flag; gunicorn calls factories via ``module:callable()``)::
 
-    gunicorn --factory bigquery_agent_analytics_tracing.otlp.app:make_app
+    gunicorn 'bigquery_agent_analytics_tracing.otlp.app:make_app()'
 
 Config comes from environment variables; the real Pub/Sub publisher is
 lazy-constructed (needs the ``receiver`` extra). The request logic lives in

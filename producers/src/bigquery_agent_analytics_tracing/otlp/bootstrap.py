@@ -563,8 +563,10 @@ def run_bootstrap(
           consumer_sa,
           "--command",
           "gunicorn",
-          "--args",
-          _CONSUMER_GUNICORN_ARGS,
+          # Single-token --args=... form: gcloud argparse treats a
+          # space-separated value that begins with '-' as another flag
+          # ("--args: expected one argument").
+          f"--args={_CONSUMER_GUNICORN_ARGS}",
           "--set-env-vars",
           f"BQAA_PROJECT={s.project},BQAA_DATASET={s.dataset},"
           f"BQAA_OTLP_ENABLE_TRACES={spans}",

@@ -161,9 +161,15 @@ def test_consumer_gunicorn_args_use_factory_call_syntax(tmp_path):
   # gunicorn >= 20.1 calls factories via the 'module:callable()' syntax.
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
-  consumer = " ".join(r.find("run deploy", "consumer")[0][0])
+  argv = r.find("run deploy", "consumer")[0][0]
+  consumer = " ".join(argv)
   assert "--factory" not in consumer
-  assert "make_push_app_from_env()" in consumer
+  # gcloud argparse treats a space-separated --args value that begins with
+  # '-' as another flag ("--args: expected one argument"); it must be the
+  # single-token --args=... form.
+  [args_token] = [a for a in argv if a.startswith("--args")]
+  assert args_token.startswith("--args=--bind")
+  assert args_token.endswith("make_push_app_from_env()")
 
 
 def test_bootstrap_default_signals_keep_traces_off(tmp_path):
