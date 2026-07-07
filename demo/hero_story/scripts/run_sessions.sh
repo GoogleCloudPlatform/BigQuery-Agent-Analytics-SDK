@@ -17,6 +17,20 @@ EVIDENCE_DIR="${EVIDENCE_DIR:-$HERE/evidence}"
 DEMO_RUN_ID="${DEMO_RUN_ID:-hero$(date +%Y%m%d%H%M%S)}"
 TEAM="${TEAM:-platform}"
 COST_CENTER="${COST_CENTER:-demo-001}"
+
+# Same identifier rules as the product CLI: these values are interpolated
+# into BigQuery SQL identifiers below.
+python3 -c "
+import re, sys
+project, dataset, run_id = sys.argv[1], sys.argv[2], sys.argv[3]
+if not re.fullmatch(r'[a-z0-9.:-]+', project, re.IGNORECASE):
+    sys.exit('invalid GCP project id %r' % project)
+if not re.fullmatch(r'\\w+', dataset, re.ASCII):
+    sys.exit('invalid BigQuery dataset id %r' % dataset)
+if not re.fullmatch(r'\\w+', run_id, re.ASCII):
+    sys.exit('invalid DEMO_RUN_ID %r (word characters only)' % run_id)
+" "$PROJECT" "$DATASET" "$DEMO_RUN_ID" || exit 2
+
 # The exact scripted prompts — sql/05 searches for these strings verbatim.
 CLAUDE_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams."
 CODEX_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams (codex)."

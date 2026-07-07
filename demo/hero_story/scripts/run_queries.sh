@@ -14,6 +14,20 @@ RUN_ID="${1:-$(cat "$EVIDENCE_DIR/DEMO_RUN_ID" 2>/dev/null || true)}"
 WINDOW="${2:-24}"
 [ -n "$RUN_ID" ] || { echo "usage: run_queries.sh <DEMO_RUN_ID> — none given and evidence/DEMO_RUN_ID missing"; exit 2; }
 
+# Same identifier rules as the product CLI: these values are interpolated
+# into BigQuery SQL identifiers below.
+python3 -c "
+import re, sys
+project, dataset, run_id = sys.argv[1], sys.argv[2], sys.argv[3]
+if not re.fullmatch(r'[a-z0-9.:-]+', project, re.IGNORECASE):
+    sys.exit('invalid GCP project id %r' % project)
+if not re.fullmatch(r'\\w+', dataset, re.ASCII):
+    sys.exit('invalid BigQuery dataset id %r' % dataset)
+if not re.fullmatch(r'\\w+', run_id, re.ASCII):
+    sys.exit('invalid DEMO_RUN_ID %r (word characters only)' % run_id)
+" "$PROJECT" "$DATASET" "$RUN_ID" || exit 2
+
+
 # The exact scripted prompt (sql/05 searches for it verbatim); keep in sync
 # with run_sessions.sh.
 SCRIPTED_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams."
