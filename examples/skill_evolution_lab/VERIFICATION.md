@@ -53,7 +53,7 @@ instead of caving. Out-of-scope is the honest edge case: V0 already scores well 
 question), and V1 learns to decline those **deliberately** (routing IT questions to IT,
 refusing unrelated ones) rather than by reflex.
 
-## Across four models × 3 seeds (held-out, golden-graded)
+## Across four models × 3 runs (held-out, golden-graded)
 
 Correctness and grounding as **mean [min–max]** over 3 runs each (analyst + judge
 fixed), on the current **multi-tool** demo. (This sweep predates the out-of-scope
@@ -93,7 +93,7 @@ Selected median-size candidate (2230 chars)
 
 No `score_fn` was used; the engine returns the median-size viable candidate and
 the held-out re-score is the proof. Run with a `score_fn` for best-of-N
-selection (and to gate out unlucky candidates like the flash-lite seed above).
+selection (and to gate out unlucky candidates like the flash-lite run above).
 
 ## The evolved V1 skill (675B → 2.2KB, gemini-3.5-flash)
 
@@ -160,15 +160,15 @@ cd examples/skill_evolution_lab
 ./setup.sh YOUR_PROJECT_ID us-central1   # ~5s
 ./run_e2e_demo.sh                        # one model, ~15-18 min (first run also does a one-time uv sync)
 
-# Reproduce the whole multi-model table (4 models x 3 seeds, ~3-4 h).
+# Reproduce the whole multi-model table (4 models x 3 runs, ~3-4 h).
 # Self-logs to runs/SWEEP_<ts>.log, so it can be detached and read later:
 nohup ./run_sweep.sh >/dev/null 2>&1 &   # background; survives logout
 tail -f runs/SWEEP_*.log                 # live progress
 cat  runs/SWEEP_*.md                      # final mean [range] table when done
 ```
 
-The four-model × 3-seed table above is produced by `run_sweep.sh` (which loops
-`run_e2e_demo.sh` over `AGENT_MODEL` and seeds, then calls `aggregate_sweep.py`).
+The four-model × 3-run table above is produced by `run_sweep.sh` (which loops
+`run_e2e_demo.sh` over `AGENT_MODEL` and repetitions, then calls `aggregate_sweep.py`).
 The V0 skill is auto-restored after each run. Exact numbers vary run-to-run (LLM
 nondeterminism, stochastic consolidation) — which is why the table reports ranges
 — but the direction is stable: the flawed V0 defers/declines on topics it has a

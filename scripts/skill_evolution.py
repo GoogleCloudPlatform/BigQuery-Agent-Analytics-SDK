@@ -265,6 +265,10 @@ def _format_tool_calls(session: dict) -> str:
     return ""
   detail = session.get("tool_calls_detail") or []
   if not detail:
+    # Empty detail but a nonzero count means calls happened yet weren't captured
+    # (e.g. a BigQuery-path session) -- say nothing rather than a false "(none)".
+    if session.get("tool_calls"):
+      return ""
     return "Tool calls: (none)\n"
   lines = ["Tool calls:"]
   for call in detail:
@@ -985,6 +989,14 @@ def _main():
       ap.error(f"--eval-spec not found: {args.eval_spec}")
     with open(args.eval_spec) as f:
       tools = (json.load(f) or {}).get("tools") or tools
+  if args.eval_spec and not tools:
+    # Library CLI stays lenient (runs without tool awareness) but warns; the
+    # lab wrapper (analyze_and_evolve.py) fail-fasts on the same condition.
+    logging.warning(
+        "--eval-spec %s has no `tools` field; analysts will run WITHOUT tool"
+        " awareness.",
+        args.eval_spec,
+    )
 
   logging.basicConfig(
       level=logging.INFO,

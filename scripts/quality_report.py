@@ -1201,11 +1201,14 @@ async def _build_resolved_map_from_conversations(
         "latency_s": conv.get("latency_s"),
         "user_turns": entry["user_turns"],
         "tool_calls": entry["tool_calls"],
-        "tool_calls_detail": conv.get("tool_calls_detail", []),
         "corrections": entry["corrections"],
         "verifications": entry["verifications"],
         "conversation": entry["turns"],
     }
+    # Carry structured tool detail only when the conversation actually has it,
+    # so a legacy conversations file (no such field) stays truthfully "absent".
+    if "tool_calls_detail" in conv:
+      resolved_entry["tool_calls_detail"] = conv["tool_calls_detail"]
     if tag_turns:
       resolved_entry["turn_tags"] = entry.get("turn_tags", [])
       resolved_entry["correction_boundaries"] = entry.get(
@@ -3889,12 +3892,17 @@ def _build_json_output(report, resolved_map, trajectories=None):
         "latency_s": ctx.get("latency_s"),
         "user_turns": ctx.get("user_turns", 0),
         "tool_calls": ctx.get("tool_calls", 0),
-        "tool_calls_detail": ctx.get("tool_calls_detail", []),
         "corrections": ctx.get("corrections", 0),
         "verifications": ctx.get("verifications", 0),
         "metrics": metrics,
         "quality_scores": quality_scores,
     }
+    # Only emit structured tool detail when it was actually captured (the
+    # conversations path records it; the BigQuery/trace path does not). Keeping
+    # key-absence truthful lets consumers tell "not captured" from "no calls"
+    # instead of rendering a false "(none)" for a BQ session that used tools.
+    if "tool_calls_detail" in ctx:
+      session_dict["tool_calls_detail"] = ctx["tool_calls_detail"]
     conversation = ctx.get("conversation", [])
     if conversation:
       turn_tags = ctx.get("turn_tags", [])

@@ -165,6 +165,19 @@ def test_format_omits_tool_calls_for_legacy_sessions():
   assert "Tool calls" not in format_trajectory(s)
 
 
+def test_format_says_nothing_when_calls_happened_but_detail_missing():
+  # BQ-path: tool_calls counted from trace spans, no structured detail. Must NOT
+  # render a false "(none)" -- say nothing instead.
+  s = _session(
+      "unhelpful",
+      question="q",
+      response="r",
+      tool_calls_detail=[],
+      tool_calls=3,
+  )
+  assert "Tool calls" not in format_trajectory(s)
+
+
 # --- passes_quality_gate ----------------------------------------------------
 
 

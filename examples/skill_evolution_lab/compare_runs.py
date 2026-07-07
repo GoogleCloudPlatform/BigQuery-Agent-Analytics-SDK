@@ -249,9 +249,13 @@ def main():
           indent=2,
       )
 
-  if args.gate and v1["overall"]["rate"] < v0["overall"]["rate"]:
+  # Require V1 to *beat* V0 (a tie is not "better"), so a zero-gain V1 never
+  # mints a new immutable registry revision. Note: this gates on the OVERALL
+  # rate only -- a V1 that gains overall while regressing on a slice still
+  # passes (acceptable for the demo; call it out if you productionize).
+  if args.gate and v1["overall"]["rate"] <= v0["overall"]["rate"]:
     print(
-        f"GATE: V1 overall {v1['overall']['rate']}% < V0"
+        f"GATE: V1 overall {v1['overall']['rate']}% <= V0"
         f" {v0['overall']['rate']}% -- V1 should not be kept.",
         file=sys.stderr,
     )
