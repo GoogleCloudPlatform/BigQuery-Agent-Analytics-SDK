@@ -28,6 +28,7 @@ gated behind the traces signal tier (``BQAA_OTLP_ENABLE_TRACES``).
 from __future__ import annotations
 
 import base64
+import binascii
 from typing import Any
 
 from bigquery_agent_analytics_tracing.otlp import envelope as env
@@ -105,6 +106,49 @@ def decode_logs_request(
   return envelopes
 
 
+def _canonical_hex_id(value: Any, nbytes: int) -> Any:
+  """Normalize a trace/span id to canonical lowercase hex.
+
+  OTLP/JSON carries ids as hex, but ``MessageToDict`` on the protobuf path
+  base64-encodes ``bytes`` fields — without normalization the same span
+  gets two different idempotency keys and the ``trace_id`` cluster column
+  mixes encodings across transports. Unrecognized shapes pass through
+  untouched (identity validation happens downstream).
+  """
+  if not value or not isinstance(value, str):
+    return value
+  if len(value) == nbytes * 2:
+    try:
+      bytes.fromhex(value)
+      return value.lower()
+    except ValueError:
+      pass
+  try:
+    raw = base64.b64decode(value, validate=True)
+    if len(raw) == nbytes:
+      return raw.hex()
+  except (ValueError, binascii.Error):
+    pass
+  return value
+
+
+def _normalize_span_ids(span: dict[str, Any]) -> dict[str, Any]:
+  span = dict(span)
+  for key, nbytes in (("traceId", 16), ("spanId", 8), ("parentSpanId", 8)):
+    if key in span:
+      span[key] = _canonical_hex_id(span[key], nbytes)
+  if span.get("links"):
+    span["links"] = [
+        {
+            **link,
+            "traceId": _canonical_hex_id(link.get("traceId"), 16),
+            "spanId": _canonical_hex_id(link.get("spanId"), 8),
+        }
+        for link in span["links"]
+    ]
+  return span
+
+
 def decode_traces_request(
     request: dict[str, Any],
     *,
@@ -114,9 +158,10 @@ def decode_traces_request(
 ) -> list[dict[str, Any]]:
   """Decode an ``ExportTraceServiceRequest`` into span envelopes.
 
-  Spans carry a natural idempotency key (``trace_id + span_id``); a span
-  missing that identity becomes a dead letter. ``raw_request`` is the
-  original wire payload (see ``decode_logs_request``).
+  Spans carry a natural idempotency key (``trace_id + span_id``, normalized
+  to canonical lowercase hex — see ``_canonical_hex_id``); a span missing
+  that identity becomes a dead letter. ``raw_request`` is the original wire
+  payload (see ``decode_logs_request``).
   """
   raw_hash = env.request_hash(raw_request)
   raw_b64 = base64.b64encode(raw_request).decode("ascii")
@@ -130,6 +175,7 @@ def decode_traces_request(
       for k, span in enumerate(scope_spans.get("spans", [])):
         position = env.SourcePosition(raw_hash, i, j, record_index=k)
         try:
+          span = _normalize_span_ids(span)
           trace_id = span.get("traceId") or ""
           span_id = span.get("spanId") or ""
           if not trace_id or not span_id:

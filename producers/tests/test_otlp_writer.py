@@ -593,3 +593,35 @@ def test_span_defaults_missing_start_time_to_ingest_time():
   del envelope["record"]["startTimeUnixNano"]
   row = writer.span_row(envelope)
   assert row["timestamp"] == "2026-06-29T00:00:00Z"
+
+
+def test_span_kind_and_status_ints_normalize_to_enum_names():
+  # OTLP/JSON encodes enums as ints; protobuf MessageToDict emits names.
+  # Both must land the same canonical STRING or filters silently miss rows.
+  envelope = _span_envelope()
+  envelope["record"]["kind"] = 2
+  envelope["record"]["status"] = {"code": 1}
+  row = writer.span_row(envelope)
+  assert row["span_kind"] == "SPAN_KIND_SERVER"
+  assert row["status_code"] == "STATUS_CODE_OK"
+  envelope["record"]["kind"] = 99  # unknown: passthrough, never crash
+  assert writer.span_row(envelope)["span_kind"] == "99"
+
+
+def test_minimal_span_row_defaults():
+  envelope = _span_envelope()
+  for key in ("kind", "status", "endTimeUnixNano", "events", "links"):
+    envelope["record"].pop(key, None)
+  envelope["otlp"]["scope"] = None
+  row = writer.span_row(envelope)
+  assert row["span_kind"] is None
+  assert row["status_code"] is None
+  assert row["end_timestamp"] is None
+  assert row["events"] == [] and row["links"] == []
+  assert row["scope_name"] is None
+
+
+def test_span_envelope_dropped_without_traces_tier():
+  w = FakeWriter()
+  assert writer.append_envelope(_span_envelope(), w) == ""
+  assert w.rows == []

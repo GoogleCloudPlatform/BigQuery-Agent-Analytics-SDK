@@ -208,7 +208,9 @@ def handle_export(
   except Exception as exc:  # noqa: BLE001 - malformed request -> dead letter
     dead_letter = env.dead_letter_envelope(
         source_product=config.source_product,
-        source_signal=signal,
+        # Success envelopes and per-span dead letters use "span"; the
+        # whole-request path must match or DLQ triage filters miss one side.
+        source_signal="span" if signal == "trace" else signal,
         stage="otlp_decode",
         reason=repr(exc),
         raw_b64=base64.b64encode(body).decode("ascii"),

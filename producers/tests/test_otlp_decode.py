@@ -452,3 +452,45 @@ def test_two_spans_get_distinct_keys_and_positions():
       envelopes[0]["source_position"]["record_index"]
       != envelopes[1]["source_position"]["record_index"]
   )
+
+
+def test_protobuf_base64_ids_normalize_to_canonical_hex():
+  # MessageToDict base64-encodes bytes fields, while OTLP/JSON carries hex:
+  # without normalization the same span gets two different idempotency keys
+  # and the trace_id cluster column mixes encodings across transports.
+  import base64
+
+  trace_hex = "0123456789abcdef0123456789abcdef"
+  span_hex = "0123456789abcdef"
+  parent_hex = "fedcba9876543210"
+  b64 = lambda h: base64.b64encode(bytes.fromhex(h)).decode("ascii")
+  span = _span(
+      traceId=b64(trace_hex),
+      spanId=b64(span_hex),
+      parentSpanId=b64(parent_hex),
+      links=[
+          {
+              "traceId": b64(trace_hex),
+              "spanId": b64(parent_hex),
+          }
+      ],
+  )
+  [envelope] = _decode_traces(_traces_request([span]))
+  record = envelope["record"]
+  assert record["traceId"] == trace_hex
+  assert record["spanId"] == span_hex
+  assert record["parentSpanId"] == parent_hex
+  assert record["links"][0]["traceId"] == trace_hex
+  assert record["links"][0]["spanId"] == parent_hex
+  assert envelope["idempotency_key"] == trace_hex + span_hex
+
+
+def test_hex_ids_are_lowercased_for_stable_keys():
+  span = _span(
+      traceId="0123456789ABCDEF0123456789ABCDEF", spanId="0123456789ABCDEF"
+  )
+  [envelope] = _decode_traces(_traces_request([span]))
+  assert envelope["record"]["traceId"] == "0123456789abcdef0123456789abcdef"
+  assert envelope["idempotency_key"] == (
+      "0123456789abcdef0123456789abcdef" + "0123456789abcdef"
+  )

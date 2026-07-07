@@ -17,7 +17,8 @@
 ``run_verify`` is strictly read-only: endpoint reachability + bearer-token
 enforcement, table/view existence, recent-row freshness, and dead-letter
 health. ``run_smoke`` additionally exercises the write path with synthetic
-OTLP logs + metrics and follows them through the native tables, the dedup
+OTLP logs + metrics (and a span when the deployment's signal tier includes
+traces) and follows them through the native tables, the dedup
 views, and the ``agent_events_otlp`` projection (running the scheduled
 MERGE once, exactly as the live e2e test does — the payload builders here
 are shared with it).
