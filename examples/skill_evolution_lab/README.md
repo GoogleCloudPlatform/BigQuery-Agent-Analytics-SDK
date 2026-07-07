@@ -1,7 +1,8 @@
 # Skill Evolution Lab
 
 An agent that **rewrites its own skill** from its conversation traces — no
-teacher model, no managed optimizer. One company-policy Q&A agent starts with a
+managed optimizer, no hand-written patches (an analyst LLM only *diagnoses* the
+traces; it never supplies the answer). One company-policy Q&A agent starts with a
 deliberately flawed `SKILL.md`, generates traffic, and the SDK's evolution
 engine reads the failing trajectories and produces a small, tool-first V1 skill.
 The skill is versioned in the **Gemini Enterprise Agent Platform Skill
@@ -12,6 +13,14 @@ evolve → re-score, all attributable because only the skill file changes. V0 is
 deliberately crippled (told to ignore a tool that already has the answers), so
 the large V0→V1 delta *illustrates* the loop finding and fixing a real defect; a
 plausibly-written baseline would gain less. See [`VERIFICATION.md`](VERIFICATION.md#what-this-proves--and-what-it-doesnt).
+
+Why BQAA makes this reusable: the Agent Analytics plugin captures the whole
+improvement substrate — the conversation, the **tool calls (name + args)**, the
+user corrections, and the outcome labels — in one analyzable place. The evolution
+engine turns those traces into behavioral skill rules and validates them on
+held-out traffic before creating a new skill revision. (This lab writes that same
+schema to local JSON so it runs without BigQuery; in production the traces come
+straight from the BQAA tables.)
 
 This is the runnable companion to the blog post *"Your Agent Can Write Its Own
 Skill"* (BigQuery Agent Analytics Series). See
@@ -180,6 +189,25 @@ A single failed run (API blip, quota) is logged and skipped — the sweep keeps
 going and still aggregates whatever completed. To re-read a finished sweep
 without re-running, point the aggregator at its manifest:
 `uv run python aggregate_sweep.py --manifest runs/sweep_<ts>.tsv`.
+
+### Reusing the engine on your own agent
+
+`analyze_and_evolve.py` is a thin wrapper; the engine
+([`scripts/skill_evolution.py`](../../scripts/skill_evolution.py)) is reusable
+directly from the CLI, no example code required:
+
+```bash
+uv run python ../../scripts/skill_evolution.py \
+    --report your_quality_report.json --skill your_SKILL.md -o evolved.md \
+    --eval-spec your_eval_spec.json \   # its `tools` field makes analysts tool-aware
+    --artifacts-dir out/               # patches, best-of-N candidates, selection.txt
+```
+
+`--tools "<freeform description>"` is an alternative to `--eval-spec` when you
+don't have a spec file. The agent runner ([`run_agent.py`](run_agent.py)) records
+each session's structured tool calls (`tool_calls_detail: [{name, args}]`), which
+the scorer carries through so the analysts — and `compare_runs.py`'s tool-selection
+table — can reason about *which* tool was chosen, not just how many calls happened.
 
 ## How it relates to the research
 

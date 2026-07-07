@@ -89,18 +89,31 @@ def _response_text(resp) -> str:
   return "\n".join(parts)
 
 
-def _count_tool_calls(chat) -> int:
-  """Count function_call parts across the full (uncurated) chat history."""
-  total = 0
+def _tool_calls_detail(chat) -> list[dict]:
+  """Structured function calls across the full (uncurated) chat history.
+
+  Returns ``[{"name": str, "args": dict}, ...]`` in call order, so downstream
+  scoring/analysis can show *which* tool was selected (e.g. lookup vs. the
+  calculator), not just how many calls happened. ``tool_calls`` (the int count)
+  is derived from ``len()`` of this.
+  """
+  calls = []
   try:
     history = chat.get_history(curated=False)
   except TypeError:
     history = chat.get_history()
   for content in history or []:
     for part in getattr(content, "parts", None) or []:
-      if getattr(part, "function_call", None):
-        total += 1
-  return total
+      fc = getattr(part, "function_call", None)
+      if fc:
+        args = getattr(fc, "args", None)
+        calls.append(
+            {
+                "name": getattr(fc, "name", "") or "",
+                "args": dict(args) if args else {},
+            }
+        )
+  return calls
 
 
 def _run_one(client, model, skill_text, question):
@@ -118,12 +131,14 @@ def _run_one(client, model, skill_text, question):
     conversation.append({"role": "agent", "text": text})
     final = text
   latency = round(time.monotonic() - t0, 2)
+  tool_detail = _tool_calls_detail(chat)
   return {
       "session_id": question.get("id", turns[0][:40]),
       "question": turns[0],
       "final_response": final,
       "conversation": conversation,
-      "tool_calls": _count_tool_calls(chat),
+      "tool_calls": len(tool_detail),
+      "tool_calls_detail": tool_detail,
       "answered_by": "policy_agent",
       "latency_s": latency,
       "category": question.get("category", ""),
@@ -162,6 +177,7 @@ def run(skill_path, question_paths, model, out_path, concurrency=8):
             "final_response": f"[ERROR: {exc}]",
             "conversation": [],
             "tool_calls": 0,
+            "tool_calls_detail": [],
             "answered_by": "policy_agent",
             "latency_s": None,
             "category": q.get("category", ""),

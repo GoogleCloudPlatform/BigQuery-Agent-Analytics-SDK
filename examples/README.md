@@ -54,7 +54,7 @@ artifacts that demonstrate SDK capabilities.
 | [context_graph/](context_graph/) | Agent Context Graph: extract decision traces from your agent's context graph — a runnable ADK agent + BQ AA plugin streaming events, the codelab artifacts ([codelab/](context_graph/codelab/)), and the scheduled Cloud Run + Cloud Scheduler deploy ([periodic_materialization/](context_graph/periodic_materialization/)). Start with the [codelab](../docs/codelabs/periodic_materialization.md). |
 | [agent_improvement_cycle/](agent_improvement_cycle/) | LoopAgent-driven prompt improvement cycle |
 | [self_evolving_agent_demo/](self_evolving_agent_demo/) | Metric-driven self-evolution demo for a single ADK agent. Uses trace signals to generate and gate a bounded prompt evolution. |
-| [skill_evolution_lab/](skill_evolution_lab/) | An agent that rewrites its own versioned `SKILL.md` from its conversation traces (no teacher model): flawed V0 → `evolve_skill()` → tool-first V1, golden-Q&A scored, with the anti-parroting rule and Skill Registry versioning. See the dedicated section below. |
+| [skill_evolution_lab/](skill_evolution_lab/) | An agent that rewrites its own versioned `SKILL.md` from its conversation traces (no managed optimizer): flawed V0 → `evolve_skill()` → tool-first V1, golden-Q&A scored, with the anti-parroting rule and Skill Registry versioning. See the dedicated section below. |
 | [decision_lineage_demo/](decision_lineage_demo/) | Decision-lineage property graph (issue #98): live ADK media-planner agent + BQ AA Plugin running across 6 campaign sessions → SDK `build_context_graph(use_ai_generate=True, include_decisions=True)` → six GQL blocks pasted into BigQuery Studio (one renders an interactive graph diagram, one is a portfolio roll-up) |
 
 ### Skill Evolution Lab — a self-improving agent
@@ -62,7 +62,8 @@ artifacts that demonstrate SDK capabilities.
 [`skill_evolution_lab/`](skill_evolution_lab/) is the runnable companion to the
 blog post *"Your Agent Can Learn From Its Own Conversations."* One company-policy Q&A agent
 reads its own conversation traces — successes and failures — and extracts a
-structured, versioned `SKILL.md`. No teacher model, no managed optimizer.
+structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
+(an analyst LLM only *diagnoses* the traces; it never supplies the answer).
 
 - **The flaw with headroom.** V0 is a deliberately flawed skill (a few facts
   baked in plus *"answer only from the above, else contact HR"*) that suppresses
@@ -92,10 +93,10 @@ cd skill_evolution_lab
 ./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
 ```
 
-A verified run (gemini-3.5-flash, golden-grounded, 70-question held-out set):
-**V0 20% → V1 100%** overall; corrections (anti-parroting) **27% → 100%**;
-evolved skill ~1.9KB. Across four models × 3 seeds, V1 correctness is **93–100%**
-per model (V0 21–51%). See the example's
+A verified run (gemini-3.5-flash, golden-graded, 80-question held-out set):
+**V0 28.7% → V1 100%** overall; corrections (anti-parroting) **26.7% → 100%**;
+out-of-scope declines **90% → 100%**; evolved skill ~2.2KB. Across four models ×
+3 runs, V1 correctness is **93–100%** per model (V0 21–51%). See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 

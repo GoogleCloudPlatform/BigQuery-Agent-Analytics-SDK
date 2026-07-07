@@ -152,10 +152,20 @@ def main():
   with open(args.skill) as f:
     current_skill = f.read()
 
+  # Tool-aware analysts are part of the core claim, so a provided --eval-spec
+  # must exist and carry a non-empty `tools` field. Fail fast instead of
+  # silently degrading to a non-tool-aware run.
   tools = None
-  if args.eval_spec and os.path.exists(args.eval_spec):
+  if args.eval_spec:
+    if not os.path.exists(args.eval_spec):
+      parser.error(f"--eval-spec not found: {args.eval_spec}")
     with open(args.eval_spec) as f:
       tools = (json.load(f) or {}).get("tools") or None
+    if not tools:
+      parser.error(
+          f"--eval-spec {args.eval_spec} has no non-empty `tools` field; "
+          "tool-aware analysts need it (remove --eval-spec to run without tools)."
+      )
 
   logger.info(
       "Evolving %s from %s (analyst=%s)...",

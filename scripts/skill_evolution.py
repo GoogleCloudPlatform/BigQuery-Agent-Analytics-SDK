@@ -252,6 +252,28 @@ def _format_conversation(conversation) -> str:
   return "\n".join(parts)
 
 
+def _format_tool_calls(session: dict) -> str:
+  """Render the actual tool calls (name + args) for the analyst.
+
+  This makes *tool selection* visible -- e.g. a deflection that never called a
+  tool, versus one that called the wrong tool -- so the analyst can propose a
+  ``TOOL_USAGE`` / ``WRONG_TOOL`` rule from observed behavior, not just the
+  judge's grounding flag. Sessions scored before this field existed carry no
+  ``tool_calls_detail`` key and render nothing (backward compatible).
+  """
+  if "tool_calls_detail" not in session:
+    return ""
+  detail = session.get("tool_calls_detail") or []
+  if not detail:
+    return "Tool calls: (none)\n"
+  lines = ["Tool calls:"]
+  for call in detail:
+    name = call.get("name", "?") or "?"
+    args = call.get("args", {}) or {}
+    lines.append(f"  - {name}({json.dumps(args, sort_keys=True)})")
+  return "\n".join(lines) + "\n"
+
+
 def format_trajectory(session: dict) -> str:
   """Format a session for analyst consumption (single- or multi-turn)."""
   metrics = session.get("metrics", {})
@@ -266,6 +288,7 @@ def format_trajectory(session: dict) -> str:
     result += f"Verdict: {usefulness.get('category', '')}\n"
     result += f"Justification: {usefulness.get('justification', '')}\n"
     result += f"Grounding: {grounding.get('category', '')}\n"
+    result += _format_tool_calls(session)
     if session.get("corrections"):
       result += f"User corrections: {session['corrections']}\n"
     for dim in (
@@ -305,8 +328,9 @@ def format_trajectory(session: dict) -> str:
       f"Agent: {session.get('answered_by', '')}\n"
       f"Verdict: {usefulness.get('category', '')}\n"
       f"Justification: {usefulness.get('justification', '')}\n"
-      f"Grounding: {grounding.get('category', '')}"
-  )
+      f"Grounding: {grounding.get('category', '')}\n"
+      f"{_format_tool_calls(session)}"
+  ).rstrip("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -886,10 +910,14 @@ def evolve_skill(
           f" ({len(selected)} chars,"
           f" {'scored best' if score_fn else 'median size'})"
       )
+    # Write the *sanitized* viable candidates (the same pool `selected` came
+    # from), so the `_SELECTED` tag attaches correctly and the saved candidate
+    # is byte-for-byte the returned skill -- raw `cands` could differ after
+    # sanitize_adk_vars().
     _write_evolution_artifacts(
         artifacts_dir,
         patches,
-        cands,
+        viable,
         selected,
         current_skill,
         version_label=version_label,
@@ -927,7 +955,36 @@ def _main():
       default="both",
       choices=["both", "error-only", "success-only"],
   )
+  ap.add_argument(
+      "--tools",
+      default=None,
+      help=(
+          "Freeform description of the agent's tools, shown to the analysts so"
+          " they can propose 'use the tool' rules instead of NO_PATCH on"
+          " deflections. Overridden by --eval-spec's `tools` field if both given."
+      ),
+  )
+  ap.add_argument(
+      "--eval-spec",
+      default=None,
+      help="eval_spec.json to read the `tools` field from (see --tools)",
+  )
+  ap.add_argument(
+      "--artifacts-dir",
+      default=None,
+      help=(
+          "Directory to write analyst patches, best-of-N candidates, the"
+          " prevalence tally, and the selection record into (for audit)"
+      ),
+  )
   args = ap.parse_args()
+
+  tools = args.tools
+  if args.eval_spec:
+    if not os.path.exists(args.eval_spec):
+      ap.error(f"--eval-spec not found: {args.eval_spec}")
+    with open(args.eval_spec) as f:
+      tools = (json.load(f) or {}).get("tools") or tools
 
   logging.basicConfig(
       level=logging.INFO,
@@ -948,6 +1005,8 @@ def _main():
       candidates=args.candidates,
       max_chars=args.max_chars,
       analyst_mode=args.analyst_mode,
+      tools=tools,
+      artifacts_dir=args.artifacts_dir,
   )
   with open(args.output, "w") as f:
     f.write(evolved)

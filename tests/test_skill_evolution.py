@@ -137,6 +137,34 @@ def test_format_renders_subtrajectory_outcomes():
   assert "[~]" in out  # parroted icon
 
 
+def test_format_renders_tool_calls_single_turn():
+  # A deflection that named the wrong tool must be visible to the analyst so it
+  # can propose a TOOL_USAGE/WRONG_TOOL rule from observed behavior.
+  s = _session(
+      "unhelpful",
+      question="what's my STD payout?",
+      response="contact HR",
+      tool_calls_detail=[
+          {"name": "lookup_company_policy", "args": {"topic": "std"}}
+      ],
+  )
+  out = format_trajectory(s)
+  assert "Tool calls:" in out
+  assert "lookup_company_policy" in out
+  assert "std" in out
+
+
+def test_format_renders_no_tool_calls_when_empty():
+  s = _session("unhelpful", question="q", response="r", tool_calls_detail=[])
+  assert "Tool calls: (none)" in format_trajectory(s)
+
+
+def test_format_omits_tool_calls_for_legacy_sessions():
+  # Sessions scored before tool_calls_detail existed carry no such key.
+  s = _session("unhelpful", question="q", response="r")
+  assert "Tool calls" not in format_trajectory(s)
+
+
 # --- passes_quality_gate ----------------------------------------------------
 
 

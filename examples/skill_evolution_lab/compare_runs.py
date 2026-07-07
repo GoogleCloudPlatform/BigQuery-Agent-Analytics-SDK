@@ -88,6 +88,53 @@ def _summarize(report: dict) -> dict:
   }
 
 
+def _tool_usage(report: dict):
+  """Per-tool *selection* counts across sessions.
+
+  Proves the tool-selection story directly (which tool the agent reached for),
+  not just an aggregate grounding rate. Needs the structured ``tool_calls_detail``
+  that ``run_agent.py`` now records; returns ``None`` for legacy reports scored
+  before that field existed, so the behavior table is simply omitted.
+  """
+  sessions = report.get("sessions", [])
+  if not any("tool_calls_detail" in s for s in sessions):
+    return None
+  by_tool: dict = {}
+  any_tool = 0
+  for s in sessions:
+    names = {
+        c.get("name")
+        for c in (s.get("tool_calls_detail") or [])
+        if c.get("name")
+    }
+    if names:
+      any_tool += 1
+    for n in names:
+      by_tool[n] = by_tool.get(n, 0) + 1
+  return {"any_tool": any_tool, "by_tool": by_tool, "total": len(sessions)}
+
+
+def _tool_rows(v0_tools, v1_tools) -> list:
+  """Behavior table rows: sessions that selected each tool, V0 vs V1."""
+  if not v0_tools or not v1_tools:
+    return []
+  total0, total1 = v0_tools["total"], v1_tools["total"]
+  rows = [
+      "## Tool selection (sessions that called each tool, held-out set)",
+      "",
+      "| Behavior | V0 | V1 |",
+      "| --- | --- | --- |",
+      f"| Called any tool | {v0_tools['any_tool']}/{total0} |"
+      f" {v1_tools['any_tool']}/{total1} |",
+  ]
+  for tool in sorted(set(v0_tools["by_tool"]) | set(v1_tools["by_tool"])):
+    a = v0_tools["by_tool"].get(tool, 0)
+    b = v1_tools["by_tool"].get(tool, 0)
+    rows.append(f"| `{tool}` | {a}/{total0} | {b}/{total1} |")
+  rows.append("")
+  return rows
+
+
 def _row(label, v0, v1):
   delta = round(v1["rate"] - v0["rate"], 1)
   sign = "+" if delta >= 0 else ""
@@ -145,6 +192,8 @@ def main():
   v1 = _summarize(v1_report)
   v0_dims = v0_report.get("summary", {}).get("dimension_averages", {}) or {}
   v1_dims = v1_report.get("summary", {}).get("dimension_averages", {}) or {}
+  v0_tools = _tool_usage(v0_report)
+  v1_tools = _tool_usage(v1_report)
 
   hdr = f" ({args.model})" if args.model else ""
   lines = [
@@ -169,6 +218,7 @@ def main():
       "(lower is better -- the agent re-verified instead of caving).",
       "",
   ]
+  lines += _tool_rows(v0_tools, v1_tools)
   dim_rows = _dim_rows(v0_dims, v1_dims)
   if dim_rows:
     lines += [
@@ -192,6 +242,8 @@ def main():
               "v1": v1,
               "v0_dimensions": v0_dims,
               "v1_dimensions": v1_dims,
+              "v0_tool_selection": v0_tools,
+              "v1_tool_selection": v1_tools,
           },
           f,
           indent=2,
