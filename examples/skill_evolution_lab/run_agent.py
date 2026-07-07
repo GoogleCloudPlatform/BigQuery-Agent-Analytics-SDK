@@ -212,7 +212,9 @@ def _write_bigquery(results, app_name, labels):
   ``agent_events``), DATASET_LOCATION (default REGION or us-central1).
   Creates the dataset/table on first use.
   """
-  from datetime import datetime, timedelta, timezone
+  from datetime import datetime
+  from datetime import timedelta
+  from datetime import timezone
   import uuid
 
   from google.cloud import bigquery
