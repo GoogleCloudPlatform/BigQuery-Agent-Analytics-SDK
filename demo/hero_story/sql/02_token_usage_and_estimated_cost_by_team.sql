@@ -10,15 +10,27 @@ WITH rates AS (
   SELECT 'claude_code', 6.00, DATE '2026-07-07'
 ),
 tokens AS (
-  -- otel_metric_sum_dedup directly: token counters are sum-type metrics,
-  -- and the dedup view guarantees retries/replays never double-count.
+  -- The two products encode token usage as DIFFERENT metric types
+  -- (verified live): claude_code.token.usage is a sum-type counter
+  -- (otel_metric_sum_dedup.value); codex.turn.token_usage is a histogram
+  -- (otel_metric_histogram_dedup.sum holds the per-point token total).
+  -- Both read dedup views so retries/replays never double-count.
   SELECT
     source_product,
     COALESCE(JSON_VALUE(resource_attributes, '$.department'), 'unattributed') AS team,
-    SUM(CAST(value AS FLOAT64)) AS total_tokens
-  FROM `${dataset}.otel_metric_sum_dedup`
-  WHERE metric_name IN ('codex.turn.token_usage', 'claude_code.token.usage')
-    AND ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @window_hours HOUR)
+    SUM(tokens) AS total_tokens
+  FROM (
+    SELECT source_product, resource_attributes, ingest_time,
+           CAST(value AS FLOAT64) AS tokens
+    FROM `${dataset}.otel_metric_sum_dedup`
+    WHERE metric_name = 'claude_code.token.usage'
+    UNION ALL
+    SELECT source_product, resource_attributes, ingest_time,
+           `sum` AS tokens
+    FROM `${dataset}.otel_metric_histogram_dedup`
+    WHERE metric_name = 'codex.turn.token_usage'
+  )
+  WHERE ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @window_hours HOUR)
     AND JSON_VALUE(resource_attributes, '$.env') = @demo_run_id
   GROUP BY 1, 2
 )
