@@ -33,14 +33,29 @@ import dataclasses
 import json
 import time
 from typing import Any, Callable
+import urllib.error
+import urllib.request
 import uuid
 
+from . import config_artifacts
 from . import sql as otel_sql
 
-# (status, body) for a POST; body is bytes, headers a plain dict.
+# (status, body) for a POST; body is bytes, headers a plain dict. Status 0
+# means the transport itself failed (unreachable/DNS/TLS/timeout).
 HttpPost = Callable[[str, bytes, dict], tuple[int, str]]
 # Rows for a query, as sequences indexable like bigquery Row tuples.
 QueryRows = Callable[[str], list]
+
+_POLL_INTERVAL_S = 5
+_HTTP_TIMEOUT_S = 30
+# Each table's real timestamp column: bqaa_metrics is a VIEW that projects
+# time_timestamp (no ingest_time), and otlp_dead_letter keys on received_at.
+# Querying the wrong column crashes against every healthy deployment.
+_TIMESTAMP_COLUMNS = {
+    "otel_logs": "ingest_time",
+    "bqaa_metrics": "time_timestamp",
+    "otlp_dead_letter": "received_at",
+}
 
 _NATIVE_TABLES = (
     "otel_logs",
@@ -71,6 +86,15 @@ class VerifySettings:
   signals: tuple[str, ...] = ("logs", "metrics")
   recent_hours: int = 24
 
+  def __post_init__(self):
+    # Same tier gate as config/bootstrap: a typo like 'traces'->'trace'
+    # would silently drop the otel_spans existence expectations.
+    if frozenset(self.signals) not in config_artifacts.SIGNAL_TIERS:
+      raise ValueError(
+          f"unsupported signal tier {','.join(self.signals)!r}; expected"
+          " 'logs,metrics' or 'logs,metrics,traces'"
+      )
+
   @property
   def qualified(self) -> str:
     return f"{self.project}.{self.dataset}"
@@ -95,6 +119,34 @@ def _empty_logs_body() -> bytes:
   return json.dumps({"resourceLogs": []}).encode("utf-8")
 
 
+def _recent_count_check(
+    settings: VerifySettings,
+    query_rows: QueryRows,
+    table: str,
+    *,
+    name: str,
+    ok_fn: Callable[[int], bool],
+    detail_fn: Callable[[int], str],
+) -> CheckResult:
+  """COUNT rows in the freshness window; a query error is a failed check.
+
+  A count the deployment considers unhealthy is reported as a warning
+  (advisory), never a hard failure — a fresh deployment has no rows and a
+  busy one may have dead letters worth inspecting.
+  """
+  column = _TIMESTAMP_COLUMNS[table]
+  try:
+    count = query_rows(
+        f"SELECT COUNT(*) FROM `{settings.qualified}.{table}` WHERE"
+        f" {column} > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL"
+        f" {settings.recent_hours} HOUR)"
+    )[0][0]
+  except Exception as exc:  # noqa: BLE001 - report, never crash the report
+    return CheckResult(name=name, ok=False, detail=f"query failed: {exc}")
+  ok = ok_fn(count)
+  return CheckResult(name=name, ok=ok, detail=detail_fn(count), warning=not ok)
+
+
 def run_verify(
     settings: VerifySettings,
     *,
@@ -106,16 +158,21 @@ def run_verify(
   logs_url = settings.endpoint.rstrip("/") + "/v1/logs"
 
   # 1. Reachability + auth enforcement: an unauthenticated request must be
-  # rejected, an authenticated empty request must be accepted.
-  status, _ = http_post(logs_url, _empty_logs_body(), {})
+  # rejected, an authenticated empty request must be accepted. Status 0
+  # means the transport itself failed (unreachable/DNS/TLS/timeout).
+  status, detail_body = http_post(logs_url, _empty_logs_body(), {})
   results.append(
       CheckResult(
           name="endpoint auth enforced",
           ok=status == 401,
-          detail=f"unauthenticated POST {logs_url} -> {status} (want 401)",
+          detail=(
+              f"unreachable: {detail_body}"
+              if status == 0
+              else f"unauthenticated POST {logs_url} -> {status} (want 401)"
+          ),
       )
   )
-  status, body = http_post(
+  status, detail_body = http_post(
       logs_url,
       _empty_logs_body(),
       {
@@ -127,18 +184,36 @@ def run_verify(
       CheckResult(
           name="endpoint reachable",
           ok=status == 200,
-          detail=f"authenticated POST {logs_url} -> {status} (want 200)",
+          detail=(
+              f"unreachable: {detail_body}"
+              if status == 0
+              # A decode-only probe: 200 proves auth + decode, not the
+              # Pub/Sub publish path (use --smoke for end-to-end proof).
+              else f"authenticated POST {logs_url} -> {status} (want 200;"
+              " decode-only probe — use --smoke for the full path)"
+          ),
       )
   )
 
-  # 2. Table/view existence.
-  existing = {
-      row[0]
-      for row in query_rows(
-          "SELECT table_name FROM"
-          f" `{settings.qualified}.INFORMATION_SCHEMA.TABLES`"
-      )
-  }
+  # 2. Table/view existence. A failing query here (dataset missing,
+  # permission denied) is exactly what this check must REPORT, not crash on.
+  try:
+    existing = {
+        row[0]
+        for row in query_rows(
+            "SELECT table_name FROM"
+            f" `{settings.qualified}.INFORMATION_SCHEMA.TABLES`"
+        )
+    }
+  except Exception as exc:  # noqa: BLE001 - report, never crash the report
+    results.append(
+        CheckResult(
+            name="tables and views exist",
+            ok=False,
+            detail=f"query failed: {exc}",
+        )
+    )
+    return results  # every later check needs the listing
   missing = [t for t in _expected_tables(settings) if t not in existing]
   results.append(
       CheckResult(
@@ -154,37 +229,33 @@ def run_verify(
   for table in ("otel_logs", "bqaa_metrics"):
     if table in missing:
       continue
-    count = query_rows(
-        f"SELECT COUNT(*) FROM `{settings.qualified}.{table}` WHERE"
-        " ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL"
-        f" {settings.recent_hours} HOUR)"
-    )[0][0]
     results.append(
-        CheckResult(
+        _recent_count_check(
+            settings,
+            query_rows,
+            table,
             name=f"recent rows in {table}",
-            ok=count > 0,
-            detail=f"{count} rows in the last {settings.recent_hours}h",
-            warning=count == 0,
+            ok_fn=lambda count: count > 0,
+            detail_fn=lambda count: (
+                f"{count} rows in the last {settings.recent_hours}h"
+            ),
         )
     )
 
   # 4. Dead-letter health: rows here mean malformed/failed deliveries.
   if "otlp_dead_letter" not in missing:
-    dead = query_rows(
-        f"SELECT COUNT(*) FROM `{settings.qualified}.otlp_dead_letter`"
-        " WHERE ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL"
-        f" {settings.recent_hours} HOUR)"
-    )[0][0]
     results.append(
-        CheckResult(
+        _recent_count_check(
+            settings,
+            query_rows,
+            "otlp_dead_letter",
             name="dead-letter health",
-            ok=dead == 0,
-            detail=(
-                f"{dead} dead-lettered records in the last"
+            ok_fn=lambda count: count == 0,
+            detail_fn=lambda count: (
+                f"{count} dead-lettered records in the last"
                 f" {settings.recent_hours}h"
-                + ("" if dead == 0 else " — inspect otlp_dead_letter.raw_b64")
+                + ("" if count == 0 else " — inspect otlp_dead_letter.raw_b64")
             ),
-            warning=dead > 0,
         )
     )
   return results
@@ -265,6 +336,19 @@ def synthetic_gauge_payload(run_id: str, now_nanos: int) -> dict:
   }
 
 
+def _send_counts(body: str) -> tuple[int, int]:
+  """(published, dead_lettered) from a receiver response body.
+
+  Unparseable/absent counts read as healthy (-1, 0): only an explicit
+  dead-letter or zero-published report fails the send check.
+  """
+  try:
+    parsed = json.loads(body)
+    return int(parsed.get("published", -1)), int(parsed.get("dead_lettered", 0))
+  except (ValueError, TypeError, AttributeError):
+    return -1, 0
+
+
 def run_smoke(
     settings: VerifySettings,
     *,
@@ -290,23 +374,34 @@ def run_smoke(
     status, body = http_post(
         base + path, json.dumps(payload).encode("utf-8"), headers
     )
+    # The receiver returns 200 with dead_lettered>0 for per-record decode
+    # failures; accepting that would burn the whole polling budget before
+    # failing with no diagnostic.
+    published, dead = _send_counts(body)
+    ok = status == 200 and dead == 0 and published != 0
     results.append(
         CheckResult(
             name=f"smoke send {path}",
-            ok=status == 200,
-            detail=f"POST {path} -> {status}",
+            ok=ok,
+            detail=(
+                f"POST {path} -> {status}"
+                + ("" if ok else f" (published={published}, dead={dead})")
+            ),
         )
     )
   if any(not r.ok for r in results):
     return results
 
+  # One shared deadline for every landing check: --timeout bounds the whole
+  # wait phase, not each check separately.
+  deadline = time.monotonic() + timeout_s
+
   def _wait_count(query: str) -> int:
-    deadline = time.monotonic() + timeout_s
     while True:
       count = query_rows(query)[0][0]
       if count or time.monotonic() >= deadline:
         return count
-      sleep(5)
+      sleep(_POLL_INTERVAL_S)
 
   run_filter = f"JSON_VALUE(log_attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
   checks = (
@@ -340,12 +435,24 @@ def run_smoke(
 
   if landed:
     # Run the projection MERGE now (scheduled every 15 min in prod) and
-    # verify the smoke event projected with the product event name.
-    query_rows(otel_sql.agent_events_otlp_merge_sql(settings.qualified))
-    rows = query_rows(
-        f"SELECT event_type FROM `{settings.qualified}.agent_events_otlp`"
-        f" WHERE JSON_VALUE(attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
-    )
+    # verify the smoke event projected with the product event name. The
+    # MERGE upserts on idempotency_key, so racing the scheduled run is
+    # data-safe; a serialization error surfaces as a failed check.
+    try:
+      query_rows(otel_sql.agent_events_otlp_merge_sql(settings.qualified))
+      rows = query_rows(
+          f"SELECT event_type FROM `{settings.qualified}.agent_events_otlp`"
+          f" WHERE JSON_VALUE(attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
+      )
+    except Exception as exc:  # noqa: BLE001 - report, never crash the report
+      results.append(
+          CheckResult(
+              name="smoke event projected into agent_events_otlp",
+              ok=False,
+              detail=f"query failed: {exc}",
+          )
+      )
+      return results
     ok = bool(rows) and rows[0][0] == "claude_code.user_prompt"
     results.append(
         CheckResult(
@@ -377,17 +484,37 @@ def run_smoke(
 # --------------------------------------------------------------------------
 
 
-def default_http_post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
-  """POST via urllib; returns (status, body) without raising on 4xx/5xx."""
-  import urllib.error
-  import urllib.request
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+  """Never follow redirects.
 
+  urllib would otherwise resend the Authorization header to the redirect
+  target (token exfiltration on a compromised/typo'd endpoint) and convert
+  the POST to a GET that dead-letters on the receiver. A 3xx surfaces as
+  its status code instead.
+  """
+
+  def redirect_request(self, *args, **kwargs):
+    return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def default_http_post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
+  """POST via urllib; (status, body), never raises.
+
+  4xx/5xx/3xx return their status code; transport failures (DNS,
+  connection refused, TLS, timeout) return status 0 with the error text —
+  the one condition a reachability check must report gracefully.
+  """
   request = urllib.request.Request(url, data=body, headers=headers)
   try:
-    with urllib.request.urlopen(request, timeout=30) as response:
-      return response.status, response.read().decode("utf-8", "replace")
+    with _NO_REDIRECT_OPENER.open(request, timeout=_HTTP_TIMEOUT_S) as resp:
+      return resp.status, resp.read().decode("utf-8", "replace")
   except urllib.error.HTTPError as exc:
     return exc.code, exc.read().decode("utf-8", "replace")
+  except (urllib.error.URLError, OSError) as exc:
+    return 0, str(exc)
 
 
 def make_query_rows(project: str) -> QueryRows:

@@ -54,28 +54,38 @@ _ALL_TABLES = [
 class FakeHttp:
   """(status, body) per (path, authed?); records posts."""
 
-  def __init__(self, unauthed_status=401, authed_status=200):
+  def __init__(
+      self,
+      unauthed_status=401,
+      authed_status=200,
+      authed_body='{"published": 1, "dead_lettered": 0}',
+  ):
     self.unauthed_status = unauthed_status
     self.authed_status = authed_status
+    self.authed_body = authed_body
     self.posts = []  # (url, body, headers)
 
   def __call__(self, url, body, headers):
     self.posts.append((url, body, headers))
     if "Authorization" in headers:
-      return self.authed_status, "{}"
+      return self.authed_status, self.authed_body
     return self.unauthed_status, "unauthorized"
 
 
 class FakeBQ:
   """Answers queries by substring; records them."""
 
-  def __init__(self, tables=None, counts=None):
+  def __init__(self, tables=None, counts=None, raising=()):
     self.tables = _ALL_TABLES if tables is None else tables
     self.counts = counts or {}
+    self.raising = tuple(raising)  # substrings whose queries raise
     self.queries = []
 
   def __call__(self, query):
     self.queries.append(query)
+    for needle in self.raising:
+      if needle in query:
+        raise RuntimeError(f"boom: {needle}")
     if "INFORMATION_SCHEMA.TABLES" in query:
       return list(self.tables)
     for needle, value in self.counts.items():
@@ -188,7 +198,7 @@ def test_smoke_sends_logs_and_metrics_and_verifies_projection():
   original = bq.__call__
 
   def with_projection(query):
-    if "agent_events_otlp" in query and "event_type" in query:
+    if query.lstrip().startswith("SELECT") and "agent_events_otlp" in query:
       bq.queries.append(query)
       return [("claude_code.user_prompt",)]
     return original(query)
@@ -248,3 +258,226 @@ def test_synthetic_payload_builders_shape():
   metric = metrics["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]
   assert metric["name"] == "bqaa_e2e_runid123"
   assert json.dumps(logs) and json.dumps(metrics)  # JSON-serializable
+
+
+# --------------------------------------------------------------------------
+# #332 full-review hardening
+# --------------------------------------------------------------------------
+
+
+def test_verify_freshness_uses_each_tables_real_timestamp_column():
+  # bqaa_metrics is a VIEW without ingest_time (it projects time_timestamp),
+  # and otlp_dead_letter keys on received_at — querying ingest_time on either
+  # crashes verify against every healthy deployment.
+  bq = FakeBQ(counts={"otel_logs": 1, "bqaa_metrics": 1})
+  verify.run_verify(
+      verify.VerifySettings(**_SETTINGS), http_post=FakeHttp(), query_rows=bq
+  )
+  logs_q = [q for q in bq.queries if ".otel_logs`" in q][0]
+  assert "ingest_time" in logs_q
+  metrics_q = [q for q in bq.queries if ".bqaa_metrics`" in q][0]
+  assert "time_timestamp" in metrics_q
+  assert "ingest_time" not in metrics_q
+  dlq_q = [q for q in bq.queries if ".otlp_dead_letter`" in q][0]
+  assert "received_at" in dlq_q
+  assert "ingest_time" not in dlq_q
+
+
+def test_verify_flags_unreachable_endpoint_as_failure():
+  # status 0 is the "transport failed" convention from default_http_post.
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=lambda url, body, headers: (0, "connection refused"),
+      query_rows=FakeBQ(),
+  )
+  assert any(
+      "reachable" in r.name or "auth" in r.name for r in _failures(results)
+  )
+
+
+def test_verify_flags_authed_non_200_as_failure():
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(authed_status=503),
+      query_rows=FakeBQ(),
+  )
+  assert any("reachable" in r.name for r in _failures(results))
+
+
+def test_verify_survives_missing_dataset_instead_of_crashing():
+  # A missing dataset (NotFound on INFORMATION_SCHEMA) is exactly what the
+  # existence check should REPORT, not crash on.
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=FakeBQ(raising=("INFORMATION_SCHEMA",)),
+  )
+  bad = [r for r in results if "exist" in r.name]
+  assert bad and not bad[0].ok and "boom" in bad[0].detail
+
+
+def test_verify_survives_failing_count_query():
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=FakeBQ(raising=(".otel_logs`",)),
+  )
+  recent = [r for r in results if "otel_logs" in r.name]
+  assert recent and not recent[0].ok and "boom" in recent[0].detail
+
+
+def test_verify_skips_counts_for_missing_tables():
+  bq = FakeBQ(tables=[])
+  results = verify.run_verify(
+      verify.VerifySettings(**_SETTINGS), http_post=FakeHttp(), query_rows=bq
+  )
+  assert not any("recent" in r.name or "dead" in r.name for r in results)
+  assert not any("COUNT(*)" in q for q in bq.queries)
+
+
+def test_verify_settings_reject_invalid_signal_tier():
+  import pytest
+
+  with pytest.raises(ValueError, match="signal"):
+    verify.VerifySettings(**_SETTINGS, signals=("logs", "metrics", "trace"))
+  with pytest.raises(ValueError, match="signal"):
+    verify.VerifySettings(**_SETTINGS, signals=("logs",))
+
+
+def test_smoke_send_failure_short_circuits_bigquery():
+  bq = FakeBQ()
+  results = verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(authed_status=500),
+      query_rows=bq,
+      sleep=lambda _: None,
+  )
+  assert _failures(results)
+  assert bq.queries == []
+
+
+def test_smoke_detects_its_own_record_being_dead_lettered():
+  # The receiver returns 200 with dead_lettered>0 for per-record decode
+  # failures; accepting that would burn the whole polling budget before
+  # failing with no diagnostic.
+  results = verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(authed_body='{"published": 0, "dead_lettered": 1}'),
+      query_rows=FakeBQ(),
+      sleep=lambda _: None,
+      timeout_s=0,
+  )
+  send = [r for r in results if "send" in r.name]
+  assert send and all(not r.ok for r in send)
+  assert any("dead" in r.detail for r in send)
+
+
+def test_smoke_projection_mismatch_is_a_failure():
+  counts = {"otel_logs": 1, "otel_metric_gauge": 1, "bqaa_metrics": 1}
+
+  def wrong_event(query):
+    if query.lstrip().startswith("SELECT") and "agent_events_otlp" in query:
+      return [("other.event",)]
+    return FakeBQ(counts=counts)(query)
+
+  def no_row(query):
+    if query.lstrip().startswith("SELECT") and "agent_events_otlp" in query:
+      return []
+    return FakeBQ(counts=counts)(query)
+
+  for query_rows in (wrong_event, no_row):
+    results = verify.run_smoke(
+        verify.VerifySettings(**_SETTINGS),
+        http_post=FakeHttp(),
+        query_rows=query_rows,
+        sleep=lambda _: None,
+    )
+    projected = [r for r in results if "projected" in r.name]
+    assert projected and not projected[0].ok and not projected[0].warning
+
+
+def test_smoke_retries_until_rows_land():
+  calls = {"n": 0}
+  sleeps = []
+
+  def eventually(query):
+    if "COUNT(*)" in query and ".otel_logs`" in query:
+      calls["n"] += 1
+      return [(1 if calls["n"] >= 2 else 0,)]
+    return FakeBQ(counts={"otel_metric_gauge": 1, "bqaa_metrics": 1})(query)
+
+  def fake_projection(query):
+    if query.lstrip().startswith("SELECT") and "agent_events_otlp" in query:
+      return [("claude_code.user_prompt",)]
+    return eventually(query)
+
+  results = verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=fake_projection,
+      sleep=sleeps.append,
+      timeout_s=60,
+  )
+  assert not _failures(results)
+  assert calls["n"] == 2
+  assert sleeps and sleeps[0] == 5
+
+
+def test_smoke_survives_failing_merge_or_projection_query():
+  counts = {"otel_logs": 1, "otel_metric_gauge": 1, "bqaa_metrics": 1}
+
+  def merge_boom(query):
+    if query.lstrip().startswith("MERGE"):
+      raise RuntimeError("concurrent update")
+    return FakeBQ(counts=counts)(query)
+
+  results = verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=merge_boom,
+      sleep=lambda _: None,
+  )
+  projected = [r for r in results if "projected" in r.name]
+  assert projected and not projected[0].ok
+  assert "concurrent update" in projected[0].detail
+
+
+def test_default_http_post_reports_unreachable_as_status_zero():
+  status, detail = verify.default_http_post(
+      "http://127.0.0.1:1/v1/logs", b"{}", {}
+  )
+  assert status == 0
+  assert detail
+
+
+def test_default_http_post_does_not_follow_redirects():
+  # A redirect would resend the Authorization header to another host and
+  # convert the POST to a GET that dead-letters on the receiver; redirects
+  # must surface as a status, never be followed.
+  assert hasattr(verify, "_NO_REDIRECT_OPENER")
+  handler = verify._NoRedirect()
+  assert (
+      handler.redirect_request(None, None, 303, "See Other", {}, "https://x")
+      is None
+  )
+
+
+def test_make_query_rows_converts_rows_to_tuples(monkeypatch):
+  class FakeJob:
+
+    def result(self):
+      return [[1, "a"], [2, "b"]]
+
+  class FakeClient:
+
+    def __init__(self, project):
+      assert project == "my-proj"
+
+    def query(self, query):
+      return FakeJob()
+
+  import google.cloud.bigquery as bigquery
+
+  monkeypatch.setattr(bigquery, "Client", FakeClient)
+  rows = verify.make_query_rows("my-proj")("SELECT 1")
+  assert rows == [(1, "a"), (2, "b")]

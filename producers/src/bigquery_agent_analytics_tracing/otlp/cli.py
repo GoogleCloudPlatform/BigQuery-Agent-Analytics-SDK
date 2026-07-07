@@ -16,8 +16,8 @@
 
 ``config`` (PR 1) generates deployable telemetry-source artifacts from an
 already-deployed receiver's coordinates; ``bootstrap`` (PR 2) deploys the
-full pipeline (plan mode by default, ``--execute`` applies). ``verify`` /
-smoke (PR 3) lands next in the stack.
+full pipeline (plan mode by default, ``--execute`` applies); ``verify``
+(PR 3) checks a deployment read-only, or end-to-end with ``--smoke``.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import urllib.parse
 
 from . import bootstrap as bootstrap_mod
 from . import config_artifacts
@@ -215,7 +216,11 @@ def _build_parser() -> argparse.ArgumentParser:
   ver.add_argument(
       "--token",
       default=None,
-      help="Bearer token (default: the BQAA_OTLP_TOKEN env var).",
+      help=(
+          "Bearer token. Prefer the BQAA_OTLP_TOKEN env var (the default):"
+          " a token on the command line is visible in shell history and"
+          " process listings."
+      ),
   )
   ver.add_argument("--project", required=True, help="GCP project id.")
   ver.add_argument("--dataset", required=True, help="BigQuery dataset id.")
@@ -239,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
       "--timeout",
       type=float,
       default=150,
-      help="Seconds to wait for smoke rows to land.",
+      help="Total seconds to wait for all smoke rows to land (one budget).",
   )
   return parser
 
@@ -363,14 +368,32 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 2
-  settings = verify_mod.VerifySettings(
-      endpoint=args.endpoint,
-      token=token,
-      project=args.project,
-      dataset=args.dataset,
-      signals=tuple(s for s in args.signals.split(",") if s),
-      recent_hours=args.recent_hours,
-  )
+  # The bearer token rides on every request: plain http to a remote host
+  # would send it cleartext. Loopback stays allowed for local harnesses.
+  host = urllib.parse.urlsplit(args.endpoint).hostname or ""
+  if args.endpoint.startswith("http://") and host not in (
+      "localhost",
+      "127.0.0.1",
+      "::1",
+  ):
+    print(
+        "bqaa-otel: error: refusing to send the bearer token over plain"
+        f" http to {host!r} — use an https endpoint (http is allowed for"
+        " localhost only).",
+        file=sys.stderr,
+    )
+    return 2
+  try:
+    settings = verify_mod.VerifySettings(
+        endpoint=args.endpoint,
+        token=token,
+        project=args.project,
+        dataset=args.dataset,
+        signals=tuple(s for s in args.signals.split(",") if s),
+        recent_hours=args.recent_hours,
+    )
+  except ValueError as exc:
+    return _report_settings_error(exc)
   query_rows = verify_mod.make_query_rows(args.project)
   results = verify_mod.run_verify(
       settings,

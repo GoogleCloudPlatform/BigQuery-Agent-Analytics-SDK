@@ -393,3 +393,114 @@ def test_verify_token_falls_back_to_env(monkeypatch):
   )
   assert rc == 0
   assert seen["token"] == "env-tok"
+
+
+# --------------------------------------------------------------------------
+# verify hardening (#332 full review)
+# --------------------------------------------------------------------------
+
+
+def test_verify_missing_token_exits_two(monkeypatch, capsys):
+  monkeypatch.delenv("BQAA_OTLP_TOKEN", raising=False)
+  rc = _run(
+      ["verify", "--endpoint", "https://r", "--project", "p", "--dataset", "d"]
+  )
+  assert rc == 2
+  assert "token" in capsys.readouterr().err.lower()
+
+
+def test_verify_rejects_plain_http_for_remote_hosts(monkeypatch, capsys):
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "http://receiver.example.com",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+      ]
+  )
+  assert rc == 2
+  assert "https" in capsys.readouterr().err.lower()
+
+
+def test_verify_allows_http_for_localhost(monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  monkeypatch.setattr(verify, "run_verify", lambda *a, **k: _fake_results())
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "http://127.0.0.1:9999",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+      ]
+  )
+  assert rc == 0
+
+
+def test_verify_invalid_signals_exit_two(monkeypatch, capsys):
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "https://r",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+          "--signals",
+          "logs,metrics,trace",
+      ]
+  )
+  assert rc == 2
+  assert "signal" in capsys.readouterr().err.lower()
+
+
+def test_verify_plumbs_settings_and_timeout(monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import verify
+
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  seen = {}
+
+  def record_verify(settings, **kw):
+    seen["settings"] = settings
+    return _fake_results()
+
+  def record_smoke(settings, **kw):
+    seen["timeout_s"] = kw.get("timeout_s")
+    return _fake_results()
+
+  monkeypatch.setattr(verify, "run_verify", record_verify)
+  monkeypatch.setattr(verify, "run_smoke", record_smoke)
+  monkeypatch.setattr(verify, "make_query_rows", lambda project: lambda q: [])
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "https://r",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+          "--signals",
+          "logs,metrics,traces",
+          "--recent-hours",
+          "6",
+          "--timeout",
+          "9",
+          "--smoke",
+      ]
+  )
+  assert rc == 0
+  assert seen["settings"].signals == ("logs", "metrics", "traces")
+  assert seen["settings"].recent_hours == 6
+  assert seen["timeout_s"] == 9
