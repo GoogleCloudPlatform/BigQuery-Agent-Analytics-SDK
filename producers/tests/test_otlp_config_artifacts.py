@@ -93,7 +93,10 @@ def test_claude_baseline_matches_issue_324_contract():
   assert env["OTEL_METRICS_EXPORTER"] == "otlp"
   assert env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
   assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == _ENDPOINT
-  assert env["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer <token>"
+  # Deterministic provenance header rides with auth (W3C comma list).
+  assert env["OTEL_EXPORTER_OTLP_HEADERS"] == (
+      "Authorization=Bearer <token>,x-bqaa-source-product=claude_code"
+  )
 
 
 def test_claude_baseline_never_enables_content():
@@ -137,7 +140,9 @@ def test_claude_traces_tier_enables_trace_exporter_and_beta_flag():
 
 def test_claude_token_is_embedded_when_provided():
   env = ca.claude_code_managed_settings(_spec(token="s3cret"))["env"]
-  assert env["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer s3cret"
+  assert env["OTEL_EXPORTER_OTLP_HEADERS"].startswith(
+      "Authorization=Bearer s3cret,"
+  )
 
 
 def test_claude_resource_attributes_rendered_as_kv_pairs():
@@ -160,45 +165,49 @@ def test_claude_resource_attributes_rendered_as_kv_pairs():
 # --------------------------------------------------------------------------
 
 
-def test_codex_config_is_valid_toml_in_the_verified_shape():
-  # The old template mixed 'exporter = "otlp-http"' (string) with an
-  # [otel.exporter."otlp-http"] table — invalid TOML that never parsed.
-  # The verified shape (real codex 0.142.5, #317 e2e) is the inline table.
+def _toml():
   try:
     import tomllib
   except ImportError:  # Python < 3.11 — the dev extra ships tomli
     import tomli as tomllib
+  return tomllib
 
-  toml = ca.codex_config_toml(_spec())
-  parsed = tomllib.loads(toml)
-  otel = parsed["otel"]
-  assert otel["exporter"]["otlp-http"]["endpoint"] == f"{_ENDPOINT}/v1/logs"
-  assert otel["exporter"]["otlp-http"]["protocol"] == "binary"
+
+def test_codex_p0_tier_generates_logs_and_metrics_exporters():
+  # Shapes verified live against codex-cli 0.142.5 (#317 e2e): inline-table
+  # exporters; metrics is P0 alongside logs. The token is EMBEDDED — codex
+  # does not expand ${ENV} refs in config headers (verified live: the
+  # literal header was sent and the receiver 401'd).
+  otel = _toml().loads(ca.codex_config_toml(_spec()))["otel"]
+  logs = otel["exporter"]["otlp-http"]
+  metrics = otel["metrics_exporter"]["otlp-http"]
+  assert logs["endpoint"] == f"{_ENDPOINT}/v1/logs"
+  assert metrics["endpoint"] == f"{_ENDPOINT}/v1/metrics"
+  for exporter in (logs, metrics):
+    assert exporter["protocol"] == "binary"
+    assert exporter["headers"]["Authorization"] == "Bearer <token>"
+    # Deterministic provenance: explicit product header, not detection.
+    assert exporter["headers"]["x-bqaa-source-product"] == "codex"
+  assert otel["trace_exporter"] == "none"  # observability tier not selected
+  assert otel["log_user_prompt"] is False
+  assert ca.CODEX_MIN_VERSION in ca.codex_config_toml(_spec())
+
+
+def test_codex_traces_tier_adds_trace_exporter():
+  otel = _toml().loads(
+      ca.codex_config_toml(_spec(signals=("logs", "metrics", "traces")))
+  )["otel"]
+  traces = otel["trace_exporter"]["otlp-http"]
+  assert traces["endpoint"] == f"{_ENDPOINT}/v1/traces"
+  assert traces["headers"]["x-bqaa-source-product"] == "codex"
+
+
+def test_codex_token_is_embedded_when_provided():
+  otel = _toml().loads(ca.codex_config_toml(_spec(token="s3cret")))["otel"]
   assert (
       otel["exporter"]["otlp-http"]["headers"]["Authorization"]
-      == "Bearer ${BQAA_OTLP_TOKEN}"
+      == "Bearer s3cret"
   )
-  assert otel["metrics_exporter"] == "none"  # gated on #317 fixtures PR
-  assert otel["trace_exporter"] == "none"
-  assert otel["log_user_prompt"] is False
-
-
-def test_codex_metrics_stay_gated_pending_317():
-  # Metrics stay off with a pointer at the gate even when metrics is a
-  # selected signal — the config shape is verified per Codex version in #317.
-  try:
-    import tomllib
-  except ImportError:  # Python < 3.11 — the dev extra ships tomli
-    import tomli as tomllib
-
-  toml = ca.codex_config_toml(_spec(signals=("logs", "metrics")))
-  assert tomllib.loads(toml)["otel"]["metrics_exporter"] == "none"
-  assert "#317" in toml
-
-
-def test_codex_traces_stay_gated_pending_317():
-  toml = ca.codex_config_toml(_spec(signals=("logs", "metrics", "traces")))
-  assert 'trace_exporter = "none"' in toml
 
 
 def test_codex_never_enables_prompt_capture_even_in_replay():

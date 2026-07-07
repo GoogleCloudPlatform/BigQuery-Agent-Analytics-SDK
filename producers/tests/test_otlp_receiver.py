@@ -404,3 +404,42 @@ def test_protobuf_trace_export_decodes_and_normalizes_ids():
   assert envelope["record"]["traceId"] == trace_hex
   assert envelope["record"]["spanId"] == span_hex
   assert envelope["idempotency_key"] == trace_hex + span_hex
+
+
+# --------------------------------------------------------------------------
+# Deterministic source_product provenance (#317)
+# --------------------------------------------------------------------------
+
+
+def _call_with_product(header_value):
+  publisher = FakePublisher()
+  result = receiver.handle_export(
+      path="/v1/logs",
+      body=_logs_body(),
+      content_type="application/json",
+      auth_header=f"Bearer {TOKEN}",
+      ingest_time=INGEST,
+      config=_config(),
+      publisher=publisher,
+      source_product_header=header_value,
+  )
+  return result, publisher
+
+
+def test_source_product_header_overrides_configured_default():
+  # A multi-product receiver stamps rows deterministically from the
+  # explicit config-driven header, never from fuzzy event-name detection.
+  result, pub = _call_with_product("codex")
+  assert result.status == 200
+  assert pub.to("proj/main")[0]["source"]["product"] == "codex"
+
+
+def test_unknown_product_header_falls_back_to_configured_default():
+  result, pub = _call_with_product("mystery-agent")
+  assert result.status == 200
+  assert pub.to("proj/main")[0]["source"]["product"] == "claude_code"
+
+
+def test_absent_product_header_uses_configured_default():
+  result, pub = _call("/v1/logs", _logs_body())
+  assert pub.to("proj/main")[0]["source"]["product"] == "claude_code"

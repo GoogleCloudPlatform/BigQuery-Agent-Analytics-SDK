@@ -66,30 +66,36 @@ content:
 
 ### Codex (user-level `~/.codex/config.toml`)
 
-`[otel]` is ignored in project-local config, so set it at user level. **Logs-only
-until [#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317)
-verifies the metrics config shape** (Codex metrics default to `statsig`, and the
-exact `metrics_exporter` endpoint block is version-specific):
+Shapes verified live against **codex-cli 0.142.5**
+([#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317)).
+Rollout notes:
+
+- `[otel]` is **ignored in project-local** `.codex/config.toml` — set it at
+  user level (`~/.codex/config.toml`). MDM/managed distribution: verify for
+  your fleet; there is no documented guarantee.
+- `[analytics]` (anonymous → OpenAI) is independent of `[otel]` — enabling
+  one does not enable the other.
+- Codex metrics default to `statsig`; metrics only reach your receiver with
+  `metrics_exporter` explicitly set as below.
+- Codex does **not** expand `${ENV}` references in config headers (verified
+  live) — the file holds the literal bearer token; do not commit it.
+- The `x-bqaa-source-product` header keeps `source_product` provenance
+  deterministic on a multi-product receiver.
 
 ```toml
 [otel]
 environment = "prod"
-exporter = "otlp-http"
-metrics_exporter = "none"    # PENDING #317: enable once the metrics shape is verified
-trace_exporter = "none"
+exporter = { otlp-http = { endpoint = "https://<receiver-url>/v1/logs", protocol = "binary", headers = { "Authorization" = "Bearer <token>", "x-bqaa-source-product" = "codex" } } }
+metrics_exporter = { otlp-http = { endpoint = "https://<receiver-url>/v1/metrics", protocol = "binary", headers = { "Authorization" = "Bearer <token>", "x-bqaa-source-product" = "codex" } } }
+trace_exporter = "none"   # optional observability tier: same shape with /v1/traces
 log_user_prompt = false
-
-[otel.exporter."otlp-http"]
-endpoint = "https://<receiver-url>/v1/logs"
-protocol = "binary"
-headers = { "Authorization" = "Bearer ${BQAA_OTLP_TOKEN}" }
 ```
 
-> Do not set `metrics_exporter = "otlp-http"` from this doc: the endpoint block
-> shape for metrics is verified per Codex version in
-> [#317](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/317).
-> Full guided config generation is
-> [#324](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/324).
+Logs-only pilots: omit `metrics_exporter` (it defaults to `statsig`, which
+does not reach your receiver). **Codex traces are observability traces —
+span/trace structure and timing, not replay.** Codex documents no
+Claude-Code-style raw request/response body path, so replay/full-content
+capture remains unsupported for Codex.
 
 ## Privacy tiers
 

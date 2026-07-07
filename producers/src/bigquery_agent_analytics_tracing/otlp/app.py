@@ -80,6 +80,7 @@ def make_app(
         body=body,
         content_type=environ.get("CONTENT_TYPE"),
         auth_header=environ.get("HTTP_AUTHORIZATION"),
+        source_product_header=environ.get("HTTP_X_BQAA_SOURCE_PRODUCT"),
         ingest_time=_utils.iso_timestamp(),
         config=config,
         publisher=publisher,

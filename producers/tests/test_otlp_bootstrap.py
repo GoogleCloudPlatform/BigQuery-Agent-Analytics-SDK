@@ -433,7 +433,9 @@ def test_bootstrap_writes_artifacts_with_deployed_endpoint(tmp_path):
   assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == _RECEIVER_URL
   # The bearer token is NOT embedded by default — artifacts are meant to be
   # committed/distributed; the summary points at the secret instead.
-  assert env["OTEL_EXPORTER_OTLP_HEADERS"] == "Authorization=Bearer <token>"
+  assert env["OTEL_EXPORTER_OTLP_HEADERS"].startswith(
+      "Authorization=Bearer <token>,"
+  )
   assert (tmp_path / "artifacts" / "codex.config.toml").exists()
 
 

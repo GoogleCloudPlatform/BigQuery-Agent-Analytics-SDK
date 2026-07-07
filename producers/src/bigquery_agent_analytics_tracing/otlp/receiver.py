@@ -46,6 +46,13 @@ SIGNAL_PATHS = {
     "/v1/traces": "trace",
 }
 
+# Products the x-bqaa-source-product header may select (#317): provenance is
+# deterministic and config-driven — the generated telemetry-source configs
+# send the header explicitly; anything else falls back to the receiver's
+# configured default. Never inferred from event names.
+KNOWN_PRODUCTS = ("claude_code", "codex")
+SOURCE_PRODUCT_HEADER = "x-bqaa-source-product"
+
 
 class Publisher(Protocol):
   """Minimal publish interface (real impl wraps google-cloud-pubsub)."""
@@ -161,6 +168,7 @@ def handle_export(
     ingest_time: str,
     config: ReceiverConfig,
     publisher: Publisher,
+    source_product_header: str | None = None,
 ) -> ReceiverResult:
   """Authenticate, decode, and route one OTLP export request."""
   signal = SIGNAL_PATHS.get(path)
@@ -178,6 +186,12 @@ def handle_export(
   if signal == "trace" and not config.enable_traces:
     return ReceiverResult(404, message="traces not enabled")
 
+  source_product = (
+      source_product_header
+      if source_product_header in KNOWN_PRODUCTS
+      else config.source_product
+  )
+
   # Decode the body AND walk its structure under one guard: any malformed
   # request — bad bytes (DecodeError) or valid JSON with the wrong OTLP shape
   # (e.g. ``{"resourceLogs":[null]}`` raising inside the decode library) —
@@ -187,27 +201,27 @@ def handle_export(
     if signal == "log":
       envelopes = decode.decode_logs_request(
           request,
-          source_product=config.source_product,
+          source_product=source_product,
           raw_request=body,
           ingest_time=ingest_time,
       )
     elif signal == "trace":
       envelopes = decode.decode_traces_request(
           request,
-          source_product=config.source_product,
+          source_product=source_product,
           raw_request=body,
           ingest_time=ingest_time,
       )
     else:
       envelopes = decode.decode_metrics_request(
           request,
-          source_product=config.source_product,
+          source_product=source_product,
           raw_request=body,
           ingest_time=ingest_time,
       )
   except Exception as exc:  # noqa: BLE001 - malformed request -> dead letter
     dead_letter = env.dead_letter_envelope(
-        source_product=config.source_product,
+        source_product=source_product,
         # Success envelopes and per-span dead letters use "span"; the
         # whole-request path must match or DLQ triage filters miss one side.
         source_signal="span" if signal == "trace" else signal,
