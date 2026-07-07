@@ -370,9 +370,18 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 2
   # The bearer token rides on every request: plain http to a remote host
   # would send it cleartext. Loopback stays allowed for local harnesses.
-  # Schemes are case-insensitive (HTTP:// must not bypass the guard).
-  split = urllib.parse.urlsplit(args.endpoint)
-  host = split.hostname or ""
+  # Schemes are case-insensitive (HTTP:// must not bypass the guard), and
+  # urlsplit itself raises on malformed bracketed IPv6 ('http://[::1').
+  try:
+    split = urllib.parse.urlsplit(args.endpoint)
+    host = split.hostname or ""
+  except ValueError as exc:
+    print(
+        f"bqaa-otel: error: --endpoint {args.endpoint!r} is not a valid"
+        f" URL ({exc}) — expected e.g. https://<receiver>.run.app",
+        file=sys.stderr,
+    )
+    return 2
   scheme = split.scheme.lower()
   if scheme not in ("http", "https"):
     print(

@@ -536,3 +536,24 @@ def test_default_http_post_never_raises_on_malformed_url():
   )
   assert status == 0
   assert detail
+
+
+def test_verify_settings_reject_non_identifier_project_and_dataset():
+  # project/dataset are interpolated into backtick-quoted SQL identifiers;
+  # a backtick-bearing value breaks out of the quoting and appends SQL.
+  import pytest
+
+  bad = dict(_SETTINGS)
+  bad["dataset"] = "ds` WHERE 1=1; DROP TABLE x;--"
+  with pytest.raises(ValueError, match="dataset"):
+    verify.VerifySettings(**bad)
+  bad = dict(_SETTINGS)
+  bad["project"] = "p`.hax"
+  with pytest.raises(ValueError, match="project"):
+    verify.VerifySettings(**bad)
+  # Legitimate ids still pass: underscores, digits, hyphens/dots/colons
+  # (legacy domain-scoped projects).
+  ok = dict(_SETTINGS)
+  ok["project"] = "domain.com:my-proj-1"
+  ok["dataset"] = "agent_analytics_2"
+  assert verify.VerifySettings(**ok).qualified

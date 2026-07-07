@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 from typing import Any, Callable
 import urllib.error
@@ -94,6 +95,14 @@ class VerifySettings:
           f"unsupported signal tier {','.join(self.signals)!r}; expected"
           " 'logs,metrics' or 'logs,metrics,traces'"
       )
+    # Both feed backtick-quoted SQL identifiers (settings.qualified): a
+    # backtick-bearing value would break out of the quoting and append
+    # arbitrary SQL. Allow dots/colons/hyphens in project ids (legacy
+    # domain-scoped projects); dataset ids are word characters only.
+    if not re.fullmatch(r"[a-z0-9.:-]+", self.project, re.IGNORECASE):
+      raise ValueError(f"invalid GCP project id {self.project!r}")
+    if not re.fullmatch(r"\w+", self.dataset, re.ASCII):
+      raise ValueError(f"invalid BigQuery dataset id {self.dataset!r}")
 
   @property
   def qualified(self) -> str:
