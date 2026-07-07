@@ -81,8 +81,9 @@ query next are real product telemetry.* Keep the two separate.
 ## Act 3 — The payoff (5 minutes)
 
 Run the SQL pack in order — each file opens with the leadership question it
-answers and every query filters on this run's `demo_run_id`, so the numbers
-on screen are from the sessions the audience just watched:
+answers. Logs/metrics/spans queries filter on this run's `demo_run_id`, so
+those numbers are from the sessions the audience just watched; dead-letter
+health rows (in `00`/`05`) are deliberately deployment-scoped:
 
 ```bash
 scripts/run_queries.sh $DEMO_RUN_ID   # writes results to evidence/

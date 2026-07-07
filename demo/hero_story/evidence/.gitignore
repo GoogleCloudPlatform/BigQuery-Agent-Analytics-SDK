@@ -1,0 +1,6 @@
+# Runtime evidence must never be committed: it contains bearer tokens (codex
+# config copies), personal identifiers, and raw outputs. Only the template
+# is tracked.
+*
+!.gitignore
+!template.md
