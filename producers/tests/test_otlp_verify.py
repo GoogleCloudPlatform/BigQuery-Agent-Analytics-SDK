@@ -481,3 +481,25 @@ def test_make_query_rows_converts_rows_to_tuples(monkeypatch):
   monkeypatch.setattr(bigquery, "Client", FakeClient)
   rows = verify.make_query_rows("my-proj")("SELECT 1")
   assert rows == [(1, "a"), (2, "b")]
+
+
+def test_smoke_survives_failing_landing_query():
+  # A missing table / permission error while polling for landed rows must
+  # become a failed check, not a traceback that also hides earlier results.
+  def landing_boom(query):
+    if "COUNT(*)" in query and ".otel_logs`" in query:
+      raise RuntimeError("permission denied")
+    return FakeBQ(counts={"otel_metric_gauge": 1, "bqaa_metrics": 1})(query)
+
+  results = verify.run_smoke(
+      verify.VerifySettings(**_SETTINGS),
+      http_post=FakeHttp(),
+      query_rows=landing_boom,
+      sleep=lambda _: None,
+      timeout_s=0,
+  )
+  logs_check = [r for r in results if "otel_logs" in r.name]
+  assert logs_check and not logs_check[0].ok
+  assert "permission denied" in logs_check[0].detail
+  # The projection step must not run when a landing check failed.
+  assert not any("projected" in r.name for r in results)

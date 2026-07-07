@@ -423,7 +423,16 @@ def run_smoke(
   )
   landed = True
   for name, query in checks:
-    count = _wait_count(query)
+    # A missing table / permission error while polling must become a failed
+    # check, not a traceback that also hides the earlier results.
+    try:
+      count = _wait_count(query)
+    except Exception as exc:  # noqa: BLE001 - report, never crash the report
+      results.append(
+          CheckResult(name=name, ok=False, detail=f"query failed: {exc}")
+      )
+      landed = False
+      continue
     results.append(
         CheckResult(
             name=name,

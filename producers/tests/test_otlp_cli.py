@@ -426,6 +426,24 @@ def test_verify_rejects_plain_http_for_remote_hosts(monkeypatch, capsys):
   assert "https" in capsys.readouterr().err.lower()
 
 
+def test_verify_rejects_mixed_case_http_scheme(monkeypatch, capsys):
+  # URL schemes are case-insensitive: HTTP:// must not bypass the guard.
+  monkeypatch.setenv("BQAA_OTLP_TOKEN", "tok")
+  rc = _run(
+      [
+          "verify",
+          "--endpoint",
+          "HTTP://receiver.example.com",
+          "--project",
+          "p",
+          "--dataset",
+          "d",
+      ]
+  )
+  assert rc == 2
+  assert "https" in capsys.readouterr().err.lower()
+
+
 def test_verify_allows_http_for_localhost(monkeypatch):
   from bigquery_agent_analytics_tracing.otlp import verify
 

@@ -370,8 +370,10 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 2
   # The bearer token rides on every request: plain http to a remote host
   # would send it cleartext. Loopback stays allowed for local harnesses.
-  host = urllib.parse.urlsplit(args.endpoint).hostname or ""
-  if args.endpoint.startswith("http://") and host not in (
+  # Schemes are case-insensitive (HTTP:// must not bypass the guard).
+  split = urllib.parse.urlsplit(args.endpoint)
+  host = split.hostname or ""
+  if split.scheme.lower() == "http" and host not in (
       "localhost",
       "127.0.0.1",
       "::1",
