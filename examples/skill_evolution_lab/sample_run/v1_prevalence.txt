@@ -1,3 +1,5 @@
-Prevalence across 53 independent analyst patches:
-  TOOL_USAGE: 51/53 (96%) -- STRONG
-  MISSING_RULE: 2/53 (4%) -- moderate
+Prevalence across 23 independent analyst patches:
+  TOOL_USAGE: 18/23 (78%) -- STRONG
+  PARROTING: 3/23 (13%) -- STRONG
+  MISSING_RULE: 1/23 (4%) -- weak
+  RESPONSE_PATTERN: 1/23 (4%) -- weak

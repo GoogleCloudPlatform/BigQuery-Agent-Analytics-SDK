@@ -989,14 +989,6 @@ def _main():
       ap.error(f"--eval-spec not found: {args.eval_spec}")
     with open(args.eval_spec) as f:
       tools = (json.load(f) or {}).get("tools") or tools
-  if args.eval_spec and not tools:
-    # Library CLI stays lenient (runs without tool awareness) but warns; the
-    # lab wrapper (analyze_and_evolve.py) fail-fasts on the same condition.
-    logging.warning(
-        "--eval-spec %s has no `tools` field; analysts will run WITHOUT tool"
-        " awareness.",
-        args.eval_spec,
-    )
 
   logging.basicConfig(
       level=logging.INFO,
@@ -1005,6 +997,17 @@ def _main():
   )
   for noisy in ("google.genai", "google_genai", "httpx", "httpcore"):
     logging.getLogger(noisy).setLevel(logging.ERROR)
+
+  if args.eval_spec and not tools:
+    # Library CLI stays lenient (runs without tool awareness) but warns; the
+    # lab wrapper (analyze_and_evolve.py) fail-fasts on the same condition.
+    # Emitted after basicConfig: a module-level logging call before it would
+    # install an implicit WARNING-level root handler and mute every INFO log.
+    logging.warning(
+        "--eval-spec %s has no `tools` field; analysts will run WITHOUT tool"
+        " awareness.",
+        args.eval_spec,
+    )
 
   with open(args.skill) as f:
     current_skill = f.read()

@@ -1,0 +1,4 @@
+Prevalence across 6 independent analyst patches:
+  RESPONSE_PATTERN: 4/6 (67%) -- STRONG
+  MISSING_RULE: 1/6 (17%) -- weak
+  TOOL_USAGE: 1/6 (17%) -- weak

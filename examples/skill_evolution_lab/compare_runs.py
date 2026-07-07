@@ -114,15 +114,15 @@ def _tool_usage(report: dict):
   return {"any_tool": any_tool, "by_tool": by_tool, "total": len(sessions)}
 
 
-def _tool_rows(v0_tools, v1_tools) -> list:
-  """Behavior table rows: sessions that selected each tool, V0 vs V1."""
+def _tool_rows(v0_tools, v1_tools, short0="V0", short1="V1") -> list:
+  """Behavior table rows: sessions that selected each tool, before vs after."""
   if not v0_tools or not v1_tools:
     return []
   total0, total1 = v0_tools["total"], v1_tools["total"]
   rows = [
       "## Tool selection (sessions that called each tool, held-out set)",
       "",
-      "| Behavior | V0 | V1 |",
+      f"| Behavior | {short0} | {short1} |",
       "| --- | --- | --- |",
       f"| Called any tool | {v0_tools['any_tool']}/{total0} |"
       f" {v1_tools['any_tool']}/{total1} |",
@@ -170,10 +170,20 @@ def _dim_rows(v0_dims: dict, v1_dims: dict) -> list:
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--v0", required=True, help="V0 report JSON")
-  parser.add_argument("--v1", required=True, help="V1 report JSON")
+  parser.add_argument("--v0", required=True, help="Baseline report JSON")
+  parser.add_argument("--v1", required=True, help="Candidate report JSON")
   parser.add_argument("-o", "--out", default=None, help="Markdown output path")
   parser.add_argument("--model", default="", help="Model label for the header")
+  parser.add_argument(
+      "--label0",
+      default="V0 (flawed)",
+      help="Column label for the baseline report (e.g. 'V1 (evolved)')",
+  )
+  parser.add_argument(
+      "--label1",
+      default="V1 (evolved)",
+      help="Column label for the candidate report (e.g. 'V2 (round 2)')",
+  )
   parser.add_argument(
       "--gate",
       action="store_true",
@@ -196,13 +206,16 @@ def main():
   v1_tools = _tool_usage(v1_report)
 
   hdr = f" ({args.model})" if args.model else ""
+  # Short labels ("V0", "V1", "V2") for compact rows and the gate message.
+  short0 = args.label0.split()[0]
+  short1 = args.label1.split()[0]
   lines = [
       f"# Skill Evolution Result{hdr}",
       "",
       "Correctness on the held-out set: in-scope answers matched & meaningful,"
       " out-of-scope questions cleanly declined.",
       "",
-      "| Metric | V0 (flawed) | V1 (evolved) | Delta |",
+      f"| Metric | {args.label0} | {args.label1} | Delta |",
       "| --- | --- | --- | --- |",
       _row("Overall", v0["overall"], v1["overall"]),
       _row("Single-turn", v0["single_turn"], v1["single_turn"]),
@@ -214,17 +227,18 @@ def main():
     )
   lines += [
       "",
-      f"Parroted sub-trajectories: V0={v0['parroted']}  V1={v1['parroted']} "
+      f"Parroted sub-trajectories: {short0}={v0['parroted']} "
+      f" {short1}={v1['parroted']} "
       "(lower is better -- the agent re-verified instead of caving).",
       "",
   ]
-  lines += _tool_rows(v0_tools, v1_tools)
+  lines += _tool_rows(v0_tools, v1_tools, short0, short1)
   dim_rows = _dim_rows(v0_dims, v1_dims)
   if dim_rows:
     lines += [
         "## Quality dimensions (average 0-2, held-out set)",
         "",
-        "| Dimension | V0 | V1 | Delta |",
+        f"| Dimension | {short0} | {short1} | Delta |",
         "| --- | --- | --- | --- |",
         *dim_rows,
         "",
@@ -255,8 +269,8 @@ def main():
   # passes (acceptable for the demo; call it out if you productionize).
   if args.gate and v1["overall"]["rate"] <= v0["overall"]["rate"]:
     print(
-        f"GATE: V1 overall {v1['overall']['rate']}% <= V0"
-        f" {v0['overall']['rate']}% -- V1 should not be kept.",
+        f"GATE: {short1} overall {v1['overall']['rate']}% <= {short0}"
+        f" {v0['overall']['rate']}% -- {short1} should not be kept.",
         file=sys.stderr,
     )
     sys.exit(GATE_EXIT_CODE)

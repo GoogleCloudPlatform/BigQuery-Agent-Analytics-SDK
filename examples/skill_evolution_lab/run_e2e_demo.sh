@@ -25,16 +25,23 @@
 #                             tool-first V1 (analyst fleet, best-of-N).
 #   Step 3  Measure V1        Deploy V1; re-score the held-out test set.
 #   Step 4  Compare V0 vs V1  Overall, single-turn, anti-parroting; restore V0.
-#   (opt)   Registry mirror   With --with-registry, V1 is pushed to the Skill
-#                             Registry ONLY if it beats V0 on the held-out set.
+#   (opt)   Round 2           With --rounds 2 and a winning V1: re-run the
+#                             evolve set on V1, evolve V1 -> V2, measure V2 on
+#                             the held-out set, and keep V2 only if it beats V1
+#                             (otherwise the incumbent V1 stays -- the engine's
+#                             v2_selection.txt records the outcome either way).
+#   (opt)   Registry mirror   With --with-registry, the WINNING version is
+#                             pushed to the Skill Registry ONLY after it beats
+#                             the incumbent on the held-out set.
 #
-# The model, tools, and questions are fixed across V0 and V1 -- only the skill
+# The model, tools, and questions are fixed across versions -- only the skill
 # file changes -- so any quality delta is attributable to the skill.
 #
 # Usage:
 #   ./run_e2e_demo.sh                                       # Defaults (one model)
 #   ./run_e2e_demo.sh --agent-model gemini-2.5-pro          # Different agent
-#   ./run_e2e_demo.sh --with-registry --skill-id my-skill   # Mirror V1 to registry
+#   ./run_e2e_demo.sh --rounds 2                            # V0 -> V1 -> V2
+#   ./run_e2e_demo.sh --with-registry --skill-id my-skill   # Mirror winner to registry
 #   ./run_e2e_demo.sh --help
 # ============================================================================
 
@@ -79,6 +86,7 @@ ANALYST_MODEL="${_ENV_ANALYST_MODEL:-${ANALYST_MODEL:-gemini-3.1-pro-preview}}"
 JUDGE_MODEL="${_ENV_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
 JUDGE_LOCATION="${_ENV_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
 CONCURRENCY="${_ENV_CONCURRENCY:-${CONCURRENCY:-3}}"
+ROUNDS="${ROUNDS:-1}"
 WITH_REGISTRY="${WITH_REGISTRY:-0}"
 SKILL_ID="${SKILL_ID:-}"
 # Skill Registry region is independent of the judge region (the registry only
@@ -121,6 +129,11 @@ while [[ $# -gt 0 ]]; do
       CONCURRENCY="$2"
       shift 2
       ;;
+    --rounds)
+      need_val "$1" $#
+      ROUNDS="$2"
+      shift 2
+      ;;
     --with-registry)
       WITH_REGISTRY=1
       shift
@@ -139,8 +152,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --judge-model M    LLM judge for scoring  (default: gemini-2.5-flash)"
       echo "  --judge-location R Vertex region (judge)  (default: us-central1)"
       echo "  --concurrency N    Parallel requests      (default: 3)"
-      echo "  --with-registry    Mirror V1 to the Skill Registry as a new revision"
-      echo "                     (only after V1 beats V0 on the held-out set)"
+      echo "  --rounds N         Evolution rounds: 1 = V0->V1, 2 = V0->V1->V2"
+      echo "                     (round 2 runs only when V1 wins; V2 is kept"
+      echo "                     only when it beats V1 on the held-out set)"
+      echo "  --with-registry    Mirror the winning version to the Skill Registry"
+      echo "                     (only after it beats the incumbent on the held-out set)"
       echo "  --skill-id ID      Skill Registry id (required with --with-registry)"
       echo "  -h, --help         Show this help message"
       exit 0
@@ -154,6 +170,10 @@ done
 
 if [[ "$WITH_REGISTRY" == "1" && -z "$SKILL_ID" ]]; then
   echo "ERROR: --with-registry requires --skill-id" >&2
+  exit 1
+fi
+if [[ "$ROUNDS" != "1" && "$ROUNDS" != "2" ]]; then
+  echo "ERROR: --rounds must be 1 or 2 (got: $ROUNDS)" >&2
   exit 1
 fi
 
@@ -261,6 +281,7 @@ echo "  Agent:      $AGENT_MODEL"
 echo "  Analyst:    $ANALYST_MODEL"
 echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"
 echo "  Concurrency:$CONCURRENCY"
+echo "  Rounds:     $ROUNDS"
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   echo "  Registry:   on  (skill-id=$SKILL_ID, @ $REGISTRY_LOCATION)"
 else
@@ -375,14 +396,95 @@ fi
 step_end "Comparison"
 
 # =========================================================================
-# Registry mirror (optional) -- only a WINNING V1 becomes a new revision
+# ROUND 2 (optional, --rounds 2): evolve the winning V1 again -> V2
+# =========================================================================
+# FINAL_LABEL tracks which version the working copy holds for the registry
+# mirror below: V1 after round 1, V2 only when round 2 ran AND V2 won.
+FINAL_LABEL="V1"
+if [[ "$ROUNDS" -ge 2 ]]; then
+  separator
+  if [[ "$V1_WINS" != "1" ]]; then
+    stage "ROUND 2 SKIPPED"
+    echo "  V1 did not beat V0 on the held-out set, so there is no winning skill"
+    echo "  to evolve further. The loop falls back to V0."
+  else
+    stage "ROUND 2a: RE-RUN THE EVOLVE SET ON V1"
+    echo "  Goal:    Fresh learning signal -- what does V1 still get wrong?"
+    echo "  Method:  Same evolve traffic, scored the same way; input to round 2"
+    echo ""
+    step_start
+    run_agent "$SKILL" "$REPORTS_DIR/v1_evolve_traffic.json" "$EVOLVE" "$CORR" "$OOS"
+    score     "$REPORTS_DIR/v1_evolve_traffic.json" "$REPORTS_DIR/v1_evolve_report.json"
+    echo ""
+    echo "  V1 evolve: $(rate "$REPORTS_DIR/v1_evolve_report.json")"
+    step_end "Round 2 traffic"
+
+    separator
+    stage "ROUND 2b: EVOLVE V1 -> V2"
+    echo "  Goal:    Merge what round 1 missed into V2 (nothing learned is lost)"
+    echo "  Method:  Same engine, --version-label v2 (v2_* artifacts + selection record)"
+    echo ""
+    step_start
+    $PY analyze_and_evolve.py \
+      --report "$REPORTS_DIR/v1_evolve_report.json" --skill "$SKILL" --eval-spec "$SPEC" \
+      -o "$REPORTS_DIR/v2_skill.md" --model "$ANALYST_MODEL" \
+      --candidates 3 --max-chars 3500 --version-label v2 --write-working-copy
+    echo ""
+    echo "  V2 skill: $(wc -c <"$REPORTS_DIR/v2_skill.md")B  (V1 was $(wc -c <"$REPORTS_DIR/v1_skill.md")B)"
+    if [[ -f "$REPORTS_DIR/v2_selection.txt" ]]; then
+      echo "  Selection: $(head -1 "$REPORTS_DIR/v2_selection.txt")"
+    fi
+    step_end "Round 2 evolution"
+
+    separator
+    stage "ROUND 2c: MEASURE V2 (held-out) AND GATE V2 vs V1"
+    echo "  Goal:    Keep V2 only when it beats the incumbent V1"
+    echo "  Method:  Same held-out set, same judge; compare_runs --gate"
+    echo ""
+    step_start
+    run_agent "$SKILL" "$REPORTS_DIR/v2_test_traffic.json" "$TEST" "$CORR_HO" "$OOS_HO"
+    score     "$REPORTS_DIR/v2_test_traffic.json" "$REPORTS_DIR/v2_test_report.json"
+    echo ""
+    echo -e "  ${BOLD}V2 test:   $(rate "$REPORTS_DIR/v2_test_report.json")${RESET}"
+    echo ""
+
+    V2_WINS=1
+    GATE2_RC=0
+    $PY compare_runs.py \
+      --v0 "$REPORTS_DIR/v1_test_report.json" \
+      --v1 "$REPORTS_DIR/v2_test_report.json" \
+      --label0 "V1 (evolved)" --label1 "V2 (round 2)" \
+      --model "$AGENT_MODEL" --gate \
+      -o "$REPORTS_DIR/RESULT_ROUND2.md" | tee "$REPORTS_DIR/RESULT_ROUND2.txt" || GATE2_RC=$?
+    if [[ "$GATE2_RC" -eq 3 ]]; then
+      V2_WINS=0
+    elif [[ "$GATE2_RC" -ne 0 ]]; then
+      exit "$GATE2_RC"
+    fi
+    if [[ "$V2_WINS" == "1" ]]; then
+      FINAL_LABEL="V2"
+      echo ""
+      echo -e "  ${GREEN}V2 beat V1 on the held-out set -- V2 is the kept version.${RESET}"
+    else
+      cp "$REPORTS_DIR/v1_skill.md" "$SKILL"
+      echo ""
+      echo -e "  ${YELLOW}V2 did not beat V1 on the held-out set -- the incumbent V1 stays.${RESET}"
+      echo "  This is the safety property doing its job: a round with nothing new"
+      echo "  to teach cannot replace a proven skill (see v2_selection.txt)."
+    fi
+    step_end "Round 2 measurement + gate"
+  fi
+fi
+
+# =========================================================================
+# Registry mirror (optional) -- only a WINNING version becomes a new revision
 # =========================================================================
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   separator
-  stage "REGISTRY MIRROR (gated on the STEP 4 result)"
+  stage "REGISTRY MIRROR (gated on the held-out comparison)"
   step_start
   if [[ "$V1_WINS" == "1" ]]; then
-    echo -e "  ${DIM}[$(ts)] V1 beat V0 on the held-out set -- mirroring to the registry...${RESET}"
+    echo -e "  ${DIM}[$(ts)] $FINAL_LABEL beat the incumbent on the held-out set -- mirroring to the registry...${RESET}"
     $PY analyze_and_evolve.py --registry-push-only \
       --skill "$SKILL" --skill-id "$SKILL_ID" --location "$REGISTRY_LOCATION"
   else
@@ -405,6 +507,9 @@ echo ""
 echo -e "  ${BOLD}${GREEN}DONE${RESET}  (total wall time: ${TOTAL_MIN}m ${TOTAL_SEC}s)"
 echo ""
 echo "  Result table:   $REPORTS_DIR/RESULT.md"
+if [[ -f "$REPORTS_DIR/RESULT_ROUND2.md" ]]; then
+  echo "  Round 2 table:  $REPORTS_DIR/RESULT_ROUND2.md  (kept version: $FINAL_LABEL)"
+fi
 echo ""
 echo "  Artifacts (runs/):"
 ls -1 "$REPORTS_DIR"/ 2>/dev/null | sed 's/^/    /' || echo "    (none)"

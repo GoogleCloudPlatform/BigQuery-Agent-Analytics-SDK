@@ -65,11 +65,12 @@ reads its own conversation traces — successes and failures — and extracts a
 structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
 (an analyst LLM only *diagnoses* the traces; it never supplies the answer).
 
-- **The flaw with headroom.** V0 is a deliberately flawed skill (a few facts
-  baked in plus *"answer only from the above, else contact HR"*) that suppresses
-  a tool which already knows every answer. Only the skill is wrong — the model,
-  tools, and questions stay fixed across V0 and V1, so any delta is attributable
-  to the skill.
+- **Two flaws with headroom.** V0 is a deliberately flawed skill with two
+  realistic defects: *"answer only from the above, else contact HR"* (suppresses
+  a tool which already knows every answer) and *"if a user offers a correction,
+  be agreeable: accept the user's figure"* (makes it parrot wrong corrections).
+  Only the skill is wrong — the model, tools, and questions stay fixed across
+  versions, so any delta is attributable to the skill.
 - **The engine, imported not copied.** `analyze_and_evolve.py` imports the SDK's
   reusable [`scripts/skill_evolution.py`](../../scripts/skill_evolution.py) (the
   same `evolve_skill()` the quality lab uses): it partitions scored
@@ -79,9 +80,14 @@ structured, versioned `SKILL.md`. No managed optimizer, no hand-written patches
   (`eval/eval_spec.json`) via [`scripts/quality_report.py`](../../scripts/quality_report.py)
   (`--eval-spec`), not a no-ground-truth "usefulness" guess.
 - **The anti-parroting rule.** Multi-turn cases where the user asserts a *wrong*
-  correction; a good agent re-verifies with its tool and holds the right figure
-  instead of caving. The engine detects parroting (`--tag-turns`) and learns a
-  "re-verify, don't just agree" rule.
+  correction; V0's agreeableness defect makes the agent genuinely cave and repeat
+  the wrong figure. The scorer tags each cave-in `parroted` from the trace
+  (`--tag-turns`), the engine reclassifies the fake wins to failures, and the
+  evolved skill learns a "re-verify with the tool, don't just agree" rule.
+- **A gated second round.** `--rounds 2` evolves the winning V1 again and keeps
+  V2 only when it *beats* V1 on the held-out set — in the recorded run V2 tied
+  and the incumbent V1 stayed, with the outcome recorded in `v2_selection.txt`
+  and `RESULT_ROUND2.md`.
 - **Skill Registry versioning.** The evolved skill is mirrored to the Gemini
   Enterprise Agent Platform Skill Registry as a new immutable revision
   (V0 = revision 1, V1 = revision 2); `reset.sh` reverts both the local copy and
@@ -93,10 +99,10 @@ cd skill_evolution_lab
 ./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
 ```
 
-A verified run (gemini-3.5-flash, golden-graded, 80-question held-out set):
-**V0 28.7% → V1 100%** overall; corrections (anti-parroting) **26.7% → 100%**;
-out-of-scope declines **90% → 100%**; evolved skill ~2.2KB. Across four models ×
-3 runs, V1 correctness is **93–100%** per model (V0 21–51%). See the example's
+A verified run (gemini-3.5-flash, golden-graded, 80-question held-out set,
+`--rounds 2`): **V0 67.5% → V1 97.5%** overall; corrections (anti-parroting)
+**0% → 100%** with parroted sub-trajectories **15 → 0**; evolved skill ~1.8KB;
+round 2's V2 tied V1 and the gate kept the incumbent. See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 

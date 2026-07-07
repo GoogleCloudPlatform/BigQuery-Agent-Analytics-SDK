@@ -77,7 +77,7 @@ def _mirror_to_registry(project: str, skill_path: str, skill_id: str, location):
       skill_id,
       skill_dir,
       display_name="Skill Lab Policy Agent",
-      description="Evolved (V1) tool-first policy skill",
+      description="Evolved tool-first policy skill",
   )
   revs = reg.list_revisions(skill_id)
   logger.info("Registry now has %d revision(s).", len(revs))
@@ -101,6 +101,15 @@ def main():
   parser.add_argument("--candidates", type=int, default=3)
   parser.add_argument("--max-chars", type=int, default=3500)
   parser.add_argument("--max-workers", type=int, default=10)
+  parser.add_argument(
+      "--version-label",
+      default="v1",
+      help=(
+          "Version being PRODUCED (artifact filename prefix): 'v1' for the"
+          " V0->V1 round, 'v2' for a V1->V2 round, so successive rounds don't"
+          " overwrite each other's patches/candidates/selection artifacts"
+      ),
+  )
   parser.add_argument(
       "--write-working-copy",
       action="store_true",
@@ -184,6 +193,7 @@ def main():
       max_workers=args.max_workers,
       tools=tools,
       artifacts_dir=os.path.dirname(os.path.abspath(args.out)),
+      version_label=args.version_label,
   )
 
   # Normalize trailing whitespace / EOF so the committed artifact stays clean

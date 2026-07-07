@@ -1,0 +1,32 @@
+[
+  {
+    "index": 1,
+    "category": "MISSING_RULE",
+    "patch": "## Root Cause\nMISSING_RULE: The agent returned an empty response instead of answering the user's question.\n\n## Analysis\nThe user asked if leftover sick days roll into the following year. Despite having the answer in its initial knowledge (sick leave does not roll over) and executing a tool call, the agent returned a completely empty response. The agent needs an explicit instruction to always generate a final, written answer to the user.\n\n## Proposed Patch\nSection: Response Rules\nAction: add_rule\nContent:\nAlways provide a clear, complete, text-based response to the user's question. Never return an empty response, whether the answer comes from your initial knowledge or after executing a tool call."
+  },
+  {
+    "index": 2,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactively include related policy guidelines and conditions.\n\n## Analysis\nThe agent successfully answered the specific question about the meal per-diem amount and proactively included related guidelines from the policy, such as receipt requirements and submission deadlines. This is a highly transferable pattern that provides a more complete, helpful answer and prevents predictable follow-up questions regarding policy conditions.\n\n## Proposed Patch\nSection: Response Rules\nAction: add_rule\nContent:\n- **Comprehensive Answers:** When providing a specific policy limit, amount, or benefit (e.g., a per-diem or allowance), proactively include any related guidelines, conditions, or requirements (such as receipt thresholds, approval needs, or submission deadlines) retrieved from the policy."
+  },
+  {
+    "index": 3,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Explicitly applying policy thresholds to user scenarios\n\n## Analysis\nThe agent successfully retrieved the expense policy and explicitly evaluated the user's specific amount ($40) against the policy's threshold ($25). This explicit comparison makes the reasoning clear and directly addresses the user's specific situation, which is a highly transferable pattern for any policy involving limits, caps, or thresholds.\n\n## Proposed Patch\nSection: Response Rules\nAction: add_rule\nContent:\n- **Applying Thresholds:** When a user asks about a specific scenario involving an amount, duration, or quantity, explicitly state the relevant policy threshold and explain how the user's specific situation compares to it (e.g., \"Since your purchase is $40, which is over the $25 threshold...\")."
+  },
+  {
+    "index": 4,
+    "category": "TOOL_USAGE",
+    "patch": "## Pattern\nTOOL_USAGE: Querying tools for topics present in Initial Knowledge\n\n## Analysis\nThe agent successfully queried the `lookup_company_policy` tool for the remote work policy despite having a brief summary of it in its Initial Knowledge. This allowed the agent to retrieve and include important additional context (core collaboration hours) that was missing from the initial summary. Reinforcing this behavior ensures the agent does not rely solely on incomplete prompt knowledge and always provides comprehensive answers.\n\n## Proposed Patch\nSection: Tool Usage\nAction: add_rule\nContent:\n- Even if a policy is briefly summarized in your Initial Knowledge, you must still query the `lookup_company_policy` tool before answering. The tool contains additional necessary context and constraints (e.g., core collaboration hours) that you should include to provide a complete and accurate response."
+  },
+  {
+    "index": 5,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive inclusion of related policy guidelines\n\n## Analysis\nThe agent successfully answered the user's specific question about the expense report deadline, but also proactively included other relevant guidelines from the retrieved policy (such as receipt requirements and meal limits). This pattern of providing a comprehensive summary of the policy reduces the need for follow-up questions and delivers a much better user experience.\n\n## Proposed Patch\nSection: Response Rules\nAction: add_rule\nContent:\n- **Comprehensive Answers:** When answering a specific question about a policy, do not just provide the narrow answer. Proactively include other important, related guidelines from the retrieved policy (e.g., limits, requirements, or exceptions) to give the user a complete picture and anticipate follow-up questions."
+  },
+  {
+    "index": 6,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Explicitly applying policy limits to the user's specific scenario.\n\n## Analysis\nThe agent successfully answered a question about a specific scenario (working remote 4 days) by first stating the policy limit (3 days) and then explicitly concluding that the user's specific request is not permitted. This is a highly transferable pattern that ensures users receive a direct, unambiguous answer to their specific question rather than just a general quote of the policy text.\n\n## Proposed Patch\nSection: Response Rules\nAction: add_rule\nContent:\n- **Scenario Application:** When a user asks if a specific scenario or request is allowed (e.g., requesting a specific number of days), state the relevant policy limit and explicitly conclude whether their specific request is permitted or denied based on that limit."
+  }
+]

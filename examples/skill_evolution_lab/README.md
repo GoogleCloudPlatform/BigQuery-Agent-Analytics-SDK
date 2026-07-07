@@ -10,9 +10,11 @@ Registry** (V0 = revision 1, V1 = revision 2).
 
 The point of the example is the **closed loop** — trace → golden-graded score →
 evolve → re-score, all attributable because only the skill file changes. V0 is
-deliberately crippled (told to ignore a tool that already has the answers), so
-the large V0→V1 delta *illustrates* the loop finding and fixing a real defect; a
-plausibly-written baseline would gain less. See [`VERIFICATION.md`](VERIFICATION.md#what-this-proves--and-what-it-doesnt).
+deliberately crippled with **two** realistic defects — told to ignore a tool
+that already has the answers, and told to accept user "corrections" at face
+value (so it genuinely parrots wrong figures back) — so the large V0→V1 delta
+*illustrates* the loop finding and fixing real defects; a plausibly-written
+baseline would gain less. See [`VERIFICATION.md`](VERIFICATION.md#what-this-proves--and-what-it-doesnt).
 
 Why BQAA makes this reusable: the Agent Analytics plugin captures the whole
 improvement substrate — the conversation, the **tool calls (name + args)**, the
@@ -36,9 +38,11 @@ Skill"* (BigQuery Agent Analytics Series). See
   (`eval/eval_spec.json`) via the SDK's `quality_report.py`, not a
   no-ground-truth "usefulness" guess.
 - **The anti-parroting rule.** Multi-turn cases where the user asserts a *wrong*
-  correction. A good agent re-verifies with its tool and holds the right figure
-  instead of caving. The engine detects parroting and learns a "re-verify, don't
-  just agree" rule.
+  correction. V0's second defect ("accept their correction") makes the agent
+  genuinely cave and repeat the user's wrong number; the scorer tags those
+  sub-trajectories `parroted` from the trace, the engine reclassifies the fake
+  wins to failures, and the evolved skill learns a "re-verify with the tool,
+  don't just agree" rule.
 - **Tool selection.** The agent has two meaningful tools —
   `lookup_company_policy` (facts) and `calculate_disability_pay` (a computed
   payout). The evolved skill learns *which* tool to reach for, not just "use a tool."
@@ -71,15 +75,15 @@ skill_evolution_lab/
     questions_oos_heldout.json          # out-of-scope cases (held-out)
   run_agent.py          # runs questions through the agent -> conversations JSON
   analyze_and_evolve.py # scored report -> evolve_skill() -> V1 (+ registry)
-  compare_runs.py       # V0 vs V1 golden-graded correctness + parroting
+  compare_runs.py       # before/after golden-graded correctness + parroting (any two versions)
   registry_cli.py       # create/update/delete/inspect registry revisions
   print_rate.py         # one-line golden-rate printer (used by run_e2e_demo.sh)
   run_e2e_demo.sh       # the whole cycle, one command (one model)
   run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
-  sample_run/           # a committed end-to-end run (scored reports, V0 +
-                        #   evolved skills, RESULT) + README explaining each file
+  sample_run/           # a committed end-to-end --rounds 2 run (scored reports, V0 +
+                        #   evolved V1/V2 skills, RESULT + RESULT_ROUND2) + README
 ```
 
 A complete recorded run lives in [`sample_run/`](sample_run/) — the scored V0/V1
@@ -114,8 +118,9 @@ prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
 **Runtime:** about **13–18 minutes** end-to-end at the default size (68 evolve +
-80 held-out questions, almost entirely Gemini API calls); `setup.sh` takes a few
-seconds. The first run also does a one-time `uv` dependency sync.
+80 held-out questions, almost entirely Gemini API calls); `--rounds 2` adds
+roughly ten more. `setup.sh` takes a few seconds. The first run also does a
+one-time `uv` dependency sync.
 
 **What you'll see** — a per-step progress trace ending in the comparison table.
 The per-step rate is over the *in-scope* questions matched to the answer key (the
@@ -123,18 +128,34 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   20.0% (14/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   62.9% (44/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
-     V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V1 test:   98.6% (69/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
-| Metric                    | V0 (flawed)   | V1 (evolved)   | Delta   |
-| Overall                   | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
+| Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
+| Overall                   | 67.5% (54/80) | 97.5% (78/80)  | +30.0pp  |
+| Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
 stable. See [`VERIFICATION.md`](VERIFICATION.md) for a recorded + reproduced run.
+
+### A second round (V0 -> V1 -> V2)
+
+```bash
+./run_e2e_demo.sh --rounds 2
+```
+
+Round 2 runs only when V1 beat V0. It replays the evolve set on V1 (fresh
+learning signal: what does V1 *still* get wrong?), evolves V1 -> V2 with
+`--version-label v2` (so `v2_patches.json`, `v2_candidates/`, and
+`v2_selection.txt` land beside the `v1_*` artifacts instead of overwriting
+them), measures V2 on the same held-out set, and keeps V2 **only when it beats
+V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
+`v2_selection.txt` record why. Both outcomes are the demo working as designed:
+a gain proves the loop compounds; a kept incumbent proves the guard holds.
 
 ### With the Skill Registry
 
@@ -145,8 +166,10 @@ WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./reset.sh   # revert local + registry
 ```
 
 The registry push happens *after* the held-out comparison (Step 4) and only
-when V1 beats V0 — the loop's "keep the new skill only when it wins" property
-is enforced, not just described.
+when the new version beats the incumbent — the loop's "keep the new skill only
+when it wins" property is enforced, not just described. With `--rounds 2` the
+pushed revision is whichever version won the final gate (V2 if it beat V1,
+else V1).
 
 Inspect revisions any time: `uv run python registry_cli.py revisions
 --skill-id skill-lab-policy`.
@@ -248,7 +271,7 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
   tokens on every call and buries the rules that matter under ones that don't.
 
 The anti-bloat rules are enforced by the consolidator prompt in `scripts/skill_evolution.py`,
-before compaction ever runs -- which is why an evolved skill stays behavioral (~2.2KB) rather
+before compaction ever runs -- which is why an evolved skill stays behavioral (~1.8KB) rather
 than a pile of baked facts:
 
 ```text

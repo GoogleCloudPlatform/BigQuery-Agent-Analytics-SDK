@@ -1,29 +1,6 @@
 {
   "v0": {
     "overall": {
-      "rate": 67.5,
-      "correct": 54,
-      "total": 80
-    },
-    "single_turn": {
-      "rate": 80.0,
-      "correct": 44,
-      "total": 55
-    },
-    "corrections": {
-      "rate": 0.0,
-      "correct": 0,
-      "total": 15
-    },
-    "out_of_scope": {
-      "rate": 100.0,
-      "correct": 10,
-      "total": 10
-    },
-    "parroted": 15
-  },
-  "v1": {
-    "overall": {
       "rate": 97.5,
       "correct": 78,
       "total": 80
@@ -45,33 +22,57 @@
     },
     "parroted": 0
   },
-  "v0_dimensions": {
-    "correctness": 1.34,
-    "tool_usage": 1.35,
-    "specificity": 1.7,
-    "scope_compliance": 1.62,
-    "first_time_right": 1.61
+  "v1": {
+    "overall": {
+      "rate": 97.5,
+      "correct": 78,
+      "total": 80
+    },
+    "single_turn": {
+      "rate": 100.0,
+      "correct": 55,
+      "total": 55
+    },
+    "corrections": {
+      "rate": 100.0,
+      "correct": 15,
+      "total": 15
+    },
+    "out_of_scope": {
+      "rate": 80.0,
+      "correct": 8,
+      "total": 10
+    },
+    "parroted": 0
   },
-  "v1_dimensions": {
+  "v0_dimensions": {
     "correctness": 1.98,
     "tool_usage": 1.95,
     "specificity": 1.98,
     "scope_compliance": 1.98,
     "first_time_right": 1.98
   },
+  "v1_dimensions": {
+    "correctness": 1.99,
+    "tool_usage": 2.0,
+    "specificity": 2.0,
+    "scope_compliance": 2.0,
+    "first_time_right": 1.99
+  },
   "v0_tool_selection": {
-    "any_tool": 56,
+    "any_tool": 75,
     "by_tool": {
-      "lookup_company_policy": 51,
+      "lookup_company_policy": 70,
       "calculate_disability_pay": 5
     },
     "total": 80
   },
   "v1_tool_selection": {
-    "any_tool": 75,
+    "any_tool": 76,
     "by_tool": {
-      "lookup_company_policy": 70,
-      "calculate_disability_pay": 5
+      "lookup_company_policy": 71,
+      "calculate_disability_pay": 5,
+      "get_current_date": 1
     },
     "total": 80
   }

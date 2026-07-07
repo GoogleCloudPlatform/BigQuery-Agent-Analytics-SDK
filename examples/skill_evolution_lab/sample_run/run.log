@@ -3,12 +3,14 @@
 
   SKILL EVOLUTION LAB -- END-TO-END
 
+  Project:    agent-skill-lab-01
   Agent:      gemini-3.5-flash
   Analyst:    gemini-3.1-pro-preview
   Judge:      gemini-2.5-flash  (@ us-central1)
   Concurrency:3
+  Rounds:     2
   Registry:   off
-  Output dir: runs/20260701_192502_gemini_3_5_flash
+  Output dir: runs/20260707_081127_gemini_3_5_flash
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -23,165 +25,179 @@
   Method:  Deploy SKILL.v0.md, run traffic, score vs the golden Q&A
   Sets:    evolve (study) + held-out (test), each with corrections + out-of-scope
 
-  [19:25:02] Running + scoring the evolve set...
+  [08:11:27] Running + scoring the evolve set...
 Running 68 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 68 conversation(s) (68 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_evolve_traffic.json
+Wrote 68 conversation(s) (68 ok) -> runs/20260707_081127_gemini_3_5_flash/v0_evolve_traffic.json
+08:12:48 [WARNING] Categorical API classification EXCEPTION for e21_benefits: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 51)
+  UNHELPFUL Sessions (showing 10 of 15)
 ──────────────────────────────────────────────────────────────────────
-
-  Session:     e04_pto  → policy_agent
-  Question:    Is my unused PTO paid out if I resign?
-  Response:    "I do not have information regarding whether unused PTO is paid out upon resignation. I suggest you contact HR to get clarification on this policy."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a substantive answer to the user's question about PTO policy.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent's response is a statement about its own lack of information, not a fact derived from a tool. The question is in scope for the `lookup_company_policy` tool, which should contain this information. The agent did not provide any policy details, indicating it did not ground its response in tool data.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     e07_sick  → policy_agent
-  Question:    After how many days out sick is a doctor's note required?
-  Response:    "I do not have information regarding when a doctor's note is required for sick leave. Please contact HR for assistance with this topic."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating it did not retrieve data from its tools, even though the `lookup_company_policy` tool should cover sick leave policies.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     e10_remote  → policy_agent
-  Question:    When are the required overlap hours for remote staff?
-  Response:    "I do not have information about the required overlap hours for remote staff. I suggest you contact HR for assistance with this topic."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, which is not a substantive answer to the user's question about remote staff overlap hours.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it does not have the information and did not provide any data from its tools. Since 'remote work' is an in-scope topic, the agent should have used a tool to find this information. Its response is not based on tool results.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e12_expenses  → policy_agent
   Question:    What's the per-diem for meals while traveling for work?
-  Response:    "I do not have that information. I suggest you contact HR for assistance with travel expenses and per-diem rates."
+  Response:    "I do not have information about the per-diem for meals while traveling for work in my standard policy list. I suggest you contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information for an in-scope topic ('expenses') and directed the user to HR, which is not a useful answer.
+  Reason:        The agent stated it did not have the information and directed the user to HR, which is not a substantive answer to the user's question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to find the information, despite the question being in scope and a tool being available. Its response was based on its own lack of knowledge rather than tool results.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     e14_expenses  → policy_agent
-  Question:    Does booking a $700 flight need approval first?
-  Response:    "I do not have that information. I suggest you contact HR for assistance with expense and travel approval policies."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to answer an in-scope question.
-  Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent did not use any tools and responded based on its internal knowledge that it lacked the information. However, a tool was needed to answer the question.
+  Reason:        The agent stated it did not have the information, implying it did not retrieve relevant data from its tools to answer the question. The topic 'expenses' is in scope for the lookup_company_policy tool, so the information should have been available.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e15_expenses  → policy_agent
   Question:    What's the deadline to file an expense report?
-  Response:    "I do not have information about the deadline to file expense reports. Please contact HR for assistance with this topic."
+  Response:    "I do not have information about the deadline to file an expense report in my standard policy list. I suggest you contact HR for assistance with this."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a useful answer for an in-scope topic like expenses.
+  Reason:        The agent did not provide a substantive answer to the user's question about the expense report deadline, instead stating it lacked information and directing the user to HR.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it did not have the information, indicating no data was retrieved from tools to answer the question.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     e16_benefits  → policy_agent
-  Question:    What percentage of my medical premium does the employer pay?
-  Response:    "I do not have information regarding the specific percentage of medical premiums that the employer covers. Our policy information states that the company offers competitive benefits, but for detailed information about medical premium contributions, please contact HR."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly states it does not have the information and directs the user to HR, failing to provide a substantive answer to an in-scope question.
-  Grounding:     ✅ GROUNDED
-  Reason:        The agent states it does not have the information, which is a truthful reflection of its inability to find the specific data, and it does not fabricate an answer. The generic statement about 'competitive benefits' likely came from a tool lookup.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+  Reason:        The agent stated it did not have the information, but the 'expenses' topic is explicitly covered by the lookup_company_policy tool, implying the information should have been available. Therefore, the agent's statement is not grounded in the expected tool output.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     e17_benefits  → policy_agent
   Question:    Which health plan types can I choose from?
-  Response:    "I do not have information about the specific health plan types available. I suggest you contact HR for more details."
+  Response:    "I do not have information about the specific health plan types available. Please contact HR for assistance with your benefits options."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Reason:        The agent stated it does not have information and directed the user to HR, failing to answer an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tool to retrieve information for an in-scope question, and therefore provided no grounded information. While it didn't fabricate, it failed to ground its response in tool data.
+  Reason:        The agent did not use any tool to retrieve information, instead stating it lacked the information.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
-  Session:     e18_benefits  → policy_agent
-  Question:    What's the most a family pays out of pocket in-network?
-  Response:    "I do not have that information. I suggest you contact HR to get the specific details regarding the in-network out-of-pocket maximums for family coverage."
+  Session:     e27_benefits  → policy_agent
+  Question:    How long until I'm fully vested in the match?
+  Response:    "I do not have information about the company's 401(k) match or vesting schedule. Please contact HR for assistance with this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer for an in-scope question.
+  Reason:        The agent stated it does not have information on an in-scope topic and directed the user to HR, failing to provide a substantive answer.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information; its response was a generic statement about not having the information.
+  Reason:        The agent claimed it did not have information and did not use any tools to retrieve data, even though a tool was available for the topic. The response is not based on tool results.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
-  Session:     e19_benefits  → policy_agent
-  Question:    What's the individual in-network out-of-pocket cap?
-  Response:    "I do not have that information. Please contact HR for details regarding the individual in-network out-of-pocket cap."
+  Session:     e29_benefits  → policy_agent
+  Question:    How many weeks of leave does a primary caregiver get?
+  Response:    "I do not have information about primary caregiver or parental leave in my current policy guidelines. Please contact HR to get details on this topic."
   Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information for an in-scope topic and directed the user to HR, which is not a substantive answer.
+  Reason:        The agent stated it did not have information for an in-scope topic (parental leave) and directed the user to HR, which is not a useful answer.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to retrieve information, despite the question being in-scope and requiring a tool lookup.
+  Reason:        The agent claimed it had no information, indicating it did not successfully retrieve data from its tools to answer the question. It did not provide any factual information.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     e30_benefits  → policy_agent
+  Question:    As a secondary caregiver, how much parental leave do I get?
+  Response:    "I do not have information about parental leave policies. I suggest you contact HR to get details on secondary caregiver leave."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have information and directed the user to HR, failing to answer an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent stated it did not have information and did not use any tools to retrieve the policy, thus the response is ungrounded.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     e35_bereavement  → policy_agent
+  Question:    How much bereavement leave do I get for losing a parent?
+  Response:    "I do not have information about bereavement leave in my primary policy list. Please contact HR for assistance with this topic."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have information for an in-scope topic (bereavement leave) and directed the user to HR, which is not a substantive answer.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent's response is a statement about its own lack of information, not data retrieved from a tool. The `lookup_company_policy` tool should have been used to retrieve this information.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     e39_eap  → policy_agent
+  Question:    How many counseling visits does the EAP cover?
+  Response:    "I do not have that information in my primary policy list. Please contact HR for more details about the Employee Assistance Program (EAP) and counseling coverage."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information and did not provide any data from its tools. It should have used the lookup_company_policy tool.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     e40_eap  → policy_agent
+  Question:    Is there a round-the-clock EAP support line?
+  Response:    "I do not have that information in my primary policy list. Please contact HR for assistance with the Employee Assistance Program (EAP) and any support lines they may offer."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent failed to provide a substantive answer to an in-scope question about EAP, instead stating it did not have the information and directing the user to HR.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent's response is a deflection to HR, not based on any data retrieved from its tools. It states it doesn't have the information, implying no tool result was used to form a substantive answer.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     e44_tuition  → policy_agent
+  Question:    What grade must I earn to get tuition reimbursed?
+  Response:    "I do not have that information in my general policy list. Please contact HR for assistance with tuition reimbursement requirements."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer for an in-scope topic.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information, indicating a lack of grounding in tool results.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
 ──────────────────────────────────────────────────────────────────────
-  DECLINED (out-of-scope) Sessions (showing 3 of 6)
+  DECLINED (out-of-scope) Sessions (showing 3 of 8)
 ──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_password  → policy_agent
+  Question:    I'm locked out of my laptop -- how do I reset my login password?
+  Response:    "I do not have information about resetting your laptop login password. Please contact HR or your IT support department for assistance with this issue."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined, directing the user to the appropriate department.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent determined the question was out of scope without needing to use any tools.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_mgr_salary  → policy_agent
   Question:    How much does my manager get paid?
-  Response:    "I do not have information about manager salaries. I suggest you contact HR for assistance with this question."
+  Response:    "I do not have access to salary or compensation information for individual employees or managers. I suggest you contact HR for assistance with this inquiry."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The question about a manager's salary is outside the agent's defined scope of company policies and benefits. The agent correctly and politely declined to answer.
+  Reason:        The agent correctly identified the question as out of scope (individual salary information) and politely declined to answer, directing the user to HR. This is a useful response for an out-of-scope query.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent correctly identified that it did not have information for this out-of-scope question and thus did not need to use any tools.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+  Reason:        The agent's response is a statement about its own limitations and scope, not data retrieved from a tool. No tool was needed or could have provided this information.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_invest  → policy_agent
   Question:    Which index funds are the best investment right now?
-  Response:    "I do not have that information. I suggest you contact HR for assistance with this topic."
+  Response:    "I do not have information about investment options or index funds. I suggest you contact HR or a financial advisor for assistance with company benefits and retirement plans."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The user's question about 'best index funds' is outside the agent's defined scope of HR policy and benefits. The agent correctly declined to provide information on this out-of-scope topic.
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, which is a useful response in this context.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope and did not require tool usage. The agent's direct response was appropriate.
-  Dimensions:    Correctness: ⚠️  MOSTLY CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
-
-  Session:     oos_layoffs  → policy_agent
-  Question:    Is my team on the list for the layoffs next quarter?
-  Response:    "I do not have that information. I suggest you contact HR regarding this matter."
-  Usefulness:    ✅ DECLINED (OK)
-  Reason:        The question about specific layoff lists is out of the agent's defined scope (company policy and benefits), and the agent correctly declined to answer by stating it does not have the information and directing the user to HR.
-  Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope, and the agent correctly declined to answer without needing to use any tools.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+  Reason:        The question was out of scope and did not require tool usage. The agent's response was a direct LLM statement about its capabilities.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 11)
+  MEANINGFUL Sessions (showing 3 of 44)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     e01_pto  → policy_agent
   Question:    How many vacation days do I get a year?
-  Response:    "You get 20 PTO (vacation) days per year, which are accrued monthly. Up to 5 unused days can roll over to the next year."
+  Response:    "You get 20 days of PTO (vacation) per year, which are accrued monthly. Up to 5 unused days can roll over to the next year."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a specific and complete answer regarding PTO days, including accrual and rollover information.
+  Reason:        The agent provided a specific and complete answer regarding the number of PTO days and rollover policy.
   Grounding:     ✅ GROUNDED
-  Reason:        The information about PTO days and rollover must have been retrieved from the lookup_company_policy tool.
+  Reason:        The information about PTO days and rollover policy would be retrieved from the lookup_company_policy tool.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     e02_pto  → policy_agent
   Question:    How many unused vacation days carry into next year?
-  Response:    "Up to 5 unused PTO (vacation) days can roll over into the next year."
+  Response:    "According to the company policy, up to 5 unused vacation (PTO) days can roll over into the next year."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct and specific answer to the user's question about PTO rollover.
+  Reason:        The agent provided a direct and specific answer to the user's question about vacation day rollover.
   Grounding:     ✅ GROUNDED
-  Reason:        The information about PTO rollover limits would come from the lookup_company_policy tool.
+  Reason:        The agent explicitly states 'According to the company policy', indicating the information was retrieved from a tool like lookup_company_policy.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     e03_pto  → policy_agent
   Question:    At what rate does my PTO accrue?
-  Response:    "Your PTO accrues monthly, at a rate of 20 days per year."
+  Response:    "Based on the company policy, you receive 20 days of PTO per year, which accrues monthly at a rate of approximately 1.67 days per month."
   Usefulness:    ✅ HELPFUL
   Reason:        The agent provided a direct and specific answer to the user's question about PTO accrual rate.
   Grounding:     ✅ GROUNDED
-  Reason:        The agent's response provides specific policy details (20 days per year, monthly accrual) which would be retrieved from the lookup_company_policy tool.
+  Reason:        The agent explicitly states 'Based on the company policy', indicating the information was retrieved from a tool like lookup_company_policy.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  UNCLASSIFIED (parse errors) Sessions (showing 1 of 1)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     e21_benefits  → policy_agent
+  Question:    What does the company put in an HSA for a single employee?
+  Response:    "The company contributes $750 per year to the HSA for an employee with individual (single) coverage."
+  Usefulness:    ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Grounding:     ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
 
 ──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
@@ -189,200 +205,201 @@ Wrote 68 conversation(s) (68 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_evo
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     68       🔴   11+6d (25%)      51 (75%)        0       0      100%      100%
+  policy_agent                     68       🟡   44+8d (78%)      15 (22%)        0       1      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              51  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              15  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 68
-  Meaningful               : 11
-  Declined (out-of-scope)  : 6
+  Meaningful               : 44
+  Declined (out-of-scope)  : 8
   Partial                  : 0
-  Unhelpful                : 51
-  Unhelpful rate           : 75.0%
-  Failure causes           : skill=51 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 25.0%  (excludes 0 unaddressable gaps)
+  Unhelpful                : 15
+  Unhelpful rate           : 22.1%
+  Parse errors             : 1 session(s) (8 metric evals)
+  Failure causes           : skill=15 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 76.5%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.65 / 2.00  ################
+    Correctness         : 1.55 / 2.00  ######################################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.56 / 2.00  ##############
+    Tool Usage          : 1.55 / 2.00  ######################################
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.35 / 2.00  ########
+    Specificity         : 1.64 / 2.00  #########################################
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.53 / 2.00  #############
+    Scope               : 1.58 / 2.00  #######################################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.53 / 2.00  #############
+    First-Time Right    : 1.58 / 2.00  #######################################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.1
-    Avg tool calls       : 0.2
+    Avg tool calls       : 0.8
     Multi-turn sessions  : 5
-    Correction rate      : 1.5%
-    Verification rate    : 5.9%
+    Correction rate      : 7.4%
+    Verification rate    : 0.0%
 
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   51  ( 75.0%) #####################################
-    ✅ HELPFUL         :   11  ( 16.2%) ########
-    ✅ DECLINED (OK)   :    6  (  8.8%) ####
+    ✅ HELPFUL         :   44  ( 65.7%) ################################
+    ❌ NOT HELPFUL     :   15  ( 22.4%) ###########
+    ✅ DECLINED (OK)   :    8  ( 11.9%) #####
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   46  ( 67.6%) #################################
-    ✅ GROUNDED        :   12  ( 17.6%) ########
-    ➖ NO TOOL NEEDED  :   10  ( 14.7%) #######
+    ✅ GROUNDED        :   44  ( 65.7%) ################################
+    ❌ NOT GROUNDED    :   15  ( 22.4%) ###########
+    ➖ NO TOOL NEEDED  :    8  ( 11.9%) #####
 
   Execution Details:
-    elapsed_seconds: 138.4
-    project: agent-quality-lab-01
+    elapsed_seconds: 100.9
+    project: agent-skill-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-01T19:29:37.013147+00:00
+    created_at: 2026-07-07T08:13:54.568800+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (75.0%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (22.1%) exceeds 10% threshold!
 
-  JSON report: runs/20260701_192502_gemini_3_5_flash/v0_evolve_report.json
-  [19:29:37] Running + scoring the held-out test set...
+  JSON report: runs/20260707_081127_gemini_3_5_flash/v0_evolve_report.json
+  [08:13:55] Running + scoring the held-out test set...
 Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_test_traffic.json
+Wrote 80 conversation(s) (80 ok) -> runs/20260707_081127_gemini_3_5_flash/v0_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  UNHELPFUL Sessions (showing 10 of 57)
+  UNHELPFUL Sessions (showing 10 of 26)
 ──────────────────────────────────────────────────────────────────────
-
-  Session:     t04_pto  → policy_agent
-  Question:    If I leave the company mid-year, what happens to my unused PTO?
-  Response:    "I do not have information about what happens to your unused PTO if you leave the company mid-year. I suggest you contact HR to get more details on this policy."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information and did not use any tool to retrieve data, even though the information was available via the lookup_company_policy tool.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t07_sick_leave  → policy_agent
-  Question:    If I'm out sick for 4 days, do I need a doctor's note?
-  Response:    "I do not have information regarding whether a doctor's note is required for taking sick leave. I suggest you contact HR to get more details on this policy."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have information and directed the user to HR, failing to answer an in-scope question that its tools could address.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tool to retrieve information, instead stating it lacked the information, which is not grounded in tool results.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t10_remote_work  → policy_agent
-  Question:    What are the core collaboration hours for remote work?
-  Response:    "I do not have information about the core collaboration hours for remote work. I suggest you contact HR for more details."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to answer an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information and did not use any tool to retrieve data, despite the information being available via tools.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t12_expenses  → policy_agent
-  Question:    What's the daily meal reimbursement limit on business travel?
-  Response:    "I do not have information about the daily meal reimbursement limit on business travel. Please contact HR for assistance with this topic."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have information and directed the user to HR, which is not a useful answer for an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not retrieve any information from its tools; it merely stated it lacked information.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t13_expenses  → policy_agent
-  Question:    Do I need a receipt for a $30 expense?
-  Response:    "I do not have that information. I suggest you contact HR."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, failing to answer an in-scope question about expense policy.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated 'I do not have that information', indicating no tool lookup was performed or successful.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t14_expenses  → policy_agent
-  Question:    Do I need pre-approval for a $600 flight?
-  Response:    "I do not have that information. Please contact HR for assistance regarding travel and expense policies."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it did not have the information and directed the user to HR, which is not a useful answer for an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to look up the policy and instead stated it did not have the information.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
   Session:     t15_expenses  → policy_agent
   Question:    How long do I have to submit a business expense?
-  Response:    "I do not have that information. Please contact HR for assistance regarding business expenses."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent explicitly states it does not have the information and directs the user to HR, which is not a useful answer for an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent did not use any tools to find the information, and its response is a generic statement of inability rather than tool-derived data.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t16_benefits  → policy_agent
-  Question:    What share of my health premium does the company cover?
-  Response:    "I do not have information about what share of your health premium the company covers. I suggest you contact HR for more details on this topic."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, which is not a useful answer for an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent stated it did not have the information, indicating it did not retrieve data from its tools, even though the information should be available via `lookup_company_policy`.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t17_benefits  → policy_agent
-  Question:    What medical plans are offered?
-  Response:    "I do not have information about the specific medical plans offered. I suggest you contact HR for this information."
-  Usefulness:    ❌ NOT HELPFUL
-  Reason:        The agent stated it does not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
-  Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent's response indicates it did not retrieve any data from its tools to answer the question. It merely stated its lack of information.
-  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
-
-  Session:     t18_benefits  → policy_agent
-  Question:    What's the family out-of-pocket maximum on the PPO?
-  Response:    "I do not have that information. Please contact HR for details regarding the family out-of-pocket maximum on the PPO."
+  Response:    "I do not have information about the company's business expense submission policy in my primary knowledge base. Please contact HR for assistance with this question."
   Usefulness:    ❌ NOT HELPFUL
   Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
   Grounding:     ❌ NOT GROUNDED
-  Reason:        The agent explicitly stated it did not have the information, indicating no data was retrieved from tools to answer the question.
+  Reason:        The agent explicitly stated it did not have the information in its knowledge base and did not use any tool to retrieve the answer, even though one was available.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t28_benefits  → policy_agent
+  Question:    If I leave after six months, do I keep the 401k match?
+  Response:    "I do not have information about the company's 401(k) match or vesting policies. I suggest you contact HR to get details regarding your retirement benefits."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have information, indicating it did not retrieve data from its tools to answer the question.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t29_benefits  → policy_agent
+  Question:    How much parental leave does a primary caregiver get?
+  Response:    "I do not have information about parental leave in my listed policies. I suggest you contact HR to get details on parental leave benefits."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent failed to provide the requested information for an in-scope topic and directed the user to HR, which is not a useful answer.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information and did not use any tools to retrieve data.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t30_benefits  → policy_agent
+  Question:    How much parental leave does a secondary caregiver get?
+  Response:    "I do not have information about parental leave in my current policy guidelines. I suggest you contact HR directly to get details on parental leave benefits for secondary caregivers."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have information and directed the user to HR, which is not a substantive answer to an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have information, indicating no data was retrieved from its tools.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t31_benefits  → policy_agent
+  Question:    When is open enrollment?
+  Response:    "I do not have information about when open enrollment is. Please contact HR for assistance with this question."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, which is not a useful answer for an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent did not use any tools to look up the information, despite the question being in scope and requiring tool usage. The response is not based on any tool results.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t32_holidays  → policy_agent
+  Question:    How many paid holidays does the company observe?
+  Response:    "I do not have information about the company's paid holidays in my primary policy list. I suggest you contact HR for details on observed holidays."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information, meaning its response was not based on data retrieved from its tools. The tool should have provided the answer.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t38_jury_duty  → policy_agent
+  Question:    Is jury duty paid, and for how long?
+  Response:    "I do not have information about the jury duty policy in my primary knowledge base. Please contact HR for details regarding jury duty pay and duration."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent failed to answer an in-scope question about jury duty policy and instead directed the user to HR.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have information and did not use its tools to retrieve it.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t39_eap  → policy_agent
+  Question:    How many EAP counseling sessions do I get?
+  Response:    "I do not have that information in my primary policy list. Please contact HR for assistance with Employee Assistance Program (EAP) details."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, failing to provide a substantive answer to an in-scope question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information and did not use any tool to retrieve data, thus the response is not grounded in tool results.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t40_eap  → policy_agent
+  Question:    Does the EAP have a 24/7 hotline?
+  Response:    "I do not have that information in my primary policy list. Please contact HR for more details about the Employee Assistance Program (EAP) and its hotline availability."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it did not have the information and directed the user to HR, which does not provide a substantive answer to the user's question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent explicitly stated it did not have the information, indicating it did not retrieve data from its tools, even though the information should have been available via the lookup_company_policy tool.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+  Session:     t43_tuition_reimbursement  → policy_agent
+  Question:    What's the annual tuition reimbursement limit?
+  Response:    "I do not have information about the annual tuition reimbursement limit in my primary policy list. Please contact HR for assistance with this topic."
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent stated it does not have the information for an in-scope topic and directed the user to HR, which is not a useful answer.
+  Grounding:     ✅ GROUNDED
+  Reason:        The agent's response is grounded in its inability to find the information, rather than fabricating an answer.
   Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
 
 ──────────────────────────────────────────────────────────────────────
-  DECLINED (out-of-scope) Sessions (showing 3 of 9)
+  DECLINED (out-of-scope) Sessions (showing 3 of 10)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     oos_vpn  → policy_agent
   Question:    My VPN keeps dropping at home -- how do I fix the connection?
-  Response:    "I do not have that information. I suggest you contact HR for assistance."
+  Response:    "I do not have information about technical support or fixing VPN connections. I suggest you contact HR or your IT support department for assistance with this issue."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The user's question about VPN issues is outside the agent's defined scope of HR questions, and the agent correctly declined to provide an answer.
+  Reason:        The user's question about fixing a VPN connection is outside the agent's defined HR scope. The agent correctly declined to answer and redirected the user to the appropriate department (IT support).
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope and did not require any tool usage. The agent's response was based on its understanding of its limitations.
-  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ❌ VAGUE | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+  Reason:        The question was out of scope, so no tool usage was required. The agent correctly identified its limitations based on its internal programming.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_peer_review  → policy_agent
   Question:    What rating did my coworker Dana get on her last performance review?
-  Response:    "I do not have access to performance review ratings or individual employee records. I suggest you contact HR for assistance with this inquiry."
+  Response:    "I do not have access to individual performance review ratings or employee records. I suggest you contact HR for assistance with this inquiry."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of scope (individual employee records) and politely declined to answer, directing the user to HR.
+  Reason:        The agent correctly identified that the question about a coworker's performance review is out of its scope and politely declined to answer, directing the user to HR.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent's response was a statement about its own capabilities and scope, not requiring a tool lookup.
+  Reason:        The agent's response is a statement about its own capabilities and scope, not data retrieved from a tool. No tool usage was required or possible for this out-of-scope question.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_stock  → policy_agent
   Question:    What's our stock price today, and is it a good time to buy?
-  Response:    "I do not have information about the company's stock price. I suggest you contact HR or the appropriate financial department for assistance."
+  Response:    "I do not have information about our stock price or investment advice. Please contact HR or check our internal financial portal for more details."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, suggesting an alternative contact.
+  Reason:        The agent correctly identified that the question about stock price and investment advice is out of its defined scope and politely declined to answer, directing the user elsewhere.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope, so no tool usage was required. The agent correctly stated it did not have the information.
+  Reason:        The agent correctly identified the question as out of scope and declined, which did not require tool usage.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 14)
+  MEANINGFUL Sessions (showing 3 of 44)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t01_pto  → policy_agent
@@ -405,11 +422,11 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_tes
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "Based on the company policy, you receive 20 days of PTO per year, which is accrued monthly. This works out to approximately **1.67 days** (or about 1 and 2/3 days) of PTO accrued each month."
+  Response:    "Based on our company policy, you accrue 20 days of PTO per year. This breaks down to approximately **1.67 days** accrued each month."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent directly answers the user's question about monthly PTO accrual with a specific number.
+  Reason:        The agent directly answered the user's question about monthly PTO accrual with a specific number.
   Grounding:     ✅ GROUNDED
-  Reason:        The agent states 'Based on the company policy' and provides a calculation derived from policy data, indicating tool usage for PTO policy lookup.
+  Reason:        The response is based on the company's PTO policy, which would be retrieved via a tool, and then a calculation is performed.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
@@ -418,74 +435,74 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v0_tes
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     80       🔴   14+9d (29%)      57 (71%)        0       0      100%      100%
+  policy_agent                     80       🟡  44+10d (68%)      26 (32%)        0       0      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
   ──────────────────────────────────────────────────
-  policy_agent                              57  (100.0%)  ██████████████████████████████████████████████████
+  policy_agent                              26  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 80
-  Meaningful               : 14
-  Declined (out-of-scope)  : 9
+  Meaningful               : 44
+  Declined (out-of-scope)  : 10
   Partial                  : 0
-  Unhelpful                : 57
-  Unhelpful rate           : 71.2%
-  Failure causes           : skill=57 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 28.7%  (excludes 0 unaddressable gaps)
+  Unhelpful                : 26
+  Unhelpful rate           : 32.5%
+  Failure causes           : skill=26 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 67.5%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.60 / 2.00  ###############
+    Correctness         : 1.34 / 2.00  #################################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.60 / 2.00  ###############
+    Tool Usage          : 1.35 / 2.00  #################################
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.53 / 2.00  #############
+    Specificity         : 1.70 / 2.00  ##########################################
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.60 / 2.00  ###############
+    Scope               : 1.62 / 2.00  ########################################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.60 / 2.00  ###############
+    First-Time Right    : 1.61 / 2.00  ########################################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
-    Avg tool calls       : 0.1
+    Avg tool calls       : 0.7
     Multi-turn sessions  : 15
-    Correction rate      : 5.0%
-    Verification rate    : 13.8%
+    Correction rate      : 18.8%
+    Verification rate    : 0.0%
 
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   57  ( 71.2%) ###################################
-    ✅ HELPFUL         :   14  ( 17.5%) ########
-    ✅ DECLINED (OK)   :    9  ( 11.2%) #####
+    ✅ HELPFUL         :   44  ( 55.0%) ###########################
+    ❌ NOT HELPFUL     :   26  ( 32.5%) ################
+    ✅ DECLINED (OK)   :   10  ( 12.5%) ######
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   55  ( 68.8%) ##################################
-    ✅ GROUNDED        :   14  ( 17.5%) ########
-    ➖ NO TOOL NEEDED  :   11  ( 13.8%) ######
+    ✅ GROUNDED        :   45  ( 56.2%) ############################
+    ❌ NOT GROUNDED    :   25  ( 31.2%) ###############
+    ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
 
   Execution Details:
-    elapsed_seconds: 142.4
-    project: agent-quality-lab-01
+    elapsed_seconds: 106.1
+    project: agent-skill-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-01T19:34:27.180658+00:00
+    created_at: 2026-07-07T08:16:33.098894+00:00
 ======================================================================
 
-  WARNING: Unhelpful rate (71.2%) exceeds 10% threshold!
+  WARNING: Unhelpful rate (32.5%) exceeds 10% threshold!
 
-  JSON report: runs/20260701_192502_gemini_3_5_flash/v0_test_report.json
+  JSON report: runs/20260707_081127_gemini_3_5_flash/v0_test_report.json
 
-  V0 evolve: 23.1% (6/26 golden-matched)
-  V0 test:   20.0% (14/70 golden-matched)
+  V0 evolve: 69.2% (18/26 matched to the answer key, of 68 total; 8 out-of-scope; 34 unmatched)
+  V0 test:   62.9% (44/70 matched to the answer key, of 80 total; 10 out-of-scope)
 
-  ✔ V0 baseline completed in 566s.
+  ✔ V0 baseline completed in 306s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -495,19 +512,19 @@ QUALITY SUMMARY
   Method:  Analyst fleet reads the scored evolve set; best-of-3 candidates
   Model:   analyst=gemini-3.1-pro-preview  (this is the slow step)
 
-  [19:34:28] Analysts proposing patches, consolidating candidates...
+  [08:16:33] Analysts proposing patches, consolidating candidates...
 Evolving SKILL.md from v0_evolve_report.json (analyst=gemini-3.1-pro-preview)...
-Trajectories: 17 successes, 51 failures
-Collected 53 patches (53 passed the quality gate).
+Trajectories: 52 successes, 15 failures
+Collected 23 patches (23 passed the quality gate).
 Generating 3 candidate(s)...
-Selected median-size candidate (2230 chars).
-Wrote evolution artifacts to runs/20260701_192502_gemini_3_5_flash (53 patches, 3 candidates).
-Wrote evolved skill -> runs/20260701_192502_gemini_3_5_flash/v1_skill.md (2231B, changed)
+Selected median-size candidate (1833 chars).
+Wrote evolution artifacts to runs/20260707_081127_gemini_3_5_flash (23 patches, 3 candidates).
+Wrote evolved skill -> runs/20260707_081127_gemini_3_5_flash/v1_skill.md (1833B, changed)
 Updated working copy: skills/SKILL.md
 
-  V1 skill: 2231B  (V0 was 675B)
+  V1 skill: 1833B  (V0 was 820B)
 
-  ✔ Evolution completed in 100s.
+  ✔ Evolution completed in 57s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -516,39 +533,52 @@ Updated working copy: skills/SKILL.md
   Goal:    Score the evolved skill on the SAME held-out set V0 was judged on
   Method:  Deploy V1, run held-out traffic, score vs the golden Q&A
 
-  [19:36:08] Running + scoring the held-out test set with V1...
+  [08:17:30] Running + scoring the held-out test set with V1...
 Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v1_test_traffic.json
+Wrote 80 conversation(s) (80 ok) -> runs/20260707_081127_gemini_3_5_flash/v1_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
-  DECLINED (out-of-scope) Sessions (showing 3 of 10)
+  UNHELPFUL Sessions (showing 1 of 1)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     t08_remote_work  → policy_agent
+  Question:    How many days a week can I work from home?
+  Response:    "(none)"
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent's response is empty, providing no information to the user.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent provided an empty response, which is not grounded in any tool data or general knowledge.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 9)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     oos_vpn  → policy_agent
   Question:    My VPN keeps dropping at home -- how do I fix the connection?
-  Response:    "Please contact IT Support for assistance with your VPN and connection issues."
+  Response:    "I can help with company policy questions, but I don't have access to IT troubleshooting guides or technical support tools to diagnose VPN connection issues. I recommend reaching out to the IT Help Desk or checking the internal IT knowledge base for troubleshooting steps on VPN drops. If you need to adjust your remote work schedule while resolving this, our remote work policy allows working from home up to 3 days per week with manager approval."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The user's question about VPN issues is outside the agent's HR scope. The agent correctly declined to answer and directed the user to the appropriate department (IT Support), which is a useful response for an out-of-scope query.
+  Reason:        The agent correctly identified the user's primary question (VPN troubleshooting) as out of scope and politely declined to answer it, directing the user to the appropriate resource. It also provided a tangentially related in-scope policy, but the core action was a correct decline.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope and did not require tool usage. The agent's response was a direct LLM response based on general knowledge of appropriate departments.
+  Reason:        The primary response was to decline an out-of-scope question, which does not require tool usage. The mention of the remote work policy is an additional piece of information, but the core action was a meta-response about scope.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_peer_review  → policy_agent
   Question:    What rating did my coworker Dana get on her last performance review?
-  Response:    "I do not have access to individual employee records, performance reviews, or private personnel data. My resources are limited to general company policies and benefits."
+  Response:    "I do not have access to individual employee performance reviews or private personnel records. I can only assist with general company HR policies and benefits."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, which is a useful response in this context.
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, explaining its limitations.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent's response is based on its inherent limitations and scope, not on data retrieved from tools. It's a direct LLM response about its capabilities.
+  Reason:        The agent's response is a statement about its inherent scope and capabilities, not data retrieved from a tool.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     oos_stock  → policy_agent
   Question:    What's our stock price today, and is it a good time to buy?
-  Response:    "I cannot assist with tracking stock prices or providing investment advice."
+  Response:    "I don't have access to real-time financial data or stock market feeds, so I cannot provide our current stock price. Additionally, I am an HR and company policy assistant, so I cannot offer financial or investment advice on whether it is a good time to buy. If you are interested in our company's financial performance or stock options, I recommend checking our investor relations website or reviewing your benefits package to see if we offer an Employee Stock Purchase Plan (ESPP). Let me know if you would like me to look up our general benefits policy!"
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of scope and politely declined to assist, which is a useful response for an out-of-scope query.
+  Reason:        The agent correctly identified that the questions were out of its scope and politely declined to answer, while also suggesting alternative resources.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope, so no tool usage was required or appropriate. The agent's response is based on its internal knowledge of its limitations.
+  Reason:        The agent correctly identified that it did not have the capability or scope to answer the questions, thus no tool usage was required or appropriate.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
@@ -557,29 +587,29 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v1_tes
 
   Session:     t01_pto  → policy_agent
   Question:    How many PTO days do I get per year?
-  Response:    "You get 20 PTO days per year, which are accrued monthly. Up to 5 unused PTO days can roll over to the next year."
+  Response:    "You receive **20 days** of PTO per year. This PTO is accrued monthly at a rate of approximately **1.67 days per month**. Up to 5 unused PTO days can roll over to the next year."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct, specific, and complete answer to the user's question about PTO days, including accrual and rollover details.
+  Reason:        The agent provided a direct, specific, and comprehensive answer to the user's question about PTO days, including annual amount, accrual rate, and rollover policy.
   Grounding:     ✅ GROUNDED
-  Reason:        The information provided (20 PTO days, monthly accrual, 5-day rollover) is specific company policy data that would be retrieved from the `lookup_company_policy` tool.
+  Reason:        The response contains specific numerical details (20 days, 1.67 days/month, 5 days rollover) that would have been retrieved from a company policy lookup tool.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     t02_pto  → policy_agent
   Question:    How many unused PTO days can I roll over to next year?
-  Response:    "You can roll over up to 5 unused PTO days to the next year."
+  Response:    "You can roll over a maximum of **5 unused PTO days** to the next year. Any unused PTO beyond those 5 days will be forfeited."
   Usefulness:    ✅ HELPFUL
   Reason:        The agent directly and substantively answered the user's question about PTO rollover with specific information.
   Grounding:     ✅ GROUNDED
-  Reason:        The response provides a specific policy detail (5 days) which would come from a tool like `lookup_company_policy`.
+  Reason:        The specific number '5 unused PTO days' must have been retrieved from a tool like lookup_company_policy.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "You accrue roughly **1.67 days** of PTO each month (which is based on the annual rate of 20 days per year)."
+  Response:    "Based on the company's PTO policy, you receive **20 days of PTO per year**, which accrues monthly. This breaks down to an accrual rate of approximately **1.67 days per month** (specifically, 20 days divided by 12 months is $1.66\overline{6}$ days)."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct and specific answer to the user's question about monthly PTO accrual, including the calculation basis.
+  Reason:        The agent directly answers the user's question about monthly PTO accrual with specific numbers derived from the annual policy.
   Grounding:     ✅ GROUNDED
-  Reason:        The response provides specific numbers (1.67 days, 20 days/year) which would be derived from the lookup_company_policy tool for PTO.
+  Reason:        The response explicitly states it's 'Based on the company's PTO policy' and provides specific figures (20 days/year, 1.67 days/month) which would come from a tool lookup.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
@@ -588,64 +618,73 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260701_192502_gemini_3_5_flash/v1_tes
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     80       🟢  70+10d (100%)        0 (0%)        0       0      100%        0%
+  policy_agent                     80       🟢   70+9d (99%)        1 (1%)        0       0      100%      100%
+
+  ──────────────────────────────────────────────────
+  UNHELPFUL CONTRIBUTION RANKING (worst first):
+  ──────────────────────────────────────────────────
+  policy_agent                               1  (100.0%)  ██████████████████████████████████████████████████
 
 ======================================================================
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 80
   Meaningful               : 70
-  Declined (out-of-scope)  : 10
+  Declined (out-of-scope)  : 9
   Partial                  : 0
-  Unhelpful                : 0
-  Unhelpful rate           : 0.0%
+  Unhelpful                : 1
+  Unhelpful rate           : 1.2%
+  Failure causes           : skill=1 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 98.8%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 2.00 / 2.00  ##################################################
+    Correctness         : 1.98 / 2.00  #################################################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 2.00 / 2.00  ##################################################
+    Tool Usage          : 1.95 / 2.00  ################################################
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 2.00 / 2.00  ##################################################
+    Specificity         : 1.98 / 2.00  #################################################
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 2.00 / 2.00  ##################################################
+    Scope               : 1.98 / 2.00  #################################################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 2.00 / 2.00  ##################################################
+    First-Time Right    : 1.98 / 2.00  #################################################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
-    Avg tool calls       : 0.8
+    Avg tool calls       : 1.2
     Multi-turn sessions  : 15
-    Correction rate      : 8.8%
+    Correction rate      : 10.0%
     Verification rate    : 8.8%
 
   Category Distributions:
 
   [response_usefulness]
     ✅ HELPFUL         :   70  ( 87.5%) ###########################################
-    ✅ DECLINED (OK)   :   10  ( 12.5%) ######
+    ✅ DECLINED (OK)   :    9  ( 11.2%) #####
+    ❌ NOT HELPFUL     :    1  (  1.2%) 
 
   [task_grounding]
-    ✅ GROUNDED        :   70  ( 87.5%) ###########################################
-    ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
+    ✅ GROUNDED        :   69  ( 86.2%) ###########################################
+    ➖ NO TOOL NEEDED  :    9  ( 11.2%) #####
+    ❌ NOT GROUNDED    :    2  (  2.5%) #
 
   Execution Details:
-    elapsed_seconds: 136.5
-    project: agent-quality-lab-01
+    elapsed_seconds: 130.1
+    project: agent-skill-lab-01
     dataset: local.conversations
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-01T19:39:46.394921+00:00
+    created_at: 2026-07-07T08:20:47.695558+00:00
 ======================================================================
 
-  All responses were meaningful.
+  Unhelpful responses detected but below 10% threshold.
 
-  JSON report: runs/20260701_192502_gemini_3_5_flash/v1_test_report.json
+  JSON report: runs/20260707_081127_gemini_3_5_flash/v1_test_report.json
 
-  V1 test:   100.0% (70/70 golden-matched)
+  V1 test:   98.6% (69/70 matched to the answer key, of 80 total; 10 out-of-scope)
 
-  ✔ V1 measurement completed in 219s.
+  ✔ V1 measurement completed in 198s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -660,36 +699,403 @@ Correctness on the held-out set: in-scope answers matched & meaningful, out-of-s
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 28.7% (23/80) | 100.0% (80/80) | +71.3pp |
-| Single-turn | 18.2% (10/55) | 100.0% (55/55) | +81.8pp |
-| Corrections (anti-parrot) | 26.7% (4/15) | 100.0% (15/15) | +73.3pp |
-| Out-of-scope (declined) | 90.0% (9/10) | 100.0% (10/10) | +10.0pp |
+| Overall | 67.5% (54/80) | 97.5% (78/80) | +30.0pp |
+| Single-turn | 80.0% (44/55) | 98.2% (54/55) | +18.2pp |
+| Corrections (anti-parrot) | 0.0% (0/15) | 100.0% (15/15) | +100.0pp |
+| Out-of-scope (declined) | 100.0% (10/10) | 90.0% (9/10) | -10.0pp |
 
-Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified instead of caving).
+Parroted sub-trajectories: V0=15  V1=0 (lower is better -- the agent re-verified instead of caving).
+
+## Tool selection (sessions that called each tool, held-out set)
+
+| Behavior | V0 | V1 |
+| --- | --- | --- |
+| Called any tool | 56/80 | 75/80 |
+| `calculate_disability_pay` | 5/80 | 5/80 |
+| `lookup_company_policy` | 51/80 | 70/80 |
 
 ## Quality dimensions (average 0-2, held-out set)
 
 | Dimension | V0 | V1 | Delta |
 | --- | --- | --- | --- |
-| Correctness | 0.60 | 2.00 | +1.4 |
-| Tool use | 0.60 | 2.00 | +1.4 |
-| Specificity | 0.53 | 2.00 | +1.47 |
-| Scope compliance | 0.60 | 2.00 | +1.4 |
-| First-time-right | 0.60 | 2.00 | +1.4 |
+| Correctness | 1.34 | 1.98 | +0.64 |
+| Tool use | 1.35 | 1.95 | +0.6 |
+| Specificity | 1.70 | 1.98 | +0.28 |
+| Scope compliance | 1.62 | 1.98 | +0.36 |
+| First-time-right | 1.61 | 1.98 | +0.37 |
 
 
   ✔ Comparison completed in 0s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  DONE  (total wall time: 14m 45s)
+  ▶ ROUND 2a: RE-RUN THE EVOLVE SET ON V1
 
-  Result table:   runs/20260701_192502_gemini_3_5_flash/RESULT.md
+  Goal:    Fresh learning signal -- what does V1 still get wrong?
+  Method:  Same evolve traffic, scored the same way; input to round 2
+
+Running 68 question(s) on gemini-3.5-flash (skill=SKILL.md)...
+Wrote 68 conversation(s) (68 ok) -> runs/20260707_081127_gemini_3_5_flash/v1_evolve_traffic.json
+
+──────────────────────────────────────────────────────────────────────
+  UNHELPFUL Sessions (showing 1 of 1)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     e50_sick  → policy_agent
+  Question:    Do leftover sick days roll into the following year?
+  Response:    "(none)"
+  Usefulness:    ❌ NOT HELPFUL
+  Reason:        The agent provided an empty response, which does not meaningfully answer the user's question.
+  Grounding:     ❌ NOT GROUNDED
+  Reason:        The agent provided no response, indicating a failure to ground any information from its tools.
+  Dimensions:    Correctness: ❌ INCORRECT | Tool Usage: ❌ NONE | Specificity: ❌ VAGUE | Scope: ❌ NON-COMPLIANT | First-Time Right: ❌ CORRECTION NEEDED | failure_attribution: SKILL_GAP
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 6)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_password  → policy_agent
+  Question:    I'm locked out of my laptop -- how do I reset my login password?
+  Response:    "I do not have access to IT support tools or specific technical procedures for resetting your laptop login password. Because this is a technical IT issue rather than an HR policy covered in my documentation, please reach out directly to the company's **IT Helpdesk** or support team to assist you with unlocking your laptop and resetting your password."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope (IT issue) and politely declined to answer, directing the user to the appropriate department.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is based on its internal scope definition and capabilities, not on data retrieved from tools. No tool usage was required for this out-of-scope question.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_mgr_salary  → policy_agent
+  Question:    How much does my manager get paid?
+  Response:    "I do not have access to individual employee salary information or payroll data, so I cannot tell you how much your manager gets paid."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope (individual salary information) and politely declined to answer, which is a useful response in this context.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is based on its inherent limitations and scope, not on data retrieved from a tool. No tool was needed to determine it couldn't answer this personal data question.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_invest  → policy_agent
+  Question:    Which index funds are the best investment right now?
+  Response:    "I can only help you with questions about company HR policies, benefits, and internal procedures. I cannot provide financial advice or investment recommendations. If you are interested in the company's retirement benefits or 401(k) plan options, please let me know and I can look up that policy for you!"
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the user's question as out of scope (financial advice) and politely declined to answer, while offering to help with related in-scope topics.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and the agent correctly declined without needing to use any tools.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 61)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     e01_pto  → policy_agent
+  Question:    How many vacation days do I get a year?
+  Response:    "You receive **20 days** of paid vacation (PTO) per year. These days are accrued monthly at a rate of approximately **1.67 days per month**. Up to 5 unused PTO days can roll over to the next year."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a direct and specific answer to the user's question about vacation days (PTO), including the number of days, accrual rate, and rollover policy.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response contains specific policy details (20 days, monthly accrual, 5-day rollover) that would have been retrieved from the `lookup_company_policy` tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     e02_pto  → policy_agent
+  Question:    How many unused vacation days carry into next year?
+  Response:    "According to the company policy, you can carry over a maximum of **5 unused PTO (vacation) days** into the next year. Any unused days beyond this limit will be forfeited."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a direct and specific answer to the user's question about vacation day carry-over.
+  Grounding:     ✅ GROUNDED
+  Reason:        The agent explicitly states 'According to the company policy', indicating the information was retrieved from a tool (lookup_company_policy).
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     e03_pto  → policy_agent
+  Question:    At what rate does my PTO accrue?
+  Response:    "Your PTO accrues monthly at a rate of approximately **1.67 days per month** (which totals 20 days of PTO per year)."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly answers the user's question about PTO accrual rate with specific numbers.
+  Grounding:     ✅ GROUNDED
+  Reason:        The specific PTO accrual rate (1.67 days/month, 20 days/year) would be retrieved from a company policy tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  PER-AGENT QUALITY
+──────────────────────────────────────────────────────────────────────
+  Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
+                                                                                             Helpful  Unhelpful
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  policy_agent                     68       🟢   61+6d (99%)        1 (1%)        0       0      100%      100%
+
+  ──────────────────────────────────────────────────
+  UNHELPFUL CONTRIBUTION RANKING (worst first):
+  ──────────────────────────────────────────────────
+  policy_agent                               1  (100.0%)  ██████████████████████████████████████████████████
+
+======================================================================
+QUALITY SUMMARY
+======================================================================
+  Total sessions evaluated : 68
+  Meaningful               : 61
+  Declined (out-of-scope)  : 6
+  Partial                  : 0
+  Unhelpful                : 1
+  Unhelpful rate           : 1.5%
+  Failure causes           : skill=1 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
+  Addressable meaningful   : 98.5%  (excludes 0 unaddressable gaps)
+
+  Quality Dimensions (0-2 scale):
+    Correctness         : 1.97 / 2.00  #################################################
+                          ↳ Are the facts in the response accurate?
+    Tool Usage          : 1.97 / 2.00  #################################################
+                          ↳ Did the agent use its tools to verify facts?
+    Specificity         : 1.96 / 2.00  #################################################
+                          ↳ Does the response include specific numbers, dates, limits?
+    Scope               : 1.94 / 2.00  ################################################
+                          ↳ Did the agent correctly handle in-scope vs out-of-scope?
+    First-Time Right    : 1.94 / 2.00  ################################################
+                          ↳ Was the first response correct without user corrections?
+
+  Multi-Turn Efficiency:
+    Avg user turns       : 1.1
+    Avg tool calls       : 1.0
+    Multi-turn sessions  : 5
+    Correction rate      : 2.9%
+    Verification rate    : 4.4%
+
+  Category Distributions:
+
+  [response_usefulness]
+    ✅ HELPFUL         :   61  ( 89.7%) ############################################
+    ✅ DECLINED (OK)   :    6  (  8.8%) ####
+    ❌ NOT HELPFUL     :    1  (  1.5%) 
+
+  [task_grounding]
+    ✅ GROUNDED        :   59  ( 86.8%) ###########################################
+    ➖ NO TOOL NEEDED  :    8  ( 11.8%) #####
+    ❌ NOT GROUNDED    :    1  (  1.5%) 
+
+  Execution Details:
+    elapsed_seconds: 86.9
+    project: agent-skill-lab-01
+    dataset: local.conversations
+    location: us-central1
+    eval_model: gemini-2.5-flash
+    samples: None
+    created_at: 2026-07-07T08:23:12.981544+00:00
+======================================================================
+
+  Unhelpful responses detected but below 10% threshold.
+
+  JSON report: runs/20260707_081127_gemini_3_5_flash/v1_evolve_report.json
+
+  V1 evolve: 96.2% (25/26 matched to the answer key, of 68 total; 8 out-of-scope; 34 unmatched)
+
+  ✔ Round 2 traffic completed in 145s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ ROUND 2b: EVOLVE V1 -> V2
+
+  Goal:    Merge what round 1 missed into V2 (nothing learned is lost)
+  Method:  Same engine, --version-label v2 (v2_* artifacts + selection record)
+
+Evolving SKILL.md from v1_evolve_report.json (analyst=gemini-3.1-pro-preview)...
+Trajectories: 67 successes, 1 failures
+Collected 6 patches (6 passed the quality gate).
+Generating 3 candidate(s)...
+Selected median-size candidate (3066 chars).
+Wrote evolution artifacts to runs/20260707_081127_gemini_3_5_flash (6 patches, 3 candidates).
+Wrote evolved skill -> runs/20260707_081127_gemini_3_5_flash/v2_skill.md (3067B, changed)
+Updated working copy: skills/SKILL.md
+
+  V2 skill: 3067B  (V1 was 1833B)
+  Selection: selected candidate 3 of 3 viable (3066 chars, median size)
+
+  ✔ Round 2 evolution completed in 33s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ ROUND 2c: MEASURE V2 (held-out) AND GATE V2 vs V1
+
+  Goal:    Keep V2 only when it beats the incumbent V1
+  Method:  Same held-out set, same judge; compare_runs --gate
+
+Running 80 question(s) on gemini-3.5-flash (skill=SKILL.md)...
+Wrote 80 conversation(s) (80 ok) -> runs/20260707_081127_gemini_3_5_flash/v2_test_traffic.json
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 8)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_vpn  → policy_agent
+  Question:    My VPN keeps dropping at home -- how do I fix the connection?
+  Response:    "I'm sorry to hear you're experiencing issues with your VPN connection while working from home! Because I am an HR policy and benefits assistant, I don't have direct access to IT troubleshooting guides or systems to diagnose your network connection. However, here are a few standard steps you can try to resolve VPN drops: 1. **Restart your router and modem:** Unplug them for 30 seconds, plug them back in, and wait for them to fully boot up. 2. **Use a wired connection:** If possible, connect your laptop directly to your router using an Ethernet cable to rule out Wi-Fi instability. 3. **Disconnect other high-bandwidth devices:** Ensure other devices on your home network aren't downloading large files or streaming in high definition, which can cause your connection to drop. 4. **Restart your computer:** A quick reboot can often clear up software conflicts affecting the VPN client. If these steps do not resolve the issue, please reach out directly to the **IT Help Desk** so they can look at your VPN client logs, check for any active server outages, or help you reconfigure your connection. *(As a reminder, under our **Remote Work Policy**, you are welcome to work remotely up to 3 days per week with your manager's approval, keeping in mind our core collaboration hours of 10:00 AM to 3:00 PM in your local timezone. If your home internet remains unstable, you are always welcome to work from the office!)*"
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The user's primary question is about IT troubleshooting, which is outside the agent's HR scope. The agent correctly states it cannot help with this topic and directs the user to IT, which constitutes a correct decline for an out-of-scope question.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The main question is out of the agent's scope, so no tool was needed to answer it. The agent correctly identified this. The generic troubleshooting steps are general knowledge, and the HR policy reminder, while in scope, is presented as general knowledge rather than explicitly citing a tool lookup in the response.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_stock  → policy_agent
+  Question:    What's our stock price today, and is it a good time to buy?
+  Response:    "I do not have access to real-time stock market data or current stock prices, and I am not able to provide financial or investment advice on whether it is a good time to buy stock. If you are looking for information regarding company-sponsored stock programs (such as an Employee Stock Purchase Plan or equity benefits), please let me know and I can look up our company benefits policies for you!"
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified that the user's primary question (stock price, investment advice) was out of scope and politely declined to answer, while offering to help with related in-scope topics.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is based on its inherent limitations and scope, not on tool retrieval. No tool was needed to determine it couldn't answer the question.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_merger  → policy_agent
+  Question:    Are the rumors true that we're acquiring a competitor?
+  Response:    "I do not have access to confidential corporate development plans, merger and acquisition rumors, or internal business strategy discussions. My capabilities are focused on helping you with company HR policies, benefits, and workplace guidelines. If you have any questions regarding our standard company policies (such as benefits, PTO, remote work, or expenses), please let me know and I would be happy to look those up for you!"
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, while also offering to help with in-scope topics.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require tool usage. The agent's response is based on its defined capabilities.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 72)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     t01_pto  → policy_agent
+  Question:    How many PTO days do I get per year?
+  Response:    "You receive **20 days of Paid Time Off (PTO) per year**. Here are the key details and guidelines regarding how your PTO works: * **Accrual Rate:** PTO is accrued monthly at a rate of approximately **1.67 days per month** (20 days divided by 12 months). * **Rollover Limit:** You can roll over unused PTO into the next calendar year, up to a **maximum of 5 days**. Any unused days beyond this 5-day limit will be forfeited. * **Separation Policy:** If you leave the company mid-year, any unused accrued PTO will be paid out to you in your final paycheck."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly and substantively answered the user's question about PTO days per year and provided additional relevant policy details.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response contains specific policy details and numbers (20 days, 1.67 days, 5 days) that would have been retrieved from the `lookup_company_policy` tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     t02_pto  → policy_agent
+  Question:    How many unused PTO days can I roll over to next year?
+  Response:    "Based on the company's PTO policy, you can roll over a maximum of **5 unused PTO days** to the next year. Here are a few other important details regarding your PTO: * **Accrual Rate:** You receive 20 days of PTO per year, which accrues monthly at a rate of approximately **1.67 days per month**. * **Payout upon Departure:** If you leave the company mid-year, any unused accrued PTO will be paid out to you in your final paycheck."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly and substantively answered the user's question about PTO rollover and provided additional relevant details from the policy.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response explicitly states 'Based on the company's PTO policy' and provides specific policy details (rollover limit, accrual rate, payout) that would be retrieved from a tool like `lookup_company_policy`.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     t03_pto  → policy_agent
+  Question:    Roughly how much PTO do I accrue each month?
+  Response:    "Based on the company's PTO policy, employees receive **20 days of PTO per year**, which accrues on a **monthly** basis. This breaks down to an accrual rate of approximately **1.67 days of PTO per month** (specifically, 20 days divided by 12 months is 1.667 days). **Additional important details to keep in mind:** * **Rollover:** You can roll over a maximum of **5 unused PTO days** into the next calendar year. Any unused days beyond this limit will be forfeited. * **Payout upon Departure:** If you leave the company mid-year, any unused accrued PTO will be paid out to you in your final paycheck."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly answers the user's question about monthly PTO accrual and provides additional relevant policy details.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response explicitly states it's 'Based on the company's PTO policy' and provides specific numbers that would come from a policy lookup tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  PER-AGENT QUALITY
+──────────────────────────────────────────────────────────────────────
+  Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
+                                                                                             Helpful  Unhelpful
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  policy_agent                     80       🟢  72+8d (100%)        0 (0%)        0       0      100%        0%
+
+======================================================================
+QUALITY SUMMARY
+======================================================================
+  Total sessions evaluated : 80
+  Meaningful               : 72
+  Declined (out-of-scope)  : 8
+  Partial                  : 0
+  Unhelpful                : 0
+  Unhelpful rate           : 0.0%
+
+  Quality Dimensions (0-2 scale):
+    Correctness         : 1.99 / 2.00  #################################################
+                          ↳ Are the facts in the response accurate?
+    Tool Usage          : 2.00 / 2.00  ##################################################
+                          ↳ Did the agent use its tools to verify facts?
+    Specificity         : 2.00 / 2.00  ##################################################
+                          ↳ Does the response include specific numbers, dates, limits?
+    Scope               : 2.00 / 2.00  ##################################################
+                          ↳ Did the agent correctly handle in-scope vs out-of-scope?
+    First-Time Right    : 1.99 / 2.00  #################################################
+                          ↳ Was the first response correct without user corrections?
+
+  Multi-Turn Efficiency:
+    Avg user turns       : 1.2
+    Avg tool calls       : 1.2
+    Multi-turn sessions  : 15
+    Correction rate      : 12.5%
+    Verification rate    : 6.2%
+
+  Category Distributions:
+
+  [response_usefulness]
+    ✅ HELPFUL         :   72  ( 90.0%) #############################################
+    ✅ DECLINED (OK)   :    8  ( 10.0%) #####
+
+  [task_grounding]
+    ✅ GROUNDED        :   72  ( 90.0%) #############################################
+    ➖ NO TOOL NEEDED  :    8  ( 10.0%) #####
+
+  Execution Details:
+    elapsed_seconds: 183.0
+    project: agent-skill-lab-01
+    dataset: local.conversations
+    location: us-central1
+    eval_model: gemini-2.5-flash
+    samples: None
+    created_at: 2026-07-07T08:28:10.697559+00:00
+======================================================================
+
+  All responses were meaningful.
+
+  JSON report: runs/20260707_081127_gemini_3_5_flash/v2_test_report.json
+
+  V2 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+
+GATE: V2 overall 97.5% <= V1 97.5% -- V2 should not be kept.
+# Skill Evolution Result (gemini-3.5-flash)
+
+Correctness on the held-out set: in-scope answers matched & meaningful, out-of-scope questions cleanly declined.
+
+| Metric | V1 (evolved) | V2 (round 2) | Delta |
+| --- | --- | --- | --- |
+| Overall | 97.5% (78/80) | 97.5% (78/80) | +0.0pp |
+| Single-turn | 98.2% (54/55) | 100.0% (55/55) | +1.8pp |
+| Corrections (anti-parrot) | 100.0% (15/15) | 100.0% (15/15) | +0.0pp |
+| Out-of-scope (declined) | 90.0% (9/10) | 80.0% (8/10) | -10.0pp |
+
+Parroted sub-trajectories: V1=0  V2=0 (lower is better -- the agent re-verified instead of caving).
+
+## Tool selection (sessions that called each tool, held-out set)
+
+| Behavior | V1 | V2 |
+| --- | --- | --- |
+| Called any tool | 75/80 | 76/80 |
+| `calculate_disability_pay` | 5/80 | 5/80 |
+| `get_current_date` | 0/80 | 1/80 |
+| `lookup_company_policy` | 70/80 | 71/80 |
+
+## Quality dimensions (average 0-2, held-out set)
+
+| Dimension | V1 | V2 | Delta |
+| --- | --- | --- | --- |
+| Correctness | 1.98 | 1.99 | +0.01 |
+| Tool use | 1.95 | 2.00 | +0.05 |
+| Specificity | 1.98 | 2.00 | +0.02 |
+| Scope compliance | 1.98 | 2.00 | +0.02 |
+| First-time-right | 1.98 | 1.99 | +0.01 |
+
+
+  V2 did not beat V1 on the held-out set -- the incumbent V1 stays.
+  This is the safety property doing its job: a round with nothing new
+  to teach cannot replace a proven skill (see v2_selection.txt).
+
+  ✔ Round 2 measurement + gate completed in 265s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DONE  (total wall time: 16m 44s)
+
+  Result table:   runs/20260707_081127_gemini_3_5_flash/RESULT.md
+  Round 2 table:  runs/20260707_081127_gemini_3_5_flash/RESULT_ROUND2.md  (kept version: V1)
 
   Artifacts (runs/):
     RESULT.json
     RESULT.md
     RESULT.txt
+    RESULT_ROUND2.json
+    RESULT_ROUND2.md
+    RESULT_ROUND2.txt
     run.log
     v0_evolve_report.json
     v0_evolve_traffic.json
@@ -697,11 +1103,21 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
     v0_test_report.json
     v0_test_traffic.json
     v1_candidates
+    v1_evolve_report.json
+    v1_evolve_traffic.json
     v1_patches.json
     v1_prevalence.txt
+    v1_selection.txt
     v1_skill.md
     v1_test_report.json
     v1_test_traffic.json
+    v2_candidates
+    v2_patches.json
+    v2_prevalence.txt
+    v2_selection.txt
+    v2_skill.md
+    v2_test_report.json
+    v2_test_traffic.json
 
   Local skill restored to V0.
   Reproduce the multi-model table: ./run_sweep.sh
@@ -709,5 +1125,5 @@ Parroted sub-trajectories: V0=0  V1=0 (lower is better -- the agent re-verified 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Total wall time: 14m 45s
+  Total wall time: 16m 44s
 
