@@ -95,7 +95,7 @@ scripts/run_queries.sh $DEMO_RUN_ID   # writes results to evidence/
 | `sql/02_token_usage_and_estimated_cost_by_team.sql` | Where is usage going, and what does it roughly cost? *(tokens are measured; dollars are an estimate from the rates CTE)* |
 | `sql/03_event_mix_and_workflow.sql` | What are the agents actually doing? |
 | `sql/04_latency_from_spans.sql` | How fast — p50/p95 from real spans, per product |
-| `sql/05_governance_privacy_dlq.sql` | Is privacy holding and is ingestion clean? *(searches for the exact scripted prompt string across content-bearing columns; returns a status row)* |
+| `sql/05_governance_privacy_dlq.sql` | Is privacy holding and is ingestion clean? *(exact scripted-prompt search returning status rows; note: privacy checks are run-scoped, dead-letter health is deliberately deployment-scoped)* |
 | `sql/06_raw_native_escape_hatch.sql` | When a product ships a new event tomorrow, do we lose it? *(no — preserved natively, queryable before any code changes)* |
 
 Close on the success screen: the verify output plus the

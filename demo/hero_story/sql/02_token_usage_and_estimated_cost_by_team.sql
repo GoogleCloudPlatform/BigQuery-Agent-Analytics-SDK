@@ -10,15 +10,16 @@ WITH rates AS (
   SELECT 'claude_code', 6.00, DATE '2026-07-07'
 ),
 tokens AS (
+  -- otel_metric_sum_dedup directly: token counters are sum-type metrics,
+  -- and the dedup view guarantees retries/replays never double-count.
   SELECT
-    s.source_product,
-    COALESCE(JSON_VALUE(s.resource_attributes, '$.department'), 'unattributed') AS team,
-    SUM(CAST(m.value AS FLOAT64)) AS total_tokens
-  FROM `${dataset}.bqaa_metrics` m
-  JOIN `${dataset}.otel_metric_sum` s USING (idempotency_key)
-  WHERE m.metric_name IN ('codex.turn.token_usage', 'claude_code.token.usage')
-    AND s.ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @window_hours HOUR)
-    AND JSON_VALUE(s.resource_attributes, '$.env') = @demo_run_id
+    source_product,
+    COALESCE(JSON_VALUE(resource_attributes, '$.department'), 'unattributed') AS team,
+    SUM(CAST(value AS FLOAT64)) AS total_tokens
+  FROM `${dataset}.otel_metric_sum_dedup`
+  WHERE metric_name IN ('codex.turn.token_usage', 'claude_code.token.usage')
+    AND ingest_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @window_hours HOUR)
+    AND JSON_VALUE(resource_attributes, '$.env') = @demo_run_id
   GROUP BY 1, 2
 )
 SELECT

@@ -24,6 +24,8 @@ JOIN `${dataset}.otel_logs_dedup` l USING (idempotency_key)
 WHERE p.timestamp > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @window_hours HOUR)
   AND JSON_VALUE(l.resource_attributes, '$.env') = @demo_run_id
 UNION ALL
+-- Deployment-scoped by design: dead letters may lack run attribution, and
+-- ingestion health is a property of the pipeline, not of one demo run.
 SELECT 'dead_letter_count',
        IF(COUNT(*) = 0, 'PASS', 'INSPECT (replayable raw_b64 preserved)'),
        COUNT(*)
