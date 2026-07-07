@@ -87,6 +87,7 @@ JUDGE_MODEL="${_ENV_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
 JUDGE_LOCATION="${_ENV_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
 CONCURRENCY="${_ENV_CONCURRENCY:-${CONCURRENCY:-3}}"
 ROUNDS="${ROUNDS:-1}"
+FROM_BIGQUERY="${FROM_BIGQUERY:-0}"
 WITH_REGISTRY="${WITH_REGISTRY:-0}"
 SKILL_ID="${SKILL_ID:-}"
 # Skill Registry region is independent of the judge region (the registry only
@@ -134,6 +135,10 @@ while [[ $# -gt 0 ]]; do
       ROUNDS="$2"
       shift 2
       ;;
+    --from-bigquery)
+      FROM_BIGQUERY=1
+      shift
+      ;;
     --with-registry)
       WITH_REGISTRY=1
       shift
@@ -155,6 +160,10 @@ while [[ $# -gt 0 ]]; do
       echo "  --rounds N         Evolution rounds: 1 = V0->V1, 2 = V0->V1->V2"
       echo "                     (round 2 runs only when V1 wins; V2 is kept"
       echo "                     only when it beats V1 on the held-out set)"
+      echo "  --from-bigquery    Log every session to a BQAA agent_events table and"
+      echo "                     score by reading it back from BigQuery (production"
+      echo "                     wiring). Uses DATASET_ID/TABLE_ID from .env"
+      echo "                     (defaults: agent_analytics.agent_events)"
       echo "  --with-registry    Mirror the winning version to the Skill Registry"
       echo "                     (only after it beats the incumbent on the held-out set)"
       echo "  --skill-id ID      Skill Registry id (required with --with-registry)"
@@ -241,22 +250,51 @@ separator() {
 restore() { cp "$V0" "$SKILL"; }
 trap restore EXIT
 
+# Unique per-run label for --from-bigquery: rows carry custom_tags
+# {run, slice} so scoring can select exactly this run's sessions from a
+# shared, append-only events table.
+RUN_LABEL="lab_${RUN_TIMESTAMP}"
+
+# slice <traffic-path> -> "v0_evolve" / "v1_test" / ... (the metric slice name)
+slice_of() { local b; b="$(basename "$1")"; echo "${b%_traffic.json}"; }
+
 # run_agent <skill> <out> <qfile...>  -- run questions through the agent.
+# With --from-bigquery, every session is also logged to the BQAA events table.
 run_agent() {
   local skill="$1" out="$2"; shift 2
   local qargs=() q
   for q in "$@"; do qargs+=(--questions "$q"); done
+  local bqargs=()
+  if [[ "$FROM_BIGQUERY" == "1" ]]; then
+    bqargs=(--log-bigquery --app-name skill-evolution-lab
+            --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
+  fi
   $PY run_agent.py --skill "$skill" "${qargs[@]}" \
-    --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out"
+    --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
 }
 
 # score <traffic> <report>  -- golden-grounded LLM judge. Full dimensions: the two
 # primary metrics (verdict + grounding) plus the five 0-2 quality dimensions.
+# Default: score the local conversations file directly. With --from-bigquery:
+# read the same sessions back from the BigQuery events table instead (the
+# production wiring), selected by this run's {run, slice} labels.
 score() {
-  GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
-    $PY "$REPO_ROOT/scripts/quality_report.py" \
-      --conversations-file "$1" --eval-spec "$SPEC" --dimensions full \
-      --tag-turns --concurrency "$CONCURRENCY" --output-json "$2"
+  if [[ "$FROM_BIGQUERY" == "1" ]]; then
+    GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
+    PROJECT_ID="$GOOGLE_CLOUD_PROJECT" \
+    DATASET_ID="${DATASET_ID:-agent_analytics}" \
+    TABLE_ID="${TABLE_ID:-agent_events}" \
+    DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
+      $PY "$REPO_ROOT/scripts/quality_report.py" \
+        --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" --limit 500 \
+        --eval-spec "$SPEC" --dimensions full \
+        --tag-turns --output-json "$2"
+  else
+    GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
+      $PY "$REPO_ROOT/scripts/quality_report.py" \
+        --conversations-file "$1" --eval-spec "$SPEC" --dimensions full \
+        --tag-turns --concurrency "$CONCURRENCY" --output-json "$2"
+  fi
 }
 
 # rate <report>  -> "X% (n/N golden-matched)"
@@ -282,6 +320,11 @@ echo "  Analyst:    $ANALYST_MODEL"
 echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"
 echo "  Concurrency:$CONCURRENCY"
 echo "  Rounds:     $ROUNDS"
+if [[ "$FROM_BIGQUERY" == "1" ]]; then
+  echo "  Traces:     BigQuery (${DATASET_ID:-agent_analytics}.${TABLE_ID:-agent_events}, run=$RUN_LABEL)"
+else
+  echo "  Traces:     local JSON (same schema; use --from-bigquery for the BQ path)"
+fi
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   echo "  Registry:   on  (skill-id=$SKILL_ID, @ $REGISTRY_LOCATION)"
 else

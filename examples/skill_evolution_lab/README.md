@@ -2,7 +2,8 @@
 
 An agent that **rewrites its own skill** from its conversation traces — no
 managed optimizer, no hand-written patches (an analyst LLM only *diagnoses* the
-traces; it never supplies the answer). One company-policy Q&A agent starts with a
+traces; it never supplies the answer — the default analyst is a stronger model
+than the agent, and the patches it produces carry behavioral rules, zero facts). One company-policy Q&A agent starts with a
 deliberately flawed `SKILL.md`, generates traffic, and the SDK's evolution
 engine reads the failing trajectories and produces a small, tool-first V1 skill.
 The skill is versioned in the **Gemini Enterprise Agent Platform Skill
@@ -156,6 +157,27 @@ them), measures V2 on the same held-out set, and keeps V2 **only when it beats
 V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
 a gain proves the loop compounds; a kept incumbent proves the guard holds.
+
+### Score from BigQuery (the production wiring)
+
+```bash
+./run_e2e_demo.sh --from-bigquery
+```
+
+By default the demo writes traces to local JSON in the exact schema the Agent
+Analytics plugin logs, so it runs without BigQuery. `--from-bigquery` exercises
+the production wiring instead: `run_agent.py --log-bigquery` inserts every
+session into a real `agent_events` table (created on first use;
+`DATASET_ID`/`TABLE_ID` from `.env`, defaults `agent_analytics.agent_events`)
+in the plugin's row shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` /
+`TOOL_COMPLETED` / `LLM_RESPONSE` spans in true chronological order, with
+`root_agent_name` and per-run `custom_tags` — and scoring reads the sessions
+back through the SDK's BigQuery trace path (`quality_report.py --label
+run=<id> --label slice=<set>`). The scorecards come back identical to the
+local path: verdicts, parroting sub-trajectories, and structured tool calls
+(the BigQuery path now populates `tool_calls_detail` from the `TOOL_*` spans).
+Requires the BigQuery API enabled and table read/write + job permissions on
+the project.
 
 ### With the Skill Registry
 

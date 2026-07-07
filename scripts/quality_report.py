@@ -1036,26 +1036,37 @@ def resolve_trace_responses(traces):
     user_turns, tool_calls = _count_trace_metrics(trace)
     conversation = _extract_conversation(trace) if user_turns > 1 else []
 
-    results.append(
-        {
-            "session_id": trace.session_id,
-            "time": (
-                trace.start_time.strftime("%Y-%m-%d %H:%M:%S")
-                if trace.start_time
-                else "?"
-            ),
-            "question": question,
-            "answered_by": answered_by,
-            "response": (response or ""),
-            "latency_s": latency_s,
-            "is_a2a": is_a2a,
-            "user_turns": user_turns,
-            "tool_calls": tool_calls,
-            "conversation": conversation,
-            "corrections": 0,
-            "verifications": 0,
-        }
-    )
+    result = {
+        "session_id": trace.session_id,
+        "time": (
+            trace.start_time.strftime("%Y-%m-%d %H:%M:%S")
+            if trace.start_time
+            else "?"
+        ),
+        "question": question,
+        "answered_by": answered_by,
+        "response": (response or ""),
+        "latency_s": latency_s,
+        "is_a2a": is_a2a,
+        "user_turns": user_turns,
+        "tool_calls": tool_calls,
+        "conversation": conversation,
+        "corrections": 0,
+        "verifications": 0,
+    }
+    # Structured tool detail from the trace's TOOL_* spans, so BigQuery-scored
+    # sessions carry the same {name, args} records local conversations do
+    # (tool-aware analysts + compare_runs' tool-selection table). Emitted only
+    # when the spans actually name their tools (or there were zero calls) --
+    # key-absence stays a truthful "not captured" for older tables.
+    tool_detail = [
+        {"name": tc.get("tool_name") or "", "args": tc.get("args") or {}}
+        for tc in trace.tool_calls
+        if tc.get("tool_name") and tc.get("tool_name") != "unknown"
+    ]
+    if tool_detail or tool_calls == 0:
+      result["tool_calls_detail"] = tool_detail
+    results.append(result)
 
   if remote_lookups:
     logger.info("Resolved %d A2A responses", remote_lookups)
