@@ -59,7 +59,7 @@ content:
     "OTEL_METRICS_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "https://<receiver-url>",
-    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer <token>"
+    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer <token>,x-bqaa-source-product=claude_code"
   }
 }
 ```

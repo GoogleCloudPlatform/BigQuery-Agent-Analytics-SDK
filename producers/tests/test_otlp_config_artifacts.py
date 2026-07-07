@@ -17,8 +17,8 @@
 The tier semantics under test come from issue #324 and the receiver design
 doc: `baseline` must never enable prompt text / raw bodies / tool content,
 `replay` must require an explicit acknowledgement, and Codex must never be
-promised content capture (no supported raw-body path) nor unverified
-metrics/trace config (gated on #317).
+promised content capture (no supported raw-body path); Codex exporter
+shapes are the ones verified live against CODEX_MIN_VERSION (#317).
 """
 
 import json

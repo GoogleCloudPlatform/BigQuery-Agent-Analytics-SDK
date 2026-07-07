@@ -31,8 +31,9 @@ Tier semantics (issue #324 + the receiver design doc):
   promised here. Codex is never offered replay: it documents no supported
   raw request/response body path.
 
-Codex metrics/trace exporter config is version-specific and stays gated
-(``"none"``) until #317 pins and verifies the concrete config shape.
+Codex exporter config is version-specific: the shapes here were verified
+live against ``CODEX_MIN_VERSION`` (#317) — logs + metrics are P0, traces
+generate only for the traces signal tier.
 """
 
 from __future__ import annotations
