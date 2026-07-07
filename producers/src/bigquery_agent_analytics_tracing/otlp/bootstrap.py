@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+import re
 import secrets as _secrets
 import shlex
 import subprocess
@@ -69,9 +70,12 @@ _APIS = (
     "iam.googleapis.com",
 )
 
+# gunicorn calls app factories via the 'module:callable()' syntax;
+# '--factory' is a uvicorn flag and makes the container exit 2 on startup
+# (hit live during the #324 e2e — first real Cloud Run deploy).
 _CONSUMER_GUNICORN_ARGS = (
-    "--factory,--bind,0.0.0.0:8080,--workers,2,--threads,8,"
-    "bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env"
+    "--bind,0.0.0.0:8080,--workers,2,--threads,8,"
+    "bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env()"
 )
 
 
@@ -187,6 +191,14 @@ class BootstrapSettings:
     # Reuse the PR 1 tier validation (privacy/signals/replay ack) so the
     # gate can't drift between `config` and `bootstrap`.
     self._spec("<pending-deploy>")
+    # Both feed backtick-quoted SQL identifiers (DDL, the DCL GRANT, the
+    # scheduled MERGE) run under admin credentials: a backtick-bearing
+    # value breaks out of the quoting and appends arbitrary SQL. Same
+    # validation as VerifySettings.
+    if not re.fullmatch(r"[a-z0-9.:-]+", self.project, re.IGNORECASE):
+      raise ValueError(f"invalid GCP project id {self.project!r}")
+    if not re.fullmatch(r"\w+", self.dataset, re.ASCII):
+      raise ValueError(f"invalid BigQuery dataset id {self.dataset!r}")
     if not self.sources:
       raise ValueError(
           "at least one telemetry source is required; expected one of"
@@ -436,7 +448,7 @@ def run_bootstrap(
           "roles/pubsub.publisher",
       ]
   )
-  # jobUser needs project scope (query jobs), but dataEditor is scoped to
+  # jobUser needs project scope (query jobs), but write access is scoped to
   # the target dataset: a project-wide grant would let a compromised
   # consumer SA modify every dataset in the project.
   runner.run(
@@ -451,16 +463,19 @@ def run_bootstrap(
           "roles/bigquery.jobUser",
       ]
   )
+  # Dataset-scoped write access via GA BigQuery DCL, piped over the same
+  # bq query stdin path the DDL uses. The obvious alternatives both fail
+  # live: `bq add-iam-policy-binding --dataset` needs an allowlisted
+  # preview API ("This feature requires allowlisting"), and `bq update
+  # --source /dev/stdin` rejects stdin ("Source path is not a file" — bq
+  # requires a regular file). GRANT is idempotent, so re-runs converge.
   runner.run(
-      [
-          "bq",
-          f"--project_id={s.project}",
-          "add-iam-policy-binding",
-          "--dataset",
-          f"--member=serviceAccount:{consumer_sa}",
-          "--role=roles/bigquery.dataEditor",
-          f"{s.project}:{s.dataset}",
-      ]
+      [*bq, "query", "--use_legacy_sql=false"],
+      input_text=(
+          "GRANT `roles/bigquery.dataEditor` ON SCHEMA"
+          f" `{s.project}.{s.dataset}`"
+          f' TO "serviceAccount:{consumer_sa}";'
+      ),
   )
   runner.run(
       [
@@ -548,8 +563,10 @@ def run_bootstrap(
           consumer_sa,
           "--command",
           "gunicorn",
-          "--args",
-          _CONSUMER_GUNICORN_ARGS,
+          # Single-token --args=... form: gcloud argparse treats a
+          # space-separated value that begins with '-' as another flag
+          # ("--args: expected one argument").
+          f"--args={_CONSUMER_GUNICORN_ARGS}",
           "--set-env-vars",
           f"BQAA_PROJECT={s.project},BQAA_DATASET={s.dataset},"
           f"BQAA_OTLP_ENABLE_TRACES={spans}",

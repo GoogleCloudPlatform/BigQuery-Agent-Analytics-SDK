@@ -125,7 +125,12 @@ def test_bootstrap_runs_the_full_deploy_sequence(tmp_path):
 def test_bootstrap_creates_schema_from_ddl_module(tmp_path):
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
-  [(argv, ddl_sql)] = r.find("bq", "query", "--use_legacy_sql=false")
+  ddl_calls = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and "CREATE TABLE" in inp
+  ]
+  [ddl_sql] = ddl_calls
   assert "CREATE TABLE IF NOT EXISTS `agent_analytics.otel_logs`" in ddl_sql
   assert "otel_spans" not in ddl_sql  # spans gated off by default
 
@@ -137,12 +142,34 @@ def test_bootstrap_traces_signal_enables_spans_everywhere(tmp_path):
       r,
       echo=lambda *_: None,
   )
-  [(_, ddl_sql)] = r.find("bq", "query", "--use_legacy_sql=false")
+  [ddl_sql] = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and "CREATE TABLE" in inp
+  ]
   assert "otel_spans" in ddl_sql
   receiver = " ".join(r.find("run deploy", "receiver")[0][0])
   consumer = " ".join(r.find("run deploy", "consumer")[0][0])
   assert "BQAA_OTLP_ENABLE_TRACES=1" in receiver
   assert "BQAA_OTLP_ENABLE_TRACES=1" in consumer
+
+
+def test_consumer_gunicorn_args_use_factory_call_syntax(tmp_path):
+  # '--factory' is a uvicorn flag, not gunicorn: the consumer container
+  # exits 2 on startup with "unrecognized arguments: --factory" (hit live
+  # during the #324 e2e — first real Cloud Run deploy of this image).
+  # gunicorn >= 20.1 calls factories via the 'module:callable()' syntax.
+  r = FakeRunner()
+  bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
+  argv = r.find("run deploy", "consumer")[0][0]
+  consumer = " ".join(argv)
+  assert "--factory" not in consumer
+  # gcloud argparse treats a space-separated --args value that begins with
+  # '-' as another flag ("--args: expected one argument"); it must be the
+  # single-token --args=... form.
+  [args_token] = [a for a in argv if a.startswith("--args")]
+  assert args_token.startswith("--args=--bind")
+  assert args_token.endswith("make_push_app_from_env()")
 
 
 def test_bootstrap_default_signals_keep_traces_off(tmp_path):
@@ -291,24 +318,31 @@ def test_bootstrap_creates_dlq_retention_subscription(tmp_path):
 
 
 def test_bootstrap_scopes_data_editor_to_the_dataset(tmp_path):
-  # jobUser needs project scope, but dataEditor must be dataset-scoped: a
+  # jobUser needs project scope, but write access must be dataset-scoped: a
   # project-wide grant lets a compromised consumer SA modify every dataset
-  # in the project.
+  # in the project. The GA mechanism is a WRITER entry in the dataset access
+  # list — `bq add-iam-policy-binding --dataset` requires allowlisting and
+  # fails on normal projects (hit live during the #324 e2e).
   r = FakeRunner()
   bootstrap.run_bootstrap(_settings(tmp_path), r, echo=lambda *_: None)
   sa = "bqaa-otlp-consumer@my-proj.iam.gserviceaccount.com"
-  # No project-level dataEditor grant.
+  # No project-level dataEditor grant, no allowlisted preview API.
   assert not r.find("gcloud projects add-iam-policy-binding", "dataEditor")
+  assert not r.find("add-iam-policy-binding", "--dataset")
   # jobUser stays project-level.
   [(job_argv, _)] = r.find("gcloud projects add-iam-policy-binding", "jobUser")
   assert f"serviceAccount:{sa}" in " ".join(job_argv)
-  # dataEditor lands on the dataset via bq add-iam-policy-binding.
-  [(argv, _)] = r.find("add-iam-policy-binding", "dataEditor")
-  joined = " ".join(argv)
-  assert joined.startswith("bq ")
-  assert "--dataset" in argv
-  assert f"--member=serviceAccount:{sa}" in argv
-  assert "my-proj:agent_analytics" in argv
+  # dataEditor lands via GA BigQuery DCL (GRANT is idempotent), piped over
+  # the same bq query stdin path the DDL uses ('bq update --source
+  # /dev/stdin' fails too: bq requires a regular file, stdin is a pipe).
+  [grant_sql] = [
+      inp
+      for _, inp in r.find("bq", "query", "--use_legacy_sql=false")
+      if inp and inp.lstrip().startswith("GRANT")
+  ]
+  assert "`roles/bigquery.dataEditor`" in grant_sql
+  assert "ON SCHEMA `my-proj.agent_analytics`" in grant_sql
+  assert f'"serviceAccount:{sa}"' in grant_sql
 
 
 def test_bootstrap_dlq_subscription_failure_is_not_swallowed(tmp_path):
@@ -343,6 +377,23 @@ def test_find_merge_config_survives_garbage_listing():
       )
       is None
   )
+
+
+def test_bootstrap_rejects_non_identifier_project_and_dataset(tmp_path):
+  # project/dataset feed backtick-quoted SQL identifiers (DDL, the DCL
+  # GRANT, the scheduled MERGE) run under admin credentials: a
+  # backtick-bearing value breaks out of the quoting and appends SQL.
+  import pytest
+
+  with pytest.raises(ValueError, match="dataset"):
+    _settings(tmp_path, dataset="ds` ; DROP TABLE x;--")
+  with pytest.raises(ValueError, match="project"):
+    _settings(tmp_path, project="p`.hax")
+  # Legitimate ids pass, incl. legacy domain-scoped projects.
+  ok = _settings(
+      tmp_path, project="domain.com:my-proj-1", dataset="agent_analytics_2"
+  )
+  assert ok.dataset == "agent_analytics_2"
 
 
 def test_bootstrap_rejects_unknown_or_empty_sources(tmp_path):

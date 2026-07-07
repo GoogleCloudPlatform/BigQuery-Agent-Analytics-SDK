@@ -21,8 +21,10 @@ RUN pip install --no-cache-dir "/src/producers[receiver]"
 ENV PORT=8080
 
 # Default role: OTLP receiver. Consumer role overrides CMD to:
-#   gunicorn --factory --bind :$PORT \
-#     bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env
-CMD exec gunicorn --factory --bind ":${PORT}" --workers 2 --threads 8 \
+#   gunicorn --bind :$PORT \
+#     'bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env()'
+# gunicorn calls factories via the 'module:callable()' syntax; '--factory'
+# is a uvicorn flag and makes the container exit 2 on startup.
+CMD exec gunicorn --bind ":${PORT}" --workers 2 --threads 8 \
     --access-logfile - \
-    bigquery_agent_analytics_tracing.otlp.app:make_app
+    'bigquery_agent_analytics_tracing.otlp.app:make_app()'

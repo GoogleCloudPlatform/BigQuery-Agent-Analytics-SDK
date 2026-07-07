@@ -110,6 +110,8 @@ def _decode_protobuf(signal: str, body: bytes) -> dict[str, Any]:
       from opentelemetry.proto.collector.logs.v1.logs_service_pb2 import ExportLogsServiceRequest as Request
     elif signal == "metric":
       from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest as Request
+    elif signal == "trace":
+      from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest as Request
     else:
       raise DecodeError(f"protobuf decode unsupported for signal {signal!r}")
   except ImportError as exc:
@@ -171,12 +173,10 @@ def handle_export(
   if not authenticate(auth_header, config.expected_token):
     return ReceiverResult(401, message="unauthenticated")
 
-  if signal == "trace":
-    if not config.enable_traces:
-      return ReceiverResult(404, message="traces not enabled")
-    # Receiver wiring exists behind the flag, but span landing is deferred to
-    # the trace work (design doc); accept-but-not-implemented.
-    return ReceiverResult(501, message="trace landing not implemented")
+  # The traces signal tier gates the whole path (issue #324); the consumer
+  # additionally drops span envelopes unless its own flag is set.
+  if signal == "trace" and not config.enable_traces:
+    return ReceiverResult(404, message="traces not enabled")
 
   # Decode the body AND walk its structure under one guard: any malformed
   # request — bad bytes (DecodeError) or valid JSON with the wrong OTLP shape
@@ -186,6 +186,13 @@ def handle_export(
     request = decode_body(signal, content_type, body)
     if signal == "log":
       envelopes = decode.decode_logs_request(
+          request,
+          source_product=config.source_product,
+          raw_request=body,
+          ingest_time=ingest_time,
+      )
+    elif signal == "trace":
+      envelopes = decode.decode_traces_request(
           request,
           source_product=config.source_product,
           raw_request=body,
@@ -201,7 +208,9 @@ def handle_export(
   except Exception as exc:  # noqa: BLE001 - malformed request -> dead letter
     dead_letter = env.dead_letter_envelope(
         source_product=config.source_product,
-        source_signal=signal,
+        # Success envelopes and per-span dead letters use "span"; the
+        # whole-request path must match or DLQ triage filters miss one side.
+        source_signal="span" if signal == "trace" else signal,
         stage="otlp_decode",
         reason=repr(exc),
         raw_b64=base64.b64encode(body).decode("ascii"),
