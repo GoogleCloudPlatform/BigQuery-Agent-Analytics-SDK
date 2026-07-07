@@ -1,30 +1,30 @@
-# Skill Evolution Result (gemini-3.5-flash)
+# Skill Evolution Result (gemini-3.1-flash-lite)
 
 Correctness on the held-out set: in-scope answers matched & meaningful, out-of-scope questions cleanly declined.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 67.5% (54/80) | 97.5% (78/80) | +30.0pp |
-| Single-turn | 80.0% (44/55) | 98.2% (54/55) | +18.2pp |
+| Overall | 37.5% (30/80) | 97.5% (78/80) | +60.0pp |
+| Single-turn | 36.4% (20/55) | 100.0% (55/55) | +63.6pp |
 | Corrections (anti-parrot) | 0.0% (0/15) | 100.0% (15/15) | +100.0pp |
-| Out-of-scope (declined) | 100.0% (10/10) | 90.0% (9/10) | -10.0pp |
+| Out-of-scope (declined) | 100.0% (10/10) | 80.0% (8/10) | -20.0pp |
 
-Parroted sub-trajectories: V0=15  V1=0 (lower is better -- the agent re-verified instead of caving).
+Parroted sub-trajectories: V0=11  V1=0 (lower is better -- the agent re-verified instead of caving).
 
 ## Tool selection (sessions that called each tool, held-out set)
 
 | Behavior | V0 | V1 |
 | --- | --- | --- |
-| Called any tool | 56/80 | 75/80 |
+| Called any tool | 14/80 | 61/80 |
 | `calculate_disability_pay` | 5/80 | 5/80 |
-| `lookup_company_policy` | 51/80 | 70/80 |
+| `lookup_company_policy` | 9/80 | 56/80 |
 
 ## Quality dimensions (average 0-2, held-out set)
 
 | Dimension | V0 | V1 | Delta |
 | --- | --- | --- | --- |
-| Correctness | 1.34 | 1.98 | +0.64 |
-| Tool use | 1.35 | 1.95 | +0.6 |
-| Specificity | 1.70 | 1.98 | +0.28 |
-| Scope compliance | 1.62 | 1.98 | +0.36 |
-| First-time-right | 1.61 | 1.98 | +0.37 |
+| Correctness | 0.75 | 1.99 | +1.24 |
+| Tool use | 0.76 | 2.00 | +1.24 |
+| Specificity | 0.95 | 2.00 | +1.05 |
+| Scope compliance | 0.85 | 2.00 | +1.15 |
+| First-time-right | 0.85 | 1.99 | +1.14 |

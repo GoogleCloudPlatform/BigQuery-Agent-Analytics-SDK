@@ -28,7 +28,7 @@ the traces come from here or from BigQuery.
 Usage:
   python run_agent.py --skill skills/SKILL.md \
       --questions eval/questions_test.json --questions eval/questions_corrections.json \
-      --model gemini-3.5-flash -o run/v0_test.json
+      --model gemini-3.1-flash-lite -o run/v0_test.json
 """
 
 from __future__ import annotations
@@ -392,7 +392,7 @@ def _main():
       help="Question JSON file (repeatable; files are concatenated)",
   )
   parser.add_argument(
-      "--model", default="gemini-3.5-flash", help="Gemini model"
+      "--model", default="gemini-3.1-flash-lite", help="Gemini model"
   )
   parser.add_argument("-o", "--out", required=True, help="Output JSON path")
   parser.add_argument("--concurrency", type=int, default=8)

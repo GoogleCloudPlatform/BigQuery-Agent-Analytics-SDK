@@ -83,8 +83,8 @@ skill_evolution_lab/
   run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
-  sample_run/           # a committed end-to-end --rounds 2 run (scored reports, V0 +
-                        #   evolved V1/V2 skills, RESULT + RESULT_ROUND2) + README
+  sample_run/           # a committed end-to-end run (scored reports, V0 + evolved
+                        #   skill, RESULT) + round2/ companion (V1->V2 gate) + README
 ```
 
 A complete recorded run lives in [`sample_run/`](sample_run/) — the scored V0/V1
@@ -118,10 +118,10 @@ held-out test sets, evolves a tool-first V1 skill, re-scores the held-out set,
 prints the V0→V1 comparison, and restores V0. Artifacts land in
 `runs/<timestamp>_<model>/` (git-ignored), with `RESULT.md` as the summary.
 
-**Runtime:** about **13–18 minutes** end-to-end at the default size (68 evolve +
-80 held-out questions, almost entirely Gemini API calls); `--rounds 2` adds
-roughly ten more. `setup.sh` takes a few seconds. The first run also does a
-one-time `uv` dependency sync.
+**Runtime:** about **10 minutes** end-to-end at the default size (68 evolve +
+80 held-out questions, almost entirely Gemini API calls) on the default
+`gemini-3.1-flash-lite`; `--rounds 2` roughly doubles it. `setup.sh` takes a
+few seconds. The first run also does a one-time `uv` dependency sync.
 
 **What you'll see** — a per-step progress trace ending in the comparison table.
 The per-step rate is over the *in-scope* questions matched to the answer key (the
@@ -129,14 +129,14 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   62.9% (44/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   28.6% (20/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
-     V1 test:   98.6% (69/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
-| Overall                   | 67.5% (54/80) | 97.5% (78/80)  | +30.0pp  |
+| Overall                   | 37.5% (30/80) | 97.5% (78/80)  | +60.0pp  |
 | Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
 ```
 
@@ -156,7 +156,10 @@ learning signal: what does V1 *still* get wrong?), evolves V1 -> V2 with
 them), measures V2 on the same held-out set, and keeps V2 **only when it beats
 V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
-a gain proves the loop compounds; a kept incumbent proves the guard holds.
+a gain proves the loop compounds; a kept incumbent proves the guard holds. A
+recorded round-2 run is committed at
+[`sample_run/round2/`](sample_run/round2/) — its V2 *tied* V1 and the gate
+kept the incumbent.
 
 ### Score from BigQuery (the production wiring)
 
@@ -199,8 +202,9 @@ Inspect revisions any time: `uv run python registry_cli.py revisions
 ### Model overrides
 
 ```bash
-# Default agent is gemini-3.5-flash; try other GA models:
-AGENT_MODEL=gemini-3.1-flash-lite ./run_e2e_demo.sh
+# Default agent is gemini-3.1-flash-lite (it obeys the flawed V0 most
+# literally, so the default run reproduces the headline); try other GA models:
+AGENT_MODEL=gemini-3.5-flash ./run_e2e_demo.sh
 AGENT_MODEL=gemini-2.5-pro ./run_e2e_demo.sh
 ```
 
@@ -293,7 +297,7 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
   tokens on every call and buries the rules that matter under ones that don't.
 
 The anti-bloat rules are enforced by the consolidator prompt in `scripts/skill_evolution.py`,
-before compaction ever runs -- which is why an evolved skill stays behavioral (~1.8KB) rather
+before compaction ever runs -- which is why an evolved skill stays behavioral (~2.4KB) rather
 than a pile of baked facts:
 
 ```text

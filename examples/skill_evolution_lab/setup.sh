@@ -47,7 +47,7 @@ GOOGLE_CLOUD_PROJECT="$PROJECT_ID"
 REGION="$REGION"
 GOOGLE_GENAI_USE_VERTEXAI=True
 # Models (override before run_e2e_demo.sh if desired):
-AGENT_MODEL="gemini-3.5-flash"
+AGENT_MODEL="gemini-3.1-flash-lite"
 ANALYST_MODEL="gemini-3.1-pro-preview"
 JUDGE_MODEL="gemini-2.5-flash"
 JUDGE_LOCATION="$REGION"

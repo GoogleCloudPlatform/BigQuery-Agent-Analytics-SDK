@@ -81,7 +81,10 @@ export GOOGLE_CLOUD_PROJECT="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}"
 
 # Defaults: env override (captured above) > .env value > built-in default.
 # CLI flags below still take precedence over all of these.
-AGENT_MODEL="${_ENV_AGENT_MODEL:-${AGENT_MODEL:-gemini-3.5-flash}}"
+# Default agent: gemini-3.1-flash-lite -- it follows the flawed V0's rules most
+# literally (lowest V0 baseline), so the default run reproduces the headline
+# gain. Override with --agent-model or AGENT_MODEL.
+AGENT_MODEL="${_ENV_AGENT_MODEL:-${AGENT_MODEL:-gemini-3.1-flash-lite}}"
 ANALYST_MODEL="${_ENV_ANALYST_MODEL:-${ANALYST_MODEL:-gemini-3.1-pro-preview}}"
 JUDGE_MODEL="${_ENV_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
 JUDGE_LOCATION="${_ENV_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
@@ -152,7 +155,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [OPTIONS]"
       echo ""
       echo "Options:"
-      echo "  --agent-model M    Agent under test       (default: gemini-3.5-flash)"
+      echo "  --agent-model M    Agent under test       (default: gemini-3.1-flash-lite)"
       echo "  --analyst-model M  Evolution analyst      (default: gemini-3.1-pro-preview)"
       echo "  --judge-model M    LLM judge for scoring  (default: gemini-2.5-flash)"
       echo "  --judge-location R Vertex region (judge)  (default: us-central1)"

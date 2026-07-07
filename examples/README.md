@@ -99,10 +99,11 @@ cd skill_evolution_lab
 ./run_e2e_demo.sh                        # V0 -> evolve -> V1 -> compare, restore V0
 ```
 
-A verified run (gemini-3.5-flash, golden-graded, 80-question held-out set,
-`--rounds 2`): **V0 67.5% → V1 97.5%** overall; corrections (anti-parroting)
-**0% → 100%** with parroted sub-trajectories **15 → 0**; evolved skill ~1.8KB;
-round 2's V2 tied V1 and the gate kept the incumbent. See the example's
+A verified run (gemini-3.1-flash-lite — the default agent — golden-graded,
+80-question held-out set): **V0 37.5% → V1 97.5%** overall (+60pp); corrections
+(anti-parroting) **0% → 100%** with parroted sub-trajectories **11 → 0**;
+evolved skill ~2.4KB. A committed round-2 recording shows the held-out gate
+refusing a V2 that merely tied V1. See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 

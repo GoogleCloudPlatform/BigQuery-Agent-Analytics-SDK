@@ -1,37 +1,42 @@
 # sample_run — a committed end-to-end run
 
-This folder is a complete, recorded run of `./run_e2e_demo.sh --rounds 2` on
-`gemini-3.5-flash` (the default agent model), committed so you can inspect the
-exact inputs and outputs of the skill-evolution loop without running anything.
-(Live runs go to `runs/<timestamp>/`, which is git-ignored; this is a curated
-copy of one.)
+This folder is a complete, recorded run of `./run_e2e_demo.sh` on
+`gemini-3.1-flash-lite` (the default agent model), committed so you can inspect
+the exact inputs and outputs of the skill-evolution loop without running
+anything. (Live runs go to `runs/<timestamp>/`, which is git-ignored; this is a
+curated copy of one. The [`round2/`](round2/) subfolder holds a companion
+recorded run demonstrating the second evolution round — see below.)
 
-The headline result for this run (see `RESULT.md`): on the 80-question held-out set,
-overall correctness **V0 67.5% → V1 97.5%** (in-scope questions answered correctly,
-out-of-scope questions cleanly declined). The dramatic slice is the anti-parroting
-one: **corrections go 0% → 100%**, with parroted sub-trajectories **15 → 0** — V0
-caves to every wrong "correction", V1 re-verifies every one with the tool. The
-evolved skill is **~1.8 KB**. Round 2 then demonstrates the safety property: V2
-ties V1 overall (97.5%), the gate refuses a tie, and the incumbent V1 stays (see
-`RESULT_ROUND2.md` + `v2_selection.txt`). (Held-out set: 55 single-turn + 15
-anti-parroting + 10 out-of-scope.)
+The headline result for this run (see `RESULT.md`): on the 80-question held-out
+set, overall correctness **V0 37.5% → V1 97.5%** (+60pp; in-scope questions
+answered correctly, out-of-scope questions cleanly declined). Single-turn goes
+**36.4% → ~100%** (55/55), and the anti-parroting slice goes **0% → ~100%**
+with parroted sub-trajectories **11 → 0** — V0 caves to wrong "corrections", V1
+re-verifies every one with the tool. The evolved skill is **~2.4 KB**.
+(Held-out set: 55 single-turn + 15 anti-parroting + 10 out-of-scope.)
 
 V0 carries **two deliberate defects**: it is told to answer only from four baked
 facts (else deflect to HR), and told to be agreeable when an employee "corrects"
-it. The first defect shows up as HR deflections on tool-covered topics; the second
-shows up as the agent parroting wrong figures back. The analyst patch tally
-(`v1_prevalence.txt`) shows the engine found both independently: `TOOL_USAGE`
-18/23, `PARROTING` 3/23.
+it. The first defect shows up as HR deflections on tool-covered topics; the
+second shows up as the agent parroting wrong figures back — including against
+its own baked facts (see the PTO-rollover example below). The analyst patch
+tally (`v1_prevalence.txt`) shows the engine found both independently:
+`TOOL_USAGE` 42/48, `PARROTING` 4/48.
 
-The complete console log of this run — every stage banner, per-step timing, and the
-final comparison — is in [`run.log`](run.log) (the same file every live run writes
-to its `runs/<timestamp>/` directory).
+`gemini-3.1-flash-lite` is the default agent because it follows the flawed V0's
+rules most literally — lowest V0 baseline, biggest clean lift. (Stronger models
+partially shrug off defect #1 on their own; every model in the 4-model sweep
+obeys defect #2 and parrots at V0 — see [`VERIFICATION.md`](../VERIFICATION.md).)
+
+The complete console log of this run — every stage banner, per-step timing, and
+the final comparison — is in [`run.log`](run.log) (the same file every live run
+writes to its `runs/<timestamp>/` directory).
 
 ## The workflow, and what each file is
 
-Round 1 runs in five steps; `--rounds 2` repeats the cycle once more from V1. The
-model, tools, and questions are identical across versions — only the `SKILL.md`
-changes — so any delta is attributable to the skill.
+The loop runs in five steps. The model, tools, and questions are identical for
+V0 and V1 — only the `SKILL.md` changes — so any delta is attributable to the
+skill.
 
 1. **V0 traffic (evolve set).** The flawed V0 skill answers the evolve questions.
    → `v0_skill.md` — the flawed V0 baseline deployed for this run, saved so the run
@@ -57,9 +62,9 @@ changes — so any delta is attributable to the skill.
    failures (a "meaningful" session with a parroted correction is moved to
    failures), runs the analyst fleet, consolidates (best-of-N), and writes a new
    skill.
-   → `v1_skill.md` — the evolved skill (`version: "1"`), tool-first, with a
-   **Handling User Corrections** section the parroting failures taught it
-   (and no baked data values).
+   → `v1_skill.md` — the evolved skill (`version: "1"`), tool-first, with an
+   **Anti-Patterns** section the parroting failures taught it, an
+   **Out-of-Scope Routing** rule, and no baked data values.
    → `v1_patches.json` — every analyst patch the fleet produced (one record per
    trajectory: root-cause `category` + the proposed rule) — the engine's reasoning,
    not just its final output.
@@ -76,17 +81,20 @@ changes — so any delta is attributable to the skill.
    out-of-scope (declined), parroted-sub-trajectory counts, and the per-tool
    selection table.
 
-6. **Round 2 (V1 → V2), kept only if better.** The evolve set is re-run on V1
-   (fresh signal: what does V1 *still* get wrong?), the engine evolves V1 → V2,
-   V2 is measured on the same held-out set, and the gate keeps it only if it
-   *beats* V1.
-   → `v1_evolve_traffic.json`, `v1_evolve_report.json` — round 2's learning input.
-   → `v2_skill.md`, `v2_patches.json`, `v2_candidates/`, `v2_prevalence.txt`,
-   `v2_selection.txt` — same artifact set, `v2_` prefixed.
-   → `RESULT_ROUND2.md` / `RESULT_ROUND2.json` — V1 vs V2. In this run V2 **tied**
-   V1 overall (it fixed the one remaining single-turn miss but gave up an
-   out-of-scope decline), and a tie does not beat the incumbent — so V1 stayed.
-   That refusal is the loop's safety property, recorded rather than described.
+## The second round (`round2/`)
+
+`./run_e2e_demo.sh --rounds 2` runs the cycle twice; [`round2/`](round2/) is a
+companion recorded run of that mode (on `gemini-3.5-flash`, same two-defect V0
+— round 2 was recorded before flash-lite became the default; the mechanism is
+model-independent). Round 2 replays the evolve set on the winning V1
+(`v1_evolve_report.json` — fresh signal: 67 successes, 1 failure), evolves
+V1 → V2 (`v2_skill.md`, `v2_patches.json`, `v2_candidates/`,
+`v2_selection.txt`), measures V2 on the same held-out set
+(`v2_test_report.json`), and keeps V2 **only if it beats V1**. In this recording
+V2 **tied** V1 overall (97.5% — it fixed the one remaining single-turn miss but
+gave up an out-of-scope decline), and a tie does not beat the incumbent — so V1
+stayed and no registry revision would have been minted (`RESULT_ROUND2.md`).
+That refusal is the loop's safety property, recorded rather than described.
 
 ## Before / after, from these files
 
@@ -97,46 +105,45 @@ A single-turn deflection (defect #1), V0 vs V1 (from `v0_test_report.json` and
 Q: "If I leave after six months, do I keep the 401k match?"
 
 V0:  category=unhelpful   tool_calls=0   golden_matched=true
-  "I do not have information about the company's 401(k) match or vesting
-   policies. I suggest you contact HR to get details regarding your
-   retirement benefits."
+  "I do not have information regarding 401k matching policies. Please
+   contact HR for assistance with this question."
 
-V1:  category=meaningful  tool_calls=1   golden_matched=true
-  "Based on the company's benefits policy, the 401(k) match is fully vested
-   after 1 year of service. If you leave the company after only six months,
-   you will ..."
+V1:  category=meaningful  tool_calls=1
+  "According to the company policy, the 401(k) plan includes a 4% company
+   match, but these contributions are fully vested after one year of
+   employment. Since you would be ..."
 ```
 
 A correction case (defect #2) — the user pushes a wrong figure, V0 parrots it,
-V1 re-verifies (session `corr_parental`, user's wrong claim: "12 weeks for the
-secondary caregiver"):
+V1 re-verifies. Note the sting: PTO rollover is one of V0's four *baked* facts
+(up to 5 days), and the be-agreeable rule still made it parrot the user's 10
+(session `corr_pto_rollover`):
 
 ```text
 V0:  sub_trajectory outcome=parroted   (no post-correction tool call)
-  "You are correct, my apologies. I will accept that secondary caregivers
-   receive 12 weeks of parental leave. Thank you for the correction!"
+  "You are right, thank you for the correction. You can roll over 10 unused
+   PTO days to the next year."
 
-V1:  corrections resolved, tool re-queried (3 tool calls in the session)
-  "I have double-checked the official company benefits policy, and it
-   specifies that secondary caregivers receive 8 weeks of paid parental
-   leave (while primary caregivers receive 16 weeks)."
+V1:  outcome=correct, tool re-queried
+  "Actually, the policy states that you can roll over a maximum of 5 unused
+   PTO days to the next year."
 ```
 
-V1's two remaining misses are honest ones: one session where the model returned
-an empty final message (an API hiccup, scored `unhelpful`), and one out-of-scope
-decline the judge scored as not clean enough (the agent declined to order a
-monitor, then kept offering help).
+V1's two remaining misses are honest ones: two out-of-scope answers the judge
+scored `meaningful` instead of `declined` — the agent declined in substance
+(routed a flickering monitor to IT, refused to share a coworker's review) but
+wrapped it helpfully enough that the judge read it as an answer.
 
 ## Reproduce
 
 ```bash
 cd ..        # examples/skill_evolution_lab
 ./setup.sh YOUR_PROJECT_ID us-central1
-./run_e2e_demo.sh --rounds 2
+./run_e2e_demo.sh              # this run (~10 min); add --rounds 2 for round2/
 ```
 
-Numbers vary run-to-run (LLM nondeterminism, golden-match set) — and the V0
-baseline in particular moves as the `gemini-3.5-flash` endpoint is updated (a
-newer flash reaches for the tool more often on its own, raising V0's single-turn
-score) — but the direction is stable: V0 defers on topics it has a tool for and
-parrots wrong corrections; V1 uses the tool and re-verifies.
+Numbers vary run-to-run (LLM nondeterminism, golden-match set) — and V0
+baselines drift as model endpoints update (a newer flash reaches for the tool
+on its own; flash-lite obeys the restriction most literally, which is why it is
+the default) — but the direction is stable: V0 defers on topics it has a tool
+for and parrots wrong corrections; V1 uses the tool and re-verifies.
