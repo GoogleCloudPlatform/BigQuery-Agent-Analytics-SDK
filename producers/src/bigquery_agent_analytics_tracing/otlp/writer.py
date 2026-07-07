@@ -15,8 +15,8 @@
 """Envelope v1 -> native BigQuery rows; append-only writer (issue #316, PR 4).
 
 Consumes the Pub/Sub envelope-v1 messages produced by the receiver (PR 3) and
-maps each to a row for its native table — ``otel_logs``, the five
-``otel_metric_*`` tables, or ``otlp_dead_letter`` (spans gated/deferred). The
+maps each to a row for its native table — ``otel_logs``, ``otel_spans``
+(traces signal tier), the five ``otel_metric_*`` tables, or ``otlp_dead_letter``. The
 row mapping is pure and table-routing is deterministic, so the whole thing is
 unit-testable with a fake writer; the real BigQuery client is lazy-imported.
 
@@ -90,6 +90,35 @@ def _int_list(values: Any) -> list[int]:
   return [int(v) for v in (values or [])]
 
 
+def _str(value: Any) -> str | None:
+  return None if value is None else str(value)
+
+
+# OTLP/JSON encodes enums as ints while protobuf MessageToDict emits names;
+# both must land the same canonical STRING or filters silently miss rows.
+_SPAN_KIND_NAMES = {
+    0: "SPAN_KIND_UNSPECIFIED",
+    1: "SPAN_KIND_INTERNAL",
+    2: "SPAN_KIND_SERVER",
+    3: "SPAN_KIND_CLIENT",
+    4: "SPAN_KIND_PRODUCER",
+    5: "SPAN_KIND_CONSUMER",
+}
+_STATUS_CODE_NAMES = {
+    0: "STATUS_CODE_UNSET",
+    1: "STATUS_CODE_OK",
+    2: "STATUS_CODE_ERROR",
+}
+
+
+def _enum_name(value: Any, names: dict[int, str]) -> str | None:
+  if value is None:
+    return None
+  if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+    return names.get(int(value), str(value))
+  return str(value)
+
+
 def _receiver_metadata_row(envelope: dict[str, Any]) -> dict[str, Any]:
   return {
       "source_product": envelope["source"]["product"],
@@ -145,6 +174,61 @@ def log_row(envelope: dict[str, Any]) -> dict[str, Any]:
       ),
       "log_attributes": _json(env.otlp_attrs_to_dict(record.get("attributes"))),
       "event_name": record.get("eventName"),
+  }
+  row.update(_receiver_metadata_row(envelope))
+  return row
+
+
+def span_row(envelope: dict[str, Any]) -> dict[str, Any]:
+  record = envelope["record"]
+  resource = envelope["otlp"]["resource_attributes"]
+  scope = envelope["otlp"].get("scope") or {}
+  status = record.get("status") or {}
+  row = {
+      "timestamp": (
+          _nanos_to_iso(record.get("startTimeUnixNano"))
+          or envelope["ingest_time"]
+      ),
+      "end_timestamp": _nanos_to_iso(record.get("endTimeUnixNano")),
+      "trace_id": record.get("traceId"),
+      "span_id": record.get("spanId"),
+      "parent_span_id": record.get("parentSpanId"),
+      "trace_state": record.get("traceState"),
+      "span_name": record.get("name"),
+      "span_kind": _enum_name(record.get("kind"), _SPAN_KIND_NAMES),
+      "service_name": resource.get("service.name"),
+      "status_code": _enum_name(status.get("code"), _STATUS_CODE_NAMES),
+      "status_message": status.get("message"),
+      "resource_attributes": _json(resource),
+      "scope_name": scope.get("name"),
+      "scope_version": scope.get("version"),
+      "scope_attributes": _json(
+          env.otlp_attrs_to_dict(scope.get("attributes"))
+      ),
+      "span_attributes": _json(
+          env.otlp_attrs_to_dict(record.get("attributes"))
+      ),
+      "events": [
+          {
+              "timestamp": _nanos_to_iso(event.get("timeUnixNano")),
+              "name": event.get("name"),
+              "attributes": _json(
+                  env.otlp_attrs_to_dict(event.get("attributes"))
+              ),
+          }
+          for event in record.get("events", []) or []
+      ],
+      "links": [
+          {
+              "trace_id": link.get("traceId"),
+              "span_id": link.get("spanId"),
+              "trace_state": link.get("traceState"),
+              "attributes": _json(
+                  env.otlp_attrs_to_dict(link.get("attributes"))
+              ),
+          }
+          for link in record.get("links", []) or []
+      ],
   }
   row.update(_receiver_metadata_row(envelope))
   return row
@@ -268,6 +352,8 @@ def target_table(envelope: dict[str, Any]) -> str:
     if kind not in _METRIC_TABLE:
       raise TableWriteError(f"unknown metric point_kind {kind!r}")
     return _METRIC_TABLE[kind]
+  if signal == "span":
+    return "otel_spans"
   raise TableWriteError(f"no native table for signal {signal!r}")
 
 
@@ -280,6 +366,8 @@ def envelope_to_row(envelope: dict[str, Any]) -> dict[str, Any]:
     return log_row(envelope)
   if signal == "metric":
     return metric_row(envelope)
+  if signal == "span":
+    return span_row(envelope)
   raise TableWriteError(f"no row mapping for signal {signal!r}")
 
 
@@ -292,10 +380,10 @@ def append_envelope(
   """Map an envelope to a row and append it to the right native table.
 
   Returns the target table name. Span envelopes are dropped unless
-  ``enable_spans`` (landing is gated/deferred — design doc).
+  ``enable_spans`` (the traces signal tier, BQAA_OTLP_ENABLE_TRACES).
   """
   if envelope["source"]["signal"] == "span" and not enable_spans:
-    return ""  # span landing deferred
+    return ""  # traces tier disabled on this consumer
   table = target_table(envelope)
   writer.append(table, envelope_to_row(envelope))
   return table

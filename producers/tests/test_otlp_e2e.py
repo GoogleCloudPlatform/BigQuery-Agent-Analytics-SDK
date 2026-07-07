@@ -198,3 +198,32 @@ def test_malformed_request_lands_in_dead_letter_with_replayable_body():
       return  # replayable original payload present
     time.sleep(5)
   pytest.fail("malformed request did not reach otlp_dead_letter with raw_b64")
+
+
+TRACES_ENABLED = os.environ.get("BQAA_OTLP_ENABLE_TRACES") == "1"
+
+
+@pytest.mark.skipif(
+    not TRACES_ENABLED,
+    reason="traces e2e needs a deployment with BQAA_OTLP_ENABLE_TRACES=1",
+)
+def test_spans_land_in_otel_spans():
+  # Traces signal tier (#324 PR4): synthetic span -> receiver -> otel_spans.
+  run_id = uuid.uuid4().hex
+  payload = otel_verify.synthetic_span_payload(run_id, int(time.time() * 1e9))
+  assert _post("/v1/traces", payload).status_code == 200
+  assert (
+      _wait_count(
+          f"SELECT COUNT(*) FROM `{_QUALIFIED}.otel_spans` WHERE"
+          f" JSON_VALUE(span_attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
+      )
+      >= 1
+  )
+  # Read-time dedup view surfaces it too.
+  assert (
+      _rows(
+          f"SELECT COUNT(*) FROM `{_QUALIFIED}.otel_spans_dedup` WHERE"
+          f" JSON_VALUE(span_attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
+      )[0][0]
+      >= 1
+  )

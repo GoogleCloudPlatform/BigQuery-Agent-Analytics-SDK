@@ -36,8 +36,9 @@ writes the ready-to-distribute Claude Code / Codex config artifacts
 `bqaa-otel config --help` for generating artifacts against an existing
 deployment).
 
-- **Endpoints:** `<url>/v1/logs`, `<url>/v1/metrics` (`/v1/traces` is gated —
-  set `ENABLE_SPANS=1` to wire it; span landing is deferred).
+- **Endpoints:** `<url>/v1/logs`, `<url>/v1/metrics`, and — when the
+  deployment's signal tier includes traces (`--signals logs,metrics,traces`
+  / `ENABLE_SPANS=1`) — `<url>/v1/traces`, landing spans in `otel_spans`.
 - **Auth:** bearer token — `Authorization: Bearer <token>`. The receiver rejects
   unauthenticated requests with `401`.
 - **Protocol:** OTLP/HTTP `http/protobuf` is the recommended enterprise default.

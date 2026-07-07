@@ -17,7 +17,8 @@
 ``run_verify`` is strictly read-only: endpoint reachability + bearer-token
 enforcement, table/view existence, recent-row freshness, and dead-letter
 health. ``run_smoke`` additionally exercises the write path with synthetic
-OTLP logs + metrics and follows them through the native tables, the dedup
+OTLP logs + metrics (and a span when the deployment's signal tier includes
+traces) and follows them through the native tables, the dedup
 views, and the ``agent_events_otlp`` projection (running the scheduled
 MERGE once, exactly as the live e2e test does — the payload builders here
 are shared with it).
@@ -358,6 +359,48 @@ def _send_counts(body: str) -> tuple[int, int]:
     return -1, 0
 
 
+def synthetic_span_payload(run_id: str, now_nanos: int) -> dict:
+  """One OTLP/JSON span tagged with ``bqaa.run_id`` (traces signal tier)."""
+  return {
+      "resourceSpans": [
+          {
+              "resource": {
+                  "attributes": [
+                      {
+                          "key": "service.name",
+                          "value": {"stringValue": "claude-code"},
+                      },
+                  ]
+              },
+              "scopeSpans": [
+                  {
+                      "scope": {"name": "bqaa-smoke"},
+                      "spans": [
+                          {
+                              # Spans key on trace_id+span_id; derive both
+                              # from the run id so replays collapse.
+                              "traceId": run_id.ljust(32, "0")[:32],
+                              "spanId": run_id.ljust(16, "0")[:16],
+                              "name": "bqaa_smoke_span",
+                              "kind": "SPAN_KIND_INTERNAL",
+                              "startTimeUnixNano": str(now_nanos),
+                              "endTimeUnixNano": str(now_nanos),
+                              "status": {"code": "STATUS_CODE_OK"},
+                              "attributes": [
+                                  {
+                                      "key": "bqaa.run_id",
+                                      "value": {"stringValue": run_id},
+                                  },
+                              ],
+                          }
+                      ],
+                  }
+              ],
+          }
+      ]
+  }
+
+
 def run_smoke(
     settings: VerifySettings,
     *,
@@ -376,10 +419,13 @@ def run_smoke(
   }
   base = settings.endpoint.rstrip("/")
 
-  for path, payload in (
+  sends = [
       ("/v1/logs", synthetic_logs_payload(run_id, now_nanos)),
       ("/v1/metrics", synthetic_gauge_payload(run_id, now_nanos)),
-  ):
+  ]
+  if "traces" in settings.signals:
+    sends.append(("/v1/traces", synthetic_span_payload(run_id, now_nanos)))
+  for path, payload in sends:
     status, body = http_post(
         base + path, json.dumps(payload).encode("utf-8"), headers
     )
@@ -413,7 +459,7 @@ def run_smoke(
       sleep(_POLL_INTERVAL_S)
 
   run_filter = f"JSON_VALUE(log_attributes, '$.\"bqaa.run_id\"') = '{run_id}'"
-  checks = (
+  checks = [
       (
           "smoke row in otel_logs",
           f"SELECT COUNT(*) FROM `{settings.qualified}.otel_logs`"
@@ -429,7 +475,15 @@ def run_smoke(
           f"SELECT COUNT(*) FROM `{settings.qualified}.bqaa_metrics`"
           f" WHERE metric_name = 'bqaa_e2e_{run_id}'",
       ),
-  )
+  ]
+  if "traces" in settings.signals:
+    checks.append(
+        (
+            "smoke span in otel_spans",
+            f"SELECT COUNT(*) FROM `{settings.qualified}.otel_spans` WHERE"
+            f" JSON_VALUE(span_attributes, '$.\"bqaa.run_id\"') = '{run_id}'",
+        )
+    )
   landed = True
   for name, query in checks:
     # A missing table / permission error while polling must become a failed
@@ -482,18 +536,6 @@ def run_smoke(
         )
     )
 
-  if "traces" in settings.signals:
-    results.append(
-        CheckResult(
-            name="traces smoke",
-            ok=False,
-            warning=True,
-            detail=(
-                "span landing is not implemented yet (#324 traces tier,"
-                " final PR of the stack) — otel_spans receives no rows"
-            ),
-        )
-    )
   return results
 
 

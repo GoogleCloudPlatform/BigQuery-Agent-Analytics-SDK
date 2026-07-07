@@ -214,15 +214,41 @@ def test_traces_path_is_404_when_disabled():
   assert pub.calls == []
 
 
-def test_traces_path_is_501_when_enabled_landing_deferred():
-  result, pub = _call("/v1/traces", b"{}", config=_config(enable_traces=True))
-  assert result.status == 501
-  assert pub.calls == []
+def test_traces_path_decodes_and_publishes_spans_when_enabled():
+  request = {
+      "resourceSpans": [
+          {
+              "resource": {"attributes": []},
+              "scopeSpans": [
+                  {
+                      "scope": {"name": "s", "version": "1"},
+                      "spans": [
+                          {
+                              "traceId": "0123456789abcdef0123456789abcdef",
+                              "spanId": "0123456789abcdef",
+                              "name": "tool_use",
+                              "startTimeUnixNano": "1000000000",
+                          }
+                      ],
+                  }
+              ],
+          }
+      ]
+  }
+  result, pub = _call(
+      "/v1/traces",
+      json.dumps(request).encode("utf-8"),
+      config=_config(enable_traces=True),
+  )
+  assert result.status == 200
+  [envelope] = pub.to("proj/main")
+  assert envelope["source"]["signal"] == "span"
+  assert envelope["record"]["name"] == "tool_use"
 
 
 def test_traces_requires_auth_before_revealing_gate_state():
   # Unauthenticated callers must get 401 on /v1/traces regardless of the gate,
-  # so 404-vs-501 never leaks to them.
+  # so 404-vs-200 never leaks to them.
   for enabled in (False, True):
     result, pub = _call(
         "/v1/traces",
@@ -315,3 +341,66 @@ def test_wsgi_unauthenticated_is_401():
       application, "/v1/logs", _logs_body(), auth="Bearer nope"
   )
   assert status.startswith("401")
+
+
+def test_trace_whole_request_dead_letter_uses_span_signal():
+  # Per-span dead letters and success envelopes use source_signal="span";
+  # the whole-request path must match or DLQ triage filters miss one side.
+  result, pub = _call(
+      "/v1/traces", b"not otlp", config=_config(enable_traces=True)
+  )
+  assert result.status == 400
+  [dl] = pub.to("proj/main")
+  assert dl["source"]["signal"] == "span"
+
+
+def test_empty_resource_spans_is_200_published_zero():
+  result, pub = _call(
+      "/v1/traces",
+      json.dumps({"resourceSpans": []}).encode("utf-8"),
+      config=_config(enable_traces=True),
+  )
+  assert result.status == 200
+  assert result.published == 0
+  assert pub.calls == []
+
+
+def test_protobuf_trace_export_decodes_and_normalizes_ids():
+  trace_service_pb2 = pytest.importorskip(
+      "opentelemetry.proto.collector.trace.v1.trace_service_pb2"
+  )
+  from opentelemetry.proto.trace.v1 import trace_pb2
+
+  trace_hex = "0123456789abcdef0123456789abcdef"
+  span_hex = "0123456789abcdef"
+  request = trace_service_pb2.ExportTraceServiceRequest(
+      resource_spans=[
+          trace_pb2.ResourceSpans(
+              scope_spans=[
+                  trace_pb2.ScopeSpans(
+                      spans=[
+                          trace_pb2.Span(
+                              trace_id=bytes.fromhex(trace_hex),
+                              span_id=bytes.fromhex(span_hex),
+                              name="tool_use",
+                              kind=trace_pb2.Span.SPAN_KIND_INTERNAL,
+                              start_time_unix_nano=1_000_000_000,
+                          )
+                      ]
+                  )
+              ]
+          )
+      ]
+  )
+  result, pub = _call(
+      "/v1/traces",
+      request.SerializeToString(),
+      content_type="application/x-protobuf",
+      config=_config(enable_traces=True),
+  )
+  assert result.status == 200
+  [envelope] = pub.to("proj/main")
+  # base64 bytes from MessageToDict must be normalized to canonical hex.
+  assert envelope["record"]["traceId"] == trace_hex
+  assert envelope["record"]["spanId"] == span_hex
+  assert envelope["idempotency_key"] == trace_hex + span_hex
