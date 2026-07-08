@@ -65,7 +65,7 @@ BILLING=$(gcloud billing projects describe "$PROJECT" --format='value(billingEna
 # returns exactly the subset of tested permissions the caller holds.)
 # This list mirrors what bootstrap ACTUALLY does — creates AND the
 # setIamPolicy/actAs/DTS surface where real runs have failed mid-deploy.
-REQUIRED_PERMS="run.services.create run.services.setIamPolicy pubsub.topics.create pubsub.subscriptions.create bigquery.datasets.create bigquery.jobs.create bigquery.transfers.update secretmanager.secrets.create secretmanager.secrets.setIamPolicy cloudbuild.builds.create iam.serviceAccounts.create iam.serviceAccounts.setIamPolicy iam.serviceAccounts.actAs resourcemanager.projects.setIamPolicy"
+REQUIRED_PERMS="serviceusage.services.enable artifactregistry.repositories.create run.services.create run.services.setIamPolicy pubsub.topics.create pubsub.topics.setIamPolicy pubsub.subscriptions.create pubsub.subscriptions.update pubsub.subscriptions.setIamPolicy bigquery.datasets.create bigquery.jobs.create bigquery.transfers.update secretmanager.secrets.create secretmanager.versions.add secretmanager.secrets.setIamPolicy cloudbuild.builds.create iam.serviceAccounts.create iam.serviceAccounts.setIamPolicy iam.serviceAccounts.actAs resourcemanager.projects.setIamPolicy"
 PERM_RESULT=$(curl -s -X POST \
   -H "Authorization: Bearer $(gcloud auth print-access-token 2>/dev/null)" \
   -H "Content-Type: application/json" \

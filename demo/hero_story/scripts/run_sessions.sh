@@ -32,7 +32,11 @@ if not re.fullmatch(r'\\w+', run_id, re.ASCII):
 " "$PROJECT" "$DATASET" "$DEMO_RUN_ID" || exit 2
 
 # The exact scripted prompts — sql/05 searches for these strings verbatim.
-CLAUDE_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams."
+# Deliberately non-trivial: the response must take long enough that at least
+# one in-session metric/span export interval elapses — Claude's shutdown
+# flush in very short sessions is unreliable (observed live), so the demo
+# must not depend on it.
+CLAUDE_PROMPT="Explain in about 150 words why unified telemetry matters for platform teams, covering adoption, cost attribution, and incident response."
 CODEX_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams (codex)."
 
 mkdir -p "$EVIDENCE_DIR"
@@ -75,11 +79,30 @@ echo "==> Claude Code session (baseline privacy, traces tier)"
   export OTEL_EXPORTER_OTLP_ENDPOINT="$ENDPOINT"
   export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${TOKEN},x-bqaa-source-product=claude_code"
   export OTEL_RESOURCE_ATTRIBUTES="env=${DEMO_RUN_ID},department=${TEAM},cost_center=${COST_CENTER}"
-  export OTEL_LOGS_EXPORT_INTERVAL=2000 OTEL_METRIC_EXPORT_INTERVAL=5000
+  # Short intervals so exports fire DURING the session, not only at the
+  # unreliable shutdown flush; OTEL_BSP_SCHEDULE_DELAY covers spans.
+  export OTEL_LOGS_EXPORT_INTERVAL=2000 OTEL_METRIC_EXPORT_INTERVAL=2000
+  export OTEL_BSP_SCHEDULE_DELAY=2000
   cd "$EVIDENCE_DIR"
   claude -p "$CLAUDE_PROMPT" --model haiku < /dev/null 2>&1 | tail -1
   sleep 10  # let the exporters flush the final batch — do not shorten
 )
+claude_session() {  # reused by the mid-poll top-up below
+  (
+    export CLAUDE_CODE_ENABLE_TELEMETRY=1
+    export OTEL_LOGS_EXPORTER=otlp OTEL_METRICS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp
+    export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+    export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+    export OTEL_EXPORTER_OTLP_ENDPOINT="$ENDPOINT"
+    export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${TOKEN},x-bqaa-source-product=claude_code"
+    export OTEL_RESOURCE_ATTRIBUTES="env=${DEMO_RUN_ID},department=${TEAM},cost_center=${COST_CENTER}"
+    export OTEL_LOGS_EXPORT_INTERVAL=2000 OTEL_METRIC_EXPORT_INTERVAL=2000
+    export OTEL_BSP_SCHEDULE_DELAY=2000
+    cd "$EVIDENCE_DIR"
+    claude -p "$CLAUDE_PROMPT" --model haiku < /dev/null 2>&1 | tail -1
+    sleep 10
+  )
+}
 
 # ---- Codex session (generated artifact + run-id environment override) ------
 echo "==> Codex session (isolated CODEX_HOME; your real ~/.codex is untouched)"
@@ -109,23 +132,54 @@ sed -e "s/<token>/${TOKEN}/g" \
 )
 
 # ---- landing assertion: never open Act 3 on an empty dashboard -------------
-echo "==> Waiting for rows to land (logs, tokens, spans; up to ~4 min)"
+# PER-PRODUCT gates: the demo's promise is BOTH products in one schema, so
+# an aggregate check that one product could satisfy alone is not enough.
+echo "==> Waiting for BOTH products to land (logs, spans, tokens; up to ~4 min)"
 QUALIFIED="${PROJECT}.${DATASET}"
-check() { bq query --project_id="$PROJECT" --headless --use_legacy_sql=false --format=csv "$1" 2>/dev/null | tail -1; }
+product_stats() {  # -> "logs,spans,tokens" for one source_product
+  bq query --project_id="$PROJECT" --headless --use_legacy_sql=false --format=csv "
+    SELECT
+      (SELECT COUNT(*) FROM \`${QUALIFIED}.otel_logs_dedup\`
+        WHERE source_product='$1' AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'),
+      (SELECT COUNT(*) FROM \`${QUALIFIED}.otel_spans_dedup\`
+        WHERE source_product='$1' AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'),
+      (SELECT CAST(COALESCE(SUM(t),0) AS INT64) FROM (
+        SELECT CAST(value AS FLOAT64) AS t FROM \`${QUALIFIED}.otel_metric_sum_dedup\`
+          WHERE metric_name='claude_code.token.usage' AND source_product='$1'
+            AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'
+        UNION ALL
+        SELECT \`sum\` FROM \`${QUALIFIED}.otel_metric_histogram_dedup\`
+          WHERE metric_name='codex.turn.token_usage' AND source_product='$1'
+            AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'))" \
+    2>/dev/null | tail -1
+}
+ALL_GREEN=0
 for i in $(seq 1 16); do
-  LOGS=$(check "SELECT COUNT(*) FROM \`${QUALIFIED}.otel_logs_dedup\` WHERE JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'")
-  SPANS=$(check "SELECT COUNT(*) FROM \`${QUALIFIED}.otel_spans_dedup\` WHERE JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'")
-  TOKENS=$(check "SELECT CAST(COALESCE(SUM(t),0) AS INT64) FROM (
-      SELECT CAST(value AS FLOAT64) AS t FROM \`${QUALIFIED}.otel_metric_sum_dedup\` WHERE metric_name='claude_code.token.usage' AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}'
-      UNION ALL SELECT \`sum\` FROM \`${QUALIFIED}.otel_metric_histogram_dedup\` WHERE metric_name='codex.turn.token_usage' AND JSON_VALUE(resource_attributes,'\$.env')='${DEMO_RUN_ID}')")
-  echo "  poll $i: logs=${LOGS:-0} spans=${SPANS:-0} tokens=${TOKENS:-0}"
-  if [ "${LOGS:-0}" -gt 0 ] && [ "${SPANS:-0}" -gt 0 ] && [ "${TOKENS:-0}" -gt 0 ]; then
-    break
+  CLAUDE=$(product_stats claude_code); CODEX=$(product_stats codex)
+  echo "  poll $i: claude_code logs,spans,tokens=${CLAUDE:-?,?,?} | codex logs,spans,tokens=${CODEX:-?,?,?}"
+  ALL_GREEN=1
+  for STATS in "${CLAUDE:-0,0,0}" "${CODEX:-0,0,0}"; do
+    IFS=, read -r L S T <<< "$STATS"
+    { [ "${L:-0}" -gt 0 ] && [ "${S:-0}" -gt 0 ] && [ "${T:-0}" -gt 0 ]; } || ALL_GREEN=0
+  done
+  # NOTE: 'if' form required — a failing '[ ] && break' is fatal under set -e.
+  if [ "$ALL_GREEN" -eq 1 ]; then break; fi
+  # One automatic top-up: if Claude surfaces are still missing halfway
+  # through the budget, run a second session rather than hoping (Claude's
+  # shutdown flush is unreliable in short sessions — observed live).
+  if [ "$i" -eq 8 ]; then
+    IFS=, read -r CL CS CT <<< "${CLAUDE:-0,0,0}"
+    if [ "${CS:-0}" -eq 0 ] || [ "${CT:-0}" -eq 0 ]; then
+      echo "  claude spans/tokens missing at poll 8 — running one top-up session"
+      claude_session
+    fi
   fi
   sleep 15
 done
-if [ "${LOGS:-0}" -eq 0 ] || [ "${SPANS:-0}" -eq 0 ] || [ "${TOKENS:-0}" -eq 0 ]; then
-  echo "ERROR: rows did not land (logs=${LOGS:-0} spans=${SPANS:-0} tokens=${TOKENS:-0}) — do not proceed to Act 3"
+if [ "$ALL_GREEN" -ne 1 ]; then
+  echo "ERROR: a product did not land all three surfaces — do not proceed to Act 3"
+  echo "  claude_code logs,spans,tokens = ${CLAUDE:-0,0,0}"
+  echo "  codex       logs,spans,tokens = ${CODEX:-0,0,0}"
   exit 1
 fi
 
