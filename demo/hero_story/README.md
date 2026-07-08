@@ -24,6 +24,25 @@ Presenter prerequisites: a deployment already bootstrapped by
 [OPERATOR.md](OPERATOR.md), `scripts/preflight.sh` green, and one rehearsal.
 Never present a first run.
 
+## Day of the demo (operational checklist)
+
+1. **Pre-demo smoke, 15–30 min before**:
+   `bqaa-otel verify --smoke --signals logs,metrics,traces …` — confirms
+   auth, logs, metrics, traces, projection, and dead-letter health while
+   there is still time to fix anything.
+2. **Fallback open in a tab**: `one_pager.md` and
+   `evidence-samples/rehearsal_*.md`. If Wi-Fi, Cloud Console, or CLI auth
+   misbehaves, the proof is still showable.
+3. **Know the ask**. Close with: *"approve a 20–50 engineer baseline
+   telemetry pilot."* Not "approve replay." Not "company-wide rollout."
+4. **Caveats ready, unprompted**: pilot auth is bearer token on public
+   Cloud Run; broad rollout needs token rotation, private ingress/IAP,
+   MDM distribution, retention policy, and finance-grade rates
+   (the OPERATOR.md hardening table).
+5. **Teardown scheduled**: if the deployment exists only for this meeting,
+   set a concrete teardown time — the live dataset contains real telemetry.
+   `scripts/teardown.sh --confirm` with the saved inventory.
+
 ---
 
 ## Act 1 — The problem (1 minute)
