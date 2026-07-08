@@ -26,10 +26,16 @@ Never present a first run.
 
 ## Day of the demo (operational checklist)
 
-1. **Pre-demo smoke, 15–30 min before**:
-   `bqaa-otel verify --smoke --signals logs,metrics,traces …` — confirms
-   auth, logs, metrics, traces, projection, and dead-letter health while
-   there is still time to fix anything.
+1. **Pre-demo smoke, 15–30 min before** — copyable, so nobody hunts for
+   flags under pressure (confirms auth, logs, metrics, traces, projection,
+   and dead-letter health while there is still time to fix anything):
+
+   ```bash
+   BQAA_OTLP_TOKEN=$(gcloud secrets versions access latest \
+       --secret=bqaa-otlp-token --project $PROJECT) \
+     bqaa-otel verify --smoke --signals logs,metrics,traces \
+       --endpoint $URL --project $PROJECT --dataset $DATASET
+   ```
 2. **Fallback open in a tab**: `one_pager.md` and
    `evidence-samples/rehearsal_*.md`. If Wi-Fi, Cloud Console, or CLI auth
    misbehaves, the proof is still showable.
