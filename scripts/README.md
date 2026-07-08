@@ -538,7 +538,7 @@ The script automatically detects and resolves responses from remote A2A
 ### Sample output
 
 - [Sample quality report](sample_quality_report.md) — full multi-session report
-  (the evolved-skill V1 held-out scorecard from the committed
+  (the V0 held-out scorecard from the committed
   [skill-evolution sample run](../examples/skill_evolution_lab/sample_run/))
 - [Sample single-session report](sample_quality_report_session.md) — verbose single-session output
 
