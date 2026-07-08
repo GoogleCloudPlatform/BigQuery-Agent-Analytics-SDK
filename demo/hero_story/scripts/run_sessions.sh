@@ -31,13 +31,9 @@ if not re.fullmatch(r'\\w+', run_id, re.ASCII):
     sys.exit('invalid DEMO_RUN_ID %r (word characters only)' % run_id)
 " "$PROJECT" "$DATASET" "$DEMO_RUN_ID" || exit 2
 
-# The exact scripted prompts — sql/05 searches for these strings verbatim.
-# Deliberately non-trivial: the response must take long enough that at least
-# one in-session metric/span export interval elapses — Claude's shutdown
-# flush in very short sessions is unreliable (observed live), so the demo
-# must not depend on it.
-CLAUDE_PROMPT="Explain in about 150 words why unified telemetry matters for platform teams, covering adoption, cost attribution, and incident response."
-CODEX_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams (codex)."
+# The exact scripted prompts live in ONE place — sql/05 searches for them
+# verbatim, so run_sessions.sh and run_queries.sh must never drift apart.
+source "$(dirname "$0")/demo_prompts.sh"
 
 mkdir -p "$EVIDENCE_DIR"
 TOKEN=$(gcloud secrets versions access latest --secret=bqaa-otlp-token --project "$PROJECT")

@@ -28,9 +28,9 @@ if not re.fullmatch(r'\\w+', run_id, re.ASCII):
 " "$PROJECT" "$DATASET" "$RUN_ID" || exit 2
 
 
-# The exact scripted prompt (sql/05 searches for it verbatim); keep in sync
-# with run_sessions.sh.
-SCRIPTED_PROMPT="Summarize in one sentence why unified telemetry matters for platform teams."
+# The exact scripted prompts live in ONE place (sourced, never duplicated):
+# sql/05 searches for BOTH verbatim as the privacy proof.
+source "$(dirname "$0")/demo_prompts.sh"
 
 mkdir -p "$EVIDENCE_DIR/sql"
 echo "SQL pack for DEMO_RUN_ID=$RUN_ID (window ${WINDOW}h)"
@@ -53,7 +53,10 @@ FAILED=0
 for f in "$HERE"/sql/*.sql; do
   name=$(basename "$f" .sql)
   PARAMS=(--parameter="demo_run_id::${RUN_ID}" --parameter="window_hours:INT64:${WINDOW}")
-  case "$name" in 05_*) PARAMS+=(--parameter="scripted_prompt::${SCRIPTED_PROMPT}");; esac
+  case "$name" in 05_*) PARAMS+=(
+      --parameter="scripted_prompt_claude::${CLAUDE_PROMPT}"
+      --parameter="scripted_prompt_codex::${CODEX_PROMPT}"
+  );; esac
   echo; echo "=== $name ==="
   if sed "s/\${dataset}/${PROJECT}.${DATASET}/g" "$f" \
       | bq query --project_id="$PROJECT" --headless --use_legacy_sql=false \
