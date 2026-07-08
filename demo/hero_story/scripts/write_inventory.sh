@@ -18,10 +18,22 @@ DTS_NAME=$(bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" ls \
   --transfer_config --transfer_location="$BQ_LOCATION" --format=json 2>/dev/null \
   | DATASET="$DATASET" python3 -c '
 import json, os, sys
-configs = json.load(sys.stdin) or []
-wanted = "bqaa_agent_events_otlp_merge_" + os.environ["DATASET"]
+try:
+    configs = json.load(sys.stdin) or []
+except ValueError:
+    configs = []
+dataset = os.environ["DATASET"]
+suffixed = "bqaa_agent_events_otlp_merge_" + dataset
+legacy = "bqaa_agent_events_otlp_merge"
+def matches(c):
+    display = c.get("displayName", "")
+    query = (c.get("params") or {}).get("query", "")
+    return display == suffixed or (
+        display == legacy and ("`" + dataset + ".agent_events_otlp`") in query
+    )
+
 for c in configs:
-    if c.get("displayName") == wanted:
+    if matches(c):
         print(c.get("name", ""))
         break')
 

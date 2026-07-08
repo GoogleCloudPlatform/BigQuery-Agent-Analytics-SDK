@@ -131,28 +131,52 @@ fi
 echo
 echo "--- post-teardown verification (existence checks, not exit codes) ---"
 V_FAIL=0
-gone() {  # gone <what> <cmd...>  — PASS if the existence probe FAILS
+gone() {  # gone <what> <cmd...>
+  # PASS only on a KNOWN not-found response; an auth/API/permission failure
+  # is UNVERIFIABLE and fails the verification — a probe error must never
+  # masquerade as "gone".
   local what="$1"; shift
-  if "$@" >/dev/null 2>&1; then
+  local out
+  if out=$("$@" 2>&1); then
     echo "FAIL  $what STILL EXISTS"; V_FAIL=1
-  else
+  elif printf '%s' "$out" | grep -qiE 'not.?found|does not exist|was not found|no such'; then
     echo "PASS  $what is gone"
+  else
+    echo "FAIL  $what UNVERIFIABLE: $(printf '%s' "$out" | head -1 | cut -c1-100)"; V_FAIL=1
   fi
 }
-DTS_LEFT=$(bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" ls --transfer_config \
-  --transfer_location="$BQ_LOCATION" --format=json 2>/dev/null \
-  | DATASET="$DATASET" python3 -c '
+# The listing must SUCCEED for a PASS: a failed listing is unverifiable,
+# and matching covers the legacy unsuffixed display name (query-text check,
+# mirroring bootstrap._find_merge_config) as well as the suffixed one.
+DTS_LISTING=$(bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" ls --transfer_config \
+  --transfer_location="$BQ_LOCATION" --format=json 2>&1)
+if [ $? -ne 0 ]; then
+  echo "FAIL  DTS listing UNVERIFIABLE: $(printf '%s' "$DTS_LISTING" | head -1 | cut -c1-100)"; V_FAIL=1
+else
+  DTS_LEFT=$(printf '%s' "$DTS_LISTING" | DATASET="$DATASET" python3 -c '
 import json, os, sys
 try:
     configs = json.load(sys.stdin) or []
 except ValueError:
     configs = []
-wanted = "bqaa_agent_events_otlp_merge_" + os.environ["DATASET"]
-print(sum(1 for c in configs if c.get("displayName") == wanted))' 2>/dev/null || echo "?")
-if [ "$DTS_LEFT" = "0" ]; then
-  echo "PASS  no DTS scheduled MERGE remains for $DATASET"
-else
-  echo "FAIL  DTS scheduled MERGE STILL EXISTS for $DATASET (count: $DTS_LEFT — bills every 15 min)"; V_FAIL=1
+dataset = os.environ["DATASET"]
+suffixed = "bqaa_agent_events_otlp_merge_" + dataset
+legacy = "bqaa_agent_events_otlp_merge"
+def matches(c):
+    display = c.get("displayName", "")
+    query = (c.get("params") or {}).get("query", "")
+    return display == suffixed or (
+        display == legacy and ("`" + dataset + ".agent_events_otlp`") in query
+    )
+
+print(sum(1 for c in configs if matches(c)))' 2>/dev/null || echo "?")
+  if [ "$DTS_LEFT" = "0" ]; then
+    echo "PASS  no DTS scheduled MERGE remains for $DATASET (incl. legacy unsuffixed)"
+  elif [ "$DTS_LEFT" = "?" ]; then
+    echo "FAIL  DTS listing UNVERIFIABLE (unparseable)"; V_FAIL=1
+  else
+    echo "FAIL  DTS scheduled MERGE STILL EXISTS for $DATASET (count: $DTS_LEFT — bills every 15 min)"; V_FAIL=1
+  fi
 fi
 gone "dataset ${DATASET} (real telemetry)" \
   bq --headless --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}"
@@ -178,14 +202,18 @@ if [ "$DATASET_ONLY" -eq 0 ]; then
       gcloud iam service-accounts describe "${sa}@${PROJECT}.iam.gserviceaccount.com" \
         --project "$PROJECT"
   done
-  BINDINGS=$(gcloud projects get-iam-policy "$PROJECT" \
-    --flatten="bindings[].members" \
-    --filter="bindings.role:roles/bigquery.jobUser AND bindings.members:serviceAccount:${CONSUMER_SA}" \
-    --format="value(bindings.role)" 2>/dev/null | grep -c . || true)
-  if [ "${BINDINGS:-0}" = "0" ]; then
-    echo "PASS  project jobUser binding for ${CONSUMER_SA} is gone"
+  # A failed policy read must not masquerade as "binding gone".
+  if POLICY=$(gcloud projects get-iam-policy "$PROJECT" \
+      --flatten="bindings[].members" \
+      --filter="bindings.role:roles/bigquery.jobUser AND bindings.members:serviceAccount:${CONSUMER_SA}" \
+      --format="value(bindings.role)" 2>&1); then
+    if [ -z "$POLICY" ]; then
+      echo "PASS  project jobUser binding for ${CONSUMER_SA} is gone"
+    else
+      echo "FAIL  project jobUser binding for ${CONSUMER_SA} STILL EXISTS"; V_FAIL=1
+    fi
   else
-    echo "FAIL  project jobUser binding for ${CONSUMER_SA} STILL EXISTS"; V_FAIL=1
+    echo "FAIL  IAM policy UNVERIFIABLE: $(printf '%s' "$POLICY" | head -1 | cut -c1-100)"; V_FAIL=1
   fi
 fi
 
