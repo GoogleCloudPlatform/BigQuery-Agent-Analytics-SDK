@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
 # Teardown for the hero demo. DRY-RUN BY DEFAULT: prints exactly what would
-# be deleted and exits. --confirm executes. Consumes the inventory written
-# by write_inventory.sh — names are never reconstructed from flags, and only
-# allowlisted bqaa-* patterns are ever deleted.
+# be deleted and exits. --confirm executes and then verifies EVERY resource
+# class is actually gone (a failed delete cannot hide — verification checks
+# existence, not command exit codes). Consumes the inventory written by
+# write_inventory.sh; every name must match a bqaa demo allowlist pattern.
 #
-#   teardown.sh [--confirm] [--dataset-only]
+#   teardown.sh [--confirm] [--dataset-only] [--verify-only]
 #
-# Two tiers:
+# Tiers:
 #   dataset-scoped : DTS scheduled MERGE + the BigQuery dataset (real
 #                    telemetry lives here — tear down promptly)
 #   pipeline       : Cloud Run services, topics/subscriptions, secret,
-#                    Artifact Registry repo, service accounts + their IAM.
-#                    Skipped with --dataset-only (another dataset on this
-#                    project may still be using the pipeline).
+#                    Artifact Registry repo, service accounts + IAM binding.
+#                    Skipped with --dataset-only.
+# --verify-only runs just the existence verification (no deletions): on a
+# live deployment everything reports STILL EXISTS, proving detection works.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$HERE/evidence}"
 INVENTORY="${INVENTORY:-$EVIDENCE_DIR/demo_resources.json}"
-CONFIRM=0; DATASET_ONLY=0
+CONFIRM=0; DATASET_ONLY=0; VERIFY_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --confirm) CONFIRM=1 ;;
     --dataset-only) DATASET_ONLY=1 ;;
+    --verify-only) VERIFY_ONLY=1 ;;
     *) echo "unknown flag: $arg"; exit 2 ;;
   esac
 done
@@ -31,100 +34,166 @@ done
 inv() { python3 -c "import json,sys; v=json.load(open('$INVENTORY'))$1; print('\n'.join(v) if isinstance(v,list) else v)"; }
 
 PROJECT=$(inv "['project']"); DATASET=$(inv "['dataset']"); REGION=$(inv "['region']")
+BQ_LOCATION=$(inv ".get('bq_location', 'US')")
 DTS=$(inv "['dts_transfer_config']")
 
 # Allowlist guard: refuse to touch anything that does not match the demo's
 # naming patterns — never judgment at runtime, always the pattern contract.
-guard() {  # guard <value> <pattern> <what>
-  case "$1" in $2) ;; *) echo "REFUSING: $3 '$1' does not match allowlist pattern '$2'"; exit 3 ;; esac
+# The DATASET pattern matters most: `bq rm -r -f` on an arbitrary dataset is
+# the single most destructive command here, so a poisoned inventory must be
+# refused, not obeyed.
+guard() {  # guard <value> <what> <pattern>... — case alternation via '|'
+  # inside an expanded variable does NOT work in bash, so patterns are
+  # separate arguments and tried in turn.
+  local val="$1" what="$2" pat; shift 2
+  for pat in "$@"; do
+    case "$val" in $pat) return 0 ;; esac
+  done
+  echo "REFUSING: $what '$val' does not match allowlist patterns: $*"
+  exit 3
 }
-guard "$DATASET" "*" "dataset"   # dataset comes from the inventory verbatim
-for svc in $(inv "['cloud_run_services']"); do guard "$svc" "bqaa-otlp-*" "cloud run service"; done
-for t in $(inv "['pubsub_topics']"); do guard "$t" "bqaa-otlp*" "topic"; done
-for s in $(inv "['pubsub_subscriptions']"); do guard "$s" "bqaa-otlp*" "subscription"; done
-guard "$(inv "['secret']")" "bqaa-otlp-*" "secret"
-guard "$(inv "['artifact_repo']")" "bqaa" "artifact repo"
-for sa in $(inv "['service_accounts']"); do guard "$sa" "bqaa-otlp-*" "service account"; done
+guard "$DATASET" "dataset" "bqaa_hero_demo_*" "otlp_e2e_*"
+for svc in $(inv "['cloud_run_services']"); do guard "$svc" "cloud run service" "bqaa-otlp-*"; done
+for t in $(inv "['pubsub_topics']"); do guard "$t" "topic" "bqaa-otlp*"; done
+for s in $(inv "['pubsub_subscriptions']"); do guard "$s" "subscription" "bqaa-otlp*"; done
+guard "$(inv "['secret']")" "secret" "bqaa-otlp-*"
+guard "$(inv "['artifact_repo']")" "artifact repo" "bqaa"
+for sa in $(inv "['service_accounts']"); do guard "$sa" "service account" "bqaa-otlp-*"; done
 
 run() {  # run <description> <cmd...>
   local desc="$1"; shift
   if [ "$CONFIRM" -eq 1 ]; then
     echo "DELETE  $desc"
-    "$@" >/dev/null 2>&1 || echo "        (already gone or failed: $*)"
+    local out
+    if ! out=$("$@" 2>&1); then
+      # Visible, never silent — and the existence verification below is the
+      # authority on whether the resource is actually gone.
+      echo "        delete command failed (verification will decide):"
+      echo "        $(echo "$out" | head -1)"
+    fi
   else
     echo "WOULD DELETE  $desc"
     echo "              $*"
   fi
 }
 
-echo "Teardown plan from $INVENTORY (project=$PROJECT dataset=$DATASET)"
-[ "$CONFIRM" -eq 1 ] || echo "DRY RUN — re-run with --confirm to execute."
-echo
-echo "--- dataset-scoped ---"
-if [ -n "$DTS" ]; then
-  run "DTS scheduled MERGE ($DTS)" \
-    bq --headless --project_id="$PROJECT" rm -f --transfer_config "$DTS"
-else
-  echo "no DTS transfer config recorded for dataset $DATASET"
-fi
-run "BigQuery dataset ${PROJECT}:${DATASET} (contains real telemetry)" \
-  bq --headless --project_id="$PROJECT" rm -r -f --dataset "${PROJECT}:${DATASET}"
+CONSUMER_SA="bqaa-otlp-consumer@${PROJECT}.iam.gserviceaccount.com"
 
-if [ "$DATASET_ONLY" -eq 0 ]; then
+if [ "$VERIFY_ONLY" -eq 0 ]; then
+  echo "Teardown plan from $INVENTORY (project=$PROJECT dataset=$DATASET location=$BQ_LOCATION)"
+  [ "$CONFIRM" -eq 1 ] || echo "DRY RUN — re-run with --confirm to execute."
   echo
-  echo "--- pipeline (shared across datasets; skip with --dataset-only) ---"
-  for svc in $(inv "['cloud_run_services']"); do
-    run "Cloud Run service $svc" \
-      gcloud run services delete "$svc" --project "$PROJECT" --region "$REGION" --quiet
-  done
-  for s in $(inv "['pubsub_subscriptions']"); do
-    run "subscription $s" gcloud pubsub subscriptions delete "$s" --project "$PROJECT" --quiet
-  done
-  for t in $(inv "['pubsub_topics']"); do
-    run "topic $t" gcloud pubsub topics delete "$t" --project "$PROJECT" --quiet
-  done
-  run "secret $(inv "['secret']")" \
-    gcloud secrets delete "$(inv "['secret']")" --project "$PROJECT" --quiet
-  run "artifact repo $(inv "['artifact_repo']") (and its images)" \
-    gcloud artifacts repositories delete "$(inv "['artifact_repo']")" \
-      --project "$PROJECT" --location "$REGION" --quiet
-  CONSUMER_SA="bqaa-otlp-consumer@${PROJECT}.iam.gserviceaccount.com"
-  run "project jobUser binding for ${CONSUMER_SA}" \
-    gcloud projects remove-iam-policy-binding "$PROJECT" \
-      --member "serviceAccount:${CONSUMER_SA}" --role roles/bigquery.jobUser --quiet
-  for sa in $(inv "['service_accounts']"); do
-    run "service account ${sa}@${PROJECT}.iam.gserviceaccount.com" \
-      gcloud iam service-accounts delete "${sa}@${PROJECT}.iam.gserviceaccount.com" \
-        --project "$PROJECT" --quiet
-  done
+  echo "--- dataset-scoped ---"
+  if [ -n "$DTS" ]; then
+    run "DTS scheduled MERGE ($DTS)" \
+      bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" rm -f --transfer_config "$DTS"
+  else
+    echo "no DTS transfer config recorded for dataset $DATASET"
+  fi
+  run "BigQuery dataset ${PROJECT}:${DATASET} (contains real telemetry)" \
+    bq --headless --project_id="$PROJECT" rm -r -f --dataset "${PROJECT}:${DATASET}"
+
+  if [ "$DATASET_ONLY" -eq 0 ]; then
+    echo
+    echo "--- pipeline (shared across datasets; skip with --dataset-only) ---"
+    for svc in $(inv "['cloud_run_services']"); do
+      run "Cloud Run service $svc" \
+        gcloud run services delete "$svc" --project "$PROJECT" --region "$REGION" --quiet
+    done
+    for s in $(inv "['pubsub_subscriptions']"); do
+      run "subscription $s" gcloud pubsub subscriptions delete "$s" --project "$PROJECT" --quiet
+    done
+    for t in $(inv "['pubsub_topics']"); do
+      run "topic $t" gcloud pubsub topics delete "$t" --project "$PROJECT" --quiet
+    done
+    run "secret $(inv "['secret']")" \
+      gcloud secrets delete "$(inv "['secret']")" --project "$PROJECT" --quiet
+    run "artifact repo $(inv "['artifact_repo']") (and its images)" \
+      gcloud artifacts repositories delete "$(inv "['artifact_repo']")" \
+        --project "$PROJECT" --location "$REGION" --quiet
+    run "project jobUser binding for ${CONSUMER_SA}" \
+      gcloud projects remove-iam-policy-binding "$PROJECT" \
+        --member "serviceAccount:${CONSUMER_SA}" --role roles/bigquery.jobUser --quiet
+    for sa in $(inv "['service_accounts']"); do
+      run "service account ${sa}@${PROJECT}.iam.gserviceaccount.com" \
+        gcloud iam service-accounts delete "${sa}@${PROJECT}.iam.gserviceaccount.com" \
+          --project "$PROJECT" --quiet
+    done
+  fi
+
+  # Dry run stops here; --confirm and --verify-only fall through to verify.
+  [ "$CONFIRM" -eq 1 ] || exit 0
 fi
 
-[ "$CONFIRM" -eq 1 ] || exit 0
-
-# ---- post-teardown verification: prove nothing keeps running/billing -------
+# ---- verification: existence checks for EVERY resource class ---------------
+# The authority on teardown success. Under --verify-only against a live
+# deployment, everything reports STILL EXISTS (proves detection works).
 echo
-echo "--- post-teardown verification ---"
+echo "--- post-teardown verification (existence checks, not exit codes) ---"
 V_FAIL=0
-DTS_LEFT=$(bq --headless --project_id="$PROJECT" --location=US ls --transfer_config \
-  --transfer_location=US --format=json 2>/dev/null \
+gone() {  # gone <what> <cmd...>  — PASS if the existence probe FAILS
+  local what="$1"; shift
+  if "$@" >/dev/null 2>&1; then
+    echo "FAIL  $what STILL EXISTS"; V_FAIL=1
+  else
+    echo "PASS  $what is gone"
+  fi
+}
+DTS_LEFT=$(bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" ls --transfer_config \
+  --transfer_location="$BQ_LOCATION" --format=json 2>/dev/null \
   | DATASET="$DATASET" python3 -c '
 import json, os, sys
-configs = json.load(sys.stdin) or []
+try:
+    configs = json.load(sys.stdin) or []
+except ValueError:
+    configs = []
 wanted = "bqaa_agent_events_otlp_merge_" + os.environ["DATASET"]
 print(sum(1 for c in configs if c.get("displayName") == wanted))' 2>/dev/null || echo "?")
-if [ "$DTS_LEFT" = "0" ]; then echo "PASS  no DTS scheduled MERGE remains for $DATASET"; else echo "FAIL  DTS configs remaining: $DTS_LEFT"; V_FAIL=1; fi
-if bq --headless --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}" >/dev/null 2>&1; then
-  echo "FAIL  dataset ${DATASET} still exists (real telemetry!)"; V_FAIL=1
+if [ "$DTS_LEFT" = "0" ]; then
+  echo "PASS  no DTS scheduled MERGE remains for $DATASET"
 else
-  echo "PASS  dataset ${DATASET} is gone"
+  echo "FAIL  DTS scheduled MERGE STILL EXISTS for $DATASET (count: $DTS_LEFT — bills every 15 min)"; V_FAIL=1
 fi
+gone "dataset ${DATASET} (real telemetry)" \
+  bq --headless --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}"
+
 if [ "$DATASET_ONLY" -eq 0 ]; then
   for svc in $(inv "['cloud_run_services']"); do
-    if gcloud run services describe "$svc" --project "$PROJECT" --region "$REGION" >/dev/null 2>&1; then
-      echo "FAIL  Cloud Run service $svc still exists"; V_FAIL=1
-    else
-      echo "PASS  Cloud Run service $svc is gone"
-    fi
+    gone "Cloud Run service $svc" \
+      gcloud run services describe "$svc" --project "$PROJECT" --region "$REGION"
   done
+  for s in $(inv "['pubsub_subscriptions']"); do
+    gone "subscription $s" gcloud pubsub subscriptions describe "$s" --project "$PROJECT"
+  done
+  for t in $(inv "['pubsub_topics']"); do
+    gone "topic $t" gcloud pubsub topics describe "$t" --project "$PROJECT"
+  done
+  gone "secret $(inv "['secret']")" \
+    gcloud secrets describe "$(inv "['secret']")" --project "$PROJECT"
+  gone "artifact repo $(inv "['artifact_repo']")" \
+    gcloud artifacts repositories describe "$(inv "['artifact_repo']")" \
+      --project "$PROJECT" --location "$REGION"
+  for sa in $(inv "['service_accounts']"); do
+    gone "service account ${sa}@${PROJECT}.iam.gserviceaccount.com" \
+      gcloud iam service-accounts describe "${sa}@${PROJECT}.iam.gserviceaccount.com" \
+        --project "$PROJECT"
+  done
+  BINDINGS=$(gcloud projects get-iam-policy "$PROJECT" \
+    --flatten="bindings[].members" \
+    --filter="bindings.role:roles/bigquery.jobUser AND bindings.members:serviceAccount:${CONSUMER_SA}" \
+    --format="value(bindings.role)" 2>/dev/null | grep -c . || true)
+  if [ "${BINDINGS:-0}" = "0" ]; then
+    echo "PASS  project jobUser binding for ${CONSUMER_SA} is gone"
+  else
+    echo "FAIL  project jobUser binding for ${CONSUMER_SA} STILL EXISTS"; V_FAIL=1
+  fi
 fi
-[ "$V_FAIL" -eq 0 ] && echo "Teardown verified clean." || { echo "Teardown verification FAILED."; exit 1; }
+
+echo
+if [ "$V_FAIL" -eq 0 ]; then
+  echo "Teardown verified clean."
+else
+  [ "$VERIFY_ONLY" -eq 1 ] && echo "(--verify-only against live infra: STILL EXISTS rows are expected and prove detection works)"
+  echo "Verification found remaining resources."
+  exit 1
+fi

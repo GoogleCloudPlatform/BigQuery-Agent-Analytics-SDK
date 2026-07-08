@@ -8,13 +8,14 @@ set -euo pipefail
 PROJECT="${PROJECT:?set PROJECT}"
 DATASET="${DATASET:?set DATASET}"
 REGION="${REGION:-us-central1}"
+BQ_LOCATION="${BQ_LOCATION:-US}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$HERE/evidence}"
 mkdir -p "$EVIDENCE_DIR"
 
 # The DTS scheduled-MERGE resource name must be queried (its id is opaque).
-DTS_NAME=$(bq --headless --project_id="$PROJECT" --location=US ls \
-  --transfer_config --transfer_location=US --format=json 2>/dev/null \
+DTS_NAME=$(bq --headless --project_id="$PROJECT" --location="$BQ_LOCATION" ls \
+  --transfer_config --transfer_location="$BQ_LOCATION" --format=json 2>/dev/null \
   | DATASET="$DATASET" python3 -c '
 import json, os, sys
 configs = json.load(sys.stdin) or []
@@ -29,15 +30,16 @@ RECEIVER_URL=$(gcloud run services describe bqaa-otlp-receiver --project "$PROJE
 
 RUN_ID=$(cat "$EVIDENCE_DIR/DEMO_RUN_ID" 2>/dev/null || echo "")
 
-python3 - "$PROJECT" "$DATASET" "$REGION" "$DTS_NAME" "$RECEIVER_URL" "$RUN_ID" << 'EOF' > "$EVIDENCE_DIR/demo_resources.json"
+python3 - "$PROJECT" "$DATASET" "$REGION" "$DTS_NAME" "$RECEIVER_URL" "$RUN_ID" "$BQ_LOCATION" << 'EOF' > "$EVIDENCE_DIR/demo_resources.json"
 import json, sys
-project, dataset, region, dts, url, run_id = sys.argv[1:7]
+project, dataset, region, dts, url, run_id, bq_location = sys.argv[1:8]
 # Redacted URL form for anything shared outside the org.
 redacted = (url[: url.find("-") + 1] + "…run.app") if url else ""
 print(json.dumps({
     "project": project,
     "dataset": dataset,
     "region": region,
+    "bq_location": bq_location,
     "demo_run_id": run_id,
     "receiver_url_redacted": redacted,
     # Dataset-scoped resources (always safe to remove for this demo):

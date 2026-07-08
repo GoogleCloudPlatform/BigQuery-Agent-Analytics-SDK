@@ -9,9 +9,10 @@ set -euo pipefail
 PROJECT="${PROJECT:?set PROJECT}"
 DATASET="${DATASET:-bqaa_hero_demo_$(date +%Y%m%d)}"
 REGION="${REGION:-us-central1}"
+BQ_LOCATION="${BQ_LOCATION:-US}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 EVIDENCE_DIR="${EVIDENCE_DIR:-$HERE/evidence}"
-export PROJECT DATASET REGION EVIDENCE_DIR
+export PROJECT DATASET REGION BQ_LOCATION EVIDENCE_DIR
 
 echo "==> Preflight (fails fast; nothing has been mutated)"
 "$HERE/scripts/preflight.sh" "$PROJECT" "$DATASET"
@@ -20,6 +21,7 @@ echo
 echo "==> Bootstrap plan (mutates nothing)"
 python3 -m bigquery_agent_analytics_tracing.otlp.cli bootstrap \
   --project "$PROJECT" --dataset "$DATASET" --region "$REGION" \
+  --bq-location "$BQ_LOCATION" \
   --signals logs,metrics,traces --source claude-code,codex \
   --out "$EVIDENCE_DIR/artifacts" | tee "$EVIDENCE_DIR/bootstrap_plan.txt" | tail -3
 
@@ -27,6 +29,7 @@ echo
 echo "==> Bootstrap execute (fresh install ~15 min incl. Cloud Build; converges on re-run)"
 python3 -m bigquery_agent_analytics_tracing.otlp.cli bootstrap \
   --project "$PROJECT" --dataset "$DATASET" --region "$REGION" \
+  --bq-location "$BQ_LOCATION" \
   --signals logs,metrics,traces --source claude-code,codex \
   --out "$EVIDENCE_DIR/artifacts" --execute
 
