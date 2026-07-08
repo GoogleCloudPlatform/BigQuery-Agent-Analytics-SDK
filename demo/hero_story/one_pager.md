@@ -30,7 +30,7 @@ preflight, deploy, sessions, verification — in under 25 minutes, first try.
 | Prompt content in warehouse | **PASS — none found** (exact scripted-prompt scan of all content-bearing columns; baseline tier) |
 | Replay without explicit acknowledgement | **Refused** (exit 2 — content capture cannot be enabled by accident) |
 | Dead letters | 0 (transport DLQ retained + replayable) |
-| Teardown | executed and **existence-verified**: dataset + scheduled job provably gone |
+| Teardown | exercised for real on the *previous* demo dataset (not this reference run's): dataset + scheduled job deleted and **existence-verified** gone |
 
 ## Why it matters
 

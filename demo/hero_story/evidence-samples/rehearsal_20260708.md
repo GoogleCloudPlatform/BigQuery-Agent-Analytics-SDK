@@ -74,11 +74,11 @@ governance_privacy_dlq
 ## teardown --dataset-only --confirm (previous e2e dataset, real telemetry)
 
 ```
-Teardown plan from /private/tmp/claude-501/-Users-haiyuancao-BigQuery-Agent-Analytics-SDK/7836024a-3794-4140-b83c-de635053d3a2/scratchpad/e2e324/old_evidence/demo_resources.json (project=test-project-0728-467323 dataset=otlp_e2e_324 location=US)
+Teardown plan from <inventory-path>/demo_resources.json (project=<project-id> dataset=otlp_e2e_324 location=US)
 
 --- dataset-scoped ---
-DELETE  DTS scheduled MERGE (projects/201486563047/locations/us/transferConfigs/6a9487ad-0000-2577-9f4b-582429b84994)
-DELETE  BigQuery dataset test-project-0728-467323:otlp_e2e_324 (contains real telemetry)
+DELETE  DTS scheduled MERGE (projects/<project-number>/locations/us/transferConfigs/<transfer-config-id>)
+DELETE  BigQuery dataset <project-id>:otlp_e2e_324 (contains real telemetry)
 
 --- post-teardown verification (existence checks, not exit codes) ---
 PASS  no DTS scheduled MERGE remains for otlp_e2e_324 (incl. legacy unsuffixed)
