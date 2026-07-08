@@ -121,6 +121,10 @@ Prevalence across 48 independent analyst patches:
   RESPONSE_PATTERN:  1/48 (2%)  -- weak
 ```
 
+`STRONG`/`weak` is a consensus flag, not a share: a root cause is STRONG once
+three or more analysts — each reading a different conversation — independently
+converge on it, which is why 4/48 sits alongside 42/48.
+
 The tally is the two-defect proof: the fleet independently diagnosed both
 planted flaws — deflection (`TOOL_USAGE`, 42 analysts) and caving to wrong
 corrections (`PARROTING`, 4 analysts) — from the traces alone. No `score_fn`

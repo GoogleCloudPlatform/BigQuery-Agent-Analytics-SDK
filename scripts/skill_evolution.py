@@ -459,6 +459,10 @@ def compute_prevalence_summary(patches: list[str]) -> str:
     lines.append(
         f"  {cat}: {count}/{total} ({round(count / total * 100)}%) -- {strength}"
     )
+  lines.append(
+      "Strength is a consensus flag, not a share: STRONG = >=3 analysts"
+      " independently converged, moderate = 2, weak = 1."
+  )
   return "\n".join(lines)
 
 

@@ -255,6 +255,7 @@ def test_prevalence_counts_categories():
   out = compute_prevalence_summary(patches)
   assert "HALLUCINATION: 2/3" in out
   assert "STRONG" in out or "moderate" in out
+  assert "consensus flag" in out
 
 
 def test_prevalence_empty_when_no_categories():

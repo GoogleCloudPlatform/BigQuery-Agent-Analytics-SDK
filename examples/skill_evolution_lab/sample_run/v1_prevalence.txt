@@ -3,3 +3,4 @@ Prevalence across 48 independent analyst patches:
   PARROTING: 4/48 (8%) -- STRONG
   MISSING_RULE: 1/48 (2%) -- weak
   RESPONSE_PATTERN: 1/48 (2%) -- weak
+Strength is a consensus flag, not a share: STRONG = >=3 analysts independently converged, moderate = 2, weak = 1.
