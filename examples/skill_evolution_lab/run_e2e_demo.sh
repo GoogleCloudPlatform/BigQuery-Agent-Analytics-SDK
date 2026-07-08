@@ -262,16 +262,16 @@ RUN_LABEL="lab_${RUN_TIMESTAMP}"
 slice_of() { local b; b="$(basename "$1")"; echo "${b%_traffic.json}"; }
 
 # run_agent <skill> <out> <qfile...>  -- run questions through the agent.
-# With --from-bigquery, every session is also logged to the BQAA events table.
+# EVERY session is also logged to the BQAA events table (execution spans live
+# there -- the scorecards' Before/After trace trees need them). --from-bigquery
+# only switches the SCORING read path; logging is always on (best-effort:
+# run_agent warns and continues if BigQuery is unavailable).
 run_agent() {
   local skill="$1" out="$2"; shift 2
   local qargs=() q
   for q in "$@"; do qargs+=(--questions "$q"); done
-  local bqargs=()
-  if [[ "$FROM_BIGQUERY" == "1" ]]; then
-    bqargs=(--log-bigquery --app-name skill-evolution-lab
-            --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
-  fi
+  local bqargs=(--log-bigquery --app-name skill-evolution-lab
+                --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
   $PY run_agent.py --skill "$skill" "${qargs[@]}" \
     --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
 }

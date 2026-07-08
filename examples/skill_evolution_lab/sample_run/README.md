@@ -54,10 +54,17 @@ skill.
    `sub_trajectories` (correction outcomes: recovered / parroted / not_recovered).
    `summary.golden_eval_summary.matched_meaningful_rate` is the headline metric.
    → Every `*_report.json` here has a human-readable twin, `*_report.md` — the
-   full markdown scorecard (summary, dimension drilldowns, per-session details).
+   full markdown scorecard (summary, dimension drilldowns, per-session details,
+   and Before/After **execution-span trees** for the correction cases).
    The demo writes both on every scoring pass; regenerate one any time with
    `quality_report.py --render-json <report.json>` (pure formatting, no model
-   calls).
+   calls). The span trees come from the BQAA events table: live runs log every
+   session there (`run_agent --log-bigquery`, on by default in the demo), and
+   this recorded run's sessions were seeded into per-slice tables
+   (`run_agent.py --seed-bigquery <traffic.json> --seed-report <report.json>`,
+   rows tagged `custom_tags.seeded`) so the traces render without re-running
+   anything. Set `PROJECT_ID`/`DATASET_ID`/`TABLE_ID` when re-rendering to pull
+   them; without BigQuery the blocks fall back to the recorded dialogue.
 
 3. **V0 baseline (held-out).** Same two steps on the *disjoint* held-out test set.
    → `v0_test_traffic.json`, `v0_test_report.json` — the honest baseline, on

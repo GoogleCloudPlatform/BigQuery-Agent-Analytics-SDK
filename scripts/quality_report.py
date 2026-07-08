@@ -3837,6 +3837,19 @@ def _render_md_from_json(json_path, args):
 
   resolved_map = {s.get("session_id", ""): s for s in sessions}
 
+  # Pull execution traces from BigQuery for these session ids (the local
+  # conversations file carries the dialogue; the spans live in the events
+  # table). Silently empty when BQ is unconfigured -- the report then falls
+  # back to dialogue-only correction blocks.
+  session_ids = [s.get("session_id", "") for s in sessions]
+  trajectories = _fetch_session_traces(
+      session_ids, max_sessions=len(session_ids)
+  )
+  if trajectories:
+    logger.info(
+        "Fetched %d execution trace(s) from BigQuery.", len(trajectories)
+    )
+
   out_path = os.path.abspath(json_path)
   if out_path.endswith(".json"):
     out_path = out_path[: -len(".json")] + ".md"
@@ -3846,7 +3859,7 @@ def _render_md_from_json(json_path, args):
       report,
       resolved_map,
       args,
-      trajectories=None,
+      trajectories=trajectories,
       out_path=out_path,
   )
 

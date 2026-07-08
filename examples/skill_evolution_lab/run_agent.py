@@ -320,6 +320,86 @@ def _write_bigquery(results, app_name, labels):
   )
 
 
+def _events_from_record(record, sub_trajectories=None):
+  """Reconstruct the ordered BQAA event stream for a RECORDED session.
+
+  The traffic file preserves the dialogue and the ordered tool calls
+  (``tool_calls_detail``); what it drops is the interleaving. Placement rule:
+  all calls sit in the turn that produced the first agent reply -- except when
+  the scored report's ``sub_trajectories`` certify a ``recovered`` outcome,
+  which by definition means the re-query happened in that post-correction
+  segment (``parroted`` / ``not_recovered`` certify its absence there).
+  """
+  conversation = record.get("conversation") or []
+  calls = list(record.get("tool_calls_detail") or [])
+
+  pairs = []  # (user_text, agent_text) per turn
+  current_user = None
+  for turn in conversation:
+    if turn.get("role") == "user":
+      current_user = turn.get("text") or ""
+    else:
+      pairs.append((current_user or "", turn.get("text") or ""))
+      current_user = None
+
+  call_pair = 0
+  for st in sub_trajectories or []:
+    if st.get("outcome") == "recovered" and st.get("start_turn") is not None:
+      call_pair = min(st["start_turn"] // 2, max(len(pairs) - 1, 0))
+
+  events = []
+  for i, (user_text, agent_text) in enumerate(pairs):
+    events.append(("USER_MESSAGE_RECEIVED", {"text": user_text}))
+    if i == call_pair:
+      for c in calls:
+        events.append(
+            (
+                "TOOL_STARTING",
+                {"tool": c.get("name", ""), "args": c.get("args") or {}},
+            )
+        )
+        events.append(("TOOL_COMPLETED", {"tool": c.get("name", "")}))
+    events.append(("LLM_RESPONSE", {"response": agent_text}))
+  return events
+
+
+def seed_bigquery(traffic_path, report_path, app_name, labels):
+  """Seed the BQAA events table from an already-recorded traffic file.
+
+  Rebuilds each session's event stream from the recorded dialogue and tool
+  calls (see ``_events_from_record``) and inserts the same row shape the
+  live ``--log-bigquery`` path writes -- so execution traces become
+  available for runs that were recorded before span logging existed,
+  without re-running the agent. Rows are tagged
+  ``custom_tags.seeded=<traffic file>`` so seeded sessions stay
+  distinguishable from live-logged ones.
+  """
+  with open(traffic_path) as f:
+    conversations = json.load(f).get("conversations", [])
+  sub_by_sid = {}
+  if report_path:
+    with open(report_path) as f:
+      for s in json.load(f).get("sessions", []):
+        sub_by_sid[s.get("session_id")] = s.get("sub_trajectories") or []
+
+  results = []
+  for r in conversations:
+    if r.get("error"):
+      continue
+    r = dict(r)
+    r["_events"] = _events_from_record(r, sub_by_sid.get(r.get("session_id")))
+    results.append(r)
+
+  labels = dict(labels or {})
+  labels.setdefault("seeded", os.path.basename(traffic_path))
+  _write_bigquery(results, app_name, labels)
+  logger.info(
+      "Seeded %d session(s) from %s into the events table.",
+      len(results),
+      traffic_path,
+  )
+
+
 def run(
     skill_path,
     question_paths,
@@ -369,7 +449,15 @@ def run(
         }
 
   if log_bigquery:
-    _write_bigquery(results, app_name, labels or {})
+    try:
+      _write_bigquery(results, app_name, labels or {})
+    except Exception as exc:  # pylint: disable=broad-except
+      logger.warning(
+          "BigQuery logging failed (%s) -- continuing; the local"
+          " conversations file is unaffected, but execution spans for this"
+          " run will be missing from the events table.",
+          exc,
+      )
 
   # The events list is a write-path detail; keep the conversations file in
   # the exact schema quality_report.py --conversations-file consumes.
@@ -386,17 +474,33 @@ def run(
 
 def _main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--skill", required=True, help="Path to SKILL.md")
+  parser.add_argument("--skill", help="Path to SKILL.md")
   parser.add_argument(
       "--questions",
       action="append",
-      required=True,
       help="Question JSON file (repeatable; files are concatenated)",
   )
   parser.add_argument(
       "--model", default="gemini-3.1-flash-lite", help="Gemini model"
   )
-  parser.add_argument("-o", "--out", required=True, help="Output JSON path")
+  parser.add_argument("-o", "--out", help="Output JSON path")
+  parser.add_argument(
+      "--seed-bigquery",
+      metavar="TRAFFIC_JSON",
+      help=(
+          "Seed the BQAA events table from an already-recorded traffic file"
+          " (no agent runs); reconstructs each session's event stream from"
+          " the recorded dialogue + tool calls"
+      ),
+  )
+  parser.add_argument(
+      "--seed-report",
+      metavar="REPORT_JSON",
+      help=(
+          "Scored report for --seed-bigquery: its sub_trajectories pin"
+          " post-correction tool calls to the right turn"
+      ),
+  )
   parser.add_argument("--concurrency", type=int, default=8)
   parser.add_argument(
       "--log-bigquery",
@@ -429,6 +533,11 @@ def _main():
     if not sep:
       parser.error(f"--bq-label expects KEY=VALUE, got: {item}")
     labels[key] = value
+  if args.seed_bigquery:
+    seed_bigquery(args.seed_bigquery, args.seed_report, args.app_name, labels)
+    return
+  if not (args.skill and args.questions and args.out):
+    parser.error("--skill, --questions, and -o/--out are required")
   run(
       args.skill,
       args.questions,
