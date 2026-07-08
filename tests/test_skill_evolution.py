@@ -258,6 +258,22 @@ def test_prevalence_counts_categories():
   assert "consensus flag" in out
 
 
+def test_prevalence_very_strong_needs_consensus_and_majority():
+  majority = ["## Root Cause\n[TOOL_USAGE]: x"] * 3 + [
+      "## Root Cause\n[PARROTING]: y"
+  ]
+  out = compute_prevalence_summary(majority)
+  assert "TOOL_USAGE: 3/4 (75%) -- VERY STRONG" in out
+  assert "PARROTING: 1/4 (25%) -- weak" in out
+
+  minority = ["## Root Cause\n[TOOL_USAGE]: x"] * 3 + [
+      "## Root Cause\n[PARROTING]: y"
+  ] * 7
+  out = compute_prevalence_summary(minority)
+  assert "TOOL_USAGE: 3/10 (30%) -- STRONG" in out
+  assert "PARROTING: 7/10 (70%) -- VERY STRONG" in out
+
+
 def test_prevalence_empty_when_no_categories():
   assert compute_prevalence_summary(["just prose", "more prose"]) == ""
 

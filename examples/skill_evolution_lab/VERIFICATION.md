@@ -115,15 +115,16 @@ Collected 48 patches (48 passed the quality gate)
 Selected median-size candidate (2416 chars)   # V0 was 820B
 
 Prevalence across 48 independent analyst patches:
-  TOOL_USAGE:       42/48 (88%) -- STRONG
+  TOOL_USAGE:       42/48 (88%) -- VERY STRONG
   PARROTING:         4/48 (8%)  -- STRONG
   MISSING_RULE:      1/48 (2%)  -- weak
   RESPONSE_PATTERN:  1/48 (2%)  -- weak
 ```
 
-`STRONG`/`weak` is a consensus flag, not a share: a root cause is STRONG once
-three or more analysts — each reading a different conversation — independently
-converge on it, which is why 4/48 sits alongside 42/48.
+The strength label is a consensus flag, not a share: a root cause is STRONG
+once three or more analysts — each reading a different conversation —
+independently converge on it, and VERY STRONG when it also carries a majority
+of all patches. A single vote stays weak.
 
 The tally is the two-defect proof: the fleet independently diagnosed both
 planted flaws — deflection (`TOOL_USAGE`, 42 analysts) and caving to wrong

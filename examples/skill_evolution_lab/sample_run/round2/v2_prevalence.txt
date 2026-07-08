@@ -1,5 +1,5 @@
 Prevalence across 6 independent analyst patches:
-  RESPONSE_PATTERN: 4/6 (67%) -- STRONG
+  RESPONSE_PATTERN: 4/6 (67%) -- VERY STRONG
   MISSING_RULE: 1/6 (17%) -- weak
   TOOL_USAGE: 1/6 (17%) -- weak
-Strength is a consensus flag, not a share: STRONG = >=3 analysts independently converged, moderate = 2, weak = 1.
+Strength is a consensus flag: weak = 1 analyst, moderate = 2, STRONG = >=3 independently converged, VERY STRONG = >=3 and a majority of all patches.
