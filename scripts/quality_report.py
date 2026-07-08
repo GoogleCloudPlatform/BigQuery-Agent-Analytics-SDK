@@ -3761,15 +3761,9 @@ def _render_md_from_json(json_path, args):
   same markdown writer. Writes ``<name>.md`` next to ``<name>.json`` and
   returns the md path.
   """
-  from bigquery_agent_analytics.categorical_evaluator import (
-      CategoricalEvaluationReport,
-  )
-  from bigquery_agent_analytics.categorical_evaluator import (
-      CategoricalMetricResult,
-  )
-  from bigquery_agent_analytics.categorical_evaluator import (
-      CategoricalSessionResult,
-  )
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
 
   with open(json_path) as f:
     data = json.load(f)
