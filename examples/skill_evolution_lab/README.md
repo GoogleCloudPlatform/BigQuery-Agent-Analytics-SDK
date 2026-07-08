@@ -21,9 +21,9 @@ Why BQAA makes this reusable: the Agent Analytics plugin captures the whole
 improvement substrate — the conversation, the **tool calls (name + args)**, the
 user corrections, and the outcome labels — in one analyzable place. The evolution
 engine turns those traces into behavioral skill rules and validates them on
-held-out traffic before creating a new skill revision. (This lab writes that same
-schema to local JSON so it runs without BigQuery; in production the traces come
-straight from the BQAA tables.)
+held-out traffic before creating a new skill revision. This lab runs that wiring
+end to end: every session is logged to a real `agent_events` table and scoring
+reads it back through the SDK's BigQuery trace path.
 
 This is the runnable companion to the blog post *"Your Agent Can Write Its Own
 Skill"* (BigQuery Agent Analytics Series). See
@@ -94,8 +94,11 @@ outputs (and what each file means) without running anything. Live runs write to
 
 ## Prerequisites
 
-- A GCP project; `roles/aiplatform.user` (plus rights to enable services on the
-  first run — `setup.sh` enables the **Vertex AI API** for you).
+- A GCP project; `roles/aiplatform.user` and BigQuery read/write + job
+  permissions (e.g. `roles/bigquery.dataEditor` + `roles/bigquery.jobUser`) —
+  every session is logged to an `agent_events` table and scoring reads it back.
+  `setup.sh` enables the **Vertex AI** and **BigQuery** APIs for you (needs
+  rights to enable services on the first run).
 - `gcloud auth application-default login`.
 - [`uv`](https://github.com/astral-sh/uv) — the scripts run via `uv run`, which
   installs the repo's dependencies from the root `pyproject.toml` automatically
@@ -161,26 +164,21 @@ recorded round-2 run is committed at
 [`sample_run/round2/`](sample_run/round2/) — its V2 *tied* V1 and the gate
 kept the incumbent.
 
-### Score from BigQuery (the production wiring)
+### BigQuery is the data path
 
-```bash
-./run_e2e_demo.sh --from-bigquery
-```
-
-By default the demo writes traces to local JSON in the exact schema the Agent
-Analytics plugin logs, so it runs without BigQuery. `--from-bigquery` exercises
-the production wiring instead: `run_agent.py --log-bigquery` inserts every
-session into a real `agent_events` table (created on first use;
+The demo runs the production wiring end to end: `run_agent.py --log-bigquery`
+inserts every session into a real `agent_events` table (created on first use;
 `DATASET_ID`/`TABLE_ID` from `.env`, defaults `agent_analytics.agent_events`)
 in the plugin's row shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` /
 `TOOL_COMPLETED` / `LLM_RESPONSE` spans in true chronological order, with
 `root_agent_name` and per-run `custom_tags` — and scoring reads the sessions
 back through the SDK's BigQuery trace path (`quality_report.py --label
-run=<id> --label slice=<set>`). The scorecards come back identical to the
-local path: verdicts, parroting sub-trajectories, and structured tool calls
-(the BigQuery path now populates `tool_calls_detail` from the `TOOL_*` spans).
-Requires the BigQuery API enabled and table read/write + job permissions on
-the project.
+run=<id> --label slice=<set>`). That events table is also where the execution
+traces in the markdown scorecards come from. The conversations JSON written
+into each run folder is a committed-artifact convenience (diffable inputs for
+`sample_run/`); the pipeline itself scores from BigQuery. Requires the
+BigQuery API enabled and table read/write + job permissions on the project
+(`setup.sh` takes care of the APIs).
 
 ### With the Skill Registry
 

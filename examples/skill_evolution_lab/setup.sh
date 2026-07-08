@@ -15,7 +15,7 @@
 #
 # Setup for the skill-evolution lab:
 #   1. Resolve the GCP project + region and write .env.
-#   2. Enable the required API (aiplatform.googleapis.com -- Vertex AI).
+#   2. Enable the required APIs (Vertex AI + BigQuery).
 #   3. Reset the working skill to V0.
 #   4. (Optional) register the V0 skill in the Skill Registry.
 #
@@ -54,18 +54,20 @@ JUDGE_LOCATION="$REGION"
 EOF
 echo "Wrote .env (project=$PROJECT_ID region=$REGION)."
 
-# Enable the one API this example needs: Vertex AI. It serves Gemini
+# Enable the two APIs this example needs. Vertex AI serves Gemini
 # generateContent (agent, analysts, judge), the text-embedding model used for
 # golden-Q&A matching, AND the Skill Registry (hosted at
-# {region}-aiplatform.googleapis.com). No BigQuery is required -- scoring runs
-# offline via --conversations-file.
-echo "Enabling required GCP API: aiplatform.googleapis.com ..."
-if gcloud services enable aiplatform.googleapis.com --project "$PROJECT_ID"; then
-  echo "  aiplatform.googleapis.com enabled."
-else
-  echo "  WARN: could not enable aiplatform.googleapis.com automatically." >&2
-  echo "        Enable 'Vertex AI API' on $PROJECT_ID before running the demo." >&2
-fi
+# {region}-aiplatform.googleapis.com). BigQuery is the data path: every
+# session is logged to an agent_events table and scoring reads it back.
+echo "Enabling required GCP APIs: aiplatform, bigquery ..."
+for api in aiplatform.googleapis.com bigquery.googleapis.com; do
+  if gcloud services enable "$api" --project "$PROJECT_ID"; then
+    echo "  $api enabled."
+  else
+    echo "  WARN: could not enable $api automatically." >&2
+    echo "        Enable it on $PROJECT_ID before running the demo." >&2
+  fi
+done
 
 # Ensure the working copy starts at the flawed V0.
 cp skills/SKILL.v0.md skills/SKILL.md

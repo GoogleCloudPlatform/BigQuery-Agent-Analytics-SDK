@@ -20,10 +20,11 @@ scenario: the user asks a question, then pushes a *wrong* "correction"; a good
 agent re-verifies with its tool and holds the right figure instead of parroting
 the user's number.
 
-Output is ``{"conversations": [...]}`` in the schema consumed by the SDK's
-``quality_report.py --conversations-file`` (session_id, question,
-final_response, conversation[], tool_calls), so scoring is identical whether
-the traces come from here or from BigQuery.
+Every session is logged to the BQAA ``agent_events`` table (``--log-bigquery``)
+-- BigQuery is the data path scoring reads from. The
+``{"conversations": [...]}`` JSON written alongside (session_id, question,
+final_response, conversation[], tool_calls) is the committed-artifact
+convenience that makes runs diffable and seedable.
 
 Usage:
   python run_agent.py --skill skills/SKILL.md \
@@ -449,18 +450,21 @@ def run(
         }
 
   if log_bigquery:
+    # BigQuery is the data path -- scoring reads the sessions back from the
+    # events table -- so a logging failure is fatal, with the cause up front.
     try:
       _write_bigquery(results, app_name, labels or {})
     except Exception as exc:  # pylint: disable=broad-except
-      logger.warning(
-          "BigQuery logging failed (%s) -- continuing; the local"
-          " conversations file is unaffected, but execution spans for this"
-          " run will be missing from the events table.",
+      logger.error(
+          "BigQuery logging failed: %s -- scoring reads sessions from the"
+          " events table, so this run cannot continue. Check PROJECT_ID /"
+          " DATASET_ID / TABLE_ID and BigQuery permissions.",
           exc,
       )
+      raise SystemExit(1)
 
-  # The events list is a write-path detail; keep the conversations file in
-  # the exact schema quality_report.py --conversations-file consumes.
+  # The events list is a write-path detail; the conversations file keeps the
+  # plain dialogue schema (the committed, diffable artifact).
   for r in results:
     r.pop("_events", None)
   with open(out_path, "w") as f:
