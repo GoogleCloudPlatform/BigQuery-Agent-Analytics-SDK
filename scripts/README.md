@@ -124,7 +124,9 @@ When `--session` is used, the console shows **all 8 metrics with full
 justifications** for the single session (verbose mode). See
 [sample single-session output](sample_quality_report_session.md).
 
-**Markdown report** (`--report` flag) is saved to `scripts/reports/` and includes:
+**Markdown report** (`--report` flag) is saved to `scripts/reports/` — or, when
+`--output-json <name>.json` is also given, next to it as `<name>.md` (the
+human-readable twin of every scored artifact). It includes:
 - Summary table and Quality Dimensions scores
 - **Dimension drilldowns** — for any dimension rated below 1.50 (needs attention
   or problem area), the report lists the sessions that scored poorly with
@@ -132,6 +134,11 @@ justifications** for the single session (verbose mode). See
   for multi-turn sessions
 - Per-agent breakdown, category distributions
 - Unhelpful / Declined / Partial session details with conversations
+
+**Re-render from JSON** (`--render-json <report.json>`): rebuilds the same
+Markdown report from an existing `--output-json` file — pure formatting, zero
+model calls — and writes `<report>.md` next to it. Use it to (re)produce the
+scorecard for any already-scored run.
 
 **Log files** are saved to `scripts/reports/` for each eval run.
 
@@ -531,6 +538,8 @@ The script automatically detects and resolves responses from remote A2A
 ### Sample output
 
 - [Sample quality report](sample_quality_report.md) — full multi-session report
+  (the V0 held-out scorecard from the committed
+  [skill-evolution sample run](../examples/skill_evolution_lab/sample_run/))
 - [Sample single-session report](sample_quality_report_session.md) — verbose single-session output
 
 ---

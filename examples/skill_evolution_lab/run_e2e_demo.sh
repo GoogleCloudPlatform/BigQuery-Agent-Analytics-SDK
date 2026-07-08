@@ -281,6 +281,9 @@ run_agent() {
 # Default: score the local conversations file directly. With --from-bigquery:
 # read the same sessions back from the BigQuery events table instead (the
 # production wiring), selected by this run's {run, slice} labels.
+# Every score writes BOTH artifacts: <name>.json (machine input for the
+# engine/compare) and its human-readable twin <name>.md (--report renders the
+# markdown scorecard next to the JSON, same basename).
 score() {
   if [[ "$FROM_BIGQUERY" == "1" ]]; then
     GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
@@ -291,12 +294,12 @@ score() {
       $PY "$REPO_ROOT/scripts/quality_report.py" \
         --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" --limit 500 \
         --eval-spec "$SPEC" --dimensions full \
-        --tag-turns --output-json "$2"
+        --tag-turns --report --output-json "$2"
   else
     GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
       $PY "$REPO_ROOT/scripts/quality_report.py" \
         --conversations-file "$1" --eval-spec "$SPEC" --dimensions full \
-        --tag-turns --concurrency "$CONCURRENCY" --output-json "$2"
+        --tag-turns --report --concurrency "$CONCURRENCY" --output-json "$2"
   fi
 }
 

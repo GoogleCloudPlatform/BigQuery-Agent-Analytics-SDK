@@ -53,6 +53,11 @@ skill.
    declined), `golden_eval` (`matched`, `expected_answer`, `similarity`), and
    `sub_trajectories` (correction outcomes: recovered / parroted / not_recovered).
    `summary.golden_eval_summary.matched_meaningful_rate` is the headline metric.
+   → Every `*_report.json` here has a human-readable twin, `*_report.md` — the
+   full markdown scorecard (summary, dimension drilldowns, per-session details).
+   The demo writes both on every scoring pass; regenerate one any time with
+   `quality_report.py --render-json <report.json>` (pure formatting, no model
+   calls).
 
 3. **V0 baseline (held-out).** Same two steps on the *disjoint* held-out test set.
    → `v0_test_traffic.json`, `v0_test_report.json` — the honest baseline, on
