@@ -91,6 +91,22 @@ resources, then verifies the DTS scheduled MERGE is gone and the dataset no
 longer exists. The dataset contains real telemetry: tear down promptly for
 throwaway projects.
 
+## Enterprise hardening before broad rollout (>200 users)
+
+The pilot posture above is deliberately simple. Before company-wide
+rollout, treat these as first-class admin operations (from an exec/security
+review of this demo):
+
+| Area | Pilot posture | Broad-rollout hardening |
+|---|---|---|
+| Token handling | one shared bearer token; Codex config holds it literally | documented rotation runbook (add secret version → redeploy → redistribute), consider per-team tokens; lost-laptop/leak response |
+| Ingress | public Cloud Run + app-layer bearer auth (401-enforced) | private ingress / IAP / enterprise gateway; threat model, rate limits, audit logging, alerting |
+| Config distribution | paste managed settings; Codex user-level file | MDM/managed dotfiles as the only channel; no hand-distributed secrets |
+| Attribution taxonomy | `department`/`cost_center`/`env` recommended | REQUIRED and validated, or cost queries degrade to `unattributed` |
+| Cost figures | estimate CTE with visible rates/as-of date | finance-grade rate table + model mapping before any billing use |
+| Telemetry drift | verified against pinned versions (codex 0.142.5) | monthly compatibility smoke (`verify --smoke` + Q2 non-empty per product); shapes and encodings changed during this project's own verification |
+| Retention | demo dataset torn down promptly | partition expiration + retention policy set at dataset creation |
+
 ## Version capture
 
 `run_sessions.sh` records into `evidence/`: BQAA commit, `gcloud`/`bq`

@@ -103,6 +103,11 @@ Close on the success screen: the verify output plus the
 both-products-one-schema result. Then hand over `one_pager.md`, regenerated
 from this run — that is the artifact that gets forwarded.
 
+**The closing line** (this is the pitch, calibrated with an exec review):
+this is not "we can watch agent sessions." It is: *we can govern AI coding
+tools like real enterprise infrastructure — in our own BigQuery project,
+with privacy controls visible in SQL.*
+
 ---
 
 ## After the demo
@@ -112,6 +117,21 @@ from this run — that is the artifact that gets forwarded.
   `evidence/template.md`).
 - Tear down if this was a throwaway project: `scripts/teardown.sh`
   (dry-run by default; the dataset contains real telemetry).
+
+## From demo to pilot (the recipe an exec reviewer endorsed)
+
+1. Pilot with 20–50 engineers (the setup scales to 200 unchanged).
+2. Enable `logs,metrics,traces`; **keep privacy at `baseline`**.
+3. Require a resource-attribute taxonomy up front — `department`,
+   `cost_center`, `env` — or the dashboards degrade into `unattributed`.
+4. Set BigQuery partition retention and cost policy before broadening.
+5. Alert on dead letters, ingestion freshness, and token spikes (the SQL
+   pack's Q0/Q5 are the starting queries).
+6. Run a security review before enabling any content-bearing mode; replay
+   stays off until then.
+7. Re-run the compatibility smoke monthly: product telemetry drifts —
+   config shapes and event encodings changed during this project's own
+   verification (see OPERATOR.md hardening notes).
 
 ## What this demo deliberately does not claim
 
@@ -123,3 +143,7 @@ from this run — that is the artifact that gets forwarded.
 - **Scoped privacy claim.** Baseline proves prompt content is not written
   into this telemetry warehouse by this configuration — it is not a claim
   about other channels.
+- **Pilot-grade, with a documented hardening path.** Bearer-token auth on
+  public Cloud Run is appropriate for a pilot; the pre-broad-rollout
+  hardening list (token rotation, private ingress, config distribution at
+  fleet scale) is in OPERATOR.md and on the one-pager — stated, not hidden.
