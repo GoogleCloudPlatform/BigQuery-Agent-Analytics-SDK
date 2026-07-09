@@ -10,7 +10,29 @@ Claude Code / Codex --OTLP--> Cloud Run receiver --> Pub/Sub --> consumer --> Bi
                                                         └── DLQ --> otlp_dead_letter
 ```
 
-## Deploy
+## Deploy (released package — the primary path, no repo checkout)
+
+```bash
+pipx install bigquery-agent-analytics-tracing
+
+# Readiness checks (mutates nothing; no Cloud Build / AR permissions needed):
+bqaa-otel bootstrap --project my-proj --dataset agent_analytics --preflight
+
+# Print the plan (runs nothing) — deploys the released, digest-pinned image:
+bqaa-otel bootstrap --project my-proj --dataset agent_analytics --region us-central1
+
+# Apply it:
+bqaa-otel bootstrap --project my-proj --dataset agent_analytics --region us-central1 --execute
+
+# Clean removal later (dry-run by default; consumes the written inventory.json):
+bqaa-otel teardown --project my-proj --dataset agent_analytics
+```
+
+The released wheel embeds the public receiver image
+(`us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver:<version>@sha256:…`),
+pinned by digest — the customer project never builds or hosts the image.
+
+## Deploy (from a repository checkout — source build)
 
 ```bash
 # Print the plan (runs nothing):
@@ -24,12 +46,10 @@ PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
   --build-from-source --execute
 ```
 
-(`bqaa-otel bootstrap ...` once the producers package is installed.
-`--build-from-source` is required when running from a repository
-checkout — an installed release wheel instead embeds the released,
-digest-pinned receiver image and deploys it with no build step;
-`setup.sh` is a thin wrapper over the same command with the historical
-env-var interface: `PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
+(`--build-from-source` builds with Cloud Build from the checkout and is
+required there — a dev checkout embeds no released image; `setup.sh` is a
+thin wrapper over the same command with the historical env-var interface:
+`PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
 
 This creates: the native tables + `*_dedup` views + `agent_events_otlp` +
 `bqaa_metrics` (DDL generated from the schema package; `gen_schema_sql.py`

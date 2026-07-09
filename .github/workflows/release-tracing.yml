@@ -254,6 +254,24 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la dist/
 
+      - name: Render customer-first release notes from the template
+        run: |
+          python3 - << 'RENDER_EOF'
+          import pathlib
+          template = pathlib.Path(
+              "producers/scripts/release_notes_template.md"
+          ).read_text()
+          codex_min = "0.142.5"
+          body = template.format(
+              version="${{ needs.verify.outputs.version }}",
+              public_image="${{ env.PUBLIC_IMAGE }}".rsplit(":", 1)[0],
+              digest="${{ needs.build-image.outputs.digest }}",
+              claude_version="2.1.203",
+              codex_min_version=codex_min,
+          )
+          pathlib.Path("release_body.md").write_text(body)
+          RENDER_EOF
+
       - name: Create DRAFT release with artifacts
         # Draft until `promote` publishes it — nothing customer-visible
         # exists for a candidate that never survived the TestPyPI gate.
@@ -264,9 +282,7 @@ jobs:
           draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
-          body: |
-            **Receiver image (pinned by digest):**
-            `${{ env.PUBLIC_IMAGE }}:${{ needs.verify.outputs.version }}@${{ needs.build-image.outputs.digest }}`
+          body_path: release_body.md
           files: |
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz

@@ -7,12 +7,18 @@ BQAA `agent_events` schema consumed by the
 ## Install
 
 ```bash
-# Core writer + drainer.
+# Core writer + drainer + the `bqaa-otel` enterprise admin CLI
+# (pipx recommended for the CLI-only enterprise-admin use case).
 pip install bigquery-agent-analytics-tracing
 
 # Storage Write API path (lower-latency, recommended for production).
 pip install "bigquery-agent-analytics-tracing[storage-write]"
 ```
+
+Enterprise admins deploying the OTel-native receiver: see
+[deploy/otlp_receiver/README.md](../deploy/otlp_receiver/README.md) —
+`bqaa-otel bootstrap` deploys the released, digest-pinned receiver image
+with no repository checkout.
 
 For dev work in this repo:
 
