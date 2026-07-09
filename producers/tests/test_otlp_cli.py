@@ -567,3 +567,111 @@ def test_verify_malformed_ipv6_endpoint_exits_cleanly(monkeypatch, capsys):
   )
   assert rc == 2
   assert "endpoint" in capsys.readouterr().err.lower()
+
+
+# --------------------------------------------------------------------------
+# bootstrap --preflight + teardown subcommand (issue #349 PR 3)
+# --------------------------------------------------------------------------
+
+
+def test_bootstrap_preflight_checks_without_deploying(monkeypatch, capsys):
+  from bigquery_agent_analytics_tracing.otlp import bootstrap
+  from bigquery_agent_analytics_tracing.otlp import preflight
+
+  def _never(*a, **k):
+    raise AssertionError("--preflight must not deploy")
+
+  seen = {}
+
+  def _fake_preflight(**kw):
+    seen.update(kw)
+    return preflight.PreflightReport(
+        (preflight.Check("auth", "OK", "gcloud authenticated"),)
+    )
+
+  monkeypatch.setattr(bootstrap, "run_bootstrap", _never)
+  monkeypatch.setattr(preflight, "run_preflight", _fake_preflight)
+  rc = _run(
+      ["bootstrap", "--project", "p", "--build-from-source", "--preflight"]
+  )
+  assert rc == 0
+  assert seen["image_mode"] == "source"
+  assert seen["check_products"] is False
+
+
+def test_bootstrap_preflight_failure_exits_nonzero(monkeypatch):
+  from bigquery_agent_analytics_tracing.otlp import preflight
+
+  monkeypatch.setattr(
+      preflight,
+      "run_preflight",
+      lambda **kw: preflight.PreflightReport(
+          (preflight.Check("billing", "FAIL", "billing not enabled"),)
+      ),
+  )
+  rc = _run(
+      ["bootstrap", "--project", "p", "--build-from-source", "--preflight"]
+  )
+  assert rc == 1
+
+
+def test_teardown_default_is_dry_run(tmp_path, monkeypatch, capsys):
+  import json
+
+  from bigquery_agent_analytics_tracing.otlp import bootstrap
+
+  inv = {
+      "mode": "released",
+      "project": "p",
+      "dataset": "ds1",
+      "region": "us-central1",
+      "bq_location": "US",
+      "cloud_run_services": [bootstrap.RECEIVER_SVC],
+      "pubsub_topics": [bootstrap.MAIN_TOPIC],
+      "pubsub_subscriptions": [bootstrap.SUBSCRIPTION],
+      "secret": bootstrap.SECRET,
+      "service_accounts": [bootstrap.RECEIVER_SVC],
+      "dts_display_name": f"{bootstrap.MERGE_DISPLAY_NAME}_ds1",
+  }
+  path = tmp_path / "inventory.json"
+  path.write_text(json.dumps(inv))
+
+  def _boom(*a, **k):
+    raise AssertionError("dry run must not execute commands")
+
+  monkeypatch.setattr(bootstrap.SubprocessRunner, "run", _boom)
+  rc = _run(
+      [
+          "teardown",
+          "--project",
+          "p",
+          "--dataset",
+          "ds1",
+          "--inventory",
+          str(path),
+      ]
+  )
+  assert rc == 0
+  out = capsys.readouterr().out
+  assert "DRY RUN" in out
+  assert "--confirm" in out
+
+
+def test_teardown_inventory_mismatch_is_a_usage_error(tmp_path, capsys):
+  import json
+
+  path = tmp_path / "inventory.json"
+  path.write_text(json.dumps({"project": "other", "dataset": "ds1"}))
+  rc = _run(
+      [
+          "teardown",
+          "--project",
+          "p",
+          "--dataset",
+          "ds1",
+          "--inventory",
+          str(path),
+      ]
+  )
+  assert rc == 2
+  assert "inventory" in capsys.readouterr().err
