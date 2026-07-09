@@ -25,8 +25,9 @@ held-out traffic before creating a new skill revision. This lab runs that wiring
 end to end: every session is logged to a real `agent_events` table and scoring
 reads it back through the SDK's BigQuery trace path.
 
-This is the runnable companion to the blog post *"Your Agent Can Write Its Own
-Skill"* (BigQuery Agent Analytics Series). See
+This is the runnable companion to the blog post
+[*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/@evekhm/your-agent-can-learn-from-its-own-conversations-26f7d46ac325)
+(BigQuery Agent Analytics Series). See
 [`VERIFICATION.md`](VERIFICATION.md) for a recorded end-to-end run.
 
 ## What it shows
