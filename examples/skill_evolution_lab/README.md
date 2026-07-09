@@ -256,7 +256,7 @@ each session's structured tool calls (`tool_calls_detail: [{name, args}]`), whic
 the scorer carries through so the analysts — and `compare_runs.py`'s tool-selection
 table — can reason about *which* tool was chosen, not just how many calls happened.
 
-Three conventions save an hour of source-reading when you wire it in:
+Three conventions to know:
 
 - **`session_id` prefixes drive the metric slicing.** The scorer and
   `compare_runs.py` key off prefixes (like `oos_`) and the correction tags to
