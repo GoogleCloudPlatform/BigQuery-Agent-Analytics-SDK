@@ -39,10 +39,16 @@ class FakeRunner:
     self.failing = tuple(failing)  # substrings whose try_run fails
     self.calls = []  # (argv tuple, input_text)
 
+  image_digest = "sha256:" + "e" * 64  # answered by 'run revisions describe'
+
   def _canned(self, argv):
     joined = " ".join(argv)
     if "projects describe" in joined:
       return "123456"
+    if "latestCreatedRevisionName" in joined:
+      return "rev-00001"
+    if "run revisions describe" in joined:
+      return f"us-docker.pkg.dev/x/y/z@{self.image_digest}"
     if "run services describe" in joined:
       return (
           _RECEIVER_URL if bootstrap.RECEIVER_SVC in joined else _CONSUMER_URL
@@ -94,6 +100,9 @@ def _settings(tmp_path, **kw):
       region="us-central1",
       bq_location="US",
       out_dir=tmp_path / "artifacts",
+      # Legacy source-build path: these tests predate the released-image
+      # default (issue #349) and exercise the Cloud Build sequence.
+      build_from_source=True,
   )
   defaults.update(kw)
   return bootstrap.BootstrapSettings(**defaults)

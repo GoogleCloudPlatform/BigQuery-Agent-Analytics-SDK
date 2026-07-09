@@ -198,6 +198,23 @@ def _build_parser() -> argparse.ArgumentParser:
       help="Directory to write config artifacts into after the deploy.",
   )
   boot.add_argument(
+      "--image",
+      default=None,
+      help=(
+          "Container image reference to deploy (e.g. the staging candidate"
+          " for the TestPyPI release gate). Default: the released image"
+          " embedded in this installation, pinned by digest."
+      ),
+  )
+  boot.add_argument(
+      "--build-from-source",
+      action="store_true",
+      help=(
+          "Build the image with Cloud Build from a repository checkout"
+          " (legacy path; requires running from the repo root)."
+      ),
+  )
+  boot.add_argument(
       "--execute",
       action="store_true",
       help="Apply the plan (default: print the commands and exit).",
@@ -323,7 +340,12 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         resource_attributes=args.resource_attributes,
         acknowledge_content_logging=args.ack_content_logging,
         out_dir=args.out,
+        image=args.image,
+        build_from_source=args.build_from_source,
     )
+    # Resolve now so a dev checkout with no released image fails with the
+    # actionable message BEFORE planning or mutating anything.
+    _, image_mode = bootstrap_mod.resolve_image(settings)
   except ValueError as exc:
     return _report_settings_error(exc)
 
@@ -331,9 +353,12 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     print(bootstrap_mod.render_plan(settings))
     return 0
 
-  # The Cloud Build step uploads the *current directory* as the build
-  # context; refuse to mutate anything unless we are at the repo root.
-  if not pathlib.Path("deploy/otlp_receiver/Dockerfile").is_file():
+  # Only the source-build path uploads the current directory as the Cloud
+  # Build context; the default released-image mode needs no checkout at all.
+  if (
+      image_mode == "source"
+      and not pathlib.Path("deploy/otlp_receiver/Dockerfile").is_file()
+  ):
     print(
         "bqaa-otel: error: deploy/otlp_receiver/Dockerfile not found —"
         " run --execute from the repository root (the Cloud Build step"

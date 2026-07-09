@@ -177,6 +177,7 @@ def test_bootstrap_default_is_plan_mode(tmp_path, capsys, monkeypatch):
           "bootstrap",
           "--project",
           "my-proj",
+          "--build-from-source",
           "--out",
           str(tmp_path),
       ]
@@ -211,6 +212,7 @@ def test_bootstrap_execute_invokes_run_bootstrap(tmp_path, monkeypatch):
           "ds1",
           "--signals",
           "logs,metrics,traces",
+          "--build-from-source",
           "--out",
           str(tmp_path),
           "--execute",
@@ -254,7 +256,7 @@ def test_bootstrap_execute_surfaces_failed_step_stderr(monkeypatch, capsys):
 
   monkeypatch.setattr(bootstrap, "run_bootstrap", _boom)
   monkeypatch.setattr("pathlib.Path.is_file", lambda self: True)
-  rc = _run(["bootstrap", "--project", "p", "--execute"])
+  rc = _run(["bootstrap", "--project", "p", "--build-from-source", "--execute"])
   assert rc == 1
   err = capsys.readouterr().err
   assert "gcloud run deploy" in err
@@ -269,9 +271,18 @@ def test_bootstrap_execute_requires_repo_root(monkeypatch, tmp_path, capsys):
 
   monkeypatch.setattr(bootstrap, "run_bootstrap", _never)
   monkeypatch.chdir(tmp_path)  # no deploy/otlp_receiver/Dockerfile here
-  rc = _run(["bootstrap", "--project", "p", "--execute"])
+  rc = _run(["bootstrap", "--project", "p", "--build-from-source", "--execute"])
   assert rc == 2
   assert "repository root" in capsys.readouterr().err
+
+
+def test_bootstrap_dev_checkout_requires_image_choice(capsys):
+  # Development checkout: no released image is embedded, so the CLI must
+  # fail actionably BEFORE planning or mutating anything (#349).
+  rc = _run(["bootstrap", "--project", "p"])
+  assert rc == 2
+  err = capsys.readouterr().err
+  assert "--image" in err and "--build-from-source" in err
 
 
 def test_bootstrap_rejects_bogus_source(capsys):
