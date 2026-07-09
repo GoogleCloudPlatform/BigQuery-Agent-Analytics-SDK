@@ -294,18 +294,21 @@ jobs:
           path: dist/
 
       - name: Strip non-PyPI artifacts
-        # The plugin tarball is a release artifact, not a PyPI
-        # distribution. Filename uses hyphens in
-        # 'bigquery-agent-analytics-tracing-claude-code-*' so it's
-        # distinguishable from the underscore-named sdist.
+        # The plugin tarball and SHA256SUMS are release artifacts, not
+        # PyPI distributions — twine rejects unknown file types, and
+        # checksums belong on the GitHub release only.
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        # No skip-existing: the version-burn rule requires byte-identical
+        # artifacts at the same version on TestPyPI and PyPI. If the
+        # version already exists, the upload MUST fail loudly — a burned
+        # version silently skipping would make the gate test old bytes.
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
 
   promote:
     name: Promote image + publish release
@@ -321,15 +324,23 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
+        # Supply-chain guard: never fetch a mutable 'latest' binary in a
+        # job that holds release credentials. Pinned version, pinned
+        # sha256, and installed before the auth step mints any token.
+        env:
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+        run: |
+          curl -sL -o crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane && sudo mv crane /usr/local/bin/
+
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.RELEASE_SA }}
-
-      - name: Install crane
-        run: |
-          curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
-            | tar -xz crane && sudo mv crane /usr/local/bin/
 
       - name: Promote staging digest to the public coordinate
         # Content-addressed copy: the digest the artifacts already embed
@@ -372,6 +383,7 @@ jobs:
       - name: Strip non-PyPI artifacts
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1

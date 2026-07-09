@@ -36,26 +36,72 @@ git tag -a "tracing-v${VERSION}" -m "tracing ${VERSION}"
 git push origin "tracing-v${VERSION}"
 ```
 
-The workflow takes over from there. Total wall-clock is ~5 minutes.
+The workflow takes over from there. Automated stages run in ~10
+minutes; the release then WAITS at two manual approval gates
+(`release-promote`, then `pypi`) — see the gate section below.
 
-## What CI does
+## What CI does (issue #349 release contract)
 
 1. **`verify`** — confirms the tag matches `pyproject.toml`, then
    runs the producer test suite on Python 3.12.
-2. **`build`** — `python -m build` for wheel + sdist, then
-   `python scripts/build_claude_plugin.py` for the plugin tarball.
-   Verifies all three expected artifacts landed in `dist/`.
-3. **`github-release`** — creates the GitHub release for the tag with
-   auto-generated notes and attaches all three artifacts.
-4. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
-   Trusted Publishing (no secrets). The plugin tarball is stripped
-   from the upload set before this step.
-5. **`publish-pypi`** — same, to PyPI. Gated by the `pypi`
-   environment, so maintainers can require manual approval here
-   without blocking the GitHub release.
+2. **`build-image`** — builds the receiver image from the repo-root
+   Dockerfile, **self-tests it before anything is pushed** (packaged
+   version must equal the tag; both Cloud Run entrypoint factories
+   must import), pushes it to the **private** staging repo
+   (`us-docker.pkg.dev/bqaa-releases/bqaa-staging/otlp-receiver`) with
+   a `<version>-candidate.<run_id>` tag, and captures the digest.
+   Auth is Workload Identity Federation — no stored keys.
+3. **`build`** — injects the pinned public image reference
+   (`us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver:<version>@sha256:…`)
+   into `_release.py` **before** `python -m build`, so wheel and sdist
+   both embed it; builds the plugin tarball; runs the mechanical
+   digest-equality gate (`scripts/release_image_tool.py verify`);
+   writes `SHA256SUMS`.
+4. **`github-release`** — creates a **draft** release with all
+   artifacts + checksums and the pinned image reference in the body.
+   Nothing is customer-visible yet.
+5. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
+   Trusted Publishing. No `skip-existing`: if the version already
+   exists there, the upload fails loudly — that version is burned
+   (see below).
+6. **`promote`** — waits on the `release-promote` environment. Run
+   the TestPyPI full-lifecycle gate BEFORE approving (see next
+   section). On approval: crane-copies the staging digest to the
+   public coordinate (content-addressed — the digest the artifacts
+   embed is unchanged), asserts public digest == packaged constant,
+   and publishes the draft release.
+7. **`publish-pypi`** — PyPI, gated by the `pypi` environment;
+   requires `promote`.
 
-The plugin tarball is **never** uploaded to PyPI — it ships only as a
-GitHub release asset.
+The plugin tarball and `SHA256SUMS` are **never** uploaded to PyPI —
+they ship only as GitHub release assets.
+
+## The TestPyPI full-lifecycle gate (before approving `release-promote`)
+
+In a clean venv on a machine with NO repo checkout:
+
+```bash
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            bigquery-agent-analytics-tracing==${VERSION}
+bqaa-otel bootstrap --preflight ...
+bqaa-otel bootstrap ... --image <staging-ref>@sha256:<digest> --execute
+bqaa-otel verify --smoke ...
+bqaa-otel teardown ...
+```
+
+(The staging ref + digest are in the `build-image` job output.) All
+green → approve `release-promote`, then run the post-promotion smoke
+WITHOUT `--image` (embedded public default), then approve `pypi`.
+Post evidence on the release issue.
+
+## Version-burn rule
+
+TestPyPI and PyPI must carry **byte-identical artifacts at the same
+version**. If a candidate fails the gate, that version is burned
+everywhere: bump the version, re-tag, rebuild from scratch. Never
+re-upload, never re-tag an image (staging and public tags are
+immutable — enforced at the repository level).
 
 ## Verifying the release
 
@@ -88,8 +134,13 @@ tar -tzf /tmp/plugin.tar.gz | head
   `PackageNotFoundError`; the `Install built wheel` step should have
   prevented this. Check that step's logs and rebuild.
 - **`publish-testpypi` fails with OIDC error** — Trusted Publisher is
-  not configured on the TestPyPI side. The GitHub release is still
-  good; configure TestPyPI then re-run the `publish-testpypi` job.
+  not configured on the TestPyPI side. Configure TestPyPI then re-run
+  the `publish-testpypi` job.
+- **`publish-testpypi` fails with "version already exists"** — that
+  version was burned by an earlier candidate. Bump, re-tag, rebuild.
+- **`build-image` fails WIF auth** — check the pool/provider and the
+  `bqaa-release-publisher` SA bindings in `bqaa-releases` (see the
+  workflow `env:` block for the exact resource names).
 - **`publish-pypi` fails the same way** — same fix on the PyPI side.
 
 If a release ships a broken artifact, do **not** delete the tag.
@@ -113,6 +164,11 @@ TestPyPI) and add a publisher with:
 
 These names must match exactly — the `environment:` blocks in the
 workflow are the binding contract.
+
+GitHub-side one-time setup: create environments `testpypi`, `pypi`,
+and `release-promote` in the repo settings, with required reviewers
+on `pypi` and `release-promote` (approving `release-promote` asserts
+the TestPyPI full-lifecycle gate passed).
 
 Until both publishers are configured, the `publish-testpypi` and
 `publish-pypi` jobs will fail with a clear error. The `build` and
