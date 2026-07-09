@@ -1102,3 +1102,24 @@ class TestTraceFilterNewFields:
     assert "agent = @agent_id" in where
     assert "tool_origin" in where
     assert "root_agent_name" in where
+
+  def test_row_scope_where_default_is_true(self):
+    assert TraceFilter().row_scope_where() == "TRUE"
+    assert TraceFilter(session_ids=["a"]).row_scope_where() == "TRUE"
+
+  def test_row_scope_where_carries_labels_and_experiment(self):
+    filt = TraceFilter(
+        session_ids=["s1"],
+        custom_labels={"run": "r1", "slice": "v1_test"},
+        experiment_id="exp1",
+    )
+    row_where = filt.row_scope_where()
+    assert "@label_key_0" in row_where and "@label_val_0" in row_where
+    assert "@label_key_1" in row_where and "@label_val_1" in row_where
+    assert "@experiment_id" in row_where
+    # session_ids select sessions; they must NOT scope rows.
+    assert "session_id" not in row_where
+    # Same parameters as to_sql_conditions, so one params list serves both.
+    _, params = filt.to_sql_conditions()
+    names = {p.name for p in params}
+    assert {"label_key_0", "label_val_0", "experiment_id"} <= names

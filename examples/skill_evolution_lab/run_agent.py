@@ -117,7 +117,7 @@ def _tool_calls_detail(chat) -> list[dict]:
   return calls
 
 
-def _session_events(chat) -> list[tuple[str, dict]]:
+def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
   """Ordered ``(event_type, content)`` pairs in the BQAA plugin's schema.
 
   Walks the full chat history in chronological order and emits the same
@@ -166,6 +166,26 @@ def _session_events(chat) -> list[tuple[str, dict]]:
                 {"tool": getattr(fr, "name", "") or "", "result": resp},
             )
         )
+  # get_history() sometimes omits the final model text part (observed with
+  # thinking models: the answer exists on the response object but not in the
+  # history), leaving the trace without its final LLM_RESPONSE -- the judge
+  # then scores an answerless conversation. Backfill from the captured
+  # conversation so the trace always ends with the agent's actual reply.
+  if conversation:
+    final_text = next(
+        (
+            t["text"]
+            for t in reversed(conversation)
+            if t["role"] == "agent" and t["text"]
+        ),
+        "",
+    )
+    has_final = any(
+        et == "LLM_RESPONSE" and c.get("response") == final_text
+        for et, c in events
+    )
+    if final_text and not has_final:
+      events.append(("LLM_RESPONSE", {"response": final_text}))
   return events
 
 
@@ -197,7 +217,7 @@ def _run_one(client, model, skill_text, question, collect_events=False):
       "category": question.get("category", ""),
   }
   if collect_events:
-    record["_events"] = _session_events(chat)
+    record["_events"] = _session_events(chat, conversation)
   return record
 
 

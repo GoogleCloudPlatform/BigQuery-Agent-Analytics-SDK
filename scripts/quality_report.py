@@ -1036,6 +1036,24 @@ def resolve_trace_responses(traces):
     user_turns, tool_calls = _count_trace_metrics(trace)
     conversation = _extract_conversation(trace) if user_turns > 1 else []
 
+    # The conversation opener anchors the session's topic. `question` is the
+    # *last* user message (aligned with the final response); golden matching
+    # must use the FIRST one, or a correction session gets matched by its
+    # pushback text ("I thought it was 10, right?") and never finds its
+    # golden pair -- the conversations-file path already matches on turns[0].
+    first_question = question
+    for span in trace.spans:
+      if span.event_type == "USER_MESSAGE_RECEIVED":
+        c = span.content
+        text = (
+            (c.get("text_summary") or c.get("text") or "")
+            if isinstance(c, dict)
+            else (str(c) if c else "")
+        )
+        if text:
+          first_question = text
+          break
+
     result = {
         "session_id": trace.session_id,
         "time": (
@@ -1044,6 +1062,7 @@ def resolve_trace_responses(traces):
             else "?"
         ),
         "question": question,
+        "first_question": first_question,
         "answered_by": answered_by,
         "response": (response or ""),
         "latency_s": latency_s,
@@ -1308,9 +1327,15 @@ def run_evaluation(
   all_session_ids = [sr.session_id for sr in report.session_results]
   logger.info("Resolving responses for %d sessions...", len(all_session_ids))
 
+  # custom_labels must carry over: session_ids repeat across scoring passes
+  # (e.g. the same held-out set replayed under slice=v0_test and
+  # slice=v1_test), and an unfiltered fetch merges those passes into one
+  # trace -- duplicated user turns, phantom multi-turn sessions.
   traces = client.list_traces(
       filter_criteria=TraceFilter(
-          session_ids=all_session_ids, limit=len(all_session_ids)
+          session_ids=all_session_ids,
+          limit=len(all_session_ids),
+          custom_labels=custom_labels,
       )
   )
   resolved = resolve_trace_responses(traces)
@@ -1326,7 +1351,8 @@ def run_evaluation(
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
     question_by_sid = {
-        sid: ctx.get("question", "") for sid, ctx in resolved_map.items()
+        sid: ctx.get("first_question") or ctx.get("question", "")
+        for sid, ctx in resolved_map.items()
     }
     _golden_ctx, golden_metadata = match_golden_qa(
         question_by_sid, golden_qa, threshold=golden_threshold

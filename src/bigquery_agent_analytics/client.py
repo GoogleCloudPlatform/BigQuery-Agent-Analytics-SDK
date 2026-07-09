@@ -166,6 +166,7 @@ SELECT
   e.is_truncated
 FROM `{project}.{dataset}.{table}` e
 JOIN trace_sessions ts ON e.session_id = ts.session_id
+WHERE {row_where}
 ORDER BY e.session_id, e.timestamp ASC
 """
 
@@ -854,6 +855,7 @@ class Client:
         dataset=self.dataset_id,
         table=self.table_id,
         where=where,
+        row_where=filt.row_scope_where(),
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=params,
@@ -1064,7 +1066,10 @@ class Client:
       fallback_reasons.append(f"ml_generate_text: {e}")
 
     # Fallback: fetch traces using same table/filter, evaluate via API
-    api_report = self._api_judge(evaluator, table, where, params)
+    row_where = (
+        trace_filter.row_scope_where() if trace_filter is not None else "TRUE"
+    )
+    api_report = self._api_judge(evaluator, table, where, params, row_where)
     api_report.details["execution_mode"] = "api_fallback"
     if fallback_reasons:
       api_report.details["fallback_reason"] = "; ".join(fallback_reasons)
@@ -1216,6 +1221,7 @@ class Client:
       table,
       where,
       params,
+      row_where="TRUE",
   ) -> EvaluationReport:
     """Evaluates using the Gemini API (fallback).
 
@@ -1228,6 +1234,7 @@ class Client:
         dataset=self.dataset_id,
         table=table,
         where=where,
+        row_where=row_where,
     )
     job_config = with_sdk_labels(
         bigquery.QueryJobConfig(query_parameters=params),
