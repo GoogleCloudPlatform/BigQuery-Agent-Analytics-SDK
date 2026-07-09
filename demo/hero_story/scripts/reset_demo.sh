@@ -22,6 +22,7 @@ echo "==> Bootstrap plan (mutates nothing)"
 python3 -m bigquery_agent_analytics_tracing.otlp.cli bootstrap \
   --project "$PROJECT" --dataset "$DATASET" --region "$REGION" \
   --bq-location "$BQ_LOCATION" \
+  --build-from-source \
   --signals logs,metrics,traces --source claude-code,codex \
   --out "$EVIDENCE_DIR/artifacts" | tee "$EVIDENCE_DIR/bootstrap_plan.txt" | tail -3
 
@@ -30,6 +31,7 @@ echo "==> Bootstrap execute (fresh install ~15 min incl. Cloud Build; converges 
 python3 -m bigquery_agent_analytics_tracing.otlp.cli bootstrap \
   --project "$PROJECT" --dataset "$DATASET" --region "$REGION" \
   --bq-location "$BQ_LOCATION" \
+  --build-from-source \
   --signals logs,metrics,traces --source claude-code,codex \
   --out "$EVIDENCE_DIR/artifacts" --execute
 
