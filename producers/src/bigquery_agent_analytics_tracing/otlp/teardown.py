@@ -175,6 +175,15 @@ def run_teardown(
             "--format=json",
         ]
     )
+    if listing is None:
+      # Hard-fail BEFORE anything destructive: if the DTS listing is
+      # unreadable we cannot find the scheduled MERGE, and deleting the
+      # rest would leave it running (and billing) against a dead dataset.
+      raise RuntimeError(
+          "cannot list DTS scheduled queries (bq ls --transfer_config"
+          " failed) — refusing to start the destructive teardown; fix"
+          " access to BigQuery Data Transfer and re-run"
+      )
     dts_name = bootstrap._find_merge_config(listing, s.dataset)
     if dts_name:
       deletions.append(

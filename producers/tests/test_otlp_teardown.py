@@ -234,8 +234,37 @@ class TestLiveReconstruction:
     settings = teardown.TeardownSettings(
         project="my-proj", dataset="ds1", inventory=None
     )
-    r = ProbeRunner(probes={bootstrap.SECRET: "exists"})
-    report = teardown.run_teardown(settings, r, echo=lambda *_: None)
+    lines = []
+    report = teardown.run_teardown(settings, ProbeRunner(), echo=lines.append)
     assert report.dry_run
-    # The plan still covers the deterministic resource classes.
-    assert any(bootstrap.SECRET in c.message for c in report.checks) or True
+    plan = "\n".join(lines)
+    # The reconstructed plan covers every deterministic resource class...
+    assert bootstrap.SECRET in plan
+    assert bootstrap.RECEIVER_SVC in plan
+    assert bootstrap.DLQ_SUBSCRIPTION in plan
+    assert "my-proj:ds1" in plan
+    # ...and never assumes a source-build AR repo.
+    assert "repositories delete" not in plan
+
+
+class TestDtsListingGate:
+
+  def test_unreadable_dts_listing_refuses_before_any_deletion(self, tmp_path):
+    class ListingFailsRunner(ProbeRunner):
+
+      def run(self, argv, input_text=None):
+        joined = " ".join(argv)
+        if "--transfer_config" in joined and "ls" in argv:
+          self.calls.append(joined)
+          raise subprocess.CalledProcessError(1, list(argv), stderr="boom")
+        return super().run(argv, input_text)
+
+    r = ListingFailsRunner()
+    with pytest.raises(RuntimeError, match="DTS"):
+      teardown.run_teardown(
+          _settings(tmp_path, confirm=True), r, echo=lambda *_: None
+      )
+    # The refusal happened BEFORE anything destructive ran: the scheduled
+    # MERGE must never survive while the rest of the deployment is gone.
+    assert not any("delete" in c for c in r.calls)
+    assert not any("rm" in c.split() for c in r.calls)
