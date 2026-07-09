@@ -675,3 +675,19 @@ def test_teardown_inventory_mismatch_is_a_usage_error(tmp_path, capsys):
   )
   assert rc == 2
   assert "inventory" in capsys.readouterr().err
+
+
+def test_teardown_precondition_failure_is_clean_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+  from bigquery_agent_analytics_tracing.otlp import teardown as teardown_mod
+
+  def _refuse(*a, **k):
+    raise RuntimeError("cannot list DTS scheduled queries — refusing")
+
+  monkeypatch.setattr(teardown_mod, "run_teardown", _refuse)
+  rc = _run(["teardown", "--project", "p", "--dataset", "ds1", "--confirm"])
+  assert rc == 1
+  err = capsys.readouterr().err
+  assert "DTS" in err
+  assert "Traceback" not in err

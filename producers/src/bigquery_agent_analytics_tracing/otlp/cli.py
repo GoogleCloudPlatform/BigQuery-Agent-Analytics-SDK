@@ -468,6 +468,11 @@ def _cmd_teardown(args: argparse.Namespace) -> int:
     )
   except ValueError as exc:
     return _report_settings_error(exc)
+  except RuntimeError as exc:
+    # Refused precondition (e.g. unreadable DTS listing before a
+    # destructive run) — an admin-facing error, never a traceback.
+    print(f"bqaa-otel: error: {exc}", file=sys.stderr)
+    return 1
   return 0 if (report.dry_run or report.ok) else 1
 
 
