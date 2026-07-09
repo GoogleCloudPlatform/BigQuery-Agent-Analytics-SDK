@@ -54,6 +54,8 @@ skill file changes** — so the delta is attributable to the skill.
 | Out-of-scope (declined) | 100.0% (10/10) | 80.0% (8/10) | -20.0pp |
 | Parroted sub-trajectories | 11 | 0 | — |
 | Called any tool | 14/80 | 61/80 | — |
+| — `lookup_company_policy` | 9/80 | 56/80 | — |
+| — `calculate_disability_pay` | 5/80 | 5/80 | — |
 
 The two defects are visible as two separate failure signatures. Defect #1 shows
 up in the single-turn slice: V0 deflects tool-covered topics to HR (401k,
@@ -72,6 +74,11 @@ substance (routed a flickering monitor to IT, refused to share a coworker's
 review) but wrapped it helpfully enough that the strict judge read it as an
 answer. V0 scores 10/10 there only because deflecting *everything* happens to
 be right for genuinely out-of-scope asks.
+
+V1 saturates the in-scope slice (70/70), so the ceiling here is the test set,
+not the method — a harder slice (ambiguous phrasing, multi-topic questions,
+lookup-plus-calculation combos) is the natural next notch and would land V1 at
+a real number under 100%.
 
 **A note on model drift.** A June 2026 recorded run measured `gemini-3.5-flash`
 at 18% single-turn under the *same* defect-#1 wording; by July the flash

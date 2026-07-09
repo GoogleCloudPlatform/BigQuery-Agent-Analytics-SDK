@@ -256,6 +256,64 @@ each session's structured tool calls (`tool_calls_detail: [{name, args}]`), whic
 the scorer carries through so the analysts — and `compare_runs.py`'s tool-selection
 table — can reason about *which* tool was chosen, not just how many calls happened.
 
+Three conventions save an hour of source-reading when you wire it in:
+
+- **`session_id` prefixes drive the metric slicing.** The scorer and
+  `compare_runs.py` key off prefixes (like `oos_`) and the correction tags to
+  split *Overall* into single-turn / corrections / out-of-scope — name your
+  sessions accordingly and the slices come for free.
+- **`eval_spec.tools` is freeform prose.** It's a plain description the judge
+  and analysts read, so write what each tool covers and when to reach for it,
+  in sentences.
+- **The root-cause taxonomy is fixed.** Analysts diagnose into a closed set
+  (`TOOL_USAGE`, `MISSING_RULE`, `PARROTING`, ...) — that's what keeps patches
+  consolidatable; add a new category in code if you need one.
+
+Before shipping an evolved skill, skim it for the usual red flags: keyword
+tables where a rule belongs, a dropped section, a missing version bump, or
+baked-in numbers that should come from a tool.
+
+## The evolution pipeline
+
+The engine ([`scripts/skill_evolution.py`](../../scripts/skill_evolution.py))
+takes the scored report plus the current skill and writes a new one — roughly,
+"how a human expert writes an operational manual":
+
+```text
+Quality report (scored conversations)
+   |
+   v
+Partition: successes (meaningful/declined) vs failures (unhelpful/partial)
+   |   (a "meaningful" session with a PARROTED correction is moved to failures)
+   |
+   +-- Error analysts   (one per failure):  root cause + "what rule prevents it?"
+   +-- Success analysts (sampled):          "what worked? should we reinforce it?"
+   |          (each analyst sees ONE trajectory on a FROZEN copy of the skill)
+   v
+Quality gate (drop weak / category-less patches)
+   |
+   v
+Consolidator (prevalence-weighted) x N candidates -> pick one (median-size, or best via score_fn)
+   |
+   v
+Compaction if the skill is over the size cap
+   |
+   v
+Evolved SKILL.md (version bumped, evolved_from recorded)
+```
+
+Three design choices matter:
+
+- **Parallel and independent.** Each analyst sees one trajectory on a *frozen*
+  copy of the skill — no cross-contamination, no ordering problems.
+- **Learn from successes too.** Error analysts find *what to stop doing*;
+  success analysts find *what to keep doing*. You need both, or you get a skill
+  that's all "don'ts."
+- **Inductive consolidation.** Rules are ranked by how many analysts proposed
+  them, so a strong recurring signal leads the skill — prevalence decides, on
+  the numbers. Ranking is soft: a concrete, non-conflicting one-off can still
+  make the cut.
+
 ## How it relates to the research
 
 The engine follows [Trace2Skill](https://arxiv.org/abs/2603.25158) (parallel
@@ -306,3 +364,44 @@ than a pile of baked facts:
     the user's own wording itself.
 12. Generalize, do not enumerate: prefer ONE rule over a long list of specific topics.
 ```
+
+## Taking it to production
+
+Every role — judge, analyst, consolidator — is domain-blind machinery. You
+point it at your own agent with three inputs: your golden Q&A (plus a one-line
+scope), your current skill, and your tool descriptions. What the machinery
+can't supply is the *quality* of those inputs, so the caveats are about keeping
+them honest:
+
+- **The judge is only as honest as the golden Q&A.** It's an LLM, so spot-check
+  verdicts and grow the golden set over time. A full scorecard is several model
+  calls per session, so budget for it (or score just the primary dimensions).
+  For scale: a full round at this demo's size is roughly 68 pro-class analyst
+  calls, a handful of consolidation calls, and a few flash-class judge calls
+  per session — single-digit dollars on current pricing.
+- **The analyst is a diagnostician** — it proposes, the consolidator disposes —
+  and it reasons over text, so a *broken* tool and a *misused* one look
+  identical to it. Its diagnoses are only as sharp as your tool descriptions
+  (the analysts' tool-awareness comes entirely from `eval_spec.tools`).
+- **The consolidator is the stochastic bottleneck.** The same patches can merge
+  into very different skills — hence best-of-N, the incumbent gate, and the
+  anti-bloat rules above.
+
+**More than one tool?** The demo's two tools force a *choice*, and the evolved
+V1 grows a real routing rule (lookup for facts, calculator for personalized
+math). As the tool count climbs the mechanism holds, but two things matter more
+with every tool you add: sharp tool descriptions (vague ones produce
+confident-but-wrong diagnoses, and "skipped the tool" splits from "picked the
+*wrong* tool") and compaction (per-tool rules are how a skill bloats).
+
+**The production shape.** Swap simulated traffic for the real sessions your
+agent already logs, filtered to the deployed skill version. Run the engine as a
+scheduled job (for example a Cloud Run Job over recent BigQuery sessions), and
+turn its output into a PR for the skill fix plus labeled issues for what a
+skill can't touch (knowledge and tool gaps) — a human reviews and merges. Treat
+the golden Q&A and the tool descriptions as living artifacts.
+
+**Known limitation.** The evolved V1 still *opens* with V0's four baked facts.
+The engine's mandate is behavioral rules, so it leaves the inherited fact block
+alone; migrating those base facts into the lookup tool (so the skill is pure
+behavior) is future work.
