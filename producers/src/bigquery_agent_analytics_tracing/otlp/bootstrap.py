@@ -39,9 +39,10 @@ import shlex
 import subprocess
 from typing import Callable, Protocol
 
+from bigquery_agent_analytics_tracing.otlp import _release
+
 from . import _release
 from . import config_artifacts
-from bigquery_agent_analytics_tracing.otlp import _release
 from . import ddl
 from . import sql
 

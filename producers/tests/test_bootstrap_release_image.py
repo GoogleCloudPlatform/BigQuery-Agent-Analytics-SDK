@@ -31,7 +31,8 @@ from bigquery_agent_analytics_tracing.otlp import _release
 from bigquery_agent_analytics_tracing.otlp import bootstrap
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from test_otlp_bootstrap import FakeRunner, _settings
+from test_otlp_bootstrap import _settings
+from test_otlp_bootstrap import FakeRunner
 
 RELEASED = (
     "us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver:0.2.0@sha256:"
