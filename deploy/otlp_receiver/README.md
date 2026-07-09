@@ -15,7 +15,8 @@ Claude Code / Codex --OTLP--> Cloud Run receiver --> Pub/Sub --> consumer --> Bi
 ```bash
 # Print the plan (runs nothing):
 PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
-  bootstrap --project my-proj --dataset agent_analytics --region us-central1
+  bootstrap --project my-proj --dataset agent_analytics --region us-central1 \
+  --build-from-source
 
 # Apply it:
 PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
