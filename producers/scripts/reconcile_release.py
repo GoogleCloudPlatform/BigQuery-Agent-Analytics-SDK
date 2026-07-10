@@ -31,6 +31,7 @@ States:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -124,6 +125,44 @@ def reconcile(
       return "partial", f"PyPI digest of {name} differs from the build anchor"
 
   return "complete", "byte identity proven against the build anchor"
+
+
+@dataclasses.dataclass(frozen=True)
+class DispatchAction:
+  publish: bool
+  exit_code: int
+  message: str
+
+
+def dispatch(state: str) -> DispatchAction:
+  """Exhaustive, fail-closed state→workflow mapping (#356 round 5:
+  invalid-anchor previously fell through a bash case with exit 0)."""
+  if state == "complete":
+    return DispatchAction(True, 0, "byte identity proven — publish")
+  if state == "unpublished":
+    return DispatchAction(
+        False,
+        1,
+        "PyPI publication did not happen — keep the draft, fix and rerun"
+        " publish-pypi, or burn the version",
+    )
+  if state == "partial":
+    return DispatchAction(
+        False,
+        1,
+        "PARTIAL publication — yank this version on PyPI, burn it"
+        " (bump + re-tag), keep the GitHub release draft",
+    )
+  if state == "invalid-anchor":
+    return DispatchAction(
+        False,
+        1,
+        "the build anchor itself is inconsistent — investigate CI before"
+        " trusting ANY artifact of this run; do not publish or yank yet",
+    )
+  return DispatchAction(
+      False, 1, f"unknown reconciliation state {state!r} — failing closed"
+  )
 
 
 def main(argv: list[str] | None = None) -> int:

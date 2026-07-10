@@ -93,13 +93,24 @@ rec = req.resource_logs.add().scope_logs.add().log_records.add()
 rec.body.string_value = 'release-selftest'
 sys.stdout.buffer.write(req.SerializeToString())
 " > "${TMPDIR:-/tmp}/bqaa-selftest-payload.bin"
-GOOD=$(curl -s --connect-timeout 2 --max-time 10 -o /dev/null -w '%{http_code}' \
+RESPONSE_FILE="${TMPDIR:-/tmp}/bqaa-selftest-response.json"
+GOOD=$(curl -s --connect-timeout 2 --max-time 10 -o "$RESPONSE_FILE" -w '%{http_code}' \
   -X POST http://127.0.0.1:18080/v1/logs \
   -H 'Content-Type: application/x-protobuf' \
   -H 'Authorization: Bearer selftest-token' \
   --data-binary @"${TMPDIR:-/tmp}/bqaa-selftest-payload.bin")
 test "$GOOD" = "200" || { echo "authenticated export got ${GOOD}, want 200"; docker logs bqaa-selftest-recv | tail -20; exit 1; }
-echo "authenticated protobuf export: 200"
+# 200 alone is NOT a decoded export: the receiver can answer 200 with
+# published=0, and per-record decode failures return 200 with
+# dead_lettered>0. Require actual publication and zero dead letters.
+python3 - "$RESPONSE_FILE" << 'CHECK_EOF'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert body.get("published", 0) > 0, f"nothing published: {body}"
+assert body.get("dead_lettered", 0) == 0, f"records dead-lettered: {body}"
+print(f"decoded + published: {body['published']} record(s), 0 dead-lettered")
+CHECK_EOF
+echo "authenticated protobuf export: 200 with proven publication"
 
 IMAGE_ID=$(docker inspect "$IMAGE" --format '{{.Id}}')
 echo "SELFTEST_IMAGE_ID=${IMAGE_ID}"

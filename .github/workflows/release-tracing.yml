@@ -233,8 +233,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
+      - name: Install the hash-locked build toolchain
+        # The wheel/sdist/plugin become the trusted release anchor: their
+        # toolchain must not resolve mutable upstream code. hatchling +
+        # build come from the reviewed lock; --no-isolation below makes
+        # the locked backend authoritative.
+        run: pip install --require-hashes -r build-requirements.lock
 
       - name: Inject the pinned public image reference
         # BEFORE building: wheel AND sdist must both embed the constant.
@@ -246,8 +250,8 @@ jobs:
             --coordinate "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" \
             --digest "${{ needs.build-image.outputs.digest }}"
 
-      - name: Build wheel and sdist
-        run: python -m build
+      - name: Build wheel and sdist (no isolation — locked backend)
+        run: python -m build --no-isolation
 
       - name: Digest-equality gate (wheel == sdist == expected)
         run: |
@@ -256,12 +260,12 @@ jobs:
             --sdist dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
             --expected "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}@${{ needs.build-image.outputs.digest }}"
 
-      - name: Install built wheel
+      - name: Install built wheel (metadata only, no dependency resolution)
         # importlib.metadata.version() needs to see the dist-info so
-        # build_claude_plugin.py stamps the real version (not the
-        # pyproject fallback). Installing the wheel mirrors the
-        # producers-ci build path exactly.
-        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+        # build_claude_plugin.py stamps the real version. --no-deps: this
+        # step must not pull mutable runtime dependencies into the job
+        # that produces the trusted anchor.
+        run: pip install --no-deps dist/bigquery_agent_analytics_tracing-*.whl
 
       - name: Build Claude Code plugin tarball
         run: python scripts/build_claude_plugin.py
@@ -532,12 +536,24 @@ jobs:
           mkdir -p release
           if ! gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
               --dir release --pattern "*" 2> download.err; then
-            echo "state=unpublished" >> "$GITHUB_ENV"
-            echo "release/assets not downloadable: $(head -1 download.err)"
-            exit 0
+            if grep -qi "release not found" download.err; then
+              echo "state=unpublished" >> "$GITHUB_ENV"
+              echo "no GitHub release exists for ${GITHUB_REF_NAME}"
+              exit 0
+            fi
+            # Auth/rate-limit/network/API failures are INDETERMINATE, not
+            # absence — the wrong recovery advice is worse than an error.
+            echo "::error::GitHub release lookup indeterminate: $(head -1 download.err)"
+            exit 1
           fi
-          curl -sf "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" \
-            -o pypi.json || echo '{}' > pypi.json
+          HTTP=$(curl -s -o pypi.json -w '%{http_code}' \
+            "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json")
+          if [ "$HTTP" = "404" ]; then
+            echo '{}' > pypi.json
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
           python3 producers/scripts/reconcile_release.py \
             --version "${VERSION}" --anchor-dir anchor/ \
             --release-dir release/ --pypi-json pypi.json | tee reconcile.out
@@ -559,18 +575,27 @@ jobs:
           echo "state=${STATE}" >> "$GITHUB_ENV"
 
       - name: Publish the draft release (complete state only, never as Latest)
+        # The state→action mapping lives in reconcile_release.dispatch()
+        # (unit-tested, exhaustive, fail-closed — an unknown or
+        # invalid-anchor state can never fall through with exit 0).
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          case "$state" in
-            complete)
-              gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-                --draft=false --latest=false
-              echo "release published" ;;
-            unpublished)
-              echo "::error::PyPI publication did not happen — the GitHub release stays draft; fix and rerun publish-pypi, or burn the version"
-              exit 1 ;;
-            partial)
-              echo "::error::PARTIAL publication (PyPI files or release assets incomplete). Recovery: yank this version on PyPI, burn it (bump + re-tag), keep the GitHub release draft"
-              exit 1 ;;
-          esac
+          set -euo pipefail
+          VERDICT=$(python3 -c "
+          import sys
+          sys.path.insert(0, 'producers/scripts')
+          import reconcile_release
+          action = reconcile_release.dispatch('$state')
+          print(f'{int(action.publish)}|{action.exit_code}|{action.message}')")
+          PUBLISH=$(echo "$VERDICT" | cut -d'|' -f1)
+          EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
+          MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
+          if [ "$PUBLISH" = "1" ]; then
+            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --draft=false --latest=false
+            echo "release published: ${MESSAGE}"
+          else
+            echo "::error::${MESSAGE}"
+          fi
+          exit "$EXIT_CODE"

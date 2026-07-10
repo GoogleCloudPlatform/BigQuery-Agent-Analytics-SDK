@@ -28,8 +28,12 @@ WORKDIR /app
 #      -o deploy/otlp_receiver/requirements.lock producers/pyproject.toml"
 COPY deploy/otlp_receiver/requirements.lock /src/requirements.lock
 COPY producers /src/producers
+# The PEP 517 build backend is hash-locked too: a bare --no-deps install
+# would still download an unpinned hatchling into an isolated build env
+# (#356 round 5). --no-build-isolation makes the locked one authoritative.
 RUN pip install --no-cache-dir --require-hashes -r /src/requirements.lock \
-    && pip install --no-cache-dir --no-deps /src/producers \
+    && pip install --no-cache-dir --require-hashes -r /src/producers/build-requirements.lock \
+    && pip install --no-cache-dir --no-build-isolation --no-deps /src/producers \
     && pip freeze > /opt/bqaa-resolved-requirements.txt
 
 ENV PORT=8080

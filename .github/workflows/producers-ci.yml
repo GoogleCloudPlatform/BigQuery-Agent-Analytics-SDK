@@ -20,13 +20,19 @@ on:
     paths:
       - 'producers/**'
       - 'plugins/claude_code/**'
+      - 'deploy/otlp_receiver/**'
+      - '.dockerignore'
       - '.github/workflows/producers-ci.yml'
+      - '.github/workflows/release-tracing.yml'
   pull_request:
     branches: [main]
     paths:
       - 'producers/**'
       - 'plugins/claude_code/**'
+      - 'deploy/otlp_receiver/**'
+      - '.dockerignore'
       - '.github/workflows/producers-ci.yml'
+      - '.github/workflows/release-tracing.yml'
 
 concurrency:
   group: producers-ci-${{ github.ref }}

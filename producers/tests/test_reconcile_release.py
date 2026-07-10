@@ -179,3 +179,27 @@ def test_pypi_digest_mismatch_is_partial(tmp_path):
   anchor = _anchor(tmp_path)
   state, _ = _run(tmp_path, anchor=anchor, pypi=_pypi(anchor, corrupt=(WHEEL,)))
   assert state == "partial"
+
+
+class TestDispatch:
+  """The state→workflow mapping must be exhaustive and fail-closed."""
+
+  def test_complete_publishes(self):
+    action = reconcile_release.dispatch("complete")
+    assert action.publish and action.exit_code == 0
+
+  def test_every_non_complete_state_fails(self):
+    for state in ("unpublished", "partial", "invalid-anchor"):
+      action = reconcile_release.dispatch(state)
+      assert not action.publish
+      assert action.exit_code != 0, state
+      assert action.message
+
+  def test_unknown_state_fails_closed(self):
+    action = reconcile_release.dispatch("something-new")
+    assert not action.publish and action.exit_code != 0
+
+  def test_each_state_has_surface_specific_recovery(self):
+    assert "rerun" in reconcile_release.dispatch("unpublished").message
+    assert "yank" in reconcile_release.dispatch("partial").message
+    assert "CI" in reconcile_release.dispatch("invalid-anchor").message
