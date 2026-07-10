@@ -187,10 +187,15 @@ def _session_events(chat, conversation=None) -> list[tuple[str, dict, int]]:
         ),
         "",
     )
+    # Only the FINAL turn's events count: an identical answer repeated from
+    # an earlier turn must not suppress the backfill of the actual final
+    # reply (e.g. the agent giving the same figure before and after a
+    # correction, with history dropping only the last text part).
     last_turn = max((t for _, _, t in events), default=0)
     has_final = any(
         et == "LLM_RESPONSE" and c.get("response") == final_text
-        for et, c, _t in events
+        for et, c, t in events
+        if t == last_turn
     )
     if final_text and not has_final:
       events.append(("LLM_RESPONSE", {"response": final_text}, last_turn))
