@@ -2799,22 +2799,23 @@ def _fetch_session_traces(session_ids, max_sessions=3):
     logger.debug("Failed to create BQ client", exc_info=True)
     return {}
 
-  def _fetch_one(sid):
-    try:
-      trace = client.get_session_trace(sid)
-      if trace and trace.spans:
-        return (sid, trace)
-    except Exception:
-      logger.debug("Failed to fetch trace for %s", sid, exc_info=True)
-    return None
+  # One list_traces call for the whole batch (a single BigQuery query),
+  # instead of one get_session_trace query per session (N+1 pattern).
+  wanted = list(session_ids[:max_sessions])
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
+
+    fetched = client.list_traces(
+        filter_criteria=_TraceFilter(session_ids=wanted, limit=len(wanted))
+    )
+  except Exception:
+    logger.debug("Batch trace fetch failed", exc_info=True)
+    return {}
 
   traces = {}
-  with ThreadPoolExecutor(max_workers=10) as executor:
-    results = executor.map(_fetch_one, session_ids[:max_sessions])
-    for result in results:
-      if result:
-        sid, trace = result
-        traces[sid] = trace
+  for trace in fetched:
+    if trace and trace.spans and trace.session_id in set(wanted):
+      traces[trace.session_id] = trace
   return traces
 
 
