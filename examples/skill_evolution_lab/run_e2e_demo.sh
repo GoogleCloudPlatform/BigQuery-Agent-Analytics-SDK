@@ -262,16 +262,27 @@ run_agent() {
   local skill="$1" out="$2"; shift 2
   local qargs=() q
   for q in "$@"; do qargs+=(--questions "$q"); done
+  # TODO(#360): collapse back to the single shared agent_events table once
+  # SDK issue #359 lands (trace rows scoped by labels + identity). Until
+  # then each slice logs to its own table: the demo reuses the same session
+  # ids across slices, and an id-only trace fetch would mix V0/V1 spans.
+  local slice_table="agent_events_${RUN_LABEL}_$(slice_of "$out")"
   local bqargs=(--log-bigquery --app-name skill-evolution-lab
                 --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
-  $PY run_agent.py --skill "$skill" "${qargs[@]}" \
-    --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
+  TABLE_ID="$slice_table" \
+    $PY run_agent.py --skill "$skill" "${qargs[@]}" \
+      --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
 }
 
 # score <traffic> <report>  -- golden-grounded LLM judge. Full dimensions: the two
 # primary metrics (verdict + grounding) plus the five 0-2 quality dimensions.
-# Scoring reads the sessions back from the BigQuery events table (the
-# production wiring), selected by this run's {run, slice} labels.
+# TODO(#360): return to server-side BigQuery scoring once SDK issue #358
+# lands (per-session judge context). Until then the judge runs on the
+# conversations file, because that is the only path where each session's
+# matched GOLDEN EXPECTED ANSWER reaches the judge -- correctness (and the
+# promotion gate built on it) is answer-key-graded rather than estimated.
+# Every session is still logged to BigQuery (production write path), and the
+# scorecards' execution-span trees are fetched from this slice's table.
 # Every score writes BOTH artifacts: <name>.json (machine input for the
 # engine/compare) and its human-readable twin <name>.md (--report renders the
 # markdown scorecard next to the JSON, same basename).
@@ -279,13 +290,13 @@ score() {
   GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
   PROJECT_ID="$GOOGLE_CLOUD_PROJECT" \
   DATASET_ID="${DATASET_ID:-agent_analytics}" \
-  TABLE_ID="${TABLE_ID:-agent_events}" \
+  TABLE_ID="agent_events_${RUN_LABEL}_$(slice_of "$1")" \
   DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
     $PY "$REPO_ROOT/scripts/quality_report.py" \
-      --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" --limit 500 \
-      --time-period 24h --trajectory-samples 500 \
+      --conversations-file "$1" \
+      --trajectory-samples 500 \
       --eval-spec "$SPEC" --dimensions full \
-      --tag-turns --report --output-json "$2"
+      --tag-turns --report --concurrency "$CONCURRENCY" --output-json "$2"
 }
 
 # rate <report>  -> "X% (n/N golden-matched)"
@@ -311,7 +322,8 @@ echo "  Analyst:    $ANALYST_MODEL"
 echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"
 echo "  Concurrency:$CONCURRENCY"
 echo "  Rounds:     $ROUNDS"
-echo "  Traces:     BigQuery (${DATASET_ID:-agent_analytics}.${TABLE_ID:-agent_events}, run=$RUN_LABEL)"
+echo "  Events:     BigQuery ${DATASET_ID:-agent_analytics}.agent_events_${RUN_LABEL}_<slice> (per-slice pending SDK #359)"
+echo "  Judge:      API judge, golden-answer-grounded (server-side judge pending SDK #358)"
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   echo "  Registry:   on  (skill-id=$SKILL_ID, @ $REGISTRY_LOCATION)"
 else

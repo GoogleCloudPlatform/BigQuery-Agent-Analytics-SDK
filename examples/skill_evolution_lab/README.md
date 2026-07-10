@@ -22,8 +22,10 @@ improvement substrate — the conversation, the **tool calls (name + args)**, th
 user corrections, and the outcome labels — in one analyzable place. The evolution
 engine turns those traces into behavioral skill rules and validates them on
 held-out traffic before creating a new skill revision. This lab runs that wiring
-end to end: every session is logged to a real `agent_events` table and scoring
-reads it back through the SDK's BigQuery trace path.
+end to end: every session is logged to real BigQuery event tables, and the
+scorecards' execution-span trees are read back through the SDK's trace path
+(judging temporarily runs on the conversations file so it stays
+golden-answer-grounded -- see the workarounds section below).
 
 This is the runnable companion to the blog post
 [*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/@evekhm/your-agent-can-learn-from-its-own-conversations-26f7d46ac325)
@@ -165,21 +167,29 @@ recorded round-2 run is committed at
 [`sample_run/round2/`](sample_run/round2/) — its V2 *tied* V1 and the gate
 kept the incumbent.
 
-### BigQuery is the data path
+### BigQuery is the write path; two disclosed workarounds pending SDK fixes
 
-The demo runs the production wiring end to end: `run_agent.py --log-bigquery`
-inserts every session into a real `agent_events` table (created on first use;
-`DATASET_ID`/`TABLE_ID` from `.env`, defaults `agent_analytics.agent_events`)
-in the plugin's row shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` /
-`TOOL_COMPLETED` / `LLM_RESPONSE` spans in true chronological order, with
-`root_agent_name` and per-run `custom_tags` — and scoring reads the sessions
-back through the SDK's BigQuery trace path (`quality_report.py --label
-run=<id> --label slice=<set>`). That events table is also where the execution
-traces in the markdown scorecards come from. The conversations JSON written
-into each run folder is a committed-artifact convenience (diffable inputs for
-`sample_run/`); the pipeline itself scores from BigQuery. Requires the
-BigQuery API enabled and table read/write + job permissions on the project
-(`setup.sh` takes care of the APIs).
+Every session is logged to real BigQuery event tables in the plugin's row
+shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` / `TOOL_COMPLETED` /
+`LLM_RESPONSE` spans in true chronological order, with per-turn invocation
+ids, parent spans, measured latencies, `root_agent_name`, and per-run
+`custom_tags` — and the execution-span trees in the markdown scorecards are
+read back from those tables. Two deliberate workarounds apply until their SDK
+issues land (cleanup checklist: issue #360):
+
+- **Judging** runs on the conversations file via the SDK's API judge, because
+  that is the only path whose judge receives each session's matched **golden
+  expected answer** — correctness, and the promotion gate built on it, is
+  answer-key-graded rather than judge-estimated. Server-side BigQuery judging
+  returns when issue #358 lands.
+- **Per-slice tables** (`agent_events_<run>_<slice>`): the demo reuses the
+  same session ids across slices, and the SDK's trace fetch selects rows by
+  session id alone — separate tables make V0/V1 span mixing physically
+  impossible. Collapses back to one shared `agent_events` table when issue
+  #359 lands.
+
+Requires the BigQuery API enabled and table read/write + job permissions on
+the project (`setup.sh` takes care of the APIs).
 
 ### With the Skill Registry
 
