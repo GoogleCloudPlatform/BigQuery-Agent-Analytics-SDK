@@ -3836,11 +3836,16 @@ def _render_md_from_json(json_path, args):
         )
     )
 
+  # Preserve the ORIGINAL scoring run's provenance (project, dataset, eval
+  # model, elapsed time) so the rendered report documents the run it came
+  # from, plus a record of what this render added.
+  details = dict(data.get("details") or {})
+  details["rendered_from"] = os.path.basename(json_path)
   report = CategoricalEvaluationReport(
       dataset=f"rendered from {os.path.basename(json_path)}",
       total_sessions=len(session_results),
       category_distributions=distributions,
-      details={"source_json": os.path.abspath(json_path)},
+      details=details,
       session_results=session_results,
   )
 
@@ -3882,18 +3887,26 @@ def _render_md_from_json(json_path, args):
 
   resolved_map = {s.get("session_id", ""): s for s in sessions}
 
-  # Pull execution traces from BigQuery for these session ids (the local
-  # conversations file carries the dialogue; the spans live in the events
-  # table). Silently empty when BQ is unconfigured -- the report then falls
-  # back to dialogue-only correction blocks.
-  session_ids = [s.get("session_id", "") for s in sessions]
-  trajectories = _fetch_session_traces(
-      session_ids, max_sessions=len(session_ids)
-  )
-  if trajectories:
-    logger.info(
-        "Fetched %d execution trace(s) from BigQuery.", len(trajectories)
+  # Pull execution traces from BigQuery for these session ids ONLY when the
+  # env is explicitly configured (offline renders stay pure: no queries).
+  # The spans live in the events table; without them the report falls back
+  # to dialogue-only correction blocks.
+  trajectories = {}
+  if PROJECT_ID and DATASET_ID and DATASET_ID != "local":
+    session_ids = [s.get("session_id", "") for s in sessions]
+    trajectories = _fetch_session_traces(
+        session_ids, max_sessions=len(session_ids)
     )
+    if trajectories:
+      logger.info(
+          "Fetched %d execution trace(s) from BigQuery (%s.%s.%s).",
+          len(trajectories),
+          PROJECT_ID,
+          DATASET_ID,
+          TABLE_ID,
+      )
+      # Mutate report.details (pydantic copies the dict at construction).
+      report.details["traces_source"] = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
   out_path = os.path.abspath(json_path)
   if out_path.endswith(".json"):
@@ -4463,12 +4476,23 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
     ]:
       os.environ.setdefault(var, default)
 
-  _load_config()
-
   if args.render_json:
+    # Pure offline formatting: BigQuery configuration is OPTIONAL here. When
+    # the env is configured, execution traces are fetched to enrich the
+    # correction blocks; when it is absent, the report renders from the JSON
+    # alone -- no model calls, no BigQuery, no config required.
+    try:
+      _load_config()
+    except SystemExit:
+      logger.info(
+          "BigQuery env not configured -- rendering offline from the JSON"
+          " (correction blocks fall back to the recorded dialogue)."
+      )
     md_path = _render_md_from_json(args.render_json, args)
     print(f"Markdown report: {md_path}")
     return
+
+  _load_config()
 
   if args.eval:
     run_eval(args)
