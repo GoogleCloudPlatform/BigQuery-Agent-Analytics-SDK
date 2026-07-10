@@ -117,8 +117,8 @@ def _tool_calls_detail(chat) -> list[dict]:
   return calls
 
 
-def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
-  """Ordered ``(event_type, content)`` pairs in the BQAA plugin's schema.
+def _session_events(chat, conversation=None) -> list[tuple[str, dict, int]]:
+  """Ordered ``(event_type, content, turn_index)`` triples (BQAA schema).
 
   Walks the full chat history in chronological order and emits the same
   event types (and ``content`` shapes) the BigQuery Agent Analytics plugin
@@ -126,21 +126,26 @@ def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
   TOOL_COMPLETED -- so a session written to the events table reads back
   through the SDK exactly like plugin-logged traffic (span order included,
   which is what the parroting sub-trajectory check leans on).
+  ``turn_index`` groups each event under the user turn (invocation) that
+  produced it, so the writer can assign real per-turn timestamps,
+  invocation ids, and parent spans.
   """
   try:
     history = chat.get_history(curated=False)
   except TypeError:
     history = chat.get_history()
   events = []
+  turn = -1
   for content in history or []:
     role = getattr(content, "role", "") or ""
     for part in getattr(content, "parts", None) or []:
       text = getattr(part, "text", None)
       if text:
         if role == "user":
-          events.append(("USER_MESSAGE_RECEIVED", {"text": text}))
+          turn += 1
+          events.append(("USER_MESSAGE_RECEIVED", {"text": text}, turn))
         else:
-          events.append(("LLM_RESPONSE", {"response": text}))
+          events.append(("LLM_RESPONSE", {"response": text}, max(turn, 0)))
       fc = getattr(part, "function_call", None)
       if fc:
         args = getattr(fc, "args", None)
@@ -151,6 +156,7 @@ def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
                     "tool": getattr(fc, "name", "") or "",
                     "args": dict(args) if args else {},
                 },
+                max(turn, 0),
             )
         )
       fr = getattr(part, "function_response", None)
@@ -164,6 +170,7 @@ def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
             (
                 "TOOL_COMPLETED",
                 {"tool": getattr(fr, "name", "") or "", "result": resp},
+                max(turn, 0),
             )
         )
   # get_history() sometimes omits the final model text part (observed with
@@ -180,25 +187,32 @@ def _session_events(chat, conversation=None) -> list[tuple[str, dict]]:
         ),
         "",
     )
+    last_turn = max((t for _, _, t in events), default=0)
     has_final = any(
         et == "LLM_RESPONSE" and c.get("response") == final_text
-        for et, c in events
+        for et, c, _t in events
     )
     if final_text and not has_final:
-      events.append(("LLM_RESPONSE", {"response": final_text}))
+      events.append(("LLM_RESPONSE", {"response": final_text}, last_turn))
   return events
 
 
 def _run_one(client, model, skill_text, question, collect_events=False):
   """Run a single (possibly multi-turn) question through the agent."""
+  from datetime import datetime
+  from datetime import timezone
+
   turns = _turns_of(question)
   config = build_config(skill_text)
   chat = client.chats.create(model=model, config=config)
   conversation = []
   final = ""
+  turn_times = []  # real (start, end) wall-clock per user turn, for telemetry
   t0 = time.monotonic()
   for turn in turns:
+    turn_start = datetime.now(timezone.utc)
     resp = chat.send_message(turn)
+    turn_times.append((turn_start, datetime.now(timezone.utc)))
     text = _response_text(resp)
     conversation.append({"role": "user", "text": turn})
     conversation.append({"role": "agent", "text": text})
@@ -218,6 +232,7 @@ def _run_one(client, model, skill_text, question, collect_events=False):
   }
   if collect_events:
     record["_events"] = _session_events(chat, conversation)
+    record["_turn_times"] = turn_times
   return record
 
 
@@ -306,29 +321,64 @@ def _write_bigquery(results, app_name, labels):
   for r in results:
     if r.get("error"):
       continue
-    ts = now
-    for event_type, content in r.get("_events", []):
-      # 1ms increments keep span order stable under BigQuery's timestamp sort.
-      ts = ts + timedelta(milliseconds=1)
-      rows.append(
-          {
-              "timestamp": ts.isoformat(),
-              "event_type": event_type,
-              "agent": app_name,
-              "session_id": r["session_id"],
-              "invocation_id": uuid.uuid4().hex,
-              "user_id": "lab-user",
-              "trace_id": r["session_id"],
-              "span_id": uuid.uuid4().hex[:16],
-              "parent_span_id": None,
-              "status": "ok",
-              "error_message": None,
-              "is_truncated": False,
-              "content": json.dumps(content),
-              "attributes": attributes,
-              "latency_ms": "{}",
-          }
-      )
+    events = r.get("_events", [])
+    turn_times = r.get("_turn_times") or []
+    # Plugin-equivalent identity: one unique trace id per session per run
+    # (never a reusable case id), one invocation id per user turn (shared by
+    # that turn's events), and per-turn parent spans (the USER_MESSAGE span
+    # is the turn root; the turn's TOOL_*/LLM_RESPONSE events nest under it).
+    trace_id = uuid.uuid4().hex
+    n_turns = max((t for _, _, t in events), default=0) + 1
+    invocation_ids = [uuid.uuid4().hex for _ in range(n_turns)]
+    root_span_ids: dict[int, str] = {}
+    # Real timestamps: each event lands inside its turn's measured
+    # (start, end) window -- USER at the start, LLM_RESPONSE at the end,
+    # tool events interpolated between. Sessions without measured windows
+    # (older traffic files) fall back to 1ms spacing from `now`.
+    events_by_turn: dict[int, list] = {}
+    for event_type, content, turn in events:
+      events_by_turn.setdefault(turn, []).append((event_type, content))
+    fallback_ts = now
+    for turn in sorted(events_by_turn):
+      turn_events = events_by_turn[turn]
+      if turn < len(turn_times):
+        start, end = turn_times[turn]
+      else:
+        start = fallback_ts
+        end = start + timedelta(milliseconds=len(turn_events))
+        fallback_ts = end + timedelta(milliseconds=1)
+      duration_ms = max((end - start).total_seconds() * 1000.0, 1.0)
+      step = duration_ms / max(len(turn_events) - 1, 1)
+      for i, (event_type, content) in enumerate(turn_events):
+        ts = start + timedelta(milliseconds=round(i * step, 3))
+        span_id = uuid.uuid4().hex[:16]
+        parent_span_id = root_span_ids.get(turn)
+        if event_type == "USER_MESSAGE_RECEIVED" and turn not in root_span_ids:
+          root_span_ids[turn] = span_id
+          parent_span_id = None
+        latency = "{}"
+        if event_type == "LLM_RESPONSE":
+          # The turn's measured wall-clock: request sent -> answer received.
+          latency = json.dumps({"total_ms": round(duration_ms, 1)})
+        rows.append(
+            {
+                "timestamp": ts.isoformat(),
+                "event_type": event_type,
+                "agent": app_name,
+                "session_id": r["session_id"],
+                "invocation_id": invocation_ids[min(turn, n_turns - 1)],
+                "user_id": "lab-user",
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "parent_span_id": parent_span_id,
+                "status": "ok",
+                "error_message": None,
+                "is_truncated": False,
+                "content": json.dumps(content),
+                "attributes": attributes,
+                "latency_ms": latency,
+            }
+        )
   errors = bq.insert_rows_json(table_ref, rows)
   if errors:
     raise RuntimeError(f"BigQuery insert failed: {errors[:3]}")
@@ -370,17 +420,18 @@ def _events_from_record(record, sub_trajectories=None):
 
   events = []
   for i, (user_text, agent_text) in enumerate(pairs):
-    events.append(("USER_MESSAGE_RECEIVED", {"text": user_text}))
+    events.append(("USER_MESSAGE_RECEIVED", {"text": user_text}, i))
     if i == call_pair:
       for c in calls:
         events.append(
             (
                 "TOOL_STARTING",
                 {"tool": c.get("name", ""), "args": c.get("args") or {}},
+                i,
             )
         )
-        events.append(("TOOL_COMPLETED", {"tool": c.get("name", "")}))
-    events.append(("LLM_RESPONSE", {"response": agent_text}))
+        events.append(("TOOL_COMPLETED", {"tool": c.get("name", "")}, i))
+    events.append(("LLM_RESPONSE", {"response": agent_text}, i))
   return events
 
 
@@ -487,6 +538,7 @@ def run(
   # plain dialogue schema (the committed, diffable artifact).
   for r in results:
     r.pop("_events", None)
+    r.pop("_turn_times", None)
   with open(out_path, "w") as f:
     json.dump({"conversations": results}, f, indent=2)
   ok = sum(1 for r in results if not r.get("error"))

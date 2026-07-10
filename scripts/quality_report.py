@@ -3267,6 +3267,26 @@ def _md_write_correction_analysis(
         )
         if segments:
           w("")
+          # Seeded sessions (rows tagged custom_tags.seeded) carry event
+          # streams RECONSTRUCTED from the recorded conversation, with tool
+          # placement certified by the scored sub-trajectory outcomes --
+          # label them so span trees are never mistaken for live telemetry.
+          seeded_from = next(
+              (
+                  (s.attributes or {}).get("custom_tags", {}).get("seeded")
+                  for s in trace_obj.spans
+                  if (s.attributes or {})
+                  .get("custom_tags", {})
+                  .get("seeded")
+              ),
+              None,
+          )
+          if seeded_from:
+            w(
+                f"*Spans reconstructed from the recorded conversation"
+                f" (seeded from `{seeded_from}`).*"
+            )
+            w("")
           for seg in segments:
             heading, outcome_suffix, outcome_icon = _correction_segment_heading(
                 seg.get("outcome", "?"), seg.get("label", "Segment")
