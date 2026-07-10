@@ -665,31 +665,6 @@ class TraceFilter:
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
 
-  def row_scope_where(self) -> str:
-    """SQL conditions that scope individual event rows, not session choice.
-
-    Trace queries select matching session_ids first, then fetch every row
-    for those sessions so traces come back complete. Labels and experiment
-    id are different: two scoring passes can reuse the same session_id
-    under different tags, and rows from another pass must not leak into
-    the trace. This returns those row-level conditions ("TRUE" when none),
-    referencing the same query parameters emitted by
-    :meth:`to_sql_conditions` — call that first and pass its params.
-    """
-    conditions = []
-    if self.custom_labels:
-      for i in range(len(self.custom_labels)):
-        conditions.append(
-            f"JSON_VALUE(attributes,"
-            f" CONCAT('$.custom_tags.', @label_key_{i}))"
-            f" = @label_val_{i}"
-        )
-    if self.experiment_id:
-      conditions.append(
-          "JSON_VALUE(attributes, '$.experiment_id')" " = @experiment_id"
-      )
-    return " AND ".join(conditions) if conditions else "TRUE"
-
 
 @dataclass
 class Trace:

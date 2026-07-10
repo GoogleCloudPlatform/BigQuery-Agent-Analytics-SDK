@@ -1328,37 +1328,6 @@ class TestBuildAiGenerateQuery:
     )
     assert "it''s-a-model" in sql
 
-  def test_without_session_context_has_no_join(self):
-    sql = build_ai_generate_query(
-        "p",
-        "d",
-        "t",
-        "1=1",
-        "gemini-2.5-flash",
-        0.0,
-    )
-    assert "@session_contexts" not in sql
-    assert "UNNEST" not in sql
-
-  def test_with_session_context_joins_and_splices(self):
-    sql = build_ai_generate_query(
-        "p",
-        "d",
-        "t",
-        "1=1",
-        "gemini-2.5-flash",
-        0.0,
-        with_session_context=True,
-    )
-    assert "LEFT JOIN UNNEST(@session_contexts) AS sc" in sql
-    assert "sc.session_id = session_transcripts.session_id" in sql
-    # Context is spliced between the shared prompt and the transcript,
-    # and a session without context degrades to the plain prompt.
-    prompt_idx = sql.index("@categorical_prompt")
-    ctx_idx = sql.index("COALESCE(CONCAT('\\n\\n', sc.context), '')")
-    transcript_idx = sql.index("'\\n\\nTranscript:\\n', transcript")
-    assert prompt_idx < ctx_idx < transcript_idx
-
 
 # ------------------------------------------------------------------ #
 # parse_classify_row Tests                                             #

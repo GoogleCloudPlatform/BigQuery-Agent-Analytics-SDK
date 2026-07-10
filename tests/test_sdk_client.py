@@ -1521,7 +1521,7 @@ class TestEvaluateCategoricalFallback:
       from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
       from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
 
-      async def fake_api(transcripts, config, endpoint, **kwargs):
+      async def fake_api(transcripts, config, endpoint):
         return [
             CategoricalSessionResult(
                 session_id="s1",
@@ -1946,7 +1946,7 @@ class TestEvaluateCategoricalAiClassify:
       from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
       from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
 
-      async def fake_api(transcripts, config, endpoint, **kwargs):
+      async def fake_api(transcripts, config, endpoint):
         return [
             CategoricalSessionResult(
                 session_id="s1",

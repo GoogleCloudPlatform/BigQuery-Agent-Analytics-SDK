@@ -166,7 +166,6 @@ SELECT
   e.is_truncated
 FROM `{project}.{dataset}.{table}` e
 JOIN trace_sessions ts ON e.session_id = ts.session_id
-WHERE {row_where}
 ORDER BY e.session_id, e.timestamp ASC
 """
 
@@ -855,7 +854,6 @@ class Client:
         dataset=self.dataset_id,
         table=self.table_id,
         where=where,
-        row_where=filt.row_scope_where(),
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=params,
@@ -1066,10 +1064,7 @@ class Client:
       fallback_reasons.append(f"ml_generate_text: {e}")
 
     # Fallback: fetch traces using same table/filter, evaluate via API
-    row_where = (
-        trace_filter.row_scope_where() if trace_filter is not None else "TRUE"
-    )
-    api_report = self._api_judge(evaluator, table, where, params, row_where)
+    api_report = self._api_judge(evaluator, table, where, params)
     api_report.details["execution_mode"] = "api_fallback"
     if fallback_reasons:
       api_report.details["fallback_reason"] = "; ".join(fallback_reasons)
@@ -1221,7 +1216,6 @@ class Client:
       table,
       where,
       params,
-      row_where="TRUE",
   ) -> EvaluationReport:
     """Evaluates using the Gemini API (fallback).
 
@@ -1234,7 +1228,6 @@ class Client:
         dataset=self.dataset_id,
         table=table,
         where=where,
-        row_where=row_where,
     )
     job_config = with_sdk_labels(
         bigquery.QueryJobConfig(query_parameters=params),
@@ -1283,7 +1276,6 @@ class Client:
       config: CategoricalEvaluationConfig,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
-      per_session_context: Optional[dict[str, str]] = None,
   ) -> CategoricalEvaluationReport:
     """Runs categorical evaluation over traces.
 
@@ -1299,12 +1291,6 @@ class Client:
             definitions and allowed categories.
         filters: Optional trace filters.
         dataset: Optional table name override.
-        per_session_context: Optional map of session_id to extra judge
-            context (e.g. a matched golden expected answer). Injected
-            into the judge prompt for that session on every execution
-            mode. AI.CLASSIFY cannot take per-session context, so when
-            this is set the CLASSIFY shortcut is skipped and evaluation
-            starts at AI.GENERATE.
 
     Returns:
         CategoricalEvaluationReport with per-session results and
@@ -1333,10 +1319,8 @@ class Client:
     classify_fallback_reason = None
     fallback_reason = None
 
-    # When justification is not needed, try AI.CLASSIFY first --
-    # unless per-session context must reach the judge (CLASSIFY takes
-    # only transcript + categories, so it would silently drop it).
-    if not config.include_justification and not per_session_context:
+    # When justification is not needed, try AI.CLASSIFY first.
+    if not config.include_justification:
       try:
         session_results, classify_null_count = self._categorical_ai_classify(
             config,
@@ -1372,7 +1356,6 @@ class Client:
           params,
           endpoint,
           connection_id,
-          per_session_context=per_session_context,
       )
       report = build_categorical_report(
           dataset=f"{table_ref} WHERE {where}",
@@ -1401,7 +1384,6 @@ class Client:
           where,
           params,
           endpoint,
-          per_session_context=per_session_context,
       )
       report = build_categorical_report(
           dataset=f"{table_ref} WHERE {where}",
@@ -1479,14 +1461,12 @@ class Client:
       params: list,
       endpoint: str,
       connection_id: Optional[str] = None,
-      per_session_context: Optional[dict[str, str]] = None,
   ) -> tuple[list, dict]:
     """Classifies sessions using BigQuery AI.GENERATE.
 
     Sessions where AI.GENERATE returns NULL (e.g. due to rate
     limiting or transient errors) are retried via the Gemini API
-    up to 3 times. ``per_session_context`` entries are spliced into
-    the matching session's judge prompt (and carried into retries).
+    up to 3 times.
     """
     prompt = build_categorical_prompt(config)
 
@@ -1499,7 +1479,6 @@ class Client:
         temperature=config.temperature,
         connection_id=connection_id,
         max_output_tokens=config.max_output_tokens,
-        with_session_context=bool(per_session_context),
     )
 
     query_params = list(params) + [
@@ -1509,23 +1488,6 @@ class Client:
             prompt,
         ),
     ]
-    if per_session_context:
-      query_params.append(
-          bigquery.ArrayQueryParameter(
-              "session_contexts",
-              "STRUCT",
-              [
-                  bigquery.StructQueryParameter(
-                      None,
-                      bigquery.ScalarQueryParameter(
-                          "session_id", "STRING", sid
-                      ),
-                      bigquery.ScalarQueryParameter("context", "STRING", ctx),
-                  )
-                  for sid, ctx in per_session_context.items()
-              ],
-          )
-      )
     job_config = bigquery.QueryJobConfig(
         query_parameters=query_params,
     )
@@ -1561,7 +1523,6 @@ class Client:
           config,
           endpoint,
           max_retries=3,
-          per_session_context=per_session_context,
       )
       resolved = 0
       if retried:
@@ -1592,7 +1553,6 @@ class Client:
       config: CategoricalEvaluationConfig,
       endpoint: str,
       max_retries: int = 3,
-      per_session_context: Optional[dict[str, str]] = None,
   ) -> list:
     """Retries classification for failed sessions via Gemini API.
 
@@ -1623,12 +1583,7 @@ class Client:
         time.sleep(backoff)
       try:
         results = _run_sync(
-            classify_sessions_via_api(
-                remaining,
-                config,
-                endpoint,
-                per_session_context=per_session_context,
-            )
+            classify_sessions_via_api(remaining, config, endpoint)
         )
         still_failed = {}
         for r in results:
@@ -1680,7 +1635,6 @@ class Client:
       where: str,
       params: list,
       endpoint: str,
-      per_session_context: Optional[dict[str, str]] = None,
   ) -> list:
     """Classifies sessions using the Gemini API (fallback).
 
@@ -1706,14 +1660,7 @@ class Client:
       sid = r.get("session_id", "unknown")
       transcripts[sid] = r.get("transcript", "")
 
-    return _run_sync(
-        classify_sessions_via_api(
-            transcripts,
-            config,
-            endpoint,
-            per_session_context=per_session_context,
-        )
-    )
+    return _run_sync(classify_sessions_via_api(transcripts, config, endpoint))
 
   def _persist_categorical_if_configured(
       self,

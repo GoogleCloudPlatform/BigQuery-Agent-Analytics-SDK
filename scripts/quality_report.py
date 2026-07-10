@@ -1322,18 +1322,23 @@ def run_evaluation(
     if app_name:
       trace_filter.root_agent_name = app_name
 
-  # Fetch traces and match golden Q&A BEFORE evaluation: each matched
-  # session's expected answer is injected into the server-side judge as
-  # per-session context, so correctness on the BigQuery path is graded
-  # against the golden answer -- same grounding as the
-  # --conversations-file path. The trace fetch reuses the evaluation's
-  # own filter (labels included: session_ids repeat across scoring
-  # passes, and an unfiltered fetch merges those passes into one trace).
+  # Fetch traces and match golden Q&A BEFORE evaluation, so golden metadata
+  # (matched question / expected answer per session) is available to the
+  # report either way.
+  # KNOWN LIMITATION (SDK issue #358): the server-side AI.GENERATE judge
+  # cannot receive per-session expected answers, so on this path golden Q&A
+  # drives the golden_eval_summary regression headline and per-session
+  # matched/expected reporting -- but does NOT ground the judge's
+  # correctness verdict (that is conversations-path only; scope/ground_truth
+  # still ground the judge on both paths).
+  # KNOWN LIMITATION (SDK issue #359): the trace row fetch is scoped by
+  # session selection only -- session_ids reused across scoring passes,
+  # users, or apps can merge foreign rows into a trace. Use per-pass tables
+  # or unique session ids until the SDK scopes rows by labels + identity.
   traces = client.list_traces(filter_criteria=trace_filter)
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
-  golden_ctx = {}
   golden_metadata = {}
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
@@ -1343,14 +1348,20 @@ def run_evaluation(
         sid: ctx.get("first_question") or ctx.get("question", "")
         for sid, ctx in resolved_map.items()
     }
-    golden_ctx, golden_metadata = match_golden_qa(
+    _golden_ctx, golden_metadata = match_golden_qa(
         question_by_sid, golden_qa, threshold=golden_threshold
+    )
+    logger.warning(
+        "Golden Q&A on the BigQuery path produces the golden_eval_summary"
+        " and per-session matches, but the server-side judge cannot take"
+        " per-session expected answers -- expected-answer correctness"
+        " grounding applies on the --conversations-file path only"
+        " (scope/ground_truth ground both paths). See SDK issue #358."
     )
 
   report = client.evaluate_categorical(
       config=cat_config,
       filters=trace_filter,
-      per_session_context=golden_ctx or None,
   )
 
   all_session_ids = [sr.session_id for sr in report.session_results]
