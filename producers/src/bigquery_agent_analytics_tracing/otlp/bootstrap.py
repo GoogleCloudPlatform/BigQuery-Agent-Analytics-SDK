@@ -39,6 +39,7 @@ import shlex
 import subprocess
 from typing import Callable, Protocol
 
+from . import _release
 from . import config_artifacts
 from . import ddl
 from . import sql
@@ -143,6 +144,11 @@ class _PlanRunner:
 
   _PLACEHOLDERS = (
       ("projects describe", "<project-number>"),
+      # Digest-assertion captures come before the service-name needles:
+      # 'run services describe --format=...latestCreatedRevisionName' also
+      # contains the service name.
+      ("latestCreatedRevisionName", "<revision>"),
+      ("run revisions describe", "<image-digest>"),
       (RECEIVER_SVC, "<receiver-url>"),
       (CONSUMER_SVC, "<consumer-url>"),
   )
@@ -186,6 +192,11 @@ class BootstrapSettings:
   resource_attributes: dict[str, str] | None = None
   acknowledge_content_logging: bool = False
   out_dir: pathlib.Path = pathlib.Path(".")
+  # Image source (issue #349): explicit --image wins; otherwise the
+  # released image embedded in the wheel; --build-from-source keeps the
+  # legacy repo-checkout Cloud Build path.
+  image: str | None = None
+  build_from_source: bool = False
 
   def __post_init__(self):
     # Reuse the PR 1 tier validation (privacy/signals/replay ack) so the
@@ -210,6 +221,10 @@ class BootstrapSettings:
             f"unknown source {source!r}; expected one of"
             f" {config_artifacts.SOURCES}"
         )
+    if self.image is not None and self.build_from_source:
+      raise ValueError("--image and --build-from-source are mutually exclusive")
+    if self.image is not None:
+      _validate_image_reference(self.image)
 
   def _spec(self, endpoint: str) -> config_artifacts.BootstrapSpec:
     return config_artifacts.BootstrapSpec(
@@ -232,8 +247,52 @@ class BootstrapResult:
   artifact_paths: tuple[pathlib.Path, ...]
 
 
-def _image(s: BootstrapSettings) -> str:
+_IMAGE_REF_RE = re.compile(r"[A-Za-z0-9./_:@-]+")
+
+
+def _validate_image_reference(ref: str) -> None:
+  """Reject references that cannot be a pinned deployable image.
+
+  The reference lands in gcloud argv and the written inventory; it must
+  carry a real version tag ('latest' is never published per the release
+  contract) and, when digest-pinned, a well-formed sha256.
+  """
+  if not _IMAGE_REF_RE.fullmatch(ref):
+    raise ValueError(f"invalid image reference {ref!r}")
+  base, _, digest = ref.partition("@")
+  if digest and not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+    raise ValueError(f"malformed digest in image reference {ref!r}")
+  tag = base.rsplit("/", 1)[-1].partition(":")[2]
+  if not tag:
+    raise ValueError(f"image reference {ref!r} has no version tag")
+  if tag == "latest":
+    raise ValueError(
+        "image tag 'latest' is never published; pin a version"
+        " (releases are pinned by digest)"
+    )
+
+
+def _source_image(s: BootstrapSettings) -> str:
   return f"{s.region}-docker.pkg.dev/{s.project}/{AR_REPO}/otlp-receiver:latest"
+
+
+def resolve_image(s: BootstrapSettings) -> tuple[str, str]:
+  """(image reference, mode) for this run.
+
+  Modes: 'explicit' (--image), 'source' (--build-from-source), 'released'
+  (the constant the release pipeline injected into the wheel). A dev
+  checkout has no released image, so it must pick one explicitly.
+  """
+  if s.image is not None:
+    return s.image, "explicit"
+  if s.build_from_source:
+    return _source_image(s), "source"
+  if _release.RELEASE_IMAGE is not None:
+    return _release.RELEASE_IMAGE, "released"
+  raise ValueError(
+      "no released image is embedded in this installation (development"
+      " checkout): pass --image <reference> or --build-from-source"
+  )
 
 
 def _find_merge_config(listing: str | None, dataset: str) -> str | None:
@@ -282,38 +341,56 @@ def run_bootstrap(
   consumer_sa = f"{CONSUMER_SVC}@{s.project}.iam.gserviceaccount.com"
   push_sa = f"bqaa-otlp-push@{s.project}.iam.gserviceaccount.com"
 
-  echo("==> Enabling APIs")
-  runner.run(["gcloud", "services", "enable", *proj, *_APIS])
+  image, image_mode = resolve_image(s)
 
-  echo(f"==> Ensuring Artifact Registry repo {AR_REPO!r} exists")
-  if (
-      runner.try_run(
+  echo("==> Enabling APIs")
+  # Default prebuilt-image mode has ZERO build footprint in the customer
+  # project: no Cloud Build / Artifact Registry APIs, no repo (issue #349).
+  apis = (
+      _APIS
+      if image_mode == "source"
+      else tuple(
+          a
+          for a in _APIS
+          if a
+          not in (
+              "cloudbuild.googleapis.com",
+              "artifactregistry.googleapis.com",
+          )
+      )
+  )
+  runner.run(["gcloud", "services", "enable", *proj, *apis])
+
+  if image_mode == "source":
+    echo(f"==> Ensuring Artifact Registry repo {AR_REPO!r} exists")
+    if (
+        runner.try_run(
+            [
+                "gcloud",
+                "artifacts",
+                "repositories",
+                "describe",
+                AR_REPO,
+                *proj,
+                "--location",
+                s.region,
+            ]
+        )
+        is None
+    ):
+      runner.run(
           [
               "gcloud",
               "artifacts",
               "repositories",
-              "describe",
+              "create",
               AR_REPO,
               *proj,
               "--location",
               s.region,
+              "--repository-format=docker",
           ]
       )
-      is None
-  ):
-    runner.run(
-        [
-            "gcloud",
-            "artifacts",
-            "repositories",
-            "create",
-            AR_REPO,
-            *proj,
-            "--location",
-            s.region,
-            "--repository-format=docker",
-        ]
-    )
 
   echo(f"==> Creating BigQuery dataset ({s.bq_location}) + native schema")
   bq = ["bq", f"--project_id={s.project}", f"--location={s.bq_location}"]
@@ -506,19 +583,21 @@ def run_bootstrap(
       ]
   )
 
-  echo("==> Building image")
-  image = _image(s)
-  build_config = (
-      "steps:\n"
-      "- name: gcr.io/cloud-builders/docker\n"
-      f"  args: ['build','-f','deploy/otlp_receiver/Dockerfile',"
-      f"'-t','{image}','.']\n"
-      f"images: ['{image}']\n"
-  )
-  runner.run(
-      ["gcloud", "builds", "submit", *proj, "--config=/dev/stdin", "."],
-      input_text=build_config,
-  )
+  if image_mode == "source":
+    echo("==> Building image")
+    build_config = (
+        "steps:\n"
+        "- name: gcr.io/cloud-builders/docker\n"
+        f"  args: ['build','-f','deploy/otlp_receiver/Dockerfile',"
+        f"'-t','{image}','.']\n"
+        f"images: ['{image}']\n"
+    )
+    runner.run(
+        ["gcloud", "builds", "submit", *proj, "--config=/dev/stdin", "."],
+        input_text=build_config,
+    )
+  else:
+    echo(f"==> Using prebuilt image ({image_mode}): {image}")
 
   main_topic_path = f"projects/{s.project}/topics/{MAIN_TOPIC}"
 
@@ -732,6 +811,68 @@ def run_bootstrap(
           "--format=value(status.url)",
       ]
   )
+
+  if "@sha256:" in image:
+    echo("==> Asserting deployed image digest matches the pinned reference")
+    expected_digest = image.partition("@")[2]
+    for svc in (RECEIVER_SVC, CONSUMER_SVC):
+      revision = runner.run(
+          [
+              "gcloud",
+              "run",
+              "services",
+              "describe",
+              svc,
+              *proj,
+              "--region",
+              s.region,
+              "--format=value(status.latestCreatedRevisionName)",
+          ]
+      )
+      deployed = runner.run(
+          [
+              "gcloud",
+              "run",
+              "revisions",
+              "describe",
+              revision,
+              *proj,
+              "--region",
+              s.region,
+              "--format=value(status.imageDigest)",
+          ]
+      )
+      deployed = deployed.strip()
+      if deployed.startswith("<"):  # plan mode placeholder — nothing deployed
+        continue
+      if not deployed.endswith(expected_digest):
+        raise RuntimeError(
+            f"{svc}: deployed image digest {deployed.strip()!r} does not"
+            f" match the pinned reference digest {expected_digest!r}"
+        )
+
+  echo("==> Writing the resource inventory (feeds teardown)")
+  inventory = {
+      "mode": image_mode,
+      "image": image,
+      "project": s.project,
+      "dataset": s.dataset,
+      "region": s.region,
+      "bq_location": s.bq_location,
+      "cloud_run_services": [RECEIVER_SVC, CONSUMER_SVC],
+      "pubsub_topics": [MAIN_TOPIC, DLQ_TOPIC],
+      "pubsub_subscriptions": [SUBSCRIPTION, DLQ_SUBSCRIPTION],
+      "secret": SECRET,
+      "service_accounts": [RECEIVER_SVC, CONSUMER_SVC, "bqaa-otlp-push"],
+      "dts_display_name": f"{MERGE_DISPLAY_NAME}_{s.dataset}",
+  }
+  if image_mode == "source":
+    # Only the source-build path creates a customer AR repo; teardown in
+    # default released-image mode must neither expect nor delete one.
+    inventory["ar_repo"] = AR_REPO
+  inventory_path = s.out_dir / "inventory.json"
+  write_file(inventory_path, json.dumps(inventory, indent=2) + "\n")
+  echo(f"  wrote {inventory_path}")
 
   echo("==> Generating telemetry-source config artifacts")
   artifacts = config_artifacts.render_artifacts(

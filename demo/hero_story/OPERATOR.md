@@ -35,10 +35,10 @@ export PROJECT=<your-project> DATASET=bqaa_hero_demo_$(date +%Y%m%d)
 scripts/preflight.sh "$PROJECT" "$DATASET"
 
 # Plan first (prints every command, mutates nothing), then execute:
-bqaa-otel bootstrap --project "$PROJECT" --dataset "$DATASET" \
+bqaa-otel bootstrap --project "$PROJECT" --dataset "$DATASET" --build-from-source \
   --signals logs,metrics,traces --source claude-code,codex \
   --out demo/hero_story/evidence/artifacts
-bqaa-otel bootstrap --project "$PROJECT" --dataset "$DATASET" \
+bqaa-otel bootstrap --project "$PROJECT" --dataset "$DATASET" --build-from-source \
   --signals logs,metrics,traces --source claude-code,codex \
   --out demo/hero_story/evidence/artifacts --execute
 ```

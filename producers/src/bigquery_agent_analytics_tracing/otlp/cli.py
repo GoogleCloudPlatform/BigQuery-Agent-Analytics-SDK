@@ -31,6 +31,8 @@ import urllib.parse
 
 from . import bootstrap as bootstrap_mod
 from . import config_artifacts
+from . import preflight as preflight_mod
+from . import teardown as teardown_mod
 from . import verify as verify_mod
 
 
@@ -198,9 +200,79 @@ def _build_parser() -> argparse.ArgumentParser:
       help="Directory to write config artifacts into after the deploy.",
   )
   boot.add_argument(
+      "--image",
+      default=None,
+      help=(
+          "Container image reference to deploy (e.g. the staging candidate"
+          " for the TestPyPI release gate). Default: the released image"
+          " embedded in this installation, pinned by digest."
+      ),
+  )
+  boot.add_argument(
+      "--build-from-source",
+      action="store_true",
+      help=(
+          "Build the image with Cloud Build from a repository checkout"
+          " (legacy path; requires running from the repo root)."
+      ),
+  )
+  boot.add_argument(
       "--execute",
       action="store_true",
       help="Apply the plan (default: print the commands and exit).",
+  )
+  boot.add_argument(
+      "--preflight",
+      action="store_true",
+      help=(
+          "Run mode-aware readiness checks (auth, billing, permissions,"
+          " org policy) and exit; mutates nothing."
+      ),
+  )
+  boot.add_argument(
+      "--check-products",
+      action="store_true",
+      help=(
+          "With --preflight: also probe the Claude/Codex CLIs (only"
+          " needed on machines that will run validation sessions)."
+      ),
+  )
+
+  tear = sub.add_parser(
+      "teardown",
+      help=(
+          "Delete a bootstrap deployment (dry-run by default; --confirm"
+          " executes; existence-verified afterwards)."
+      ),
+  )
+  tear.add_argument("--project", required=True, help="GCP project id.")
+  tear.add_argument("--dataset", required=True, help="BigQuery dataset id.")
+  tear.add_argument("--region", default="us-central1", help="Cloud Run region.")
+  tear.add_argument(
+      "--bq-location", default="US", help="BigQuery/DTS location."
+  )
+  tear.add_argument(
+      "--inventory",
+      type=pathlib.Path,
+      default=None,
+      help=(
+          "inventory.json written by bootstrap --execute (default:"
+          " ./inventory.json if present; otherwise the deterministic"
+          " resource names are reconstructed and probed live)."
+      ),
+  )
+  tear.add_argument(
+      "--confirm",
+      action="store_true",
+      help="Execute the deletions (default: print the plan and exit).",
+  )
+  tear.add_argument(
+      "--dataset-only",
+      action="store_true",
+      help=(
+          "Only remove the DTS scheduled MERGE and the dataset; keep the"
+          " shared pipeline (another dataset may still use it)."
+      ),
   )
 
   ver = sub.add_parser(
@@ -323,17 +395,35 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         resource_attributes=args.resource_attributes,
         acknowledge_content_logging=args.ack_content_logging,
         out_dir=args.out,
+        image=args.image,
+        build_from_source=args.build_from_source,
     )
+    # Resolve now so a dev checkout with no released image fails with the
+    # actionable message BEFORE planning or mutating anything.
+    _, image_mode = bootstrap_mod.resolve_image(settings)
   except ValueError as exc:
     return _report_settings_error(exc)
+
+  if args.preflight:
+    report = preflight_mod.run_preflight(
+        project=settings.project,
+        dataset=settings.dataset,
+        image_mode=image_mode,
+        runner=bootstrap_mod.SubprocessRunner(echo=lambda *_: None),
+        check_products=args.check_products,
+    )
+    return 0 if report.ok else 1
 
   if not args.execute:
     print(bootstrap_mod.render_plan(settings))
     return 0
 
-  # The Cloud Build step uploads the *current directory* as the build
-  # context; refuse to mutate anything unless we are at the repo root.
-  if not pathlib.Path("deploy/otlp_receiver/Dockerfile").is_file():
+  # Only the source-build path uploads the current directory as the Cloud
+  # Build context; the default released-image mode needs no checkout at all.
+  if (
+      image_mode == "source"
+      and not pathlib.Path("deploy/otlp_receiver/Dockerfile").is_file()
+  ):
     print(
         "bqaa-otel: error: deploy/otlp_receiver/Dockerfile not found —"
         " run --execute from the repository root (the Cloud Build step"
@@ -357,6 +447,33 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
     )
     return 1
   return 0
+
+
+def _cmd_teardown(args: argparse.Namespace) -> int:
+  inventory = args.inventory
+  if inventory is None and pathlib.Path("inventory.json").is_file():
+    inventory = pathlib.Path("inventory.json")
+  try:
+    settings = teardown_mod.TeardownSettings(
+        project=args.project,
+        dataset=args.dataset,
+        region=args.region,
+        bq_location=args.bq_location,
+        inventory=inventory,
+        confirm=args.confirm,
+        dataset_only=args.dataset_only,
+    )
+    report = teardown_mod.run_teardown(
+        settings, bootstrap_mod.SubprocessRunner(echo=lambda *_: None)
+    )
+  except ValueError as exc:
+    return _report_settings_error(exc)
+  except RuntimeError as exc:
+    # Refused precondition (e.g. unreadable DTS listing before a
+    # destructive run) — an admin-facing error, never a traceback.
+    print(f"bqaa-otel: error: {exc}", file=sys.stderr)
+    return 1
+  return 0 if (report.dry_run or report.ok) else 1
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -453,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     return _cmd_bootstrap(args)
   if args.command == "verify":
     return _cmd_verify(args)
+  if args.command == "teardown":
+    return _cmd_teardown(args)
   raise AssertionError(f"unhandled command {args.command!r}")
 
 

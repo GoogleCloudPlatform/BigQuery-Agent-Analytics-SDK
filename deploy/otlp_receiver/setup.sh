@@ -38,6 +38,7 @@ SIGNALS="logs,metrics"
 
 PYTHONPATH="producers/src${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m \
   bigquery_agent_analytics_tracing.otlp.cli bootstrap \
+  --build-from-source \
   --project "$PROJECT" --dataset "$DATASET" --region "$REGION" \
   --bq-location "$BQ_LOCATION" --signals "$SIGNALS" \
   --source-product "$SOURCE_PRODUCT" --execute

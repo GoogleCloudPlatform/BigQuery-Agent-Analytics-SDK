@@ -20,15 +20,36 @@
 # is distinct from the root `vX.Y.Z` tags used by the consumption SDK
 # so the two release pipelines never collide.
 #
-# Pipeline:
+# Pipeline (issue #349 release contract — staging→promote, digest-pinned):
 #   verify          - tag matches pyproject; run producer tests on 3.12
-#   build           - wheel + sdist + Claude Code plugin tarball
-#   github-release  - attach all artifacts to the GitHub release for
-#                     this tag, with auto-generated release notes
+#   build-image     - build the receiver image, SELF-TEST it (packaged
+#                     version must match the tag; app factories import),
+#                     push to the PRIVATE staging repo with a candidate
+#                     tag, capture the digest. Auth: Workload Identity
+#                     Federation (no long-lived keys).
+#   build           - inject the FINAL public coordinate + digest into
+#                     _release.py, then build wheel + sdist (BOTH embed
+#                     the constant), plugin tarball, run the mechanical
+#                     digest-equality gate, write SHA256SUMS
+#   github-release  - DRAFT release with all artifacts + checksums; it
+#                     is published only by `promote`, after the TestPyPI
+#                     full-lifecycle gate passes
 #   publish-testpypi - upload wheel + sdist to TestPyPI via Trusted
-#                      Publishing (no secrets)
-#   publish-pypi    - same, to PyPI (gated by the `pypi` environment
-#                     so maintainers can require manual approval)
+#                      Publishing (no secrets). The full-lifecycle gate
+#                      (install from TestPyPI → bootstrap --image
+#                      <staging>@digest → verify → teardown) runs against
+#                      this upload BEFORE `release-promote` is approved.
+#   promote         - manual-approval environment `release-promote`:
+#                     crane-copy staging@digest → public coordinate
+#                     (content-addressed; digest unchanged), assert the
+#                     public digest equals the packaged constant, then
+#                     publish the draft GitHub release
+#   publish-pypi    - PyPI (gated by the `pypi` environment). Version-burn
+#                     rule: a candidate that failed the gate burns its
+#                     version; never re-tag — bump and rebuild.
+#
+# One-time GitHub setup: environments `testpypi`, `pypi`, and
+# `release-promote` (the latter two with required reviewers).
 #
 # Trusted Publishing setup (one-time, on the PyPI side):
 #   - https://docs.pypi.org/trusted-publishers/adding-a-publisher/
@@ -52,6 +73,13 @@ on:
 concurrency:
   group: release-tracing-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  # Frozen coordinate (issue #349): the project id is the stable asset.
+  PUBLIC_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver
+  STAGING_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa-staging/otlp-receiver
+  WIF_PROVIDER: projects/383897661993/locations/global/workloadIdentityPools/github/providers/github-actions
+  RELEASE_SA: bqaa-release-publisher@bqaa-releases.iam.gserviceaccount.com
 
 jobs:
   verify:
@@ -88,10 +116,65 @@ jobs:
       - name: Run tests
         run: pytest --tb=short -q
 
+  build-image:
+    name: Build + self-test + stage receiver image
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+      staging_ref: ${{ steps.digest.outputs.staging_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (repo root context, per Dockerfile contract)
+        run: |
+          docker build -f deploy/otlp_receiver/Dockerfile \
+            -t "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}" .
+
+      - name: Self-test image BEFORE anything is pushed
+        # Gate: packaged version must equal the release tag, and both
+        # Cloud Run entrypoint factories must import. A digest is only
+        # captured for an image that passed.
+        run: |
+          docker run --rm \
+            "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}" \
+            python -c "
+          import importlib.metadata as m
+          v = m.version('bigquery-agent-analytics-tracing')
+          assert v == '${{ needs.verify.outputs.version }}', f'image has {v}'
+          from bigquery_agent_analytics_tracing.otlp import app, consumer
+          assert callable(app.make_app)
+          assert callable(consumer.make_push_app_from_env)
+          print('self-test ok:', v)
+          "
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.RELEASE_SA }}
+
+      - name: Push candidate to the private staging repo
+        run: |
+          gcloud auth configure-docker us-docker.pkg.dev --quiet
+          docker push "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}"
+
+      - name: Capture digest
+        id: digest
+        run: |
+          DIGEST=$(gcloud artifacts docker images describe \
+            "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}" \
+            --format='value(image_summary.digest)')
+          echo "staged: ${STAGING_IMAGE}@${DIGEST}"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "staging_ref=${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, build-image]
     defaults:
       run:
         working-directory: producers
@@ -105,8 +188,25 @@ jobs:
       - name: Install build tools
         run: pip install build
 
+      - name: Inject the pinned public image reference
+        # BEFORE building: wheel AND sdist must both embed the constant.
+        # The image itself never carries it (a digest cannot appear in
+        # the artifact it is computed from).
+        run: |
+          python scripts/release_image_tool.py inject \
+            --target src/bigquery_agent_analytics_tracing/otlp/_release.py \
+            --coordinate "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" \
+            --digest "${{ needs.build-image.outputs.digest }}"
+
       - name: Build wheel and sdist
         run: python -m build
+
+      - name: Digest-equality gate (wheel == sdist == expected)
+        run: |
+          python scripts/release_image_tool.py verify \
+            --wheel dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl \
+            --sdist dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
+            --expected "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}@${{ needs.build-image.outputs.digest }}"
 
       - name: Install built wheel
         # importlib.metadata.version() needs to see the dist-info so
@@ -128,6 +228,9 @@ jobs:
           test -f dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz \
             || (echo "::error::missing plugin tarball" && exit 1)
 
+      - name: Write SHA256SUMS
+        run: python scripts/release_image_tool.py checksums --dist-dir dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-tracing-dist
@@ -135,9 +238,9 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    name: Create GitHub release
+    name: Create GitHub release (draft)
     runs-on: ubuntu-latest
-    needs: [verify, build]
+    needs: [verify, build-image, build]
     permissions:
       contents: write
     steps:
@@ -151,17 +254,24 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la dist/
 
-      - name: Create release with artifacts
+      - name: Create DRAFT release with artifacts
+        # Draft until `promote` publishes it — nothing customer-visible
+        # exists for a candidate that never survived the TestPyPI gate.
         uses: softprops/action-gh-release@v2
         with:
           name: "Tracing ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
+          draft: true
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            **Receiver image (pinned by digest):**
+            `${{ env.PUBLIC_IMAGE }}:${{ needs.verify.outputs.version }}@${{ needs.build-image.outputs.digest }}`
           files: |
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl
             dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz
             dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz
+            dist/SHA256SUMS
 
   publish-testpypi:
     name: Publish to TestPyPI
@@ -184,23 +294,81 @@ jobs:
           path: dist/
 
       - name: Strip non-PyPI artifacts
-        # The plugin tarball is a release artifact, not a PyPI
-        # distribution. Filename uses hyphens in
-        # 'bigquery-agent-analytics-tracing-claude-code-*' so it's
-        # distinguishable from the underscore-named sdist.
+        # The plugin tarball and SHA256SUMS are release artifacts, not
+        # PyPI distributions — twine rejects unknown file types, and
+        # checksums belong on the GitHub release only.
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        # No skip-existing: the version-burn rule requires byte-identical
+        # artifacts at the same version on TestPyPI and PyPI. If the
+        # version already exists, the upload MUST fail loudly — a burned
+        # version silently skipping would make the gate test old bytes.
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+
+  promote:
+    name: Promote image + publish release
+    runs-on: ubuntu-latest
+    # Manual approval on `release-promote` = the TestPyPI full-lifecycle
+    # gate verdict (install from TestPyPI → bootstrap --image
+    # <staging_ref>@digest → verify --smoke → teardown, evidence on the
+    # release issue). Approving asserts the gate passed.
+    needs: [verify, build-image, publish-testpypi]
+    environment:
+      name: release-promote
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
+        # Supply-chain guard: never fetch a mutable 'latest' binary in a
+        # job that holds release credentials. Pinned version, pinned
+        # sha256, and installed before the auth step mints any token.
+        env:
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
+        run: |
+          curl -sL -o crane.tar.gz \
+            "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane && sudo mv crane /usr/local/bin/
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.RELEASE_SA }}
+
+      - name: Promote staging digest to the public coordinate
+        # Content-addressed copy: the digest the artifacts already embed
+        # is preserved; only the public tag comes into existence here.
+        run: |
+          crane auth login us-docker.pkg.dev -u oauth2accesstoken \
+            --password "$(gcloud auth print-access-token)"
+          crane copy \
+            "${STAGING_IMAGE}@${{ needs.build-image.outputs.digest }}" \
+            "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}"
+
+      - name: Assert public digest equals the packaged constant
+        run: |
+          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}")
+          echo "public:  ${PUBLIC_DIGEST}"
+          echo "staged:  ${{ needs.build-image.outputs.digest }}"
+          test "${PUBLIC_DIGEST}" = "${{ needs.build-image.outputs.digest }}" \
+            || (echo "::error::digest drift between staging and public" && exit 1)
+
+      - name: Publish the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [verify, publish-testpypi]
+    needs: [verify, promote, publish-testpypi]
     environment:
       name: pypi
       url: https://pypi.org/p/bigquery-agent-analytics-tracing
@@ -215,6 +383,7 @@ jobs:
       - name: Strip non-PyPI artifacts
         run: |
           rm -f dist/bigquery-agent-analytics-tracing-claude-code-*.tar.gz
+          rm -f dist/SHA256SUMS
           ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1

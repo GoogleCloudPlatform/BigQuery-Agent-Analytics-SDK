@@ -15,14 +15,19 @@ Claude Code / Codex --OTLP--> Cloud Run receiver --> Pub/Sub --> consumer --> Bi
 ```bash
 # Print the plan (runs nothing):
 PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
-  bootstrap --project my-proj --dataset agent_analytics --region us-central1
+  bootstrap --project my-proj --dataset agent_analytics --region us-central1 \
+  --build-from-source
 
 # Apply it:
 PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
-  bootstrap --project my-proj --dataset agent_analytics --region us-central1 --execute
+  bootstrap --project my-proj --dataset agent_analytics --region us-central1 \
+  --build-from-source --execute
 ```
 
-(`bqaa-otel bootstrap ...` once the producers package is installed;
+(`bqaa-otel bootstrap ...` once the producers package is installed.
+`--build-from-source` is required when running from a repository
+checkout — an installed release wheel instead embeds the released,
+digest-pinned receiver image and deploys it with no build step;
 `setup.sh` is a thin wrapper over the same command with the historical
 env-var interface: `PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
 
