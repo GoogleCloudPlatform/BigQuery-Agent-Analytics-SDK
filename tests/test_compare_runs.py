@@ -19,18 +19,26 @@ scored report count as failures, so a run can never improve its rate by
 erroring out on hard cases.
 """
 
+import importlib.util
 import json
 import os
-import sys
 
-sys.path.insert(
-    0,
-    os.path.join(
-        os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
-    ),
+# Load by explicit path under a unique module name: another example
+# (self_evolving_agent_demo) ships its own compare_runs.py, and a bare
+# `import compare_runs` would collide with it via sys.modules.
+_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "examples",
+    "skill_evolution_lab",
+    "compare_runs.py",
 )
-from compare_runs import _load_expected_ids  # noqa: E402
-from compare_runs import _summarize
+_spec = importlib.util.spec_from_file_location("skill_lab_compare_runs", _PATH)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+
+_load_expected_ids = _mod._load_expected_ids
+_summarize = _mod._summarize
 
 
 def _ok_session(sid, **extra):
