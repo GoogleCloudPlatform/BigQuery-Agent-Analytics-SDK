@@ -16,9 +16,10 @@ The tag namespace (`tracing-vX.Y.Z`) is distinct from the root SDK's
 2. `producers-ci.yml` is green on `main` for the commit you're
    tagging.
 3. Any user-facing changes since the prior release have a one-line
-   note ready for the GitHub release body (the workflow uses
-   `generate_release_notes: true`; supplement with handwritten notes
-   only if needed).
+   note ready for the GitHub release body (the workflow renders
+   the curated customer-first template via
+   `scripts/render_release_notes.py`; generic generated notes are
+   disabled — the repo-wide tag stream would pull unrelated SDK PRs).
 4. PyPI side: project + Trusted Publisher are already configured.
    Setup is one-time per project — see "PyPI Trusted Publishing
    setup" below.
@@ -91,11 +92,17 @@ with --no-deps, checksum it against the release SHA256SUMS, install
 dependencies from real PyPI, then install the verified local file.
 
 ```bash
-python -m venv gate && source gate/bin/activate
+GATE=$(mktemp -d) && python -m venv "$GATE/venv" && source "$GATE/venv/bin/activate"
+WHEEL="bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl"
 pip download --no-deps --index-url https://test.pypi.org/simple/ \
-  --dest /tmp/gate bigquery-agent-analytics-tracing==${VERSION}
-sha256sum /tmp/gate/*.whl          # MUST match the draft release SHA256SUMS
-pip install /tmp/gate/*.whl        # deps resolve from real PyPI
+  --dest "$GATE" bigquery-agent-analytics-tracing==${VERSION}
+# Mechanical integrity gate: compare against the SHA256SUMS the build
+# attested to the draft release — not an eyeball check.
+gh release download "tracing-v${VERSION}" \
+  --repo GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK \
+  --pattern SHA256SUMS --dir "$GATE"
+(cd "$GATE" && grep " ${WHEEL}$" SHA256SUMS | sha256sum -c -)
+pip install "$GATE/${WHEEL}"       # deps resolve from real PyPI
 bqaa-otel bootstrap --preflight ...
 bqaa-otel bootstrap ... --image <staging-ref>@sha256:<digest> --execute
 bqaa-otel verify --smoke ...
@@ -120,12 +127,10 @@ immutable — enforced at the repository level).
 ## Verifying the release
 
 ```bash
-# TestPyPI install
-pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            bigquery-agent-analytics-tracing==${VERSION}
+# TestPyPI verification happens ONLY via the checksum-gated procedure in
+# the lifecycle-gate section above (never mixed indexes).
 
-# PyPI install (after publish-pypi job completes)
+# PyPI install (after publish-pypi + finalize complete)
 pip install bigquery-agent-analytics-tracing==${VERSION}
 
 # Sanity check

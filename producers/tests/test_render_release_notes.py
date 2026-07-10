@@ -91,6 +91,62 @@ def test_render_rejects_a_malformed_public_image():
     )
 
 
+def _token_fill_snippet():
+  """The exact bash between the token-fill markers, executed as-is."""
+  body = _render()
+  start = body.index("# --token-fill-start--")
+  end = body.index("# --token-fill-end--")
+  return body[start:end]
+
+
+def test_token_fill_snippet_replaces_placeholders_in_both_files(tmp_path):
+  import subprocess
+
+  for name in ("codex.config.toml", "claude-code.managed-settings.json"):
+    (tmp_path / name).write_text("Authorization=Bearer <token>\n")
+  result = subprocess.run(
+      ["bash", "-c", 'TOKEN="real-secret"\n' + _token_fill_snippet()],
+      cwd=tmp_path,
+      env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+      capture_output=True,
+      text=True,
+  )
+  assert result.returncode == 0, result.stderr
+  for name in ("codex.config.toml", "claude-code.managed-settings.json"):
+    content = (tmp_path / name).read_text()
+    assert "<token>" not in content
+    assert "real-secret" in content
+
+
+def test_token_fill_snippet_fails_on_missing_artifact(tmp_path):
+  import subprocess
+
+  (tmp_path / "codex.config.toml").write_text("<token>")
+  # claude-code.managed-settings.json deliberately absent
+  result = subprocess.run(
+      ["bash", "-c", 'TOKEN="real-secret"\n' + _token_fill_snippet()],
+      cwd=tmp_path,
+      env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+      capture_output=True,
+      text=True,
+  )
+  assert result.returncode != 0
+  assert "missing artifact" in result.stdout + result.stderr
+
+
+def test_token_fill_snippet_fails_on_empty_token(tmp_path):
+  import subprocess
+
+  result = subprocess.run(
+      ["bash", "-c", 'TOKEN=""\n' + _token_fill_snippet()],
+      cwd=tmp_path,
+      env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+      capture_output=True,
+      text=True,
+  )
+  assert result.returncode != 0
+
+
 def test_lifecycle_defines_its_variables_and_fills_both_artifacts():
   body = _render()
   # Variables are defined before first use (#356: bootstrap prints a URL
@@ -101,4 +157,4 @@ def test_lifecycle_defines_its_variables_and_fills_both_artifacts():
   assert "claude-code.managed-settings.json" in body
   assert "codex.config.toml" in body
   assert 'test -n "$TOKEN"' in body or '[ -n "$TOKEN" ]' in body
-  assert "grep -l '<token>'" in body  # placeholder-survival guard
+  assert "--token-fill-start--" in body  # executable guard block present

@@ -35,12 +35,22 @@ URL=$(gcloud run services describe bqaa-otlp-receiver \
 #    a literal <token> placeholder means every export gets a 401):
 TOKEN=$(gcloud secrets versions access latest \
   --secret=bqaa-otlp-token --project $PROJECT)
+# --token-fill-start-- (executed verbatim by the renderer test suite)
+set -euo pipefail
+export TOKEN  # the python child below reads it from the environment
 test -n "$TOKEN" || {{ echo "empty token — aborting"; exit 1; }}
 for f in codex.config.toml claude-code.managed-settings.json; do
-  sed -i.bak "s/<token>/${{TOKEN}}/g" "$f" && rm "$f.bak"  # never commit these
+  test -f "$f" || {{ echo "missing artifact $f — aborting"; exit 1; }}
+  python3 - "$f" << 'FILL_EOF'
+import os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+path.write_text(path.read_text().replace("<token>", os.environ["TOKEN"]))
+FILL_EOF
+  if grep -q '<token>' "$f"; then
+    echo "placeholder still present in $f — aborting"; exit 1
+  fi
 done
-grep -l '<token>' codex.config.toml claude-code.managed-settings.json \
-  && {{ echo "placeholder still present — aborting"; exit 1; }}
+# --token-fill-end-- Never commit these files.
 # Then distribute: Claude Code managed settings via admin console/MDM;
 # Codex config.toml via managed dotfiles.
 

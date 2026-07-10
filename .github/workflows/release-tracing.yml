@@ -169,16 +169,24 @@ jobs:
             -t "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" .
 
       - name: Self-test image BEFORE anything is pushed
-        # Gate: packaged version must equal the release tag, both Cloud
-        # Run entrypoint factories must import, AND the container must
-        # serve real HTTP (bad-token OTLP POST -> 401 proves gunicorn,
-        # the app factory, and the auth layer end to end). A digest is
-        # only captured for an image that passed.
+        # Gate (executed locally before landing — the first version could
+        # not even boot without ADC): a Pub/Sub emulator gives the eager
+        # PubSubPublisher a credential-free channel, then the container
+        # must (a) reject a bad token with 401 and (b) accept a REAL
+        # authenticated protobuf export with 200 — proving gunicorn, the
+        # app factory, auth, protobuf decode, and publish end to end.
         run: |
           IMG="${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
-          docker run -d --name selftest -p 18080:8080 \
+          docker run -d --name pubsub-emu --network host \
+            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+            gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+          until curl -s http://localhost:8085 > /dev/null; do sleep 2; done
+          curl -s -X PUT http://localhost:8085/v1/projects/selftest/topics/selftest-topic > /dev/null
+          docker run -d --name selftest --network host \
+            -e PORT=18080 \
             -e BQAA_OTLP_TOKEN=selftest-token \
-            -e BQAA_OTLP_MAIN_TOPIC=projects/selftest/topics/none \
+            -e BQAA_OTLP_MAIN_TOPIC=projects/selftest/topics/selftest-topic \
+            -e PUBSUB_EMULATOR_HOST=localhost:8085 \
             "$IMG"
           for i in $(seq 1 20); do
             CODE=$(curl -s -o /dev/null -w '%{http_code}' \
@@ -188,21 +196,23 @@ jobs:
             [ "$CODE" = "401" ] && break
             sleep 2
           done
-          docker rm -f selftest
-          test "$CODE" = "401" || (echo "::error::container HTTP self-test failed (got ${CODE:-none}, want 401)" && exit 1)
-          echo "container serves HTTP and enforces auth (401)"
-
-          docker run --rm \
-            "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" \
-            python -c "
-          import importlib.metadata as m
-          v = m.version('bigquery-agent-analytics-tracing')
-          assert v == '${{ needs.verify.outputs.version }}', f'image has {v}'
-          from bigquery_agent_analytics_tracing.otlp import app, consumer
-          assert callable(app.make_app)
-          assert callable(consumer.make_push_app_from_env)
-          print('self-test ok:', v)
-          "
+          test "$CODE" = "401" || (docker logs selftest; echo "::error::bad-token probe got ${CODE:-none}, want 401" && exit 1)
+          pip install --quiet opentelemetry-proto protobuf
+          python3 - << 'PAYLOAD_EOF'
+          from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
+          req = logs_service_pb2.ExportLogsServiceRequest()
+          rec = req.resource_logs.add().scope_logs.add().log_records.add()
+          rec.body.string_value = "release-selftest"
+          open("/tmp/payload.bin", "wb").write(req.SerializeToString())
+          PAYLOAD_EOF
+          GOOD=$(curl -s -o /dev/null -w '%{http_code}' \
+            -X POST http://localhost:18080/v1/logs \
+            -H 'Content-Type: application/x-protobuf' \
+            -H 'Authorization: Bearer selftest-token' \
+            --data-binary @/tmp/payload.bin)
+          docker rm -f selftest pubsub-emu > /dev/null
+          test "$GOOD" = "200" || (echo "::error::authenticated protobuf export got ${GOOD}, want 200" && exit 1)
+          echo "container self-test: 401 on bad token, 200 on real protobuf export"
 
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
         with:
@@ -228,6 +238,12 @@ jobs:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
     needs: [verify, build-image]
+    outputs:
+      # Downstream jobs must consume the artifact identity the PRODUCING
+      # attempt created: a downstream-only rerun increments run_attempt
+      # without recreating this job, so reconstructing the name there
+      # would request an artifact that never existed.
+      dist_name: release-tracing-dist-a${{ github.run_attempt }}
     defaults:
       run:
         working-directory: producers
@@ -301,7 +317,7 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
-          name: release-tracing-dist-a${{ github.run_attempt }}
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: List downloaded artifacts
@@ -315,13 +331,33 @@ jobs:
             --public-image "${{ env.PUBLIC_IMAGE }}" \
             --out release_body.md
 
-      - name: Refuse to touch an already-published release
-        # A full rerun must never mutate something customers already see.
+      - name: Fail closed on existing-release state
+        # A full rerun must never mutate something customers already see,
+        # and an indeterminate lookup (auth/rate-limit/network) must fail,
+        # not fall through. Only an explicit 404 proceeds; a stale DRAFT
+        # from an earlier attempt is deleted so assets can never mix
+        # across attempts; a published release always fails.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json isDraft -q .isDraft 2>/dev/null | grep -q false; then
-            echo "::error::release ${GITHUB_REF_NAME} is already PUBLISHED — burn the version and cut a new tag instead of rerunning"
+          set +e
+          RESP=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" 2>&1)
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            if echo "$RESP" | grep -q "HTTP 404"; then
+              echo "no existing release — proceeding"
+              exit 0
+            fi
+            echo "::error::release lookup INDETERMINATE (refusing to proceed): $(echo "$RESP" | head -1)"
+            exit 1
+          fi
+          IS_DRAFT=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["draft"])')
+          if [ "$IS_DRAFT" = "True" ]; then
+            echo "stale draft from an earlier attempt — deleting so assets cannot mix"
+            gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes
+          else
+            echo "::error::release ${GITHUB_REF_NAME} is already PUBLISHED — burn the version and cut a new tag"
             exit 1
           fi
 
@@ -363,7 +399,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
-          name: release-tracing-dist-a${{ github.run_attempt }}
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: Strip non-PyPI artifacts
@@ -384,7 +420,7 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   promote:
-    name: Promote image + publish release
+    name: Promote image (gate-approved)
     runs-on: ubuntu-latest
     # Manual approval on `release-promote` = the TestPyPI full-lifecycle
     # gate verdict (install from TestPyPI → bootstrap --image
@@ -394,7 +430,8 @@ jobs:
     environment:
       name: release-promote
     permissions:
-      contents: write
+      # No contents: write — promote copies the image and asserts digests;
+      # only finalize touches the GitHub release.
       id-token: write
     steps:
       - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
@@ -446,7 +483,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [verify, promote, publish-testpypi]
+    needs: [verify, build, promote, publish-testpypi]
     environment:
       name: pypi
       url: https://pypi.org/p/bigquery-agent-analytics-tracing
@@ -455,7 +492,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
-          name: release-tracing-dist-a${{ github.run_attempt }}
+          name: ${{ needs.build.outputs.dist_name }}
           path: dist/
 
       - name: Strip non-PyPI artifacts
@@ -479,28 +516,66 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Reconcile published state
+      - name: Reconcile published state by ARTIFACT IDENTITY, not counts
+        # A failed upload is idempotent only when byte identity is proven:
+        # exact expected filenames, sha256sum -c against the SHA256SUMS
+        # the build attested, PyPI digests equal to the same manifest,
+        # nothing yanked, and the public image digest matching the one
+        # the release body advertises.
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.verify.outputs.version }}
+          CRANE_VERSION: v0.20.2
+          CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
         run: |
-          PYPI_FILES=$(curl -s "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" | python3 -c '
-          import json, sys
-          try:
-              data = json.load(sys.stdin)
-          except ValueError:
-              data = {}
-          print(len(data.get("urls", [])))
-          ')
-          ASSETS=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets -q '.assets | length' || echo 0)
-          echo "PyPI files for ${VERSION}: ${PYPI_FILES} (want 2) | GitHub release assets: ${ASSETS} (want 4)"
-          if [ "${PYPI_FILES}" = "2" ] && [ "${ASSETS}" = "4" ]; then
-            echo "state=complete" >> "$GITHUB_ENV"
-          elif [ "${PYPI_FILES}" = "0" ]; then
+          set -euo pipefail
+          WHEEL="bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl"
+          SDIST="bigquery_agent_analytics_tracing-${VERSION}.tar.gz"
+          PLUGIN="bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz"
+          mkdir -p assets && cd assets
+          if ! gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "*" 2> ../download.err; then
             echo "state=unpublished" >> "$GITHUB_ENV"
-          else
-            echo "state=partial" >> "$GITHUB_ENV"
+            echo "release/assets not downloadable: $(head -1 ../download.err)"
+            exit 0
           fi
+          for f in "$WHEEL" "$SDIST" "$PLUGIN" SHA256SUMS; do
+            test -f "$f" || { echo "state=partial" >> "$GITHUB_ENV"; echo "missing asset $f"; exit 0; }
+          done
+          sha256sum -c SHA256SUMS || { echo "state=partial" >> "$GITHUB_ENV"; echo "asset bytes do not match the attested SHA256SUMS"; exit 0; }
+          PYPI=$(curl -sf "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" || echo "")
+          if [ -z "$PYPI" ]; then
+            echo "state=unpublished" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "$PYPI" > ../pypi.json
+          MATCH=$(python3 - "$WHEEL" "$SDIST" << 'IDENT_EOF'
+          import hashlib, json, pathlib, sys
+          wheel, sdist = sys.argv[1], sys.argv[2]
+          data = json.load(open("../pypi.json"))
+          urls = {u["filename"]: u for u in data.get("urls", [])}
+          ok = True
+          for name in (wheel, sdist):
+              entry = urls.get(name)
+              if entry is None or entry.get("yanked"):
+                  ok = False
+                  continue
+              local = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+              if entry["digests"]["sha256"] != local:
+                  ok = False
+          print("identical" if ok else "mismatch")
+          IDENT_EOF
+          )
+          test "$MATCH" = "identical" || { echo "state=partial" >> "$GITHUB_ENV"; echo "PyPI bytes differ from release assets (or yanked)"; exit 0; }
+          cd ..
+          curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane
+          PUBLIC_DIGEST=$(./crane digest "${PUBLIC_IMAGE}:${VERSION}")
+          BODY_DIGEST=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json body -q .body | grep -o 'sha256:[0-9a-f]\{64\}' | head -1)
+          test "$PUBLIC_DIGEST" = "$BODY_DIGEST" || { echo "state=partial" >> "$GITHUB_ENV"; echo "public image digest ${PUBLIC_DIGEST} != release body ${BODY_DIGEST}"; exit 0; }
+          echo "state=complete" >> "$GITHUB_ENV"
+          echo "byte identity proven across release assets, PyPI files, and the public image"
 
       - name: Publish the draft release (complete state only, never as Latest)
         env:

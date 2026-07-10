@@ -9,14 +9,18 @@
 # Build with the repository root as the build context:
 #   docker build -f deploy/otlp_receiver/Dockerfile -t <image> .
 
-FROM python:3.12-slim
+# Pinned by digest for release reproducibility (python:3.12-slim as of
+# 2026-07-10). Full hash-locked pip dependencies are follow-up work; the
+# freeze layer below records what was actually resolved for audit.
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 
 WORKDIR /app
 
 # Install the producer package with the receiver extra (gunicorn,
 # google-cloud-pubsub, opentelemetry-proto).
 COPY producers /src/producers
-RUN pip install --no-cache-dir "/src/producers[receiver]"
+RUN pip install --no-cache-dir "/src/producers[receiver]" \
+    && pip freeze > /opt/bqaa-resolved-requirements.txt
 
 ENV PORT=8080
 
