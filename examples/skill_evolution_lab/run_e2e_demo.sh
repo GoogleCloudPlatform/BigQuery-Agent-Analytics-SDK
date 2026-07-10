@@ -283,7 +283,7 @@ score() {
   DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
     $PY "$REPO_ROOT/scripts/quality_report.py" \
       --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" --limit 500 \
-      --time-period 24h \
+      --time-period 24h --trajectory-samples 500 \
       --eval-spec "$SPEC" --dimensions full \
       --tag-turns --report --output-json "$2"
 }
