@@ -455,7 +455,9 @@ def compute_prevalence_summary(patches: list[str]) -> str:
   total = len(patches)
   lines = [f"Prevalence across {total} independent analyst patches:"]
   for cat, count in counts.most_common():
-    if count >= 3 and count / total >= 0.5:
+    # Strict majority (> half): an exact 50/50 split is consensus for
+    # NEITHER side, so a tie stays STRONG instead of VERY STRONG.
+    if count >= 3 and count / total > 0.5:
       strength = "VERY STRONG"
     elif count >= 3:
       strength = "STRONG"
@@ -468,8 +470,8 @@ def compute_prevalence_summary(patches: list[str]) -> str:
     )
   lines.append(
       "Strength is a consensus flag: weak = 1 analyst, moderate = 2, STRONG ="
-      " >=3 independently converged, VERY STRONG = >=3 and a majority of all"
-      " patches."
+      " >=3 independently converged, VERY STRONG = >=3 and a strict majority"
+      " (more than half) of all patches."
   )
   return "\n".join(lines)
 
