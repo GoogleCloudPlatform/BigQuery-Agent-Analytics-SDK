@@ -3276,9 +3276,7 @@ def _md_write_correction_analysis(
               (
                   (s.attributes or {}).get("custom_tags", {}).get("seeded")
                   for s in trace_obj.spans
-                  if (s.attributes or {})
-                  .get("custom_tags", {})
-                  .get("seeded")
+                  if (s.attributes or {}).get("custom_tags", {}).get("seeded")
               ),
               None,
           )
