@@ -3817,8 +3817,13 @@ def _write_md_report(
     os.makedirs(report_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
+  # Strip trailing whitespace per physical line (conversation text often
+  # carries it), so committed scorecards pass `git diff --check`. The writer
+  # never relies on trailing-double-space GFM line breaks.
+  text = "\n".join(lines)
+  text = "\n".join(line.rstrip() for line in text.split("\n"))
   with open(report_path, "w") as f:
-    f.write("\n".join(lines) + "\n")
+    f.write(text + "\n")
 
   return os.path.abspath(report_path)
 
