@@ -50,7 +50,7 @@ minutes; the release then WAITS at two manual approval gates
    version must equal the tag; both Cloud Run entrypoint factories
    must import), pushes it to the **private** staging repo
    (`us-docker.pkg.dev/bqaa-releases/bqaa-staging/otlp-receiver`) with
-   a `<version>-candidate.<run_id>` tag, and captures the digest.
+   a `<version>-candidate.<run_id>.<run_attempt>` tag, and captures the digest.
    Auth is Workload Identity Federation — no stored keys.
 3. **`build`** — injects the pinned public image reference
    (`us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver:<version>@sha256:…`)

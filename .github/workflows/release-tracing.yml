@@ -22,10 +22,14 @@
 #
 # Pipeline (issue #349 release contract — staging→promote, digest-pinned):
 #   verify          - tag matches pyproject; run producer tests on 3.12
-#   build-image     - build the receiver image, SELF-TEST it (packaged
-#                     version must match the tag; app factories import),
-#                     push to the PRIVATE staging repo with a candidate
-#                     tag, capture the digest. Auth: Workload Identity
+#   build-image     - build the receiver image and run the checked-in
+#                     self-test (deploy/otlp_receiver/selftest.sh, also
+#                     run by PR CI): version + factory assertions, then
+#                     401/200 against a pinned Pub/Sub emulator on a
+#                     private bridge network. The tested image ID is
+#                     re-asserted immediately before the push to the
+#                     PRIVATE staging repo (candidate tag includes
+#                     run_id.run_attempt). Auth: Workload Identity
 #                     Federation (no long-lived keys).
 #   build           - inject the FINAL public coordinate + digest into
 #                     _release.py, then build wheel + sdist (BOTH embed
@@ -94,6 +98,7 @@ jobs:
   verify:
     name: Verify version + tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: producers
@@ -153,6 +158,7 @@ jobs:
   build-image:
     name: Build + self-test + stage receiver image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: verify
     permissions:
       contents: read
@@ -168,51 +174,16 @@ jobs:
           docker build -f deploy/otlp_receiver/Dockerfile \
             -t "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" .
 
-      - name: Self-test image BEFORE anything is pushed
-        # Gate (executed locally before landing — the first version could
-        # not even boot without ADC): a Pub/Sub emulator gives the eager
-        # PubSubPublisher a credential-free channel, then the container
-        # must (a) reject a bad token with 401 and (b) accept a REAL
-        # authenticated protobuf export with 200 — proving gunicorn, the
-        # app factory, auth, protobuf decode, and publish end to end.
+      - name: Self-test image BEFORE anything is pushed (checked-in script)
+        # deploy/otlp_receiver/selftest.sh — also executed by PR CI, so
+        # the gate is not tag-only. Pinned emulator, private bridge
+        # network, bounded waits, payload generated INSIDE the image (no
+        # host installs while this job holds id-token: write).
+        id: selftest
         run: |
           IMG="${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
-          docker run -d --name pubsub-emu --network host \
-            gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
-            gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
-          until curl -s http://localhost:8085 > /dev/null; do sleep 2; done
-          curl -s -X PUT http://localhost:8085/v1/projects/selftest/topics/selftest-topic > /dev/null
-          docker run -d --name selftest --network host \
-            -e PORT=18080 \
-            -e BQAA_OTLP_TOKEN=selftest-token \
-            -e BQAA_OTLP_MAIN_TOPIC=projects/selftest/topics/selftest-topic \
-            -e PUBSUB_EMULATOR_HOST=localhost:8085 \
-            "$IMG"
-          for i in $(seq 1 20); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-              -X POST http://localhost:18080/v1/logs \
-              -H 'Content-Type: application/x-protobuf' \
-              -H 'Authorization: Bearer wrong-token' --data-binary '' || true)
-            [ "$CODE" = "401" ] && break
-            sleep 2
-          done
-          test "$CODE" = "401" || (docker logs selftest; echo "::error::bad-token probe got ${CODE:-none}, want 401" && exit 1)
-          pip install --quiet opentelemetry-proto protobuf
-          python3 - << 'PAYLOAD_EOF'
-          from opentelemetry.proto.collector.logs.v1 import logs_service_pb2
-          req = logs_service_pb2.ExportLogsServiceRequest()
-          rec = req.resource_logs.add().scope_logs.add().log_records.add()
-          rec.body.string_value = "release-selftest"
-          open("/tmp/payload.bin", "wb").write(req.SerializeToString())
-          PAYLOAD_EOF
-          GOOD=$(curl -s -o /dev/null -w '%{http_code}' \
-            -X POST http://localhost:18080/v1/logs \
-            -H 'Content-Type: application/x-protobuf' \
-            -H 'Authorization: Bearer selftest-token' \
-            --data-binary @/tmp/payload.bin)
-          docker rm -f selftest pubsub-emu > /dev/null
-          test "$GOOD" = "200" || (echo "::error::authenticated protobuf export got ${GOOD}, want 200" && exit 1)
-          echo "container self-test: 401 on bad token, 200 on real protobuf export"
+          bash deploy/otlp_receiver/selftest.sh "$IMG" "${{ needs.verify.outputs.version }}" | tee selftest.log
+          echo "image_id=$(grep '^SELFTEST_IMAGE_ID=' selftest.log | cut -d= -f2)" >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
         with:
@@ -220,9 +191,16 @@ jobs:
           service_account: ${{ env.RELEASE_SA }}
 
       - name: Push candidate to the private staging repo
+        # The image ID is re-checked against the one the self-test ran:
+        # nothing that executed since (including the auth action) can
+        # swap in untested bytes.
         run: |
+          IMG="${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
+          NOW=$(docker inspect "$IMG" --format '{{.Id}}')
+          test "$NOW" = "${{ steps.selftest.outputs.image_id }}" \
+            || (echo "::error::image ID changed after self-test (${NOW} != ${{ steps.selftest.outputs.image_id }})" && exit 1)
           gcloud auth configure-docker us-docker.pkg.dev --quiet
-          docker push "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
+          docker push "$IMG"
 
       - name: Capture digest
         id: digest
@@ -237,6 +215,7 @@ jobs:
   build:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [verify, build-image]
     outputs:
       # Downstream jobs must consume the artifact identity the PRODUCING
@@ -309,6 +288,7 @@ jobs:
   github-release:
     name: Create GitHub release (draft)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [verify, build-image, build]
     permissions:
       contents: write
@@ -385,6 +365,7 @@ jobs:
   publish-testpypi:
     name: Publish to TestPyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Depend on github-release too: the plugin tarball ships ONLY as a
     # GitHub release asset, so if that step fails we must not let the
     # wheel/sdist reach PyPI. Otherwise the "wheel and plugin always
@@ -422,6 +403,7 @@ jobs:
   promote:
     name: Promote image (gate-approved)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Manual approval on `release-promote` = the TestPyPI full-lifecycle
     # gate verdict (install from TestPyPI → bootstrap --image
     # <staging_ref>@digest → verify --smoke → teardown, evidence on the
@@ -460,16 +442,25 @@ jobs:
         # Reruns: the public tag is immutable, so an existing tag is
         # accepted ONLY if it already carries the exact expected digest.
         run: |
-          crane auth login us-docker.pkg.dev -u oauth2accesstoken \
-            --password "$(gcloud auth print-access-token)"
-          if EXISTING=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" 2>/dev/null); then
+          gcloud auth print-access-token \
+            | crane auth login us-docker.pkg.dev -u oauth2accesstoken --password-stdin
+          set +e
+          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" 2> digest.err)
+          RC=$?
+          set -e
+          if [ $RC -eq 0 ]; then
             test "$EXISTING" = "${{ needs.build-image.outputs.digest }}" \
               || (echo "::error::public tag exists with digest ${EXISTING}, expected ${{ needs.build-image.outputs.digest }} — version is burned" && exit 1)
             echo "public tag already carries the expected digest (rerun) — skipping copy"
-          else
+          elif grep -qi "MANIFEST_UNKNOWN\|manifest unknown" digest.err; then
+            # ONLY an explicit manifest-not-found enters the mutating path;
+            # auth/rate-limit/network failures must never become a copy.
             crane copy \
               "${STAGING_IMAGE}@${{ needs.build-image.outputs.digest }}" \
               "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}"
+          else
+            echo "::error::registry state INDETERMINATE: $(head -1 digest.err)"
+            exit 1
           fi
 
       - name: Assert public digest equals the packaged constant
@@ -483,6 +474,7 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [verify, build, promote, publish-testpypi]
     environment:
       name: pypi
@@ -506,22 +498,30 @@ jobs:
   finalize:
     name: Reconcile + publish the GitHub release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Runs even when publish-pypi fails: a PARTIAL PyPI publication (one
     # distribution public, one not) must be surfaced with the recovery
     # path, not stranded silently in a draft. Publishes the release only
     # on COMPLETE state; --latest=false preserves the SDK's vX.Y.Z
     # release as the repository's Latest.
-    if: always() && needs.verify.result == 'success'
-    needs: [verify, publish-pypi]
+    if: always() && needs.verify.result == 'success' && needs.build.result == 'success'
+    needs: [verify, build, publish-pypi]
     permissions:
       contents: write
     steps:
-      - name: Reconcile published state by ARTIFACT IDENTITY, not counts
-        # A failed upload is idempotent only when byte identity is proven:
-        # exact expected filenames, sha256sum -c against the SHA256SUMS
-        # the build attested, PyPI digests equal to the same manifest,
-        # nothing yanked, and the public image digest matching the one
-        # the release body advertises.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ needs.build.outputs.dist_name }}
+          path: anchor/
+
+      - name: Reconcile against the IMMUTABLE build artifact
+        # scripts/reconcile_release.py is unit-tested with a full state
+        # matrix (exact sets, byte identity, extras rejected, yanked
+        # rejected) — the mutable draft's own manifest is never the
+        # anchor. The public image digest is additionally re-checked
+        # against the packaged constant extracted from the anchor wheel.
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.verify.outputs.version }}
@@ -529,53 +529,34 @@ jobs:
           CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
         run: |
           set -euo pipefail
-          WHEEL="bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl"
-          SDIST="bigquery_agent_analytics_tracing-${VERSION}.tar.gz"
-          PLUGIN="bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz"
-          mkdir -p assets && cd assets
+          mkdir -p release
           if ! gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --pattern "*" 2> ../download.err; then
+              --dir release --pattern "*" 2> download.err; then
             echo "state=unpublished" >> "$GITHUB_ENV"
-            echo "release/assets not downloadable: $(head -1 ../download.err)"
+            echo "release/assets not downloadable: $(head -1 download.err)"
             exit 0
           fi
-          for f in "$WHEEL" "$SDIST" "$PLUGIN" SHA256SUMS; do
-            test -f "$f" || { echo "state=partial" >> "$GITHUB_ENV"; echo "missing asset $f"; exit 0; }
-          done
-          sha256sum -c SHA256SUMS || { echo "state=partial" >> "$GITHUB_ENV"; echo "asset bytes do not match the attested SHA256SUMS"; exit 0; }
-          PYPI=$(curl -sf "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" || echo "")
-          if [ -z "$PYPI" ]; then
-            echo "state=unpublished" >> "$GITHUB_ENV"
-            exit 0
+          curl -sf "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" \
+            -o pypi.json || echo '{}' > pypi.json
+          python3 producers/scripts/reconcile_release.py \
+            --version "${VERSION}" --anchor-dir anchor/ \
+            --release-dir release/ --pypi-json pypi.json | tee reconcile.out
+          STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
+          if [ "$STATE" = "complete" ]; then
+            curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+            echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+            tar -xzf crane.tar.gz crane
+            PUBLIC_DIGEST=$(./crane digest "${PUBLIC_IMAGE}:${VERSION}")
+            WHEEL_DIGEST=$(python3 -c "
+          import sys, zipfile
+          sys.path.insert(0, 'producers/scripts')
+          import release_image_tool
+          ref = release_image_tool.extract_from_wheel(__import__('pathlib').Path('anchor/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl'))
+          print(ref.split('@')[1])")
+            test "$PUBLIC_DIGEST" = "$WHEEL_DIGEST" \
+              || { echo "state=partial" >> "$GITHUB_ENV"; echo "public image ${PUBLIC_DIGEST} != anchor wheel ${WHEEL_DIGEST}"; exit 0; }
           fi
-          echo "$PYPI" > ../pypi.json
-          MATCH=$(python3 - "$WHEEL" "$SDIST" << 'IDENT_EOF'
-          import hashlib, json, pathlib, sys
-          wheel, sdist = sys.argv[1], sys.argv[2]
-          data = json.load(open("../pypi.json"))
-          urls = {u["filename"]: u for u in data.get("urls", [])}
-          ok = True
-          for name in (wheel, sdist):
-              entry = urls.get(name)
-              if entry is None or entry.get("yanked"):
-                  ok = False
-                  continue
-              local = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
-              if entry["digests"]["sha256"] != local:
-                  ok = False
-          print("identical" if ok else "mismatch")
-          IDENT_EOF
-          )
-          test "$MATCH" = "identical" || { echo "state=partial" >> "$GITHUB_ENV"; echo "PyPI bytes differ from release assets (or yanked)"; exit 0; }
-          cd ..
-          curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
-          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
-          tar -xzf crane.tar.gz crane
-          PUBLIC_DIGEST=$(./crane digest "${PUBLIC_IMAGE}:${VERSION}")
-          BODY_DIGEST=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json body -q .body | grep -o 'sha256:[0-9a-f]\{64\}' | head -1)
-          test "$PUBLIC_DIGEST" = "$BODY_DIGEST" || { echo "state=partial" >> "$GITHUB_ENV"; echo "public image digest ${PUBLIC_DIGEST} != release body ${BODY_DIGEST}"; exit 0; }
-          echo "state=complete" >> "$GITHUB_ENV"
-          echo "byte identity proven across release assets, PyPI files, and the public image"
+          echo "state=${STATE}" >> "$GITHUB_ENV"
 
       - name: Publish the draft release (complete state only, never as Latest)
         env:

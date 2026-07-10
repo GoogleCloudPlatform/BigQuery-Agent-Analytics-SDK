@@ -2,7 +2,7 @@
 
 Producer packages and tracing adapters that emit rows into the canonical
 BQAA `agent_events` schema consumed by the
-[`bigquery-agent-analytics`](../) SDK.
+[`bigquery-agent-analytics`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK) SDK.
 
 ## Install
 
@@ -24,7 +24,7 @@ For dev work in this repo:
 
 ```bash
 cd producers
-pip install -e ".[dev]"
+pip install -e ".[dev,receiver]"
 ```
 
 ## Quickstart (library)
@@ -47,9 +47,9 @@ logger.log_event(
 ## Quickstart (Claude Code plugin)
 
 If you run Claude Code, the
-[Claude Code plugin artifact](../plugins/claude_code/) wires up all
+[Claude Code plugin artifact](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/plugins/claude_code) wires up all
 nine hooks for you. Install via the marketplace catalog this repo
-serves at [`/.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.json):
+serves at [`/.claude-plugin/marketplace.json`](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/.claude-plugin/marketplace.json):
 
 ```
 /plugin marketplace add GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK
@@ -59,7 +59,7 @@ serves at [`/.claude-plugin/marketplace.json`](../.claude-plugin/marketplace.jso
 Add the marketplace by `<owner>/<repo>`, **not** by a direct URL to
 `marketplace.json` — the catalog's `source` is a relative path that
 Claude Code can only resolve from a Git checkout. See the
-[plugin README](../plugins/claude_code/README.md#installing-the-plugin)
+[plugin README](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/plugins/claude_code/README.md#installing-the-plugin)
 for the sparse-checkout variant and details.
 
 The plugin vendors its own copy of the tracing package, so the

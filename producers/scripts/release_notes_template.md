@@ -41,6 +41,7 @@ export TOKEN  # the python child below reads it from the environment
 test -n "$TOKEN" || {{ echo "empty token — aborting"; exit 1; }}
 for f in codex.config.toml claude-code.managed-settings.json; do
   test -f "$f" || {{ echo "missing artifact $f — aborting"; exit 1; }}
+  chmod 600 "$f"  # token-bearing: never world-readable on a shared host
   python3 - "$f" << 'FILL_EOF'
 import os, pathlib, sys
 path = pathlib.Path(sys.argv[1])

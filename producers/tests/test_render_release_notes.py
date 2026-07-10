@@ -113,9 +113,12 @@ def test_token_fill_snippet_replaces_placeholders_in_both_files(tmp_path):
   )
   assert result.returncode == 0, result.stderr
   for name in ("codex.config.toml", "claude-code.managed-settings.json"):
-    content = (tmp_path / name).read_text()
+    path = tmp_path / name
+    content = path.read_text()
     assert "<token>" not in content
     assert "real-secret" in content
+    # Token-bearing files must not be world-readable on a shared host.
+    assert (path.stat().st_mode & 0o077) == 0, oct(path.stat().st_mode)
 
 
 def test_token_fill_snippet_fails_on_missing_artifact(tmp_path):

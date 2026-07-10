@@ -17,9 +17,19 @@ FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a
 WORKDIR /app
 
 # Install the producer package with the receiver extra (gunicorn,
-# google-cloud-pubsub, opentelemetry-proto).
+# google-cloud-pubsub, opentelemetry-proto). Dependencies come from the
+# reviewed hash-locked constraints (pip-compile --generate-hashes inside
+# this exact base image); --require-hashes means a mutated upstream
+# release cannot change production bytes at the same source commit. The
+# package itself installs --no-deps on top. Regenerate the lock with:
+#   docker run --rm -v "$PWD:/src" python:3.12-slim@<base digest> bash -c \
+#     "pip install -q pip-tools && cd /src && pip-compile --generate-hashes \
+#      --strip-extras --extra receiver \
+#      -o deploy/otlp_receiver/requirements.lock producers/pyproject.toml"
+COPY deploy/otlp_receiver/requirements.lock /src/requirements.lock
 COPY producers /src/producers
-RUN pip install --no-cache-dir "/src/producers[receiver]" \
+RUN pip install --no-cache-dir --require-hashes -r /src/requirements.lock \
+    && pip install --no-cache-dir --no-deps /src/producers \
     && pip freeze > /opt/bqaa-resolved-requirements.txt
 
 ENV PORT=8080
