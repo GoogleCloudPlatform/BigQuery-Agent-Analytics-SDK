@@ -87,7 +87,9 @@ pip install --index-url https://test.pypi.org/simple/ \
 bqaa-otel bootstrap --preflight ...
 bqaa-otel bootstrap ... --image <staging-ref>@sha256:<digest> --execute
 bqaa-otel verify --smoke ...
-bqaa-otel teardown ...
+bqaa-otel teardown ... --confirm   # WITH --confirm: the gate evidence must
+                                   # show real deletion + existence PASSes,
+                                   # not a dry-run plan
 ```
 
 (The staging ref + digest are in the `build-image` job output.) All

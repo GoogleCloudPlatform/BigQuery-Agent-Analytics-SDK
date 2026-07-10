@@ -16,7 +16,7 @@ pip install "bigquery-agent-analytics-tracing[storage-write]"
 ```
 
 Enterprise admins deploying the OTel-native receiver: see
-[deploy/otlp_receiver/README.md](../deploy/otlp_receiver/README.md) —
+[the deployment guide](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/deploy/otlp_receiver/README.md) —
 `bqaa-otel bootstrap` deploys the released, digest-pinned receiver image
 with no repository checkout.
 

@@ -24,8 +24,10 @@ bqaa-otel bootstrap --project my-proj --dataset agent_analytics --region us-cent
 # Apply it:
 bqaa-otel bootstrap --project my-proj --dataset agent_analytics --region us-central1 --execute
 
-# Clean removal later (dry-run by default; consumes the written inventory.json):
+# Clean removal later — preview first (dry run prints the exact plan),
+# then execute with --confirm (deletes + existence-verifies every class):
 bqaa-otel teardown --project my-proj --dataset agent_analytics
+bqaa-otel teardown --project my-proj --dataset agent_analytics --confirm
 ```
 
 The released wheel embeds the public receiver image
@@ -142,13 +144,18 @@ traces (`otel.trace_exporter`) are observability only.
 ```bash
 # Read-only health checks: endpoint reachability + auth enforcement,
 # table/view existence, recent rows, dead-letter health.
-BQAA_OTLP_TOKEN=<token> PYTHONPATH=producers/src python3 -m \
-  bigquery_agent_analytics_tracing.otlp.cli verify \
-  --endpoint <url> --project <proj> --dataset <dataset>
+TOKEN=$(gcloud secrets versions access latest \
+  --secret=bqaa-otlp-token --project $PROJECT)
+BQAA_OTLP_TOKEN=$TOKEN bqaa-otel verify \
+  --endpoint $URL --project $PROJECT --dataset $DATASET
 
 # Add --smoke to also send synthetic OTLP logs+metrics and follow them into
 # the native tables, dedup views, and the agent_events_otlp projection.
 ```
+
+(From a source checkout, prefix with
+`PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli`
+instead of `bqaa-otel`.)
 
 The full pytest e2e (same payloads as `--smoke`, plus protobuf-path and
 dead-letter round-trips) remains available:

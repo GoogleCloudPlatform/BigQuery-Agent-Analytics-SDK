@@ -79,7 +79,12 @@ env:
   PUBLIC_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver
   STAGING_IMAGE: us-docker.pkg.dev/bqaa-releases/bqaa-staging/otlp-receiver
   WIF_PROVIDER: projects/383897661993/locations/global/workloadIdentityPools/github/providers/github-actions
+  # Stager: can write ONLY the private staging repo (used by build-image,
+  # which runs unprotected). Promoter: can write ONLY the public repo and
+  # its WIF binding trusts ONLY the release-promote environment subject —
+  # an unapproved workflow cannot reach the public registry.
   RELEASE_SA: bqaa-release-publisher@bqaa-releases.iam.gserviceaccount.com
+  PROMOTER_SA: bqaa-release-promoter@bqaa-releases.iam.gserviceaccount.com
 
 jobs:
   verify:
@@ -92,6 +97,22 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag points into protected main
+        # Tag provenance: any tracing-v* tag triggers this workflow, and
+        # later jobs mint cloud credentials. The tagged SHA must be an
+        # ancestor of origin/main (which carries the branch protections)
+        # or nothing else runs. Tag creation itself is restricted to
+        # repository admins by the "tracing release tags" ruleset.
+        run: |
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is NOT on origin/main — refusing to release"
+            exit 1
+          fi
+          echo "tag SHA is on protected main"
 
       - uses: actions/setup-python@v5
         with:
@@ -254,33 +275,25 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la dist/
 
-      - name: Render customer-first release notes from the template
+      - name: Render customer-first release notes (PR-tested script)
         run: |
-          python3 - << 'RENDER_EOF'
-          import pathlib
-          template = pathlib.Path(
-              "producers/scripts/release_notes_template.md"
-          ).read_text()
-          codex_min = "0.142.5"
-          body = template.format(
-              version="${{ needs.verify.outputs.version }}",
-              public_image="${{ env.PUBLIC_IMAGE }}".rsplit(":", 1)[0],
-              digest="${{ needs.build-image.outputs.digest }}",
-              claude_version="2.1.203",
-              codex_min_version=codex_min,
-          )
-          pathlib.Path("release_body.md").write_text(body)
-          RENDER_EOF
+          python3 producers/scripts/render_release_notes.py \
+            --version "${{ needs.verify.outputs.version }}" \
+            --digest "${{ needs.build-image.outputs.digest }}" \
+            --out release_body.md
 
       - name: Create DRAFT release with artifacts
-        # Draft until `promote` publishes it — nothing customer-visible
-        # exists for a candidate that never survived the TestPyPI gate.
+        # Draft until `finalize` publishes it (after PyPI approval) —
+        # nothing customer-visible exists for a candidate that never
+        # survived the gates. No generic generated notes: the repo-wide
+        # tag stream would pull unrelated SDK PRs into the base diff;
+        # the curated tracing changelog lives in the rendered template.
         uses: softprops/action-gh-release@v2
         with:
           name: "Tracing ${{ github.ref_name }}"
           tag_name: ${{ github.ref_name }}
           draft: true
-          generate_release_notes: true
+          make_latest: false
           fail_on_unmatched_files: true
           body_path: release_body.md
           files: |
@@ -356,7 +369,9 @@ jobs:
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.RELEASE_SA }}
+          # The promoter: writable ONLY on the public repo, impersonable
+          # ONLY by this environment-protected job's OIDC subject.
+          service_account: ${{ env.PROMOTER_SA }}
 
       - name: Promote staging digest to the public coordinate
         # Content-addressed copy: the digest the artifacts already embed
@@ -375,11 +390,6 @@ jobs:
           echo "staged:  ${{ needs.build-image.outputs.digest }}"
           test "${PUBLIC_DIGEST}" = "${{ needs.build-image.outputs.digest }}" \
             || (echo "::error::digest drift between staging and public" && exit 1)
-
-      - name: Publish the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
   publish-pypi:
     name: Publish to PyPI
@@ -403,3 +413,21 @@ jobs:
           ls -la dist/
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  finalize:
+    name: Publish the GitHub release
+    runs-on: ubuntu-latest
+    # Last, rerunnable step: the release becomes public only after BOTH
+    # approvals (release-promote, pypi) and the PyPI upload succeeded.
+    # --latest=false preserves the SDK's vX.Y.Z release as the
+    # repository's Latest release.
+    needs: [verify, publish-pypi]
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the draft release (never as Latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --draft=false --latest=false

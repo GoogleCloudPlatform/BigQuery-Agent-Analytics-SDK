@@ -1,6 +1,6 @@
-<!-- Customer-first release notes (issue #349): rendered by the release
-     workflow with version/digest; auto-generated commit notes are
-     appended below by the GitHub release. Order is deliberate:
+<!-- Customer-first release notes (issue #349): rendered by
+     scripts/render_release_notes.py (PR-tested — see
+     tests/test_render_release_notes.py). Order is deliberate:
      install -> preflight -> bootstrap -> config artifacts -> verify ->
      cleanup. -->
 
@@ -21,17 +21,23 @@ bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --preflight
 bqaa-otel bootstrap --project $PROJECT --dataset $DATASET \
   --signals logs,metrics,traces --source claude-code,codex --execute
 
-# 3. Distribute the generated config artifacts (Claude Code managed
-#    settings via admin console/MDM; Codex config.toml via managed
-#    dotfiles) — written to --out with a do-not-commit token warning.
+# 3. Fill the bearer token into the generated artifacts BEFORE
+#    distributing them (Codex does NOT expand env vars in headers —
+#    a literal <token> placeholder means every export gets a 401):
+TOKEN=$(gcloud secrets versions access latest \
+  --secret=bqaa-otlp-token --project $PROJECT)
+sed -i.bak "s/<token>/${{TOKEN}}/g" codex.config.toml  # never commit this file
+# Then distribute: Claude Code managed settings via admin console/MDM;
+# Codex config.toml via managed dotfiles.
 
 # 4. Prove the pipeline end to end:
-BQAA_OTLP_TOKEN=... bqaa-otel verify --smoke \
+BQAA_OTLP_TOKEN=$TOKEN bqaa-otel verify --smoke \
   --signals logs,metrics,traces --endpoint $URL \
   --project $PROJECT --dataset $DATASET
 
-# 5. Clean removal when done (dry-run by default, existence-verified):
-bqaa-otel teardown --project $PROJECT --dataset $DATASET
+# 5. Clean removal when done — preview first, then execute:
+bqaa-otel teardown --project $PROJECT --dataset $DATASET            # dry run
+bqaa-otel teardown --project $PROJECT --dataset $DATASET --confirm  # deletes + existence-verifies
 ```
 
 ## Receiver image (pinned by digest)
@@ -43,6 +49,20 @@ bqaa-otel teardown --project $PROJECT --dataset $DATASET
 Tags are immutable; `latest` is never published. `SHA256SUMS` for all
 artifacts is attached to this release.
 
+## What's in this release (tracing package only)
+
+- OTel-native OTLP receiver → BigQuery: native log/metric/span tables,
+  dedup views, `agent_events_otlp` projection, transport DLQ (#316)
+- `bqaa-otel` enterprise admin CLI: `config`, `bootstrap` (plan/execute/
+  `--preflight`), `verify --smoke`, `teardown` — signal tiers and
+  privacy tiers with an explicit content-logging acknowledgement gate
+  (#324)
+- Verified Codex telemetry contracts and deterministic `source_product`
+  provenance for Claude Code + Codex in one schema (#317)
+- Hardening found by real deployments: GA DCL grants, Cloud Run
+  entrypoint fixes, OTLP enum-encoding normalization, generated-config
+  correctness (#340, #342, #343)
+
 ## Verified product versions
 
 Claude Code {claude_version} · Codex {codex_min_version} (verified
@@ -52,6 +72,7 @@ re-run the compatibility smoke monthly.
 ## Evaluation path
 
 The rehearsed end-to-end demo (both products, real telemetry, privacy
-proofs) lives in [`demo/hero_story/`](../../demo/hero_story/).
+proofs):
+https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/tracing-v{version}/demo/hero_story
 
 ---
