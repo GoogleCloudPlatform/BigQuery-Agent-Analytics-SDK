@@ -246,8 +246,9 @@ trap restore EXIT
 
 # Unique per-run label: every logged row carries custom_tags {run, slice} so
 # scoring can select exactly this run's sessions from a shared, append-only
-# events table.
-RUN_LABEL="lab_${RUN_TIMESTAMP}"
+# events table. PID + RANDOM make the label collision-safe when several runs
+# start within the same second (e.g. a parallel sweep).
+RUN_LABEL="lab_${RUN_TIMESTAMP}_$$${RANDOM}"
 
 # slice <traffic-path> -> "v0_evolve" / "v1_test" / ... (the metric slice name)
 slice_of() { local b; b="$(basename "$1")"; echo "${b%_traffic.json}"; }

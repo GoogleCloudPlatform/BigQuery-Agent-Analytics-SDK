@@ -435,6 +435,31 @@ def _events_from_record(record, sub_trajectories=None):
   return events
 
 
+def _already_seeded(traffic_basename) -> bool:
+  """True when the target table already has rows seeded from this file."""
+  from google.api_core import exceptions as gcp_exceptions
+  from google.cloud import bigquery
+
+  project = os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+  dataset = os.getenv("DATASET_ID", "agent_analytics")
+  table_id = os.getenv("TABLE_ID", "agent_events")
+  bq = bigquery.Client(project=project)
+  query = (
+      f"SELECT COUNT(*) AS n FROM `{project}.{dataset}.{table_id}` "
+      "WHERE JSON_VALUE(attributes, '$.custom_tags.seeded') = @src"
+  )
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("src", "STRING", traffic_basename)
+      ]
+  )
+  try:
+    rows = list(bq.query(query, job_config=job_config).result())
+    return rows[0]["n"] > 0
+  except gcp_exceptions.NotFound:
+    return False  # table does not exist yet -- nothing seeded
+
+
 def seed_bigquery(traffic_path, report_path, app_name, labels):
   """Seed the BQAA events table from an already-recorded traffic file.
 
@@ -445,7 +470,20 @@ def seed_bigquery(traffic_path, report_path, app_name, labels):
   without re-running the agent. Rows are tagged
   ``custom_tags.seeded=<traffic file>`` so seeded sessions stay
   distinguishable from live-logged ones.
+
+  IDEMPOTENT: if the target table already contains rows seeded from this
+  traffic file, the seeding is skipped -- re-running the documented command
+  never duplicates spans. To re-seed, use a fresh TABLE_ID or delete the
+  previously seeded rows first.
   """
+  basename = os.path.basename(traffic_path)
+  if _already_seeded(basename):
+    logger.info(
+        "Table already contains rows seeded from %s -- skipping (idempotent)."
+        " Use a fresh TABLE_ID or delete those rows to re-seed.",
+        basename,
+    )
+    return
   with open(traffic_path) as f:
     conversations = json.load(f).get("conversations", [])
   sub_by_sid = {}
