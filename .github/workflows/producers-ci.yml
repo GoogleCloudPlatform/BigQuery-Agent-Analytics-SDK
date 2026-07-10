@@ -94,10 +94,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build
+        # Same hash-locked toolchain + no-isolation path the RELEASE
+        # anchor build uses — a lock/backend incompatibility must fail in
+        # PR CI, not first at tag time (#356 round 6).
+        run: pip install --require-hashes -r build-requirements.lock
 
-      - name: Build sdist and wheel
-        run: python -m build
+      - name: Build sdist and wheel (no isolation — locked backend)
+        run: python -m build --no-isolation
 
       - name: List wheel/sdist
         run: ls -la dist/
@@ -106,7 +109,7 @@ jobs:
         # Make `importlib.metadata.version` resolve correctly so the
         # plugin manifest gets a real version stamped in, not the
         # pyproject fallback.
-        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+        run: pip install --no-deps dist/bigquery_agent_analytics_tracing-*.whl
 
       - name: Build Claude Code plugin artifact
         run: python scripts/build_claude_plugin.py

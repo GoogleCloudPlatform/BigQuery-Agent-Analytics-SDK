@@ -8,33 +8,32 @@
 #   - consumer (override CMD): Pub/Sub *push* handler (consumer:make_push_app_from_env)
 # Build with the repository root as the build context:
 #   docker build -f deploy/otlp_receiver/Dockerfile -t <image> .
+#
+# Supply-chain contract (#349/#356): digest-pinned base; runtime deps AND
+# the PEP 517 build backend install from reviewed hash-locked files
+# (regenerate with deploy/otlp_receiver/regen-locks.sh); multi-stage so
+# the shipped image carries neither the build toolchain nor the source
+# tree — only the runtime lock and the built wheel.
 
-# Pinned by digest for release reproducibility (python:3.12-slim as of
-# 2026-07-10). Full hash-locked pip dependencies are follow-up work; the
-# freeze layer below records what was actually resolved for audit.
+FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+
+WORKDIR /build
+COPY producers /build/producers
+RUN pip install --no-cache-dir --require-hashes \
+      -r /build/producers/build-requirements.lock \
+    && python -m build --no-isolation --wheel --outdir /build/dist \
+      /build/producers
+
 FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 
 WORKDIR /app
 
-# Install the producer package with the receiver extra (gunicorn,
-# google-cloud-pubsub, opentelemetry-proto). Dependencies come from the
-# reviewed hash-locked constraints (pip-compile --generate-hashes inside
-# this exact base image); --require-hashes means a mutated upstream
-# release cannot change production bytes at the same source commit. The
-# package itself installs --no-deps on top. Regenerate the lock with:
-#   docker run --rm -v "$PWD:/src" python:3.12-slim@<base digest> bash -c \
-#     "pip install -q pip-tools && cd /src && pip-compile --generate-hashes \
-#      --strip-extras --extra receiver \
-#      -o deploy/otlp_receiver/requirements.lock producers/pyproject.toml"
-COPY deploy/otlp_receiver/requirements.lock /src/requirements.lock
-COPY producers /src/producers
-# The PEP 517 build backend is hash-locked too: a bare --no-deps install
-# would still download an unpinned hatchling into an isolated build env
-# (#356 round 5). --no-build-isolation makes the locked one authoritative.
-RUN pip install --no-cache-dir --require-hashes -r /src/requirements.lock \
-    && pip install --no-cache-dir --require-hashes -r /src/producers/build-requirements.lock \
-    && pip install --no-cache-dir --no-build-isolation --no-deps /src/producers \
-    && pip freeze > /opt/bqaa-resolved-requirements.txt
+COPY deploy/otlp_receiver/requirements.lock /tmp/requirements.lock
+COPY --from=builder /build/dist/*.whl /tmp/
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.lock \
+    && pip install --no-cache-dir --no-deps /tmp/*.whl \
+    && pip freeze > /opt/bqaa-resolved-requirements.txt \
+    && rm /tmp/*.whl /tmp/requirements.lock
 
 ENV PORT=8080
 
@@ -42,7 +41,8 @@ ENV PORT=8080
 #   gunicorn --bind :$PORT \
 #     'bigquery_agent_analytics_tracing.otlp.consumer:make_push_app_from_env()'
 # gunicorn calls factories via the 'module:callable()' syntax; '--factory'
-# is a uvicorn flag and makes the container exit 2 on startup.
+# is a uvicorn flag and makes the container exit 2 on startup
+# (hit live during the #324 e2e — first real Cloud Run deploy).
 CMD exec gunicorn --bind ":${PORT}" --workers 2 --threads 8 \
     --access-logfile - \
     'bigquery_agent_analytics_tracing.otlp.app:make_app()'

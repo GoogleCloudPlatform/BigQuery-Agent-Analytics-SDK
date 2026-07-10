@@ -203,3 +203,57 @@ class TestDispatch:
     assert "rerun" in reconcile_release.dispatch("unpublished").message
     assert "yank" in reconcile_release.dispatch("partial").message
     assert "CI" in reconcile_release.dispatch("invalid-anchor").message
+
+
+class TestMalformedPypiResponses:
+  """An HTTP-200 body that fails to parse is INDETERMINATE, never absence."""
+
+  def _main(self, tmp_path, pypi_bytes):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    pypi_path = tmp_path / "pypi.json"
+    pypi_path.write_bytes(pypi_bytes)
+    out = []
+    rc = reconcile_release.main(
+        [
+            "--version",
+            VERSION,
+            "--anchor-dir",
+            str(anchor),
+            "--release-dir",
+            str(release),
+            "--pypi-json",
+            str(pypi_path),
+        ],
+        echo=out.append,
+    )
+    state = next(l.split("=", 1)[1] for l in out if l.startswith("state="))
+    return rc, state
+
+  def test_truncated_json_is_invalid_response(self, tmp_path):
+    rc, state = self._main(tmp_path, b'{"urls": [{"filename": "x')
+    assert state == "invalid-response"
+    assert rc != 0
+
+  def test_non_object_json_is_invalid_response(self, tmp_path):
+    rc, state = self._main(tmp_path, b'"surprise"')
+    assert state == "invalid-response"
+    assert rc != 0
+
+  def test_explicit_absence_marker_is_unpublished(self, tmp_path):
+    # The workflow writes '{}' ONLY for an explicit HTTP 404.
+    rc, state = self._main(tmp_path, b"{}")
+    assert state == "unpublished"
+
+
+class TestDispatchNewStates:
+
+  def test_invalid_response_fails_with_indeterminate_recovery(self):
+    action = reconcile_release.dispatch("invalid-response")
+    assert not action.publish and action.exit_code != 0
+    assert "indeterminate" in action.message.lower()
+
+  def test_missing_release_is_a_cross_surface_partial(self):
+    action = reconcile_release.dispatch("missing-release")
+    assert not action.publish and action.exit_code != 0
+    assert "yank" in action.message

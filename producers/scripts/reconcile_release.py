@@ -36,6 +36,7 @@ import hashlib
 import json
 import pathlib
 import sys
+from typing import Callable
 
 
 def _expected_files(version: str) -> tuple[str, str, str]:
@@ -160,12 +161,30 @@ def dispatch(state: str) -> DispatchAction:
         "the build anchor itself is inconsistent — investigate CI before"
         " trusting ANY artifact of this run; do not publish or yank yet",
     )
+  if state == "invalid-response":
+    return DispatchAction(
+        False,
+        1,
+        "the PyPI lookup returned an unparseable success body — the"
+        " publication state is INDETERMINATE; retry the lookup before"
+        " taking any recovery action",
+    )
+  if state == "missing-release":
+    return DispatchAction(
+        False,
+        1,
+        "PyPI carries files for this version but the GitHub release is"
+        " missing — a cross-surface partial: yank the PyPI files, burn"
+        " the version (bump + re-tag)",
+    )
   return DispatchAction(
       False, 1, f"unknown reconciliation state {state!r} — failing closed"
   )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None, echo: Callable[[str], None] = print
+) -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--version", required=True)
   parser.add_argument("--anchor-dir", type=pathlib.Path, required=True)
@@ -177,19 +196,25 @@ def main(argv: list[str] | None = None) -> int:
       help="File holding the PyPI release JSON ('{}' when absent).",
   )
   args = parser.parse_args(argv)
+  # Only the workflow's explicit-404 marker ('{}') means absence. A
+  # success body that fails to parse (or is not an object) is an
+  # INDETERMINATE lookup, never confirmed absence (#356 round 6).
   try:
     pypi = json.loads(args.pypi_json.read_text())
-  except ValueError:
-    pypi = {}
-  state, detail = reconcile(
-      version=args.version,
-      anchor_dir=args.anchor_dir,
-      release_dir=args.release_dir,
-      pypi=pypi,
-  )
-  print(f"state={state}")
-  print(f"detail={detail}")
-  return 0
+    if not isinstance(pypi, dict):
+      raise ValueError(f"expected a JSON object, got {type(pypi).__name__}")
+  except ValueError as exc:
+    state, detail = "invalid-response", f"unparseable PyPI body: {exc}"
+  else:
+    state, detail = reconcile(
+        version=args.version,
+        anchor_dir=args.anchor_dir,
+        release_dir=args.release_dir,
+        pypi=pypi,
+    )
+  echo(f"state={state}")
+  echo(f"detail={detail}")
+  return dispatch(state).exit_code
 
 
 if __name__ == "__main__":

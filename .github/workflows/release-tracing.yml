@@ -36,8 +36,8 @@
 #                     the constant), plugin tarball, run the mechanical
 #                     digest-equality gate, write SHA256SUMS
 #   github-release  - DRAFT release with all artifacts + checksums; it
-#                     is published only by `promote`, after the TestPyPI
-#                     full-lifecycle gate passes
+#                     is published only by `finalize`, after BOTH
+#                     approvals and byte-identity reconciliation
 #   publish-testpypi - upload wheel + sdist to TestPyPI via Trusted
 #                      Publishing (no secrets). The full-lifecycle gate
 #                      (install from TestPyPI → bootstrap --image
@@ -533,31 +533,52 @@ jobs:
           CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
         run: |
           set -euo pipefail
+          # Surface 1: the GitHub release. Absence is a CLASSIFICATION,
+          # not an early exit — a deleted draft after a PyPI upload is a
+          # cross-surface partial, not "unpublished".
+          RELEASE_MISSING=0
           mkdir -p release
           if ! gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
               --dir release --pattern "*" 2> download.err; then
             if grep -qi "release not found" download.err; then
-              echo "state=unpublished" >> "$GITHUB_ENV"
-              echo "no GitHub release exists for ${GITHUB_REF_NAME}"
-              exit 0
+              RELEASE_MISSING=1
+            else
+              # Auth/rate-limit/network/API failures are INDETERMINATE —
+              # the wrong recovery advice is worse than an error.
+              echo "::error::GitHub release lookup indeterminate: $(head -1 download.err)"
+              exit 1
             fi
-            # Auth/rate-limit/network/API failures are INDETERMINATE, not
-            # absence — the wrong recovery advice is worse than an error.
-            echo "::error::GitHub release lookup indeterminate: $(head -1 download.err)"
+          fi
+          # Surface 2: PyPI. Transport failures (DNS/TLS/connect) are
+          # indeterminate and must not fall into the HTTP branches.
+          if ! HTTP=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o pypi.json -w '%{http_code}' \
+              "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" 2> curl.err); then
+            echo "::error::PyPI lookup transport failure: $(head -1 curl.err)"
             exit 1
           fi
-          HTTP=$(curl -s -o pypi.json -w '%{http_code}' \
-            "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json")
           if [ "$HTTP" = "404" ]; then
             echo '{}' > pypi.json
           elif [ "$HTTP" != "200" ]; then
             echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
             exit 1
           fi
-          python3 producers/scripts/reconcile_release.py \
-            --version "${VERSION}" --anchor-dir anchor/ \
-            --release-dir release/ --pypi-json pypi.json | tee reconcile.out
-          STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
+          if [ "$RELEASE_MISSING" = "1" ]; then
+            # Classify the cross-surface state without the release dir.
+            if [ "$HTTP" = "404" ]; then
+              STATE=unpublished
+            else
+              STATE=missing-release
+            fi
+            echo "GitHub release absent; PyPI HTTP ${HTTP} -> state=${STATE}"
+          else
+            set +e
+            python3 producers/scripts/reconcile_release.py \
+              --version "${VERSION}" --anchor-dir anchor/ \
+              --release-dir release/ --pypi-json pypi.json | tee reconcile.out
+            set -e
+            STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
+          fi
           if [ "$STATE" = "complete" ]; then
             curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
             echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
@@ -592,9 +613,26 @@ jobs:
           EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
           MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
           if [ "$PUBLISH" = "1" ]; then
+            # Re-anchor the customer-facing body: asset reconciliation
+            # never reads the draft body, and anything with contents:write
+            # could have edited it during the approval pause. Re-render
+            # from the protected checkout with the digest extracted from
+            # the ANCHOR wheel, then publish atomically.
+            ANCHOR_DIGEST=$(python3 -c "
+          import pathlib, sys
+          sys.path.insert(0, 'producers/scripts')
+          import release_image_tool
+          ref = release_image_tool.extract_from_wheel(pathlib.Path(
+              'anchor/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl'))
+          print(ref.split('@')[1])")
+            python3 producers/scripts/render_release_notes.py \
+              --version "${{ needs.verify.outputs.version }}" \
+              --digest "$ANCHOR_DIGEST" \
+              --public-image "${{ env.PUBLIC_IMAGE }}" \
+              --out release_body.md
             gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --draft=false --latest=false
-            echo "release published: ${MESSAGE}"
+              --notes-file release_body.md --draft=false --latest=false
+            echo "release published with re-anchored body: ${MESSAGE}"
           else
             echo "::error::${MESSAGE}"
           fi
