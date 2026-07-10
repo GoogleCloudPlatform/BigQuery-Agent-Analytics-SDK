@@ -23,8 +23,11 @@
 #   ./setup.sh [PROJECT_ID] [REGION]
 #   WITH_REGISTRY=1 SKILL_ID=skill-lab-policy ./setup.sh   # also create V0 skill
 #
-# Required IAM: roles/aiplatform.user (Gemini + Skill Registry), plus rights to
-# enable services (roles/serviceusage.serviceUsageAdmin) on first run.
+# Required IAM: roles/aiplatform.user (Gemini + Skill Registry), BigQuery
+# read/write + jobs (roles/bigquery.dataEditor + roles/bigquery.jobUser --
+# every session is logged to an agent_events table and scoring reads it
+# back), plus rights to enable services
+# (roles/serviceusage.serviceUsageAdmin) on first run.
 # Authenticate with: gcloud auth application-default login
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
