@@ -433,6 +433,7 @@ def build_ai_generate_query(
     temperature: float,
     connection_id: Optional[str] = None,
     max_output_tokens: int = 8192,
+    with_session_context: bool = False,
 ) -> str:
   """Builds the AI.GENERATE categorical classification query.
 
@@ -447,6 +448,13 @@ def build_ai_generate_query(
       endpoint: Model endpoint.
       temperature: Sampling temperature.
       connection_id: Optional BQ connection ID.
+      max_output_tokens: Max output tokens for the model response.
+      with_session_context: When True, the query LEFT JOINs the
+          ``@session_contexts`` array parameter
+          (``ARRAY<STRUCT<session_id STRING, context STRING>>``) and
+          splices each session's context between the shared prompt and
+          the transcript -- this is how per-session golden expected
+          answers reach the server-side judge.
 
   Returns:
       Complete SQL query string.
@@ -455,6 +463,16 @@ def build_ai_generate_query(
   if connection_id:
     escaped = _escape_sql_string_literal(connection_id)
     connection_clause = f"\n    connection_id => '{escaped}',"
+
+  context_join = ""
+  context_expr = ""
+  if with_session_context:
+    context_join = """
+LEFT JOIN UNNEST(@session_contexts) AS sc
+  ON sc.session_id = session_transcripts.session_id"""
+    context_expr = (
+        "\n      COALESCE(CONCAT('\\n\\n', sc.context), ''),"
+    )
 
   return f"""\
 WITH session_transcripts AS (
@@ -483,18 +501,18 @@ WITH session_transcripts AS (
   LIMIT @trace_limit
 )
 SELECT
-  session_id,
+  session_transcripts.session_id AS session_id,
   transcript,
   (AI.GENERATE(
     CONCAT(
-      @categorical_prompt,
+      @categorical_prompt,{context_expr}
       '\\n\\nTranscript:\\n', transcript
     ),{connection_clause}
     endpoint => '{_escape_sql_string_literal(endpoint)}',
     model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": {max_output_tokens}}}}}',
     output_schema => 'classifications STRING'
   )).classifications AS classifications
-FROM session_transcripts
+FROM session_transcripts{context_join}
 """
 
 

@@ -196,3 +196,72 @@ class TestQuerySiteLabels:
     assert judge_calls, "no query labeled with sdk_feature=eval-llm-judge"
     judge_labels = dict(judge_calls[0].kwargs["job_config"].labels or {})
     assert judge_labels.get("sdk_ai_function") == "ai-generate"
+
+
+class TestCategoricalPerSessionContext:
+  """evaluate_categorical threads per-session golden context to the judge."""
+
+  def _run(self, config_kwargs, per_session_context):
+    from bigquery_agent_analytics.categorical_evaluator import (
+        CategoricalEvaluationConfig,
+    )
+    from bigquery_agent_analytics.categorical_evaluator import (
+        CategoricalMetricCategory,
+    )
+    from bigquery_agent_analytics.categorical_evaluator import (
+        CategoricalMetricDefinition,
+    )
+
+    mock_bq = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = iter([])
+    mock_bq.query.return_value = mock_job
+    client = _make_client(bq_client=mock_bq)
+    config = CategoricalEvaluationConfig(
+        metrics=[
+            CategoricalMetricDefinition(
+                name="m",
+                definition="d",
+                categories=[
+                    CategoricalMetricCategory(name="a", definition="x"),
+                    CategoricalMetricCategory(name="b", definition="y"),
+                ],
+            )
+        ],
+        **config_kwargs,
+    )
+    report = client.evaluate_categorical(
+        config=config, per_session_context=per_session_context
+    )
+    return mock_bq, report
+
+  def test_context_param_and_join_reach_the_generate_query(self):
+    mock_bq, _ = self._run({}, {"s1": "EXPECTED ANSWER: 42"})
+    call = mock_bq.query.call_args_list[0]
+    sql = call.args[0]
+    assert "LEFT JOIN UNNEST(@session_contexts)" in sql
+    params = call.kwargs["job_config"].query_parameters
+    names = [getattr(p, "name", None) for p in params]
+    assert "session_contexts" in names
+    ctx_param = next(p for p in params if p.name == "session_contexts")
+    assert isinstance(ctx_param, bigquery.ArrayQueryParameter)
+
+  def test_no_context_keeps_query_unchanged(self):
+    mock_bq, _ = self._run({}, None)
+    call = mock_bq.query.call_args_list[0]
+    assert "@session_contexts" not in call.args[0]
+    names = [
+        getattr(p, "name", None)
+        for p in call.kwargs["job_config"].query_parameters
+    ]
+    assert "session_contexts" not in names
+
+  def test_classify_shortcut_skipped_when_context_present(self):
+    # AI.CLASSIFY cannot carry per-session context; the cascade must
+    # start at AI.GENERATE so the expected answer reaches the judge.
+    mock_bq, _ = self._run(
+        {"include_justification": False}, {"s1": "ctx"}
+    )
+    sql = mock_bq.query.call_args_list[0].args[0]
+    assert "AI.GENERATE" in sql
+    assert "AI.CLASSIFY" not in sql

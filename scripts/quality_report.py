@@ -1322,47 +1322,55 @@ def run_evaluation(
     if app_name:
       trace_filter.root_agent_name = app_name
 
-  report = client.evaluate_categorical(config=cat_config, filters=trace_filter)
-
-  all_session_ids = [sr.session_id for sr in report.session_results]
-  logger.info("Resolving responses for %d sessions...", len(all_session_ids))
-
-  # custom_labels must carry over: session_ids repeat across scoring passes
-  # (e.g. the same held-out set replayed under slice=v0_test and
-  # slice=v1_test), and an unfiltered fetch merges those passes into one
-  # trace -- duplicated user turns, phantom multi-turn sessions.
-  traces = client.list_traces(
-      filter_criteria=TraceFilter(
-          session_ids=all_session_ids,
-          limit=len(all_session_ids),
-          custom_labels=custom_labels,
-      )
-  )
+  # Fetch traces and match golden Q&A BEFORE evaluation: each matched
+  # session's expected answer is injected into the server-side judge as
+  # per-session context, so correctness on the BigQuery path is graded
+  # against the golden answer -- same grounding as the
+  # --conversations-file path. The trace fetch reuses the evaluation's
+  # own filter (labels included: session_ids repeat across scoring
+  # passes, and an unfiltered fetch merges those passes into one trace).
+  traces = client.list_traces(filter_criteria=trace_filter)
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
-  # Golden Q&A matching (same as the --conversations-file path). The server-side
-  # judge (AI.GENERATE over BigQuery) can't receive per-session expected answers,
-  # so on this path golden Q&A drives the golden_eval_summary regression headline
-  # and per-session matched/expected reporting — but does NOT inject the expected
-  # answer into the judge for correctness grounding (that is conversations-only).
-  # scope/ground_truth still ground the judge on both paths.
+  golden_ctx = {}
   golden_metadata = {}
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
+    # Matching keys off the conversation's FIRST user message (the
+    # topic anchor), consistent with the conversations-file path.
     question_by_sid = {
         sid: ctx.get("first_question") or ctx.get("question", "")
         for sid, ctx in resolved_map.items()
     }
-    _golden_ctx, golden_metadata = match_golden_qa(
+    golden_ctx, golden_metadata = match_golden_qa(
         question_by_sid, golden_qa, threshold=golden_threshold
     )
-    logger.warning(
-        "Golden Q&A on the BigQuery path produces the golden_eval_summary and "
-        "per-session matches, but the server-side judge cannot take per-session "
-        "expected answers — expected-answer correctness grounding applies on the "
-        "--conversations-file path only (scope/ground_truth ground both paths)."
+
+  report = client.evaluate_categorical(
+      config=cat_config,
+      filters=trace_filter,
+      per_session_context=golden_ctx or None,
+  )
+
+  all_session_ids = [sr.session_id for sr in report.session_results]
+  logger.info("Resolving responses for %d sessions...", len(all_session_ids))
+
+  # The pre-fetch and the evaluation run the same filter, but the
+  # evaluation's transcript CTE can admit sessions the pre-fetch missed
+  # (or vice versa); backfill any evaluated session we did not resolve.
+  missing = [sid for sid in all_session_ids if sid not in resolved_map]
+  if missing:
+    extra = client.list_traces(
+        filter_criteria=TraceFilter(
+            session_ids=missing,
+            limit=len(missing),
+            custom_labels=custom_labels,
+        )
     )
+    for r in resolve_trace_responses(extra):
+      resolved_map[r["session_id"]] = r
+    resolved = list(resolved_map.values())
 
   # Infer corrections/verifications for multi-turn sessions (concurrent).
   mt_sessions = [
