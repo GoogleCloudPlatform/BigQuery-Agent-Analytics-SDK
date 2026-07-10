@@ -481,6 +481,10 @@ def seed_bigquery(traffic_path, report_path, app_name, labels):
   never duplicates spans. To re-seed, use a fresh TABLE_ID or delete the
   previously seeded rows first.
   """
+  from datetime import datetime
+  from datetime import timedelta
+  from datetime import timezone
+
   basename = os.path.basename(traffic_path)
   if _already_seeded(basename):
     logger.info(
@@ -498,11 +502,27 @@ def seed_bigquery(traffic_path, report_path, app_name, labels):
         sub_by_sid[s.get("session_id")] = s.get("sub_trajectories") or []
 
   results = []
+  seed_time = datetime.now(timezone.utc)
   for r in conversations:
     if r.get("error"):
       continue
     r = dict(r)
     r["_events"] = _events_from_record(r, sub_by_sid.get(r.get("session_id")))
+    # Reconstruct per-turn windows from the RECORDED total latency, split
+    # evenly across turns and anchored at seed time -- proportional rather
+    # than measured, which is exactly what the custom_tags.seeded label (and
+    # the scorecard's 'reconstructed' note) discloses.
+    n_turns = max((t for _, _, t in r["_events"]), default=0) + 1
+    total_s = float(r.get("latency_s") or n_turns)
+    per_turn = total_s / n_turns
+    start = seed_time - timedelta(seconds=total_s)
+    r["_turn_times"] = [
+        (
+            start + timedelta(seconds=i * per_turn),
+            start + timedelta(seconds=(i + 1) * per_turn),
+        )
+        for i in range(n_turns)
+    ]
     results.append(r)
 
   labels = dict(labels or {})
