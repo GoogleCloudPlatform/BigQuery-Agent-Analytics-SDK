@@ -86,8 +86,8 @@ skill_evolution_lab/
   run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
-  sample_run/           # a committed end-to-end run (scored reports, V0 + evolved
-                        #   skill, RESULT) + round2/ companion (V1->V2 gate) + README
+  sample_run/           # a committed end-to-end --rounds 2 run (scored reports,
+                        #   V0 + evolved skills, RESULT + RESULT_ROUND2) + README
 ```
 
 A complete recorded run lives in [`sample_run/`](sample_run/) — the scored V0/V1
@@ -135,14 +135,14 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   28.6% (20/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   27.1% (19/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
      V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
-| Overall                   | 37.5% (30/80) | 97.5% (78/80)  | +60.0pp  |
+| Overall                   | 36.2% (29/80) | 97.5% (78/80)  | +61.3pp  |
 | Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
 ```
 
@@ -162,10 +162,9 @@ learning signal: what does V1 *still* get wrong?), evolves V1 -> V2 with
 them), measures V2 on the same held-out set, and keeps V2 **only when it beats
 V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
-a gain proves the loop compounds; a kept incumbent proves the guard holds. A
-recorded round-2 run is committed at
-[`sample_run/round2/`](sample_run/round2/) — its V2 *tied* V1 and the gate
-kept the incumbent.
+a gain proves the loop compounds; a kept incumbent proves the guard holds. The
+committed [`sample_run/`](sample_run/) is a `--rounds 2` recording — its V2
+*tied* V1 and the gate kept the incumbent (`sample_run/RESULT_ROUND2.md`).
 
 ### BigQuery is the write path; two disclosed workarounds pending SDK fixes
 

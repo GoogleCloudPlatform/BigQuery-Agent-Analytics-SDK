@@ -1,18 +1,18 @@
 {
   "summary": {
     "total_sessions": 80,
-    "meaningful": 20,
+    "meaningful": 19,
     "declined": 10,
     "partial": 0,
     "unhelpful": 50,
-    "meaningful_rate": 37.5,
+    "meaningful_rate": 36.2,
     "unhelpful_rate": 62.5,
     "dimension_averages": {
-      "correctness": 0.75,
-      "tool_usage": 0.76,
-      "specificity": 0.95,
-      "scope_compliance": 0.85,
-      "first_time_right": 0.85
+      "correctness": 0.73,
+      "tool_usage": 0.75,
+      "specificity": 0.94,
+      "scope_compliance": 0.84,
+      "first_time_right": 0.84
     },
     "avg_user_turns": 1.2,
     "avg_tool_calls": 0.2,
@@ -26,16 +26,16 @@
     "tool_gap": 0,
     "knowledge_gap_rate": 0.0,
     "tool_gap_rate": 0.0,
-    "addressable_meaningful_rate": 37.5,
+    "addressable_meaningful_rate": 36.2,
     "knowledge_gap_questions": [],
     "tool_gap_questions": [],
     "golden_eval_summary": {
       "total_sessions": 80,
       "matched": 70,
-      "matched_meaningful": 20,
+      "matched_meaningful": 19,
       "matched_unhelpful": 50,
-      "matched_partial": 0,
-      "matched_meaningful_rate": 28.6,
+      "matched_partial": 1,
+      "matched_meaningful_rate": 27.1,
       "unmatched": 10,
       "unmatched_meaningful": 10,
       "unmatched_unhelpful": 0,
@@ -397,50 +397,50 @@
   },
   "category_distributions": {
     "response_usefulness": {
-      "meaningful": 20,
+      "meaningful": 19,
       "unhelpful": 50,
       "declined": 10
     },
     "task_grounding": {
-      "grounded": 20,
+      "grounded": 19,
       "ungrounded": 50,
       "no_tool_needed": 10
     },
     "correctness": {
-      "correct": 30,
+      "correct": 29,
       "incorrect": 50
     },
     "tool_usage": {
-      "proper": 20,
+      "proper": 19,
       "none": 49,
       "partial": 1,
       "no_tool_needed": 10
     },
     "specificity": {
-      "specific": 38,
+      "specific": 37,
       "vague": 42
     },
     "scope_compliance": {
-      "compliant": 34,
+      "compliant": 33,
       "non_compliant": 46
     },
     "first_time_right": {
-      "correct": 34,
+      "correct": 33,
       "correction_needed": 46
     },
     "failure_attribution": {
-      "not_a_failure": 30,
+      "not_a_failure": 29,
       "skill_gap": 50
     }
   },
   "per_agent": {
     "policy_agent": {
       "total": 80,
-      "meaningful": 20,
+      "meaningful": 19,
       "declined": 10,
       "unhelpful": 50,
       "partial": 0,
-      "unclassified": 0,
+      "unclassified": 1,
       "a2a_count": 0
     }
   },
@@ -451,7 +451,7 @@
       "response": "You get 20 days of PTO per year, which are accrued monthly. Up to 5 unused days can roll over.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.77,
+      "latency_s": 1.64,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -523,6 +523,7 @@
           "text": "You get 20 days of PTO per year, which are accrued monthly. Up to 5 unused days can roll over."
         }
       ],
+      "execution_trace": "Session: t01_pto\nTime: 21:12:00  Total: 1.6s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.6s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How many PTO days do I get per year?",
@@ -538,7 +539,7 @@
       "response": "You can roll over up to 5 unused PTO days to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.73,
+      "latency_s": 1.84,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -610,6 +611,7 @@
           "text": "You can roll over up to 5 unused PTO days to the next year."
         }
       ],
+      "execution_trace": "Session: t02_pto\nTime: 21:12:00  Total: 1.8s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.8s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How many unused PTO days can I roll over to next year?",
@@ -625,7 +627,7 @@
       "response": "You are entitled to 20 days of PTO per year, which accrues monthly. This means you accrue approximately 1.67 days of PTO each month.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.75,
+      "latency_s": 1.58,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -697,6 +699,7 @@
           "text": "You are entitled to 20 days of PTO per year, which accrues monthly. This means you accrue approximately 1.67 days of PTO each month."
         }
       ],
+      "execution_trace": "Session: t03_pto\nTime: 21:12:00  Total: 1.6s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.6s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Roughly how much PTO do I accrue each month?",
@@ -712,7 +715,7 @@
       "response": "I do not have information regarding what happens to unused PTO if you leave the company mid-year. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.61,
+      "latency_s": 0.67,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -784,6 +787,7 @@
           "text": "I do not have information regarding what happens to unused PTO if you leave the company mid-year. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t04_pto\nTime: 21:12:02  Total: 667ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [667ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -800,7 +804,7 @@
       "response": "You get 10 sick days per year, which do not roll over.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.54,
+      "latency_s": 1.45,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -872,6 +876,7 @@
           "text": "You get 10 sick days per year, which do not roll over."
         }
       ],
+      "execution_trace": "Session: t05_sick_leave\nTime: 21:12:02  Total: 1.5s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.4s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How many sick days do I get per year?",
@@ -887,7 +892,7 @@
       "response": "No, sick leave does not roll over to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.61,
+      "latency_s": 0.55,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -959,6 +964,7 @@
           "text": "No, sick leave does not roll over to the next year."
         }
       ],
+      "execution_trace": "Session: t06_sick_leave\nTime: 21:12:02  Total: 549ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [549ms]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Do sick days roll over to the next year?",
@@ -974,65 +980,65 @@
       "response": "Yes, according to company policy, a doctor's note is required for sick leave absences longer than 3 consecutive days. Since you are planning to be out for 4 days, you will need to provide one.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.3,
+      "latency_s": 2.97,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
       "verifications": 0,
       "metrics": {
         "response_usefulness": {
-          "category": "meaningful",
-          "justification": "The agent directly answers the user's question about needing a doctor's note for a 4-day absence, providing the relevant company policy."
+          "category": null,
+          "justification": null
         },
         "task_grounding": {
-          "category": "grounded",
-          "justification": "The agent explicitly states 'according to company policy', indicating the information was retrieved from a tool like lookup_company_policy."
+          "category": null,
+          "justification": null
         },
         "correctness": {
-          "category": "correct",
-          "justification": "The agent's response aligns perfectly with the ground truth: a doctor's note is required for absences longer than 3 consecutive days, and thus for 4 days."
+          "category": null,
+          "justification": null
         },
         "tool_usage": {
-          "category": "proper",
-          "justification": "The agent correctly used a tool (implied lookup_company_policy) to retrieve information about sick leave policy, which is an in-scope topic."
+          "category": null,
+          "justification": null
         },
         "specificity": {
-          "category": "specific",
-          "justification": "The response provides specific details: 'longer than 3 consecutive days' and applies it directly to the user's '4 days' absence."
+          "category": null,
+          "justification": null
         },
         "scope_compliance": {
-          "category": "compliant",
-          "justification": "The question about sick leave policy is explicitly within the agent's defined scope, and the agent correctly answered it."
+          "category": null,
+          "justification": null
         },
         "first_time_right": {
-          "category": "correct",
-          "justification": "The agent's first and only response in this single-turn conversation was correct and complete, requiring no further clarification or correction."
+          "category": null,
+          "justification": null
         },
         "failure_attribution": {
-          "category": "not_a_failure",
-          "justification": "The agent provided a useful and correct answer, so there is no failure to attribute."
+          "category": null,
+          "justification": null
         }
       },
       "quality_scores": {
         "correctness": {
-          "score": 2,
-          "reason": "The agent's response aligns perfectly with the ground truth: a doctor's note is required for absences longer than 3 consecutive days, and thus for 4 days."
+          "score": 0,
+          "reason": ""
         },
         "tool_usage": {
-          "score": 2,
-          "reason": "The agent correctly used a tool (implied lookup_company_policy) to retrieve information about sick leave policy, which is an in-scope topic."
+          "score": 0,
+          "reason": ""
         },
         "specificity": {
-          "score": 2,
-          "reason": "The response provides specific details: 'longer than 3 consecutive days' and applies it directly to the user's '4 days' absence."
+          "score": 0,
+          "reason": ""
         },
         "scope_compliance": {
-          "score": 2,
-          "reason": "The question about sick leave policy is explicitly within the agent's defined scope, and the agent correctly answered it."
+          "score": 0,
+          "reason": ""
         },
         "first_time_right": {
-          "score": 2,
-          "reason": "The agent's first and only response in this single-turn conversation was correct and complete, requiring no further clarification or correction."
+          "score": 0,
+          "reason": ""
         }
       },
       "tool_calls_detail": [
@@ -1053,6 +1059,7 @@
           "text": "Yes, according to company policy, a doctor's note is required for sick leave absences longer than 3 consecutive days. Since you are planning to be out for 4 days, you will need to provide one."
         }
       ],
+      "execution_trace": "Session: t07_sick_leave\nTime: 21:12:02  Total: 3.0s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [3.0s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "If I'm out sick for 4 days, do I need a doctor's note?",
@@ -1068,7 +1075,7 @@
       "response": "You can work from home up to 3 days per week, provided you have manager approval. Please note that core collaboration hours are 10am-3pm in your local timezone.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.27,
+      "latency_s": 1.31,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -1147,6 +1154,7 @@
           "text": "You can work from home up to 3 days per week, provided you have manager approval. Please note that core collaboration hours are 10am-3pm in your local timezone."
         }
       ],
+      "execution_trace": "Session: t08_remote_work\nTime: 21:12:02  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How many days a week can I work from home?",
@@ -1162,7 +1170,7 @@
       "response": "Yes, you need manager approval to work remotely, up to 3 days per week.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.66,
+      "latency_s": 0.58,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1234,6 +1242,7 @@
           "text": "Yes, you need manager approval to work remotely, up to 3 days per week."
         }
       ],
+      "execution_trace": "Session: t09_remote_work\nTime: 21:12:03  Total: 584ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [584ms]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Do I need approval to work remotely?",
@@ -1249,7 +1258,7 @@
       "response": "I do not have information regarding core collaboration hours. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.61,
+      "latency_s": 0.5,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1321,6 +1330,7 @@
           "text": "I do not have information regarding core collaboration hours. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t10_remote_work\nTime: 21:12:04  Total: 497ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [498ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1337,7 +1347,7 @@
       "response": "According to company policy, you can work remotely for up to 3 days per week with manager approval. I do not have information regarding working remotely for four days a week; please contact HR for further clarification.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.72,
+      "latency_s": 0.68,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1409,6 +1419,7 @@
           "text": "According to company policy, you can work remotely for up to 3 days per week with manager approval. I do not have information regarding working remotely for four days a week; please contact HR for further clarification."
         }
       ],
+      "execution_trace": "Session: t11_remote_work\nTime: 21:12:04  Total: 683ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [683ms]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Can I work remotely four days a week?",
@@ -1424,7 +1435,7 @@
       "response": "I do not have information regarding meal reimbursement limits. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.51,
+      "latency_s": 1.55,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1496,6 +1507,7 @@
           "text": "I do not have information regarding meal reimbursement limits. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t12_expenses\nTime: 21:12:04  Total: 1.6s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.6s]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1512,7 +1524,7 @@
       "response": "I do not have information regarding expense policies. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.58,
+      "latency_s": 0.78,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1584,6 +1596,7 @@
           "text": "I do not have information regarding expense policies. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t13_expenses\nTime: 21:12:04  Total: 779ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [779ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1600,7 +1613,7 @@
       "response": "I do not have information regarding expense policies or pre-approval requirements. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.54,
+      "latency_s": 0.69,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1672,6 +1685,7 @@
           "text": "I do not have information regarding expense policies or pre-approval requirements. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t14_expenses\nTime: 21:12:05  Total: 693ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [693ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1688,7 +1702,7 @@
       "response": "I do not have information regarding business expense submission timelines. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.66,
+      "latency_s": 0.61,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1760,6 +1774,7 @@
           "text": "I do not have information regarding business expense submission timelines. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t15_expenses\nTime: 21:12:05  Total: 612ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [612ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1848,6 +1863,7 @@
           "text": "I do not have information regarding the specific share of health premiums covered by the company. Please contact HR for details about your benefits."
         }
       ],
+      "execution_trace": "Session: t16_benefits\nTime: 21:12:06  Total: 643ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [643ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1864,7 +1880,7 @@
       "response": "I do not have information regarding specific medical plans. Please contact HR for details on the benefits offered.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.62,
+      "latency_s": 0.66,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -1936,6 +1952,7 @@
           "text": "I do not have information regarding specific medical plans. Please contact HR for details on the benefits offered."
         }
       ],
+      "execution_trace": "Session: t17_benefits\nTime: 21:12:06  Total: 660ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [660ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -1952,7 +1969,7 @@
       "response": "I do not have information regarding the family out-of-pocket maximum on the PPO. Please contact HR for details about specific benefit plan coverage.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.64,
+      "latency_s": 0.76,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2024,6 +2041,7 @@
           "text": "I do not have information regarding the family out-of-pocket maximum on the PPO. Please contact HR for details about specific benefit plan coverage."
         }
       ],
+      "execution_trace": "Session: t18_benefits\nTime: 21:12:06  Total: 765ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [765ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2040,7 +2058,7 @@
       "response": "I do not have information regarding the individual out-of-pocket maximum on the PPO. Please contact HR for details about specific benefit plans.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.65,
+      "latency_s": 1.52,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2112,6 +2130,7 @@
           "text": "I do not have information regarding the individual out-of-pocket maximum on the PPO. Please contact HR for details about specific benefit plans."
         }
       ],
+      "execution_trace": "Session: t19_benefits\nTime: 21:12:06  Total: 1.5s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.5s]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2128,7 +2147,7 @@
       "response": "I do not have information regarding HSA contributions. Please contact HR for details on this benefit.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.42,
+      "latency_s": 0.52,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2200,6 +2219,7 @@
           "text": "I do not have information regarding HSA contributions. Please contact HR for details on this benefit."
         }
       ],
+      "execution_trace": "Session: t20_benefits\nTime: 21:12:07  Total: 520ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [520ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2216,7 +2236,7 @@
       "response": "I do not have information regarding HSA contributions. Please contact HR for details about your benefits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.55,
+      "latency_s": 0.67,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2288,6 +2308,7 @@
           "text": "I do not have information regarding HSA contributions. Please contact HR for details about your benefits."
         }
       ],
+      "execution_trace": "Session: t21_benefits\nTime: 21:12:07  Total: 670ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [670ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2304,7 +2325,7 @@
       "response": "I do not have information regarding specific dental coverage. Please contact HR for details about your benefits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.57,
+      "latency_s": 0.73,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2376,6 +2397,7 @@
           "text": "I do not have information regarding specific dental coverage. Please contact HR for details about your benefits."
         }
       ],
+      "execution_trace": "Session: t22_benefits\nTime: 21:12:07  Total: 730ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [730ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2392,7 +2414,7 @@
       "response": "I do not have information regarding dental coverage for major procedures. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.76,
+      "latency_s": 0.85,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2464,6 +2486,7 @@
           "text": "I do not have information regarding dental coverage for major procedures. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t23_benefits\nTime: 21:12:07  Total: 850ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [850ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2480,7 +2503,7 @@
       "response": "I do not have information regarding orthodontia coverage. Please contact HR for details on specific benefits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.55,
+      "latency_s": 0.81,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2552,6 +2575,7 @@
           "text": "I do not have information regarding orthodontia coverage. Please contact HR for details on specific benefits."
         }
       ],
+      "execution_trace": "Session: t24_benefits\nTime: 21:12:08  Total: 809ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [809ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2568,7 +2592,7 @@
       "response": "I do not have information regarding specific vision benefits. Please contact HR for details on that topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.62,
+      "latency_s": 0.7,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2640,6 +2664,7 @@
           "text": "I do not have information regarding specific vision benefits. Please contact HR for details on that topic."
         }
       ],
+      "execution_trace": "Session: t25_benefits\nTime: 21:12:08  Total: 700ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [700ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2656,7 +2681,7 @@
       "response": "I do not have information regarding the company's 401k match. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.59,
+      "latency_s": 0.61,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2728,6 +2753,7 @@
           "text": "I do not have information regarding the company's 401k match. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t26_benefits\nTime: 21:12:08  Total: 605ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [605ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2744,7 +2770,7 @@
       "response": "I do not have information regarding 401k vesting. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.48,
+      "latency_s": 0.41,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2816,6 +2842,7 @@
           "text": "I do not have information regarding 401k vesting. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t27_benefits\nTime: 21:12:09  Total: 414ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [414ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2832,7 +2859,7 @@
       "response": "I do not have information regarding 401k matching policies. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.51,
+      "latency_s": 0.59,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2904,6 +2931,7 @@
           "text": "I do not have information regarding 401k matching policies. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t28_benefits\nTime: 21:12:09  Total: 593ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [592ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -2920,7 +2948,7 @@
       "response": "I do not have information regarding parental leave. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.56,
+      "latency_s": 0.52,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -2992,6 +3020,7 @@
           "text": "I do not have information regarding parental leave. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t29_benefits\nTime: 21:12:09  Total: 515ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [515ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3008,7 +3037,7 @@
       "response": "I do not have information regarding parental leave policies. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.58,
+      "latency_s": 0.59,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3080,6 +3109,7 @@
           "text": "I do not have information regarding parental leave policies. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t30_benefits\nTime: 21:12:09  Total: 589ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [589ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3096,7 +3126,7 @@
       "response": "I do not have information regarding open enrollment. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.46,
+      "latency_s": 0.67,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3168,6 +3198,7 @@
           "text": "I do not have information regarding open enrollment. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t31_benefits\nTime: 21:12:09  Total: 666ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [666ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3184,7 +3215,7 @@
       "response": "I do not have information regarding paid holidays. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.72,
+      "latency_s": 0.6,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3256,6 +3287,7 @@
           "text": "I do not have information regarding paid holidays. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t32_holidays\nTime: 21:12:09  Total: 600ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [600ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3272,7 +3304,7 @@
       "response": "I do not have information regarding company holidays. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.66,
+      "latency_s": 0.56,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3344,6 +3376,7 @@
           "text": "I do not have information regarding company holidays. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t33_holidays\nTime: 21:12:10  Total: 560ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [560ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3360,7 +3393,7 @@
       "response": "I do not have information regarding specific holiday schedules. Please contact HR for details about paid holidays.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.48,
+      "latency_s": 0.73,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3432,6 +3465,7 @@
           "text": "I do not have information regarding specific holiday schedules. Please contact HR for details about paid holidays."
         }
       ],
+      "execution_trace": "Session: t34_holidays\nTime: 21:12:10  Total: 734ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [734ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3448,7 +3482,7 @@
       "response": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.59,
+      "latency_s": 0.62,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3520,6 +3554,7 @@
           "text": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t35_bereavement\nTime: 21:12:10  Total: 615ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [615ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3536,7 +3571,7 @@
       "response": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.63,
+      "latency_s": 0.45,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3608,6 +3643,7 @@
           "text": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t36_bereavement\nTime: 21:12:10  Total: 449ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [449ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3624,7 +3660,7 @@
       "response": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.68,
+      "latency_s": 0.47,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3696,6 +3732,7 @@
           "text": "I do not have information regarding bereavement leave. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t37_bereavement\nTime: 21:12:11  Total: 465ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [465ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3712,7 +3749,7 @@
       "response": "I do not have information regarding jury duty policy. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.61,
+      "latency_s": 0.71,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -3784,6 +3821,7 @@
           "text": "I do not have information regarding jury duty policy. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t38_jury_duty\nTime: 21:12:11  Total: 710ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [710ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -3800,7 +3838,7 @@
       "response": "The Employee Assistance Program (EAP) offers free, confidential counseling with up to 8 sessions per issue per year, plus a 24/7 hotline covering mental health, stress, legal, and financial matters.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.16,
+      "latency_s": 1.34,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -3879,6 +3917,7 @@
           "text": "The Employee Assistance Program (EAP) offers free, confidential counseling with up to 8 sessions per issue per year, plus a 24/7 hotline covering mental health, stress, legal, and financial matters."
         }
       ],
+      "execution_trace": "Session: t39_eap\nTime: 21:12:11  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How many EAP counseling sessions do I get?",
@@ -3894,7 +3933,7 @@
       "response": "Yes, the Employee Assistance Program (EAP) includes a 24/7 hotline that covers mental health, stress, legal, and financial matters.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.13,
+      "latency_s": 1.35,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -3973,6 +4012,7 @@
           "text": "Yes, the Employee Assistance Program (EAP) includes a 24/7 hotline that covers mental health, stress, legal, and financial matters."
         }
       ],
+      "execution_trace": "Session: t40_eap\nTime: 21:12:11  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.4s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Does the EAP have a 24/7 hotline?",
@@ -3988,7 +4028,7 @@
       "response": "I do not have information regarding a four-day work week policy. I suggest you contact HR for clarification on this matter.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.55,
+      "latency_s": 0.71,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4060,6 +4100,7 @@
           "text": "I do not have information regarding a four-day work week policy. I suggest you contact HR for clarification on this matter."
         }
       ],
+      "execution_trace": "Session: t41_flex_time\nTime: 21:12:11  Total: 709ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [709ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4076,7 +4117,7 @@
       "response": "I do not have information regarding flex time policies. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.45,
+      "latency_s": 0.42,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4148,6 +4189,7 @@
           "text": "I do not have information regarding flex time policies. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t42_flex_time\nTime: 21:12:12  Total: 415ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [415ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4164,7 +4206,7 @@
       "response": "I do not have information regarding tuition reimbursement. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.69,
+      "latency_s": 0.5,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4236,6 +4278,7 @@
           "text": "I do not have information regarding tuition reimbursement. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t43_tuition_reimbursement\nTime: 21:12:12  Total: 496ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [496ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4252,7 +4295,7 @@
       "response": "I do not have information regarding tuition reimbursement policies. Please contact HR for assistance with this topic.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.63,
+      "latency_s": 0.73,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4324,6 +4367,7 @@
           "text": "I do not have information regarding tuition reimbursement policies. Please contact HR for assistance with this topic."
         }
       ],
+      "execution_trace": "Session: t44_tuition_reimbursement\nTime: 21:12:12  Total: 732ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [732ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4340,7 +4384,7 @@
       "response": "Short-term disability covers 60% of your salary for up to 12 weeks after a 7-day waiting period, provided you have a qualifying medical condition and a physician's certification. The 7-day waiting period is unpaid time before benefits begin, but it does not reduce the 12 payable weeks.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.52,
+      "latency_s": 1.51,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -4419,6 +4463,7 @@
           "text": "Short-term disability covers 60% of your salary for up to 12 weeks after a 7-day waiting period, provided you have a qualifying medical condition and a physician's certification. The 7-day waiting period is unpaid time before benefits begin, but it does not reduce the 12 payable weeks."
         }
       ],
+      "execution_trace": "Session: t45_short_term_disability\nTime: 21:12:12  Total: 1.5s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.5s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "What does short-term disability pay?",
@@ -4434,7 +4479,7 @@
       "response": "Short-term disability covers up to 12 weeks after a 7-day unpaid waiting period for a qualifying medical condition.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.16,
+      "latency_s": 1.33,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -4513,6 +4558,7 @@
           "text": "Short-term disability covers up to 12 weeks after a 7-day unpaid waiting period for a qualifying medical condition."
         }
       ],
+      "execution_trace": "Session: t46_short_term_disability\nTime: 21:12:13  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "How long does short-term disability last?",
@@ -4528,7 +4574,7 @@
       "response": "Yes, there is a 7-day waiting period for short-term disability. This is unpaid time before benefits begin, and it does not reduce the 12 payable weeks.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.33,
+      "latency_s": 0.99,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -4607,6 +4653,7 @@
           "text": "Yes, there is a 7-day waiting period for short-term disability. This is unpaid time before benefits begin, and it does not reduce the 12 payable weeks."
         }
       ],
+      "execution_trace": "Session: t47_short_term_disability\nTime: 21:12:13  Total: 986ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [986ms]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Is there a waiting period for short-term disability?",
@@ -4622,7 +4669,7 @@
       "response": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this question.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.65,
+      "latency_s": 0.66,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4694,6 +4741,7 @@
           "text": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this question."
         }
       ],
+      "execution_trace": "Session: t48_benefits\nTime: 21:12:14  Total: 658ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [658ms]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4710,7 +4758,7 @@
       "response": "I do not have information regarding tuition reimbursement. Please contact HR for assistance with this policy.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.59,
+      "latency_s": 1.44,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4782,6 +4830,7 @@
           "text": "I do not have information regarding tuition reimbursement. Please contact HR for assistance with this policy."
         }
       ],
+      "execution_trace": "Session: t49_tuition_reimbursement\nTime: 21:12:14  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.4s]",
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -4798,7 +4847,7 @@
       "response": "No, sick leave does not roll over year to year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.53,
+      "latency_s": 0.68,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -4870,6 +4919,7 @@
           "text": "No, sick leave does not roll over year to year."
         }
       ],
+      "execution_trace": "Session: t50_sick_leave\nTime: 21:12:14  Total: 685ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [685ms]",
       "golden_eval": {
         "matched": true,
         "golden_question": "Do unused sick days carry over year to year?",
@@ -4885,7 +4935,7 @@
       "response": "If you are out for 4 weeks on short-term disability, your total payout would be $2,400. This is based on a weekly benefit of $600 (60% of your salary). \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.23,
+      "latency_s": 1.67,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -4965,6 +5015,7 @@
           "text": "If you are out for 4 weeks on short-term disability, your total payout would be $2,400. This is based on a weekly benefit of $600 (60% of your salary). \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin."
         }
       ],
+      "execution_trace": "Session: tc06_calc_std\nTime: 21:12:14  Total: 1.7s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (calculate_disability_pay)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (calculate_disability_pay)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.7s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "I earn $52,000. What's my total short-term disability payout if I'm out for 4 weeks?",
@@ -4980,7 +5031,7 @@
       "response": "On a $91,000 annual salary, short-term disability pays $1,050 per week. \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.2,
+      "latency_s": 1.34,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -5045,8 +5096,8 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "annual_salary": 91000,
-            "weeks_out": 1
+            "weeks_out": 1,
+            "annual_salary": 91000
           }
         }
       ],
@@ -5060,6 +5111,7 @@
           "text": "On a $91,000 annual salary, short-term disability pays $1,050 per week. \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin."
         }
       ],
+      "execution_trace": "Session: tc07_calc_std\nTime: 21:12:15  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (calculate_disability_pay)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (calculate_disability_pay)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "On a $91,000 salary, how much does short-term disability pay each week?",
@@ -5075,7 +5127,7 @@
       "response": "For a gross annual salary of $65,000, your short-term disability benefit replaces 60% of your salary, which comes to $750 per week.\n\nSince the policy covers a maximum of 12 weeks, your total benefit for your 14-week leave would be $9,000. Please note that there is a 7-day unpaid waiting period before these benefits begin.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.28,
+      "latency_s": 1.25,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -5140,8 +5192,8 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "annual_salary": 65000,
-            "weeks_out": 14
+            "weeks_out": 14,
+            "annual_salary": 65000
           }
         }
       ],
@@ -5155,6 +5207,7 @@
           "text": "For a gross annual salary of $65,000, your short-term disability benefit replaces 60% of your salary, which comes to $750 per week.\n\nSince the policy covers a maximum of 12 weeks, your total benefit for your 14-week leave would be $9,000. Please note that there is a 7-day unpaid waiting period before these benefits begin."
         }
       ],
+      "execution_trace": "Session: tc08_calc_std\nTime: 21:12:15  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (calculate_disability_pay)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (calculate_disability_pay)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "I make $65,000 and expect to be out 14 weeks on short-term disability. What's my total benefit?",
@@ -5170,7 +5223,7 @@
       "response": "For an annual salary of $182,000, your weekly short-term disability benefit would be $2,100. \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.04,
+      "latency_s": 1.34,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -5250,6 +5303,7 @@
           "text": "For an annual salary of $182,000, your weekly short-term disability benefit would be $2,100. \n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin."
         }
       ],
+      "execution_trace": "Session: tc09_calc_std\nTime: 21:12:16  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (calculate_disability_pay)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (calculate_disability_pay)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "What's the weekly short-term disability benefit on a $182,000 salary?",
@@ -5265,7 +5319,7 @@
       "response": "If you take 8 weeks of short-term disability with an annual salary of $117,000, your total payout would be $10,800. This is based on a weekly benefit of $1,350 (60% of your salary).\n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.35,
+      "latency_s": 1.41,
       "user_turns": 1,
       "tool_calls": 1,
       "corrections": 0,
@@ -5330,8 +5384,8 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "annual_salary": 117000,
-            "weeks_out": 8
+            "weeks_out": 8,
+            "annual_salary": 117000
           }
         }
       ],
@@ -5345,6 +5399,7 @@
           "text": "If you take 8 weeks of short-term disability with an annual salary of $117,000, your total payout would be $10,800. This is based on a weekly benefit of $1,350 (60% of your salary).\n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin."
         }
       ],
+      "execution_trace": "Session: tc10_calc_std\nTime: 21:12:16  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (calculate_disability_pay)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (calculate_disability_pay)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.4s]",
       "golden_eval": {
         "matched": true,
         "golden_question": "If I make $117,000 and take 8 weeks of short-term disability, what's my total payout?",
@@ -5466,6 +5521,37 @@
           "outcome": "not_recovered"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about a policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact ('12 weeks') to correct the agent's claim of having no information on the topic."
+        }
+      ],
+      "execution_trace": "Session: corr_parental\nTime: 21:12:17  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [593ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [785ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [593ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "not_recovered",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [785ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -5482,7 +5568,7 @@
       "response": "You are right, thank you for that information. I apologize for the confusion. Please contact HR if you need further details regarding bereavement leave.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.43,
+      "latency_s": 1.29,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -5588,6 +5674,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "User asks a question about bereavement leave policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact ('3 days for a sibling') that contradicts the agent's previous claim of not having information."
+        }
+      ],
+      "execution_trace": "Session: corr_bereavement\nTime: 21:12:17  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [576ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [715ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [576ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [715ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -5604,7 +5721,7 @@
       "response": "I do not have information regarding specific benefit coverage amounts like that. Please contact HR for confirmation on your benefits.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.24,
+      "latency_s": 1.32,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 0,
@@ -5696,6 +5813,30 @@
           "outcome": "unhelpful"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about policy coverage and amount."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "VERIFY",
+          "evidence": "User provides external information and asks the agent to confirm it, without directly correcting a claim made by the agent."
+        }
+      ],
+      "execution_trace": "Session: corr_ortho\nTime: 21:12:18  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [654ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [662ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "full_conversation",
+          "outcome": "unhelpful",
+          "start_turn": 0,
+          "end_turn": 3,
+          "trace": "\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [654ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [662ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -5712,7 +5853,7 @@
       "response": "You are right, thank you for that information. I apologize that I didn't have that in my records. If you have any other questions about our policies, please let me know!",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.62,
+      "latency_s": 1.24,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -5818,6 +5959,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about a specific policy detail."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact that the agent claimed not to have, correcting the agent's knowledge gap."
+        }
+      ],
+      "execution_trace": "Session: corr_oop\nTime: 21:12:18  Total: 1.2s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [597ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [644ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [597ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [644ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -5834,7 +6006,7 @@
       "response": "I apologize for the confusion. Thank you for that information; I have noted that vesting occurs after 2 years. Please let me know if you have any other questions I can help with!",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.4,
+      "latency_s": 1.36,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -5940,6 +6112,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about 401k vesting."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact ('vested after 2 years') that contradicts the agent's previous claim of not having information, and asks for confirmation."
+        }
+      ],
+      "execution_trace": "Session: corr_vesting\nTime: 21:12:19  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [644ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [720ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [644ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [720ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -5956,7 +6159,7 @@
       "response": "You are right, thank you for the correction. You get 25 days of PTO per year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.18,
+      "latency_s": 1.13,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6062,6 +6265,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about PTO policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User directly contradicts the agent's previous statement about PTO days and provides a different number."
+        }
+      ],
+      "execution_trace": "Session: corr_pto_days\nTime: 21:12:19  Total: 1.1s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [516ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [610ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [516ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [610ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6078,7 +6312,7 @@
       "response": "You are right, thank you for the correction. You can roll over 10 unused PTO days to the next year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.14,
+      "latency_s": 1.4,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6184,6 +6418,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about PTO rollover policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User contradicts the agent's previous answer (5 days) and provides a specific counter-fact (10 days)."
+        }
+      ],
+      "execution_trace": "Session: corr_pto_rollover\nTime: 21:12:19  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [735ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [666ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [735ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [666ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6200,7 +6465,7 @@
       "response": "I apologize for the confusion. Thank you for the correction; I have noted that you have 15 sick days per year.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.15,
+      "latency_s": 1.1,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6306,6 +6571,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "User asks a primary question about sick days."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User directly contradicts the agent's previous statement with a specific counter-fact ('15 sick days' instead of '10 sick days')."
+        }
+      ],
+      "execution_trace": "Session: corr_sick\nTime: 21:12:20  Total: 1.1s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [475ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [629ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [475ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [629ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6322,7 +6618,7 @@
       "response": "I apologize for the confusion. If your manager has approved 4 days a week, then that is the arrangement for you. Thank you for the correction.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.99,
+      "latency_s": 1.91,
       "user_turns": 2,
       "tool_calls": 1,
       "corrections": 1,
@@ -6435,6 +6731,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about company policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User contradicts the agent's previous statement about the number of WFH days with a specific counter-fact from their manager."
+        }
+      ],
+      "execution_trace": "Session: corr_remote\nTime: 21:12:20  Total: 1.9s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n\u2502   \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [613ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [613ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6451,7 +6778,7 @@
       "response": "I understand; thank you for that information. Since I do not have access to the company's expense policy, please contact HR to confirm the requirements for expense receipts.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.36,
+      "latency_s": 1.42,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 0,
@@ -6543,6 +6870,30 @@
           "outcome": "not_recovered"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial query from the user, seeking information about expense receipts."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "The user provides what they believe is the policy and asks for confirmation, following up on the agent's inability to answer the initial question. It does not correct a specific wrong claim made by the agent, but rather attempts to guide the agent to an answer."
+        }
+      ],
+      "execution_trace": "Session: corr_receipt\nTime: 21:12:21  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [646ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [770ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "overall_conversation",
+          "outcome": "not_recovered",
+          "start_turn": 0,
+          "end_turn": 3,
+          "trace": "\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [646ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [770ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6559,7 +6910,7 @@
       "response": "You are right, thank you for that information. I will keep that in mind.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.35,
+      "latency_s": 1.23,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6665,6 +7016,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "User asks an initial question about a company policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User contradicts the agent's implied lack of knowledge and provides a specific policy detail."
+        }
+      ],
+      "execution_trace": "Session: corr_travel\nTime: 21:12:21  Total: 1.2s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [567ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [661ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [567ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [661ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6681,7 +7063,7 @@
       "response": "You are correct, thank you for that information. I have noted that the company observes 13 paid holidays.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.19,
+      "latency_s": 1.31,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6787,6 +7169,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "User asks an initial question about company policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User corrects the agent's previous statement that it had no information, providing a specific number of holidays."
+        }
+      ],
+      "execution_trace": "Session: corr_holidays\nTime: 21:12:22  Total: 1.3s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [681ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [631ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [681ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [631ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6803,7 +7216,7 @@
       "response": "I apologize for the confusion. Thank you for that information; I have noted that the company covers 100% of the health premium. Please let me know if you have any other questions!",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.39,
+      "latency_s": 1.48,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -6909,6 +7322,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about company policy."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact ('100%') that the agent previously claimed not to have information about, implicitly correcting the agent's inability to answer."
+        }
+      ],
+      "execution_trace": "Session: corr_premium\nTime: 21:12:22  Total: 1.5s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [823ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [658ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [823ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [658ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -6925,7 +7369,7 @@
       "response": "You may be right! I apologize for the confusion. Since I don't have specific details on dental coverage in my records, please feel free to rely on your information, or you can contact HR if you would like to confirm the specifics.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 1.4,
+      "latency_s": 1.42,
       "user_turns": 2,
       "tool_calls": 0,
       "corrections": 1,
@@ -7031,6 +7475,37 @@
           "outcome": "not_recovered"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "User asks a direct question about dental coverage."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User provides a specific fact ('covered 100%') that contradicts the agent's previous claim of lacking information, and asks for confirmation."
+        }
+      ],
+      "execution_trace": "Session: corr_dental_major\nTime: 21:12:22  Total: 1.4s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [659ms]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [763ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [659ms]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "not_recovered",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [763ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -7047,7 +7522,7 @@
       "response": "I apologize for the confusion. If you have information that it lasts 26 weeks, I will certainly accept that figure. Please feel free to proceed with that understanding.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 2.0,
+      "latency_s": 1.95,
       "user_turns": 2,
       "tool_calls": 1,
       "corrections": 1,
@@ -7160,6 +7635,37 @@
           "outcome": "parroted"
         }
       ],
+      "turn_tags": [
+        {
+          "turn_index": 0,
+          "role": "user",
+          "tag": "FOLLOWUP",
+          "evidence": "Initial question about a policy duration."
+        },
+        {
+          "turn_index": 2,
+          "role": "user",
+          "tag": "CORRECTION",
+          "evidence": "User contradicts the agent's previous answer (12 weeks) with a specific counter-fact (26 weeks) and asks for confirmation."
+        }
+      ],
+      "execution_trace": "Session: corr_std\nTime: 21:12:23  Total: 1.9s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u251c\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n\u2502   \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n\u2502   \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n\u2502   \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [655ms]",
+      "execution_sub_trajectories": [
+        {
+          "label": "pre_correction_1",
+          "outcome": "wrong",
+          "start_turn": 0,
+          "end_turn": 1,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_STARTING (lookup_company_policy)\n    \u251c\u2500\u2500 skill-evolution-lab > TOOL_COMPLETED (lookup_company_policy)\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.3s]"
+        },
+        {
+          "label": "post_correction_1",
+          "outcome": "parroted",
+          "start_turn": 2,
+          "end_turn": 3,
+          "trace": "\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [655ms]"
+        }
+      ],
       "failure_class": "skill_gap",
       "golden_eval": {
         "matched": true,
@@ -7176,7 +7682,7 @@
       "response": "I do not have information regarding technical support or VPN troubleshooting. Please contact HR for assistance with this issue.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.46,
+      "latency_s": 2.04,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7248,6 +7754,7 @@
           "text": "I do not have information regarding technical support or VPN troubleshooting. Please contact HR for assistance with this issue."
         }
       ],
+      "execution_trace": "Session: oos_vpn\nTime: 21:12:23  Total: 2.0s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [2.0s]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5021
@@ -7259,7 +7766,7 @@
       "response": "I do not have information regarding individual performance reviews. Please contact HR for assistance with that inquiry.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.52,
+      "latency_s": 0.7,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7331,6 +7838,7 @@
           "text": "I do not have information regarding individual performance reviews. Please contact HR for assistance with that inquiry."
         }
       ],
+      "execution_trace": "Session: oos_peer_review\nTime: 21:12:24  Total: 697ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [697ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5939
@@ -7342,7 +7850,7 @@
       "response": "I do not have information regarding the company's stock price or investment advice. Please contact HR for further assistance.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.67,
+      "latency_s": 0.69,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7414,6 +7922,7 @@
           "text": "I do not have information regarding the company's stock price or investment advice. Please contact HR for further assistance."
         }
       ],
+      "execution_trace": "Session: oos_stock\nTime: 21:12:24  Total: 692ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [692ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.6334
@@ -7425,7 +7934,7 @@
       "response": "I do not have information regarding company acquisitions. I suggest you contact HR for further information.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.64,
+      "latency_s": 1.04,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7497,6 +8006,7 @@
           "text": "I do not have information regarding company acquisitions. I suggest you contact HR for further information."
         }
       ],
+      "execution_trace": "Session: oos_merger\nTime: 21:12:25  Total: 1.0s\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [1.0s]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5741
@@ -7508,7 +8018,7 @@
       "response": "I do not have information about lunch spots near the office. I recommend contacting HR for assistance with local recommendations.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.71,
+      "latency_s": 0.69,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7580,6 +8090,7 @@
           "text": "I do not have information about lunch spots near the office. I recommend contacting HR for assistance with local recommendations."
         }
       ],
+      "execution_trace": "Session: oos_restaurant\nTime: 21:12:25  Total: 689ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [689ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5619
@@ -7591,7 +8102,7 @@
       "response": "I do not have information regarding personal tax filing. Please contact HR for assistance with this matter.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.52,
+      "latency_s": 0.82,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7663,6 +8174,7 @@
           "text": "I do not have information regarding personal tax filing. Please contact HR for assistance with this matter."
         }
       ],
+      "execution_trace": "Session: oos_tax\nTime: 21:12:26  Total: 817ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [817ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5564
@@ -7674,7 +8186,7 @@
       "response": "I do not have information regarding equipment requests or office supplies. I suggest you contact HR for assistance with this matter.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.7,
+      "latency_s": 0.79,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7746,6 +8258,7 @@
           "text": "I do not have information regarding equipment requests or office supplies. I suggest you contact HR for assistance with this matter."
         }
       ],
+      "execution_trace": "Session: oos_monitor\nTime: 21:12:26  Total: 786ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [786ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.4974
@@ -7757,7 +8270,7 @@
       "response": "I do not have that information. Please contact HR for assistance with questions outside of company policies.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.61,
+      "latency_s": 0.63,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7829,6 +8342,7 @@
           "text": "I do not have that information. Please contact HR for assistance with questions outside of company policies."
         }
       ],
+      "execution_trace": "Session: oos_sports\nTime: 21:12:26  Total: 630ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [630ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.4787
@@ -7840,7 +8354,7 @@
       "response": "I do not have information regarding how to set up your work email on your personal phone. Please contact HR for assistance with this.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.74,
+      "latency_s": 0.75,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7912,6 +8426,7 @@
           "text": "I do not have information regarding how to set up your work email on your personal phone. Please contact HR for assistance with this."
         }
       ],
+      "execution_trace": "Session: oos_email_setup\nTime: 21:12:26  Total: 754ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [754ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5516
@@ -7923,7 +8438,7 @@
       "response": "I do not have that information. I suggest you contact HR for assistance with that request.",
       "answered_by": "policy_agent",
       "is_a2a": false,
-      "latency_s": 0.81,
+      "latency_s": 0.66,
       "user_turns": 1,
       "tool_calls": 0,
       "corrections": 0,
@@ -7995,6 +8510,7 @@
           "text": "I do not have that information. I suggest you contact HR for assistance with that request."
         }
       ],
+      "execution_trace": "Session: oos_homeaddr\nTime: 21:12:27  Total: 659ms\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u2514\u2500\u2500 skill-evolution-lab > USER_MESSAGE_RECEIVED\n    \u2514\u2500\u2500 skill-evolution-lab > LLM_RESPONSE [659ms]",
       "golden_eval": {
         "matched": false,
         "similarity": 0.5381
@@ -8002,11 +8518,11 @@
     }
   ],
   "details": {
-    "parse_errors": "0",
-    "parse_error_rate": "0.0",
-    "elapsed_seconds": "128.9",
+    "parse_errors": "8",
+    "parse_error_rate": "0.0125",
+    "elapsed_seconds": "123.4",
     "project": "agent-skill-lab-01",
-    "dataset": "local.conversations",
+    "dataset": "agent_analytics.agent_events_lab_20260710_210901_10380244954_v0_test",
     "location": "us-central1",
     "eval_model": "gemini-2.5-flash",
     "samples": "None"
