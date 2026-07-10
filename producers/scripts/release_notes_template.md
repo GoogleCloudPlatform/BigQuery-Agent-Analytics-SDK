@@ -13,20 +13,34 @@ pipx install bigquery-agent-analytics-tracing=={version}
 ## Deploy your telemetry warehouse
 
 ```bash
+# 0. The variables every command below uses:
+PROJECT=my-gcp-project
+DATASET=agent_analytics
+REGION=us-central1
+
 # 1. Readiness checks (mutates nothing; needs no build permissions):
 bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --preflight
 
 # 2. Deploy (prints the plan first; --execute applies). Deploys the
 #    released receiver image, pinned by digest:
-bqaa-otel bootstrap --project $PROJECT --dataset $DATASET \
+bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --region $REGION \
   --signals logs,metrics,traces --source claude-code,codex --execute
 
-# 3. Fill the bearer token into the generated artifacts BEFORE
+# The receiver URL (bootstrap prints it; this recovers it any time):
+URL=$(gcloud run services describe bqaa-otlp-receiver \
+  --project $PROJECT --region $REGION --format='value(status.url)')
+
+# 3. Fill the bearer token into BOTH generated artifacts BEFORE
 #    distributing them (Codex does NOT expand env vars in headers —
 #    a literal <token> placeholder means every export gets a 401):
 TOKEN=$(gcloud secrets versions access latest \
   --secret=bqaa-otlp-token --project $PROJECT)
-sed -i.bak "s/<token>/${{TOKEN}}/g" codex.config.toml  # never commit this file
+test -n "$TOKEN" || {{ echo "empty token — aborting"; exit 1; }}
+for f in codex.config.toml claude-code.managed-settings.json; do
+  sed -i.bak "s/<token>/${{TOKEN}}/g" "$f" && rm "$f.bak"  # never commit these
+done
+grep -l '<token>' codex.config.toml claude-code.managed-settings.json \
+  && {{ echo "placeholder still present — aborting"; exit 1; }}
 # Then distribute: Claude Code managed settings via admin console/MDM;
 # Codex config.toml via managed dotfiles.
 

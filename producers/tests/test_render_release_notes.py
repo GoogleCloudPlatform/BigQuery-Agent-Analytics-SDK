@@ -27,11 +27,16 @@ from bigquery_agent_analytics_tracing.otlp import config_artifacts
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
 import render_release_notes
 
+PUBLIC_IMAGE = "us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver"
+
 
 def _render():
+  # public_image is REQUIRED and comes from the workflow's authoritative
+  # env var — the renderer holds no duplicate coordinate (#356 review).
   return render_release_notes.render(
       version="0.2.0",
       digest="sha256:" + "e" * 64,
+      public_image=PUBLIC_IMAGE,
   )
 
 
@@ -73,3 +78,27 @@ def test_curated_changelog_names_the_tracing_prs_only():
   body = _render()
   for issue in ("#316", "#324", "#317", "#340", "#342", "#343"):
     assert issue in body
+
+
+def test_render_rejects_a_malformed_public_image():
+  import pytest
+
+  with pytest.raises(ValueError):
+    render_release_notes.render(
+        version="0.2.0",
+        digest="sha256:" + "e" * 64,
+        public_image="not a registry/path",
+    )
+
+
+def test_lifecycle_defines_its_variables_and_fills_both_artifacts():
+  body = _render()
+  # Variables are defined before first use (#356: bootstrap prints a URL
+  # but never exports $URL).
+  assert "PROJECT=" in body and "DATASET=" in body and "URL=$(" in body
+  # BOTH generated artifacts get the token fill, with a guard against an
+  # empty token and an assertion that no placeholder survives.
+  assert "claude-code.managed-settings.json" in body
+  assert "codex.config.toml" in body
+  assert 'test -n "$TOKEN"' in body or '[ -n "$TOKEN" ]' in body
+  assert "grep -l '<token>'" in body  # placeholder-survival guard

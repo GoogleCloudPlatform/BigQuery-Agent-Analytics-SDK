@@ -64,26 +64,38 @@ minutes; the release then WAITS at two manual approval gates
    Trusted Publishing. No `skip-existing`: if the version already
    exists there, the upload fails loudly — that version is burned
    (see below).
-6. **`promote`** — waits on the `release-promote` environment. Run
-   the TestPyPI full-lifecycle gate BEFORE approving (see next
-   section). On approval: crane-copies the staging digest to the
-   public coordinate (content-addressed — the digest the artifacts
-   embed is unchanged), asserts public digest == packaged constant,
-   and publishes the draft release.
+6. **`promote`** — waits on the `release-promote` environment
+   (restricted to `tracing-v*` tags; impersonates the promoter SA,
+   the only identity that can write the public repo). Run the
+   TestPyPI full-lifecycle gate BEFORE approving (see next section).
+   On approval: crane-copies the staging digest to the public
+   coordinate (idempotent — an existing tag is accepted only with the
+   exact expected digest) and asserts public digest == packaged
+   constant. It does NOT publish the release.
 7. **`publish-pypi`** — PyPI, gated by the `pypi` environment;
    requires `promote`.
+8. **`finalize`** — runs `always()`: reconciles the PyPI file set and
+   the four release assets; publishes the draft GitHub release ONLY
+   on complete state (never as the repository's Latest); a partial
+   publication is surfaced with the yank/version-burn recovery.
 
 The plugin tarball and `SHA256SUMS` are **never** uploaded to PyPI —
 they ship only as GitHub release assets.
 
 ## The TestPyPI full-lifecycle gate (before approving `release-promote`)
 
-In a clean venv on a machine with NO repo checkout:
+In a clean venv on a machine with NO repo checkout. Never mix indexes
+(pip gives --index-url/--extra-index-url NO priority — a dependency
+squatter on TestPyPI could be chosen): download the exact candidate
+with --no-deps, checksum it against the release SHA256SUMS, install
+dependencies from real PyPI, then install the verified local file.
 
 ```bash
-pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            bigquery-agent-analytics-tracing==${VERSION}
+python -m venv gate && source gate/bin/activate
+pip download --no-deps --index-url https://test.pypi.org/simple/ \
+  --dest /tmp/gate bigquery-agent-analytics-tracing==${VERSION}
+sha256sum /tmp/gate/*.whl          # MUST match the draft release SHA256SUMS
+pip install /tmp/gate/*.whl        # deps resolve from real PyPI
 bqaa-otel bootstrap --preflight ...
 bqaa-otel bootstrap ... --image <staging-ref>@sha256:<digest> --execute
 bqaa-otel verify --smoke ...
