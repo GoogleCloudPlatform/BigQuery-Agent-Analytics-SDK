@@ -63,8 +63,42 @@ def _parroted(session: dict) -> bool:
   return False
 
 
-def _summarize(report: dict) -> dict:
+def _load_expected_ids(paths) -> list:
+  """Expected session ids from the run's question files.
+
+  These define the comparison's exact denominator: a session that errored,
+  timed out, or otherwise never reached the scored report counts as a
+  failure -- a candidate can never improve its rate by dropping hard cases.
+  """
+  ids = []
+  for path in paths or []:
+    with open(path) as f:
+      data = json.load(f)
+    qs = data.get("questions", data) if isinstance(data, dict) else data
+    for q in qs:
+      qid = q.get("id")
+      if qid:
+        ids.append(qid)
+  return ids
+
+
+def _summarize(report: dict, expected_ids=None) -> dict:
   sessions = report.get("sessions", [])
+  missing = 0
+  if expected_ids:
+    # Exact-set semantics: the denominator is the expected question set.
+    # Sessions absent from the report become failing placeholders (the
+    # existing correctness checks fail them naturally), and stray sessions
+    # outside the expected set are excluded.
+    by_id = {s.get("session_id"): s for s in sessions}
+    sessions = []
+    for sid in expected_ids:
+      if sid in by_id:
+        sessions.append(by_id[sid])
+      else:
+        sessions.append({"session_id": sid})
+        missing += 1
+
   oos = [s for s in sessions if _is_oos(s)]
   corr = [s for s in sessions if not _is_oos(s) and _is_correction(s)]
   single = [s for s in sessions if not _is_oos(s) and not _is_correction(s)]
@@ -85,6 +119,7 @@ def _summarize(report: dict) -> dict:
       "corrections": {"rate": c_rate, "correct": c_ok, "total": c_n},
       "out_of_scope": {"rate": o_rate, "correct": o_ok, "total": o_n},
       "parroted": sum(1 for s in corr if _parroted(s)),
+      "missing": missing,
   }
 
 
@@ -192,14 +227,27 @@ def main():
           " demo gate the registry mirror on the held-out comparison"
       ),
   )
+  parser.add_argument(
+      "--questions",
+      action="append",
+      default=None,
+      metavar="QUESTIONS_JSON",
+      help=(
+          "Question file(s) defining the expected session set (repeatable)."
+          " Sessions missing from a report count as failures, so the gate"
+          " is over the exact question set -- a run cannot improve by"
+          " dropping hard cases"
+      ),
+  )
   args = parser.parse_args()
 
+  expected_ids = _load_expected_ids(args.questions)
   with open(args.v0) as f:
     v0_report = json.load(f)
   with open(args.v1) as f:
     v1_report = json.load(f)
-  v0 = _summarize(v0_report)
-  v1 = _summarize(v1_report)
+  v0 = _summarize(v0_report, expected_ids)
+  v1 = _summarize(v1_report, expected_ids)
   v0_dims = v0_report.get("summary", {}).get("dimension_averages", {}) or {}
   v1_dims = v1_report.get("summary", {}).get("dimension_averages", {}) or {}
   v0_tools = _tool_usage(v0_report)
@@ -232,6 +280,13 @@ def main():
       "(lower is better -- the agent re-verified instead of caving).",
       "",
   ]
+  if v0.get("missing") or v1.get("missing"):
+    lines += [
+        f"Sessions missing from the scored reports (errored or dropped),"
+        f" counted as failures: {short0}={v0['missing']} "
+        f" {short1}={v1['missing']}.",
+        "",
+    ]
   lines += _tool_rows(v0_tools, v1_tools, short0, short1)
   dim_rows = _dim_rows(v0_dims, v1_dims)
   if dim_rows:

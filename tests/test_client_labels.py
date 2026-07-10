@@ -202,15 +202,9 @@ class TestCategoricalPerSessionContext:
   """evaluate_categorical threads per-session golden context to the judge."""
 
   def _run(self, config_kwargs, per_session_context):
-    from bigquery_agent_analytics.categorical_evaluator import (
-        CategoricalEvaluationConfig,
-    )
-    from bigquery_agent_analytics.categorical_evaluator import (
-        CategoricalMetricCategory,
-    )
-    from bigquery_agent_analytics.categorical_evaluator import (
-        CategoricalMetricDefinition,
-    )
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
 
     mock_bq = MagicMock()
     mock_job = MagicMock()
@@ -259,9 +253,7 @@ class TestCategoricalPerSessionContext:
   def test_classify_shortcut_skipped_when_context_present(self):
     # AI.CLASSIFY cannot carry per-session context; the cascade must
     # start at AI.GENERATE so the expected answer reaches the judge.
-    mock_bq, _ = self._run(
-        {"include_justification": False}, {"s1": "ctx"}
-    )
+    mock_bq, _ = self._run({"include_justification": False}, {"s1": "ctx"})
     sql = mock_bq.query.call_args_list[0].args[0]
     assert "AI.GENERATE" in sql
     assert "AI.CLASSIFY" not in sql

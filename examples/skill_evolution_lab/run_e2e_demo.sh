@@ -413,6 +413,7 @@ GATE_RC=0
 $PY compare_runs.py \
   --v0 "$REPORTS_DIR/v0_test_report.json" \
   --v1 "$REPORTS_DIR/v1_test_report.json" \
+  --questions "$TEST" --questions "$CORR_HO" --questions "$OOS_HO" \
   --model "$AGENT_MODEL" --gate \
   -o "$REPORTS_DIR/RESULT.md" | tee "$REPORTS_DIR/RESULT.txt" || GATE_RC=$?
 if [[ "$GATE_RC" -eq 3 ]]; then
@@ -481,6 +482,7 @@ if [[ "$ROUNDS" -ge 2 ]]; then
     $PY compare_runs.py \
       --v0 "$REPORTS_DIR/v1_test_report.json" \
       --v1 "$REPORTS_DIR/v2_test_report.json" \
+      --questions "$TEST" --questions "$CORR_HO" --questions "$OOS_HO" \
       --label0 "V1 (evolved)" --label1 "V2 (round 2)" \
       --model "$AGENT_MODEL" --gate \
       -o "$REPORTS_DIR/RESULT_ROUND2.md" | tee "$REPORTS_DIR/RESULT_ROUND2.txt" || GATE2_RC=$?

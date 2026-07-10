@@ -470,9 +470,7 @@ def build_ai_generate_query(
     context_join = """
 LEFT JOIN UNNEST(@session_contexts) AS sc
   ON sc.session_id = session_transcripts.session_id"""
-    context_expr = (
-        "\n      COALESCE(CONCAT('\\n\\n', sc.context), ''),"
-    )
+    context_expr = "\n      COALESCE(CONCAT('\\n\\n', sc.context), ''),"
 
   return f"""\
 WITH session_transcripts AS (
