@@ -39,6 +39,7 @@ import dataclasses
 import hashlib
 import json
 import pathlib
+import re
 import sys
 from typing import Callable
 
@@ -61,7 +62,11 @@ def _validated_urls(pypi: dict) -> tuple[dict | None, str]:
   [{}], duplicates, missing digests) must become 'invalid-response' —
   never a crash and never a destructive classification (#356 round 7).
   """
-  urls = pypi.get("urls", [])
+  if "urls" not in pypi:
+    # An HTTP 200 without 'urls' is a schema violation — absence is
+    # represented ONLY by the explicit 404 (pypi=None), never by '{}'.
+    return None, "success body has no 'urls' key"
+  urls = pypi["urls"]
   if urls is None or not isinstance(urls, list):
     return None, f"'urls' is {type(urls).__name__}, expected a list"
   seen: dict[str, dict] = {}
@@ -73,11 +78,16 @@ def _validated_urls(pypi: dict) -> tuple[dict | None, str]:
       return None, "url entry has no string filename"
     if name in seen:
       return None, f"duplicate filename {name!r}"
+    if not isinstance(entry.get("yanked"), bool):
+      # Missing/null/string 'yanked' reached 'complete' in review — the
+      # field must exist with Boolean type before this response is
+      # trusted for ANY classification.
+      return None, f"{name!r} has no boolean 'yanked' field"
     digest = entry.get("digests", {})
     if (
         not isinstance(digest, dict)
         or not isinstance(digest.get("sha256"), str)
-        or len(digest["sha256"]) != 64
+        or not re.fullmatch(r"[0-9a-f]{64}", digest["sha256"])
     ):
       return None, f"{name!r} has no valid sha256 digest object"
     seen[name] = entry
@@ -89,11 +99,15 @@ def reconcile(
     version: str,
     anchor_dir: pathlib.Path,
     release_dir: pathlib.Path | None,
-    pypi: dict,
+    pypi: dict | None,
 ) -> tuple[str, str]:
-  """Returns (state, detail). ``release_dir=None`` = the GitHub release
-  is MISSING; the anchor and the PyPI schema are still fully validated
-  before any cross-surface classification."""
+  """Returns (state, detail).
+
+  ``release_dir=None`` = the GitHub release is MISSING. ``pypi=None`` =
+  PyPI returned an explicit 404 (the ONLY absence representation — an
+  HTTP-200 body must satisfy the complete schema). Confirmed PyPI
+  absence is classified BEFORE asset recovery advice, so yank/burn is
+  only ever emitted when validated PyPI files actually exist."""
   wheel, sdist, plugin = _expected_files(version)
   expected = {wheel, sdist, plugin}
 
@@ -125,39 +139,52 @@ def reconcile(
       return "invalid-anchor", f"anchor bytes of {name} do not match manifest"
 
   # --- PyPI schema is validated BEFORE any classification --------------------
-  urls, why = _validated_urls(pypi)
-  if urls is None:
-    return "invalid-response", f"invalid PyPI response schema: {why}"
+  if pypi is None:
+    urls: dict = {}
+  else:
+    urls, why = _validated_urls(pypi)
+    if urls is None:
+      return "invalid-response", f"invalid PyPI response schema: {why}"
+  pypi_absent = not urls
 
   # --- GitHub release missing: cross-surface classification ------------------
   if release_dir is None:
-    if not urls:
-      return "unpublished", "no GitHub release and no PyPI files"
+    if pypi_absent:
+      return "missing-all", "no GitHub release and nothing on PyPI"
     return (
         "missing-release",
         "PyPI carries validated files but the GitHub release is missing",
     )
 
   # --- GitHub release assets: exact set + byte identity ---------------------
+  # 'partial' (yank/burn advice) is reserved for states where validated
+  # PyPI files exist; a broken draft with NOTHING published is
+  # 'draft-invalid' (nothing to yank).
+  asset_problem = None
   release_files = {p.name for p in release_dir.iterdir()}
   expected_release = expected | {"SHA256SUMS"}
   if release_files != expected_release:
     missing = expected_release - release_files
     extra = release_files - expected_release
-    return (
-        "partial",
+    asset_problem = (
         f"release asset set mismatch (missing: {sorted(missing)},"
-        f" extra: {sorted(extra)})",
+        f" extra: {sorted(extra)})"
     )
-  for name in expected:
-    if _sha256(release_dir / name) != manifest[name]:
-      return "partial", f"release asset {name} differs from the build anchor"
-  if (release_dir / "SHA256SUMS").read_text() != manifest_path.read_text():
-    return "partial", "release SHA256SUMS differs from the build anchor"
+  else:
+    for name in expected:
+      if _sha256(release_dir / name) != manifest[name]:
+        asset_problem = f"release asset {name} differs from the build anchor"
+        break
+    else:
+      if (release_dir / "SHA256SUMS").read_text() != manifest_path.read_text():
+        asset_problem = "release SHA256SUMS differs from the build anchor"
 
-  # --- PyPI: exact distribution set + digests + not yanked ------------------
-  if not urls:
-    return "unpublished", "PyPI has no files for this version"
+  if pypi_absent:
+    if asset_problem:
+      return "draft-invalid", f"nothing on PyPI and {asset_problem}"
+    return "unpublished", "draft verified against the anchor; PyPI has no files"
+  if asset_problem:
+    return "partial", asset_problem
   expected_pypi = {wheel, sdist}
   if set(urls) != expected_pypi:
     missing = expected_pypi - set(urls)
@@ -218,6 +245,21 @@ def dispatch(state: str) -> DispatchAction:
         " publication state is INDETERMINATE; retry the lookup before"
         " taking any recovery action",
     )
+  if state == "missing-all":
+    return DispatchAction(
+        False,
+        1,
+        "nothing exists on either surface — no draft and nothing on PyPI;"
+        " rerun the pipeline from github-release (PyPI needs no cleanup)",
+    )
+  if state == "draft-invalid":
+    return DispatchAction(
+        False,
+        1,
+        "the release draft differs from the build anchor and NOTHING is on"
+        " PyPI (no cleanup there) — delete the draft and rerun"
+        " github-release",
+    )
   if state == "missing-release":
     return DispatchAction(
         False,
@@ -246,19 +288,29 @@ def main(
   parser.add_argument(
       "--pypi-json",
       type=pathlib.Path,
-      required=True,
-      help="File holding the PyPI release JSON ('{}' when absent).",
+      default=None,
+      help="File holding the PyPI release JSON (HTTP 200 body).",
+  )
+  parser.add_argument(
+      "--pypi-missing",
+      action="store_true",
+      help="PyPI returned an explicit 404 — the only absence marker.",
   )
   args = parser.parse_args(argv)
   if (args.release_dir is None) == (not args.release_missing):
     parser.error("exactly one of --release-dir / --release-missing required")
+  if (args.pypi_json is None) == (not args.pypi_missing):
+    parser.error("exactly one of --pypi-json / --pypi-missing required")
   # Only the workflow's explicit-404 marker ('{}') means absence. A
   # success body that fails to parse (or is not an object) is an
   # INDETERMINATE lookup, never confirmed absence (#356 round 6).
   try:
-    pypi = json.loads(args.pypi_json.read_text())
-    if not isinstance(pypi, dict):
-      raise ValueError(f"expected a JSON object, got {type(pypi).__name__}")
+    if args.pypi_missing:
+      pypi = None
+    else:
+      pypi = json.loads(args.pypi_json.read_text())
+      if not isinstance(pypi, dict):
+        raise ValueError(f"expected a JSON object, got {type(pypi).__name__}")
   except ValueError as exc:
     state, detail = "invalid-response", f"unparseable PyPI body: {exc}"
   else:

@@ -557,8 +557,11 @@ jobs:
             echo "::error::PyPI lookup transport failure: $(head -1 curl.err)"
             exit 1
           fi
+          PYPI_ARG="--pypi-json pypi.json"
           if [ "$HTTP" = "404" ]; then
-            echo '{}' > pypi.json
+            # The explicit 404 is the ONLY absence marker; an HTTP-200
+            # body must satisfy the complete schema in the reconciler.
+            PYPI_ARG=--pypi-missing
           elif [ "$HTTP" != "200" ]; then
             echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
             exit 1
@@ -575,7 +578,7 @@ jobs:
           set +e
           python3 producers/scripts/reconcile_release.py \
             --version "${VERSION}" --anchor-dir anchor/ \
-            $RELEASE_ARG --pypi-json pypi.json | tee reconcile.out
+            $RELEASE_ARG $PYPI_ARG | tee reconcile.out
           set -e
           STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
           if [ "$STATE" = "complete" ]; then

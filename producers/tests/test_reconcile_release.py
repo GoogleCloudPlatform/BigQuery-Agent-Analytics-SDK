@@ -97,13 +97,16 @@ def _pypi(anchor, omit=(), extra=(), yanked=(), corrupt=()):
   return {"urls": urls}
 
 
+_ABSENT = object()
+
+
 def _run(tmp_path, **kw):
   anchor = kw.pop("anchor", None) or _anchor(tmp_path)
   release = kw.pop("release", None)
   if release is None:
     release = _release(tmp_path, anchor)
-  pypi = kw.pop("pypi", None)
-  if pypi is None:
+  pypi = kw.pop("pypi", _ABSENT)
+  if pypi is _ABSENT:
     pypi = _pypi(anchor)
   return reconcile_release.reconcile(
       version=VERSION, anchor_dir=anchor, release_dir=release, pypi=pypi
@@ -150,8 +153,10 @@ def test_release_tampered_bytes_are_partial(tmp_path):
   assert state == "partial"
 
 
-def test_pypi_absent_is_unpublished(tmp_path):
-  state, _ = _run(tmp_path, pypi={"urls": []})
+def test_pypi_confirmed_absent_with_exact_draft_is_unpublished(tmp_path):
+  # pypi=None is the ONLY absence representation (explicit HTTP 404);
+  # an HTTP-200 '{}' must never be treated as absence.
+  state, _ = _run(tmp_path, pypi=None)
   assert state == "unpublished"
 
 
@@ -189,7 +194,15 @@ class TestDispatch:
     assert action.publish and action.exit_code == 0
 
   def test_every_non_complete_state_fails(self):
-    for state in ("unpublished", "partial", "invalid-anchor"):
+    for state in (
+        "unpublished",
+        "partial",
+        "invalid-anchor",
+        "invalid-response",
+        "missing-release",
+        "missing-all",
+        "draft-invalid",
+    ):
       action = reconcile_release.dispatch(state)
       assert not action.publish
       assert action.exit_code != 0, state
@@ -203,6 +216,94 @@ class TestDispatch:
     assert "rerun" in reconcile_release.dispatch("unpublished").message
     assert "yank" in reconcile_release.dispatch("partial").message
     assert "CI" in reconcile_release.dispatch("invalid-anchor").message
+
+
+class TestCompleteSuccessSchema:
+  """An HTTP 200 must carry the COMPLETE expected schema: reproduced in
+  review — correct filenames/digests with 'yanked' omitted reached
+  'complete'."""
+
+  def _reconcile(self, tmp_path, pypi):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    return reconcile_release.reconcile(
+        version=VERSION, anchor_dir=anchor, release_dir=release, pypi=pypi
+    )
+
+  def test_http_200_empty_object_is_invalid_response(self, tmp_path):
+    # '{}' is NOT the absence marker anymore; a 200 without 'urls' is
+    # a schema violation.
+    state, _ = self._reconcile(tmp_path, {})
+    assert state == "invalid-response"
+
+  def test_yanked_omitted_never_reaches_complete(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    pypi = _pypi(anchor)
+    for entry in pypi["urls"]:
+      del entry["yanked"]
+    state, _ = self._reconcile(tmp_path, pypi)
+    assert state == "invalid-response"
+
+  def test_yanked_null_or_string_is_invalid_response(self, tmp_path):
+    for bad in (None, "false"):
+      anchor = _anchor(tmp_path)
+      pypi = _pypi(anchor)
+      pypi["urls"][0]["yanked"] = bad
+      state, _ = self._reconcile(tmp_path, pypi)
+      assert state == "invalid-response", bad
+
+  def test_bad_digests_are_invalid_response(self, tmp_path):
+    for bad in ("E" * 64, "g" * 64, "a" * 63, "a" * 65):
+      anchor = _anchor(tmp_path)
+      pypi = _pypi(anchor)
+      pypi["urls"][0]["digests"]["sha256"] = bad
+      state, _ = self._reconcile(tmp_path, pypi)
+      assert state == "invalid-response", bad
+
+
+class TestAbsenceFirstClassification:
+  """Confirmed PyPI absence is classified BEFORE asset recovery advice:
+  yank/version-burn must only ever be emitted when validated PyPI files
+  actually exist."""
+
+  def test_no_release_and_no_pypi_is_missing_all(self, tmp_path):
+    state, _ = reconcile_release.reconcile(
+        version=VERSION,
+        anchor_dir=_anchor(tmp_path),
+        release_dir=None,
+        pypi=None,
+    )
+    assert state == "missing-all"
+    action = reconcile_release.dispatch(state)
+    assert "yank" not in action.message
+    assert (
+        "draft" not in action.message.lower()
+        or "no draft" in action.message.lower()
+    )
+
+  def test_broken_draft_with_no_pypi_is_draft_invalid_not_partial(
+      self, tmp_path
+  ):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor, omit=(PLUGIN,))
+    state, _ = reconcile_release.reconcile(
+        version=VERSION, anchor_dir=anchor, release_dir=release, pypi=None
+    )
+    assert state == "draft-invalid"
+    action = reconcile_release.dispatch(state)
+    assert "yank" not in action.message  # nothing was published to yank
+
+  def test_partial_advice_requires_actual_pypi_files(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor, omit=(PLUGIN,))
+    state, _ = reconcile_release.reconcile(
+        version=VERSION,
+        anchor_dir=anchor,
+        release_dir=release,
+        pypi=_pypi(anchor),
+    )
+    assert state == "partial"
+    assert "yank" in reconcile_release.dispatch(state).message
 
 
 class TestSchemaValidation:
@@ -257,13 +358,13 @@ class TestReleaseMissingMatrix:
         version=VERSION, anchor_dir=anchor, release_dir=None, pypi=pypi
     )
 
-  def test_release_missing_and_pypi_absent_is_unpublished(self, tmp_path):
-    state, _ = self._run(tmp_path, pypi={})
-    assert state == "unpublished"
+  def test_release_missing_and_pypi_absent_is_missing_all(self, tmp_path):
+    state, _ = self._run(tmp_path, pypi=None)
+    assert state == "missing-all"
 
-  def test_release_missing_and_pypi_empty_urls_is_unpublished(self, tmp_path):
+  def test_release_missing_and_pypi_empty_urls_is_missing_all(self, tmp_path):
     state, _ = self._run(tmp_path, pypi={"urls": []})
-    assert state == "unpublished"
+    assert state == "missing-all"
 
   def test_release_missing_with_valid_pypi_files_is_missing_release(
       self, tmp_path
@@ -322,10 +423,30 @@ class TestMalformedPypiResponses:
     assert state == "invalid-response"
     assert rc != 0
 
-  def test_explicit_absence_marker_is_unpublished(self, tmp_path):
-    # The workflow writes '{}' ONLY for an explicit HTTP 404.
-    rc, state = self._main(tmp_path, b"{}")
+  def test_pypi_missing_flag_is_the_absence_marker(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    out = []
+    rc = reconcile_release.main(
+        [
+            "--version",
+            VERSION,
+            "--anchor-dir",
+            str(anchor),
+            "--release-dir",
+            str(release),
+            "--pypi-missing",
+        ],
+        echo=out.append,
+    )
+    state = next(l.split("=", 1)[1] for l in out if l.startswith("state="))
     assert state == "unpublished"
+    assert rc != 0
+
+  def test_http_200_empty_object_via_cli_is_invalid_response(self, tmp_path):
+    rc, state = self._main(tmp_path, b"{}")
+    assert state == "invalid-response"
+    assert rc != 0
 
 
 class TestDispatchNewStates:
