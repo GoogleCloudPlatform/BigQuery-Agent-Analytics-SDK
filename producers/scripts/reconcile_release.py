@@ -22,10 +22,14 @@ exact filename sets (no subsets, no extras), byte identity, nothing
 yanked.
 
 States:
-  complete       every surface matches the anchor exactly → publish
-  unpublished    PyPI has no files for the version → keep draft, rerun
-  partial        anything missing/extra/tampered/yanked → yank + burn
-  invalid-anchor the anchor itself is inconsistent → investigate CI
+  complete         every surface matches the anchor exactly → publish
+  unpublished      no PyPI files (and no release assets claim) → rerun
+  partial          anything missing/extra/tampered/yanked → yank + burn
+  missing-release  PyPI has validated files but the GitHub release is
+                   gone → cross-surface partial, yank + burn
+  invalid-anchor   the anchor itself is inconsistent → investigate CI
+  invalid-response the PyPI success body is unparseable or violates the
+                   schema → INDETERMINATE, retry the lookup first
 """
 
 from __future__ import annotations
@@ -50,14 +54,46 @@ def _sha256(path: pathlib.Path) -> str:
   return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _validated_urls(pypi: dict) -> tuple[dict | None, str]:
+  """({filename: entry}, "") on a valid schema, else (None, why).
+
+  Object-shaped but invalid success bodies ({"urls": null},
+  [{}], duplicates, missing digests) must become 'invalid-response' —
+  never a crash and never a destructive classification (#356 round 7).
+  """
+  urls = pypi.get("urls", [])
+  if urls is None or not isinstance(urls, list):
+    return None, f"'urls' is {type(urls).__name__}, expected a list"
+  seen: dict[str, dict] = {}
+  for entry in urls:
+    if not isinstance(entry, dict):
+      return None, f"url entry is {type(entry).__name__}, expected an object"
+    name = entry.get("filename")
+    if not isinstance(name, str) or not name:
+      return None, "url entry has no string filename"
+    if name in seen:
+      return None, f"duplicate filename {name!r}"
+    digest = entry.get("digests", {})
+    if (
+        not isinstance(digest, dict)
+        or not isinstance(digest.get("sha256"), str)
+        or len(digest["sha256"]) != 64
+    ):
+      return None, f"{name!r} has no valid sha256 digest object"
+    seen[name] = entry
+  return seen, ""
+
+
 def reconcile(
     *,
     version: str,
     anchor_dir: pathlib.Path,
-    release_dir: pathlib.Path,
+    release_dir: pathlib.Path | None,
     pypi: dict,
 ) -> tuple[str, str]:
-  """Returns (state, detail)."""
+  """Returns (state, detail). ``release_dir=None`` = the GitHub release
+  is MISSING; the anchor and the PyPI schema are still fully validated
+  before any cross-surface classification."""
   wheel, sdist, plugin = _expected_files(version)
   expected = {wheel, sdist, plugin}
 
@@ -88,6 +124,20 @@ def reconcile(
     if _sha256(anchor_dir / name) != digest:
       return "invalid-anchor", f"anchor bytes of {name} do not match manifest"
 
+  # --- PyPI schema is validated BEFORE any classification --------------------
+  urls, why = _validated_urls(pypi)
+  if urls is None:
+    return "invalid-response", f"invalid PyPI response schema: {why}"
+
+  # --- GitHub release missing: cross-surface classification ------------------
+  if release_dir is None:
+    if not urls:
+      return "unpublished", "no GitHub release and no PyPI files"
+    return (
+        "missing-release",
+        "PyPI carries validated files but the GitHub release is missing",
+    )
+
   # --- GitHub release assets: exact set + byte identity ---------------------
   release_files = {p.name for p in release_dir.iterdir()}
   expected_release = expected | {"SHA256SUMS"}
@@ -106,7 +156,6 @@ def reconcile(
     return "partial", "release SHA256SUMS differs from the build anchor"
 
   # --- PyPI: exact distribution set + digests + not yanked ------------------
-  urls = {u["filename"]: u for u in pypi.get("urls", ())}
   if not urls:
     return "unpublished", "PyPI has no files for this version"
   expected_pypi = {wheel, sdist}
@@ -188,7 +237,12 @@ def main(
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--version", required=True)
   parser.add_argument("--anchor-dir", type=pathlib.Path, required=True)
-  parser.add_argument("--release-dir", type=pathlib.Path, required=True)
+  parser.add_argument("--release-dir", type=pathlib.Path, default=None)
+  parser.add_argument(
+      "--release-missing",
+      action="store_true",
+      help="The GitHub release does not exist (cross-surface classification).",
+  )
   parser.add_argument(
       "--pypi-json",
       type=pathlib.Path,
@@ -196,6 +250,8 @@ def main(
       help="File holding the PyPI release JSON ('{}' when absent).",
   )
   args = parser.parse_args(argv)
+  if (args.release_dir is None) == (not args.release_missing):
+    parser.error("exactly one of --release-dir / --release-missing required")
   # Only the workflow's explicit-404 marker ('{}') means absence. A
   # success body that fails to parse (or is not an object) is an
   # INDETERMINATE lookup, never confirmed absence (#356 round 6).

@@ -35,7 +35,14 @@ assert v == '${VERSION}', f'image has {v}, want ${VERSION}'
 from bigquery_agent_analytics_tracing.otlp import app, consumer
 assert callable(app.make_app)
 assert callable(consumer.make_push_app_from_env)
-print('version + factories ok:', v)
+# Multi-stage property: the runtime image must carry neither the build
+# toolchain nor the source tree — only the installed package.
+import importlib.util, pathlib
+assert importlib.util.find_spec('build') is None, 'build tool in runtime image'
+assert importlib.util.find_spec('hatchling') is None, 'hatchling in runtime image'
+assert not pathlib.Path('/build').exists(), 'builder stage leaked /build'
+assert not pathlib.Path('/src').exists(), 'source tree leaked /src'
+print('version + factories + multi-stage hygiene ok:', v)
 "
 
 echo "==> private bridge network + pinned emulator"

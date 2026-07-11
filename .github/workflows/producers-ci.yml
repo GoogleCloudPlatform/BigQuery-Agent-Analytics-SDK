@@ -140,3 +140,20 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
       - name: Run the checked-in self-test (same script the release runs)
         run: bash deploy/otlp_receiver/selftest.sh bqaa-pr-selftest "$VERSION"
+
+  lock-drift:
+    name: Hash-lock drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Regenerate locks with the exact pinned generator
+        run: bash deploy/otlp_receiver/regen-locks.sh
+      - name: Locks must match the reviewed files
+        run: |
+          git diff --exit-code deploy/otlp_receiver/requirements.lock \
+            producers/build-requirements.lock \
+            || (echo "::error::checked-in locks drift from regen-locks.sh output — regenerate and review" && exit 1)

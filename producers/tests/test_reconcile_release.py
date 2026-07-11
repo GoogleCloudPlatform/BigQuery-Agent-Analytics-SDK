@@ -205,6 +205,88 @@ class TestDispatch:
     assert "CI" in reconcile_release.dispatch("invalid-anchor").message
 
 
+class TestSchemaValidation:
+  """Object-shaped but invalid PyPI schemas are invalid-response, never a
+  crash and never a destructive classification."""
+
+  def _reconcile(self, tmp_path, pypi):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    return reconcile_release.reconcile(
+        version=VERSION, anchor_dir=anchor, release_dir=release, pypi=pypi
+    )
+
+  def test_urls_null_is_invalid_response(self, tmp_path):
+    state, _ = self._reconcile(tmp_path, {"urls": None})
+    assert state == "invalid-response"
+
+  def test_url_entry_without_filename_is_invalid_response(self, tmp_path):
+    state, _ = self._reconcile(tmp_path, {"urls": [{}]})
+    assert state == "invalid-response"
+
+  def test_non_dict_url_entry_is_invalid_response(self, tmp_path):
+    state, _ = self._reconcile(tmp_path, {"urls": ["x"]})
+    assert state == "invalid-response"
+
+  def test_duplicate_filenames_are_invalid_response(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    entry = _pypi(anchor)["urls"][0]
+    state, detail = reconcile_release.reconcile(
+        version=VERSION,
+        anchor_dir=anchor,
+        release_dir=release,
+        pypi={"urls": [entry, dict(entry)]},
+    )
+    assert state == "invalid-response"
+
+  def test_missing_digest_object_is_invalid_response(self, tmp_path):
+    state, _ = self._reconcile(
+        tmp_path, {"urls": [{"filename": WHEEL, "yanked": False}]}
+    )
+    assert state == "invalid-response"
+
+
+class TestReleaseMissingMatrix:
+  """Surface combination lives IN the reconciler: anchor and PyPI are
+  fully validated before any cross-surface classification."""
+
+  def _run(self, tmp_path, anchor=None, pypi=None):
+    anchor = anchor or _anchor(tmp_path)
+    return reconcile_release.reconcile(
+        version=VERSION, anchor_dir=anchor, release_dir=None, pypi=pypi
+    )
+
+  def test_release_missing_and_pypi_absent_is_unpublished(self, tmp_path):
+    state, _ = self._run(tmp_path, pypi={})
+    assert state == "unpublished"
+
+  def test_release_missing_and_pypi_empty_urls_is_unpublished(self, tmp_path):
+    state, _ = self._run(tmp_path, pypi={"urls": []})
+    assert state == "unpublished"
+
+  def test_release_missing_with_valid_pypi_files_is_missing_release(
+      self, tmp_path
+  ):
+    anchor = _anchor(tmp_path)
+    state, _ = self._run(tmp_path, anchor=anchor, pypi=_pypi(anchor))
+    assert state == "missing-release"
+
+  def test_release_missing_with_malformed_pypi_is_invalid_response(
+      self, tmp_path
+  ):
+    state, _ = self._run(tmp_path, pypi={"urls": None})
+    assert state == "invalid-response"
+
+  def test_release_missing_with_invalid_anchor_is_invalid_anchor(
+      self, tmp_path
+  ):
+    anchor = _anchor(tmp_path)
+    (anchor / "SHA256SUMS").unlink()
+    state, _ = self._run(tmp_path, anchor=anchor, pypi={"urls": []})
+    assert state == "invalid-anchor"
+
+
 class TestMalformedPypiResponses:
   """An HTTP-200 body that fails to parse is INDETERMINATE, never absence."""
 

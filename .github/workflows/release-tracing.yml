@@ -563,22 +563,21 @@ jobs:
             echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
             exit 1
           fi
+          # Surface combination lives IN the tested reconciler: the anchor
+          # and the PyPI schema are validated on EVERY path, so a
+          # truncated success body can never become destructive
+          # yank/version-burn advice (#356 round 7).
           if [ "$RELEASE_MISSING" = "1" ]; then
-            # Classify the cross-surface state without the release dir.
-            if [ "$HTTP" = "404" ]; then
-              STATE=unpublished
-            else
-              STATE=missing-release
-            fi
-            echo "GitHub release absent; PyPI HTTP ${HTTP} -> state=${STATE}"
+            RELEASE_ARG=--release-missing
           else
-            set +e
-            python3 producers/scripts/reconcile_release.py \
-              --version "${VERSION}" --anchor-dir anchor/ \
-              --release-dir release/ --pypi-json pypi.json | tee reconcile.out
-            set -e
-            STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
+            RELEASE_ARG="--release-dir release/"
           fi
+          set +e
+          python3 producers/scripts/reconcile_release.py \
+            --version "${VERSION}" --anchor-dir anchor/ \
+            $RELEASE_ARG --pypi-json pypi.json | tee reconcile.out
+          set -e
+          STATE=$(grep '^state=' reconcile.out | cut -d= -f2)
           if [ "$STATE" = "complete" ]; then
             curl -sL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
             echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
@@ -613,25 +612,16 @@ jobs:
           EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
           MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
           if [ "$PUBLISH" = "1" ]; then
-            # Re-anchor the customer-facing body: asset reconciliation
-            # never reads the draft body, and anything with contents:write
-            # could have edited it during the approval pause. Re-render
-            # from the protected checkout with the digest extracted from
-            # the ANCHOR wheel, then publish atomically.
-            ANCHOR_DIGEST=$(python3 -c "
-          import pathlib, sys
-          sys.path.insert(0, 'producers/scripts')
-          import release_image_tool
-          ref = release_image_tool.extract_from_wheel(pathlib.Path(
-              'anchor/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl'))
-          print(ref.split('@')[1])")
-            python3 producers/scripts/render_release_notes.py \
+            # Re-anchor the customer-facing body via the PR-TESTED
+            # composed helper (anchor-wheel digest -> renderer -> atomic
+            # gh release edit): anything with contents:write could have
+            # edited the draft body during the approval pause.
+            python3 producers/scripts/publish_release_body.py \
               --version "${{ needs.verify.outputs.version }}" \
-              --digest "$ANCHOR_DIGEST" \
               --public-image "${{ env.PUBLIC_IMAGE }}" \
-              --out release_body.md
-            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --notes-file release_body.md --draft=false --latest=false
+              --anchor-dir anchor/ \
+              --tag "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}"
             echo "release published with re-anchored body: ${MESSAGE}"
           else
             echo "::error::${MESSAGE}"
