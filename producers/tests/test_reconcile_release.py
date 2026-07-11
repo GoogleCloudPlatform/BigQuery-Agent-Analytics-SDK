@@ -22,6 +22,7 @@ anchor, extras rejected.
 import hashlib
 import json
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
@@ -329,9 +330,18 @@ class TestEmptyRelease:
     assert "burn" in message or "bump" in message
 
 
+def _documented_states(doc):
+  """Exact row tokens of the docstring state table (first token of each
+  two-space-indented row, before 2+ spaces of column gap)."""
+  return {
+      m.group(1)
+      for m in re.finditer(r"^  ([a-z][a-z-]+)\s{2,}", doc, re.MULTILINE)
+  }
+
+
 class TestStateContract:
-  """The documented, dispatched, and produced state vocabularies are one
-  set — the module docstring cannot drift from the implementation."""
+  """Produced, dispatched, and documented vocabularies are ONE set,
+  asserted with exact bidirectional equality — not substring matching."""
 
   def test_dispatch_handles_exactly_the_known_states(self):
     for state in reconcile_release.KNOWN_STATES:
@@ -340,10 +350,32 @@ class TestStateContract:
     unknown = reconcile_release.dispatch("not-a-state")
     assert not unknown.publish and unknown.exit_code != 0
 
-  def test_docstring_documents_every_known_state(self):
+  def test_constants_dispatch_and_docs_are_exactly_equal(self):
+    constants = {
+        getattr(reconcile_release, name)
+        for name in (
+            "COMPLETE",
+            "UNPUBLISHED",
+            "EMPTY_RELEASE",
+            "PARTIAL",
+            "MISSING_RELEASE",
+            "MISSING_ALL",
+            "DRAFT_INVALID",
+            "INVALID_ANCHOR",
+            "INVALID_RESPONSE",
+        )
+    }
+    documented = _documented_states(reconcile_release.__doc__)
+    assert constants == reconcile_release.KNOWN_STATES == documented
+
+  def test_mutated_contracts_are_detected(self):
+    # A stale extra documented row and a removed row must BOTH fail the
+    # equality — proving the parser is not one-way substring matching.
     doc = reconcile_release.__doc__
-    for state in reconcile_release.KNOWN_STATES:
-      assert state in doc, f"{state} missing from the module state contract"
+    extra = doc + "\n  obsolete-state   never produced anymore\n"
+    assert _documented_states(extra) != reconcile_release.KNOWN_STATES
+    removed = doc.replace("  empty-release", "  # empty-release")
+    assert _documented_states(removed) != reconcile_release.KNOWN_STATES
 
 
 class TestSchemaValidation:

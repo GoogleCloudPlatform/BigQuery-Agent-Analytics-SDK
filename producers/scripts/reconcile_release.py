@@ -38,7 +38,8 @@ generated from one mapping, and tests assert the vocabularies match):
   draft-invalid    draft differs from the anchor and PyPI is confirmed
                    absent → delete the draft and rerun (no cleanup)
   invalid-anchor   the anchor itself is inconsistent → investigate CI
-  invalid-response the PyPI success body is unparseable or violates the
+  invalid-response  the PyPI success body is unparseable or violates
+                    the
                    schema → INDETERMINATE, retry the lookup first
 """
 
@@ -52,6 +53,18 @@ import pathlib
 import re
 import sys
 from typing import Callable
+
+# The state vocabulary: defined ONCE — reconcile() returns, dispatch()
+# keys, and the documented table are all held to this set by tests.
+COMPLETE = "complete"
+UNPUBLISHED = "unpublished"
+EMPTY_RELEASE = "empty-release"
+PARTIAL = "partial"
+MISSING_RELEASE = "missing-release"
+MISSING_ALL = "missing-all"
+DRAFT_INVALID = "draft-invalid"
+INVALID_ANCHOR = "invalid-anchor"
+INVALID_RESPONSE = "invalid-response"
 
 
 def _expected_files(version: str) -> tuple[str, str, str]:
@@ -124,7 +137,7 @@ def reconcile(
   # --- the anchor itself must be internally exact ---------------------------
   manifest_path = anchor_dir / "SHA256SUMS"
   if not manifest_path.is_file():
-    return "invalid-anchor", "anchor has no SHA256SUMS manifest"
+    return INVALID_ANCHOR, "anchor has no SHA256SUMS manifest"
   manifest: dict[str, str] = {}
   for line in manifest_path.read_text().splitlines():
     if line.strip():
@@ -134,19 +147,19 @@ def reconcile(
     missing = expected - set(manifest)
     extra = set(manifest) - expected
     return (
-        "invalid-anchor",
+        INVALID_ANCHOR,
         f"anchor manifest set mismatch (missing: {sorted(missing)},"
         f" extra: {sorted(extra)})",
     )
   anchor_files = {p.name for p in anchor_dir.iterdir()} - {"SHA256SUMS"}
   if anchor_files != expected:
     return (
-        "invalid-anchor",
+        INVALID_ANCHOR,
         f"anchor files set mismatch: {sorted(anchor_files ^ expected)}",
     )
   for name, digest in manifest.items():
     if _sha256(anchor_dir / name) != digest:
-      return "invalid-anchor", f"anchor bytes of {name} do not match manifest"
+      return INVALID_ANCHOR, f"anchor bytes of {name} do not match manifest"
 
   # --- PyPI schema is validated BEFORE any classification --------------------
   if pypi is None:
@@ -154,7 +167,7 @@ def reconcile(
   else:
     urls, why = _validated_urls(pypi)
     if urls is None:
-      return "invalid-response", f"invalid PyPI response schema: {why}"
+      return INVALID_RESPONSE, f"invalid PyPI response schema: {why}"
   # pypi=None (explicit 404) is the SOLE confirmed-absence predicate.
   # An HTTP-200 body with zero files means the release record EXISTS
   # with deleted files — and PyPI forbids reusing deleted filenames, so
@@ -162,16 +175,16 @@ def reconcile(
   pypi_absent = pypi is None
   if not pypi_absent and not urls:
     return (
-        "empty-release",
+        EMPTY_RELEASE,
         "PyPI retains a release record with zero files for this version",
     )
 
   # --- GitHub release missing: cross-surface classification ------------------
   if release_dir is None:
     if pypi_absent:
-      return "missing-all", "no GitHub release and nothing on PyPI"
+      return MISSING_ALL, "no GitHub release and nothing on PyPI"
     return (
-        "missing-release",
+        MISSING_RELEASE,
         "PyPI carries validated files but the GitHub release is missing",
     )
 
@@ -200,27 +213,27 @@ def reconcile(
 
   if pypi_absent:
     if asset_problem:
-      return "draft-invalid", f"nothing on PyPI and {asset_problem}"
-    return "unpublished", "draft verified against the anchor; PyPI has no files"
+      return DRAFT_INVALID, f"nothing on PyPI and {asset_problem}"
+    return UNPUBLISHED, "draft verified against the anchor; PyPI has no files"
   if asset_problem:
-    return "partial", asset_problem
+    return PARTIAL, asset_problem
   expected_pypi = {wheel, sdist}
   if set(urls) != expected_pypi:
     missing = expected_pypi - set(urls)
     extra = set(urls) - expected_pypi
     return (
-        "partial",
+        PARTIAL,
         f"PyPI file set mismatch (missing: {sorted(missing)},"
         f" extra: {sorted(extra)})",
     )
   for name in expected_pypi:
     entry = urls[name]
     if entry.get("yanked"):
-      return "partial", f"PyPI file {name} is yanked"
+      return PARTIAL, f"PyPI file {name} is yanked"
     if entry.get("digests", {}).get("sha256") != manifest[name]:
-      return "partial", f"PyPI digest of {name} differs from the build anchor"
+      return PARTIAL, f"PyPI digest of {name} differs from the build anchor"
 
-  return "complete", "byte identity proven against the build anchor"
+  return COMPLETE, "byte identity proven against the build anchor"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,53 +244,53 @@ class DispatchAction:
 
 
 _STATE_ACTIONS: dict[str, DispatchAction] = {
-    "complete": DispatchAction(True, 0, "byte identity proven — publish"),
-    "unpublished": DispatchAction(
+    COMPLETE: DispatchAction(True, 0, "byte identity proven — publish"),
+    UNPUBLISHED: DispatchAction(
         False,
         1,
         "PyPI publication did not happen — keep the draft, fix and rerun"
         " publish-pypi, or burn the version",
     ),
-    "empty-release": DispatchAction(
+    EMPTY_RELEASE: DispatchAction(
         False,
         1,
         "PyPI retains a release record with ZERO files — deleted filenames"
         " cannot be reused, so this version is burned even though there is"
         " nothing to remove; bump the version, rebuild, and cut a new tag",
     ),
-    "partial": DispatchAction(
+    PARTIAL: DispatchAction(
         False,
         1,
         "PARTIAL publication — yank this version on PyPI, burn it"
         " (bump + re-tag), keep the GitHub release draft",
     ),
-    "missing-release": DispatchAction(
+    MISSING_RELEASE: DispatchAction(
         False,
         1,
         "PyPI carries files for this version but the GitHub release is"
         " missing — a cross-surface partial: yank the PyPI files, burn"
         " the version (bump + re-tag)",
     ),
-    "missing-all": DispatchAction(
+    MISSING_ALL: DispatchAction(
         False,
         1,
         "nothing exists on either surface — no draft and nothing on PyPI;"
         " restart the pipeline from github-release (PyPI needs no cleanup)",
     ),
-    "draft-invalid": DispatchAction(
+    DRAFT_INVALID: DispatchAction(
         False,
         1,
         "the release draft differs from the build anchor and NOTHING is on"
         " PyPI (no cleanup there) — delete the draft and restart"
         " github-release",
     ),
-    "invalid-anchor": DispatchAction(
+    INVALID_ANCHOR: DispatchAction(
         False,
         1,
         "the build anchor itself is inconsistent — investigate CI before"
         " trusting ANY artifact of this run; do not publish yet",
     ),
-    "invalid-response": DispatchAction(
+    INVALID_RESPONSE: DispatchAction(
         False,
         1,
         "the PyPI lookup returned an unparseable success body — the"
@@ -340,7 +353,7 @@ def main(
       if not isinstance(pypi, dict):
         raise ValueError(f"expected a JSON object, got {type(pypi).__name__}")
   except ValueError as exc:
-    state, detail = "invalid-response", f"unparseable PyPI body: {exc}"
+    state, detail = INVALID_RESPONSE, f"unparseable PyPI body: {exc}"
   else:
     state, detail = reconcile(
         version=args.version,
