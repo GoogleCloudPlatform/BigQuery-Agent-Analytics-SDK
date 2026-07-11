@@ -8,6 +8,11 @@
 #   - consumer (override CMD): Pub/Sub *push* handler (consumer:make_push_app_from_env)
 # Build with the repository root as the build context:
 #   docker build -f deploy/otlp_receiver/Dockerfile -t <image> .
+
+# THE canonical base reference: both stages consume this single ARG, and
+# regen-locks.sh parses it — the build and the lock generator cannot
+# drift independently.
+ARG PYTHON_BASE=python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
 #
 # Supply-chain contract (#349/#356): digest-pinned base; runtime deps AND
 # the PEP 517 build backend install from reviewed hash-locked files
@@ -15,7 +20,7 @@
 # the shipped image carries neither the build toolchain nor the source
 # tree — only the runtime lock and the built wheel.
 
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+FROM ${PYTHON_BASE} AS builder
 
 WORKDIR /build
 COPY producers /build/producers
@@ -24,7 +29,7 @@ RUN pip install --no-cache-dir --require-hashes \
     && python -m build --no-isolation --wheel --outdir /build/dist \
       /build/producers
 
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+FROM ${PYTHON_BASE}
 
 WORKDIR /app
 

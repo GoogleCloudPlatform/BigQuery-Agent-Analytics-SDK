@@ -306,6 +306,46 @@ class TestAbsenceFirstClassification:
     assert "yank" in reconcile_release.dispatch(state).message
 
 
+class TestEmptyRelease:
+  """{"urls": []} on HTTP 200 is a burned version, not absence."""
+
+  def test_release_present_with_empty_urls_is_empty_release(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    state, _ = reconcile_release.reconcile(
+        version=VERSION,
+        anchor_dir=anchor,
+        release_dir=release,
+        pypi={"urls": []},
+    )
+    assert state == "empty-release"
+
+  def test_empty_release_recovery_is_burn_only(self):
+    action = reconcile_release.dispatch("empty-release")
+    assert not action.publish and action.exit_code != 0
+    message = action.message.lower()
+    assert "yank" not in message
+    assert "rerun" not in message  # same-version rerun would fail
+    assert "burn" in message or "bump" in message
+
+
+class TestStateContract:
+  """The documented, dispatched, and produced state vocabularies are one
+  set — the module docstring cannot drift from the implementation."""
+
+  def test_dispatch_handles_exactly_the_known_states(self):
+    for state in reconcile_release.KNOWN_STATES:
+      action = reconcile_release.dispatch(state)
+      assert action.message, state
+    unknown = reconcile_release.dispatch("not-a-state")
+    assert not unknown.publish and unknown.exit_code != 0
+
+  def test_docstring_documents_every_known_state(self):
+    doc = reconcile_release.__doc__
+    for state in reconcile_release.KNOWN_STATES:
+      assert state in doc, f"{state} missing from the module state contract"
+
+
 class TestSchemaValidation:
   """Object-shaped but invalid PyPI schemas are invalid-response, never a
   crash and never a destructive classification."""
@@ -362,9 +402,12 @@ class TestReleaseMissingMatrix:
     state, _ = self._run(tmp_path, pypi=None)
     assert state == "missing-all"
 
-  def test_release_missing_and_pypi_empty_urls_is_missing_all(self, tmp_path):
+  def test_release_missing_and_pypi_empty_urls_is_empty_release(self, tmp_path):
+    # HTTP 200 with urls: [] = the release record EXISTS with deleted
+    # files; deleted filenames cannot be reused, so the version is
+    # burned — never the same-version rerun advice absence would give.
     state, _ = self._run(tmp_path, pypi={"urls": []})
-    assert state == "missing-all"
+    assert state == "empty-release"
 
   def test_release_missing_with_valid_pypi_files_is_missing_release(
       self, tmp_path

@@ -21,12 +21,22 @@ the GitHub release assets, the PyPI file set — must match it exactly:
 exact filename sets (no subsets, no extras), byte identity, nothing
 yanked.
 
-States:
+States (the complete contract — KNOWN_STATES and dispatch() are
+generated from one mapping, and tests assert the vocabularies match):
   complete         every surface matches the anchor exactly → publish
-  unpublished      no PyPI files (and no release assets claim) → rerun
-  partial          anything missing/extra/tampered/yanked → yank + burn
+  unpublished      draft verified against the anchor; PyPI confirmed
+                   absent (explicit 404) → fix and rerun publish-pypi
+  empty-release    PyPI returned HTTP 200 with zero files: the release
+                   record exists, files were deleted, and PyPI forbids
+                   filename reuse → the version is burned; bump + re-tag
+  partial          validated PyPI files exist but something is missing/
+                   extra/tampered/yanked → yank + burn
   missing-release  PyPI has validated files but the GitHub release is
                    gone → cross-surface partial, yank + burn
+  missing-all      no draft and PyPI confirmed absent → rerun the
+                   pipeline from github-release (PyPI needs no cleanup)
+  draft-invalid    draft differs from the anchor and PyPI is confirmed
+                   absent → delete the draft and rerun (no cleanup)
   invalid-anchor   the anchor itself is inconsistent → investigate CI
   invalid-response the PyPI success body is unparseable or violates the
                    schema → INDETERMINATE, retry the lookup first
@@ -145,7 +155,16 @@ def reconcile(
     urls, why = _validated_urls(pypi)
     if urls is None:
       return "invalid-response", f"invalid PyPI response schema: {why}"
-  pypi_absent = not urls
+  # pypi=None (explicit 404) is the SOLE confirmed-absence predicate.
+  # An HTTP-200 body with zero files means the release record EXISTS
+  # with deleted files — and PyPI forbids reusing deleted filenames, so
+  # the version is burned regardless of any other surface state.
+  pypi_absent = pypi is None
+  if not pypi_absent and not urls:
+    return (
+        "empty-release",
+        "PyPI retains a release record with zero files for this version",
+    )
 
   # --- GitHub release missing: cross-surface classification ------------------
   if release_dir is None:
@@ -211,63 +230,72 @@ class DispatchAction:
   message: str
 
 
-def dispatch(state: str) -> DispatchAction:
-  """Exhaustive, fail-closed state→workflow mapping (#356 round 5:
-  invalid-anchor previously fell through a bash case with exit 0)."""
-  if state == "complete":
-    return DispatchAction(True, 0, "byte identity proven — publish")
-  if state == "unpublished":
-    return DispatchAction(
+_STATE_ACTIONS: dict[str, DispatchAction] = {
+    "complete": DispatchAction(True, 0, "byte identity proven — publish"),
+    "unpublished": DispatchAction(
         False,
         1,
         "PyPI publication did not happen — keep the draft, fix and rerun"
         " publish-pypi, or burn the version",
-    )
-  if state == "partial":
-    return DispatchAction(
+    ),
+    "empty-release": DispatchAction(
+        False,
+        1,
+        "PyPI retains a release record with ZERO files — deleted filenames"
+        " cannot be reused, so this version is burned even though there is"
+        " nothing to remove; bump the version, rebuild, and cut a new tag",
+    ),
+    "partial": DispatchAction(
         False,
         1,
         "PARTIAL publication — yank this version on PyPI, burn it"
         " (bump + re-tag), keep the GitHub release draft",
-    )
-  if state == "invalid-anchor":
-    return DispatchAction(
-        False,
-        1,
-        "the build anchor itself is inconsistent — investigate CI before"
-        " trusting ANY artifact of this run; do not publish or yank yet",
-    )
-  if state == "invalid-response":
-    return DispatchAction(
-        False,
-        1,
-        "the PyPI lookup returned an unparseable success body — the"
-        " publication state is INDETERMINATE; retry the lookup before"
-        " taking any recovery action",
-    )
-  if state == "missing-all":
-    return DispatchAction(
-        False,
-        1,
-        "nothing exists on either surface — no draft and nothing on PyPI;"
-        " rerun the pipeline from github-release (PyPI needs no cleanup)",
-    )
-  if state == "draft-invalid":
-    return DispatchAction(
-        False,
-        1,
-        "the release draft differs from the build anchor and NOTHING is on"
-        " PyPI (no cleanup there) — delete the draft and rerun"
-        " github-release",
-    )
-  if state == "missing-release":
-    return DispatchAction(
+    ),
+    "missing-release": DispatchAction(
         False,
         1,
         "PyPI carries files for this version but the GitHub release is"
         " missing — a cross-surface partial: yank the PyPI files, burn"
         " the version (bump + re-tag)",
-    )
+    ),
+    "missing-all": DispatchAction(
+        False,
+        1,
+        "nothing exists on either surface — no draft and nothing on PyPI;"
+        " restart the pipeline from github-release (PyPI needs no cleanup)",
+    ),
+    "draft-invalid": DispatchAction(
+        False,
+        1,
+        "the release draft differs from the build anchor and NOTHING is on"
+        " PyPI (no cleanup there) — delete the draft and restart"
+        " github-release",
+    ),
+    "invalid-anchor": DispatchAction(
+        False,
+        1,
+        "the build anchor itself is inconsistent — investigate CI before"
+        " trusting ANY artifact of this run; do not publish yet",
+    ),
+    "invalid-response": DispatchAction(
+        False,
+        1,
+        "the PyPI lookup returned an unparseable success body — the"
+        " publication state is INDETERMINATE; retry the lookup before"
+        " taking any recovery action",
+    ),
+}
+
+KNOWN_STATES = frozenset(_STATE_ACTIONS)
+
+
+def dispatch(state: str) -> DispatchAction:
+  """Exhaustive, fail-closed state→workflow mapping. One mapping feeds
+  KNOWN_STATES, dispatch(), and the documented contract; anything
+  outside it fails closed."""
+  action = _STATE_ACTIONS.get(state)
+  if action is not None:
+    return action
   return DispatchAction(
       False, 1, f"unknown reconciliation state {state!r} — failing closed"
   )
@@ -301,9 +329,9 @@ def main(
     parser.error("exactly one of --release-dir / --release-missing required")
   if (args.pypi_json is None) == (not args.pypi_missing):
     parser.error("exactly one of --pypi-json / --pypi-missing required")
-  # Only the workflow's explicit-404 marker ('{}') means absence. A
-  # success body that fails to parse (or is not an object) is an
-  # INDETERMINATE lookup, never confirmed absence (#356 round 6).
+  # --pypi-missing (the explicit HTTP 404) is the sole absence marker.
+  # A success body that fails to parse (or is not an object) is an
+  # INDETERMINATE lookup, never confirmed absence.
   try:
     if args.pypi_missing:
       pypi = None
