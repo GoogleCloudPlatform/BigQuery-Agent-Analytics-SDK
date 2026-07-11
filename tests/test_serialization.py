@@ -37,8 +37,11 @@ from bigquery_agent_analytics.serialization import serialize
 from bigquery_agent_analytics.trace import ContentPart
 from bigquery_agent_analytics.trace import EventType
 from bigquery_agent_analytics.trace import ObjectRef
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 _NOW = datetime(2026, 3, 12, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -330,3 +333,63 @@ class TestSerializeRoundTrip:
     dumped = json.dumps(serialized)
     loaded = json.loads(dumped)
     assert isinstance(loaded, dict)
+
+
+# ------------------------------------------------------------------ #
+# Identity contract (issue #359, U1)                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestSerializeIdentity:
+
+  def _trace(self, user_id, run_label):
+    return Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        user_id=user_id,
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id),
+        scope=TraceScope(custom_labels={"run": run_label}),
+    )
+
+  def test_trace_with_identity_json_safe_and_legacy_fields_unchanged(self):
+    result = serialize(self._trace("alice", "v0"))
+    # Legacy scalar fields keep their names and values.
+    assert result["trace_id"] == "t1"
+    assert result["session_id"] == "sess-1"
+    assert result["user_id"] == "alice"
+    # The identity is additive and nested.
+    assert result["identity"]["session_id"] == "sess-1"
+    assert result["identity"]["user_id"] == "alice"
+    json.dumps(result)
+
+  def test_identity_null_fields_serialize_stably(self):
+    identity = TraceIdentity(session_id="sess-1")
+    result = serialize(identity)
+    assert result == {
+        "session_id": "sess-1",
+        "user_id": None,
+        "root_agent_name": None,
+    }
+    json.dumps(result)
+
+  def test_scope_with_null_fields_json_safe(self):
+    result = serialize(TraceScope())
+    json.dumps(result)
+    result = serialize(TraceScope(custom_labels={"b": "2", "a": "1"}))
+    json.dumps(result)
+
+  def test_colliding_traces_stay_distinguishable_after_serialization(self):
+    a = serialize(self._trace("alice", "v0"))
+    b = serialize(self._trace("alice", "v1"))
+    assert a["session_id"] == b["session_id"]
+    assert a != b
+
+  def test_resolved_selector_serializes(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(experiment_id="exp-1"),
+    )
+    result = serialize(resolved)
+    assert result["identity"]["user_id"] == "alice"
+    assert result["scope"]["experiment_id"] == "exp-1"
+    json.dumps(result)

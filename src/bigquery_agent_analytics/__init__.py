@@ -78,12 +78,18 @@ try:
   from .insights import InsightsReport
   from .insights import SessionFacet
   from .serialization import serialize
+  from .trace import AmbiguousSessionError
   from .trace import ContentPart
   from .trace import EventType
   from .trace import ObjectRef
+  from .trace import resolve_singular_candidate
+  from .trace import ResolvedTraceSelector
   from .trace import Span
   from .trace import Trace
   from .trace import TraceFilter
+  from .trace import TraceIdentity
+  from .trace import TraceScope
+  from .trace import TraceSelector
   from .views import ViewManager
 
   __all__.extend(
@@ -95,6 +101,12 @@ try:
           "EventType",
           "ObjectRef",
           "TraceFilter",
+          "TraceIdentity",
+          "TraceScope",
+          "TraceSelector",
+          "ResolvedTraceSelector",
+          "AmbiguousSessionError",
+          "resolve_singular_candidate",
           "ViewManager",
           "CodeEvaluator",
           "SystemEvaluator",

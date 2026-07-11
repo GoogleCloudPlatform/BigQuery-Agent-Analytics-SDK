@@ -37,7 +37,7 @@ from enum import Enum
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Union
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -666,12 +666,225 @@ class TraceFilter:
     return where, params
 
 
+_LabelsInput = Union[dict[str, str], tuple[tuple[str, str], ...], None]
+
+
+def _canonicalize_labels(
+    labels: _LabelsInput,
+) -> Optional[tuple[tuple[str, str], ...]]:
+  """Normalize custom labels into a sorted key/value tuple.
+
+  JSON objects do not preserve key order, so scope equality and
+  signatures must never depend on the order labels were supplied in.
+  """
+  if labels is None:
+    return None
+  items = labels.items() if isinstance(labels, dict) else labels
+  return tuple(sorted((str(k), str(v)) for k, v in items))
+
+
+@dataclass(frozen=True)
+class TraceIdentity:
+  """Intrinsic identity of a scoped multi-turn session (issue #359).
+
+  ``session_id`` is the persistent conversation-thread identifier and
+  may be reused across users, root agents, and evaluation passes; the
+  intrinsic dimensions here keep colliding sessions distinguishable.
+  ``trace_id`` is deliberately absent — it is the producer's
+  OpenTelemetry execution identifier, and one multi-turn session may
+  contain more than one trace ID.
+  """
+
+  session_id: str
+  user_id: Optional[str] = None
+  root_agent_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TraceScope:
+  """Caller-selected scope pinning one recorded pass of a session.
+
+  ``custom_labels`` is canonicalized to a sorted key/value tuple so
+  equality, hashing, and :attr:`scope_signature` are independent of
+  the order labels were supplied in.
+  """
+
+  experiment_id: Optional[str] = None
+  custom_labels: _LabelsInput = None
+
+  def __post_init__(self) -> None:
+    object.__setattr__(
+        self, "custom_labels", _canonicalize_labels(self.custom_labels)
+    )
+
+  @property
+  def labels_dict(self) -> dict[str, str]:
+    """Returns the canonical labels as a plain dict."""
+    return dict(self.custom_labels) if self.custom_labels else {}
+
+  @property
+  def scope_signature(self) -> str:
+    """Canonical string signature for this scope.
+
+    Two scopes with the same experiment and label payload always
+    produce the same signature, so V0/V1 evaluation passes remain
+    distinguishable even when the caller did not know their labels
+    in advance.
+    """
+    parts = [f"experiment={self.experiment_id or ''}"]
+    if self.custom_labels:
+      parts.extend(f"{k}={v}" for k, v in self.custom_labels)
+    return ";".join(parts)
+
+
+@dataclass(frozen=True)
+class TraceSelector:
+  """Optional caller pins for resolving a scoped session.
+
+  Unset fields mean "not pinned" — candidate resolution decides
+  whether the unpinned population is unambiguous. Maps onto
+  :class:`TraceFilter` via :meth:`to_trace_filter` so both surfaces
+  share one predicate implementation.
+  """
+
+  session_id: str
+  user_id: Optional[str] = None
+  root_agent_name: Optional[str] = None
+  experiment_id: Optional[str] = None
+  custom_labels: _LabelsInput = None
+
+  def __post_init__(self) -> None:
+    object.__setattr__(
+        self, "custom_labels", _canonicalize_labels(self.custom_labels)
+    )
+
+  def to_trace_filter(self, limit: int = 100) -> TraceFilter:
+    """Build the equivalent list-level ``TraceFilter`` for these pins."""
+    return TraceFilter(
+        session_ids=[self.session_id],
+        user_id=self.user_id,
+        root_agent_name=self.root_agent_name,
+        experiment_id=self.experiment_id,
+        custom_labels=dict(self.custom_labels) if self.custom_labels else None,
+        limit=limit,
+    )
+
+
+@dataclass(frozen=True)
+class ResolvedTraceSelector:
+  """A fully resolved candidate: intrinsic identity plus scope."""
+
+  identity: TraceIdentity
+  scope: TraceScope = field(default_factory=TraceScope)
+
+  @property
+  def scope_signature(self) -> str:
+    """Canonical scope signature of this candidate."""
+    return self.scope.scope_signature
+
+
+_RETRY_DIMENSIONS: tuple[str, ...] = (
+    "user_id",
+    "root_agent_name",
+    "experiment_id",
+    "custom_labels",
+)
+
+
+class AmbiguousSessionError(ValueError):
+  """A singular session lookup matched more than one candidate.
+
+  Subclasses ``ValueError`` so existing callers that catch the
+  not-found ``ValueError`` from singular lookups degrade gracefully.
+
+  The printable form is redacted: it carries only the candidate count
+  and the names of the dimensions that would disambiguate a retry —
+  never user IDs, label values, event content, or judge context. The
+  full candidate selectors remain programmatically accessible via
+  :attr:`candidates` and :meth:`to_dict` for structured surfaces that
+  are allowed to return identity dimensions and scope signatures.
+  """
+
+  def __init__(self, candidates: Sequence[ResolvedTraceSelector]):
+    self.candidates: tuple[ResolvedTraceSelector, ...] = tuple(candidates)
+    self.retry_dimensions: tuple[str, ...] = self._differing_dimensions(
+        self.candidates
+    )
+    dims = ", ".join(self.retry_dimensions) or "scope"
+    super().__init__(
+        f"Ambiguous singular session lookup: {len(self.candidates)}"
+        f" candidates match. Retry with an explicit selector for: {dims}."
+    )
+
+  @staticmethod
+  def _differing_dimensions(
+      candidates: Sequence[ResolvedTraceSelector],
+  ) -> tuple[str, ...]:
+    """Names of the dimensions whose values differ across candidates."""
+    extractors = {
+        "user_id": lambda c: c.identity.user_id,
+        "root_agent_name": lambda c: c.identity.root_agent_name,
+        "experiment_id": lambda c: c.scope.experiment_id,
+        "custom_labels": lambda c: c.scope.custom_labels,
+    }
+    differing = []
+    for dim in _RETRY_DIMENSIONS:
+      values = {extractors[dim](c) for c in candidates}
+      if len(values) > 1:
+        differing.append(dim)
+    return tuple(differing)
+
+  def to_dict(self) -> dict[str, Any]:
+    """Structured, JSON-safe payload for agent-facing surfaces.
+
+    Carries candidate identity dimensions and scope signatures only;
+    event content and judge context never appear here.
+    """
+    from .serialization import serialize
+
+    return {
+        "error": "ambiguous_session",
+        "candidate_count": len(self.candidates),
+        "retry_dimensions": list(self.retry_dimensions),
+        "candidates": [serialize(c) for c in self.candidates],
+    }
+
+
+def resolve_singular_candidate(
+    candidates: Sequence[ResolvedTraceSelector],
+) -> ResolvedTraceSelector:
+  """Validate that a singular (legacy session-only) lookup is unambiguous.
+
+  Args:
+      candidates: The resolved candidates matching the caller's key.
+
+  Returns:
+      The single matching candidate.
+
+  Raises:
+      ValueError: If no candidate matches.
+      AmbiguousSessionError: If more than one candidate matches. No
+          implicit fallback (such as newest-wins) is ever applied.
+  """
+  resolved = list(candidates)
+  if not resolved:
+    raise ValueError("No candidates match the requested session.")
+  if len(resolved) > 1:
+    raise AmbiguousSessionError(candidates=resolved)
+  return resolved[0]
+
+
 @dataclass
 class Trace:
   """A complete agent trace for a session.
 
   Contains all spans (events) for the session and provides
   visualization via the :meth:`render` method.
+
+  ``identity`` and ``scope`` are additive (issue #359): they carry the
+  resolved intrinsic identity and selected scope so two traces sharing
+  a ``session_id`` stay distinguishable after serialization. The
+  legacy scalar fields keep their names and meanings.
   """
 
   trace_id: str
@@ -681,6 +894,8 @@ class Trace:
   start_time: Optional[datetime] = None
   end_time: Optional[datetime] = None
   total_latency_ms: Optional[float] = None
+  identity: Optional[TraceIdentity] = None
+  scope: Optional[TraceScope] = None
 
   def _build_tree(self) -> list[Span]:
     """Builds a tree of spans using parent_span_id relationships."""

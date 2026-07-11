@@ -16,14 +16,21 @@
 
 from datetime import datetime
 from datetime import timezone
+import json
 
 import pytest
 
+from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ContentPart
 from bigquery_agent_analytics.trace import ObjectRef
+from bigquery_agent_analytics.trace import resolve_singular_candidate
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceFilter
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.trace import TraceSelector
 
 
 class TestSpan:
@@ -1102,3 +1109,217 @@ class TestTraceFilterNewFields:
     assert "agent = @agent_id" in where
     assert "tool_origin" in where
     assert "root_agent_name" in where
+
+
+class TestTraceIdentity:
+  """Tests for the intrinsic TraceIdentity value object (issue #359, U1)."""
+
+  def test_equality_and_hash_dedup(self):
+    a = TraceIdentity(
+        session_id="sess-1", user_id="alice", root_agent_name="root"
+    )
+    b = TraceIdentity(
+        session_id="sess-1", user_id="alice", root_agent_name="root"
+    )
+    assert a == b
+    assert len({a, b}) == 1
+
+  def test_same_session_different_user_distinct(self):
+    a = TraceIdentity(session_id="sess-1", user_id="alice")
+    b = TraceIdentity(session_id="sess-1", user_id="bob")
+    c = TraceIdentity(session_id="sess-1", user_id=None)
+    assert len({a, b, c}) == 3
+
+  def test_immutable(self):
+    identity = TraceIdentity(session_id="sess-1")
+    with pytest.raises(AttributeError):
+      identity.session_id = "sess-2"
+
+
+class TestTraceScope:
+  """Tests for the caller-selected TraceScope value object."""
+
+  def test_label_canonicalization_dict_order_irrelevant(self):
+    a = TraceScope(
+        experiment_id="exp-1", custom_labels={"run": "v1", "slice": "3"}
+    )
+    b = TraceScope(
+        experiment_id="exp-1", custom_labels={"slice": "3", "run": "v1"}
+    )
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a.scope_signature == b.scope_signature
+
+  def test_scope_signature_distinguishes_passes(self):
+    v0 = TraceScope(custom_labels={"run": "v0"})
+    v1 = TraceScope(custom_labels={"run": "v1"})
+    assert v0.scope_signature != v1.scope_signature
+
+  def test_empty_scope_stable(self):
+    empty = TraceScope()
+    assert empty == TraceScope()
+    assert isinstance(empty.scope_signature, str)
+
+  def test_labels_dict_round_trip(self):
+    scope = TraceScope(custom_labels={"b": "2", "a": "1"})
+    assert scope.labels_dict == {"a": "1", "b": "2"}
+
+
+class TestTraceSelector:
+  """Tests for caller-pin selectors and their TraceFilter mapping."""
+
+  def test_selector_dedup_keeps_collision_candidates(self):
+    a = TraceSelector(session_id="sess-1", user_id="alice")
+    a_dup = TraceSelector(session_id="sess-1", user_id="alice")
+    b = TraceSelector(session_id="sess-1", user_id="bob")
+    c = TraceSelector(
+        session_id="sess-1", user_id="alice", custom_labels={"run": "v1"}
+    )
+    deduped = {a, a_dup, b, c}
+    assert len(deduped) == 3
+
+  def test_to_trace_filter_maps_pins(self):
+    selector = TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name="root",
+        experiment_id="exp-1",
+        custom_labels={"run": "v1"},
+    )
+    filt = selector.to_trace_filter(limit=7)
+    assert filt.session_ids == ["sess-1"]
+    assert filt.user_id == "alice"
+    assert filt.root_agent_name == "root"
+    assert filt.experiment_id == "exp-1"
+    assert filt.custom_labels == {"run": "v1"}
+    assert filt.limit == 7
+
+  def test_to_trace_filter_unpinned_fields_absent(self):
+    filt = TraceSelector(session_id="sess-1").to_trace_filter()
+    assert filt.session_ids == ["sess-1"]
+    assert filt.user_id is None
+    assert filt.root_agent_name is None
+    assert filt.experiment_id is None
+    assert filt.custom_labels is None
+
+
+class TestResolvedTraceSelector:
+  """Tests for resolved identity + scope combinations."""
+
+  def test_exposes_identity_scope_and_signature(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+    assert resolved.identity.session_id == "sess-1"
+    assert resolved.scope_signature == resolved.scope.scope_signature
+
+  def test_same_identity_different_scope_distinct(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    v0 = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v0"})
+    )
+    v1 = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v1"})
+    )
+    assert len({v0, v1}) == 2
+
+
+class TestAmbiguousSessionError:
+  """Tests for the typed ambiguity error (KTD3 redaction contract)."""
+
+  def _candidates(self):
+    return [
+        ResolvedTraceSelector(
+            identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            scope=TraceScope(custom_labels={"run": "v0"}),
+        ),
+        ResolvedTraceSelector(
+            identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+            scope=TraceScope(custom_labels={"run": "v1"}),
+        ),
+    ]
+
+  def test_subclasses_value_error(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    assert isinstance(err, ValueError)
+
+  def test_printable_form_redacts_candidate_values(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    printable = str(err)
+    assert "2" in printable
+    assert "user_id" in printable
+    # Candidate values, session ids, and label values must not leak.
+    for leaked in ("alice", "bob", "sess-1", "v0", "v1"):
+      assert leaked not in printable
+
+  def test_retry_dimensions_name_differing_fields(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    assert "user_id" in err.retry_dimensions
+    assert "custom_labels" in err.retry_dimensions
+    assert "root_agent_name" not in err.retry_dimensions
+
+  def test_structured_candidates_accessible(self):
+    candidates = self._candidates()
+    err = AmbiguousSessionError(candidates=candidates)
+    assert err.candidates == tuple(candidates)
+    payload = err.to_dict()
+    assert payload["candidate_count"] == 2
+    assert sorted(payload["retry_dimensions"]) == sorted(err.retry_dimensions)
+    users = {c["identity"]["user_id"] for c in payload["candidates"]}
+    assert users == {"alice", "bob"}
+    json.dumps(payload)
+
+
+class TestResolveSingularCandidate:
+  """Tests for legacy session-only key validation (R5/R7 rules)."""
+
+  def _candidate(self, user_id):
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id),
+        scope=TraceScope(),
+    )
+
+  def test_single_candidate_accepted(self):
+    only = self._candidate("alice")
+    assert resolve_singular_candidate([only]) is only
+
+  def test_multiple_candidates_rejected(self):
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate(
+          [self._candidate("alice"), self._candidate("bob")]
+      )
+
+  def test_zero_candidates_raise_value_error(self):
+    with pytest.raises(ValueError, match="No candidates"):
+      resolve_singular_candidate([])
+
+  def test_never_picks_newest_implicitly(self):
+    # Ordering must not matter: ambiguity is raised regardless of the
+    # candidates' order, so no "latest wins" fallback can exist.
+    candidates = [self._candidate("bob"), self._candidate("alice")]
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate(list(reversed(candidates)))
+
+
+class TestTraceAdditiveIdentity:
+  """Trace gains an additive identity without breaking legacy fields."""
+
+  def test_trace_accepts_identity_and_scope(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        user_id="alice",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+    assert trace.session_id == "sess-1"
+    assert trace.user_id == "alice"
+    assert trace.trace_id == "t1"
+    assert trace.identity.user_id == "alice"
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_trace_identity_defaults_to_none(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    assert trace.identity is None
+    assert trace.scope is None
