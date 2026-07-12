@@ -41,15 +41,18 @@ skill.
 1. **V0 traffic (evolve set).** The flawed V0 skill answers the evolve questions.
    → `v0_skill.md` — the flawed V0 baseline deployed for this run, saved so the run
    is self-contained and you can diff V0 against the evolved `v1_skill.md`.
-   Every session is logged to the BQAA `agent_events` table — BigQuery is the
-   data path scoring reads from.
+   Every session is logged live to BQAA-shaped events tables (per-slice
+   `agent_events_<run>_<slice>`, pending SDK #359) — BigQuery is the write
+   path, and the execution-span trees in the scorecards are read back from it.
    → `v0_evolve_traffic.json` — raw conversations, one per session:
    `{session_id, question, conversation[], final_response, tool_calls, ...}`,
    the committed, diffable record of what was said.
 
 2. **Score V0 (evolve set).** `quality_report.py --eval-spec eval_spec.json
-   --tag-turns` reads the sessions back from BigQuery, grades each conversation
-   against the golden Q&A, and tags corrections.
+   --tag-turns` grades each conversation against the golden Q&A and tags
+   corrections. Judging runs on the run's conversations file so the judge
+   receives each session's matched expected answer (pending SDK #358 — see the
+   lab README's disclosures); the execution-span trees are read from BigQuery.
    → `v0_evolve_report.json` — **the engine's input.** Each session has
    `metrics.response_usefulness.category` (meaningful / unhelpful / partial /
    declined), `golden_eval` (`matched`, `expected_answer`, `similarity`), and
@@ -60,12 +63,12 @@ skill.
    and Before/After **execution-span trees** for the correction cases).
    The demo writes both on every scoring pass; regenerate one any time with
    `quality_report.py --render-json <report.json>` (pure formatting, no model
-   calls). The span trees come from the BQAA events table: every run logs its
-   sessions there, and this recorded run's sessions were seeded into per-slice
-   tables (`run_agent.py --seed-bigquery <traffic.json> --seed-report
-   <report.json>`, rows tagged `custom_tags.seeded`) so the traces render
-   without re-running anything. Set `PROJECT_ID`/`DATASET_ID`/`TABLE_ID` when
-   re-rendering to pull them.
+   calls). The span trees come from the BQAA events tables: this recording
+   logged its sessions live during the run, and the committed scorecards carry
+   that telemetry. To re-render with fresh trace enrichment, re-seed the
+   committed traffic (`run_agent.py --seed-bigquery <traffic.json>
+   --seed-report <report.json>`, rows tagged `custom_tags.seeded`) and set
+   `PROJECT_ID`/`DATASET_ID`/`TABLE_ID`.
 
 3. **V0 baseline (held-out).** Same two steps on the *disjoint* held-out test set.
    → `v0_test_traffic.json`, `v0_test_report.json` — the honest baseline, on
