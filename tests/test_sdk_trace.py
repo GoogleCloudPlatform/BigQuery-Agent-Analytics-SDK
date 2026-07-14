@@ -26,11 +26,13 @@ from bigquery_agent_analytics.trace import ObjectRef
 from bigquery_agent_analytics.trace import resolve_singular_candidate
 from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import SQL_NULL
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceFilter
 from bigquery_agent_analytics.trace import TraceIdentity
 from bigquery_agent_analytics.trace import TraceScope
 from bigquery_agent_analytics.trace import TraceSelector
+from bigquery_agent_analytics.trace import UNSET
 
 
 class TestSpan:
@@ -1111,6 +1113,47 @@ class TestTraceFilterNewFields:
     assert "root_agent_name" in where
 
 
+class TestTraceFilterNullSafePins:
+  """Three-state identity pins on TraceFilter (issue #359, U1)."""
+
+  def test_sql_null_pin_emits_is_null_predicates(self):
+    filt = TraceFilter(
+        user_id=SQL_NULL,
+        root_agent_name=SQL_NULL,
+        experiment_id=SQL_NULL,
+    )
+    where, params = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.root_agent_name') IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.experiment_id') IS NULL" in where
+    # NULL pins bind no equality parameters.
+    param_names = {p.name for p in params}
+    assert param_names == {"trace_limit"}
+
+  def test_none_still_means_unfiltered(self):
+    where, _ = TraceFilter().to_sql_conditions()
+    assert "user_id" not in where
+    assert "root_agent_name" not in where
+    assert "experiment_id" not in where
+
+  def test_empty_string_values_filter_by_equality(self):
+    filt = TraceFilter(user_id="", root_agent_name="", experiment_id="")
+    where, params = filt.to_sql_conditions()
+    assert "user_id = @user_id" in where
+    assert (
+        "JSON_VALUE(attributes, '$.root_agent_name') = @root_agent_name"
+        in where
+    )
+    assert "JSON_VALUE(attributes, '$.experiment_id') = @experiment_id" in where
+    values = {p.name: p.value for p in params if p.name != "trace_limit"}
+    assert values == {"user_id": "", "root_agent_name": "", "experiment_id": ""}
+
+  def test_null_and_empty_string_pins_are_distinct_predicates(self):
+    null_where, _ = TraceFilter(user_id=SQL_NULL).to_sql_conditions()
+    empty_where, _ = TraceFilter(user_id="").to_sql_conditions()
+    assert null_where != empty_where
+
+
 class TestTraceIdentity:
   """Tests for the intrinsic TraceIdentity value object (issue #359, U1)."""
 
@@ -1273,6 +1316,42 @@ class TestTraceSelector:
     ).to_trace_filter()
     assert filt.custom_labels is None
 
+  def test_unset_and_explicit_null_pins_are_distinct(self):
+    unpinned = TraceSelector(session_id="sess-1")
+    null_pinned = TraceSelector(session_id="sess-1", user_id=None)
+    assert unpinned.user_id is UNSET
+    assert null_pinned.user_id is None
+    assert unpinned != null_pinned
+    assert len({unpinned, null_pinned}) == 2
+
+  def test_to_trace_filter_maps_three_pin_states(self):
+    filt = TraceSelector(
+        session_id="sess-1",
+        user_id=None,
+        root_agent_name="root",
+    ).to_trace_filter()
+    # Explicit NULL pin becomes the NULL-safe filter sentinel.
+    assert filt.user_id is SQL_NULL
+    # Concrete pins pass through; UNSET dimensions stay unfiltered.
+    assert filt.root_agent_name == "root"
+    assert filt.experiment_id is None
+
+  def test_empty_string_pin_survives_to_sql(self):
+    # An empty-string identity value is a concrete value, not an
+    # absent one; it must not collapse into an unpinned dimension.
+    filt = TraceSelector(session_id="sess-1", user_id="").to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    assert "user_id = @user_id" in where
+    user_param = next(p for p in params if p.name == "user_id")
+    assert user_param.value == ""
+
+  def test_sql_null_sentinel_rejected_as_selector_pin(self):
+    # The selector spells a NULL pin as explicit None; accepting the
+    # filter-side sentinel too would create two unequal spellings of
+    # the same pin.
+    with pytest.raises(TypeError, match="pin to SQL"):
+      TraceSelector(session_id="sess-1", user_id=SQL_NULL)
+
 
 class TestResolvedTraceSelector:
   """Tests for resolved identity + scope combinations."""
@@ -1309,7 +1388,52 @@ class TestResolvedTraceSelector:
         root_agent_name="root",
         experiment_id="exp-1",
         custom_labels={"run": "v0"},
+        scope_signature=resolved.scope_signature,
     )
+
+  def test_to_selector_pins_null_identity_dimensions(self):
+    # AE2: a resolved NULL user/root-agent candidate retries as an
+    # explicit NULL pin, not as an unpinned session-only request.
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+        scope=TraceScope(),
+    )
+    selector = resolved.to_selector()
+    assert selector.user_id is None
+    assert selector.root_agent_name is None
+    assert selector.experiment_id is None
+    assert selector != TraceSelector(session_id="sess-1")
+    filt = selector.to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.root_agent_name') IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.experiment_id') IS NULL" in where
+    param_names = {p.name for p in params}
+    assert "user_id" not in param_names
+    assert "root_agent_name" not in param_names
+    assert "experiment_id" not in param_names
+
+  def test_to_selector_distinguishes_subset_and_superset_scopes(self):
+    # AE3: the retry selector for the {'run': 'v1'} pass must not
+    # also select the {'run': 'v1', 'slice': '3'} pass, and an
+    # unlabeled candidate must not retry as an unpinned scope.
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    subset = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v1"})
+    )
+    superset = ResolvedTraceSelector(
+        identity=identity,
+        scope=TraceScope(custom_labels={"run": "v1", "slice": "3"}),
+    )
+    unlabeled = ResolvedTraceSelector(identity=identity, scope=TraceScope())
+    selectors = {
+        subset.to_selector(),
+        superset.to_selector(),
+        unlabeled.to_selector(),
+    }
+    assert len(selectors) == 3
+    assert subset.to_selector().scope_signature == subset.scope_signature
+    assert unlabeled.to_selector().scope_signature == unlabeled.scope_signature
 
 
 class TestAmbiguousSessionError:
@@ -1363,6 +1487,7 @@ class TestAmbiguousSessionError:
                     "root_agent_name": None,
                     "experiment_id": None,
                     "custom_labels": {"run": "v0"},
+                    "scope_signature": candidates[0].scope_signature,
                 },
                 "scope_signature": candidates[0].scope_signature,
             },
@@ -1373,6 +1498,7 @@ class TestAmbiguousSessionError:
                     "root_agent_name": None,
                     "experiment_id": None,
                     "custom_labels": {"run": "v1"},
+                    "scope_signature": candidates[1].scope_signature,
                 },
                 "scope_signature": candidates[1].scope_signature,
             },
@@ -1386,17 +1512,64 @@ class TestAmbiguousSessionError:
     for entry, original in zip(payload["candidates"], candidates):
       assert TraceSelector(**entry["selector"]) == original.to_selector()
 
-  def test_scopeless_candidate_payload_has_null_labels(self):
-    payload = AmbiguousSessionError(
-        candidates=[
-            ResolvedTraceSelector(
-                identity=TraceIdentity(session_id="sess-1"),
-            ),
-        ]
-    ).to_dict()
-    selector = payload["candidates"][0]["selector"]
-    assert selector["custom_labels"] is None
-    assert TraceSelector(**selector) == TraceSelector(session_id="sess-1")
+  def test_null_and_non_null_identity_ambiguity_round_trips(self):
+    # AE2: a NULL-user candidate and a non-NULL-user candidate are a
+    # real ambiguity, and the NULL candidate's payload retries as an
+    # explicit NULL pin — not as the same session-only request that
+    # was ambiguous in the first place.
+    null_user = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+    )
+    named_user = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    err = AmbiguousSessionError(candidates=[null_user, named_user])
+    assert err.retry_dimensions == ("user_id",)
+    payload = err.to_dict()
+    null_selector = payload["candidates"][0]["selector"]
+    assert null_selector["user_id"] is None
+    assert null_selector["custom_labels"] is None
+    retried = TraceSelector(**null_selector)
+    assert retried == null_user.to_selector()
+    assert retried != TraceSelector(session_id="sess-1")
+    where, _ = retried.to_trace_filter().to_sql_conditions()
+    assert "user_id IS NULL" in where
+
+  def test_constructor_rejects_non_ambiguous_populations(self):
+    single = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="at least two distinct"):
+      AmbiguousSessionError(candidates=[single])
+    duplicate = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="at least two distinct"):
+      AmbiguousSessionError(candidates=[single, duplicate])
+
+  def test_constructor_rejects_cross_session_candidates(self):
+    a = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    b = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-2", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="share one session_id"):
+      AmbiguousSessionError(candidates=[a, b])
+
+  def test_constructor_dedupes_before_counting(self):
+    a = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    a_dup = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    b = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+    )
+    err = AmbiguousSessionError(candidates=[a, a_dup, b])
+    assert err.candidates == (a, b)
+    assert err.to_dict()["candidate_count"] == 2
 
 
 class TestResolveSingularCandidate:
@@ -1508,3 +1681,54 @@ class TestTraceAdditiveIdentity:
         identity=TraceIdentity(session_id="sess-1", user_id="alice"),
     )
     assert trace.user_id == "alice"
+
+  def test_mutating_session_id_against_identity_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      trace.session_id = "sess-2"
+    # The failed write must not leave a desynchronized object behind.
+    assert trace.session_id == "sess-1"
+
+  def test_mutating_user_id_against_identity_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      trace.user_id = "mallory"
+    with pytest.raises(ValueError, match="cannot be cleared"):
+      trace.user_id = None
+    assert trace.user_id == "alice"
+
+  def test_replacing_identity_with_contradiction_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      trace.identity = TraceIdentity(session_id="sess-2", user_id="alice")
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      trace.identity = TraceIdentity(session_id="sess-1", user_id="bob")
+
+  def test_consistent_writes_and_serialization_stay_aligned(self):
+    from bigquery_agent_analytics.serialization import serialize
+
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    # Legacy traces without identity remain freely mutable.
+    trace.user_id = "temp"
+    trace.user_id = None
+    # Attaching an identity later backfills the mirror.
+    trace.identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.user_id == "alice"
+    # Idempotent consistent writes are allowed.
+    trace.user_id = "alice"
+    trace.session_id = "sess-1"
+    result = serialize(trace)
+    assert result["session_id"] == result["identity"]["session_id"]
+    assert result["user_id"] == result["identity"]["user_id"]

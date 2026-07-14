@@ -432,14 +432,20 @@ class TraceFilter:
 
   All fields are optional. When multiple fields are set they
   are combined with AND logic.
+
+  The identity/scope dimensions ``user_id``, ``root_agent_name``, and
+  ``experiment_id`` are three-state (issue #359): ``None`` leaves the
+  dimension unfiltered (legacy behavior), the :data:`SQL_NULL`
+  sentinel matches only rows where the dimension is SQL ``NULL``, and
+  a string — including the empty string — matches by equality.
   """
 
   start_time: Optional[datetime] = None
   end_time: Optional[datetime] = None
   agent_id: Optional[str] = None
-  user_id: Optional[str] = None
+  user_id: _ScalarPin = None
   session_ids: Optional[list[str]] = None
-  experiment_id: Optional[str] = None
+  experiment_id: _ScalarPin = None
   has_error: Optional[bool] = None
   error_type: Optional[str] = None
   custom_labels: Optional[dict[str, str]] = None
@@ -447,7 +453,7 @@ class TraceFilter:
   max_latency_ms: Optional[float] = None
   event_types: Optional[list[str]] = None
   tool_origin: Optional[str] = None
-  root_agent_name: Optional[str] = None
+  root_agent_name: _ScalarPin = None
   limit: int = 100
 
   @classmethod
@@ -539,7 +545,9 @@ class TraceFilter:
               self.agent_id,
           )
       )
-    if self.user_id:
+    if self.user_id is SQL_NULL:
+      conditions.append("user_id IS NULL")
+    elif self.user_id is not None:
       conditions.append("user_id = @user_id")
       params.append(
           bigquery.ScalarQueryParameter(
@@ -602,7 +610,9 @@ class TraceFilter:
               self.max_latency_ms,
           )
       )
-    if self.experiment_id:
+    if self.experiment_id is SQL_NULL:
+      conditions.append("JSON_VALUE(attributes, '$.experiment_id') IS NULL")
+    elif self.experiment_id is not None:
       conditions.append(
           "JSON_VALUE(attributes, '$.experiment_id')" " = @experiment_id"
       )
@@ -642,7 +652,9 @@ class TraceFilter:
               self.tool_origin,
           )
       )
-    if self.root_agent_name:
+    if self.root_agent_name is SQL_NULL:
+      conditions.append("JSON_VALUE(attributes, '$.root_agent_name') IS NULL")
+    elif self.root_agent_name is not None:
       conditions.append(
           "JSON_VALUE(attributes, '$.root_agent_name')" " = @root_agent_name"
       )
@@ -665,6 +677,39 @@ class TraceFilter:
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
 
+
+class _PinSentinel:
+  """Singleton marker for selector/filter pin states (issue #359).
+
+  ``None`` is ambiguous for identity dimensions: a resolved candidate
+  can legitimately carry SQL ``NULL`` in ``user_id``,
+  ``root_agent_name``, or ``experiment_id``, so "not pinned" and
+  "pinned to NULL" need distinct representations. These sentinels are
+  identity-compared (``is``) and survive ``copy``/``deepcopy``.
+  """
+
+  __slots__ = ("_name",)
+
+  def __init__(self, name: str) -> None:
+    self._name = name
+
+  def __repr__(self) -> str:
+    return self._name
+
+  def __copy__(self) -> "_PinSentinel":
+    return self
+
+  def __deepcopy__(self, memo: dict) -> "_PinSentinel":
+    return self
+
+
+UNSET = _PinSentinel("UNSET")
+"""Selector pin state: this dimension is not pinned at all."""
+
+SQL_NULL = _PinSentinel("SQL_NULL")
+"""Filter pin state: match only rows where this dimension is SQL NULL."""
+
+_ScalarPin = Union[str, "_PinSentinel", None]
 
 _LabelsInput = Union[dict[str, str], tuple[tuple[str, str], ...], None]
 
@@ -773,30 +818,69 @@ class TraceScope:
 class TraceSelector:
   """Optional caller pins for resolving a scoped session.
 
-  Unset fields mean "not pinned" — candidate resolution decides
-  whether the unpinned population is unambiguous. Maps onto
+  The scalar identity/scope dimensions are three-state: the
+  :data:`UNSET` default means "not pinned" (candidate resolution
+  decides whether the unpinned population is unambiguous), an
+  explicit ``None`` pins the dimension to SQL ``NULL``, and a string
+  — including the empty string — pins it by equality. A resolved
+  candidate whose ``user_id`` is NULL therefore retries as a
+  different selector than a bare session-only request.
+
+  ``custom_labels`` is a subset pin: selected traces must carry at
+  least these labels. ``scope_signature`` is the exact-scope pin: it
+  matches only candidates whose full resolved
+  :attr:`TraceScope.scope_signature` equals it, so the selector for a
+  ``{'run': 'v1'}`` pass cannot also match a
+  ``{'run': 'v1', 'slice': '3'}`` pass, and an unlabeled candidate is
+  distinguishable from an unpinned scope. Maps onto
   :class:`TraceFilter` via :meth:`to_trace_filter` so both surfaces
-  share one predicate implementation.
+  share one predicate implementation; ``scope_signature`` has no SQL
+  equivalent and is enforced during candidate resolution.
   """
 
   session_id: str
-  user_id: Optional[str] = None
-  root_agent_name: Optional[str] = None
-  experiment_id: Optional[str] = None
+  user_id: _ScalarPin = UNSET
+  root_agent_name: _ScalarPin = UNSET
+  experiment_id: _ScalarPin = UNSET
   custom_labels: _LabelsInput = None
+  scope_signature: Optional[str] = None
 
   def __post_init__(self) -> None:
+    for dim in ("user_id", "root_agent_name", "experiment_id"):
+      value = getattr(self, dim)
+      if value is UNSET or value is None or isinstance(value, str):
+        continue
+      raise TypeError(
+          f"TraceSelector.{dim} must be a string, None (pin to SQL"
+          " NULL), or left UNSET."
+      )
     object.__setattr__(
         self, "custom_labels", _canonicalize_labels(self.custom_labels)
     )
 
+  @staticmethod
+  def _pin_to_filter_value(value: _ScalarPin) -> _ScalarPin:
+    """Map a selector pin onto the TraceFilter three-state encoding."""
+    if value is UNSET:
+      return None
+    if value is None:
+      return SQL_NULL
+    return value
+
   def to_trace_filter(self, limit: int = 100) -> TraceFilter:
-    """Build the equivalent list-level ``TraceFilter`` for these pins."""
+    """Build the equivalent list-level ``TraceFilter`` for these pins.
+
+    Explicit ``None`` pins become NULL-safe :data:`SQL_NULL`
+    predicates; :data:`UNSET` dimensions stay unfiltered. The
+    ``scope_signature`` pin is not representable as a SQL predicate —
+    label pins pre-filter rows to a superset and resolution applies
+    the exact signature match.
+    """
     return TraceFilter(
         session_ids=[self.session_id],
-        user_id=self.user_id,
-        root_agent_name=self.root_agent_name,
-        experiment_id=self.experiment_id,
+        user_id=self._pin_to_filter_value(self.user_id),
+        root_agent_name=self._pin_to_filter_value(self.root_agent_name),
+        experiment_id=self._pin_to_filter_value(self.experiment_id),
         custom_labels=dict(self.custom_labels) if self.custom_labels else None,
         limit=limit,
     )
@@ -815,13 +899,22 @@ class ResolvedTraceSelector:
     return self.scope.scope_signature
 
   def to_selector(self) -> TraceSelector:
-    """Build the retry-ready :class:`TraceSelector` pinning this candidate."""
+    """Build the retry-ready :class:`TraceSelector` pinning this candidate.
+
+    Every dimension is pinned — a resolved NULL ``user_id``,
+    ``root_agent_name``, or ``experiment_id`` becomes an explicit
+    ``None`` pin (matched NULL-safely), never an unpinned dimension,
+    and ``scope_signature`` pins the exact resolved scope. The retry
+    therefore selects only this candidate, not the original ambiguous
+    population.
+    """
     return TraceSelector(
         session_id=self.identity.session_id,
         user_id=self.identity.user_id,
         root_agent_name=self.identity.root_agent_name,
         experiment_id=self.scope.experiment_id,
         custom_labels=self.scope.custom_labels,
+        scope_signature=self.scope_signature,
     )
 
   def to_retry_payload(self) -> dict[str, Any]:
@@ -829,8 +922,11 @@ class ResolvedTraceSelector:
 
     ``selector`` holds exactly the :class:`TraceSelector` keyword
     arguments that pin this candidate (``TraceSelector(**selector)``
-    reconstructs it), and ``scope_signature`` carries the canonical
-    scope key. Event content and judge context never appear here.
+    reconstructs it); a JSON ``null`` there is an explicit
+    pin-to-SQL-NULL, since resolved candidates leave no dimension
+    unpinned. ``scope_signature`` is mirrored at the top level as the
+    candidate's canonical scope key for correlation. Event content
+    and judge context never appear here.
     """
     return {
         "selector": {
@@ -839,6 +935,7 @@ class ResolvedTraceSelector:
             "root_agent_name": self.identity.root_agent_name,
             "experiment_id": self.scope.experiment_id,
             "custom_labels": self.scope.labels_dict or None,
+            "scope_signature": self.scope_signature,
         },
         "scope_signature": self.scope_signature,
     }
@@ -867,7 +964,20 @@ class AmbiguousSessionError(ValueError):
   """
 
   def __init__(self, candidates: Sequence[ResolvedTraceSelector]):
-    self.candidates: tuple[ResolvedTraceSelector, ...] = tuple(candidates)
+    deduped = tuple(dict.fromkeys(candidates))
+    if len(deduped) < 2:
+      raise ValueError(
+          "AmbiguousSessionError requires at least two distinct"
+          " candidates; a zero- or one-candidate population is not"
+          " ambiguous."
+      )
+    if len({c.identity.session_id for c in deduped}) > 1:
+      raise ValueError(
+          "AmbiguousSessionError candidates must share one session_id;"
+          " candidates from different sessions are distinct lookups,"
+          " not an ambiguity."
+      )
+    self.candidates: tuple[ResolvedTraceSelector, ...] = deduped
     self.retry_dimensions: tuple[str, ...] = self._differing_dimensions(
         self.candidates
     )
@@ -955,9 +1065,13 @@ class Trace:
 
   When ``identity`` is present it is the single identity authority:
   the legacy ``session_id``/``user_id`` scalars are mirrors of it.
-  Construction rejects contradictory mirrored values and backfills an
-  unset ``user_id`` from the identity, so downstream code keyed on
-  either surface can never see two different identities for one trace.
+  The invariant holds for the object's whole lifetime, not just
+  construction — assigning a contradictory ``session_id``,
+  ``user_id``, or replacement ``identity`` raises, and attaching an
+  identity to a trace with an unset ``user_id`` backfills the mirror.
+  Downstream code keyed on either surface can therefore never see two
+  different identities for one trace. To change identity, build a new
+  ``Trace``.
   """
 
   trace_id: str
@@ -970,22 +1084,42 @@ class Trace:
   identity: Optional[TraceIdentity] = None
   scope: Optional[TraceScope] = None
 
-  def __post_init__(self) -> None:
-    if self.identity is None:
+  def __setattr__(self, name: str, value: Any) -> None:
+    if name in ("session_id", "user_id", "identity"):
+      self._check_identity_write(name, value)
+    object.__setattr__(self, name, value)
+    if name == "identity" and value is not None and self.user_id is None:
+      # Keep the legacy mirror in sync when an identity is attached
+      # before user_id is known (dataclass __init__ assigns user_id
+      # first, and client code may attach identity after construction).
+      object.__setattr__(self, "user_id", value.user_id)
+
+  def _check_identity_write(self, name: str, value: Any) -> None:
+    """Reject writes that would desynchronize identity and mirrors."""
+    identity = value if name == "identity" else getattr(self, "identity", None)
+    if identity is None:
       return
-    if self.identity.session_id != self.session_id:
+    session_id = (
+        value if name == "session_id" else getattr(self, "session_id", None)
+    )
+    if session_id != identity.session_id:
       raise ValueError(
           "Trace.identity.session_id contradicts Trace.session_id;"
           " the identity is authoritative and mirrored fields must"
           " match it."
       )
-    if self.user_id is None:
-      self.user_id = self.identity.user_id
-    elif self.user_id != self.identity.user_id:
+    user_id = value if name == "user_id" else getattr(self, "user_id", None)
+    if user_id is not None and user_id != identity.user_id:
       raise ValueError(
           "Trace.identity.user_id contradicts Trace.user_id; the"
           " identity is authoritative and mirrored fields must"
           " match it."
+      )
+    if name == "user_id" and value is None and identity.user_id is not None:
+      raise ValueError(
+          "Trace.user_id mirrors Trace.identity.user_id and cannot be"
+          " cleared while an identity with a non-NULL user is"
+          " attached."
       )
 
   def _build_tree(self) -> list[Span]:

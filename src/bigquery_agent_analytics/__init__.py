@@ -85,11 +85,13 @@ try:
   from .trace import resolve_singular_candidate
   from .trace import ResolvedTraceSelector
   from .trace import Span
+  from .trace import SQL_NULL
   from .trace import Trace
   from .trace import TraceFilter
   from .trace import TraceIdentity
   from .trace import TraceScope
   from .trace import TraceSelector
+  from .trace import UNSET
   from .views import ViewManager
 
   __all__.extend(
@@ -107,6 +109,8 @@ try:
           "ResolvedTraceSelector",
           "AmbiguousSessionError",
           "resolve_singular_candidate",
+          "UNSET",
+          "SQL_NULL",
           "ViewManager",
           "CodeEvaluator",
           "SystemEvaluator",
