@@ -2081,3 +2081,190 @@ class TestTraceFilterLifetimeValidation:
     where, _ = filt.to_sql_conditions()
     assert "user_id IS NULL" in where
     assert "@root_agent_name" in where
+
+
+class TestLabelKeyJsonPathQuoting:
+  """Label keys must be quoted JSONPath segments (round 5, P1)."""
+
+  def _key_param(self, labels):
+    _, params = TraceFilter(custom_labels=labels).to_sql_conditions()
+    return next(p for p in params if p.name == "label_key_0").value
+
+  def test_simple_key_is_quoted(self):
+    assert self._key_param({"run": "v1"}) == '"run"'
+
+  def test_dotted_key_stays_one_segment(self):
+    # $.custom_tags."a.b" selects the literal member; the unquoted
+    # form would traverse into a nested object and return NULL.
+    assert self._key_param({"a.b": "x"}) == '"a.b"'
+
+  def test_bracket_key_quoted(self):
+    assert self._key_param({"a[0]": "x"}) == '"a[0]"'
+
+  def test_quote_and_backslash_keys_escaped(self):
+    assert self._key_param({'a"b': "x"}) == '"a\\"b"'
+    assert self._key_param({"a\\b": "x"}) == '"a\\\\b"'
+
+  def test_empty_key_quoted(self):
+    assert self._key_param({"": "x"}) == '""'
+
+  def test_value_not_quoted(self):
+    _, params = TraceFilter(custom_labels={"a.b": "v.w"}).to_sql_conditions()
+    val = next(p for p in params if p.name == "label_val_0").value
+    assert val == "v.w"
+
+
+class TestStrSubclassNormalization:
+  """Equality-overriding str subclasses must not drive identity
+  decisions (round 5)."""
+
+  class _Collider(str):
+    """Compares equal to everything; hashes into one bucket."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_identity_fields_normalized_to_exact_str(self):
+    identity = TraceIdentity(
+        session_id=self._Collider("sess-1"),
+        user_id=self._Collider("alice"),
+        root_agent_name=self._Collider("root"),
+    )
+    for value in (
+        identity.session_id,
+        identity.user_id,
+        identity.root_agent_name,
+    ):
+      assert type(value) is str
+    assert identity.user_id == "alice"
+
+  def test_colliding_user_ids_still_ambiguous(self):
+    alice = ResolvedTraceSelector(
+        identity=TraceIdentity("sess-1", user_id=self._Collider("alice"))
+    )
+    bob = ResolvedTraceSelector(
+        identity=TraceIdentity("sess-1", user_id=self._Collider("bob"))
+    )
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate([alice, bob])
+
+  def test_trace_mirror_check_uses_exact_str(self):
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id=self._Collider("legacy"),
+          identity=TraceIdentity(session_id="different"),
+      )
+
+  def test_scope_and_selector_and_filter_normalized(self):
+    scope = TraceScope(
+        experiment_id=self._Collider("exp"),
+        custom_labels={self._Collider("k"): self._Collider("v")},
+    )
+    assert type(scope.experiment_id) is str
+    key, value = scope.custom_labels[0]
+    assert type(key) is str and type(value) is str
+    selector = TraceSelector(
+        session_id=self._Collider("sess-1"),
+        user_id=self._Collider("alice"),
+    )
+    assert type(selector.session_id) is str
+    assert type(selector.user_id) is str
+    filt = TraceFilter(user_id=self._Collider("alice"))
+    assert type(filt.user_id) is str
+
+  def test_value_object_subclasses_rejected(self):
+    class EvilIdentity(TraceIdentity):
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return 0
+
+    evil = EvilIdentity(session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=evil)
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      Trace(trace_id="t1", session_id="sess-1", identity=evil)
+
+
+class TestPinSentinelImmutability:
+  """Sentinel state must be sealed (round 5)."""
+
+  def test_name_writes_rejected(self):
+    with pytest.raises(AttributeError, match="immutable"):
+      UNSET._name = "SQL_NULL"
+    with pytest.raises(AttributeError, match="immutable"):
+      SQL_NULL._name = "UNSET"
+    with pytest.raises(AttributeError, match="immutable"):
+      del UNSET._name
+
+  def test_pickle_and_wire_names_derived_from_identity(self):
+    import pickle
+
+    from bigquery_agent_analytics.serialization import serialize
+
+    # Force the display name out of sync through the object protocol
+    # escape hatch; encodings must still follow singleton identity.
+    object.__setattr__(UNSET, "_name", "SQL_NULL")
+    try:
+      assert pickle.loads(pickle.dumps(UNSET)) is UNSET
+      assert serialize(SQL_NULL) == {"$pin": "SQL_NULL"}
+      restored = pickle.loads(pickle.dumps(TraceSelector(session_id="sess-1")))
+      assert restored.user_id is UNSET
+    finally:
+      object.__setattr__(UNSET, "_name", "UNSET")
+
+
+class TestExportsIndependentOfClient:
+  """U1 contract must import without optional client deps (round 5)."""
+
+  def test_identity_exports_survive_blocked_client_import(self):
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class Blocker(importlib.abc.MetaPathFinder):
+          def find_spec(self, fullname, path=None, target=None):
+            if fullname == "bigquery_agent_analytics.client":
+              raise ImportError("blocked for test")
+            return None
+
+        sys.meta_path.insert(0, Blocker())
+        import bigquery_agent_analytics as bqaa
+
+        names = [
+            "TraceIdentity", "TraceScope", "TraceSelector",
+            "ResolvedTraceSelector", "AmbiguousSessionError",
+            "resolve_singular_candidate", "UNSET", "SQL_NULL",
+            "decode_pin",
+        ]
+        missing = [
+            n for n in names
+            if not hasattr(bqaa, n) or n not in bqaa.__all__
+        ]
+        assert not missing, f"missing: {missing}"
+        assert not hasattr(bqaa, "Client")
+        print("OK")
+    """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout

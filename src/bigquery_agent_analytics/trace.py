@@ -426,6 +426,19 @@ def _parse_time_window(window: str) -> datetime:
   return datetime.now(timezone.utc) - delta
 
 
+def _jsonpath_member_segment(key: str) -> str:
+  """Encode a label key as a quoted JSONPath member segment.
+
+  Label keys are user data: dots, brackets, quotes, backslashes, or
+  an empty key must select the literal member instead of changing the
+  path structure. BigQuery JSONPath quotes member names with double
+  quotes and backslash escapes, so ``a.b`` becomes ``"a.b"`` and is
+  appended to ``$.custom_tags.`` as one segment.
+  """
+  escaped = key.replace("\\", "\\\\").replace('"', '\\"')
+  return f'"{escaped}"'
+
+
 @dataclass
 class TraceFilter:
   """Filtering criteria for listing traces.
@@ -468,6 +481,8 @@ class TraceFilter:
             f"TraceFilter.{name} must be a string, None (unfiltered),"
             " or SQL_NULL."
         )
+      if isinstance(value, str):
+        value = _exact_str(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -646,7 +661,11 @@ class TraceFilter:
             f" CONCAT('$.custom_tags.', @{param_key}))"
             f" = @{param_val}"
         )
-        params.append(bigquery.ScalarQueryParameter(param_key, "STRING", key))
+        params.append(
+            bigquery.ScalarQueryParameter(
+                param_key, "STRING", _jsonpath_member_segment(key)
+            )
+        )
         params.append(bigquery.ScalarQueryParameter(param_val, "STRING", value))
     if self.event_types:
       conditions.append("event_type IN UNNEST(@event_types)")
@@ -708,7 +727,16 @@ class _PinSentinel:
   __slots__ = ("_name",)
 
   def __init__(self, name: str) -> None:
-    self._name = name
+    object.__setattr__(self, "_name", name)
+
+  def __setattr__(self, name: str, value: Any) -> None:
+    # Pickle restoration and wire encoding are derived from singleton
+    # identity, but a writable display name would still let one write
+    # confuse process-global diagnostics.
+    raise AttributeError("Pin sentinels are immutable.")
+
+  def __delattr__(self, name: str) -> None:
+    raise AttributeError("Pin sentinels are immutable.")
 
   def __repr__(self) -> str:
     return self._name
@@ -720,7 +748,7 @@ class _PinSentinel:
     return self
 
   def __reduce__(self) -> tuple[Any, tuple[str]]:
-    return (_resolve_pin_sentinel, (self._name,))
+    return (_resolve_pin_sentinel, (_pin_sentinel_name(self),))
 
 
 UNSET = _PinSentinel("UNSET")
@@ -733,6 +761,33 @@ SQL_NULL = _PinSentinel("SQL_NULL")
 def _resolve_pin_sentinel(name: str) -> _PinSentinel:
   """Resolve a pickled sentinel back to its module singleton."""
   return {"UNSET": UNSET, "SQL_NULL": SQL_NULL}[name]
+
+
+def _pin_sentinel_name(sentinel: _PinSentinel) -> str:
+  """Canonical sentinel name derived from singleton identity.
+
+  Pickle and wire encodings must not trust mutable display state;
+  only the two module singletons have names.
+  """
+  if sentinel is UNSET:
+    return "UNSET"
+  if sentinel is SQL_NULL:
+    return "SQL_NULL"
+  raise ValueError("Unknown pin sentinel.")
+
+
+def _exact_str(value: str) -> str:
+  """Copy a ``str`` (or subclass) into an exact built-in ``str``.
+
+  ``str`` subclasses can override ``__eq__``/``__hash__``/``__ne__``,
+  and identity comparison, deduplication, and mirror validation must
+  never run on caller-controlled semantics. ``str.join`` copies the
+  character data through internal APIs without invoking any subclass
+  hook.
+  """
+  if type(value) is str:
+    return value
+  return "".join((value,))
 
 
 _PIN_WIRE_KEY = "$pin"
@@ -805,6 +860,8 @@ def _canonicalize_labels(
     key, value = item
     if not isinstance(key, str) or not isinstance(value, str):
       raise TypeError("Custom label keys and values must be strings.")
+    key = _exact_str(key)
+    value = _exact_str(value)
     if key in seen:
       raise ValueError(f"Duplicate custom label key: {key!r}.")
     seen.add(key)
@@ -831,13 +888,19 @@ class TraceIdentity:
   def __post_init__(self) -> None:
     if not isinstance(self.session_id, str):
       raise TypeError("TraceIdentity.session_id must be a string.")
+    object.__setattr__(self, "session_id", _exact_str(self.session_id))
     for dim in ("user_id", "root_agent_name"):
       value = getattr(self, dim)
-      if value is not None and not isinstance(value, str):
+      if value is None:
+        continue
+      if not isinstance(value, str):
         # Non-string values (e.g. 1 vs True) can compare equal while
         # producing different serialized forms, silently merging or
         # splitting identities downstream.
         raise TypeError(f"TraceIdentity.{dim} must be a string or None.")
+      # str subclasses may override __eq__/__hash__, which would let
+      # distinct identities compare equal during fail-closed dedup.
+      object.__setattr__(self, dim, _exact_str(value))
 
 
 @dataclass(frozen=True)
@@ -853,12 +916,12 @@ class TraceScope:
   custom_labels: _LabelsInput = None
 
   def __post_init__(self) -> None:
-    if self.experiment_id is not None and not isinstance(
-        self.experiment_id, str
-    ):
-      # 1 and True compare and hash equal but sign differently, so a
-      # non-string experiment_id could dedupe two distinct scopes.
-      raise TypeError("TraceScope.experiment_id must be a string or None.")
+    if self.experiment_id is not None:
+      if not isinstance(self.experiment_id, str):
+        # 1 and True compare and hash equal but sign differently, so a
+        # non-string experiment_id could dedupe two distinct scopes.
+        raise TypeError("TraceScope.experiment_id must be a string or None.")
+      object.__setattr__(self, "experiment_id", _exact_str(self.experiment_id))
     object.__setattr__(
         self, "custom_labels", _canonicalize_labels(self.custom_labels)
     )
@@ -928,18 +991,25 @@ class TraceSelector:
   def __post_init__(self) -> None:
     if not isinstance(self.session_id, str):
       raise TypeError("TraceSelector.session_id must be a string.")
+    object.__setattr__(self, "session_id", _exact_str(self.session_id))
     for dim in ("user_id", "root_agent_name", "experiment_id"):
       value = getattr(self, dim)
-      if value is UNSET or value is None or isinstance(value, str):
+      if value is UNSET or value is None:
         continue
-      raise TypeError(
-          f"TraceSelector.{dim} must be a string, None (pin to SQL"
-          " NULL), or left UNSET."
+      if not isinstance(value, str):
+        raise TypeError(
+            f"TraceSelector.{dim} must be a string, None (pin to SQL"
+            " NULL), or left UNSET."
+        )
+      object.__setattr__(self, dim, _exact_str(value))
+    if self.scope_signature is not None:
+      if not isinstance(self.scope_signature, str):
+        raise TypeError(
+            "TraceSelector.scope_signature must be a string or None."
+        )
+      object.__setattr__(
+          self, "scope_signature", _exact_str(self.scope_signature)
       )
-    if self.scope_signature is not None and not isinstance(
-        self.scope_signature, str
-    ):
-      raise TypeError("TraceSelector.scope_signature must be a string or None.")
     object.__setattr__(
         self, "custom_labels", _canonicalize_labels(self.custom_labels)
     )
@@ -980,12 +1050,13 @@ class ResolvedTraceSelector:
   scope: TraceScope = field(default_factory=TraceScope)
 
   def __post_init__(self) -> None:
-    # Foreign component values (e.g. identity=1 vs identity=True) can
-    # compare equal across distinct candidates, silently collapsing a
-    # real ambiguity during deduplication.
-    if not isinstance(self.identity, TraceIdentity):
+    # Foreign component values (e.g. identity=1 vs identity=True) or
+    # subclasses overriding __eq__/__hash__ can compare equal across
+    # distinct candidates, silently collapsing a real ambiguity
+    # during deduplication — exact trusted types only.
+    if type(self.identity) is not TraceIdentity:
       raise TypeError("ResolvedTraceSelector.identity must be a TraceIdentity.")
-    if not isinstance(self.scope, TraceScope):
+    if type(self.scope) is not TraceScope:
       raise TypeError("ResolvedTraceSelector.scope must be a TraceScope.")
 
   @property
@@ -1214,12 +1285,12 @@ class Trace:
   scope: Optional[TraceScope] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
-    if (
-        name == "scope"
-        and value is not None
-        and not isinstance(value, TraceScope)
-    ):
+    if name == "scope" and value is not None and type(value) is not TraceScope:
       raise TypeError("Trace.scope must be a TraceScope or None.")
+    if name in ("session_id", "user_id") and isinstance(value, str):
+      # Exact-str normalization keeps mirror comparisons off
+      # caller-controlled __eq__/__ne__ semantics.
+      value = _exact_str(value)
     if name in ("session_id", "user_id", "identity"):
       self._check_identity_write(name, value)
     object.__setattr__(self, name, value)
@@ -1243,11 +1314,12 @@ class Trace:
   def _check_identity_write(self, name: str, value: Any) -> None:
     """Reject writes that would desynchronize identity and mirrors."""
     if name == "identity":
-      if value is not None and not isinstance(value, TraceIdentity):
-        # A mutable duck-typed stand-in (e.g. SimpleNamespace) could
-        # be mutated through its own alias after attachment,
-        # bypassing these guards entirely; only the frozen,
-        # validated value object is an acceptable authority.
+      if value is not None and type(value) is not TraceIdentity:
+        # A mutable duck-typed stand-in (e.g. SimpleNamespace) or a
+        # subclass with overridden equality could bypass these guards
+        # through its own alias or comparison semantics; only the
+        # exact frozen, validated value object is an acceptable
+        # authority.
         raise TypeError("Trace.identity must be a TraceIdentity or None.")
       current = getattr(self, "identity", None)
       if current is not None and value != current:

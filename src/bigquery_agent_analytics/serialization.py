@@ -46,6 +46,7 @@ def serialize(obj: Any) -> Any:
       A JSON-safe Python object (dict, list, str, int, float, bool,
       or None).
   """
+  from .trace import _pin_sentinel_name
   from .trace import _PIN_WIRE_KEY
   from .trace import _PinSentinel
 
@@ -55,8 +56,9 @@ def serialize(obj: Any) -> Any:
     # Tagged wire encoding (decode with trace.decode_pin): plain JSON
     # null cannot carry SQL_NULL because None already means
     # "unfiltered" on TraceFilter. UNSET only reaches here outside a
-    # dataclass field (those are omitted below).
-    return {_PIN_WIRE_KEY: repr(obj)}
+    # dataclass field (those are omitted below). The tag name is
+    # derived from singleton identity, never display state.
+    return {_PIN_WIRE_KEY: _pin_sentinel_name(obj)}
   if hasattr(obj, "model_dump"):
     return obj.model_dump(mode="json")
   if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -75,12 +77,18 @@ def serialize(obj: Any) -> Any:
 def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
   """Recursively convert a dataclass instance to a dict.
 
-  Fields holding the :data:`~bigquery_agent_analytics.trace.UNSET`
-  pin sentinel are omitted entirely: JSON has no third state, and
-  encoding UNSET as ``null`` would reconstruct as an explicit
-  pin-to-SQL-NULL. Omission round-trips — absent keyword arguments
-  restore the UNSET default, while explicit NULL pins serialize as
-  ``null`` and reconstruct unchanged.
+  Pin wire contract (issue #359): fields holding the
+  :data:`~bigquery_agent_analytics.trace.UNSET` pin sentinel are
+  omitted entirely — JSON has no third state, and encoding UNSET as
+  ``null`` would reconstruct as an explicit pin-to-SQL-NULL. Omission
+  round-trips: absent keyword arguments restore the UNSET default.
+  On ``TraceSelector``, explicit NULL pins serialize as ``null`` and
+  reconstruct unchanged. On ``TraceFilter``, a
+  :data:`~bigquery_agent_analytics.trace.SQL_NULL` pin serializes as
+  the tagged object ``{"$pin": "SQL_NULL"}`` (``null`` already means
+  "unfiltered" there) and must be passed through
+  :func:`~bigquery_agent_analytics.trace.decode_pin` before
+  reconstruction.
   """
   from .trace import UNSET
 
