@@ -70,15 +70,38 @@ class SkillRegistry:
       return env_token
     if self._cached_token and time.monotonic() < self._token_expiry:
       return self._cached_token
-    out = subprocess.run(
-        ["gcloud", "auth", "application-default", "print-access-token"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    self._cached_token = out.stdout.strip()
+    token = self._adc_token()
+    if token is None:
+      out = subprocess.run(
+          ["gcloud", "auth", "application-default", "print-access-token"],
+          capture_output=True,
+          text=True,
+          check=True,
+      )
+      token = out.stdout.strip()
+    self._cached_token = token
     self._token_expiry = time.monotonic() + self._TOKEN_TTL
     return self._cached_token
+
+  @staticmethod
+  def _adc_token() -> str | None:
+    """Mint a token from Application Default Credentials.
+
+    Works in environments without the gcloud CLI (Cloud Run, Agent Engine).
+    Returns None when ADC is not configured so the caller can fall back.
+    """
+    try:
+      import google.auth
+      from google.auth.transport.requests import Request
+
+      creds, _ = google.auth.default(
+          scopes=["https://www.googleapis.com/auth/cloud-platform"]
+      )
+      creds.refresh(Request())
+      return creds.token
+    except Exception as e:  # pylint: disable=broad-except
+      logger.debug("ADC token unavailable (%s); trying gcloud CLI", e)
+      return None
 
   def _headers(self) -> dict:
     return {
