@@ -46,8 +46,17 @@ def serialize(obj: Any) -> Any:
       A JSON-safe Python object (dict, list, str, int, float, bool,
       or None).
   """
+  from .trace import _PIN_WIRE_KEY
+  from .trace import _PinSentinel
+
   if obj is None:
     return None
+  if isinstance(obj, _PinSentinel):
+    # Tagged wire encoding (decode with trace.decode_pin): plain JSON
+    # null cannot carry SQL_NULL because None already means
+    # "unfiltered" on TraceFilter. UNSET only reaches here outside a
+    # dataclass field (those are omitted below).
+    return {_PIN_WIRE_KEY: repr(obj)}
   if hasattr(obj, "model_dump"):
     return obj.model_dump(mode="json")
   if dataclasses.is_dataclass(obj) and not isinstance(obj, type):

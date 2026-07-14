@@ -80,6 +80,7 @@ try:
   from .serialization import serialize
   from .trace import AmbiguousSessionError
   from .trace import ContentPart
+  from .trace import decode_pin
   from .trace import EventType
   from .trace import ObjectRef
   from .trace import resolve_singular_candidate
@@ -111,6 +112,7 @@ try:
           "resolve_singular_candidate",
           "UNSET",
           "SQL_NULL",
+          "decode_pin",
           "ViewManager",
           "CodeEvaluator",
           "SystemEvaluator",

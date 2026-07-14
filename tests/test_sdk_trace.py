@@ -1976,3 +1976,108 @@ class TestPackageRootExports:
       assert name in bqaa.__all__, name
     assert bqaa.UNSET is UNSET
     assert bqaa.SQL_NULL is SQL_NULL
+
+
+class TestIdentityFieldDeletion:
+  """del must not bypass the lifetime identity invariant (round 4)."""
+
+  def test_delete_detach_retag_blocked(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    for name in ("identity", "session_id", "user_id"):
+      with pytest.raises(AttributeError, match="cannot be deleted"):
+        delattr(trace, name)
+    # The object is untouched and still guarded after the attempts.
+    assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      trace.session_id = "sess-2"
+
+  def test_delete_blocked_without_identity_too(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(AttributeError, match="cannot be deleted"):
+      del trace.session_id
+
+  def test_other_fields_remain_deletable(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    trace.extra_note = "x"
+    del trace.extra_note
+
+
+class TestTraceComponentTypes:
+  """Trace requires the concrete immutable value objects (round 4)."""
+
+  def test_duck_typed_identity_rejected(self):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        session_id="sess-1", user_id="alice", root_agent_name=None
+    )
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      Trace(trace_id="t1", session_id="sess-1", user_id="alice", identity=fake)
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      trace.identity = fake
+
+  def test_duck_typed_scope_rejected(self):
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      Trace(trace_id="t1", session_id="sess-1", scope={"run": "v0"})
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      trace.scope = object()
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    trace.scope = None
+
+
+class TestResolvedSelectorComponentTypes:
+  """Candidates must be real value objects before dedup (round 4)."""
+
+  def test_foreign_identity_rejected_at_construction(self):
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=1, scope=TraceScope())
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=True, scope=TraceScope())
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      ResolvedTraceSelector(
+          identity=TraceIdentity(session_id="sess-1"), scope="scope"
+      )
+
+  def test_resolver_rejects_foreign_candidates_before_dedup(self):
+    real = ResolvedTraceSelector(identity=TraceIdentity(session_id="sess-1"))
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      resolve_singular_candidate([real, "sess-1"])
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      resolve_singular_candidate([1, True])
+
+  def test_error_rejects_foreign_candidates(self):
+    real = ResolvedTraceSelector(identity=TraceIdentity(session_id="sess-1"))
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      AmbiguousSessionError(candidates=[real, object()])
+
+
+class TestTraceFilterLifetimeValidation:
+  """Tri-state pin validation must survive mutation (round 4)."""
+
+  def test_post_construction_unset_assignment_rejected(self):
+    filt = TraceFilter()
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      filt.user_id = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.root_agent_name"):
+      filt.root_agent_name = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      filt.experiment_id = 1
+    # Failed writes leave the filter unchanged and SQL clean.
+    where, params = filt.to_sql_conditions()
+    assert "user_id" not in where
+    assert all(p.name == "trace_limit" for p in params)
+
+  def test_valid_mutations_still_allowed(self):
+    filt = TraceFilter()
+    filt.user_id = SQL_NULL
+    filt.root_agent_name = "root"
+    filt.experiment_id = None
+    where, _ = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "@root_agent_name" in where

@@ -445,3 +445,47 @@ class TestSelectorWireFormat:
     payload = serialize(original)
     assert payload["custom_labels"] == [["run", "v1"]]
     assert TraceSelector(**payload) == original
+
+
+class TestPinWireEncoding:
+  """SQL_NULL must have a tagged, decodable wire form (round 4)."""
+
+  def test_sql_null_filter_serializes_json_safe(self):
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    payload = serialize(TraceFilter(user_id=SQL_NULL))
+    assert payload["user_id"] == {"$pin": "SQL_NULL"}
+    json.dumps(payload)
+
+  def test_format_output_json_handles_sql_null_filter(self):
+    from bigquery_agent_analytics.formatter import format_output
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    rendered = format_output(TraceFilter(user_id=SQL_NULL), "json")
+    assert json.loads(rendered)["user_id"] == {"$pin": "SQL_NULL"}
+
+  def test_decode_pin_round_trips_null_safe_filter(self):
+    from bigquery_agent_analytics.trace import decode_pin
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    payload = serialize(TraceFilter(user_id=SQL_NULL))
+    restored = TraceFilter(user_id=decode_pin(payload["user_id"]))
+    assert restored.user_id is SQL_NULL
+    where, _ = restored.to_sql_conditions()
+    assert "user_id IS NULL" in where
+
+  def test_decode_pin_passes_ordinary_values_through(self):
+    from bigquery_agent_analytics.trace import decode_pin
+    from bigquery_agent_analytics.trace import UNSET
+
+    assert decode_pin(None) is None
+    assert decode_pin("alice") == "alice"
+    assert decode_pin({"$pin": "UNSET"}) is UNSET
+    assert decode_pin({"$pin": "bogus"}) == {"$pin": "bogus"}
+    assert decode_pin({"$pin": "SQL_NULL", "x": 1}) == {
+        "$pin": "SQL_NULL",
+        "x": 1,
+    }

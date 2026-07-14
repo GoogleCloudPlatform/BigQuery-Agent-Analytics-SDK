@@ -456,18 +456,19 @@ class TraceFilter:
   root_agent_name: _ScalarPin = None
   limit: int = 100
 
-  def __post_init__(self) -> None:
-    for dim in ("user_id", "root_agent_name", "experiment_id"):
-      value = getattr(self, dim)
-      if value is None or value is SQL_NULL or isinstance(value, str):
-        continue
-      # UNSET (and any foreign sentinel) belongs to the selector
-      # surface; accepting it here would bind the sentinel object as
-      # an equality query parameter.
-      raise TypeError(
-          f"TraceFilter.{dim} must be a string, None (unfiltered), or"
-          " SQL_NULL."
-      )
+  def __setattr__(self, name: str, value: Any) -> None:
+    # Validated on every write, not just construction: the filter is
+    # mutable, and a post-construction `f.user_id = UNSET` would
+    # otherwise bind the sentinel object as an equality query
+    # parameter. UNSET (and any foreign value) belongs to the
+    # selector surface.
+    if name in ("user_id", "root_agent_name", "experiment_id"):
+      if not (value is None or value is SQL_NULL or isinstance(value, str)):
+        raise TypeError(
+            f"TraceFilter.{name} must be a string, None (unfiltered),"
+            " or SQL_NULL."
+        )
+    object.__setattr__(self, name, value)
 
   @classmethod
   def from_cli_args(
@@ -734,6 +735,30 @@ def _resolve_pin_sentinel(name: str) -> _PinSentinel:
   return {"UNSET": UNSET, "SQL_NULL": SQL_NULL}[name]
 
 
+_PIN_WIRE_KEY = "$pin"
+
+
+def decode_pin(value: Any) -> Any:
+  """Decode the tagged JSON wire encoding of a pin sentinel.
+
+  ``serialize()`` encodes :data:`SQL_NULL` (and a bare :data:`UNSET`
+  outside dataclass fields, which are omitted instead) as the tagged
+  object ``{"$pin": "<name>"}``, because plain JSON ``null`` already
+  means "unfiltered" on :class:`TraceFilter` and "pin to SQL NULL" on
+  :class:`TraceSelector`. This helper restores the module singleton
+  from that tag and returns every other value unchanged, so
+  ``TraceFilter(user_id=decode_pin(payload["user_id"]))`` round-trips
+  a NULL-safe filter.
+  """
+  if (
+      isinstance(value, dict)
+      and set(value) == {_PIN_WIRE_KEY}
+      and value[_PIN_WIRE_KEY] in ("UNSET", "SQL_NULL")
+  ):
+    return _resolve_pin_sentinel(value[_PIN_WIRE_KEY])
+  return value
+
+
 _ScalarPin = Union[str, "_PinSentinel", None]
 
 _LabelsInput = Union[dict[str, str], Sequence[tuple[str, str]], None]
@@ -954,6 +979,15 @@ class ResolvedTraceSelector:
   identity: TraceIdentity
   scope: TraceScope = field(default_factory=TraceScope)
 
+  def __post_init__(self) -> None:
+    # Foreign component values (e.g. identity=1 vs identity=True) can
+    # compare equal across distinct candidates, silently collapsing a
+    # real ambiguity during deduplication.
+    if not isinstance(self.identity, TraceIdentity):
+      raise TypeError("ResolvedTraceSelector.identity must be a TraceIdentity.")
+    if not isinstance(self.scope, TraceScope):
+      raise TypeError("ResolvedTraceSelector.scope must be a TraceScope.")
+
   @property
   def scope_signature(self) -> str:
     """Canonical scope signature of this candidate."""
@@ -1030,7 +1064,7 @@ class AmbiguousSessionError(ValueError):
   """
 
   def __init__(self, candidates: Sequence[ResolvedTraceSelector]):
-    deduped = tuple(dict.fromkeys(candidates))
+    deduped = tuple(dict.fromkeys(_validated_candidates(candidates)))
     if len(deduped) < 2:
       raise ValueError(
           "AmbiguousSessionError requires at least two distinct"
@@ -1097,6 +1131,25 @@ class AmbiguousSessionError(ValueError):
     }
 
 
+def _validated_candidates(
+    candidates: Sequence[ResolvedTraceSelector],
+) -> list[ResolvedTraceSelector]:
+  """Require real resolved selectors before any dedup/hash decision.
+
+  Foreign values that happen to compare equal (or hash together)
+  would otherwise collapse silently inside ``dict.fromkeys()``
+  instead of failing clearly.
+  """
+  validated = list(candidates)
+  for candidate in validated:
+    if not isinstance(candidate, ResolvedTraceSelector):
+      raise TypeError(
+          "Candidates must be ResolvedTraceSelector instances; got"
+          f" {type(candidate).__name__}."
+      )
+  return validated
+
+
 def resolve_singular_candidate(
     candidates: Sequence[ResolvedTraceSelector],
 ) -> ResolvedTraceSelector:
@@ -1117,7 +1170,7 @@ def resolve_singular_candidate(
           matches. No implicit fallback (such as newest-wins) is ever
           applied.
   """
-  resolved = list(dict.fromkeys(candidates))
+  resolved = list(dict.fromkeys(_validated_candidates(candidates)))
   if not resolved:
     raise ValueError("No candidates match the requested session.")
   if len(resolved) > 1:
@@ -1161,6 +1214,12 @@ class Trace:
   scope: Optional[TraceScope] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
+    if (
+        name == "scope"
+        and value is not None
+        and not isinstance(value, TraceScope)
+    ):
+      raise TypeError("Trace.scope must be a TraceScope or None.")
     if name in ("session_id", "user_id", "identity"):
       self._check_identity_write(name, value)
     object.__setattr__(self, name, value)
@@ -1170,9 +1229,26 @@ class Trace:
       # first, and client code may attach identity after construction).
       object.__setattr__(self, "user_id", value.user_id)
 
+  def __delattr__(self, name: str) -> None:
+    if name in ("session_id", "user_id", "identity"):
+      # Deleting an identity-authority field would fall back to the
+      # dataclass class-level default (None), silently detaching the
+      # identity and reopening the retag path the write guards close.
+      raise AttributeError(
+          f"Trace.{name} carries the identity contract and cannot be"
+          " deleted."
+      )
+    object.__delattr__(self, name)
+
   def _check_identity_write(self, name: str, value: Any) -> None:
     """Reject writes that would desynchronize identity and mirrors."""
     if name == "identity":
+      if value is not None and not isinstance(value, TraceIdentity):
+        # A mutable duck-typed stand-in (e.g. SimpleNamespace) could
+        # be mutated through its own alias after attachment,
+        # bypassing these guards entirely; only the frozen,
+        # validated value object is an acceptable authority.
+        raise TypeError("Trace.identity must be a TraceIdentity or None.")
       current = getattr(self, "identity", None)
       if current is not None and value != current:
         # Replacement (including a NULL-user -> named-user retag or a
