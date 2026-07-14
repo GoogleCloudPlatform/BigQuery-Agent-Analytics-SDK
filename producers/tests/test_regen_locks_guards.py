@@ -247,4 +247,31 @@ echo "v$N-unique" > "$OUT_DIR/candidate.lock"
     diag_dirs = list((home / ".cache").glob("bqaa-lock-diagnostics.*"))
     assert diag_dirs, "diagnostics were not preserved"
     kept = {f.name for f in diag_dirs[0].iterdir()}
-    assert {"seed.lock", "candidate.lock"} <= kept
+    assert {"previous-seed.lock", "candidate.lock"} <= kept
+    # The reviewer reproduced the erased delta: reseeding overwrote the
+    # seed with the candidate, so both preserved locks were byte-equal.
+    # The diagnostics must be the last two DISTINCT resolutions — the
+    # final phase's input and its output.
+    previous = (diag_dirs[0] / "previous-seed.lock").read_text().strip()
+    candidate = (diag_dirs[0] / "candidate.lock").read_text().strip()
+    assert previous != candidate, "diagnostic locks are byte-identical"
+    assert previous == "v2-unique"  # phase 2's output = phase 3's input
+    assert candidate == "v3-unique"  # phase 3's output
+
+  def test_first_phase_exhaustion_keeps_the_checked_in_seed(self, tmp_path):
+    # MAX_PHASES=1: the preserved pair is the checked-in seed and the
+    # single candidate it produced.
+    stub = """
+N=$(cat "$STUB_STATE" 2>/dev/null || echo 0); N=$((N+1)); echo $N > "$STUB_STATE"
+OUT_DIR=$(echo "$@" | grep -oE '[^ ]+:/out' | cut -d: -f1)
+echo "v$N-unique" > "$OUT_DIR/candidate.lock"
+"""
+    out, home, r = self._run(tmp_path, stub, max_phases=1)
+    assert r.returncode != 0
+    diag_dirs = list((home / ".cache").glob("bqaa-lock-diagnostics.*"))
+    assert diag_dirs
+    previous = (diag_dirs[0] / "previous-seed.lock").read_text()
+    candidate = (diag_dirs[0] / "candidate.lock").read_text().strip()
+    assert "v1" in previous  # the checked-in seed body
+    assert candidate == "v1-unique"
+    assert previous.strip() != candidate

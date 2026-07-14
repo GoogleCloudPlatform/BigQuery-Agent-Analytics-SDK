@@ -17,15 +17,19 @@
 Issue #349 / #356 round 4: the mutable draft's own manifest is NOT an
 identity anchor (a manifest omitting a present file still passes
 ``sha256sum -c``). The anchor is the CI build artifact; everything else —
-the GitHub release assets, the PyPI file set — must match it exactly:
-exact filename sets (no subsets, no extras), byte identity, nothing
-yanked.
+the GitHub release assets, the PyPI file set, the TestPyPI file set —
+must match it exactly: exact filename sets (no subsets, no extras), byte
+identity, nothing yanked. Release VISIBILITY is part of the reconciled
+state too (#356 round 11): a draft accidentally published during the
+approval pause exposes incomplete artifacts, so "keep the draft" advice
+must never be emitted for a release that is already customer-visible.
 
 States (the complete contract — KNOWN_STATES and dispatch() are
 generated from one mapping, and tests assert the vocabularies match):
   complete         every surface matches the anchor exactly → publish
   unpublished      draft verified against the anchor; PyPI confirmed
-                   absent (explicit 404) → fix and rerun publish-pypi
+                   absent (explicit 404) → rerun the FAILED publish jobs
+                   from the original workflow attempt
   empty-release    PyPI returned HTTP 200 with zero files: the release
                    record exists, files were deleted, and PyPI forbids
                    filename reuse → the version is burned; bump + re-tag
@@ -37,10 +41,17 @@ generated from one mapping, and tests assert the vocabularies match):
                    pipeline from github-release (PyPI needs no cleanup)
   draft-invalid    draft differs from the anchor and PyPI is confirmed
                    absent → delete the draft and rerun (no cleanup)
+  testpypi-partial  production PyPI is absent but TestPyPI holds a
+                   deviating file set for this version — a failed upload
+                   cannot be retried at the same version → burn (bump +
+                   re-tag; production needs no cleanup)
+  premature-publication  the GitHub release is publicly visible while
+                   the underlying state is not complete → re-draft it
+                   immediately, then follow the underlying recovery
   invalid-anchor   the anchor itself is inconsistent → investigate CI
-  invalid-response  the PyPI success body is unparseable or violates
-                    the
-                   schema → INDETERMINATE, retry the lookup first
+  invalid-response  a PyPI/TestPyPI success body is unparseable or
+                   violates the schema → INDETERMINATE, retry the
+                   lookup first
 """
 
 from __future__ import annotations
@@ -63,6 +74,8 @@ PARTIAL = "partial"
 MISSING_RELEASE = "missing-release"
 MISSING_ALL = "missing-all"
 DRAFT_INVALID = "draft-invalid"
+TESTPYPI_PARTIAL = "testpypi-partial"
+PREMATURE_PUBLICATION = "premature-publication"
 INVALID_ANCHOR = "invalid-anchor"
 INVALID_RESPONSE = "invalid-response"
 
@@ -117,20 +130,33 @@ def _validated_urls(pypi: dict) -> tuple[dict | None, str]:
   return seen, ""
 
 
-def reconcile(
+def _index_problem(
+    urls: dict, expected: set[str], manifest: dict[str, str]
+) -> str | None:
+  """First deviation of a validated index file set from the anchor."""
+  if set(urls) != expected:
+    missing = expected - set(urls)
+    extra = set(urls) - expected
+    return (
+        f"file set mismatch (missing: {sorted(missing)},"
+        f" extra: {sorted(extra)})"
+    )
+  for name in sorted(expected):
+    if urls[name]["yanked"]:
+      return f"file {name} is yanked"
+    if urls[name]["digests"]["sha256"] != manifest[name]:
+      return f"digest of {name} differs from the build anchor"
+  return None
+
+
+def _classify(
     *,
     version: str,
     anchor_dir: pathlib.Path,
     release_dir: pathlib.Path | None,
     pypi: dict | None,
+    testpypi: dict | None,
 ) -> tuple[str, str]:
-  """Returns (state, detail).
-
-  ``release_dir=None`` = the GitHub release is MISSING. ``pypi=None`` =
-  PyPI returned an explicit 404 (the ONLY absence representation — an
-  HTTP-200 body must satisfy the complete schema). Confirmed PyPI
-  absence is classified BEFORE asset recovery advice, so yank/burn is
-  only ever emitted when validated PyPI files actually exist."""
   wheel, sdist, plugin = _expected_files(version)
   expected = {wheel, sdist, plugin}
 
@@ -161,13 +187,19 @@ def reconcile(
     if _sha256(anchor_dir / name) != digest:
       return INVALID_ANCHOR, f"anchor bytes of {name} do not match manifest"
 
-  # --- PyPI schema is validated BEFORE any classification --------------------
+  # --- index schemas are validated BEFORE any classification -----------------
   if pypi is None:
     urls: dict = {}
   else:
     urls, why = _validated_urls(pypi)
     if urls is None:
       return INVALID_RESPONSE, f"invalid PyPI response schema: {why}"
+  if testpypi is None:
+    tp_urls: dict = {}
+  else:
+    tp_urls, why = _validated_urls(testpypi)
+    if tp_urls is None:
+      return INVALID_RESPONSE, f"invalid TestPyPI response schema: {why}"
   # pypi=None (explicit 404) is the SOLE confirmed-absence predicate.
   # An HTTP-200 body with zero files means the release record EXISTS
   # with deleted files — and PyPI forbids reusing deleted filenames, so
@@ -179,10 +211,32 @@ def reconcile(
         "PyPI retains a release record with zero files for this version",
     )
 
+  # --- TestPyPI surface status ------------------------------------------------
+  # The uploader can publish one distribution and fail on the next,
+  # burning the version there (#356 P2): with production absent, a
+  # deviating TestPyPI set means a same-version retry can NEVER succeed,
+  # so 'rerun publication' advice would send the operator into a wall.
+  expected_pypi = {wheel, sdist}
+  if testpypi is None:
+    tp_problem = None
+    tp_status = "absent"
+  else:
+    tp_problem = _index_problem(tp_urls, expected_pypi, manifest)
+    tp_status = "complete" if tp_problem is None else "partial"
+
   # --- GitHub release missing: cross-surface classification ------------------
   if release_dir is None:
     if pypi_absent:
-      return MISSING_ALL, "no GitHub release and nothing on PyPI"
+      if tp_problem is not None:
+        return (
+            TESTPYPI_PARTIAL,
+            "production PyPI is absent, the GitHub release is missing,"
+            f" and TestPyPI {tp_problem}",
+        )
+      return (
+          MISSING_ALL,
+          "no GitHub release and nothing on PyPI" f" (TestPyPI: {tp_status})",
+      )
     return (
         MISSING_RELEASE,
         "PyPI carries validated files but the GitHub release is missing",
@@ -212,28 +266,89 @@ def reconcile(
         asset_problem = "release SHA256SUMS differs from the build anchor"
 
   if pypi_absent:
+    # TestPyPI burn wins over draft advice: whether the draft is exact
+    # or broken, a same-version rerun dies at the TestPyPI upload.
+    if tp_problem is not None:
+      draft_note = (
+          f"; additionally {asset_problem}"
+          if asset_problem
+          else "; the draft matches the anchor"
+      )
+      return (
+          TESTPYPI_PARTIAL,
+          f"production PyPI is absent and TestPyPI {tp_problem}{draft_note}",
+      )
     if asset_problem:
       return DRAFT_INVALID, f"nothing on PyPI and {asset_problem}"
-    return UNPUBLISHED, "draft verified against the anchor; PyPI has no files"
+    return (
+        UNPUBLISHED,
+        "draft verified against the anchor; PyPI has no files"
+        f" (TestPyPI: {tp_status})",
+    )
   if asset_problem:
     return PARTIAL, asset_problem
-  expected_pypi = {wheel, sdist}
-  if set(urls) != expected_pypi:
-    missing = expected_pypi - set(urls)
-    extra = set(urls) - expected_pypi
-    return (
-        PARTIAL,
-        f"PyPI file set mismatch (missing: {sorted(missing)},"
-        f" extra: {sorted(extra)})",
-    )
-  for name in expected_pypi:
-    entry = urls[name]
-    if entry.get("yanked"):
-      return PARTIAL, f"PyPI file {name} is yanked"
-    if entry.get("digests", {}).get("sha256") != manifest[name]:
-      return PARTIAL, f"PyPI digest of {name} differs from the build anchor"
+  pypi_problem = _index_problem(urls, expected_pypi, manifest)
+  if pypi_problem is not None:
+    return PARTIAL, f"PyPI {pypi_problem}"
+  # Production is complete. TestPyPI files may have been pruned (the
+  # index deletes old files routinely), so absence there is tolerated —
+  # but a file that IS present must carry the anchor's bytes: the
+  # full-lifecycle gate installed from TestPyPI, and a digest conflict
+  # means the gate exercised different bytes than customers receive.
+  for name in sorted(expected_pypi & set(tp_urls)):
+    if tp_urls[name]["digests"]["sha256"] != manifest[name]:
+      return PARTIAL, f"TestPyPI digest of {name} differs from the build anchor"
 
   return COMPLETE, "byte identity proven against the build anchor"
+
+
+_PREMATURE_WRAPPABLE = frozenset(
+    {UNPUBLISHED, EMPTY_RELEASE, PARTIAL, DRAFT_INVALID, TESTPYPI_PARTIAL}
+)
+
+
+def reconcile(
+    *,
+    version: str,
+    anchor_dir: pathlib.Path,
+    release_dir: pathlib.Path | None,
+    pypi: dict | None,
+    testpypi: dict | None = None,
+    release_published: bool = False,
+) -> tuple[str, str]:
+  """Returns (state, detail).
+
+  ``release_dir=None`` = the GitHub release is MISSING. ``pypi=None`` /
+  ``testpypi=None`` = that index returned an explicit 404 (the ONLY
+  absence representation — an HTTP-200 body must satisfy the complete
+  schema). ``release_published=True`` = the release exists and is NOT a
+  draft. Confirmed PyPI absence is classified BEFORE asset recovery
+  advice, so yank/burn is only ever emitted when validated PyPI files
+  actually exist."""
+  state, detail = _classify(
+      version=version,
+      anchor_dir=anchor_dir,
+      release_dir=release_dir,
+      pypi=pypi,
+      testpypi=testpypi,
+  )
+  # Visibility is part of the reconciled state (#356 round 11): every
+  # determinate non-complete state flips to premature-publication when
+  # the release is already publicly visible — "keep the draft" advice
+  # would be wrong for artifacts customers can already download. The
+  # indeterminate states (invalid-anchor / invalid-response) keep their
+  # retry-first advice: visibility recovery needs a trusted
+  # classification underneath it.
+  if (
+      release_published
+      and release_dir is not None
+      and state in _PREMATURE_WRAPPABLE
+  ):
+    return (
+        PREMATURE_PUBLICATION,
+        f"the release is publicly visible; underlying state {state}: {detail}",
+    )
+  return state, detail
 
 
 @dataclasses.dataclass(frozen=True)
@@ -249,7 +364,9 @@ _STATE_ACTIONS: dict[str, DispatchAction] = {
         False,
         1,
         "PyPI publication did not happen — keep the draft, fix and rerun"
-        " publish-pypi, or burn the version",
+        " the FAILED publish jobs from the ORIGINAL workflow attempt (a"
+        " full rerun rebuilds the anchor and can never byte-match), or"
+        " burn the version",
     ),
     EMPTY_RELEASE: DispatchAction(
         False,
@@ -275,14 +392,32 @@ _STATE_ACTIONS: dict[str, DispatchAction] = {
         False,
         1,
         "nothing exists on either surface — no draft and nothing on PyPI;"
-        " restart the pipeline from github-release (PyPI needs no cleanup)",
+        " restart github-release from the ORIGINAL workflow attempt so the"
+        " preserved anchor artifacts are reused (PyPI needs no cleanup)",
     ),
     DRAFT_INVALID: DispatchAction(
         False,
         1,
         "the release draft differs from the build anchor and NOTHING is on"
         " PyPI (no cleanup there) — delete the draft and restart"
-        " github-release",
+        " github-release from the ORIGINAL workflow attempt",
+    ),
+    TESTPYPI_PARTIAL: DispatchAction(
+        False,
+        1,
+        "TestPyPI already holds a deviating file set for this version —"
+        " the failed upload cannot be retried at the same version, so it"
+        " is burned even though production PyPI needs no cleanup: bump"
+        " the version, rebuild, and cut a new tag",
+    ),
+    PREMATURE_PUBLICATION: DispatchAction(
+        False,
+        1,
+        "the GitHub release is PUBLISHED while reconciliation is NOT"
+        " complete — incomplete artifacts are customer-visible RIGHT NOW:"
+        " convert it back to a draft (gh release edit --draft=true)"
+        " immediately, then follow the recovery for the underlying state"
+        " in the detail line",
     ),
     INVALID_ANCHOR: DispatchAction(
         False,
@@ -327,6 +462,12 @@ def main(
       help="The GitHub release does not exist (cross-surface classification).",
   )
   parser.add_argument(
+      "--release-published",
+      action="store_true",
+      help="The GitHub release exists and is NOT a draft (visibility is"
+      " part of the reconciled state).",
+  )
+  parser.add_argument(
       "--pypi-json",
       type=pathlib.Path,
       default=None,
@@ -337,29 +478,53 @@ def main(
       action="store_true",
       help="PyPI returned an explicit 404 — the only absence marker.",
   )
+  parser.add_argument(
+      "--testpypi-json",
+      type=pathlib.Path,
+      default=None,
+      help="File holding the TestPyPI release JSON (HTTP 200 body).",
+  )
+  parser.add_argument(
+      "--testpypi-missing",
+      action="store_true",
+      help="TestPyPI returned an explicit 404 — the only absence marker.",
+  )
   args = parser.parse_args(argv)
   if (args.release_dir is None) == (not args.release_missing):
     parser.error("exactly one of --release-dir / --release-missing required")
+  if args.release_published and args.release_dir is None:
+    parser.error("--release-published requires --release-dir")
   if (args.pypi_json is None) == (not args.pypi_missing):
     parser.error("exactly one of --pypi-json / --pypi-missing required")
-  # --pypi-missing (the explicit HTTP 404) is the sole absence marker.
-  # A success body that fails to parse (or is not an object) is an
-  # INDETERMINATE lookup, never confirmed absence.
+  if (args.testpypi_json is None) == (not args.testpypi_missing):
+    parser.error("exactly one of --testpypi-json / --testpypi-missing required")
+
+  # --pypi-missing/--testpypi-missing (the explicit HTTP 404) are the
+  # sole absence markers. A success body that fails to parse (or is not
+  # an object) is an INDETERMINATE lookup, never confirmed absence.
+  def _load(path: pathlib.Path, surface: str) -> dict:
+    body = json.loads(path.read_text())
+    if not isinstance(body, dict):
+      raise ValueError(
+          f"{surface}: expected a JSON object, got {type(body).__name__}"
+      )
+    return body
+
   try:
-    if args.pypi_missing:
-      pypi = None
-    else:
-      pypi = json.loads(args.pypi_json.read_text())
-      if not isinstance(pypi, dict):
-        raise ValueError(f"expected a JSON object, got {type(pypi).__name__}")
+    pypi = None if args.pypi_missing else _load(args.pypi_json, "PyPI")
+    testpypi = (
+        None if args.testpypi_missing else _load(args.testpypi_json, "TestPyPI")
+    )
   except ValueError as exc:
-    state, detail = INVALID_RESPONSE, f"unparseable PyPI body: {exc}"
+    state, detail = INVALID_RESPONSE, f"unparseable index body: {exc}"
   else:
     state, detail = reconcile(
         version=args.version,
         anchor_dir=args.anchor_dir,
         release_dir=args.release_dir,
         pypi=pypi,
+        testpypi=testpypi,
+        release_published=args.release_published,
     )
   echo(f"state={state}")
   echo(f"detail={detail}")

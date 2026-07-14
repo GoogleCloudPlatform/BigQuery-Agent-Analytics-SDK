@@ -67,13 +67,19 @@ for phase in $(seq 1 "$MAX_PHASES"); do
     cp "$OUT/candidate.lock" "$OUT/pip-tools.lock"
     break
   fi
+  # Keep the phase INPUT distinct from its OUTPUT before reseeding: on
+  # exhaustion the diagnostics must show the last two resolutions, not
+  # one lock copied twice (the overwrite below erases the delta).
+  cp "$OUT/seed.lock" "$OUT/previous-seed.lock"
   cp "$OUT/candidate.lock" "$OUT/seed.lock"
 done
 if [ "$CONVERGED" != "1" ]; then
   # Preserve the evidence: a rerun from the unchanged checked-in seed is
-  # a deterministic dead end, so the last two locks must survive.
+  # a deterministic dead end, so the final phase's input
+  # (previous-seed.lock) and output (candidate.lock) — two DISTINCT
+  # resolutions whose diff is the non-convergence — must both survive.
   DIAG=$(mktemp -d "$HOME/.cache/bqaa-lock-diagnostics.XXXXXX")
-  cp "$OUT/seed.lock" "$OUT/candidate.lock" "$DIAG/" 2>/dev/null || true
+  cp "$OUT/previous-seed.lock" "$OUT/candidate.lock" "$DIAG/" 2>/dev/null || true
   echo "generator lock did not converge within ${MAX_PHASES} phases" >&2
   echo "diagnostic locks preserved in: ${DIAG}" >&2
   exit 1

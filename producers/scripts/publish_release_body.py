@@ -18,8 +18,12 @@ Asset reconciliation never reads the draft body, and anything holding
 ``contents: write`` could have edited it during the approval pause. This
 helper composes the full re-anchor: extract the digest from the ANCHOR
 wheel → render the notes from the protected checkout → publish
-atomically with ``gh release edit --notes-file … --draft=false
---latest=false``. PR-tested with a fake anchor wheel and a stubbed gh.
+atomically with ``gh release edit --title … --notes-file …
+--draft=false --prerelease=false --latest=false``. The edit REASSERTS
+the canonical title and flags, not only the body — the same
+contents:write window could have renamed the draft or flipped it to a
+prerelease (#356 round 11). PR-tested with a fake anchor wheel and a
+stubbed gh.
 """
 
 from __future__ import annotations
@@ -71,9 +75,12 @@ def publish(
           tag,
           "--repo",
           repo,
+          "--title",
+          f"Tracing {tag}",
           "--notes-file",
           str(body_path),
           "--draft=false",
+          "--prerelease=false",
           "--latest=false",
       ]
   )

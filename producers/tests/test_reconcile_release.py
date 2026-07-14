@@ -25,6 +25,8 @@ import pathlib
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
 import reconcile_release
 
@@ -109,8 +111,15 @@ def _run(tmp_path, **kw):
   pypi = kw.pop("pypi", _ABSENT)
   if pypi is _ABSENT:
     pypi = _pypi(anchor)
+  testpypi = kw.pop("testpypi", None)
+  release_published = kw.pop("release_published", False)
   return reconcile_release.reconcile(
-      version=VERSION, anchor_dir=anchor, release_dir=release, pypi=pypi
+      version=VERSION,
+      anchor_dir=anchor,
+      release_dir=release,
+      pypi=pypi,
+      testpypi=testpypi,
+      release_published=release_published,
   )
 
 
@@ -197,12 +206,15 @@ class TestDispatch:
   def test_every_non_complete_state_fails(self):
     for state in (
         "unpublished",
+        "empty-release",
         "partial",
         "invalid-anchor",
         "invalid-response",
         "missing-release",
         "missing-all",
         "draft-invalid",
+        "testpypi-partial",
+        "premature-publication",
     ):
       action = reconcile_release.dispatch(state)
       assert not action.publish
@@ -361,6 +373,8 @@ class TestStateContract:
             "MISSING_RELEASE",
             "MISSING_ALL",
             "DRAFT_INVALID",
+            "TESTPYPI_PARTIAL",
+            "PREMATURE_PUBLICATION",
             "INVALID_ANCHOR",
             "INVALID_RESPONSE",
         )
@@ -482,6 +496,7 @@ class TestMalformedPypiResponses:
             str(release),
             "--pypi-json",
             str(pypi_path),
+            "--testpypi-missing",
         ],
         echo=out.append,
     )
@@ -511,6 +526,7 @@ class TestMalformedPypiResponses:
             "--release-dir",
             str(release),
             "--pypi-missing",
+            "--testpypi-missing",
         ],
         echo=out.append,
     )
@@ -535,3 +551,231 @@ class TestDispatchNewStates:
     action = reconcile_release.dispatch("missing-release")
     assert not action.publish and action.exit_code != 0
     assert "yank" in action.message
+
+
+class TestTestPyPISurface:
+  """TestPyPI's absent/complete/partial states are part of the recovery
+  matrix (#356 P2): a partial TestPyPI upload burns the version there,
+  so production-404 + exact draft must NOT say 'rerun publication'."""
+
+  def test_prod_absent_testpypi_partial_is_burned_not_unpublished(
+      self, tmp_path
+  ):
+    # THE regression from review: the uploader published the wheel and
+    # failed on the sdist; a same-version rerun cannot succeed.
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path,
+        anchor=anchor,
+        pypi=None,
+        testpypi=_pypi(anchor, omit=(SDIST,)),
+    )
+    assert state == "testpypi-partial"
+    assert SDIST in detail
+    message = reconcile_release.dispatch(state).message.lower()
+    assert "burn" in message or "bump" in message
+    assert "yank" not in message
+    assert "rerun" not in message
+
+  def test_prod_absent_testpypi_complete_is_unpublished(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path, anchor=anchor, pypi=None, testpypi=_pypi(anchor)
+    )
+    assert state == "unpublished"
+    assert "TestPyPI: complete" in detail
+
+  def test_prod_absent_testpypi_absent_is_unpublished(self, tmp_path):
+    state, detail = _run(tmp_path, pypi=None, testpypi=None)
+    assert state == "unpublished"
+    assert "TestPyPI: absent" in detail
+
+  def test_testpypi_empty_urls_with_prod_absent_is_burned(self, tmp_path):
+    state, _ = _run(tmp_path, pypi=None, testpypi={"urls": []})
+    assert state == "testpypi-partial"
+
+  def test_testpypi_yanked_with_prod_absent_is_burned(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    state, _ = _run(
+        tmp_path,
+        anchor=anchor,
+        pypi=None,
+        testpypi=_pypi(anchor, yanked=(WHEEL,)),
+    )
+    assert state == "testpypi-partial"
+
+  def test_broken_draft_with_testpypi_partial_is_still_burned(self, tmp_path):
+    # The burn outranks draft advice: deleting the draft and restarting
+    # would die at the TestPyPI upload anyway.
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor, omit=(PLUGIN,))
+    state, detail = _run(
+        tmp_path,
+        anchor=anchor,
+        release=release,
+        pypi=None,
+        testpypi=_pypi(anchor, omit=(SDIST,)),
+    )
+    assert state == "testpypi-partial"
+    assert PLUGIN in detail  # the draft problem still surfaces in the detail
+
+  def test_release_missing_prod_absent_testpypi_partial_is_burned(
+      self, tmp_path
+  ):
+    anchor = _anchor(tmp_path)
+    state, _ = reconcile_release.reconcile(
+        version=VERSION,
+        anchor_dir=anchor,
+        release_dir=None,
+        pypi=None,
+        testpypi=_pypi(anchor, omit=(SDIST,)),
+    )
+    assert state == "testpypi-partial"
+
+  def test_invalid_testpypi_schema_is_invalid_response(self, tmp_path):
+    state, detail = _run(tmp_path, pypi=None, testpypi={"urls": None})
+    assert state == "invalid-response"
+    assert "TestPyPI" in detail
+
+  def test_testpypi_digest_conflict_with_prod_complete_is_partial(
+      self, tmp_path
+  ):
+    # The full-lifecycle gate installed from TestPyPI: a digest conflict
+    # means it exercised different bytes than customers receive.
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path, anchor=anchor, testpypi=_pypi(anchor, corrupt=(WHEEL,))
+    )
+    assert state == "partial"
+    assert "TestPyPI" in detail
+
+  def test_testpypi_pruned_files_with_prod_complete_stay_complete(
+      self, tmp_path
+  ):
+    # TestPyPI prunes old files routinely — absence there must never
+    # block (or yank!) a byte-verified production release.
+    anchor = _anchor(tmp_path)
+    for testpypi in (None, _pypi(anchor, omit=(SDIST,))):
+      state, _ = _run(tmp_path, anchor=anchor, testpypi=testpypi)
+      assert state == "complete"
+
+
+class TestPrematurePublication:
+  """A draft accidentally published during the approval pause is
+  customer-visible: 'keep the draft' advice would be wrong (#356 P1)."""
+
+  def test_published_release_with_prod_absent_is_premature(self, tmp_path):
+    state, detail = _run(tmp_path, pypi=None, release_published=True)
+    assert state == "premature-publication"
+    assert "unpublished" in detail  # the underlying state survives in detail
+    message = reconcile_release.dispatch(state).message.lower()
+    assert "draft" in message  # re-draft advice
+    assert "customer-visible" in message
+
+  def test_published_release_with_partial_pypi_is_premature(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path,
+        anchor=anchor,
+        pypi=_pypi(anchor, omit=(SDIST,)),
+        release_published=True,
+    )
+    assert state == "premature-publication"
+    assert "partial" in detail
+
+  def test_published_release_with_complete_state_stays_complete(self, tmp_path):
+    # Publication re-runs `gh release edit`, which idempotently
+    # reasserts title/prerelease/latest/body on the visible release.
+    state, _ = _run(tmp_path, release_published=True)
+    assert state == "complete"
+
+  def test_indeterminate_states_are_not_wrapped(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    (anchor / "SHA256SUMS").unlink()
+    state, _ = _run(tmp_path, anchor=anchor, release_published=True)
+    assert state == "invalid-anchor"
+    state, _ = _run(tmp_path, pypi={"urls": None}, release_published=True)
+    assert state == "invalid-response"
+
+  def test_published_flag_needs_release_dir_in_cli(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    with pytest.raises(SystemExit):
+      reconcile_release.main(
+          [
+              "--version",
+              VERSION,
+              "--anchor-dir",
+              str(anchor),
+              "--release-missing",
+              "--release-published",
+              "--pypi-missing",
+              "--testpypi-missing",
+          ],
+          echo=lambda _: None,
+      )
+
+  def test_premature_publication_via_cli(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    out = []
+    rc = reconcile_release.main(
+        [
+            "--version",
+            VERSION,
+            "--anchor-dir",
+            str(anchor),
+            "--release-dir",
+            str(release),
+            "--release-published",
+            "--pypi-missing",
+            "--testpypi-missing",
+        ],
+        echo=out.append,
+    )
+    assert rc != 0
+    state = next(l.split("=", 1)[1] for l in out if l.startswith("state="))
+    assert state == "premature-publication"
+
+
+class TestMalformedTestPyPIResponses:
+  """The TestPyPI success body gets the same fail-closed treatment as
+  the production body: unparseable is INDETERMINATE, never absence."""
+
+  def test_truncated_testpypi_json_is_invalid_response(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release(tmp_path, anchor)
+    bad = tmp_path / "testpypi.json"
+    bad.write_bytes(b'{"urls": [{"filename": "x')
+    out = []
+    rc = reconcile_release.main(
+        [
+            "--version",
+            VERSION,
+            "--anchor-dir",
+            str(anchor),
+            "--release-dir",
+            str(release),
+            "--pypi-missing",
+            "--testpypi-json",
+            str(bad),
+        ],
+        echo=out.append,
+    )
+    state = next(l.split("=", 1)[1] for l in out if l.startswith("state="))
+    assert state == "invalid-response"
+    assert rc != 0
+
+  def test_testpypi_args_are_mutually_required(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    with pytest.raises(SystemExit):
+      reconcile_release.main(
+          [
+              "--version",
+              VERSION,
+              "--anchor-dir",
+              str(anchor),
+              "--release-missing",
+              "--pypi-missing",
+          ],
+          echo=lambda _: None,
+      )

@@ -13,8 +13,9 @@
 # limitations under the License.
 
 """The complete publish-time body re-anchor path, composed and tested
-(#356 round 7): anchor-wheel digest extraction -> renderer -> atomic
-gh release edit with --notes-file --draft=false --latest=false."""
+(#356 rounds 7 + 11): anchor-wheel digest extraction -> renderer ->
+atomic gh release edit reasserting title, body, --draft=false,
+--prerelease=false, --latest=false."""
 
 import pathlib
 import sys
@@ -68,6 +69,11 @@ def test_composes_extract_render_and_atomic_publish(tmp_path):
   assert "tracing-v0.2.0" in argv
   assert "--notes-file" in argv and "--draft=false" in argv
   assert "--latest=false" in argv
+  # Publication REASSERTS the canonical title and prerelease flag: the
+  # contents:write window during the approval pause could have renamed
+  # the draft or flipped it to a prerelease (#356 round 11).
+  assert "--prerelease=false" in argv
+  assert argv[argv.index("--title") + 1] == "Tracing tracing-v0.2.0"
 
 
 def test_fails_when_anchor_wheel_is_absent(tmp_path):

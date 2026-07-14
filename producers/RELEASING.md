@@ -60,7 +60,13 @@ minutes; the release then WAITS at two manual approval gates
    writes `SHA256SUMS`.
 4. **`github-release`** — creates a **draft** release with all
    artifacts + checksums and the pinned image reference in the body.
-   Nothing is customer-visible yet.
+   Nothing is customer-visible yet. A stale draft from an earlier
+   attempt is deleted ONLY when PyPI **and** TestPyPI both return an
+   explicit 404 for the version: once an index accepted files, the
+   existing draft is their only byte-identical counterpart (a rebuilt
+   anchor embeds new timestamps and can never byte-match), so the
+   draft is preserved and the failed jobs must be re-run from the
+   **original** workflow attempt — never a full rerun.
 5. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
    Trusted Publishing. No `skip-existing`: if the version already
    exists there, the upload fails loudly — that version is burned
@@ -75,10 +81,17 @@ minutes; the release then WAITS at two manual approval gates
    constant. It does NOT publish the release.
 7. **`publish-pypi`** — PyPI, gated by the `pypi` environment;
    requires `promote`.
-8. **`finalize`** — runs `always()`: reconciles the PyPI file set and
-   the four release assets; publishes the draft GitHub release ONLY
-   on complete state (never as the repository's Latest); a partial
-   publication is surfaced with the yank/version-burn recovery.
+8. **`finalize`** — runs `always()`: reconciles the PyPI **and**
+   TestPyPI file sets, the four release assets, and the release's
+   **visibility** (a draft accidentally published during an approval
+   pause is classified `premature-publication` — re-draft it first,
+   never "keep the draft"); publishes the draft GitHub release ONLY
+   on complete state (never as the repository's Latest), reasserting
+   the canonical title, body, `prerelease=false`, and `latest=false`;
+   a partial publication is surfaced with the yank/version-burn
+   recovery, and a partial TestPyPI upload (production absent) is
+   surfaced as `testpypi-partial` — the version is burned there, so
+   bump + re-tag rather than retrying the same version.
 
 The plugin tarball and `SHA256SUMS` are **never** uploaded to PyPI —
 they ship only as GitHub release assets.
@@ -161,6 +174,12 @@ tar -tzf /tmp/plugin.tar.gz | head
   `bqaa-release-publisher` SA bindings in `bqaa-releases` (see the
   workflow `env:` block for the exact resource names).
 - **`publish-pypi` fails the same way** — same fix on the PyPI side.
+- **`finalize` fails transiently after PyPI accepted the upload** —
+  re-run the failed `finalize` job from the **original** workflow
+  attempt (Actions → the run → "Re-run failed jobs"). Never trigger a
+  full rerun: it rebuilds the wheel/sdist with new timestamps, and the
+  guard in `github-release` will refuse to touch the preserved draft
+  because the indexes already hold the original bytes.
 
 If a release ships a broken artifact, do **not** delete the tag.
 Yank the PyPI release and ship the next patch version
