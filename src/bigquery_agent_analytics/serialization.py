@@ -64,8 +64,21 @@ def serialize(obj: Any) -> Any:
 
 
 def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
-  """Recursively convert a dataclass instance to a dict."""
+  """Recursively convert a dataclass instance to a dict.
+
+  Fields holding the :data:`~bigquery_agent_analytics.trace.UNSET`
+  pin sentinel are omitted entirely: JSON has no third state, and
+  encoding UNSET as ``null`` would reconstruct as an explicit
+  pin-to-SQL-NULL. Omission round-trips — absent keyword arguments
+  restore the UNSET default, while explicit NULL pins serialize as
+  ``null`` and reconstruct unchanged.
+  """
+  from .trace import UNSET
+
   result: dict[str, Any] = {}
   for f in dataclasses.fields(obj):
-    result[f.name] = serialize(getattr(obj, f.name))
+    value = getattr(obj, f.name)
+    if value is UNSET:
+      continue
+    result[f.name] = serialize(value)
   return result

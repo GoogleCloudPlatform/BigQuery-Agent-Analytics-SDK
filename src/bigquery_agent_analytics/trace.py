@@ -456,6 +456,19 @@ class TraceFilter:
   root_agent_name: _ScalarPin = None
   limit: int = 100
 
+  def __post_init__(self) -> None:
+    for dim in ("user_id", "root_agent_name", "experiment_id"):
+      value = getattr(self, dim)
+      if value is None or value is SQL_NULL or isinstance(value, str):
+        continue
+      # UNSET (and any foreign sentinel) belongs to the selector
+      # surface; accepting it here would bind the sentinel object as
+      # an equality query parameter.
+      raise TypeError(
+          f"TraceFilter.{dim} must be a string, None (unfiltered), or"
+          " SQL_NULL."
+      )
+
   @classmethod
   def from_cli_args(
       cls,
@@ -685,7 +698,10 @@ class _PinSentinel:
   can legitimately carry SQL ``NULL`` in ``user_id``,
   ``root_agent_name``, or ``experiment_id``, so "not pinned" and
   "pinned to NULL" need distinct representations. These sentinels are
-  identity-compared (``is``) and survive ``copy``/``deepcopy``.
+  identity-compared (``is``) and survive ``copy``, ``deepcopy``, and
+  ``pickle`` — a clone would silently change pin semantics (an
+  ``UNSET`` clone reads as a concrete equality pin, an ``SQL_NULL``
+  clone stops emitting ``IS NULL``).
   """
 
   __slots__ = ("_name",)
@@ -702,6 +718,9 @@ class _PinSentinel:
   def __deepcopy__(self, memo: dict) -> "_PinSentinel":
     return self
 
+  def __reduce__(self) -> tuple[Any, tuple[str]]:
+    return (_resolve_pin_sentinel, (self._name,))
+
 
 UNSET = _PinSentinel("UNSET")
 """Selector pin state: this dimension is not pinned at all."""
@@ -709,9 +728,15 @@ UNSET = _PinSentinel("UNSET")
 SQL_NULL = _PinSentinel("SQL_NULL")
 """Filter pin state: match only rows where this dimension is SQL NULL."""
 
+
+def _resolve_pin_sentinel(name: str) -> _PinSentinel:
+  """Resolve a pickled sentinel back to its module singleton."""
+  return {"UNSET": UNSET, "SQL_NULL": SQL_NULL}[name]
+
+
 _ScalarPin = Union[str, "_PinSentinel", None]
 
-_LabelsInput = Union[dict[str, str], tuple[tuple[str, str], ...], None]
+_LabelsInput = Union[dict[str, str], Sequence[tuple[str, str]], None]
 
 
 def _canonicalize_labels(
@@ -725,10 +750,16 @@ def _canonicalize_labels(
   Empty label payloads normalize to ``None`` so ``{}``, ``()``, and
   ``None`` all mean "no labels" and compare (and sign) identically.
 
+  Every entry is rebuilt as a fresh ``(key, value)`` tuple rather
+  than kept as the caller's container element, so JSON round-tripped
+  payloads (lists of two-item lists) normalize to the same hashable
+  canonical form as native tuple input.
+
   Raises:
-      TypeError: If a key or value is not a string. Values are never
-          coerced, because silent coercion would let two distinct
-          inputs collide in filters and scope signatures.
+      TypeError: If an entry is not a two-item (key, value) pair, or
+          a key or value is not a string. Values are never coerced,
+          because silent coercion would let two distinct inputs
+          collide in filters and scope signatures.
       ValueError: If the same key appears more than once. A duplicate
           key cannot round-trip through the dict-based
           ``TraceFilter.custom_labels`` surface without silently
@@ -740,13 +771,20 @@ def _canonicalize_labels(
   if not items:
     return None
   seen: set[str] = set()
-  for key, value in items:
+  normalized: list[tuple[str, str]] = []
+  for item in items:
+    if not isinstance(item, (tuple, list)) or len(item) != 2:
+      raise TypeError(
+          "Each custom label entry must be a two-item (key, value)" " pair."
+      )
+    key, value = item
     if not isinstance(key, str) or not isinstance(value, str):
       raise TypeError("Custom label keys and values must be strings.")
     if key in seen:
       raise ValueError(f"Duplicate custom label key: {key!r}.")
     seen.add(key)
-  return tuple(sorted(items))
+    normalized.append((key, value))
+  return tuple(sorted(normalized))
 
 
 @dataclass(frozen=True)
@@ -765,6 +803,17 @@ class TraceIdentity:
   user_id: Optional[str] = None
   root_agent_name: Optional[str] = None
 
+  def __post_init__(self) -> None:
+    if not isinstance(self.session_id, str):
+      raise TypeError("TraceIdentity.session_id must be a string.")
+    for dim in ("user_id", "root_agent_name"):
+      value = getattr(self, dim)
+      if value is not None and not isinstance(value, str):
+        # Non-string values (e.g. 1 vs True) can compare equal while
+        # producing different serialized forms, silently merging or
+        # splitting identities downstream.
+        raise TypeError(f"TraceIdentity.{dim} must be a string or None.")
+
 
 @dataclass(frozen=True)
 class TraceScope:
@@ -779,6 +828,12 @@ class TraceScope:
   custom_labels: _LabelsInput = None
 
   def __post_init__(self) -> None:
+    if self.experiment_id is not None and not isinstance(
+        self.experiment_id, str
+    ):
+      # 1 and True compare and hash equal but sign differently, so a
+      # non-string experiment_id could dedupe two distinct scopes.
+      raise TypeError("TraceScope.experiment_id must be a string or None.")
     object.__setattr__(
         self, "custom_labels", _canonicalize_labels(self.custom_labels)
     )
@@ -846,6 +901,8 @@ class TraceSelector:
   scope_signature: Optional[str] = None
 
   def __post_init__(self) -> None:
+    if not isinstance(self.session_id, str):
+      raise TypeError("TraceSelector.session_id must be a string.")
     for dim in ("user_id", "root_agent_name", "experiment_id"):
       value = getattr(self, dim)
       if value is UNSET or value is None or isinstance(value, str):
@@ -854,6 +911,10 @@ class TraceSelector:
           f"TraceSelector.{dim} must be a string, None (pin to SQL"
           " NULL), or left UNSET."
       )
+    if self.scope_signature is not None and not isinstance(
+        self.scope_signature, str
+    ):
+      raise TypeError("TraceSelector.scope_signature must be a string or None.")
     object.__setattr__(
         self, "custom_labels", _canonicalize_labels(self.custom_labels)
     )
@@ -946,6 +1007,11 @@ _RETRY_DIMENSIONS: tuple[str, ...] = (
     "root_agent_name",
     "experiment_id",
     "custom_labels",
+    # Label pins are subset matches, so custom_labels alone cannot
+    # unambiguously retry an unlabeled or subset-labeled candidate;
+    # scope_signature is the exact discriminator and is hinted
+    # whenever candidate signatures differ.
+    "scope_signature",
 )
 
 
@@ -987,6 +1053,13 @@ class AmbiguousSessionError(ValueError):
         f" candidates match. Retry with an explicit selector for: {dims}."
     )
 
+  def __reduce__(self) -> tuple[Any, tuple[Any]]:
+    # Exception.args holds the redacted message, so default
+    # copy/deepcopy/pickle reconstruction would call __init__ with a
+    # string instead of the candidate sequence. Rebuild from the
+    # stored candidates instead.
+    return (self.__class__, (self.candidates,))
+
   @staticmethod
   def _differing_dimensions(
       candidates: Sequence[ResolvedTraceSelector],
@@ -997,6 +1070,7 @@ class AmbiguousSessionError(ValueError):
         "root_agent_name": lambda c: c.identity.root_agent_name,
         "experiment_id": lambda c: c.scope.experiment_id,
         "custom_labels": lambda c: c.scope.custom_labels,
+        "scope_signature": lambda c: c.scope_signature,
     }
     differing = []
     for dim in _RETRY_DIMENSIONS:
@@ -1066,12 +1140,14 @@ class Trace:
   When ``identity`` is present it is the single identity authority:
   the legacy ``session_id``/``user_id`` scalars are mirrors of it.
   The invariant holds for the object's whole lifetime, not just
-  construction — assigning a contradictory ``session_id``,
-  ``user_id``, or replacement ``identity`` raises, and attaching an
-  identity to a trace with an unset ``user_id`` backfills the mirror.
-  Downstream code keyed on either surface can therefore never see two
-  different identities for one trace. To change identity, build a new
-  ``Trace``.
+  construction — assigning a contradictory ``session_id`` or
+  ``user_id`` raises, and attaching an identity to a trace with an
+  unset ``user_id`` backfills the mirror. An identity may be attached
+  late only while none exists; once attached it cannot be replaced or
+  detached (only re-assigned an equal value), so a trace can never be
+  retagged to a different identity. Downstream code keyed on either
+  surface therefore never sees two different identities for one
+  trace. To change identity, build a new ``Trace``.
   """
 
   trace_id: str
@@ -1096,6 +1172,17 @@ class Trace:
 
   def _check_identity_write(self, name: str, value: Any) -> None:
     """Reject writes that would desynchronize identity and mirrors."""
+    if name == "identity":
+      current = getattr(self, "identity", None)
+      if current is not None and value != current:
+        # Replacement (including a NULL-user -> named-user retag or a
+        # root-agent-only swap) and detachment would both let the
+        # trace change identity after the fact; only an equal
+        # idempotent re-assignment is allowed.
+        raise ValueError(
+            "Trace.identity cannot be replaced or detached once"
+            " attached; build a new Trace for a different identity."
+        )
     identity = value if name == "identity" else getattr(self, "identity", None)
     if identity is None:
       return

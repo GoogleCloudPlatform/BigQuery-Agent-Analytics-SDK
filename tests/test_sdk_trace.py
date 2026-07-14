@@ -1478,7 +1478,7 @@ class TestAmbiguousSessionError:
     assert payload == {
         "error": "ambiguous_session",
         "candidate_count": 2,
-        "retry_dimensions": ["user_id", "custom_labels"],
+        "retry_dimensions": ["user_id", "custom_labels", "scope_signature"],
         "candidates": [
             {
                 "selector": {
@@ -1705,16 +1705,48 @@ class TestTraceAdditiveIdentity:
       trace.user_id = None
     assert trace.user_id == "alice"
 
-  def test_replacing_identity_with_contradiction_rejected(self):
+  def test_identity_immutable_once_attached(self):
     trace = Trace(
         trace_id="t1",
         session_id="sess-1",
         identity=TraceIdentity(session_id="sess-1", user_id="alice"),
     )
-    with pytest.raises(ValueError, match="session_id contradicts"):
+    # Any replacement is rejected, even when the new identity would
+    # be consistent with the current scalar mirrors.
+    with pytest.raises(ValueError, match="cannot be replaced"):
       trace.identity = TraceIdentity(session_id="sess-2", user_id="alice")
-    with pytest.raises(ValueError, match="user_id contradicts"):
+    with pytest.raises(ValueError, match="cannot be replaced"):
       trace.identity = TraceIdentity(session_id="sess-1", user_id="bob")
+    # Detaching would let the mirrors be retagged afterwards.
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = None
+    # Idempotent equal re-assignment stays allowed.
+    trace.identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.user_id == "alice"
+
+  def test_null_user_identity_cannot_be_retagged(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1"),
+    )
+    # A NULL-user identity must not upgrade to a named user, and a
+    # root-agent-only swap must not slip past the scalar mirrors.
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(session_id="sess-1", user_id="mallory")
+    assert trace.user_id is None
+
+  def test_root_agent_only_replacement_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", root_agent_name="root-a"),
+    )
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(
+          session_id="sess-1", root_agent_name="root-b"
+      )
+    assert trace.identity.root_agent_name == "root-a"
 
   def test_consistent_writes_and_serialization_stay_aligned(self):
     from bigquery_agent_analytics.serialization import serialize
@@ -1732,3 +1764,215 @@ class TestTraceAdditiveIdentity:
     result = serialize(trace)
     assert result["session_id"] == result["identity"]["session_id"]
     assert result["user_id"] == result["identity"]["user_id"]
+
+
+class TestPinSentinelDurability:
+  """Sentinels must keep singleton identity through pickle (round 3)."""
+
+  def test_sentinels_survive_pickle(self):
+    import pickle
+
+    assert pickle.loads(pickle.dumps(UNSET)) is UNSET
+    assert pickle.loads(pickle.dumps(SQL_NULL)) is SQL_NULL
+
+  def test_pickled_selector_keeps_unset_semantics(self):
+    import pickle
+
+    restored = pickle.loads(pickle.dumps(TraceSelector(session_id="sess-1")))
+    assert restored.user_id is UNSET
+    assert restored == TraceSelector(session_id="sess-1")
+    filt = restored.to_trace_filter()
+    where, _ = filt.to_sql_conditions()
+    assert "user_id" not in where
+
+  def test_pickled_filter_keeps_null_pin_semantics(self):
+    import pickle
+
+    restored = pickle.loads(pickle.dumps(TraceFilter(user_id=SQL_NULL)))
+    where, params = restored.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert all(p.name != "user_id" for p in params)
+
+  def test_sentinels_survive_copy_and_deepcopy(self):
+    import copy
+
+    assert copy.copy(UNSET) is UNSET
+    assert copy.deepcopy(SQL_NULL) is SQL_NULL
+    cloned = copy.deepcopy(TraceSelector(session_id="sess-1"))
+    assert cloned.user_id is UNSET
+
+
+class TestAmbiguousSessionErrorDurability:
+  """The error must survive copy/deepcopy/pickle intact (round 3)."""
+
+  def _error(self):
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1"),
+            ),
+        ]
+    )
+
+  def test_copy_and_deepcopy_preserve_candidates(self):
+    import copy
+
+    err = self._error()
+    for clone in (copy.copy(err), copy.deepcopy(err)):
+      assert clone.candidates == err.candidates
+      assert clone.retry_dimensions == err.retry_dimensions
+      assert clone.to_dict() == err.to_dict()
+
+  def test_pickle_round_trip_preserves_payload(self):
+    import pickle
+
+    err = self._error()
+    restored = pickle.loads(pickle.dumps(err))
+    assert restored.candidates == err.candidates
+    assert restored.to_dict() == err.to_dict()
+    assert str(restored) == str(err)
+
+
+class TestScopeSignatureRetryGuidance:
+  """scope_signature must be hinted when only scope payloads differ."""
+
+  def _colliding(self, labels_a, labels_b):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=identity, scope=TraceScope(custom_labels=labels_a)
+            ),
+            ResolvedTraceSelector(
+                identity=identity, scope=TraceScope(custom_labels=labels_b)
+            ),
+        ]
+    )
+
+  def test_subset_superset_collision_hints_scope_signature(self):
+    err = self._colliding({"run": "v1"}, {"run": "v1", "slice": "3"})
+    assert "scope_signature" in err.retry_dimensions
+    assert "custom_labels" in err.retry_dimensions
+    assert "scope_signature" in str(err)
+
+  def test_unlabeled_labeled_collision_hints_scope_signature(self):
+    err = self._colliding(None, {"run": "v1"})
+    assert "scope_signature" in err.retry_dimensions
+    assert "scope_signature" in str(err)
+
+  def test_identity_only_collision_does_not_hint_scope_signature(self):
+    err = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+            ),
+        ]
+    )
+    assert err.retry_dimensions == ("user_id",)
+
+
+class TestLabelPairNormalization:
+  """Canonical labels must be rebuilt pairs, not caller containers."""
+
+  def test_json_round_trip_normalizes_and_hashes(self):
+    from bigquery_agent_analytics.serialization import serialize
+
+    original = TraceScope(custom_labels=(("a", "b"),))
+    payload = serialize(original)
+    assert payload["custom_labels"] == [["a", "b"]]
+    restored = TraceScope(custom_labels=payload["custom_labels"])
+    assert restored == original
+    assert hash(restored) == hash(original)
+    assert restored.scope_signature == original.scope_signature
+
+  def test_string_entry_rejected(self):
+    # "ab" would unpack into ("a", "b") but is not a (key, value) pair.
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=["ab"])
+
+  def test_wrong_arity_entries_rejected(self):
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=(("a", "b", "c"),))
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=(("a",),))
+
+
+class TestConstructorTypeBoundaries:
+  """Public models reject values that break value semantics (round 3)."""
+
+  def test_trace_identity_rejects_non_string_fields(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      TraceIdentity(session_id=1)
+    with pytest.raises(TypeError, match="user_id must be a string"):
+      TraceIdentity(session_id="sess-1", user_id=True)
+    with pytest.raises(TypeError, match="root_agent_name must be a string"):
+      TraceIdentity(session_id="sess-1", root_agent_name=3)
+
+  def test_trace_scope_rejects_non_string_experiment_id(self):
+    # 1 and True compare equal but sign differently, so both must be
+    # rejected instead of silently deduplicating distinct scopes.
+    with pytest.raises(TypeError, match="experiment_id must be a string"):
+      TraceScope(experiment_id=1)
+    with pytest.raises(TypeError, match="experiment_id must be a string"):
+      TraceScope(experiment_id=True)
+
+  def test_trace_filter_rejects_unset_and_foreign_values(self):
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      TraceFilter(user_id=UNSET)
+    with pytest.raises(TypeError, match="TraceFilter.root_agent_name"):
+      TraceFilter(root_agent_name=UNSET)
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      TraceFilter(experiment_id=1)
+    # The supported states still construct.
+    TraceFilter(user_id=None, root_agent_name=SQL_NULL, experiment_id="e")
+
+  def test_trace_selector_rejects_non_string_session_and_signature(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      TraceSelector(session_id=1)
+    with pytest.raises(TypeError, match="scope_signature must be a string"):
+      TraceSelector(session_id="sess-1", scope_signature=1)
+
+
+class TestScopeSignatureGolden:
+  """Exact golden encoding of the v1 scope signature."""
+
+  def test_full_signature_golden(self):
+    scope = TraceScope(
+        experiment_id="exp-1", custom_labels={"b": "2", "a": "1"}
+    )
+    assert scope.scope_signature == (
+        'v1:{"custom_labels":[["a","1"],["b","2"]],"experiment_id":"exp-1"}'
+    )
+
+  def test_empty_signature_golden(self):
+    assert TraceScope().scope_signature == (
+        'v1:{"custom_labels":[],"experiment_id":null}'
+    )
+
+
+class TestPackageRootExports:
+  """The identity contract is importable from the package root."""
+
+  def test_all_identity_names_exported(self):
+    import bigquery_agent_analytics as bqaa
+
+    for name in (
+        "TraceIdentity",
+        "TraceScope",
+        "TraceSelector",
+        "ResolvedTraceSelector",
+        "AmbiguousSessionError",
+        "resolve_singular_candidate",
+        "UNSET",
+        "SQL_NULL",
+    ):
+      assert hasattr(bqaa, name), name
+      assert name in bqaa.__all__, name
+    assert bqaa.UNSET is UNSET
+    assert bqaa.SQL_NULL is SQL_NULL

@@ -393,3 +393,55 @@ class TestSerializeIdentity:
     assert result["identity"]["user_id"] == "alice"
     assert result["scope"]["experiment_id"] == "exp-1"
     json.dumps(result)
+
+
+class TestSelectorWireFormat:
+  """UNSET pins must serialize by omission (issue #359, round 3)."""
+
+  def test_default_selector_serializes_json_safe(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+    from bigquery_agent_analytics.trace import UNSET
+
+    payload = serialize(TraceSelector(session_id="sess-1"))
+    # UNSET dimensions are omitted; JSON null is reserved for
+    # explicit pin-to-SQL-NULL.
+    assert payload == {
+        "session_id": "sess-1",
+        "custom_labels": None,
+        "scope_signature": None,
+    }
+    json.dumps(payload)
+    restored = TraceSelector(**payload)
+    assert restored == TraceSelector(session_id="sess-1")
+    assert restored.user_id is UNSET
+
+  def test_explicit_null_pin_round_trips_as_null(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    original = TraceSelector(
+        session_id="sess-1", user_id=None, root_agent_name="root"
+    )
+    payload = serialize(original)
+    assert payload["user_id"] is None
+    assert payload["root_agent_name"] == "root"
+    assert "experiment_id" not in payload
+    restored = TraceSelector(**payload)
+    assert restored == original
+    assert restored.user_id is None
+
+  def test_format_output_json_handles_selector(self):
+    from bigquery_agent_analytics.formatter import format_output
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    rendered = format_output(TraceSelector(session_id="sess-1"), "json")
+    parsed = json.loads(rendered)
+    assert parsed["session_id"] == "sess-1"
+    assert "user_id" not in parsed
+
+  def test_labeled_selector_labels_round_trip(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    original = TraceSelector(session_id="sess-1", custom_labels={"run": "v1"})
+    payload = serialize(original)
+    assert payload["custom_labels"] == [["run", "v1"]]
+    assert TraceSelector(**payload) == original
