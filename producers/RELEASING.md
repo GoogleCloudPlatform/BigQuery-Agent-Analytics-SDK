@@ -66,11 +66,21 @@ minutes; the release then WAITS at two manual approval gates
    existing draft is their only byte-identical counterpart (a rebuilt
    anchor embeds new timestamps and can never byte-match), so the
    draft is preserved and the failed jobs must be re-run from the
-   **original** workflow attempt — never a full rerun.
+   **original** workflow attempt — never a full rerun. Drafts are
+   discovered via the authenticated release LIST (the by-tag endpoint
+   returns only published releases), index absence uses fresh
+   cache-busted lookups (PyPI responses are CDN-cached), and deletion
+   re-fetches the release by ID immediately beforehand and aborts if
+   it is no longer the same unpublished draft.
 5. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
    Trusted Publishing. No `skip-existing`: if the version already
-   exists there, the upload fails loudly — that version is burned
-   (see below).
+   exists there with ANY deviation, the job fails loudly — that
+   version is burned (see below). Rerun safety: a PR-tested pre-check
+   (`scripts/check_index_publication.py`) first compares the index
+   against the local files, so a rerun after a lost upload response
+   passes without re-uploading when the index already carries the
+   EXACT byte-identical wheel + sdist. `publish-pypi` runs the same
+   gate against production.
 6. **`promote`** — waits on the `release-promote` environment
    (restricted to `tracing-v*` tags; impersonates the promoter SA,
    the only identity that can write the public repo). Run the
@@ -81,17 +91,24 @@ minutes; the release then WAITS at two manual approval gates
    constant. It does NOT publish the release.
 7. **`publish-pypi`** — PyPI, gated by the `pypi` environment;
    requires `promote`.
-8. **`finalize`** — runs `always()`: reconciles the PyPI **and**
-   TestPyPI file sets, the four release assets, and the release's
-   **visibility** (a draft accidentally published during an approval
-   pause is classified `premature-publication` — re-draft it first,
-   never "keep the draft"); publishes the draft GitHub release ONLY
-   on complete state (never as the repository's Latest), reasserting
-   the canonical title, body, `prerelease=false`, and `latest=false`;
-   a partial publication is surfaced with the yank/version-burn
-   recovery, and a partial TestPyPI upload (production absent) is
-   surfaced as `testpypi-partial` — the version is burned there, so
-   bump + re-tag rather than retrying the same version.
+8. **`finalize`** — runs `always()` but is gated on `github-release`
+   succeeding (when the rerun guard deliberately fails, its "rerun the
+   original attempt" advice must stay authoritative — finalize must
+   not reconcile the preserved draft against a rebuilt anchor):
+   reconciles the PyPI **and** TestPyPI file sets, the four release
+   assets, and the release's **visibility** (a draft accidentally
+   published during an approval pause is classified
+   `premature-publication` — contain it first, never "keep the
+   draft"); publishes ONLY on complete state via a snapshot-bound,
+   **ID-based** edit — the exact release object's asset digests are
+   re-verified against the anchor immediately before and after the
+   publish (never as the repository's Latest), reasserting the
+   canonical title, body, `prerelease=false`, and `latest=false`, and
+   asserting the published release is **immutable**; a partial
+   publication is surfaced with the yank/version-burn recovery, and a
+   partial TestPyPI upload (production absent) is surfaced as
+   `testpypi-partial` — the version is burned there, so bump + re-tag
+   rather than retrying the same version.
 
 The plugin tarball and `SHA256SUMS` are **never** uploaded to PyPI —
 they ship only as GitHub release assets.
@@ -180,6 +197,15 @@ tar -tzf /tmp/plugin.tar.gz | head
   full rerun: it rebuilds the wheel/sdist with new timestamps, and the
   guard in `github-release` will refuse to touch the preserved draft
   because the indexes already hold the original bytes.
+- **`publish-testpypi`/`publish-pypi` fails after the index accepted
+  the upload (lost response)** — re-run the failed job from the
+  original attempt: the pre-check verifies the index already carries
+  the exact byte-identical files and skips the re-upload.
+- **`finalize` reports the published release is NOT immutable** — the
+  artifacts themselves were verified, but the repository's immutable
+  releases setting is disabled, so the published assets remain
+  replaceable. Enable it (Settings → General → Releases → immutable
+  releases) and re-run `finalize` from the original attempt.
 
 If a release ships a broken artifact, do **not** delete the tag.
 Yank the PyPI release and ship the next patch version
@@ -206,7 +232,11 @@ workflow are the binding contract.
 GitHub-side one-time setup: create environments `testpypi`, `pypi`,
 and `release-promote` in the repo settings, with required reviewers
 on `pypi` and `release-promote` (approving `release-promote` asserts
-the TestPyPI full-lifecycle gate passed).
+the TestPyPI full-lifecycle gate passed), and **enable immutable
+releases** (Settings → General → Releases): `finalize` fails closed
+if a published release is still mutable, because mutable published
+assets and `SHA256SUMS` remain replaceable by anything holding
+`contents: write`.
 
 Until both publishers are configured, the `publish-testpypi` and
 `publish-pypi` jobs will fail with a clear error. The `build` and

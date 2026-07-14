@@ -57,18 +57,27 @@
 #   publish-pypi    - PyPI (gated by the `pypi` environment). Version-burn
 #                     rule: a candidate that failed the gate burns its
 #                     version; never re-tag — bump and rebuild.
-#   finalize        - always(): reconciles PyPI + TestPyPI file sets,
-#                     release assets AND release visibility (a draft
-#                     published early during the approval pause becomes
-#                     premature-publication, not "keep the draft");
-#                     publishes the draft release ONLY on complete state
-#                     (never as the repository Latest), reasserting the
-#                     canonical title/body/prerelease=false/latest=false;
+#   finalize        - always() but gated on github-release success (a
+#                     failed rerun guard must keep its recovery advice
+#                     authoritative): reconciles PyPI + TestPyPI file
+#                     sets, release assets AND release visibility (a
+#                     draft published early during the approval pause
+#                     becomes premature-publication, not "keep the
+#                     draft"); publishes the draft ONLY on complete
+#                     state via a snapshot-bound, ID-based edit (asset
+#                     digests re-verified against the anchor before AND
+#                     after; never as the repository Latest), reasserting
+#                     canonical title/body/prerelease=false/latest=false
+#                     and asserting the published release is IMMUTABLE;
 #                     surfaces partial publication with the
 #                     yank/version-burn recovery.
 #
 # One-time GitHub setup: environments `testpypi`, `pypi`, and
-# `release-promote` (the latter two with required reviewers).
+# `release-promote` (the latter two with required reviewers), and
+# ENABLE IMMUTABLE RELEASES (Settings → General → Releases): finalize
+# fails closed if a published release is still mutable, because mutable
+# published assets/SHA256SUMS remain replaceable by anything holding
+# contents:write.
 #
 # Trusted Publishing setup (one-time, on the PyPI side):
 #   - https://docs.pypi.org/trusted-publishers/adding-a-publisher/
@@ -338,24 +347,35 @@ jobs:
         # counterpart and must be preserved (rerun the FAILED jobs from
         # the original attempt instead). A published release always
         # fails: the version is burned.
+        #
+        # Discovery uses authenticated LIST RELEASES, never the by-tag
+        # endpoint: GET /releases/tags/{tag} returns only PUBLISHED
+        # releases, so a draft would 404 and be misread as absent (#356
+        # round 12). The delete re-fetches the release BY ID immediately
+        # before deletion and requires it to still be the same draft —
+        # the guard's verdict must not act on a stale snapshot (TOCTOU).
+        # Index lookups carry a unique cache-busting query string: PyPI
+        # responses are CDN-cached (https://docs.pypi.org/api/), and a
+        # cached 404 is not a fresh absence proof.
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
-          set +e
-          RESP=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" 2>&1)
-          RC=$?
-          set -e
+          if ! MATCHES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" 2> releases.err \
+              | jq -c -s --arg tag "$GITHUB_REF_NAME" 'add | map(select(.tag_name == $tag))'); then
+            echo "::error::release list INDETERMINATE (refusing to proceed): $(head -1 releases.err)"
+            exit 1
+          fi
+          COUNT=$(jq length <<<"$MATCHES")
           RELEASE_STATE=absent
-          if [ $RC -ne 0 ]; then
-            if ! echo "$RESP" | grep -q "HTTP 404"; then
-              echo "::error::release lookup INDETERMINATE (refusing to proceed): $(echo "$RESP" | head -1)"
-              exit 1
-            fi
-          else
-            IS_DRAFT=$(echo "$RESP" | python3 -c 'import json,sys; print(json.load(sys.stdin)["draft"])')
-            if [ "$IS_DRAFT" = "True" ]; then
+          RELEASE_ID=""
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
+            exit 1
+          elif [ "$COUNT" = "1" ]; then
+            RELEASE_ID=$(jq -r '.[0].id' <<<"$MATCHES")
+            if [ "$(jq -r '.[0].draft' <<<"$MATCHES")" = "true" ]; then
               RELEASE_STATE=draft
             else
               RELEASE_STATE=published
@@ -364,10 +384,11 @@ jobs:
           # Explicit 404 = absent, 200 = present; anything else (auth,
           # rate limit, transport) is indeterminate and fails here so it
           # can never reach the guard as a fake absence.
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
           index_state() {
             local http
             if ! http=$(curl -sS --connect-timeout 10 --max-time 30 \
-                -o /dev/null -w '%{http_code}' "$1" 2> curl.err); then
+                -o /dev/null -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
               echo "::error::index lookup transport failure (${1}): $(head -1 curl.err)" >&2
               return 1
             fi
@@ -394,8 +415,18 @@ jobs:
             exit $RC
           fi
           if grep -q '^delete_draft=1$' guard.out; then
-            echo "stale draft from an earlier attempt — deleting so assets cannot mix"
-            gh release delete "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --yes
+            # TOCTOU guard: the same OBJECT must still be an unpublished
+            # draft on the same tag at deletion time; any change since
+            # discovery (e.g. someone published it) aborts the delete.
+            FRESH=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" 2> fresh.err) \
+              || { echo "::error::pre-delete re-fetch failed: $(head -1 fresh.err)"; exit 1; }
+            if [ "$(jq -r '.draft' <<<"$FRESH")" != "true" ] \
+                || [ "$(jq -r '.tag_name' <<<"$FRESH")" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::release ${RELEASE_ID} changed between discovery and deletion — refusing to delete"
+              exit 1
+            fi
+            echo "stale draft from an earlier attempt — deleting release id ${RELEASE_ID} so assets cannot mix"
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"
           fi
 
       - name: Create DRAFT release with artifacts
@@ -435,6 +466,8 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: ${{ needs.build.outputs.dist_name }}
@@ -449,13 +482,60 @@ jobs:
           rm -f dist/SHA256SUMS
           ls -la dist/
 
+      - name: Pre-check index state (rerun-safe upload gate, PR-tested)
+        # The uploader can succeed while the job fails afterward (lost
+        # response). skip-existing stays disabled, so a plain rerun would
+        # die on "version already exists" with no recovery (#356 round
+        # 12). scripts/check_index_publication.py makes the rerun viable
+        # without weakening byte identity: absent → upload; an EXACT
+        # verified existing publication (same names, digests, nothing
+        # yanked) → the stage is already satisfied, skip the upload;
+        # anything else → the version is burned there, fail. The unique
+        # query string forces a CDN cache miss (PyPI caches responses).
+        id: precheck
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          if ! HTTP=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o index.json -w '%{http_code}' \
+              "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json?${BUST}" 2> curl.err); then
+            echo "::error::TestPyPI lookup transport failure: $(head -1 curl.err)"
+            exit 1
+          fi
+          INDEX_ARG="--index-json index.json"
+          if [ "$HTTP" = "404" ]; then
+            INDEX_ARG=--index-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::TestPyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          set +e
+          python3 producers/scripts/check_index_publication.py \
+            --version "${VERSION}" --dist-dir dist/ $INDEX_ARG | tee precheck.out
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo "::error::$(grep '^detail=' precheck.out | cut -d= -f2-)"
+            exit $RC
+          fi
+          echo "status=$(grep '^status=' precheck.out | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 branch
         # No skip-existing: the version-burn rule requires byte-identical
         # artifacts at the same version on TestPyPI and PyPI. If the
         # version already exists, the upload MUST fail loudly — a burned
         # version silently skipping would make the gate test old bytes.
+        # (An exact byte-identical existing publication was already
+        # verified by the pre-check above and skips this step entirely.)
+        if: steps.precheck.outputs.status == 'absent'
         with:
           repository-url: https://test.pypi.org/legacy/
+
+      - name: Upload already satisfied (verified byte-identical rerun)
+        if: steps.precheck.outputs.status == 'satisfied'
+        run: echo "TestPyPI already carries the exact wheel + sdist — upload stage satisfied without re-upload"
 
   promote:
     name: Promote image (gate-approved)
@@ -539,6 +619,8 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: ${{ needs.build.outputs.dist_name }}
@@ -550,7 +632,46 @@ jobs:
           rm -f dist/SHA256SUMS
           ls -la dist/
 
+      - name: Pre-check index state (rerun-safe upload gate, PR-tested)
+        # Same rerun-safety as publish-testpypi: an exact verified
+        # existing publication satisfies the stage; anything else that
+        # exists at this version is a burn (#356 round 12).
+        id: precheck
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
+          if ! HTTP=$(curl -sS --connect-timeout 10 --max-time 30 \
+              -o index.json -w '%{http_code}' \
+              "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json?${BUST}" 2> curl.err); then
+            echo "::error::PyPI lookup transport failure: $(head -1 curl.err)"
+            exit 1
+          fi
+          INDEX_ARG="--index-json index.json"
+          if [ "$HTTP" = "404" ]; then
+            INDEX_ARG=--index-missing
+          elif [ "$HTTP" != "200" ]; then
+            echo "::error::PyPI lookup indeterminate (HTTP ${HTTP}) — not treating as absent"
+            exit 1
+          fi
+          set +e
+          python3 producers/scripts/check_index_publication.py \
+            --version "${VERSION}" --dist-dir dist/ $INDEX_ARG | tee precheck.out
+          RC=$?
+          set -e
+          if [ $RC -ne 0 ]; then
+            echo "::error::$(grep '^detail=' precheck.out | cut -d= -f2-)"
+            exit $RC
+          fi
+          echo "status=$(grep '^status=' precheck.out | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 branch
+        if: steps.precheck.outputs.status == 'absent'
+
+      - name: Upload already satisfied (verified byte-identical rerun)
+        if: steps.precheck.outputs.status == 'satisfied'
+        run: echo "PyPI already carries the exact wheel + sdist — upload stage satisfied without re-upload"
 
   finalize:
     name: Reconcile + publish the GitHub release
@@ -561,8 +682,15 @@ jobs:
     # path, not stranded silently in a draft. Publishes the release only
     # on COMPLETE state; --latest=false preserves the SDK's vX.Y.Z
     # release as the repository's Latest.
-    if: always() && needs.verify.result == 'success' && needs.build.result == 'success'
-    needs: [verify, build, publish-pypi]
+    #
+    # github-release MUST have succeeded (#356 round 12): when its guard
+    # deliberately fails a full rerun to preserve the original draft,
+    # finalize must NOT reconcile that draft against the newly rebuilt,
+    # byte-different anchor — it would override the guard's correct
+    # "rerun the original attempt" advice with invalid-draft/yank/burn
+    # guidance. Recovery must use the original attempt's anchor.
+    if: always() && needs.verify.result == 'success' && needs.build.result == 'success' && needs.github-release.result == 'success'
+    needs: [verify, build, github-release, publish-pypi]
     permissions:
       contents: write
     steps:
@@ -586,51 +714,57 @@ jobs:
           CRANE_SHA256: c14340087103ba9dadf61d45acd20675490fd0ccbd56ac7901fc1b502137f44b
         run: |
           set -euo pipefail
-          # Surface 1: the GitHub release — METADATA first (visibility is
-          # part of the reconciled state: a draft accidentally published
-          # during the approval pause must become premature-publication,
-          # never "keep the draft" advice), then the assets. Absence is a
-          # CLASSIFICATION, not an early exit — a deleted draft after a
-          # PyPI upload is a cross-surface partial, not "unpublished".
+          # Surface 1: the GitHub release — discovered via authenticated
+          # LIST RELEASES, never the by-tag endpoint (that returns only
+          # PUBLISHED releases, so the normal draft would 404 and be
+          # misread as missing, #356 round 12). Metadata first (a draft
+          # accidentally published during the approval pause must become
+          # premature-publication, never "keep the draft" advice), then
+          # the assets, downloaded BY ASSET ID from the same release
+          # object. Absence is a CLASSIFICATION, not an early exit — a
+          # deleted draft after a PyPI upload is a cross-surface partial,
+          # not "unpublished".
           RELEASE_ARG=--release-missing
           PUBLISHED_ARG=""
-          set +e
-          META=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" 2>&1)
-          RC=$?
-          set -e
-          if [ $RC -ne 0 ]; then
-            if ! echo "$META" | grep -q "HTTP 404"; then
-              # Auth/rate-limit/network/API failures are INDETERMINATE —
-              # the wrong recovery advice is worse than an error.
-              echo "::error::GitHub release lookup indeterminate: $(echo "$META" | head -1)"
-              exit 1
-            fi
-          else
-            IS_DRAFT=$(echo "$META" | python3 -c 'import json,sys; print(json.load(sys.stdin)["draft"])')
-            if [ "$IS_DRAFT" = "False" ]; then
+          RELEASE_ID=""
+          if ! MATCHES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" 2> releases.err \
+              | jq -c -s --arg tag "$GITHUB_REF_NAME" 'add | map(select(.tag_name == $tag))'); then
+            # Auth/rate-limit/network/API failures are INDETERMINATE —
+            # the wrong recovery advice is worse than an error.
+            echo "::error::GitHub release list indeterminate: $(head -1 releases.err)"
+            exit 1
+          fi
+          COUNT=$(jq length <<<"$MATCHES")
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
+            exit 1
+          elif [ "$COUNT" = "1" ]; then
+            RELEASE_ID=$(jq -r '.[0].id' <<<"$MATCHES")
+            if [ "$(jq -r '.[0].draft' <<<"$MATCHES")" = "false" ]; then
               PUBLISHED_ARG=--release-published
             fi
             mkdir -p release
-            if ! gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-                --dir release --pattern "*" 2> download.err; then
-              if grep -qi "no assets\|no such asset" download.err; then
-                echo "release exists with zero assets — reconciling the empty set"
-              else
-                echo "::error::release asset download failed after metadata succeeded: $(head -1 download.err)"
-                exit 1
-              fi
-            fi
+            jq -r '.[0].assets[] | "\(.id)\t\(.name)"' <<<"$MATCHES" \
+              | while IFS=$'\t' read -r asset_id asset_name; do
+                  gh api -H "Accept: application/octet-stream" \
+                    "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+                    > "release/${asset_name}"
+                done
             RELEASE_ARG="--release-dir release/"
+            echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
           fi
           # Surfaces 2 + 3: production PyPI AND TestPyPI (#356: a partial
           # TestPyPI upload burns the version there — production-404 plus
           # an exact draft must not become same-version rerun advice).
           # Transport failures (DNS/TLS/connect) are indeterminate and
-          # must not fall into the HTTP branches.
+          # must not fall into the HTTP branches. The unique query string
+          # forces a CDN cache miss (PyPI responses are cached,
+          # https://docs.pypi.org/api/) so absence proof is fresh.
+          BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
           fetch_index() {  # $1 = URL, $2 = output file; prints the HTTP code
             local http
             if ! http=$(curl -sS --connect-timeout 10 --max-time 30 \
-                -o "$2" -w '%{http_code}' "$1" 2> curl.err); then
+                -o "$2" -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
               echo "::error::index lookup transport failure (${1}): $(head -1 curl.err)" >&2
               return 1
             fi
@@ -675,8 +809,19 @@ jobs:
           import release_image_tool
           ref = release_image_tool.extract_from_wheel(__import__('pathlib').Path('anchor/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl'))
           print(ref.split('@')[1])")
-            test "$PUBLIC_DIGEST" = "$WHEEL_DIGEST" \
-              || { echo "state=partial" >> "$GITHUB_ENV"; echo "public image ${PUBLIC_DIGEST} != anchor wheel ${WHEEL_DIGEST}"; exit 0; }
+            if [ "$PUBLIC_DIGEST" != "$WHEEL_DIGEST" ]; then
+              # The published-visibility signal must survive this
+              # override (#356 round 12): a mismatch on an already
+              # public release is premature-publication (containment
+              # first), not plain partial.
+              if [ -n "$PUBLISHED_ARG" ]; then
+                echo "state=premature-publication" >> "$GITHUB_ENV"
+              else
+                echo "state=partial" >> "$GITHUB_ENV"
+              fi
+              echo "public image ${PUBLIC_DIGEST} != anchor wheel ${WHEEL_DIGEST}"
+              exit 0
+            fi
           fi
           echo "state=${STATE}" >> "$GITHUB_ENV"
 
@@ -698,16 +843,21 @@ jobs:
           EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
           MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
           if [ "$PUBLISH" = "1" ]; then
-            # Re-anchor the customer-facing body via the PR-TESTED
-            # composed helper (anchor-wheel digest -> renderer -> atomic
-            # gh release edit): anything with contents:write could have
-            # edited the draft body during the approval pause.
+            # Snapshot-bound publish via the PR-TESTED helper: fetch the
+            # exact RELEASE ID that was reconciled, verify every asset
+            # digest against the anchor immediately BEFORE and AFTER the
+            # ID-based publish edit, and assert the published release is
+            # IMMUTABLE — anything with contents:write could have swapped
+            # draft assets between reconciliation and this step, and only
+            # the repository's immutable-releases setting keeps them
+            # non-replaceable afterwards (#356 round 12).
             python3 producers/scripts/publish_release_body.py \
               --version "${{ needs.verify.outputs.version }}" \
               --public-image "${{ env.PUBLIC_IMAGE }}" \
               --anchor-dir anchor/ \
               --tag "${GITHUB_REF_NAME}" \
-              --repo "${GITHUB_REPOSITORY}"
+              --repo "${GITHUB_REPOSITORY}" \
+              --release-id "${RELEASE_ID}"
             echo "release published with re-anchored body: ${MESSAGE}"
           else
             echo "::error::${MESSAGE}"

@@ -46,8 +46,9 @@ generated from one mapping, and tests assert the vocabularies match):
                    cannot be retried at the same version → burn (bump +
                    re-tag; production needs no cleanup)
   premature-publication  the GitHub release is publicly visible while
-                   the underlying state is not complete → re-draft it
-                   immediately, then follow the underlying recovery
+                   the underlying state is ANYTHING but complete
+                   (indeterminate included: containment first) →
+                   re-draft or burn, then the underlying recovery
   invalid-anchor   the anchor itself is inconsistent → investigate CI
   invalid-response  a PyPI/TestPyPI success body is unparseable or
                    violates the schema → INDETERMINATE, retry the
@@ -291,20 +292,22 @@ def _classify(
   if pypi_problem is not None:
     return PARTIAL, f"PyPI {pypi_problem}"
   # Production is complete. TestPyPI files may have been pruned (the
-  # index deletes old files routinely), so absence there is tolerated —
-  # but a file that IS present must carry the anchor's bytes: the
-  # full-lifecycle gate installed from TestPyPI, and a digest conflict
-  # means the gate exercised different bytes than customers receive.
-  for name in sorted(expected_pypi & set(tp_urls)):
+  # index deletes old files routinely), so MISSING files are tolerated —
+  # but every file that IS present must be an expected filename, not
+  # yanked, and digest-identical to the anchor: the full-lifecycle gate
+  # installed from TestPyPI, and a deviating present file means the gate
+  # may have exercised different bytes than customers receive (#356
+  # round 12: an extra platform wheel and a yanked expected wheel both
+  # reached 'complete' when only the name intersection was checked).
+  for name in sorted(tp_urls):
+    if name not in expected_pypi:
+      return PARTIAL, f"TestPyPI carries unexpected file {name}"
+    if tp_urls[name]["yanked"]:
+      return PARTIAL, f"TestPyPI file {name} is yanked"
     if tp_urls[name]["digests"]["sha256"] != manifest[name]:
       return PARTIAL, f"TestPyPI digest of {name} differs from the build anchor"
 
   return COMPLETE, "byte identity proven against the build anchor"
-
-
-_PREMATURE_WRAPPABLE = frozenset(
-    {UNPUBLISHED, EMPTY_RELEASE, PARTIAL, DRAFT_INVALID, TESTPYPI_PARTIAL}
-)
 
 
 def reconcile(
@@ -332,18 +335,15 @@ def reconcile(
       pypi=pypi,
       testpypi=testpypi,
   )
-  # Visibility is part of the reconciled state (#356 round 11): every
-  # determinate non-complete state flips to premature-publication when
-  # the release is already publicly visible — "keep the draft" advice
-  # would be wrong for artifacts customers can already download. The
-  # indeterminate states (invalid-anchor / invalid-response) keep their
-  # retry-first advice: visibility recovery needs a trusted
-  # classification underneath it.
-  if (
-      release_published
-      and release_dir is not None
-      and state in _PREMATURE_WRAPPABLE
-  ):
+  # Visibility is ORTHOGONAL to the underlying classification (#356
+  # round 12): EVERY non-complete state — including the indeterminate
+  # invalid-anchor / invalid-response — flips to premature-publication
+  # when the release is already publicly visible, because containment
+  # (get it out of customers' sight) always comes first; the underlying
+  # state and its recovery advice are preserved in the detail line. A
+  # published release with a malformed index response must never get
+  # retry-only advice while it stays public.
+  if release_published and release_dir is not None and state != COMPLETE:
     return (
         PREMATURE_PUBLICATION,
         f"the release is publicly visible; underlying state {state}: {detail}",
@@ -416,8 +416,11 @@ _STATE_ACTIONS: dict[str, DispatchAction] = {
         "the GitHub release is PUBLISHED while reconciliation is NOT"
         " complete — incomplete artifacts are customer-visible RIGHT NOW:"
         " convert it back to a draft (gh release edit --draft=true)"
-        " immediately, then follow the recovery for the underlying state"
-        " in the detail line",
+        " immediately; if the repository enforces immutable releases it"
+        " cannot be re-drafted — treat the version as burned (yank any"
+        " published index files, bump, re-tag) and ship a corrected"
+        " follow-up release; then follow the recovery for the underlying"
+        " state in the detail line",
     ),
     INVALID_ANCHOR: DispatchAction(
         False,

@@ -193,6 +193,37 @@ class TestTransactionalCopyback:
       assert not pathlib.Path(str(path) + ".bqaa-bak").exists()
       assert not pathlib.Path(str(path) + ".bqaa-new").exists()
 
+  def test_stale_backup_from_a_previous_run_is_never_restored(self, tmp_path):
+    # Two-run regression (#356 round 12). Run 1 commits but its cleanup
+    # is interrupted, stranding stale .bqaa-bak files that hold the
+    # PREVIOUS generation. Run 2 then fails before backing up every
+    # destination: rollback must restore ONLY the backups run 2 created
+    # — restoring a stale backup for a destination run 2 never touched
+    # would mix lock generations.
+    out, dests, prelude = self._setup(tmp_path)
+    hook = (
+        'RM_CALLS=0\nrm() { command rm "$@"; RM_CALLS=$((RM_CALLS+1));'
+        ' if [ "$RM_CALLS" = "1" ]; then kill -TERM $$; fi; }'
+    )
+    _bash(_section("copyback"), prelude + "\n" + hook, tmp_path)
+    # Run 1 committed generation "new"; at least one stale backup with
+    # generation "original" must be stranded for the regression to bite.
+    assert all(p.read_text().startswith("new ") for p in dests.values())
+    stale = [
+        p for p in dests.values() if pathlib.Path(str(p) + ".bqaa-bak").exists()
+    ]
+    assert stale, "run 1 did not strand a stale backup"
+    # Run 2: the staged sources still exist in $OUT; delete one so the
+    # SECOND staging copy fails after the first destination was already
+    # backed up by run 2.
+    (out / "requirements.lock").unlink()
+    r = _bash(_section("copyback"), prelude, tmp_path)
+    assert r.returncode != 0
+    contents = {key: path.read_text() for key, path in dests.items()}
+    assert all(
+        v.startswith("new ") for v in contents.values()
+    ), f"rollback restored a stale previous-run backup: {contents}"
+
 
 class TestBoundedConvergence:
   """The fixed-point loop with a stubbed generator: multi-phase

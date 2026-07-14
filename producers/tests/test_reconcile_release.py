@@ -659,6 +659,30 @@ class TestTestPyPISurface:
       state, _ = _run(tmp_path, anchor=anchor, testpypi=testpypi)
       assert state == "complete"
 
+  def test_testpypi_extra_file_with_prod_complete_is_partial(self, tmp_path):
+    # Reviewer reproduction (#356 round 12): an unexpected platform
+    # wheel on TestPyPI reached 'complete' when only the intersection
+    # of names was checked — every PRESENT file must be expected.
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path,
+        anchor=anchor,
+        testpypi=_pypi(anchor, extra=("evil-platform.whl",)),
+    )
+    assert state == "partial"
+    assert "evil-platform.whl" in detail
+
+  def test_testpypi_yanked_file_with_prod_complete_is_partial(self, tmp_path):
+    # Reviewer reproduction (#356 round 12): a yanked expected wheel on
+    # TestPyPI reached 'complete' — the lifecycle gate could have
+    # installed different bytes.
+    anchor = _anchor(tmp_path)
+    state, detail = _run(
+        tmp_path, anchor=anchor, testpypi=_pypi(anchor, yanked=(WHEEL,))
+    )
+    assert state == "partial"
+    assert "yanked" in detail
+
 
 class TestPrematurePublication:
   """A draft accidentally published during the approval pause is
@@ -689,13 +713,26 @@ class TestPrematurePublication:
     state, _ = _run(tmp_path, release_published=True)
     assert state == "complete"
 
-  def test_indeterminate_states_are_not_wrapped(self, tmp_path):
+  def test_indeterminate_states_are_wrapped_too(self, tmp_path):
+    # Visibility is orthogonal (#356 round 12): a published release
+    # with a malformed index response (or a broken anchor) must NOT get
+    # retry-only advice while it stays public — containment first, the
+    # underlying classification survives in the detail line.
     anchor = _anchor(tmp_path)
     (anchor / "SHA256SUMS").unlink()
-    state, _ = _run(tmp_path, anchor=anchor, release_published=True)
-    assert state == "invalid-anchor"
-    state, _ = _run(tmp_path, pypi={"urls": None}, release_published=True)
-    assert state == "invalid-response"
+    state, detail = _run(tmp_path, anchor=anchor, release_published=True)
+    assert state == "premature-publication"
+    assert "invalid-anchor" in detail
+    state, detail = _run(tmp_path, pypi={"urls": None}, release_published=True)
+    assert state == "premature-publication"
+    assert "invalid-response" in detail
+
+  def test_premature_message_covers_immutable_releases(self):
+    # Containment advice must account for immutable releases being
+    # non-redraftable (#356 round 12).
+    message = reconcile_release.dispatch("premature-publication").message
+    assert "immutable" in message
+    assert "burn" in message
 
   def test_published_flag_needs_release_dir_in_cli(self, tmp_path):
     anchor = _anchor(tmp_path)

@@ -109,14 +109,24 @@ DEST_PIP_TOOLS="${DEST_PIP_TOOLS:-$REPO_ROOT/deploy/otlp_receiver/pip-tools.lock
 DEST_REQUIREMENTS="${DEST_REQUIREMENTS:-$REPO_ROOT/deploy/otlp_receiver/requirements.lock}"
 DEST_BUILD="${DEST_BUILD:-$REPO_ROOT/producers/build-requirements.lock}"
 COMMITTED=0
+BACKED_UP=()
 rollback() {
   # Armed ONLY until every destination rename succeeded: after the
   # commit point, an interrupted best-effort cleanup must never undo a
   # completed transaction (reproduced in review: TERM during cleanup
-  # left one new + two old locks with exit 0).
+  # left one new + two old locks with exit 0). Restore ONLY the backups
+  # THIS invocation created: a post-commit interruption of a previous
+  # run can strand stale .bqaa-bak files, and restoring one of those
+  # for a destination this run never touched would mix lock
+  # generations (#356 round 12). Stale backups are left in place for
+  # forensics; a later successful run's cleanup removes them.
   if [ "$COMMITTED" = "0" ]; then
+    if [ "${#BACKED_UP[@]}" -gt 0 ]; then
+      for dest in "${BACKED_UP[@]}"; do
+        [ -f "$dest.bqaa-bak" ] && mv -f "$dest.bqaa-bak" "$dest"
+      done
+    fi
     for dest in "$DEST_PIP_TOOLS" "$DEST_REQUIREMENTS" "$DEST_BUILD"; do
-      [ -f "$dest.bqaa-bak" ] && mv -f "$dest.bqaa-bak" "$dest"
       rm -f "$dest.bqaa-new"
     done
   fi
@@ -132,6 +142,7 @@ for pair in "pip-tools.lock:$DEST_PIP_TOOLS" \
   src_name="${pair%%:*}"; dest="${pair#*:}"
   cp "$OUT/$src_name" "$dest.bqaa-new"   # stage next to the destination
   cp "$dest" "$dest.bqaa-bak"            # keep the original for rollback
+  BACKED_UP+=("$dest")                   # rollback restores ONLY these
 done
 for dest in "$DEST_PIP_TOOLS" "$DEST_REQUIREMENTS" "$DEST_BUILD"; do
   mv -f "$dest.bqaa-new" "$dest"
