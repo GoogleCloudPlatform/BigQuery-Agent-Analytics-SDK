@@ -1164,6 +1164,56 @@ class TestTraceScope:
     scope = TraceScope(custom_labels={"b": "2", "a": "1"})
     assert scope.labels_dict == {"a": "1", "b": "2"}
 
+  def test_empty_labels_normalize_to_no_labels(self):
+    assert TraceScope(custom_labels={}) == TraceScope()
+    assert TraceScope(custom_labels=()) == TraceScope(custom_labels=None)
+    assert (
+        TraceScope(custom_labels={}).scope_signature
+        == TraceScope().scope_signature
+    )
+
+  def test_scope_signature_is_versioned(self):
+    assert TraceScope().scope_signature.startswith("v1:")
+
+  def test_scope_signature_delimiter_values_do_not_collide(self):
+    # A label value containing the old "k=v;k=v" delimiters must not
+    # collide with the scope that spells the same payload as two
+    # separate labels.
+    packed = TraceScope(custom_labels={"a": "b;c=d"})
+    split = TraceScope(custom_labels={"a": "b", "c": "d"})
+    assert packed.scope_signature != split.scope_signature
+
+  def test_scope_signature_experiment_id_cannot_smuggle_labels(self):
+    packed = TraceScope(experiment_id="x;a=b")
+    split = TraceScope(experiment_id="x", custom_labels={"a": "b"})
+    assert packed.scope_signature != split.scope_signature
+
+  def test_scope_signature_key_value_boundary_stable(self):
+    a = TraceScope(custom_labels={"ab": "c"})
+    b = TraceScope(custom_labels={"a": "bc"})
+    assert a.scope_signature != b.scope_signature
+
+  def test_scope_signature_unicode_labels_distinct_and_stable(self):
+    quoted = TraceScope(custom_labels={"k": 'v"w'})
+    escaped = TraceScope(custom_labels={"k": "v\\u0022w"})
+    assert quoted.scope_signature != escaped.scope_signature
+    accented = TraceScope(custom_labels={"k": "café"})
+    assert accented.scope_signature == accented.scope_signature
+    assert (
+        accented.scope_signature
+        != TraceScope(custom_labels={"k": "cafe"}).scope_signature
+    )
+
+  def test_non_string_label_keys_or_values_rejected(self):
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceScope(custom_labels={1: "v"})
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceScope(custom_labels={"k": 1})
+
+  def test_duplicate_label_keys_rejected(self):
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceScope(custom_labels=(("run", "v0"), ("run", "v1")))
+
 
 class TestTraceSelector:
   """Tests for caller-pin selectors and their TraceFilter mapping."""
@@ -1202,6 +1252,27 @@ class TestTraceSelector:
     assert filt.experiment_id is None
     assert filt.custom_labels is None
 
+  def test_duplicate_label_keys_rejected(self):
+    # A duplicate key would silently drop one value in the dict-based
+    # to_trace_filter() conversion, so it is rejected at construction.
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceSelector(
+          session_id="sess-1", custom_labels=(("run", "v0"), ("run", "v1"))
+      )
+
+  def test_non_string_label_values_rejected(self):
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceSelector(session_id="sess-1", custom_labels={"slice": 3})
+
+  def test_empty_labels_equal_unlabeled_selector(self):
+    assert TraceSelector(session_id="sess-1", custom_labels={}) == (
+        TraceSelector(session_id="sess-1")
+    )
+    filt = TraceSelector(
+        session_id="sess-1", custom_labels={}
+    ).to_trace_filter()
+    assert filt.custom_labels is None
+
 
 class TestResolvedTraceSelector:
   """Tests for resolved identity + scope combinations."""
@@ -1223,6 +1294,22 @@ class TestResolvedTraceSelector:
         identity=identity, scope=TraceScope(custom_labels={"run": "v1"})
     )
     assert len({v0, v1}) == 2
+
+  def test_to_selector_round_trips_all_pins(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(
+            session_id="sess-1", user_id="alice", root_agent_name="root"
+        ),
+        scope=TraceScope(experiment_id="exp-1", custom_labels={"run": "v0"}),
+    )
+    selector = resolved.to_selector()
+    assert selector == TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name="root",
+        experiment_id="exp-1",
+        custom_labels={"run": "v0"},
+    )
 
 
 class TestAmbiguousSessionError:
@@ -1259,16 +1346,57 @@ class TestAmbiguousSessionError:
     assert "custom_labels" in err.retry_dimensions
     assert "root_agent_name" not in err.retry_dimensions
 
-  def test_structured_candidates_accessible(self):
+  def test_structured_candidates_full_json_shape(self):
     candidates = self._candidates()
     err = AmbiguousSessionError(candidates=candidates)
     assert err.candidates == tuple(candidates)
     payload = err.to_dict()
-    assert payload["candidate_count"] == 2
-    assert sorted(payload["retry_dimensions"]) == sorted(err.retry_dimensions)
-    users = {c["identity"]["user_id"] for c in payload["candidates"]}
-    assert users == {"alice", "bob"}
+    assert payload == {
+        "error": "ambiguous_session",
+        "candidate_count": 2,
+        "retry_dimensions": ["user_id", "custom_labels"],
+        "candidates": [
+            {
+                "selector": {
+                    "session_id": "sess-1",
+                    "user_id": "alice",
+                    "root_agent_name": None,
+                    "experiment_id": None,
+                    "custom_labels": {"run": "v0"},
+                },
+                "scope_signature": candidates[0].scope_signature,
+            },
+            {
+                "selector": {
+                    "session_id": "sess-1",
+                    "user_id": "bob",
+                    "root_agent_name": None,
+                    "experiment_id": None,
+                    "custom_labels": {"run": "v1"},
+                },
+                "scope_signature": candidates[1].scope_signature,
+            },
+        ],
+    }
     json.dumps(payload)
+
+  def test_candidate_payload_selector_is_retry_ready(self):
+    candidates = self._candidates()
+    payload = AmbiguousSessionError(candidates=candidates).to_dict()
+    for entry, original in zip(payload["candidates"], candidates):
+      assert TraceSelector(**entry["selector"]) == original.to_selector()
+
+  def test_scopeless_candidate_payload_has_null_labels(self):
+    payload = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1"),
+            ),
+        ]
+    ).to_dict()
+    selector = payload["candidates"][0]["selector"]
+    assert selector["custom_labels"] is None
+    assert TraceSelector(**selector) == TraceSelector(session_id="sess-1")
 
 
 class TestResolveSingularCandidate:
@@ -1301,6 +1429,26 @@ class TestResolveSingularCandidate:
     with pytest.raises(AmbiguousSessionError):
       resolve_singular_candidate(list(reversed(candidates)))
 
+  def test_duplicate_rows_of_one_candidate_stay_unambiguous(self):
+    # Candidate discovery may return the same resolved selector more
+    # than once; duplicates count as one candidate, not an ambiguity.
+    only = self._candidate("alice")
+    duplicate = self._candidate("alice")
+    assert resolve_singular_candidate([only, duplicate]) == only
+
+  def test_duplicates_do_not_mask_distinct_candidates(self):
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      resolve_singular_candidate(
+          [
+              self._candidate("alice"),
+              self._candidate("alice"),
+              self._candidate("bob"),
+          ]
+      )
+    err = exc_info.value
+    assert len(err.candidates) == 2
+    assert err.retry_dimensions == ("user_id",)
+
 
 class TestTraceAdditiveIdentity:
   """Trace gains an additive identity without breaking legacy fields."""
@@ -1323,3 +1471,40 @@ class TestTraceAdditiveIdentity:
     trace = Trace(trace_id="t1", session_id="sess-1")
     assert trace.identity is None
     assert trace.scope is None
+
+  def test_contradictory_session_id_rejected(self):
+    # The identity is the single authority: mirrored legacy scalars
+    # must agree with it so downstream code keyed on either surface
+    # sees one identity.
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="legacy-session",
+          identity=TraceIdentity(session_id="different-session"),
+      )
+
+  def test_contradictory_user_id_rejected(self):
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="sess-1",
+          user_id="legacy-user",
+          identity=TraceIdentity(session_id="sess-1", user_id="other-user"),
+      )
+    # An identity resolved with a NULL user also contradicts a
+    # non-NULL legacy scalar.
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="sess-1",
+          user_id="legacy-user",
+          identity=TraceIdentity(session_id="sess-1"),
+      )
+
+  def test_unset_user_id_backfilled_from_identity(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    assert trace.user_id == "alice"

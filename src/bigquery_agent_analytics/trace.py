@@ -676,11 +676,32 @@ def _canonicalize_labels(
 
   JSON objects do not preserve key order, so scope equality and
   signatures must never depend on the order labels were supplied in.
+
+  Empty label payloads normalize to ``None`` so ``{}``, ``()``, and
+  ``None`` all mean "no labels" and compare (and sign) identically.
+
+  Raises:
+      TypeError: If a key or value is not a string. Values are never
+          coerced, because silent coercion would let two distinct
+          inputs collide in filters and scope signatures.
+      ValueError: If the same key appears more than once. A duplicate
+          key cannot round-trip through the dict-based
+          ``TraceFilter.custom_labels`` surface without silently
+          dropping one value.
   """
   if labels is None:
     return None
-  items = labels.items() if isinstance(labels, dict) else labels
-  return tuple(sorted((str(k), str(v)) for k, v in items))
+  items = list(labels.items() if isinstance(labels, dict) else labels)
+  if not items:
+    return None
+  seen: set[str] = set()
+  for key, value in items:
+    if not isinstance(key, str) or not isinstance(value, str):
+      raise TypeError("Custom label keys and values must be strings.")
+    if key in seen:
+      raise ValueError(f"Duplicate custom label key: {key!r}.")
+    seen.add(key)
+  return tuple(sorted(items))
 
 
 @dataclass(frozen=True)
@@ -724,17 +745,28 @@ class TraceScope:
 
   @property
   def scope_signature(self) -> str:
-    """Canonical string signature for this scope.
+    """Versioned canonical string signature for this scope.
 
     Two scopes with the same experiment and label payload always
     produce the same signature, so V0/V1 evaluation passes remain
     distinguishable even when the caller did not know their labels
     in advance.
+
+    The encoding is a ``v1:`` prefix followed by compact JSON with
+    sorted keys. JSON escaping makes the signature injective:
+    delimiter characters or Unicode inside experiment IDs or label
+    keys/values cannot make two distinct scopes collide, unlike a
+    naive ``k=v;k=v`` concatenation.
     """
-    parts = [f"experiment={self.experiment_id or ''}"]
-    if self.custom_labels:
-      parts.extend(f"{k}={v}" for k, v in self.custom_labels)
-    return ";".join(parts)
+    payload = {
+        "experiment_id": self.experiment_id,
+        "custom_labels": (
+            [[k, v] for k, v in self.custom_labels]
+            if self.custom_labels
+            else []
+        ),
+    }
+    return "v1:" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -781,6 +813,35 @@ class ResolvedTraceSelector:
   def scope_signature(self) -> str:
     """Canonical scope signature of this candidate."""
     return self.scope.scope_signature
+
+  def to_selector(self) -> TraceSelector:
+    """Build the retry-ready :class:`TraceSelector` pinning this candidate."""
+    return TraceSelector(
+        session_id=self.identity.session_id,
+        user_id=self.identity.user_id,
+        root_agent_name=self.identity.root_agent_name,
+        experiment_id=self.scope.experiment_id,
+        custom_labels=self.scope.custom_labels,
+    )
+
+  def to_retry_payload(self) -> dict[str, Any]:
+    """JSON-safe candidate payload for structured error surfaces.
+
+    ``selector`` holds exactly the :class:`TraceSelector` keyword
+    arguments that pin this candidate (``TraceSelector(**selector)``
+    reconstructs it), and ``scope_signature`` carries the canonical
+    scope key. Event content and judge context never appear here.
+    """
+    return {
+        "selector": {
+            "session_id": self.identity.session_id,
+            "user_id": self.identity.user_id,
+            "root_agent_name": self.identity.root_agent_name,
+            "experiment_id": self.scope.experiment_id,
+            "custom_labels": self.scope.labels_dict or None,
+        },
+        "scope_signature": self.scope_signature,
+    }
 
 
 _RETRY_DIMENSIONS: tuple[str, ...] = (
@@ -837,16 +898,18 @@ class AmbiguousSessionError(ValueError):
   def to_dict(self) -> dict[str, Any]:
     """Structured, JSON-safe payload for agent-facing surfaces.
 
+    Each candidate entry is the exact shape produced by
+    :meth:`ResolvedTraceSelector.to_retry_payload`: a ``selector``
+    dict of :class:`TraceSelector` keyword arguments that retries the
+    lookup in one step, plus the candidate's ``scope_signature``.
     Carries candidate identity dimensions and scope signatures only;
     event content and judge context never appear here.
     """
-    from .serialization import serialize
-
     return {
         "error": "ambiguous_session",
         "candidate_count": len(self.candidates),
         "retry_dimensions": list(self.retry_dimensions),
-        "candidates": [serialize(c) for c in self.candidates],
+        "candidates": [c.to_retry_payload() for c in self.candidates],
     }
 
 
@@ -859,14 +922,18 @@ def resolve_singular_candidate(
       candidates: The resolved candidates matching the caller's key.
 
   Returns:
-      The single matching candidate.
+      The single matching candidate. Duplicate occurrences of one
+      resolved selector count as a single candidate, so a repeated
+      row from candidate discovery never turns an unambiguous lookup
+      into an ambiguity error.
 
   Raises:
       ValueError: If no candidate matches.
-      AmbiguousSessionError: If more than one candidate matches. No
-          implicit fallback (such as newest-wins) is ever applied.
+      AmbiguousSessionError: If more than one distinct candidate
+          matches. No implicit fallback (such as newest-wins) is ever
+          applied.
   """
-  resolved = list(candidates)
+  resolved = list(dict.fromkeys(candidates))
   if not resolved:
     raise ValueError("No candidates match the requested session.")
   if len(resolved) > 1:
@@ -885,6 +952,12 @@ class Trace:
   resolved intrinsic identity and selected scope so two traces sharing
   a ``session_id`` stay distinguishable after serialization. The
   legacy scalar fields keep their names and meanings.
+
+  When ``identity`` is present it is the single identity authority:
+  the legacy ``session_id``/``user_id`` scalars are mirrors of it.
+  Construction rejects contradictory mirrored values and backfills an
+  unset ``user_id`` from the identity, so downstream code keyed on
+  either surface can never see two different identities for one trace.
   """
 
   trace_id: str
@@ -896,6 +969,24 @@ class Trace:
   total_latency_ms: Optional[float] = None
   identity: Optional[TraceIdentity] = None
   scope: Optional[TraceScope] = None
+
+  def __post_init__(self) -> None:
+    if self.identity is None:
+      return
+    if self.identity.session_id != self.session_id:
+      raise ValueError(
+          "Trace.identity.session_id contradicts Trace.session_id;"
+          " the identity is authoritative and mirrored fields must"
+          " match it."
+      )
+    if self.user_id is None:
+      self.user_id = self.identity.user_id
+    elif self.user_id != self.identity.user_id:
+      raise ValueError(
+          "Trace.identity.user_id contradicts Trace.user_id; the"
+          " identity is authoritative and mirrored fields must"
+          " match it."
+      )
 
   def _build_tree(self) -> list[Span]:
     """Builds a tree of spans using parent_span_id relationships."""
