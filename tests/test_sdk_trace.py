@@ -2660,8 +2660,19 @@ class TestSessionIdsIdentitySurface:
 class TestUnaddressableLabelKeys:
   """Keys BigQuery JSONPath cannot encode fail closed (round 9, P1)."""
 
-  UNADDRESSABLE = ["a\\", 'a\\"b', "trailing\\\\", 'x\\\\"y']
-  ADDRESSABLE = ["a\\b", "a\\\\b", "\\a", 'a"b', "a.b", ""]
+  # Live-verified parity rule: only ODD-length backslash runs before
+  # a quote or at the end of the key are invalid in BigQuery JSONPath.
+  UNADDRESSABLE = ["a\\", 'a\\"b', "a\\\\\\", 'a\\\\\\"b']
+  ADDRESSABLE = [
+      "a\\b",
+      "a\\\\b",
+      "\\a",
+      'a"b',
+      "a.b",
+      "",
+      "a\\\\",  # even trailing run: valid (live-verified)
+      'a\\\\"b',  # even run before quote: valid (live-verified)
+  ]
 
   def test_rejected_at_segment_construction(self):
     for key in self.UNADDRESSABLE:
@@ -2893,3 +2904,130 @@ class TestSetdefaultLookupFirst:
       filt.custom_labels.setdefault("new")
     assert filt.custom_labels.setdefault("new", "x") == "x"
     assert filt.custom_labels["new"] == "x"
+
+
+class TestRetryableUnaddressableScopeLabels:
+  """Resolved candidates with unaddressable label keys must still
+  produce an executable one-step retry (round 10, P1)."""
+
+  def _candidate(self):
+    # BigQuery JSON can store this member even though its quoted
+    # JSONPath form does not exist.
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"a\\": "x", "run": "v1"}),
+    )
+
+  def test_retry_payload_round_trip_is_executable(self):
+    payload = json.loads(json.dumps(self._candidate().to_retry_payload()))
+    selector = TraceSelector(**payload["selector"])
+    filt = selector.to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    # The addressable label still pre-filters; the unaddressable one
+    # is excluded from SQL (the signature pin preserves exactness).
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"run"'}
+    assert selector.scope_signature == self._candidate().scope_signature
+    assert filt.session_ids == ["sess-1"]
+    assert "session_id IN UNNEST(@session_ids)" in where
+
+  def test_signatureless_selector_fails_closed(self):
+    selector = TraceSelector(session_id="sess-1", custom_labels={"a\\": "x"})
+    with pytest.raises(ValueError, match="scope_signature"):
+      selector.to_trace_filter()
+
+  def test_all_labels_unaddressable_drops_predicates_entirely(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+        scope=TraceScope(custom_labels={"a\\": "x"}),
+    )
+    filt = resolved.to_selector().to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    assert not [p for p in params if p.name.startswith("label_key")]
+
+
+class TestNonStringOperandShortCircuit:
+  """Hostile non-string operands must never drive comparisons
+  (round 10, P2)."""
+
+  class _EvilObject:
+    """Not a string; hash collides with 'run', equality matches all."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_misses_without_comparison(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilObject()
+    assert evil not in filt.custom_labels
+    assert filt.custom_labels.get(evil) is None
+    assert filt.custom_labels.get(evil, "d") == "d"
+    with pytest.raises(KeyError):
+      filt.custom_labels[evil]
+    with pytest.raises(KeyError):
+      filt.custom_labels.pop(evil)
+    assert filt.custom_labels.pop(evil, "d") == "d"
+    with pytest.raises(KeyError):
+      del filt.custom_labels[evil]
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_list_misses_without_comparison(self):
+    filt = TraceFilter(session_ids=["sess-1", "sess-2"])
+    evil = self._EvilObject()
+    assert evil not in filt.session_ids
+    assert filt.session_ids.count(evil) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(evil)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(evil)
+    assert filt.session_ids == ["sess-1", "sess-2"]
+
+
+class TestUpdateRawPairParsing:
+  """Hostile equality must not collapse distinct keys before
+  normalization (round 10, P2)."""
+
+  class _E(str):
+    """Colliding hash, always-true equality — but distinct chars."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_distinct_character_keys_survive_hostile_equality(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update([(self._E("a"), "1"), (self._E("b"), "2")])
+    assert filt.custom_labels == {"a": "1", "b": "2"}
+
+  def test_same_character_hostile_keys_still_fail_closed(self):
+    filt = TraceFilter(custom_labels={})
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([(self._E("k"), "1"), (self._E("k"), "2")])
+    assert filt.custom_labels == {}
+
+  def test_mapping_protocol_and_kwargs_still_work(self):
+    filt = TraceFilter(custom_labels={})
+
+    class MappingLike:
+
+      def keys(self):
+        return ["m"]
+
+      def __getitem__(self, key):
+        return "1"
+
+    filt.custom_labels.update(MappingLike(), extra="2")
+    assert filt.custom_labels == {"m": "1", "extra": "2"}
+    with pytest.raises(TypeError, match="at most 1 argument"):
+      filt.custom_labels.update({}, {})

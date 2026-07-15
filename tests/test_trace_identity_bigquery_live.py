@@ -73,6 +73,8 @@ _HOSTILE_KEYS = [
     "a\\b",  # the round-8 P1: literal backslash must match
     "a\\\\b",  # interior double backslash: also literal
     "\\a",  # leading backslash
+    "a\\\\",  # round-10: EVEN trailing run is valid
+    'a\\\\"b',  # round-10: EVEN run before a quote is valid
     "",
     "a b",
     "a\nb",
@@ -84,8 +86,10 @@ _HOSTILE_KEYS = [
 # them before query submission (unit-tested); the live tests below
 # prove the underlying unaddressability.
 _UNADDRESSABLE_KEYS = [
-    "a\\",  # trailing backslash merges with the closing quote
-    'a\\"b',  # backslash immediately before a quote
+    "a\\",  # odd trailing run (1)
+    "a\\\\\\",  # odd trailing run (3)
+    'a\\"b',  # odd run (1) before a quote
+    'a\\\\\\"b',  # odd run (3) before a quote
 ]
 
 

@@ -426,7 +426,26 @@ def _parse_time_window(window: str) -> datetime:
   return datetime.now(timezone.utc) - delta
 
 
-_UNADDRESSABLE_KEY = re.compile(r'\\("|$)')
+def _is_unaddressable_label_key(key: str) -> bool:
+  """True if BigQuery JSONPath cannot encode this member key.
+
+  Live-verified grammar: a run of consecutive backslashes immediately
+  before a double quote or at the end of the key is invalid only when
+  the run length is odd — even runs parse and match (verified through
+  length 4 in both contexts). Interior backslash runs not adjacent to
+  a quote are always literal.
+  """
+  i, n = 0, len(key)
+  while i < n:
+    if key[i] == "\\":
+      start = i
+      while i < n and key[i] == "\\":
+        i += 1
+      if (i - start) % 2 == 1 and (i == n or key[i] == '"'):
+        return True
+    else:
+      i += 1
+  return False
 
 
 def _jsonpath_member_segment(key: str) -> str:
@@ -443,22 +462,24 @@ def _jsonpath_member_segment(key: str) -> str:
   or leading — are matched literally, so doubling them silently
   matches nothing.
 
-  That grammar leaves two key shapes unrepresentable: a backslash
-  immediately before a double quote, and a trailing backslash (the
-  backslash merges with the following quote and BigQuery aborts with
-  ``Invalid token in JSONPath``). Those keys are rejected here — and
-  earlier, at filter-label validation — instead of submitting a
-  query that errors.
+  That grammar leaves some key shapes unrepresentable: an
+  odd-length run of backslashes immediately before a double quote or
+  at the end of the key merges with the following quote and BigQuery
+  aborts with ``Invalid token in JSONPath`` (even-length runs parse
+  and match). Those keys are rejected here — and earlier, at
+  filter-label validation — instead of submitting a query that
+  errors.
 
   Raises:
-      ValueError: If the key ends with a backslash or contains a
-          backslash immediately before a double quote.
+      ValueError: If the key contains an odd-length backslash run
+          immediately before a double quote or at the end of the key.
   """
-  if _UNADDRESSABLE_KEY.search(key):
+  if _is_unaddressable_label_key(key):
     raise ValueError(
         f"Custom label key {key!r} cannot be addressed by BigQuery"
-        " JSONPath: a backslash immediately before a double quote or"
-        " at the end of the key has no valid quoted-member encoding."
+        " JSONPath: an odd-length backslash run immediately before a"
+        " double quote or at the end of the key has no valid"
+        " quoted-member encoding."
     )
   escaped = key.replace('"', '\\"')
   return f'"{escaped}"'
@@ -877,13 +898,18 @@ def _validated_label_item(key: Any, value: Any) -> tuple[str, str]:
         "TraceFilter.custom_labels keys and values must be strings."
     )
   key = _exact_str(key)
-  if _UNADDRESSABLE_KEY.search(key):
+  if _is_unaddressable_label_key(key):
     raise ValueError(
         f"Custom label key {key!r} cannot be addressed by BigQuery"
-        " JSONPath: a backslash immediately before a double quote or"
-        " at the end of the key has no valid quoted-member encoding."
+        " JSONPath: an odd-length backslash run immediately before a"
+        " double quote or at the end of the key has no valid"
+        " quoted-member encoding."
     )
   return key, _exact_str(value)
+
+
+_NON_STRING_OPERAND = object()
+"""Marker: a read/removal operand that can never match stored data."""
 
 
 def _exact_lookup_str(value: Any) -> Any:
@@ -891,15 +917,17 @@ def _exact_lookup_str(value: Any) -> Any:
 
   Removal and membership operands must not drive comparisons with
   caller-controlled ``__eq__``/``__hash__`` — an equality-overriding
-  subclass could delete or match a different, valid entry, which
-  boundary revalidation cannot detect afterwards. Non-strings pass
-  through so native KeyError/ValueError semantics apply; surrogates
-  are not rejected here because a read of a never-storable key should
-  simply miss.
+  operand could delete or match a different, valid entry, which
+  boundary revalidation cannot detect afterwards. The containers
+  store exact strings exclusively, so non-string operands are mapped
+  to :data:`_NON_STRING_OPERAND` and each method short-circuits to
+  its native miss behavior without ever invoking the operand's
+  comparison hooks. Surrogates are not rejected here because a read
+  of a never-storable key should simply miss.
   """
-  if isinstance(value, str) and type(value) is not str:
-    return "".join((value,))
-  return value
+  if isinstance(value, str):
+    return value if type(value) is str else "".join((value,))
+  return _NON_STRING_OPERAND
 
 
 class _ValidatedLabels(dict):
@@ -930,19 +958,34 @@ class _ValidatedLabels(dict):
     super().__setitem__(key, value)
 
   def __getitem__(self, key: Any) -> str:
-    return super().__getitem__(_exact_lookup_str(key))
+    lookup = _exact_lookup_str(key)
+    if lookup is _NON_STRING_OPERAND:
+      raise KeyError(repr(key))
+    return super().__getitem__(lookup)
 
   def __contains__(self, key: Any) -> bool:
-    return super().__contains__(_exact_lookup_str(key))
+    lookup = _exact_lookup_str(key)
+    return lookup is not _NON_STRING_OPERAND and super().__contains__(lookup)
 
   def __delitem__(self, key: Any) -> None:
-    super().__delitem__(_exact_lookup_str(key))
+    lookup = _exact_lookup_str(key)
+    if lookup is _NON_STRING_OPERAND:
+      raise KeyError(repr(key))
+    super().__delitem__(lookup)
 
   def get(self, key: Any, default: Any = None) -> Any:
-    return super().get(_exact_lookup_str(key), default)
+    lookup = _exact_lookup_str(key)
+    if lookup is _NON_STRING_OPERAND:
+      return default
+    return super().get(lookup, default)
 
   def pop(self, key: Any, *args: Any) -> Any:
-    return super().pop(_exact_lookup_str(key), *args)
+    lookup = _exact_lookup_str(key)
+    if lookup is _NON_STRING_OPERAND:
+      if args:
+        return args[0]
+      raise KeyError(repr(key))
+    return super().pop(lookup, *args)
 
   def __ior__(self, other: Any) -> "_ValidatedLabels":
     self.update(other)
@@ -952,7 +995,7 @@ class _ValidatedLabels(dict):
     # Lookup first: an existing key returns its value without
     # validating the (unused) default, matching plain-dict semantics.
     lookup = _exact_lookup_str(key)
-    if super().__contains__(lookup):
+    if lookup is not _NON_STRING_OPERAND and super().__contains__(lookup):
       return super().__getitem__(lookup)
     key, default = _validated_label_item(key, default)
     super().__setitem__(key, default)
@@ -962,9 +1005,26 @@ class _ValidatedLabels(dict):
     # Normalize the whole batch first so (a) two distinct subclass
     # keys with identical character data fail closed instead of one
     # predicate silently overwriting the other, and (b) a validation
-    # failure commits nothing rather than a valid prefix.
+    # failure commits nothing rather than a valid prefix. The raw
+    # input is parsed WITHOUT building an intermediate dict: a
+    # pre-normalization dict(*args) would let a caller-controlled
+    # colliding __hash__/always-true __eq__ merge distinct keys
+    # before exact-string normalization ever runs.
+    if len(args) > 1:
+      raise TypeError(f"update expected at most 1 argument, got {len(args)}")
+    raw_items: list[Any] = []
+    if args:
+      source = args[0]
+      if isinstance(source, dict):
+        raw_items.extend(source.items())
+      elif hasattr(source, "keys"):
+        raw_items.extend((key, source[key]) for key in source.keys())
+      else:
+        raw_items.extend(source)
+    raw_items.extend(kwargs.items())
     batch: dict[str, str] = {}
-    for key, value in dict(*args, **kwargs).items():
+    for item in raw_items:
+      key, value = item
       key, value = _validated_label_item(key, value)
       if key in batch:
         raise ValueError(f"Duplicate custom label key: {key!r}.")
@@ -1020,16 +1080,26 @@ class _ValidatedSessionIds(list):
     return self
 
   def __contains__(self, value: Any) -> bool:
-    return super().__contains__(_exact_lookup_str(value))
+    lookup = _exact_lookup_str(value)
+    return lookup is not _NON_STRING_OPERAND and super().__contains__(lookup)
 
   def remove(self, value: Any) -> None:
-    super().remove(_exact_lookup_str(value))
+    lookup = _exact_lookup_str(value)
+    if lookup is _NON_STRING_OPERAND:
+      raise ValueError(f"{value!r} not in TraceFilter.session_ids")
+    super().remove(lookup)
 
   def index(self, value: Any, *args: Any) -> int:
-    return super().index(_exact_lookup_str(value), *args)
+    lookup = _exact_lookup_str(value)
+    if lookup is _NON_STRING_OPERAND:
+      raise ValueError(f"{value!r} not in TraceFilter.session_ids")
+    return super().index(lookup, *args)
 
   def count(self, value: Any) -> int:
-    return super().count(_exact_lookup_str(value))
+    lookup = _exact_lookup_str(value)
+    if lookup is _NON_STRING_OPERAND:
+      return 0
+    return super().count(lookup)
 
   def __reduce__(self) -> tuple[Any, tuple[list]]:
     return (self.__class__, (list(self),))
@@ -1346,13 +1416,48 @@ class TraceSelector:
     ``scope_signature`` pin is not representable as a SQL predicate —
     label pins pre-filter rows to a superset and resolution applies
     the exact signature match.
+
+    BigQuery JSON can store label keys whose quoted JSONPath form
+    does not exist (odd backslash runs before a quote or at the end
+    of the key), so a resolved candidate can legitimately carry such
+    a label. Because label predicates are only a subset pre-filter,
+    those keys are excluded from the SQL conditions when the exact
+    ``scope_signature`` pin is present — the signature still selects
+    exactly this candidate during resolution, keeping the one-step
+    retry executable. Without a signature the exclusion would
+    silently broaden the query, so the conversion fails closed
+    instead.
+
+    Raises:
+        ValueError: If a label key is unaddressable in JSONPath and
+            no ``scope_signature`` pin is present to preserve
+            exactness.
     """
+    labels = dict(self.custom_labels) if self.custom_labels else None
+    if labels:
+      addressable = {
+          key: value
+          for key, value in labels.items()
+          if not _is_unaddressable_label_key(key)
+      }
+      if len(addressable) != len(labels):
+        if self.scope_signature is None:
+          dropped = sorted(set(labels) - set(addressable))
+          raise ValueError(
+              "Custom label keys"
+              f" {dropped!r} cannot be addressed by BigQuery JSONPath"
+              " and no scope_signature pin is present; dropping them"
+              " would silently broaden the query. Retry with the"
+              " candidate's full selector (which carries the"
+              " signature) or without the unaddressable label pins."
+          )
+        labels = addressable or None
     return TraceFilter(
         session_ids=[self.session_id],
         user_id=self._pin_to_filter_value(self.user_id),
         root_agent_name=self._pin_to_filter_value(self.root_agent_name),
         experiment_id=self._pin_to_filter_value(self.experiment_id),
-        custom_labels=dict(self.custom_labels) if self.custom_labels else None,
+        custom_labels=labels,
         limit=limit,
     )
 
