@@ -170,18 +170,24 @@ TestPyPI and PyPI must carry **byte-identical artifacts at the same
 version**. Not every failure burns the version — distinguish:
 
 - **Burned**: a lifecycle-gate failure caused by defective candidate
-  bytes after TestPyPI accepted them, ANY index deviation from the
-  anchor (subset/extra/yanked/digest mismatch), or any reconciler
-  burn state (`empty-release`, `testpypi-partial`, `partial`). Bump
-  the version, rebuild, re-tag. Never re-upload, never re-tag an
-  image (staging and public tags are immutable — enforced at the
-  repository level).
+  bytes after TestPyPI accepted them, an index deviation from the
+  **original accepted anchor** (subset/extra/yanked/digest mismatch),
+  or any reconciler burn state (`empty-release`, `testpypi-partial`,
+  `partial`, `missing-release`). Bump the version, rebuild, re-tag.
+  Never re-upload, never re-tag an image (staging and public tags are
+  immutable — enforced at the repository level).
 - **NOT burned**: a transient job failure, a lost upload response, or
   a `finalize` failure while the index carries the EXACT anchor bytes
   — re-run the failed jobs from the **original** workflow attempt
   (the rerun-safe pre-checks recognize the byte-identical publication
-  and pass without re-uploading). A full rerun is never the recovery:
-  rebuilt bytes cannot match, which is itself a burn.
+  and pass without re-uploading).
+- **Rejected, but not a burn**: an accidental **full rerun**. Its
+  rebuilt bytes cannot match what an index accepted, so the guard
+  refuses the rebuilt attempt — abandon it and return to the
+  **original** workflow run, which remains recoverable (its draft and
+  artifact are preserved). A burn is asserted only when the index
+  deviates from the ORIGINAL accepted anchor, never merely from a
+  newly rebuilt one.
 
 ## Verifying the release
 
@@ -319,7 +325,17 @@ mutable-release burn guidance; all other API calls keep the standard
 job token. Until they are configured, `finalize` fails at the token
 mint with a clear error and the release stays a draft.
 
-Until both publishers are configured, the `publish-testpypi` and
-`publish-pypi` jobs will fail with a clear error. The `build` and
-`github-release` jobs are independent and will still complete, so
-the tag stays valid.
+Publisher misconfiguration fails at two different points in the DAG:
+a missing **TestPyPI** publisher fails `publish-testpypi`, so
+`promote` and `publish-pypi` never run; a missing **production**
+publisher lets every earlier stage pass and then fails
+`publish-pypi`. In both cases the error is a clear OIDC/trusted-
+publisher failure, the `build` and `github-release` jobs still
+complete, and the tag stays valid.
+
+Immediately after each index's FIRST trusted upload creates that
+index project, add a second Google-controlled **Owner** (not
+Maintainer — a Maintainer can upload but cannot manage the project or
+collaborators, so it provides no administrative recovery;
+https://docs.pypi.org/organization-accounts/roles-entities/) and
+confirm 2FA/account recovery for both owners.
