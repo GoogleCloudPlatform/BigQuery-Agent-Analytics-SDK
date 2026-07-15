@@ -745,6 +745,11 @@ jobs:
           RELEASE_ARG=--release-missing
           PUBLISHED_ARG=""
           RELEASE_ID=""
+          # Only a DRAFT publication performs the Administration:read
+          # policy lookup — the helper's published/idempotent path
+          # returns before it (#356 round 15), so the App token must
+          # not be minted (or required) for those reruns.
+          echo "RELEASE_IS_DRAFT=0" >> "$GITHUB_ENV"
           if ! MATCHES=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" 2> releases.err \
               | jq -c -s --arg tag "$GITHUB_REF_NAME" 'add | map(select(.tag_name == $tag))'); then
             # Auth/rate-limit/network/API failures are INDETERMINATE —
@@ -764,7 +769,9 @@ jobs:
             DRAFT_RAW=$(jq -r '.[0].draft | if type == "boolean" then tostring else "invalid" end' <<<"$MATCHES")
             if [ "$DRAFT_RAW" = "false" ]; then
               PUBLISHED_ARG=--release-published
-            elif [ "$DRAFT_RAW" != "true" ]; then
+            elif [ "$DRAFT_RAW" = "true" ]; then
+              echo "RELEASE_IS_DRAFT=1" >> "$GITHUB_ENV"
+            else
               echo "::error::release draft flag is not a Boolean — refusing to classify"
               exit 1
             fi
@@ -882,14 +889,19 @@ jobs:
         # permissions), so the round-13 preflight would fail on every
         # release with the job token (#356 round 14). A narrowly scoped
         # GitHub App installation token (ONLY Administration:read) is
-        # minted, and ONLY when a publication will actually happen;
-        # every other API call keeps the standard job token. One-time
-        # setup: create the App, install it on this repository, and set
+        # minted, and ONLY when a DRAFT publication will actually
+        # happen: `complete` also covers the already-published
+        # idempotent rerun, whose helper path performs NO policy read —
+        # minting there would let missing/rotated App credentials break
+        # a harmless rerun and mask the helper's burn guidance for an
+        # exact-but-public mutable release (#356 round 15). Every other
+        # API call keeps the standard job token. One-time setup: create
+        # the App, install it on this repository, and set
         # BQAA_RELEASE_POLICY_APP_ID (variable) +
         # BQAA_RELEASE_POLICY_APP_PRIVATE_KEY (secret) — see
         # RELEASING.md.
         id: policy_token
-        if: env.state == 'complete'
+        if: env.state == 'complete' && env.RELEASE_IS_DRAFT == '1'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ vars.BQAA_RELEASE_POLICY_APP_ID }}

@@ -265,8 +265,11 @@ can never be granted. Create a GitHub App whose ONLY repository
 permission is Administration: read, install it on this repository
 only, and set the repository variable `BQAA_RELEASE_POLICY_APP_ID`
 plus the secret `BQAA_RELEASE_POLICY_APP_PRIVATE_KEY`. The workflow
-mints a short-lived installation token from these only when a
-publication is about to happen; all other API calls keep the standard
+mints a short-lived installation token from these only when a DRAFT
+publication is about to happen — idempotent reruns of an
+already-published release perform no policy read and never touch the
+App credentials, so a rotated key cannot break them or mask the
+mutable-release burn guidance; all other API calls keep the standard
 job token. Until they are configured, `finalize` fails at the token
 mint with a clear error and the release stays a draft.
 
