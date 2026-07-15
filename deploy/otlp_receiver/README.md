@@ -10,7 +10,36 @@ Claude Code / Codex --OTLP--> Cloud Run receiver --> Pub/Sub --> consumer --> Bi
                                                         └── DLQ --> otlp_dead_letter
 ```
 
-## Deploy
+## Deploy (released package — the primary path, no repo checkout)
+
+```bash
+pipx install bigquery-agent-analytics-tracing
+
+# The variables every command below uses:
+PROJECT=my-gcp-project
+DATASET=agent_analytics
+REGION=us-central1
+
+# Readiness checks (mutates nothing; no Cloud Build / AR permissions needed):
+bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --preflight
+
+# Print the plan (runs nothing) — deploys the released, digest-pinned image:
+bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --region $REGION
+
+# Apply it:
+bqaa-otel bootstrap --project $PROJECT --dataset $DATASET --region $REGION --execute
+
+# Clean removal later — preview first (dry run prints the exact plan),
+# then execute with --confirm (deletes + existence-verifies every class):
+bqaa-otel teardown --project $PROJECT --dataset $DATASET
+bqaa-otel teardown --project $PROJECT --dataset $DATASET --confirm
+```
+
+The released wheel embeds the public receiver image
+(`us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver:<version>@sha256:…`),
+pinned by digest — the customer project never builds or hosts the image.
+
+## Deploy (from a repository checkout — source build)
 
 ```bash
 # Print the plan (runs nothing):
@@ -24,12 +53,10 @@ PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli \
   --build-from-source --execute
 ```
 
-(`bqaa-otel bootstrap ...` once the producers package is installed.
-`--build-from-source` is required when running from a repository
-checkout — an installed release wheel instead embeds the released,
-digest-pinned receiver image and deploys it with no build step;
-`setup.sh` is a thin wrapper over the same command with the historical
-env-var interface: `PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
+(`--build-from-source` builds with Cloud Build from the checkout and is
+required there — a dev checkout embeds no released image; `setup.sh` is a
+thin wrapper over the same command with the historical env-var interface:
+`PROJECT=my-proj bash deploy/otlp_receiver/setup.sh`.)
 
 This creates: the native tables + `*_dedup` views + `agent_events_otlp` +
 `bqaa_metrics` (DDL generated from the schema package; `gen_schema_sql.py`
@@ -122,13 +149,20 @@ traces (`otel.trace_exporter`) are observability only.
 ```bash
 # Read-only health checks: endpoint reachability + auth enforcement,
 # table/view existence, recent rows, dead-letter health.
-BQAA_OTLP_TOKEN=<token> PYTHONPATH=producers/src python3 -m \
-  bigquery_agent_analytics_tracing.otlp.cli verify \
-  --endpoint <url> --project <proj> --dataset <dataset>
+TOKEN=$(gcloud secrets versions access latest \
+  --secret=bqaa-otlp-token --project $PROJECT)
+URL=$(gcloud run services describe bqaa-otlp-receiver \
+  --project $PROJECT --region $REGION --format='value(status.url)')
+BQAA_OTLP_TOKEN=$TOKEN bqaa-otel verify \
+  --endpoint $URL --project $PROJECT --dataset $DATASET
 
 # Add --smoke to also send synthetic OTLP logs+metrics and follow them into
 # the native tables, dedup views, and the agent_events_otlp projection.
 ```
+
+(From a source checkout, prefix with
+`PYTHONPATH=producers/src python3 -m bigquery_agent_analytics_tracing.otlp.cli`
+instead of `bqaa-otel`.)
 
 The full pytest e2e (same payloads as `--smoke`, plus protobuf-path and
 dead-letter round-trips) remains available:

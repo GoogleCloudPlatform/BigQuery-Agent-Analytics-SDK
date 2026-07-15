@@ -20,13 +20,19 @@ on:
     paths:
       - 'producers/**'
       - 'plugins/claude_code/**'
+      - 'deploy/otlp_receiver/**'
+      - '.dockerignore'
       - '.github/workflows/producers-ci.yml'
+      - '.github/workflows/release-tracing.yml'
   pull_request:
     branches: [main]
     paths:
       - 'producers/**'
       - 'plugins/claude_code/**'
+      - 'deploy/otlp_receiver/**'
+      - '.dockerignore'
       - '.github/workflows/producers-ci.yml'
+      - '.github/workflows/release-tracing.yml'
 
 concurrency:
   group: producers-ci-${{ github.ref }}
@@ -41,9 +47,9 @@ jobs:
     name: Producers format check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
@@ -64,14 +70,14 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ matrix.python-version }}
 
       - name: Install package with dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,receiver]"  # receiver: protobuf path must run in PR CI, not only at tag time
 
       - name: Run tests
         run: pytest --tb=short -q
@@ -81,17 +87,20 @@ jobs:
     runs-on: ubuntu-latest
     needs: [format, test]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build
+        # Same hash-locked toolchain + no-isolation path the RELEASE
+        # anchor build uses — a lock/backend incompatibility must fail in
+        # PR CI, not first at tag time (#356 round 6).
+        run: pip install --require-hashes -r build-requirements.lock
 
-      - name: Build sdist and wheel
-        run: python -m build
+      - name: Build sdist and wheel (no isolation — locked backend)
+        run: python -m build --no-isolation
 
       - name: List wheel/sdist
         run: ls -la dist/
@@ -100,7 +109,7 @@ jobs:
         # Make `importlib.metadata.version` resolve correctly so the
         # plugin manifest gets a real version stamped in, not the
         # pyproject fallback.
-        run: pip install dist/bigquery_agent_analytics_tracing-*.whl
+        run: pip install --no-deps dist/bigquery_agent_analytics_tracing-*.whl
 
       - name: Build Claude Code plugin artifact
         run: python scripts/build_claude_plugin.py
@@ -108,7 +117,44 @@ jobs:
       - name: List plugin artifact
         run: ls -la dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: producers-dist
           path: producers/dist/
+
+  image-selftest:
+    name: Receiver image self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Repo root: the Dockerfile requires the repository root as its
+        # build context (unlike the other jobs, which run in producers/).
+        working-directory: .
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Build the receiver image (hash-locked deps)
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('producers/pyproject.toml','rb'))['project']['version'])")
+          docker build -f deploy/otlp_receiver/Dockerfile -t bqaa-pr-selftest .
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Run the checked-in self-test (same script the release runs)
+        run: bash deploy/otlp_receiver/selftest.sh bqaa-pr-selftest "$VERSION"
+
+  lock-drift:
+    name: Hash-lock drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Regenerate locks with the exact pinned generator
+        run: bash deploy/otlp_receiver/regen-locks.sh
+      - name: Locks must match the reviewed files (all three)
+        run: |
+          git diff --exit-code deploy/otlp_receiver/pip-tools.lock \
+            deploy/otlp_receiver/requirements.lock \
+            producers/build-requirements.lock \
+            || (echo "::error::checked-in locks drift from regen-locks.sh output — regenerate and review" && exit 1)
