@@ -71,10 +71,21 @@ _HOSTILE_KEYS = [
     "a[0]",
     'a"b',
     "a\\b",  # the round-8 P1: literal backslash must match
+    "a\\\\b",  # interior double backslash: also literal
+    "\\a",  # leading backslash
     "",
     "a b",
     "a\nb",
     "a\tb",
+]
+
+# Round-9 P1: these key shapes have NO valid quoted-member encoding —
+# BigQuery aborts with "Invalid token in JSONPath". The SDK rejects
+# them before query submission (unit-tested); the live tests below
+# prove the underlying unaddressability.
+_UNADDRESSABLE_KEYS = [
+    "a\\",  # trailing backslash merges with the closing quote
+    'a\\"b',  # backslash immediately before a quote
 ]
 
 
@@ -104,6 +115,22 @@ class TestJsonPathMemberSegmentLive:
   @pytest.mark.parametrize("key", _HOSTILE_KEYS, ids=repr)
   def test_segment_selects_the_member(self, bq_client, key):
     assert _probe(bq_client, key, _jsonpath_member_segment(key)) == "expected"
+
+  @pytest.mark.parametrize("key", _UNADDRESSABLE_KEYS, ids=repr)
+  def test_unaddressable_keys_rejected_before_submission(self, key):
+    with pytest.raises(ValueError, match="cannot be addressed"):
+      _jsonpath_member_segment(key)
+
+  @pytest.mark.parametrize("key", _UNADDRESSABLE_KEYS, ids=repr)
+  def test_unaddressable_keys_abort_live_queries(self, bq_client, key):
+    # Raw probe with quote-only escaping (what the pre-round-9 helper
+    # emitted): live BigQuery rejects the whole query, proving these
+    # keys must be rejected client-side rather than encoded.
+    from google.api_core import exceptions as gexc
+
+    raw_segment = '"' + key.replace('"', '\\"') + '"'
+    with pytest.raises(gexc.BadRequest, match="Invalid token"):
+      _probe(bq_client, key, raw_segment)
 
   def test_doubled_backslash_regression(self, bq_client):
     # The pre-fix encoding doubled backslashes; BigQuery matches

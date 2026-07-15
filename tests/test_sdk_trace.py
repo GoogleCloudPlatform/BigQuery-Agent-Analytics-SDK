@@ -20,6 +20,7 @@ import json
 
 import pytest
 
+from bigquery_agent_analytics import trace as trace_module
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ContentPart
 from bigquery_agent_analytics.trace import ObjectRef
@@ -2654,3 +2655,241 @@ class TestSessionIdsIdentitySurface:
     list.append(filt.session_ids, 3)
     with pytest.raises(TypeError, match="entries must be strings"):
       filt.to_sql_conditions()
+
+
+class TestUnaddressableLabelKeys:
+  """Keys BigQuery JSONPath cannot encode fail closed (round 9, P1)."""
+
+  UNADDRESSABLE = ["a\\", 'a\\"b', "trailing\\\\", 'x\\\\"y']
+  ADDRESSABLE = ["a\\b", "a\\\\b", "\\a", 'a"b', "a.b", ""]
+
+  def test_rejected_at_segment_construction(self):
+    for key in self.UNADDRESSABLE:
+      with pytest.raises(ValueError, match="cannot be addressed"):
+        trace_module._jsonpath_member_segment(key)
+
+  def test_rejected_at_filter_label_validation(self):
+    for key in self.UNADDRESSABLE:
+      with pytest.raises(ValueError, match="cannot be addressed"):
+        TraceFilter(custom_labels={key: "x"})
+    filt = TraceFilter(custom_labels={"k": "v"})
+    with pytest.raises(ValueError, match="cannot be addressed"):
+      filt.custom_labels["a\\"] = "x"
+
+  def test_addressable_backslash_shapes_still_accepted(self):
+    for key in self.ADDRESSABLE:
+      filt = TraceFilter(custom_labels={key: "x"})
+      _, params = filt.to_sql_conditions()
+      segment = next(p for p in params if p.name == "label_key_0").value
+      assert segment == trace_module._jsonpath_member_segment(key)
+
+
+class TestSessionIdsSelfExtension:
+  """Batch writes terminate and are atomic (round 9, P1)."""
+
+  def test_self_extend_terminates_and_doubles(self):
+    filt = TraceFilter(session_ids=["a", "b"])
+    filt.session_ids.extend(filt.session_ids)
+    assert filt.session_ids == ["a", "b", "a", "b"]
+
+  def test_self_iadd_terminates(self):
+    filt = TraceFilter(session_ids=["a"])
+    filt.session_ids += filt.session_ids
+    assert filt.session_ids == ["a", "a"]
+
+  def test_failed_batch_commits_nothing(self):
+    filt = TraceFilter(session_ids=["a"])
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.extend(["ok", 3])
+    assert filt.session_ids == ["a"]
+
+
+class TestLabelBatchUpdateAtomicity:
+  """update()/|= normalize the whole batch first (round 9, P2)."""
+
+  def _colliding_keys(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    return KeyA("k"), KeyB("k")
+
+  def test_update_detects_normalized_collision(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    key_a, key_b = self._colliding_keys()
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update({key_a: "first", key_b: "second"})
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_update_failure_commits_nothing(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.update([("good", "y"), ("bad", 1)])
+    assert "good" not in filt.custom_labels
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_ior_shares_the_atomic_path(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels |= {"bad": 1}
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_legitimate_batch_update_overwrites_existing(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    filt.custom_labels.update({"run": "v2", "slice": "3"})
+    assert filt.custom_labels == {"run": "v2", "slice": "3"}
+
+
+class TestValidatedContainersStdlibCompat:
+  """The containers must behave like dict/list to stdlib (round 9)."""
+
+  def test_dataclasses_asdict_round_trips(self):
+    import dataclasses
+
+    filt = TraceFilter(custom_labels={"k": "v"}, session_ids=["s1"])
+    plain = dataclasses.asdict(filt)
+    assert plain["custom_labels"] == {"k": "v"}
+    assert plain["session_ids"] == ["s1"]
+
+  def test_labels_constructor_matches_dict_forms(self):
+    from bigquery_agent_analytics.trace import _ValidatedLabels
+
+    assert _ValidatedLabels() == {}
+    assert _ValidatedLabels({"a": "1"}) == {"a": "1"}
+    assert _ValidatedLabels([("a", "1")]) == {"a": "1"}
+    assert _ValidatedLabels((pair for pair in [("a", "1")])) == {"a": "1"}
+    assert _ValidatedLabels(a="1") == {"a": "1"}
+
+
+class TestRemovalOperandNormalization:
+  """Equality-overriding operands must not misdirect removals
+  (round 9, P2)."""
+
+  class _Evil(str):
+    """Claims equality with everything; hash collides broadly."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_lookup_and_removal_normalized(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil("unrelated")
+    assert evil not in filt.custom_labels
+    assert filt.custom_labels.get(evil) is None
+    with pytest.raises(KeyError):
+      filt.custom_labels[evil]
+    with pytest.raises(KeyError):
+      filt.custom_labels.pop(evil)
+    with pytest.raises(KeyError):
+      del filt.custom_labels[evil]
+    assert filt.custom_labels == {"run": "v1"}
+    # A well-behaved subclass operand still finds the real entry.
+    assert filt.custom_labels.pop(self._Evil("run")) == "v1"
+
+  def test_list_membership_and_removal_normalized(self):
+    filt = TraceFilter(session_ids=["sess-1", "sess-2"])
+    evil = self._Evil("unrelated")
+    assert evil not in filt.session_ids
+    assert filt.session_ids.count(evil) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(evil)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(evil)
+    assert filt.session_ids == ["sess-1", "sess-2"]
+    filt.session_ids.remove(self._Evil("sess-1"))
+    assert filt.session_ids == ["sess-2"]
+
+
+class TestDecodePinExactness:
+  """Hostile equality must never mint a sentinel (round 9, P2)."""
+
+  class _FakeTag(str):
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("UNSET")
+
+  def test_fake_tag_passes_through_unchanged(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    payload = {"$pin": self._FakeTag("not-a-pin")}
+    result = decode_pin(payload)
+    assert result is payload
+    assert result is not UNSET
+
+  def test_fake_key_passes_through_unchanged(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    payload = {self._FakeTag("not-the-key"): "UNSET"}
+    assert decode_pin(payload) is payload
+
+  def test_exact_wire_form_still_resolves(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    assert decode_pin({"$pin": "UNSET"}) is UNSET
+    assert decode_pin({"$pin": "SQL_NULL"}) is SQL_NULL
+    assert decode_pin({"$pin": "bogus"}) == {"$pin": "bogus"}
+
+
+class TestAugmentedAssignmentAliasing:
+  """+=/|= must keep aliases attached and avoid rewrap (round 9)."""
+
+  def test_ior_preserves_container_identity(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    alias = filt.custom_labels
+    filt.custom_labels |= {"slice": "3"}
+    assert filt.custom_labels is alias
+    assert alias == {"run": "v1", "slice": "3"}
+
+  def test_iadd_preserves_container_identity(self):
+    filt = TraceFilter(session_ids=["a"])
+    alias = filt.session_ids
+    filt.session_ids += ["b"]
+    assert filt.session_ids is alias
+    assert alias == ["a", "b"]
+
+  def test_external_assignment_still_copies(self):
+    filt_a = TraceFilter(session_ids=["a"])
+    filt_b = TraceFilter(session_ids=["b"])
+    filt_a.session_ids = filt_b.session_ids
+    assert filt_a.session_ids == ["b"]
+    assert filt_a.session_ids is not filt_b.session_ids
+
+
+class TestSetdefaultLookupFirst:
+  """setdefault must not validate an unused default (round 9, P3)."""
+
+  def test_existing_key_ignores_default(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert filt.custom_labels.setdefault("run") == "v1"
+    assert filt.custom_labels.setdefault("run", 123) == "v1"
+
+  def test_missing_key_validates_default(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.setdefault("new")
+    assert filt.custom_labels.setdefault("new", "x") == "x"
+    assert filt.custom_labels["new"] == "x"

@@ -426,6 +426,9 @@ def _parse_time_window(window: str) -> datetime:
   return datetime.now(timezone.utc) - delta
 
 
+_UNADDRESSABLE_KEY = re.compile(r'\\("|$)')
+
+
 def _jsonpath_member_segment(key: str) -> str:
   """Encode a label key as a quoted JSONPath member segment.
 
@@ -434,13 +437,29 @@ def _jsonpath_member_segment(key: str) -> str:
   structure, so every key is wrapped in double quotes and appended to
   ``$.custom_tags.`` as one segment.
 
-  BigQuery's JSONPath grammar is NOT JSON-string escaping: inside a
-  quoted member only the double quote is escaped (``\\"``);
-  backslashes and control characters are matched literally. Doubling
-  backslashes here makes ``{"a\\\\b": ...}`` silently match nothing
-  (verified against live BigQuery), turning a valid exact-selector
-  retry into a false "not found".
+  BigQuery's JSONPath grammar is NOT JSON-string escaping (all
+  verified against live BigQuery): inside a quoted member only the
+  double quote is escaped (``\\"``); backslashes — single, doubled,
+  or leading — are matched literally, so doubling them silently
+  matches nothing.
+
+  That grammar leaves two key shapes unrepresentable: a backslash
+  immediately before a double quote, and a trailing backslash (the
+  backslash merges with the following quote and BigQuery aborts with
+  ``Invalid token in JSONPath``). Those keys are rejected here — and
+  earlier, at filter-label validation — instead of submitting a
+  query that errors.
+
+  Raises:
+      ValueError: If the key ends with a backslash or contains a
+          backslash immediately before a double quote.
   """
+  if _UNADDRESSABLE_KEY.search(key):
+    raise ValueError(
+        f"Custom label key {key!r} cannot be addressed by BigQuery"
+        " JSONPath: a backslash immediately before a double quote or"
+        " at the end of the key has no valid quoted-member encoding."
+    )
   escaped = key.replace('"', '\\"')
   return f'"{escaped}"'
 
@@ -496,9 +515,17 @@ class TraceFilter:
       # strings (with post-normalization duplicate detection) and
       # stored in a validating mutable dict so ordinary in-place
       # writes stay checked while dict-style mutation keeps working.
-      value = _ValidatedLabels(_normalized_filter_labels(value))
+      # Skip rewrapping when the assigned value IS this field's
+      # current validating container: augmented assignment (|=)
+      # stores the returned self back through here, and copying it
+      # would detach existing aliases and make repeated updates
+      # quadratic. Externally assigned containers are still copied.
+      if value is not getattr(self, "custom_labels", None):
+        value = _ValidatedLabels(_normalized_filter_labels(value))
     if name == "session_ids" and value is not None:
-      value = _normalized_session_ids(value)
+      # Same identity-skip as custom_labels, for += on the list.
+      if value is not getattr(self, "session_ids", None):
+        value = _normalized_session_ids(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -839,12 +866,40 @@ def _exact_str(value: str) -> str:
 
 
 def _validated_label_item(key: Any, value: Any) -> tuple[str, str]:
-  """Validate and normalize one filter-label key/value pair."""
+  """Validate and normalize one filter-label key/value pair.
+
+  Keys that BigQuery JSONPath cannot address (trailing backslash or
+  backslash-before-quote) are rejected here so the failure happens at
+  assignment time instead of aborting the query at submission.
+  """
   if not isinstance(key, str) or not isinstance(value, str):
     raise TypeError(
         "TraceFilter.custom_labels keys and values must be strings."
     )
-  return _exact_str(key), _exact_str(value)
+  key = _exact_str(key)
+  if _UNADDRESSABLE_KEY.search(key):
+    raise ValueError(
+        f"Custom label key {key!r} cannot be addressed by BigQuery"
+        " JSONPath: a backslash immediately before a double quote or"
+        " at the end of the key has no valid quoted-member encoding."
+    )
+  return key, _exact_str(value)
+
+
+def _exact_lookup_str(value: Any) -> Any:
+  """Copy a str (or subclass) read-operand into an exact ``str``.
+
+  Removal and membership operands must not drive comparisons with
+  caller-controlled ``__eq__``/``__hash__`` — an equality-overriding
+  subclass could delete or match a different, valid entry, which
+  boundary revalidation cannot detect afterwards. Non-strings pass
+  through so native KeyError/ValueError semantics apply; surrogates
+  are not rejected here because a read of a never-storable key should
+  simply miss.
+  """
+  if isinstance(value, str) and type(value) is not str:
+    return "".join((value,))
+  return value
 
 
 class _ValidatedLabels(dict):
@@ -854,34 +909,68 @@ class _ValidatedLabels(dict):
   is part of the public ``TraceFilter`` contract and keeps working;
   each write normalizes hostile ``str`` subclasses to exact built-in
   strings and rejects non-strings and surrogates, so mutation cannot
-  smuggle values past the assignment-time validation. Removals need
-  no validation. Low-level ``dict.__setitem__`` bypasses are caught
-  by the SQL-boundary revalidation.
+  smuggle values past the assignment-time validation. Batch updates
+  are normalized as a whole (with post-normalization duplicate
+  detection) and applied atomically. Read/removal operands are
+  normalized too, so equality-overriding subclasses cannot look up or
+  delete a different entry. Low-level ``dict.__setitem__`` bypasses
+  are caught by the SQL-boundary revalidation.
   """
 
-  def __init__(self, mapping: dict[str, str]) -> None:
+  def __init__(self, *args: Any, **kwargs: Any) -> None:
+    # Standard dict(*args, **kwargs) construction (including the
+    # iterable-of-pairs form dataclasses.asdict() uses to rebuild
+    # mapping subclasses), routed through the validated batch path.
     super().__init__()
-    for key, value in mapping.items():
-      self[key] = value
+    if args or kwargs:
+      self.update(*args, **kwargs)
 
   def __setitem__(self, key: Any, value: Any) -> None:
     key, value = _validated_label_item(key, value)
     super().__setitem__(key, value)
 
+  def __getitem__(self, key: Any) -> str:
+    return super().__getitem__(_exact_lookup_str(key))
+
+  def __contains__(self, key: Any) -> bool:
+    return super().__contains__(_exact_lookup_str(key))
+
+  def __delitem__(self, key: Any) -> None:
+    super().__delitem__(_exact_lookup_str(key))
+
+  def get(self, key: Any, default: Any = None) -> Any:
+    return super().get(_exact_lookup_str(key), default)
+
+  def pop(self, key: Any, *args: Any) -> Any:
+    return super().pop(_exact_lookup_str(key), *args)
+
   def __ior__(self, other: Any) -> "_ValidatedLabels":
     self.update(other)
     return self
 
-  def setdefault(self, key: Any, default: Any = None) -> str:
+  def setdefault(self, key: Any, default: Any = None) -> Any:
+    # Lookup first: an existing key returns its value without
+    # validating the (unused) default, matching plain-dict semantics.
+    lookup = _exact_lookup_str(key)
+    if super().__contains__(lookup):
+      return super().__getitem__(lookup)
     key, default = _validated_label_item(key, default)
-    if key in self:
-      return self[key]
     super().__setitem__(key, default)
     return default
 
   def update(self, *args: Any, **kwargs: Any) -> None:
+    # Normalize the whole batch first so (a) two distinct subclass
+    # keys with identical character data fail closed instead of one
+    # predicate silently overwriting the other, and (b) a validation
+    # failure commits nothing rather than a valid prefix.
+    batch: dict[str, str] = {}
     for key, value in dict(*args, **kwargs).items():
-      self[key] = value
+      key, value = _validated_label_item(key, value)
+      if key in batch:
+        raise ValueError(f"Duplicate custom label key: {key!r}.")
+      batch[key] = value
+    for key, value in batch.items():
+      super().__setitem__(key, value)
 
   def __reduce__(self) -> tuple[Any, tuple[dict]]:
     return (self.__class__, (dict(self),))
@@ -895,17 +984,26 @@ class _ValidatedSessionIds(list):
   working but every added entry is checked against the exact-string/
   surrogate contract, so a mutated list cannot collapse identities on
   the JSON wire or reach the BigQuery array parameter unchecked.
-  Removals and reordering need no validation.
+  Batch inputs are fully materialized and validated before any entry
+  is committed — self-extension therefore terminates, and a failing
+  batch commits nothing. Membership/removal operands are normalized
+  so equality-overriding subclasses cannot remove or match a
+  different, valid session ID.
   """
 
   def __init__(self, iterable: Any = ()) -> None:
-    super().__init__(_validated_session_id_entry(v) for v in iterable)
+    super().__init__([_validated_session_id_entry(v) for v in iterable])
 
   def append(self, value: Any) -> None:
     super().append(_validated_session_id_entry(value))
 
   def extend(self, iterable: Any) -> None:
-    super().extend(_validated_session_id_entry(v) for v in iterable)
+    # Materialize BEFORE extending: a lazy generator over `self`
+    # (f.session_ids.extend(f.session_ids)) would observe every newly
+    # appended entry and never terminate; materializing also makes a
+    # failed batch atomic instead of committing a valid prefix.
+    values = [_validated_session_id_entry(v) for v in iterable]
+    super().extend(values)
 
   def insert(self, index: int, value: Any) -> None:
     super().insert(index, _validated_session_id_entry(value))
@@ -920,6 +1018,18 @@ class _ValidatedSessionIds(list):
   def __iadd__(self, iterable: Any) -> "_ValidatedSessionIds":
     self.extend(iterable)
     return self
+
+  def __contains__(self, value: Any) -> bool:
+    return super().__contains__(_exact_lookup_str(value))
+
+  def remove(self, value: Any) -> None:
+    super().remove(_exact_lookup_str(value))
+
+  def index(self, value: Any, *args: Any) -> int:
+    return super().index(_exact_lookup_str(value), *args)
+
+  def count(self, value: Any) -> int:
+    return super().count(_exact_lookup_str(value))
 
   def __reduce__(self) -> tuple[Any, tuple[list]]:
     return (self.__class__, (list(self),))
@@ -990,14 +1100,22 @@ def decode_pin(value: Any) -> Any:
   from that tag and returns every other value unchanged, so
   ``TraceFilter(user_id=decode_pin(payload["user_id"]))`` round-trips
   a NULL-safe filter.
+
+  Only the exact wire shape resolves: an exact built-in ``dict`` with
+  the single exact-``str`` key ``"$pin"`` and an exact-``str`` tag of
+  ``"UNSET"`` or ``"SQL_NULL"`` — precisely what ``json.loads``
+  produces. Near misses, including strings whose subclass equality
+  claims to match, pass through unchanged; hostile comparison
+  semantics must never mint a real sentinel.
   """
-  if (
-      isinstance(value, dict)
-      and set(value) == {_PIN_WIRE_KEY}
-      and value[_PIN_WIRE_KEY] in ("UNSET", "SQL_NULL")
-  ):
-    return _resolve_pin_sentinel(value[_PIN_WIRE_KEY])
-  return value
+  if type(value) is not dict or len(value) != 1:
+    return value
+  key, tag = next(iter(value.items()))
+  if type(key) is not str or key != _PIN_WIRE_KEY:
+    return value
+  if type(tag) is not str or tag not in ("UNSET", "SQL_NULL"):
+    return value
+  return _resolve_pin_sentinel(tag)
 
 
 # Separate pin aliases per surface so the annotations match the
