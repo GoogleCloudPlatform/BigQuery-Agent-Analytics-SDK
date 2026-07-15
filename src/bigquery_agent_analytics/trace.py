@@ -926,21 +926,56 @@ class _NonStringOperand:
 
 _NON_STRING_OPERAND = _NonStringOperand()
 
+# Trusted type descriptors: attribute access on a class consults its
+# metaclass, so hostile metaclass properties could hijack __name__,
+# __mro__, or hash-slot reads. These getset descriptors bypass the
+# metaclass entirely.
+_TYPE_NAME = type.__dict__["__name__"]
+_TYPE_MRO = type.__dict__["__mro__"]
+_TYPE_DICT = type.__dict__["__dict__"]
 
-def _exact_lookup_str(value: Any) -> Any:
+
+def _safe_type_name(obj: Any) -> str:
+  """Real class name of ``obj`` without metaclass attribute hooks."""
+  return _TYPE_NAME.__get__(type(obj))
+
+
+def _class_hash_slot(tp: type) -> Any:
+  """Resolve ``__hash__`` along the real MRO without metaclass hooks."""
+  for klass in _TYPE_MRO.__get__(tp):
+    class_dict = _TYPE_DICT.__get__(klass)
+    if "__hash__" in class_dict:
+      return class_dict["__hash__"]
+  return None
+
+
+def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
   """Copy a str (or subclass) read-operand into an exact ``str``.
 
   Removal and membership operands must not drive comparisons with
   caller-controlled ``__eq__``/``__hash__`` — an equality-overriding
   operand could delete or match a different, valid entry, which
-  boundary revalidation cannot detect afterwards. The containers
-  store exact strings exclusively, so non-string operands are mapped
-  to :data:`_NON_STRING_OPERAND` and delegated to the native method,
-  which yields its own miss behavior. Surrogates are not rejected
-  here because a read of a never-storable key should simply miss.
+  boundary revalidation cannot detect afterwards. Detection uses the
+  real ``type()``, never ``isinstance()``, because a spoofed
+  ``__class__`` property would otherwise smuggle a non-string into
+  the str-subclass copy path.
+
+  Non-string operands map to :data:`_NON_STRING_OPERAND` and are
+  delegated to the native method, which yields its own miss behavior.
+  With ``require_hashable`` (the mapping surfaces), unhashable
+  operands raise ``TypeError`` exactly like a plain dict — detected
+  through the class's real hash slot so no caller hook runs; plain
+  lists compare rather than hash, so list surfaces keep miss
+  semantics. Surrogates are not rejected here because a read of a
+  never-storable key should simply miss.
   """
-  if isinstance(value, str):
-    return value if type(value) is str else "".join((value,))
+  tp = type(value)
+  if tp is str:
+    return value
+  if issubclass(tp, str):
+    return "".join((value,))
+  if require_hashable and _class_hash_slot(tp) is None:
+    raise TypeError(f"unhashable type: {_safe_type_name(value)!r}")
   return _NON_STRING_OPERAND
 
 
@@ -972,22 +1007,22 @@ class _ValidatedLabels(dict):
     super().__setitem__(key, value)
 
   def __getitem__(self, key: Any) -> str:
-    return super().__getitem__(_exact_lookup_str(key))
+    return super().__getitem__(_exact_lookup_str(key, require_hashable=True))
 
   def __contains__(self, key: Any) -> bool:
-    return super().__contains__(_exact_lookup_str(key))
+    return super().__contains__(_exact_lookup_str(key, require_hashable=True))
 
   def __delitem__(self, key: Any) -> None:
-    super().__delitem__(_exact_lookup_str(key))
+    super().__delitem__(_exact_lookup_str(key, require_hashable=True))
 
   def get(self, key: Any, default: Any = None) -> Any:
-    return super().get(_exact_lookup_str(key), default)
+    return super().get(_exact_lookup_str(key, require_hashable=True), default)
 
   def pop(self, key: Any, *args: Any) -> Any:
     # Delegation preserves native arity validation (at most one
     # default) and native miss errors carrying only the safe-repr
     # sentinel, never the caller object.
-    return super().pop(_exact_lookup_str(key), *args)
+    return super().pop(_exact_lookup_str(key, require_hashable=True), *args)
 
   def __ior__(self, other: Any) -> "_ValidatedLabels":
     self.update(other)
@@ -996,7 +1031,7 @@ class _ValidatedLabels(dict):
   def setdefault(self, key: Any, default: Any = None) -> Any:
     # Lookup first: an existing key returns its value without
     # validating the (unused) default, matching plain-dict semantics.
-    lookup = _exact_lookup_str(key)
+    lookup = _exact_lookup_str(key, require_hashable=True)
     if super().__contains__(lookup):
       return super().__getitem__(lookup)
     key, default = _validated_label_item(key, default)
@@ -1162,30 +1197,59 @@ def _parse_scope_signature_labels(
   """Parse a canonical ``v1:`` scope signature into its label payload.
 
   Returns the ``custom_labels`` mapping the signature attests, or
-  ``None`` when the signature is not a well-formed v1 encoding. Used
-  to prove that a label pin being excluded from SQL is actually part
-  of the exact scope the signature will select.
+  ``None`` when the signature is not one a real :class:`TraceScope`
+  can generate. Used to prove that a label pin being excluded from
+  SQL is actually part of the exact scope the signature will select,
+  so validation is strictly canonical: exact schema (exactly the two
+  known fields), exact built-in types, no duplicate label keys, and
+  — the decisive check — byte-for-byte re-encoding equality against
+  the signature rebuilt from the parsed payload. Parser failures on
+  hostile input (including ``RecursionError`` from deep nesting) are
+  normalized to a rejection.
   """
   if type(signature) is not str or not signature.startswith("v1:"):
     return None
   try:
     payload = json.loads(signature[3:])
-  except json.JSONDecodeError:
+  except (ValueError, RecursionError):
+    # ValueError covers JSONDecodeError; RecursionError is raised by
+    # deeply nested input and must reject, not propagate.
     return None
-  if not isinstance(payload, dict):
+  if type(payload) is not dict or set(payload) != {
+      "custom_labels",
+      "experiment_id",
+  }:
     return None
-  raw_labels = payload.get("custom_labels")
-  if not isinstance(raw_labels, list):
+  experiment_id = payload["experiment_id"]
+  if experiment_id is not None and type(experiment_id) is not str:
+    return None
+  raw_labels = payload["custom_labels"]
+  if type(raw_labels) is not list:
     return None
   labels: dict[str, str] = {}
   for entry in raw_labels:
     if (
-        not isinstance(entry, list)
+        type(entry) is not list
         or len(entry) != 2
-        or not all(isinstance(part, str) for part in entry)
+        or type(entry[0]) is not str
+        or type(entry[1]) is not str
     ):
       return None
+    if entry[0] in labels:
+      # Canonical signatures cannot contain duplicate label keys.
+      return None
     labels[entry[0]] = entry[1]
+  try:
+    rebuilt = TraceScope(
+        experiment_id=experiment_id, custom_labels=labels or None
+    )
+  except (TypeError, ValueError):
+    return None
+  if rebuilt.scope_signature != signature:
+    # Non-canonical encodings (unsorted labels, whitespace, escape
+    # variants) are signatures no TraceScope generates; attesting
+    # them would let impossible signatures strip SQL predicates.
+    return None
   return labels
 
 
@@ -1702,7 +1766,7 @@ def _validated_candidates(
     if type(candidate) is not ResolvedTraceSelector:
       raise TypeError(
           "Candidates must be ResolvedTraceSelector instances (exact"
-          f" type); got {type(candidate).__name__}."
+          f" type); got {_safe_type_name(candidate)}."
       )
   return validated
 

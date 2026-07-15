@@ -3173,3 +3173,132 @@ class TestExactDuplicateLastWriteWins:
     with pytest.raises(ValueError, match="Duplicate custom label key"):
       filt.custom_labels.update([("run", "v1"), (KeyA("run"), "v2")])
     assert filt.custom_labels == {}
+
+
+class TestSpoofedClassProperty:
+  """A spoofed __class__ must not reach the str copy path
+  (round 12, P2)."""
+
+  class _FakeStr:
+    """Claims to be a str via __class__; hooks would raise."""
+
+    @property
+    def __class__(self):
+      return str
+
+    def __eq__(self, other):
+      raise RuntimeError("comparison hook must not run")
+
+    def __hash__(self):
+      return hash("run")
+
+    def __repr__(self):
+      raise RuntimeError("repr hook must not run")
+
+  def test_label_lookups_miss_without_hooks(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    fake = self._FakeStr()
+    assert isinstance(fake, str)  # the spoof works on isinstance
+    assert fake not in filt.custom_labels
+    assert filt.custom_labels.get(fake) is None
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_session_lookups_miss_without_hooks(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    fake = self._FakeStr()
+    assert fake not in filt.session_ids
+    assert filt.session_ids.count(fake) == 0
+    assert filt.session_ids == ["sess-1"]
+
+
+class TestStrictCanonicalSignatureAttestation:
+  """Only signatures a real TraceScope generates attest label drops
+  (round 12, P2)."""
+
+  UNADDRESSABLE = {"a\\": "x"}
+
+  def _selector(self, signature):
+    return TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=signature,
+    )
+
+  def test_impossible_signatures_rejected(self):
+    labels_json = '[["a\\\\","x"]]'
+    impossible = [
+        # Missing / extra schema fields.
+        'v1:{"custom_labels":%s}' % labels_json,
+        'v1:{"custom_labels":%s,"experiment_id":null,"extra":1}' % labels_json,
+        # Duplicate label keys.
+        'v1:{"custom_labels":[["a\\\\","x"],["a\\\\","x"]],'
+        '"experiment_id":null}',
+        # Non-canonical encoding: unsorted keys / added whitespace.
+        'v1:{"experiment_id":null,"custom_labels":%s}' % labels_json,
+        'v1:{"custom_labels": %s,"experiment_id":null}' % labels_json,
+        # Wrong types.
+        'v1:{"custom_labels":%s,"experiment_id":1}' % labels_json,
+    ]
+    for signature in impossible:
+      with pytest.raises(ValueError, match="does not attest"):
+        self._selector(signature).to_trace_filter()
+
+  def test_deeply_nested_signature_rejected_not_crashing(self):
+    deep = "v1:" + "[" * 200000
+    with pytest.raises(ValueError, match="does not attest"):
+      self._selector(deep).to_trace_filter()
+
+  def test_genuine_signature_still_attests(self):
+    genuine = TraceScope(custom_labels=self.UNADDRESSABLE).scope_signature
+    filt = self._selector(genuine).to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    assert not [p for p in params if p.name.startswith("label_key")]
+
+
+class TestUnhashableOperandNativeBehavior:
+  """Mappings raise TypeError for unhashable operands like a plain
+  dict; lists keep native comparison-miss semantics (round 12, P2)."""
+
+  def test_mapping_raises_type_error(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in ([], {}, set()):
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels[operand]
+      with pytest.raises(TypeError, match="unhashable"):
+        operand in filt.custom_labels
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels.get(operand)
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels.pop(operand, "default")
+
+  def test_list_keeps_native_miss_semantics(self):
+    # Plain lists compare rather than hash: `[] in ['a']` is False.
+    filt = TraceFilter(session_ids=["sess-1"])
+    assert [] not in filt.session_ids
+    assert filt.session_ids.count([]) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove([])
+
+  def test_hashable_non_string_still_misses(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert 3 not in filt.custom_labels
+    with pytest.raises(KeyError):
+      filt.custom_labels[3]
+
+
+class TestHostileMetaclassNameRetrieval:
+  """Error formatting must not execute metaclass hooks
+  (round 12, P3)."""
+
+  def test_candidate_type_error_avoids_metaclass_name(self):
+    class Meta(type):
+
+      @property
+      def __name__(cls):
+        raise RuntimeError("metaclass hook must not run")
+
+    class Hostile(metaclass=Meta):
+      pass
+
+    with pytest.raises(TypeError, match="Hostile"):
+      resolve_singular_candidate([Hostile()])
