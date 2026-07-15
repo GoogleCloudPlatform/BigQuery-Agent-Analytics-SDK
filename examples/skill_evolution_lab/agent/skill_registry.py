@@ -194,6 +194,31 @@ class SkillRegistry:
     resp.raise_for_status()
     return resp.json()
 
+  def get_latest(self, skill_id: str) -> dict:
+    """Skill payload of the NEWEST revision.
+
+    GetSkill can keep serving an older revision's payload after updates
+    (observed live: nine revisions in, GetSkill still returned revision
+    two's zip). ListSkillRevisions is newest-first and GetSkillRevision
+    returns that revision's payload under ``skill``, so this is the
+    deterministic way to read what was last published. Falls back to
+    GetSkill when the skill has no readable revisions.
+    """
+    revisions = self.list_revisions(skill_id)
+    if revisions:
+      rev_id = revisions[0].get("name", "").split("/revisions/")[-1]
+      resp = requests.get(
+          f"{self.base}/skills/{skill_id}/revisions/{rev_id}",
+          headers=self._headers(),
+          timeout=60,
+      )
+      resp.raise_for_status()
+      skill = resp.json().get("skill", {})
+      if skill.get("zippedFilesystem"):
+        skill.setdefault("revisionId", rev_id)
+        return skill
+    return self.get(skill_id)
+
   def list_revisions(self, skill_id: str) -> list:
     resp = requests.get(
         f"{self.base}/skills/{skill_id}/revisions",
