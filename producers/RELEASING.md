@@ -261,12 +261,32 @@ release published while the setting is off keeps mutable assets and
 Policy-read credential (one-time): the immutable-releases check calls
 `GET /repos/{repo}/immutable-releases`, which requires repository
 **Administration: read** — a permission the workflow `GITHUB_TOKEN`
-can never be granted. Create a GitHub App whose ONLY repository
-permission is Administration: read, install it on this repository
-only, and set the repository variable `BQAA_RELEASE_POLICY_APP_ID`
-plus the secret `BQAA_RELEASE_POLICY_APP_PRIVATE_KEY`. The workflow
-mints a short-lived installation token from these only when a DRAFT
-publication is about to happen — idempotent reruns of an
+can never be granted. Because the App requests repository
+Administration permission, installation needs a **GoogleCloudPlatform
+organization owner** — a repository admin alone cannot complete this
+([installation requirements](https://docs.github.com/en/apps/using-github-apps/installing-a-github-app-from-a-third-party)):
+
+1. An organization owner creates an **organization-owned** GitHub
+   App.
+2. Registration setting: **"Where can this GitHub App be
+   installed?" → Only on this account** — keeps the App private so no
+   other account can install it
+   ([docs](https://docs.github.com/en/enterprise-cloud@latest/apps/creating-github-apps/registering-a-github-app/making-a-github-app-public-or-private)).
+3. Grant only repository **Administration: read**; disable webhooks;
+   request no organization or account permissions.
+4. Generate and download a private key for the App.
+5. The organization owner installs it on **only**
+   `BigQuery-Agent-Analytics-SDK`.
+6. Store the App ID as the repository variable
+   `BQAA_RELEASE_POLICY_APP_ID` and the PEM as the repository secret
+   `BQAA_RELEASE_POLICY_APP_PRIVATE_KEY`. Then delete the downloaded
+   workstation copy of the PEM unless it is retained in an approved
+   secret manager, and record who owns future key rotation — an App
+   private key can authenticate against every installation of that
+   App ([best practices](https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/best-practices-for-creating-a-github-app)).
+
+The workflow mints a short-lived installation token from these only
+when a DRAFT publication is about to happen — idempotent reruns of an
 already-published release perform no policy read and never touch the
 App credentials, so a rotated key cannot break them or mask the
 mutable-release burn guidance; all other API calls keep the standard
