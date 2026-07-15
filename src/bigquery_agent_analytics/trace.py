@@ -908,8 +908,23 @@ def _validated_label_item(key: Any, value: Any) -> tuple[str, str]:
   return key, _exact_str(value)
 
 
-_NON_STRING_OPERAND = object()
-"""Marker: a read/removal operand that can never match stored data."""
+class _NonStringOperand:
+  """Marker: a read/removal operand that can never match stored data.
+
+  Hash and equality are identity-based, so delegating it to the
+  native dict/list method produces the method's own miss behavior
+  (False/0/KeyError/ValueError) and native arity validation without
+  invoking any caller-controlled hook — including ``__repr__``, which
+  this class overrides so even error formatting stays safe.
+  """
+
+  __slots__ = ()
+
+  def __repr__(self) -> str:
+    return "<non-string operand>"
+
+
+_NON_STRING_OPERAND = _NonStringOperand()
 
 
 def _exact_lookup_str(value: Any) -> Any:
@@ -920,10 +935,9 @@ def _exact_lookup_str(value: Any) -> Any:
   operand could delete or match a different, valid entry, which
   boundary revalidation cannot detect afterwards. The containers
   store exact strings exclusively, so non-string operands are mapped
-  to :data:`_NON_STRING_OPERAND` and each method short-circuits to
-  its native miss behavior without ever invoking the operand's
-  comparison hooks. Surrogates are not rejected here because a read
-  of a never-storable key should simply miss.
+  to :data:`_NON_STRING_OPERAND` and delegated to the native method,
+  which yields its own miss behavior. Surrogates are not rejected
+  here because a read of a never-storable key should simply miss.
   """
   if isinstance(value, str):
     return value if type(value) is str else "".join((value,))
@@ -958,34 +972,22 @@ class _ValidatedLabels(dict):
     super().__setitem__(key, value)
 
   def __getitem__(self, key: Any) -> str:
-    lookup = _exact_lookup_str(key)
-    if lookup is _NON_STRING_OPERAND:
-      raise KeyError(repr(key))
-    return super().__getitem__(lookup)
+    return super().__getitem__(_exact_lookup_str(key))
 
   def __contains__(self, key: Any) -> bool:
-    lookup = _exact_lookup_str(key)
-    return lookup is not _NON_STRING_OPERAND and super().__contains__(lookup)
+    return super().__contains__(_exact_lookup_str(key))
 
   def __delitem__(self, key: Any) -> None:
-    lookup = _exact_lookup_str(key)
-    if lookup is _NON_STRING_OPERAND:
-      raise KeyError(repr(key))
-    super().__delitem__(lookup)
+    super().__delitem__(_exact_lookup_str(key))
 
   def get(self, key: Any, default: Any = None) -> Any:
-    lookup = _exact_lookup_str(key)
-    if lookup is _NON_STRING_OPERAND:
-      return default
-    return super().get(lookup, default)
+    return super().get(_exact_lookup_str(key), default)
 
   def pop(self, key: Any, *args: Any) -> Any:
-    lookup = _exact_lookup_str(key)
-    if lookup is _NON_STRING_OPERAND:
-      if args:
-        return args[0]
-      raise KeyError(repr(key))
-    return super().pop(lookup, *args)
+    # Delegation preserves native arity validation (at most one
+    # default) and native miss errors carrying only the safe-repr
+    # sentinel, never the caller object.
+    return super().pop(_exact_lookup_str(key), *args)
 
   def __ior__(self, other: Any) -> "_ValidatedLabels":
     self.update(other)
@@ -995,7 +997,7 @@ class _ValidatedLabels(dict):
     # Lookup first: an existing key returns its value without
     # validating the (unused) default, matching plain-dict semantics.
     lookup = _exact_lookup_str(key)
-    if lookup is not _NON_STRING_OPERAND and super().__contains__(lookup):
+    if super().__contains__(lookup):
       return super().__getitem__(lookup)
     key, default = _validated_label_item(key, default)
     super().__setitem__(key, default)
@@ -1023,12 +1025,18 @@ class _ValidatedLabels(dict):
         raw_items.extend(source)
     raw_items.extend(kwargs.items())
     batch: dict[str, str] = {}
+    exact_raw: dict[str, bool] = {}
     for item in raw_items:
-      key, value = item
-      key, value = _validated_label_item(key, value)
-      if key in batch:
+      raw_key, raw_value = item
+      key, value = _validated_label_item(raw_key, raw_value)
+      is_exact = type(raw_key) is str
+      if key in batch and not (is_exact and exact_raw[key]):
+        # Two DISTINCT subclass keys normalizing to one string is a
+        # silent predicate drop and fails closed; ordinary exact-str
+        # duplicates keep standard dict last-write-wins semantics.
         raise ValueError(f"Duplicate custom label key: {key!r}.")
       batch[key] = value
+      exact_raw[key] = is_exact
     for key, value in batch.items():
       super().__setitem__(key, value)
 
@@ -1080,26 +1088,18 @@ class _ValidatedSessionIds(list):
     return self
 
   def __contains__(self, value: Any) -> bool:
-    lookup = _exact_lookup_str(value)
-    return lookup is not _NON_STRING_OPERAND and super().__contains__(lookup)
+    return super().__contains__(_exact_lookup_str(value))
 
   def remove(self, value: Any) -> None:
-    lookup = _exact_lookup_str(value)
-    if lookup is _NON_STRING_OPERAND:
-      raise ValueError(f"{value!r} not in TraceFilter.session_ids")
-    super().remove(lookup)
+    super().remove(_exact_lookup_str(value))
 
   def index(self, value: Any, *args: Any) -> int:
-    lookup = _exact_lookup_str(value)
-    if lookup is _NON_STRING_OPERAND:
-      raise ValueError(f"{value!r} not in TraceFilter.session_ids")
-    return super().index(lookup, *args)
+    # Delegation keeps native start/stop arity validation and native
+    # miss errors carrying only the safe-repr sentinel.
+    return super().index(_exact_lookup_str(value), *args)
 
   def count(self, value: Any) -> int:
-    lookup = _exact_lookup_str(value)
-    if lookup is _NON_STRING_OPERAND:
-      return 0
-    return super().count(lookup)
+    return super().count(_exact_lookup_str(value))
 
   def __reduce__(self) -> tuple[Any, tuple[list]]:
     return (self.__class__, (list(self),))
@@ -1154,6 +1154,39 @@ def _normalized_session_ids(session_ids: Any) -> list[str]:
         "TraceFilter.session_ids must be a list of strings or None."
     )
   return _ValidatedSessionIds(session_ids)
+
+
+def _parse_scope_signature_labels(
+    signature: str,
+) -> Optional[dict[str, str]]:
+  """Parse a canonical ``v1:`` scope signature into its label payload.
+
+  Returns the ``custom_labels`` mapping the signature attests, or
+  ``None`` when the signature is not a well-formed v1 encoding. Used
+  to prove that a label pin being excluded from SQL is actually part
+  of the exact scope the signature will select.
+  """
+  if type(signature) is not str or not signature.startswith("v1:"):
+    return None
+  try:
+    payload = json.loads(signature[3:])
+  except json.JSONDecodeError:
+    return None
+  if not isinstance(payload, dict):
+    return None
+  raw_labels = payload.get("custom_labels")
+  if not isinstance(raw_labels, list):
+    return None
+  labels: dict[str, str] = {}
+  for entry in raw_labels:
+    if (
+        not isinstance(entry, list)
+        or len(entry) != 2
+        or not all(isinstance(part, str) for part in entry)
+    ):
+      return None
+    labels[entry[0]] = entry[1]
+  return labels
 
 
 _PIN_WIRE_KEY = "$pin"
@@ -1441,15 +1474,29 @@ class TraceSelector:
           if not _is_unaddressable_label_key(key)
       }
       if len(addressable) != len(labels):
-        if self.scope_signature is None:
-          dropped = sorted(set(labels) - set(addressable))
+        dropped = {key: labels[key] for key in set(labels) - set(addressable)}
+        attested = (
+            _parse_scope_signature_labels(self.scope_signature)
+            if self.scope_signature is not None
+            else None
+        )
+        # A signature only justifies dropping a label pin if the
+        # exact scope it selects actually CONTAINS that pin — a
+        # mismatched signature (which resolution will honor) would
+        # otherwise silently erase the pin. Generated retry selectors
+        # carry the candidate's own signature and always pass.
+        if attested is None or any(
+            attested.get(key) != value for key, value in dropped.items()
+        ):
           raise ValueError(
               "Custom label keys"
-              f" {dropped!r} cannot be addressed by BigQuery JSONPath"
-              " and no scope_signature pin is present; dropping them"
-              " would silently broaden the query. Retry with the"
-              " candidate's full selector (which carries the"
-              " signature) or without the unaddressable label pins."
+              f" {sorted(dropped)!r} cannot be addressed by BigQuery"
+              " JSONPath, and the scope_signature pin is absent or"
+              " does not attest those exact label pairs; dropping"
+              " them would silently broaden or misdirect the query."
+              " Retry with the candidate's full selector (whose"
+              " signature contains its labels) or without the"
+              " unaddressable label pins."
           )
         labels = addressable or None
     return TraceFilter(

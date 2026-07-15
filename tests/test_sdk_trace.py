@@ -3031,3 +3031,145 @@ class TestUpdateRawPairParsing:
     assert filt.custom_labels == {"m": "1", "extra": "2"}
     with pytest.raises(TypeError, match="at most 1 argument"):
       filt.custom_labels.update({}, {})
+
+
+class TestSignatureAttestedLabelDrop:
+  """Only a signature attesting the dropped pins may drop them
+  (round 11, P1)."""
+
+  UNADDRESSABLE = {"a\\": "x"}
+
+  def test_mismatched_signature_cannot_erase_pin(self):
+    victim = TraceScope(custom_labels={"other": "y"})
+    selector = TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=victim.scope_signature,
+    )
+    with pytest.raises(ValueError, match="does not attest"):
+      selector.to_trace_filter()
+
+  def test_signature_with_wrong_value_rejected(self):
+    wrong_value = TraceScope(custom_labels={"a\\": "DIFFERENT"})
+    selector = TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=wrong_value.scope_signature,
+    )
+    with pytest.raises(ValueError, match="does not attest"):
+      selector.to_trace_filter()
+
+  def test_malformed_signature_rejected(self):
+    for bogus in ("v1:not-json", "v2:{}", 'v1:{"custom_labels":"x"}'):
+      selector = TraceSelector(
+          session_id="s",
+          custom_labels=self.UNADDRESSABLE,
+          scope_signature=bogus,
+      )
+      with pytest.raises(ValueError, match="does not attest"):
+        selector.to_trace_filter()
+
+  def test_attesting_signature_still_drops(self):
+    scope = TraceScope(custom_labels={"a\\": "x", "run": "v1"})
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="s"), scope=scope
+    )
+    filt = resolved.to_selector().to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"run"'}
+
+
+class TestMissPathsAvoidCallerHooks:
+  """Miss behavior must not run caller __repr__ and must keep native
+  arity validation (round 11, P2)."""
+
+  class _LoudRepr:
+    """Counts (and could raise in) __repr__; equality matches all."""
+
+    def __init__(self):
+      self.repr_calls = 0
+
+    def __repr__(self):
+      self.repr_calls += 1
+      raise RuntimeError("repr must not be invoked")
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_misses_never_invoke_repr(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    loud = self._LoudRepr()
+    assert loud not in filt.custom_labels
+    assert filt.custom_labels.get(loud) is None
+    with pytest.raises(KeyError):
+      filt.custom_labels[loud]
+    with pytest.raises(KeyError):
+      filt.custom_labels.pop(loud)
+    with pytest.raises(KeyError):
+      del filt.custom_labels[loud]
+    assert loud.repr_calls == 0
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_list_misses_never_invoke_repr(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    loud = self._LoudRepr()
+    assert loud not in filt.session_ids
+    assert filt.session_ids.count(loud) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(loud)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(loud)
+    assert loud.repr_calls == 0
+
+  def test_pop_arity_validated_on_miss_path(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError):
+      filt.custom_labels.pop(object(), "d1", "d2")
+    assert filt.custom_labels.pop(object(), "d1") == "d1"
+
+  def test_index_bounds_arity_validated_on_miss_path(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    with pytest.raises(TypeError):
+      filt.session_ids.index(object(), 0, 1, 2)
+    # Native start/stop bounds still apply on the miss path.
+    with pytest.raises(ValueError):
+      filt.session_ids.index(object(), 0, 1)
+
+
+class TestExactDuplicateLastWriteWins:
+  """Ordinary exact-str duplicates keep dict semantics (round 11)."""
+
+  def test_mapping_plus_kwargs_last_write_wins(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update({"run": "v1"}, run="v2")
+    assert filt.custom_labels == {"run": "v2"}
+
+  def test_pair_iterable_last_write_wins(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update([("run", "v1"), ("run", "v2")])
+    assert filt.custom_labels == {"run": "v2"}
+
+  def test_constructor_pairs_last_write_wins(self):
+    from bigquery_agent_analytics.trace import _ValidatedLabels
+
+    assert _ValidatedLabels([("run", "v1"), ("run", "v2")]) == {"run": "v2"}
+
+  def test_hostile_subclass_collisions_still_fail_closed(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    filt = TraceFilter(custom_labels={})
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([(KeyA("run"), "v1"), ("run", "v2")])
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([("run", "v1"), (KeyA("run"), "v2")])
+    assert filt.custom_labels == {}
