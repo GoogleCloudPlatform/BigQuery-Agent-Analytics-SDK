@@ -35,11 +35,18 @@ index is `absent` (explicit 404), `exact` (the index holds exactly the
 current wheel+sdist bytes), or `deviating` (anything else — burned).
 That makes the guard consistent with the reconciler's recoveries: an
 exact TestPyPI publication with the draft missing PROCEEDS to recreate
-the draft from the preserved original-attempt artifact (a full rerun
-naturally shows `deviating` because rebuilt bytes differ), while
+the draft from the preserved original-attempt artifact, while
 production files always make the missing-release / preserved-draft
-paths authoritative. A published release always fails: that version is
-burned.
+paths authoritative. `deviating` covers two situations the guard cannot
+tell apart from its inputs, so the message states both branches: on
+the ORIGINAL workflow attempt the current distributions ARE the
+original workflow build anchor, and an index conflict (pre-existing or
+tampered files) burns the version outright — finalize cannot classify
+that run because github-release fails at this guard; on a full rerun
+the mismatch proves only that the rebuilt attempt must be abandoned in
+favor of the recoverable original run. A burn is asserted against the
+original workflow build anchor, never merely against a rebuilt one. A
+published release always fails: that version is burned.
 """
 
 from __future__ import annotations
@@ -96,10 +103,17 @@ def decide(release_state: str, pypi: str, testpypi: str) -> GuardAction:
     return GuardAction(
         False,
         1,
-        f"{where} holds files for this version that DIFFER from the"
-        " current dist bytes — the version is burned there (bump the"
-        " version, rebuild, and cut a new tag); any existing draft is"
-        " preserved for forensics",
+        f"{where} holds files for this version that DIFFER from THIS"
+        " attempt's dist bytes. If THIS IS the ORIGINAL workflow"
+        " attempt, these distributions ARE the original workflow build"
+        " anchor — the index already holds conflicting or pre-existing"
+        " files that cannot be replaced, so the version is BURNED: bump"
+        " the version, rebuild, and cut a new tag. If this is a full"
+        " rerun, the mismatch proves only that the rebuilt attempt must"
+        " be abandoned (NOT burned by this check alone): return to the"
+        " ORIGINAL workflow attempt and re-run its FAILED jobs for"
+        " authoritative reconciliation. Any existing draft is preserved"
+        " for forensics",
     )
   if pypi == "exact":
     if release_state == "draft":

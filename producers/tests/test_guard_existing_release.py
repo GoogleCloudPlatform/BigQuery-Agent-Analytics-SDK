@@ -52,15 +52,34 @@ def test_draft_with_exact_testpypi_files_is_preserved_too():
   assert "TestPyPI" in action.message
 
 
-def test_deviating_index_is_burned():
-  # A full rerun rebuilds bytes, so its dist DIFFERS from what the
-  # index accepted: byte validation turns that into an explicit burn.
+def test_deviating_message_states_the_first_attempt_burn_branch():
+  # The guard's inputs cannot distinguish a first-attempt conflict
+  # from a full rerun, so the message must state the ORIGINAL-attempt
+  # branch explicitly (#353 review): on the original attempt the
+  # current distributions ARE the original workflow build anchor, and
+  # pre-existing/conflicting index files burn the version — finalize
+  # cannot classify that run because github-release fails here.
   for release in ("absent", "draft"):
     action = guard_existing_release.decide(release, "deviating", "absent")
     assert not action.proceed
     assert action.exit_code != 0
-    assert "DIFFER" in action.message
+    assert "ORIGINAL workflow" in action.message
+    assert "original workflow build anchor" in action.message
+    assert "BURNED" in action.message
     assert "bump" in action.message
+    assert "accepted anchor" not in action.message  # corrected wording
+
+
+def test_deviating_message_states_the_full_rerun_reject_branch():
+  # Same inputs, second interpretation: a full rerun's rebuilt bytes
+  # prove only that the rebuilt attempt must be abandoned — return to
+  # the original run for authoritative reconciliation.
+  for release in ("absent", "draft"):
+    action = guard_existing_release.decide(release, "deviating", "absent")
+    assert "full" in action.message and "rerun" in action.message
+    assert "NOT burned" in action.message
+    assert "abandoned" in action.message
+    assert "ORIGINAL workflow attempt" in action.message
   action = guard_existing_release.decide("absent", "absent", "deviating")
   assert not action.proceed
   assert "TestPyPI" in action.message
