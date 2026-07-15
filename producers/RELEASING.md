@@ -20,9 +20,12 @@ The tag namespace (`tracing-vX.Y.Z`) is distinct from the root SDK's
    the curated customer-first template via
    `scripts/render_release_notes.py`; generic generated notes are
    disabled — the repo-wide tag stream would pull unrelated SDK PRs).
-4. PyPI side: project + Trusted Publisher are already configured.
-   Setup is one-time per project — see "PyPI Trusted Publishing
-   setup" below.
+4. PyPI side: a **pending Trusted Publisher** is registered on BOTH
+   indexes (for the first release neither project exists yet — the
+   pending publisher creates it on the first trusted upload and does
+   not reserve the name before then; for later releases the existing
+   project publishers suffice). Setup is one-time per project — see
+   "PyPI Trusted Publishing setup" below.
 
 ## Cut the release
 
@@ -164,10 +167,21 @@ Post evidence on the release issue.
 ## Version-burn rule
 
 TestPyPI and PyPI must carry **byte-identical artifacts at the same
-version**. If a candidate fails the gate, that version is burned
-everywhere: bump the version, re-tag, rebuild from scratch. Never
-re-upload, never re-tag an image (staging and public tags are
-immutable — enforced at the repository level).
+version**. Not every failure burns the version — distinguish:
+
+- **Burned**: a lifecycle-gate failure caused by defective candidate
+  bytes after TestPyPI accepted them, ANY index deviation from the
+  anchor (subset/extra/yanked/digest mismatch), or any reconciler
+  burn state (`empty-release`, `testpypi-partial`, `partial`). Bump
+  the version, rebuild, re-tag. Never re-upload, never re-tag an
+  image (staging and public tags are immutable — enforced at the
+  repository level).
+- **NOT burned**: a transient job failure, a lost upload response, or
+  a `finalize` failure while the index carries the EXACT anchor bytes
+  — re-run the failed jobs from the **original** workflow attempt
+  (the rerun-safe pre-checks recognize the byte-identical publication
+  and pass without re-uploading). A full rerun is never the recovery:
+  rebuilt bytes cannot match, which is itself a burn.
 
 ## Verifying the release
 
@@ -217,9 +231,11 @@ tar -tzf /tmp/plugin.tar.gz | head
   original attempt: the pre-check verifies the index already carries
   the exact byte-identical files and skips the re-upload.
 - **`finalize` refuses to publish because immutable releases are
-  disabled** — nothing was published (the release is still a draft):
-  enable the setting (Settings → General → Releases → immutable
-  releases) and re-run `finalize` from the original attempt.
+  disabled** — the GitHub release remains a draft, but PyPI and
+  TestPyPI already contain the exact files (the index stages run
+  before `finalize`). Enable immutable releases (Settings → General →
+  Releases) and re-run `finalize` from the **original** workflow
+  attempt; never trigger a full rerun.
 - **a release was somehow published while the setting was off** —
   immutability is NOT retroactive: enabling the setting cannot protect
   it, so treat the version as burned (delete the release, yank any
@@ -248,10 +264,20 @@ These names must match exactly — the `environment:` blocks in the
 workflow are the binding contract.
 
 GitHub-side one-time setup: create environments `testpypi`, `pypi`,
-and `release-promote` in the repo settings, with required reviewers
-on `pypi` and `release-promote` (approving `release-promote` asserts
-the TestPyPI full-lifecycle gate passed), and **enable immutable
-releases BEFORE the first release** (Settings → General → Releases):
+and `release-promote` in the repo settings —
+
+- restrict **all three** environments to tag `tracing-v*`
+  (Settings → Environments → Deployment branches and tags → Selected →
+  Tag rule `tracing-v*`); the `testpypi` rule matters even without a
+  reviewer, because it stops a branch-modified copy of the workflow
+  from using the TestPyPI OIDC identity and burning a version;
+- required reviewers on `pypi` and `release-promote` ONLY (approving
+  `release-promote` asserts the TestPyPI full-lifecycle gate passed);
+  `testpypi` gets no reviewer — the manual lifecycle verdict is the
+  later `release-promote` approval —
+
+and **enable immutable releases BEFORE the first release**
+(Settings → General → Releases):
 `finalize` verifies the setting and refuses to publish while it is
 off, because GitHub applies immutability only at publish time — a
 release published while the setting is off keeps mutable assets and
