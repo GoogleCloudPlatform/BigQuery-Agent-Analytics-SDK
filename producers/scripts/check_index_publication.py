@@ -33,9 +33,11 @@ the byte-identity contract:
                 burned on this index; bump + re-tag
   indeterminate the response or local inputs prove nothing (malformed
                 HTTP-200 body, schema violation, missing local dist
-                file) → refetch / investigate before acting; a
+                file, or a local publish set that is not EXACTLY the
+                wheel + sdist — the uploader would publish extras
+                irreversibly) → refetch / investigate before acting; a
                 transient CDN or API glitch is NOT a version burn
-                (#356 round 13)
+                (#356 rounds 13-14)
 
 Exit code is 0 for absent/satisfied and 1 otherwise, so the workflow
 step fails closed on any state that cannot lead to a valid release —
@@ -69,6 +71,21 @@ def check(
   """Returns (status, detail). ``index=None`` = an explicit 404."""
   wheel = f"bigquery_agent_analytics_tracing-{version}-py3-none-any.whl"
   sdist = f"bigquery_agent_analytics_tracing-{version}.tar.gz"
+  # The LOCAL publish set must be exactly wheel + sdist (#356 round
+  # 14): the uploader publishes every distribution left in the
+  # directory, so an unexpected extra local file would be uploaded
+  # irreversibly at this version before finalize could ever reject it.
+  present = (
+      sorted(p.name for p in dist_dir.iterdir()) if dist_dir.is_dir() else []
+  )
+  extras = [name for name in present if name not in (wheel, sdist)]
+  if extras:
+    return (
+        INDETERMINATE,
+        f"local publish set contains unexpected distributions {extras} —"
+        " the uploader would publish them irreversibly; investigate the"
+        " build artifact and strip step (this is not an index burn)",
+    )
   local: dict[str, str] = {}
   for name in (wheel, sdist):
     path = dist_dir / name

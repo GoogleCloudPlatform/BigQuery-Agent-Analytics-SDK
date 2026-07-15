@@ -60,21 +60,24 @@ minutes; the release then WAITS at two manual approval gates
    writes `SHA256SUMS`.
 4. **`github-release`** — creates a **draft** release with all
    artifacts + checksums and the pinned image reference in the body.
-   Nothing is customer-visible yet. A stale draft from an earlier
-   attempt is deleted ONLY when PyPI **and** TestPyPI both return an
-   explicit 404 for the version: once an index accepted files, the
-   existing draft is their only byte-identical counterpart (a rebuilt
-   anchor embeds new timestamps and can never byte-match), so the
-   draft is preserved and the failed jobs must be re-run from the
-   **original** workflow attempt — never a full rerun. Drafts are
-   discovered via the authenticated release LIST (the by-tag endpoint
-   returns only published releases) and index absence uses fresh
-   cache-busted lookups (PyPI responses are CDN-cached). The workflow
-   **never deletes a release automatically**: GitHub has no
-   conditional delete, so a GET-then-DELETE pair races publication.
-   When only a stale draft blocks a rerun (both indexes 404), the job
-   fails with instructions to verify the draft is still unpublished,
-   delete it manually, and re-run the job.
+   Nothing is customer-visible yet. The guard
+   (`scripts/guard_existing_release.py`) **never deletes a release**:
+   GitHub has no conditional delete, so a GET-then-DELETE pair races
+   publication. It first classifies the world: drafts are discovered
+   via the authenticated release LIST (the by-tag endpoint returns
+   only published releases), and each index is byte-validated against
+   the job's own dist files — `absent` (fresh cache-busted explicit
+   404; PyPI responses are CDN-cached), `exact` (the index holds
+   exactly the current bytes, i.e. an original-attempt rerun), or
+   `deviating` (a full rerun's rebuilt bytes, or anything tampered —
+   the version is burned). A stale draft with both indexes absent
+   BLOCKS the job with instructions to verify the draft is still
+   unpublished, delete it manually, and re-run; once an index accepted
+   files, the draft is their only byte-identical counterpart, so it is
+   preserved and the failed jobs must be re-run from the **original**
+   workflow attempt — never a full rerun. The one automatic recovery:
+   no release + production absent + TestPyPI byte-exact recreates the
+   missing draft (the upload stages are already satisfied).
 5. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
    Trusted Publishing. No `skip-existing`: if the version already
    exists there with ANY deviation, the job fails loudly — that
@@ -102,10 +105,16 @@ minutes; the release then WAITS at two manual approval gates
    assets, and the release's **visibility** (a draft accidentally
    published during an approval pause is classified
    `premature-publication` — contain it first, never "keep the
-   draft"); verifies the repository's **immutable-releases setting is
-   enabled BEFORE publishing anything** (GitHub does not apply
-   immutability retroactively, so a release published while the
-   setting is off stays permanently mutable and can only be burned);
+   draft"); classifies the exact release object FIRST (an already
+   public mutable release fails with burn guidance immediately), then
+   verifies the repository's **immutable-releases setting is enabled
+   BEFORE publishing a draft** (GitHub does not apply immutability
+   retroactively, so a release published while the setting is off
+   stays permanently mutable and can only be burned) — that policy
+   read requires repository **Administration: read**, which the
+   workflow `GITHUB_TOKEN` can never carry, so it uses a dedicated
+   GitHub App installation token (see one-time setup below) while
+   every other API call keeps the job token;
    publishes ONLY on complete state via a snapshot-bound, **ID-based**
    edit — the exact release object's asset digests AND canonical
    title/body/prerelease are re-verified against the anchor
@@ -248,6 +257,18 @@ off, because GitHub applies immutability only at publish time — a
 release published while the setting is off keeps mutable assets and
 `SHA256SUMS` forever, replaceable by anything holding
 `contents: write`.
+
+Policy-read credential (one-time): the immutable-releases check calls
+`GET /repos/{repo}/immutable-releases`, which requires repository
+**Administration: read** — a permission the workflow `GITHUB_TOKEN`
+can never be granted. Create a GitHub App whose ONLY repository
+permission is Administration: read, install it on this repository
+only, and set the repository variable `BQAA_RELEASE_POLICY_APP_ID`
+plus the secret `BQAA_RELEASE_POLICY_APP_PRIVATE_KEY`. The workflow
+mints a short-lived installation token from these only when a
+publication is about to happen; all other API calls keep the standard
+job token. Until they are configured, `finalize` fails at the token
+mint with a clear error and the release stays a draft.
 
 Until both publishers are configured, the `publish-testpypi` and
 `publish-pypi` jobs will fail with a clear error. The `build` and

@@ -376,34 +376,65 @@ jobs:
             echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
             exit 1
           elif [ "$COUNT" = "1" ]; then
-            if [ "$(jq -r '.[0].draft' <<<"$MATCHES")" = "true" ]; then
-              RELEASE_STATE=draft
-            else
-              RELEASE_STATE=published
-            fi
+            # The draft flag must be a BOOLEAN (#356 round 14): a
+            # missing/null/string value is an indeterminate API state,
+            # never silently classified either way.
+            DRAFT_RAW=$(jq -r '.[0].draft | if type == "boolean" then tostring else "invalid" end' <<<"$MATCHES")
+            case "$DRAFT_RAW" in
+              true) RELEASE_STATE=draft ;;
+              false) RELEASE_STATE=published ;;
+              *)
+                echo "::error::release draft flag is not a Boolean — refusing to classify"
+                exit 1
+                ;;
+            esac
           fi
-          # Explicit 404 = absent, 200 = present; anything else (auth,
-          # rate limit, transport) is indeterminate and fails here so it
-          # can never reach the guard as a fake absence.
+          # Index states are BYTE-VALIDATED (#356 round 14): 404 =
+          # absent; an HTTP-200 body is compared against the CURRENT
+          # dist by the PR-tested check_index_publication.py — exact
+          # (original-attempt bytes) vs deviating (burned). Anything
+          # else (auth, rate limit, transport, malformed body) is
+          # indeterminate and fails here so it can never reach the
+          # guard as a fake state.
+          mkdir -p gate-dist
+          cp "dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl" \
+             "dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz" gate-dist/
           BUST="bqaa-fresh=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s)"
-          index_state() {
-            local http
+          index_state() {  # $1 = URL, $2 = scratch prefix
+            local http status
             if ! http=$(curl -sS --connect-timeout 10 --max-time 30 \
-                -o /dev/null -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
+                -o "$2.json" -w '%{http_code}' "${1}?${BUST}" 2> curl.err); then
               echo "::error::index lookup transport failure (${1}): $(head -1 curl.err)" >&2
               return 1
             fi
             case "$http" in
-              404) echo absent ;;
-              200) echo present ;;
+              404)
+                echo absent
+                return 0
+                ;;
+              200) ;;
               *)
                 echo "::error::index lookup indeterminate (${1}, HTTP ${http})" >&2
                 return 1
                 ;;
             esac
+            set +e
+            python3 producers/scripts/check_index_publication.py \
+              --version "${VERSION}" --dist-dir gate-dist \
+              --index-json "$2.json" > "$2.check"
+            set -e
+            status=$(grep '^status=' "$2.check" | cut -d= -f2 || true)
+            case "$status" in
+              satisfied) echo exact ;;
+              conflict) echo deviating ;;
+              *)
+                echo "::error::index state INDETERMINATE (${1}): $(grep '^detail=' "$2.check" | cut -d= -f2- || true)" >&2
+                return 1
+                ;;
+            esac
           }
-          PYPI_STATE=$(index_state "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json")
-          TESTPYPI_STATE=$(index_state "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json")
+          PYPI_STATE=$(index_state "https://pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" pypi-gate)
+          TESTPYPI_STATE=$(index_state "https://test.pypi.org/pypi/bigquery-agent-analytics-tracing/${VERSION}/json" testpypi-gate)
           set +e
           python3 producers/scripts/guard_existing_release.py \
             --release-state "$RELEASE_STATE" \
@@ -727,58 +758,48 @@ jobs:
             exit 1
           elif [ "$COUNT" = "1" ]; then
             RELEASE_ID=$(jq -r '.[0].id' <<<"$MATCHES")
-            if [ "$(jq -r '.[0].draft' <<<"$MATCHES")" = "false" ]; then
+            # The draft flag must be a BOOLEAN (#356 round 14): a
+            # missing/null/string value is indeterminate, never
+            # silently classified as a draft.
+            DRAFT_RAW=$(jq -r '.[0].draft | if type == "boolean" then tostring else "invalid" end' <<<"$MATCHES")
+            if [ "$DRAFT_RAW" = "false" ]; then
               PUBLISHED_ARG=--release-published
+            elif [ "$DRAFT_RAW" != "true" ]; then
+              echo "::error::release draft flag is not a Boolean — refusing to classify"
+              exit 1
             fi
             mkdir -p release
-            # Validate asset METADATA before any byte is streamed (#356
-            # round 13): release metadata is operator/attacker
-            # influencable, and downloading arbitrary extras could
-            # exhaust runner disk or the job timeout before the tested
-            # reconciler ever classifies the set. Only the four expected
-            # hardcoded names with sane sizes are downloaded, by asset
-            # ID, to hardcoded destinations; unexpected or oversized
-            # assets become EMPTY placeholders so the reconciler still
-            # sees the exact-set / byte-identity mismatch and emits its
-            # tested classification.
-            ASSETS=$(jq -c '.[0].assets | map({id, name, size})' <<<"$MATCHES")
-            if ! jq -e 'all(.[]; (.id | type == "number") and (.name | type == "string") and ((.name | length) > 0) and (.size | type == "number") and (.size >= 0))' >/dev/null <<<"$ASSETS"; then
-              echo "::error::release asset metadata is malformed — refusing to download"
+            # The asset trust boundary is PR-TESTED code, not inline
+            # shell (#356 round 14): plan_asset_downloads.py validates
+            # the metadata (well-formed ids/names/sizes, no duplicates,
+            # no unsafe names) and plans downloads ONLY for the four
+            # expected hardcoded names within the size cap; unexpected
+            # or oversized assets become EMPTY placeholders so the
+            # tested reconciler still sees the exact-set/byte mismatch
+            # without unbounded downloads (#356 round 13).
+            jq '.[0].assets' <<<"$MATCHES" > assets-metadata.json
+            set +e
+            python3 producers/scripts/plan_asset_downloads.py \
+              --version "${VERSION}" --assets-json assets-metadata.json > plan.out
+            RC=$?
+            set -e
+            if [ $RC -ne 0 ]; then
+              echo "::error::$(grep '^detail=' plan.out | cut -d= -f2-)"
               exit 1
             fi
-            if [ "$(jq -r '[.[].name] | length - (unique | length)' <<<"$ASSETS")" != "0" ]; then
-              echo "::error::duplicate asset names on the release — ambiguous, resolve manually"
-              exit 1
-            fi
-            if jq -r '.[].name' <<<"$ASSETS" | grep -qEv '^[A-Za-z0-9._+-]+$'; then
-              echo "::error::release carries an asset with an unsafe name — refusing to touch it"
-              exit 1
-            fi
-            WHEEL_A="bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl"
-            SDIST_A="bigquery_agent_analytics_tracing-${VERSION}.tar.gz"
-            PLUGIN_A="bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz"
-            MAX_ASSET_BYTES=104857600  # 100 MiB — far above any real artifact
-            jq -c '.[]' <<<"$ASSETS" | while read -r entry; do
-              asset_id=$(jq -r '.id' <<<"$entry")
-              asset_name=$(jq -r '.name' <<<"$entry")
-              asset_size=$(jq -r '.size' <<<"$entry")
-              case "$asset_name" in
-                "$WHEEL_A"|"$SDIST_A"|"$PLUGIN_A"|SHA256SUMS)
-                  if [ "$asset_size" -le "$MAX_ASSET_BYTES" ]; then
-                    gh api -H "Accept: application/octet-stream" \
-                      "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
-                      > "release/${asset_name}"
-                  else
-                    echo "asset ${asset_name} exceeds the size cap — placeholder for classification"
-                    : > "release/${asset_name}"
-                  fi
+            while IFS=$'\t' read -r action f1 f2; do
+              case "$action" in
+                download)
+                  gh api -H "Accept: application/octet-stream" \
+                    "repos/${GITHUB_REPOSITORY}/releases/assets/${f1}" \
+                    > "release/${f2}"
                   ;;
-                *)
-                  echo "unexpected asset ${asset_name} — not downloading (placeholder for exact-set classification)"
-                  : > "release/${asset_name}"
+                placeholder)
+                  echo "asset ${f1} not downloaded — empty placeholder for exact-set/byte classification"
+                  : > "release/${f1}"
                   ;;
               esac
-            done
+            done < plan.out
             RELEASE_ARG="--release-dir release/"
             echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
           fi
@@ -854,12 +875,34 @@ jobs:
           fi
           echo "state=${STATE}" >> "$GITHUB_ENV"
 
+      - name: Mint the policy-read token (GitHub App, Administration:read)
+        # GET /repos/{repo}/immutable-releases requires repository
+        # Administration:read — a permission the workflow GITHUB_TOKEN
+        # can NEVER carry (it is not among the workflow-grantable
+        # permissions), so the round-13 preflight would fail on every
+        # release with the job token (#356 round 14). A narrowly scoped
+        # GitHub App installation token (ONLY Administration:read) is
+        # minted, and ONLY when a publication will actually happen;
+        # every other API call keeps the standard job token. One-time
+        # setup: create the App, install it on this repository, and set
+        # BQAA_RELEASE_POLICY_APP_ID (variable) +
+        # BQAA_RELEASE_POLICY_APP_PRIVATE_KEY (secret) — see
+        # RELEASING.md.
+        id: policy_token
+        if: env.state == 'complete'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ vars.BQAA_RELEASE_POLICY_APP_ID }}
+          private-key: ${{ secrets.BQAA_RELEASE_POLICY_APP_PRIVATE_KEY }}
+          permission-administration: read
+
       - name: Publish the draft release (complete state only, never as Latest)
         # The state→action mapping lives in reconcile_release.dispatch()
         # (unit-tested, exhaustive, fail-closed — an unknown or
         # invalid-anchor state can never fall through with exit 0).
         env:
           GH_TOKEN: ${{ github.token }}
+          ADMIN_GH_TOKEN: ${{ steps.policy_token.outputs.token }}
         run: |
           set -euo pipefail
           VERDICT=$(python3 -c "
@@ -887,7 +930,8 @@ jobs:
               --anchor-dir anchor/ \
               --tag "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
-              --release-id "${RELEASE_ID}"
+              --release-id "${RELEASE_ID}" \
+              --admin-token-env ADMIN_GH_TOKEN
             echo "release published with re-anchored body: ${MESSAGE}"
           else
             echo "::error::${MESSAGE}"

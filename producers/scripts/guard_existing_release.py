@@ -27,11 +27,19 @@ DELETE would remove a customer-visible release (and, with immutable
 releases, permanently retire the tag name). When a stale draft is the
 only thing standing in the way (both package indexes return an
 explicit 404), the guard FAILS with instructions for the operator to
-verify and delete the draft manually, then re-run this job. Once
-either index holds files, the draft must be preserved and the operator
-must rerun the FAILED jobs from the original workflow attempt (which
-re-downloads the original build artifact) instead of a full rerun. A
-published release always fails: that version is burned.
+verify and delete the draft manually, then re-run this job.
+
+Index states are BYTE-VALIDATED (#356 round 14): the caller runs
+check_index_publication.py against the job's dist/ artifacts, so each
+index is `absent` (explicit 404), `exact` (the index holds exactly the
+current wheel+sdist bytes), or `deviating` (anything else — burned).
+That makes the guard consistent with the reconciler's recoveries: an
+exact TestPyPI publication with the draft missing PROCEEDS to recreate
+the draft from the preserved original-attempt artifact (a full rerun
+naturally shows `deviating` because rebuilt bytes differ), while
+production files always make the missing-release / preserved-draft
+paths authoritative. A published release always fails: that version is
+burned.
 """
 
 from __future__ import annotations
@@ -41,7 +49,7 @@ import dataclasses
 from typing import Callable
 
 RELEASE_STATES = ("absent", "draft", "published")
-INDEX_STATES = ("absent", "present")
+INDEX_STATES = ("absent", "exact", "deviating")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -55,9 +63,11 @@ def decide(release_state: str, pypi: str, testpypi: str) -> GuardAction:
   """Exhaustive, fail-closed decision over the release × index matrix.
 
   ``release_state``: absent | draft | published (from the release API).
-  ``pypi`` / ``testpypi``: absent (explicit 404) | present (HTTP 200).
-  Indeterminate lookups must be rejected by the CALLER — they never
-  reach this function, and any unknown token fails closed here."""
+  ``pypi`` / ``testpypi``: absent (explicit 404) | exact (the index
+  holds exactly the current dist bytes, per check_index_publication) |
+  deviating (any validated mismatch). Indeterminate lookups must be
+  rejected by the CALLER — they never reach this function, and any
+  unknown token fails closed here."""
   if (
       release_state not in RELEASE_STATES
       or pypi not in INDEX_STATES
@@ -76,28 +86,57 @@ def decide(release_state: str, pypi: str, testpypi: str) -> GuardAction:
         "release is already PUBLISHED — the version is burned; bump and"
         " cut a new tag",
     )
-  indexed = [
+  deviating = [
       name
       for name, state in (("PyPI", pypi), ("TestPyPI", testpypi))
-      if state == "present"
+      if state == "deviating"
   ]
-  if indexed:
-    where = " and ".join(indexed)
+  if deviating:
+    where = " and ".join(deviating)
+    return GuardAction(
+        False,
+        1,
+        f"{where} holds files for this version that DIFFER from the"
+        " current dist bytes — the version is burned there (bump the"
+        " version, rebuild, and cut a new tag); any existing draft is"
+        " preserved for forensics",
+    )
+  if pypi == "exact":
     if release_state == "draft":
       return GuardAction(
           False,
           1,
-          f"{where} already accepted files for this version — the existing"
-          " draft is PRESERVED (a rebuilt anchor can never byte-match"
-          " published bytes); rerun the FAILED jobs from the ORIGINAL"
+          "PyPI already accepted exactly these bytes — the existing"
+          " draft is PRESERVED; rerun the FAILED jobs from the ORIGINAL"
           " workflow attempt instead of a full rerun",
       )
     return GuardAction(
         False,
         1,
-        f"{where} holds files for this version but no GitHub release"
-        " exists — a cross-surface partial; do NOT rebuild at this"
-        " version: follow the finalize yank/version-burn recovery",
+        "PyPI holds validated files for this version but no GitHub"
+        " release exists — a cross-surface partial; do NOT rebuild at"
+        " this version: follow the finalize yank/version-burn recovery",
+    )
+  if testpypi == "exact":
+    if release_state == "draft":
+      return GuardAction(
+          False,
+          1,
+          "TestPyPI already accepted exactly these bytes — the existing"
+          " draft is PRESERVED; rerun the FAILED jobs from the ORIGINAL"
+          " workflow attempt instead of a full rerun",
+      )
+    # Production is absent, TestPyPI is byte-exact, and the release is
+    # missing: this is the reconciler's missing-all recovery — the
+    # draft is recreated from the preserved artifact and the upload
+    # stages are already satisfied (#356 round 14 cross-module
+    # consistency).
+    return GuardAction(
+        True,
+        0,
+        "TestPyPI already holds exactly the current bytes and no release"
+        " exists — recreating the draft; the TestPyPI upload stage will"
+        " be satisfied without re-upload",
     )
   if release_state == "draft":
     return GuardAction(

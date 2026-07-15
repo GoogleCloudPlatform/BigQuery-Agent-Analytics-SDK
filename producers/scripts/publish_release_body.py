@@ -12,32 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Snapshot-bound publish of the reconciled release (#356 rounds 12-13).
+"""Snapshot-bound publish of the reconciled release (#356 rounds 12-14).
 
 Publication must be bound to the exact release object that was
 reconciled, not to the mutable tag: anything holding ``contents:
 write`` can replace draft assets between reconciliation and publish.
 This helper therefore operates on the RELEASE ID:
 
-  0. PREREQUISITE: the repository's immutable-releases setting
+  1. fetch the release by ID; require the same id/tag, a BOOLEAN
+     ``draft`` flag, and an asset set exactly equal to the anchor:
+     same names, each asset's API ``digest`` equal to the sha256 of
+     the anchor file. The release state is classified FIRST (#356
+     round 14): an already-public mutable release must get burn
+     guidance immediately, never draft-recovery advice.
+  2. for a DRAFT only: the repository's immutable-releases setting
      (``GET /repos/{repo}/immutable-releases``) must be ENABLED before
      anything becomes public — GitHub applies immutability only to
      releases published while the setting is on, so enabling it later
      can never retroactively protect an already-published release.
-     Nothing is published while the setting is off.
-  1. fetch the release by ID; require the same id/tag and an asset set
-     exactly equal to the anchor: same names, each asset's API
-     ``digest`` equal to the sha256 of the anchor file;
-  2. render the canonical body from the ANCHOR wheel and publish via
+     That endpoint requires repository Administration:read, which the
+     workflow ``GITHUB_TOKEN`` can never carry — the caller must
+     supply a separate, narrowly scoped credential (a GitHub App
+     installation token with ONLY Administration:read) via
+     ``--admin-token-env``; every other API call keeps the standard
+     job token.
+  3. render the canonical body from the ANCHOR wheel and publish via
      ``PATCH /releases/{id}`` with a JSON ``--input`` payload (never
-     ``-f field=@file`` — gh raw fields do not read files, they send
-     the literal string; reproduced in review round 13) reasserting
-     tag, title, body, ``draft=false``, ``prerelease=false``,
-     ``make_latest="false"``;
-  3. re-fetch by ID and re-verify the snapshot AND the canonical
-     editable metadata (title, body, prerelease) on the published
-     object, assert it is IMMUTABLE (defense in depth behind step 0),
-     and assert it did not become the repository's Latest.
+     ``-f field=@file`` — gh raw fields send the literal string)
+     reasserting tag, title, body, ``draft=false``,
+     ``prerelease=false``, ``make_latest="false"``;
+  4. re-fetch by ID and re-verify the snapshot AND the canonical
+     editable metadata (title, body, prerelease), assert the object is
+     IMMUTABLE, and assert it did not become the repository's Latest —
+     tolerating ONLY an explicit no-Latest 404; any other Latest
+     lookup failure fails closed.
 
 Idempotent rerun: a published, immutable release with a verified asset
 snapshot is checked against the canonical metadata too — immutable
@@ -53,6 +61,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -62,14 +71,44 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import release_image_tool
 import render_release_notes
 
-RunGh = Callable[[list[str]], tuple[int, str]]
+# (returncode, stdout, stderr) — stderr is part of the contract so the
+# explicit no-Latest HTTP 404 can be told apart from auth/rate-limit/
+# transport failures (#356 round 14: never fail open on those).
+RunGh = Callable[[list[str]], tuple[int, str, str]]
 
 
-def _run_gh(argv: list[str]) -> tuple[int, str]:
+def _run_gh(argv: list[str]) -> tuple[int, str, str]:
   proc = subprocess.run(argv, check=False, capture_output=True, text=True)
   if proc.stderr:
     sys.stderr.write(proc.stderr)
-  return proc.returncode, proc.stdout
+  return proc.returncode, proc.stdout, proc.stderr
+
+
+def make_env_token_run_gh(token_env: str) -> RunGh:
+  """A gh runner that authenticates with the token held in the given
+  environment variable — used ONLY for the Administration:read policy
+  lookup, keeping the broad-permission credential away from every
+  other call."""
+
+  def run(argv: list[str]) -> tuple[int, str, str]:
+    token = os.environ.get(token_env, "")
+    if not token:
+      return (
+          1,
+          "",
+          f"admin token environment variable {token_env!r} is empty or"
+          " unset — the immutable-releases policy read needs a GitHub App"
+          " installation token with Administration:read",
+      )
+    env = dict(os.environ, GH_TOKEN=token)
+    proc = subprocess.run(
+        argv, check=False, capture_output=True, text=True, env=env
+    )
+    if proc.stderr:
+      sys.stderr.write(proc.stderr)
+    return proc.returncode, proc.stdout, proc.stderr
+
+  return run
 
 
 def expected_asset_digests(
@@ -110,6 +149,13 @@ def verify_snapshot(
   if release.get("tag_name") != tag:
     problems.append(
         f"tag changed: expected {tag!r}, got {release.get('tag_name')!r}"
+    )
+  if not isinstance(release.get("draft"), bool):
+    # A missing/None/string draft flag must never fall through to the
+    # publish edit (#356 round 14) — visibility is part of the
+    # fail-closed snapshot contract.
+    problems.append(
+        f"draft flag is {release.get('draft')!r}, expected a Boolean"
     )
   assets = release.get("assets")
   if not isinstance(assets, list):
@@ -175,9 +221,10 @@ def canonical_problems(
 
 
 def _fetch_json(repo_path: str, run_gh: RunGh) -> tuple[dict | None, str]:
-  rc, out = run_gh(["gh", "api", repo_path])
+  rc, out, err = run_gh(["gh", "api", repo_path])
   if rc != 0:
-    return None, f"fetch of {repo_path} failed (exit {rc})"
+    first = err.strip().splitlines()[0] if err.strip() else f"exit {rc}"
+    return None, f"fetch of {repo_path} failed: {first}"
   try:
     obj = json.loads(out)
     if not isinstance(obj, dict):
@@ -187,17 +234,28 @@ def _fetch_json(repo_path: str, run_gh: RunGh) -> tuple[dict | None, str]:
   return obj, ""
 
 
-def _latest_problem(
-    repo: str, release_id: int, run_gh: RunGh, echo: Callable[[str], None]
-) -> str | None:
+def _latest_problem(repo: str, release_id: int, run_gh: RunGh) -> str | None:
   """The tracing release must never be the repository's Latest (that
-  belongs to the SDK's vX.Y.Z releases)."""
-  latest, why = _fetch_json(f"repos/{repo}/releases/latest", run_gh)
-  if latest is None:
-    # No readable Latest (e.g. no other published release yet) — the
-    # payload's make_latest="false" is the enforcement; note and go on.
-    echo(f"note: Latest lookup unavailable ({why}); relying on make_latest")
-    return None
+  belongs to the SDK's vX.Y.Z releases). ONLY an explicit no-Latest
+  HTTP 404 passes; auth/rate-limit/transport/malformed responses fail
+  closed (#356 round 14) — `make_latest=false` constrains only our own
+  PATCH, it proves nothing about the current Latest pointer."""
+  rc, out, err = run_gh(["gh", "api", f"repos/{repo}/releases/latest"])
+  if rc != 0:
+    if "HTTP 404" in err:
+      # The repository has no Latest at all — ours certainly is not it.
+      return None
+    first = err.strip().splitlines()[0] if err.strip() else f"exit {rc}"
+    return (
+        f"Latest lookup failed ({first}) — refusing to assume the tracing"
+        " release did not become the repository's Latest"
+    )
+  try:
+    latest = json.loads(out)
+    if not isinstance(latest, dict):
+      raise ValueError(f"expected an object, got {type(latest).__name__}")
+  except ValueError as exc:
+    return f"Latest lookup returned an unparseable body ({exc})"
   if latest.get("id") == release_id:
     return (
         "this release became the repository's Latest — it must not"
@@ -216,6 +274,7 @@ def publish(
     repo: str,
     release_id: int,
     out_dir: pathlib.Path,
+    admin_run_gh: RunGh,
     run_gh: RunGh = _run_gh,
     echo: Callable[[str], None] = print,
 ) -> int:
@@ -237,24 +296,10 @@ def publish(
   body_path = out_dir / "release_body.md"
   body_path.write_text(expected_body)
 
-  # 0. Immutability is a PREREQUISITE, not a postcondition: GitHub does
-  # not retroactively protect releases published while the setting was
-  # off, so nothing may become public until the policy is attested.
-  setting, why = _fetch_json(f"repos/{repo}/immutable-releases", run_gh)
-  if setting is None:
-    echo(f"::error::immutable-releases policy check failed: {why}")
-    return 1
-  if setting.get("enabled") is not True:
-    echo(
-        "::error::the repository's immutable-releases setting is DISABLED"
-        " — publishing now would create a permanently mutable release"
-        " (enabling the setting later is NOT retroactive). Enable it"
-        " (Settings → General → Releases → immutable releases) and re-run"
-        " finalize; the release is still an unpublished draft."
-    )
-    return 1
-
-  # 1. The pre-publish snapshot: the exact object reconciliation saw.
+  # 1. Classify the EXACT release object FIRST (#356 round 14): a
+  # published mutable release needs immediate burn/containment
+  # guidance — checking the repository setting first would mask it
+  # behind false "still a draft" advice.
   release, why = _fetch_json(f"repos/{repo}/releases/{release_id}", run_gh)
   if release is None:
     echo(f"::error::{why}")
@@ -269,7 +314,7 @@ def publish(
     )
     return 1
 
-  if release.get("draft") is False:
+  if release["draft"] is False:
     if release.get("immutable") is not True:
       echo(
           "::error::this release was PUBLISHED while the repository was"
@@ -299,7 +344,7 @@ def publish(
       repair_path.write_text(
           json.dumps({"name": expected_name, "body": expected_body})
       )
-      rc, _ = run_gh(
+      rc, _, _ = run_gh(
           [
               "gh",
               "api",
@@ -326,7 +371,7 @@ def publish(
             f"::error::metadata repair did not converge: {'; '.join(problems)}"
         )
         return 1
-    latest_problem = _latest_problem(repo, release_id, run_gh, echo)
+    latest_problem = _latest_problem(repo, release_id, run_gh)
     if latest_problem:
       echo(f"::error::{latest_problem}")
       return 1
@@ -336,7 +381,26 @@ def publish(
     )
     return 0
 
-  # 2. Publish the EXACT object by ID with a JSON payload. Never
+  # 2. The release is a DRAFT: immutability is a PREREQUISITE for
+  # publication, read with the narrowly scoped Administration:read
+  # credential — the workflow GITHUB_TOKEN can never carry that
+  # permission (#356 round 14), and it must not be broadened: only
+  # this single policy read uses the admin token.
+  setting, why = _fetch_json(f"repos/{repo}/immutable-releases", admin_run_gh)
+  if setting is None:
+    echo(f"::error::immutable-releases policy check failed: {why}")
+    return 1
+  if setting.get("enabled") is not True:
+    echo(
+        "::error::the repository's immutable-releases setting is DISABLED"
+        " — publishing now would create a permanently mutable release"
+        " (enabling the setting later is NOT retroactive). Enable it"
+        " (Settings → General → Releases → immutable releases) and re-run"
+        " finalize; the release is still an unpublished draft."
+    )
+    return 1
+
+  # 3. Publish the EXACT object by ID with a JSON payload. Never
   # `-f field=@file`: gh raw fields send the literal string, only a
   # JSON --input body carries the rendered notes.
   payload_path = out_dir / "publish_payload.json"
@@ -352,7 +416,7 @@ def publish(
           }
       )
   )
-  rc, _ = run_gh(
+  rc, _, _ = run_gh(
       [
           "gh",
           "api",
@@ -366,8 +430,8 @@ def publish(
   if rc != 0:
     return rc
 
-  # 3. Post-publish: same snapshot AND canonical metadata, now
-  # published — and immutable (defense in depth behind the step-0
+  # 4. Post-publish: same snapshot AND canonical metadata, now
+  # published — and immutable (defense in depth behind the step-2
   # prerequisite).
   release, why = _fetch_json(f"repos/{repo}/releases/{release_id}", run_gh)
   if release is None:
@@ -393,7 +457,7 @@ def publish(
         " delete the release, yank any index files, bump and re-tag."
     )
     return 1
-  latest_problem = _latest_problem(repo, release_id, run_gh, echo)
+  latest_problem = _latest_problem(repo, release_id, run_gh)
   if latest_problem:
     echo(f"::error::{latest_problem}")
     return 1
@@ -412,6 +476,13 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--tag", required=True)
   parser.add_argument("--repo", required=True)
   parser.add_argument("--release-id", type=int, required=True)
+  parser.add_argument(
+      "--admin-token-env",
+      required=True,
+      help="Name of the environment variable holding a GitHub App"
+      " installation token with Administration:read — used ONLY for the"
+      " immutable-releases policy lookup.",
+  )
   parser.add_argument("--out-dir", type=pathlib.Path, default=pathlib.Path("."))
   args = parser.parse_args(argv)
   return publish(
@@ -422,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
       repo=args.repo,
       release_id=args.release_id,
       out_dir=args.out_dir,
+      admin_run_gh=make_env_token_run_gh(args.admin_token_env),
   )
 
 

@@ -127,6 +127,22 @@ def test_invalid_schema_is_indeterminate_not_a_burn(tmp_path):
     assert "burn" not in detail.replace("not an index burn", "")
 
 
+def test_extra_local_distribution_blocks_the_upload(tmp_path):
+  # Round-14 reproduction: the uploader publishes EVERY file left in
+  # dist/, so a third local wheel returning `absent` would be uploaded
+  # irreversibly at this version before finalize could reject it. The
+  # local publish set must be exactly wheel + sdist.
+  dist = _dist(tmp_path)
+  (dist / "extra-platform.whl").write_bytes(b"surprise")
+  for index in (None, _index(dist)):
+    status, detail = check_index_publication.check(
+        version=VERSION, dist_dir=dist, index=index
+    )
+    assert status == "indeterminate"
+    assert "extra-platform.whl" in detail
+    assert "irreversibly" in detail
+
+
 def test_missing_local_distribution_is_indeterminate(tmp_path):
   # A broken build artifact is not an index burn either — investigate
   # the artifact rather than re-tag.

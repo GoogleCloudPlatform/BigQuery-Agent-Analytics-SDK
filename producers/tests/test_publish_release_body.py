@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Snapshot-bound publish path (#356 rounds 12-13): the immutable
-policy is a PREREQUISITE checked before anything becomes public, the
-release is fetched BY ID, asset digests AND canonical editable metadata
-are verified on every snapshot, and the publish carries the rendered
-notes in a JSON --input payload (gh raw fields do not read @files)."""
+"""Snapshot-bound publish path (#356 rounds 12-14): the release state
+is classified FIRST (a public mutable release gets burn guidance, not
+draft advice), the immutable policy gates only the draft publication
+path and is read with a SEPARATE Administration:read credential (the
+job GITHUB_TOKEN can never carry it), the payload is JSON --input, the
+draft flag must be Boolean, and the Latest assertion tolerates only an
+explicit no-Latest 404."""
 
 import hashlib
 import json
@@ -113,18 +115,15 @@ def _release_json(
 
 
 class FakeGh:
-  """Routes fetches by path; records every call.
+  """The standard job-token runner: serves /releases/{id} from a queue
+  and /releases/latest; REFUSES the admin-only policy path."""
 
-  ``releases`` is a queue served for /releases/{id} fetches. ``latest``
-  is the /releases/latest object (None → the endpoint errors).
-  ``setting`` is the /immutable-releases object (a tuple = raw (rc,
-  out)). PATCH calls return ``patch_rc``."""
-
-  def __init__(self, releases=(), *, setting=None, latest="other", patch_rc=0):
+  def __init__(self, releases=(), *, latest="other", patch_rc=0):
     self.releases = list(releases)
-    self.setting = {"enabled": True} if setting is None else setting
     if latest == "other":
-      latest = {"id": RELEASE_ID + 1}
+      latest = (0, json.dumps({"id": RELEASE_ID + 1}), "")
+    elif latest == "missing":
+      latest = (1, "", "gh: HTTP 404: Not Found")
     self.latest = latest
     self.patch_rc = patch_rc
     self.calls = []
@@ -132,27 +131,44 @@ class FakeGh:
   def __call__(self, argv):
     self.calls.append(argv)
     if "PATCH" in argv:
-      return self.patch_rc, ""
+      return self.patch_rc, "", ""
     path = argv[2]
-    if path.endswith("/immutable-releases"):
-      if isinstance(self.setting, tuple):
-        return self.setting
-      return 0, json.dumps(self.setting)
+    assert "immutable-releases" not in path, (
+        "the policy read must NEVER use the job token — it requires the"
+        " Administration:read credential"
+    )
     if path.endswith("/releases/latest"):
-      if self.latest is None:
-        return 1, ""
-      return 0, json.dumps(self.latest)
+      return self.latest
     item = self.releases.pop(0)
     if isinstance(item, tuple):
       return item
-    return 0, json.dumps(item)
+    return 0, json.dumps(item), ""
 
   @property
   def patch_calls(self):
     return [c for c in self.calls if "PATCH" in c]
 
 
-def _publish(tmp_path, gh, out=None):
+class FakeAdminGh:
+  """The Administration:read runner: serves ONLY the policy path."""
+
+  def __init__(self, setting=None):
+    self.setting = {"enabled": True} if setting is None else setting
+    self.calls = []
+
+  def __call__(self, argv):
+    self.calls.append(argv)
+    path = argv[2]
+    assert path.endswith("/immutable-releases"), (
+        "the Administration:read credential must be used ONLY for the"
+        f" policy read, got {path}"
+    )
+    if isinstance(self.setting, tuple):
+      return self.setting
+    return 0, json.dumps(self.setting), ""
+
+
+def _publish(tmp_path, gh, admin=None, out=None):
   return publish_release_body.publish(
       version=VERSION,
       public_image=PUBLIC_IMAGE,
@@ -162,6 +178,7 @@ def _publish(tmp_path, gh, out=None):
       release_id=RELEASE_ID,
       out_dir=tmp_path,
       run_gh=gh,
+      admin_run_gh=admin if admin is not None else FakeAdminGh(),
       echo=(out.append if out is not None else print),
   )
 
@@ -174,7 +191,8 @@ def test_happy_path_publishes_by_id_with_json_payload(tmp_path):
           _release_json(anchor, draft=False, immutable=True),
       ]
   )
-  rc = _publish(tmp_path, gh)
+  admin = FakeAdminGh()
+  rc = _publish(tmp_path, gh, admin)
   assert rc == 0
   (patch,) = gh.patch_calls
   assert f"repos/{REPO}/releases/{RELEASE_ID}" in patch  # by ID, not tag
@@ -190,12 +208,13 @@ def test_happy_path_publishes_by_id_with_json_payload(tmp_path):
       "prerelease": False,
       "make_latest": "false",
   }
+  # The policy read happened exactly once, on the admin credential.
+  assert len(admin.calls) == 1
 
 
 def test_payload_carries_rendered_notes_not_a_filename(tmp_path):
-  # Reviewer reproduction (#356 round 13): `gh api -f body=@file`
-  # publishes the literal string "@file". The transmitted value must be
-  # the rendered notes themselves, via a JSON --input payload.
+  # Round-13 reproduction: `gh api -f body=@file` publishes the literal
+  # string "@file". The transmitted value must be the rendered notes.
   anchor = _anchor(tmp_path)
   gh = FakeGh(
       [
@@ -214,35 +233,109 @@ def test_payload_carries_rendered_notes_not_a_filename(tmp_path):
   assert not payload["body"].startswith("@")
 
 
-def test_disabled_immutable_setting_blocks_before_anything_is_public(
-    tmp_path,
-):
-  # The prerequisite (#356 round 13): enabling the setting later is NOT
-  # retroactive, so nothing may be published while it is off. The
-  # release must not even be fetched, let alone PATCHed.
+class TestCredentialBoundary:
+  """The immutable-releases endpoint needs Administration:read, which
+  the workflow GITHUB_TOKEN can never carry (#356 round 14 P1)."""
+
+  def test_policy_read_uses_only_the_admin_credential(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [
+            _release_json(anchor, draft=True),
+            _release_json(anchor, draft=False, immutable=True),
+        ]
+    )
+    admin = FakeAdminGh()
+    assert _publish(tmp_path, gh, admin) == 0
+    # The fakes THEMSELVES assert the boundary (FakeGh refuses the
+    # policy path; FakeAdminGh refuses everything else) — here we pin
+    # the call counts: one policy read, nothing else on admin.
+    assert [c[2] for c in admin.calls] == [f"repos/{REPO}/immutable-releases"]
+    assert all("immutable-releases" not in c[2] for c in gh.calls)
+
+  def test_failing_admin_credential_fails_closed(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    out = []
+    gh = FakeGh([_release_json(anchor, draft=True)])
+    admin = FakeAdminGh(
+        setting=(1, "", "gh: HTTP 403: Resource not accessible")
+    )
+    rc = _publish(tmp_path, gh, admin, out)
+    assert rc != 0
+    assert not gh.patch_calls
+    assert any("policy check failed" in line for line in out)
+
+  def test_env_token_runner_fails_without_the_variable(self, monkeypatch):
+    monkeypatch.delenv("BQAA_TEST_ADMIN_TOKEN", raising=False)
+    runner = publish_release_body.make_env_token_run_gh("BQAA_TEST_ADMIN_TOKEN")
+    rc, out, err = runner(["gh", "api", "whatever"])
+    assert rc != 0
+    assert "Administration:read" in err
+
+
+def test_disabled_immutable_setting_blocks_the_draft_publication(tmp_path):
+  # Enabling the setting later is NOT retroactive, so nothing may be
+  # published while it is off — checked AFTER classifying the release
+  # (round 14: the setting must not mask a public mutable release).
   anchor = _anchor(tmp_path)
   out = []
-  gh = FakeGh([_release_json(anchor, draft=True)], setting={"enabled": False})
-  rc = _publish(tmp_path, gh, out)
+  gh = FakeGh([_release_json(anchor, draft=True)])
+  admin = FakeAdminGh(setting={"enabled": False})
+  rc = _publish(tmp_path, gh, admin, out)
   assert rc != 0
   assert not gh.patch_calls
-  assert len(gh.calls) == 1  # only the policy check ran
   assert any("NOT retroactive" in line for line in out)
   assert any("still an unpublished draft" in line for line in out)
 
 
-def test_unreadable_immutable_setting_fails_closed(tmp_path):
-  _anchor(tmp_path)
-  gh = FakeGh([], setting=(1, ""))
-  assert _publish(tmp_path, gh) != 0
+def test_published_mutable_release_gets_burn_guidance_even_with_setting_off(
+    tmp_path,
+):
+  # Round-14 reproduction: setting disabled AND the release already
+  # published mutable — the old order returned "enable and rerun, it's
+  # still a draft", leaving a customer-visible mutable release exposed.
+  # The release state must be classified FIRST.
+  anchor = _anchor(tmp_path)
+  out = []
+  gh = FakeGh([_release_json(anchor, draft=False, immutable=False)])
+  admin = FakeAdminGh(setting={"enabled": False})
+  rc = _publish(tmp_path, gh, admin, out)
+  assert rc != 0
   assert not gh.patch_calls
+  assert not admin.calls  # never reached the policy check
+  assert any("burned" in line for line in out)
+  assert not any("still an unpublished draft" in line for line in out)
+
+
+class TestDraftFlagSchema:
+  """A missing/None/string draft flag must never fall through to the
+  publish edit (#356 round 14)."""
+
+  def test_non_boolean_draft_refuses_to_publish(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    for bad in (None, "false", "true", 0):
+      release = _release_json(anchor, draft=bad)
+      out = []
+      gh = FakeGh([release])
+      rc = _publish(tmp_path, gh, out=out)
+      assert rc != 0, bad
+      assert not gh.patch_calls, bad
+      assert any("Boolean" in line for line in out), bad
+
+  def test_missing_draft_field_refuses_to_publish(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    release = _release_json(anchor)
+    del release["draft"]
+    gh = FakeGh([release])
+    assert _publish(tmp_path, gh) != 0
+    assert not gh.patch_calls
 
 
 def test_tampered_asset_before_publish_refuses_to_publish(tmp_path):
   anchor = _anchor(tmp_path)
   out = []
   gh = FakeGh([_release_json(anchor, tamper=(WHEEL,))])
-  rc = _publish(tmp_path, gh, out)
+  rc = _publish(tmp_path, gh, out=out)
   assert rc != 0
   assert not gh.patch_calls
   assert any("snapshot changed" in line for line in out)
@@ -264,19 +357,6 @@ def test_wrong_release_id_or_tag_refuses_to_publish(tmp_path):
   assert _publish(tmp_path, gh) != 0
 
 
-def test_published_mutable_release_is_burned_not_repaired(tmp_path):
-  # Published while the setting was off: immutability cannot be applied
-  # retroactively, so "enable and re-run" would be false advice.
-  anchor = _anchor(tmp_path)
-  out = []
-  gh = FakeGh([_release_json(anchor, draft=False, immutable=False)])
-  rc = _publish(tmp_path, gh, out)
-  assert rc != 0
-  assert not gh.patch_calls
-  assert any("burned" in line for line in out)
-  assert any("retroactively" in line for line in out)
-
-
 def test_post_publish_tamper_is_detected(tmp_path):
   anchor = _anchor(tmp_path)
   out = []
@@ -286,14 +366,12 @@ def test_post_publish_tamper_is_detected(tmp_path):
           _release_json(anchor, draft=False, immutable=True, tamper=(SDIST,)),
       ]
   )
-  rc = _publish(tmp_path, gh, out)
+  rc = _publish(tmp_path, gh, out=out)
   assert rc != 0
   assert any("post-publish" in line for line in out)
 
 
 def test_post_publish_canonical_drift_is_detected(tmp_path):
-  # The canonical metadata must be verified on the published snapshot
-  # too (#356 round 13) — title/notes stay editable forever.
   anchor = _anchor(tmp_path)
   gh = FakeGh(
       [
@@ -324,7 +402,7 @@ def test_post_publish_mutable_fails_as_defense_in_depth(tmp_path):
           _release_json(anchor, draft=False, immutable=False),
       ]
   )
-  rc = _publish(tmp_path, gh, out)
+  rc = _publish(tmp_path, gh, out=out)
   assert rc != 0
   assert any("MUTABLE" in line for line in out)
 
@@ -340,34 +418,73 @@ def test_still_draft_after_edit_fails(tmp_path):
   assert _publish(tmp_path, gh) != 0
 
 
-def test_becoming_repository_latest_fails(tmp_path):
-  anchor = _anchor(tmp_path)
-  out = []
-  gh = FakeGh(
-      [
-          _release_json(anchor, draft=True),
-          _release_json(anchor, draft=False, immutable=True),
-      ],
-      latest={"id": RELEASE_ID},
-  )
-  rc = _publish(tmp_path, gh, out)
-  assert rc != 0
-  assert any("Latest" in line for line in out)
+class TestLatestAssertion:
+  """Only an explicit no-Latest 404 passes; every other failure fails
+  closed (#356 round 14 — make_latest constrains only our own PATCH)."""
 
+  def test_becoming_repository_latest_fails(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    out = []
+    gh = FakeGh(
+        [
+            _release_json(anchor, draft=True),
+            _release_json(anchor, draft=False, immutable=True),
+        ],
+        latest=(0, json.dumps({"id": RELEASE_ID}), ""),
+    )
+    rc = _publish(tmp_path, gh, out=out)
+    assert rc != 0
+    assert any("Latest" in line for line in out)
 
-def test_unreadable_latest_is_noted_not_fatal(tmp_path):
-  anchor = _anchor(tmp_path)
-  out = []
-  gh = FakeGh(
-      [
-          _release_json(anchor, draft=True),
-          _release_json(anchor, draft=False, immutable=True),
-      ],
-      latest=None,
-  )
-  rc = _publish(tmp_path, gh, out)
-  assert rc == 0
-  assert any("Latest lookup unavailable" in line for line in out)
+  def test_explicit_no_latest_404_passes(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [
+            _release_json(anchor, draft=True),
+            _release_json(anchor, draft=False, immutable=True),
+        ],
+        latest="missing",
+    )
+    assert _publish(tmp_path, gh) == 0
+
+  def test_auth_rate_limit_and_transport_errors_fail_closed(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    for err in (
+        "gh: HTTP 403: rate limit exceeded",
+        "gh: HTTP 401: Bad credentials",
+        "gh: HTTP 500: Internal Server Error",
+        "dial tcp: lookup api.github.com: no such host",
+    ):
+      out = []
+      gh = FakeGh(
+          [
+              _release_json(anchor, draft=True),
+              _release_json(anchor, draft=False, immutable=True),
+          ],
+          latest=(1, "", err),
+      )
+      rc = _publish(tmp_path, gh, out=out)
+      assert rc != 0, err
+      assert any("refusing to assume" in line for line in out), err
+
+  def test_unparseable_latest_body_fails_closed(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [
+            _release_json(anchor, draft=True),
+            _release_json(anchor, draft=False, immutable=True),
+        ],
+        latest=(0, "not-json", ""),
+    )
+    assert _publish(tmp_path, gh) != 0
+
+  def test_idempotent_rerun_also_asserts_latest(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [_release_json(anchor, draft=False, immutable=True)],
+        latest=(0, json.dumps({"id": RELEASE_ID}), ""),
+    )
+    assert _publish(tmp_path, gh) != 0
 
 
 class TestIdempotentRerun:
@@ -375,13 +492,13 @@ class TestIdempotentRerun:
   def test_published_immutable_canonical_is_a_no_op(self, tmp_path):
     anchor = _anchor(tmp_path)
     gh = FakeGh([_release_json(anchor, draft=False, immutable=True)])
-    rc = _publish(tmp_path, gh)
+    admin = FakeAdminGh()
+    rc = _publish(tmp_path, gh, admin)
     assert rc == 0
     assert not gh.patch_calls
+    assert not admin.calls  # already immutably published: no policy read
 
   def test_editable_metadata_drift_is_repaired(self, tmp_path):
-    # Immutable releases still allow title/notes edits (#356 round 13):
-    # drift is repaired with a metadata-only PATCH.
     anchor = _anchor(tmp_path)
     out = []
     gh = FakeGh(
@@ -392,7 +509,7 @@ class TestIdempotentRerun:
             _release_json(anchor, draft=False, immutable=True),
         ]
     )
-    rc = _publish(tmp_path, gh, out)
+    rc = _publish(tmp_path, gh, out=out)
     assert rc == 0
     (patch,) = gh.patch_calls
     payload = json.loads(
@@ -419,7 +536,7 @@ class TestIdempotentRerun:
     gh = FakeGh(
         [_release_json(anchor, draft=False, immutable=True, prerelease=True)]
     )
-    rc = _publish(tmp_path, gh, out)
+    rc = _publish(tmp_path, gh, out=out)
     assert rc != 0
     assert not gh.patch_calls
     assert any("unrepairable" in line for line in out)
@@ -460,7 +577,7 @@ def test_propagates_gh_patch_failure(tmp_path):
 
 def test_unparseable_release_fetch_fails(tmp_path):
   _anchor(tmp_path)
-  gh = FakeGh([(0, "not-json")])
+  gh = FakeGh([(0, "not-json", "")])
   assert _publish(tmp_path, gh) != 0
-  gh = FakeGh([(1, "")])
+  gh = FakeGh([(1, "", "gh: HTTP 500")])
   assert _publish(tmp_path, gh) != 0
