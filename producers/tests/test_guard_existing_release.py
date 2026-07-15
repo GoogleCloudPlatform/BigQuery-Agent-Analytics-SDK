@@ -52,15 +52,25 @@ def test_draft_with_exact_testpypi_files_is_preserved_too():
   assert "TestPyPI" in action.message
 
 
-def test_deviating_index_is_burned():
+def test_deviating_index_rejects_the_rebuilt_attempt_before_burning():
   # A full rerun rebuilds bytes, so its dist DIFFERS from what the
-  # index accepted: byte validation turns that into an explicit burn.
+  # index accepted. That REJECTS the rebuilt attempt — the message
+  # must FIRST direct an accidental full rerun back to the original
+  # workflow run, and assert a burn only for deviation from the
+  # ORIGINAL accepted anchor (#353 review).
   for release in ("absent", "draft"):
     action = guard_existing_release.decide(release, "deviating", "absent")
     assert not action.proceed
     assert action.exit_code != 0
     assert "DIFFER" in action.message
-    assert "bump" in action.message
+    assert "NOT burned" in action.message
+    assert "ORIGINAL workflow attempt" in action.message
+    assert "ORIGINAL accepted anchor" in action.message
+    assert "bump" in action.message  # the true-burn branch stays stated
+    # The original-run direction comes before the burn clause.
+    assert action.message.index("ORIGINAL workflow attempt") < (
+        action.message.index("bump")
+    )
   action = guard_existing_release.decide("absent", "absent", "deviating")
   assert not action.proceed
   assert "TestPyPI" in action.message

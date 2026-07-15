@@ -35,11 +35,14 @@ index is `absent` (explicit 404), `exact` (the index holds exactly the
 current wheel+sdist bytes), or `deviating` (anything else — burned).
 That makes the guard consistent with the reconciler's recoveries: an
 exact TestPyPI publication with the draft missing PROCEEDS to recreate
-the draft from the preserved original-attempt artifact (a full rerun
-naturally shows `deviating` because rebuilt bytes differ), while
+the draft from the preserved original-attempt artifact, while
 production files always make the missing-release / preserved-draft
-paths authoritative. A published release always fails: that version is
-burned.
+paths authoritative. A full rerun naturally shows `deviating` because
+rebuilt bytes differ — that REJECTS the rebuilt attempt and directs
+the operator back to the recoverable original run; a burn is asserted
+only for a deviation from the ORIGINAL accepted anchor (which finalize
+reports as a burn state), never merely from a rebuilt one. A published
+release always fails: that version is burned.
 """
 
 from __future__ import annotations
@@ -96,10 +99,15 @@ def decide(release_state: str, pypi: str, testpypi: str) -> GuardAction:
     return GuardAction(
         False,
         1,
-        f"{where} holds files for this version that DIFFER from the"
-        " current dist bytes — the version is burned there (bump the"
-        " version, rebuild, and cut a new tag); any existing draft is"
-        " preserved for forensics",
+        f"{where} holds files for this version that DIFFER from THIS"
+        " attempt's dist bytes. If this is a full rerun, the rebuilt"
+        " attempt is REJECTED but the version is NOT burned: abandon"
+        " this run and re-run the FAILED jobs from the ORIGINAL"
+        " workflow attempt, whose preserved artifact matches what the"
+        " index accepted. The version is burned ONLY if the index also"
+        " deviates from the ORIGINAL accepted anchor (finalize reports"
+        " that as a burn state) — then bump the version, rebuild, and"
+        " cut a new tag. Any existing draft is preserved for forensics",
     )
   if pypi == "exact":
     if release_state == "draft":
