@@ -171,10 +171,13 @@ version**. Not every failure burns the version — distinguish:
 
 - **Burned**: a lifecycle-gate failure caused by defective candidate
   bytes after TestPyPI accepted them, an index deviation from the
-  **original accepted anchor** (subset/extra/yanked/digest mismatch),
-  or any reconciler burn state (`empty-release`, `testpypi-partial`,
-  `partial`, `missing-release`). Bump the version, rebuild, re-tag.
-  Never re-upload, never re-tag an image (staging and public tags are
+  **original workflow build anchor** (subset/extra/yanked/digest
+  mismatch — including pre-existing files found on the FIRST attempt,
+  where the current distributions are that anchor and the conflicting
+  filenames can never be replaced), or any reconciler burn state
+  (`empty-release`, `testpypi-partial`, `partial`,
+  `missing-release`). Bump the version, rebuild, re-tag. Never
+  re-upload, never re-tag an image (staging and public tags are
   immutable — enforced at the repository level).
 - **NOT burned**: a transient job failure, a lost upload response, or
   a `finalize` failure while the index carries the EXACT anchor bytes
@@ -185,9 +188,9 @@ version**. Not every failure burns the version — distinguish:
   rebuilt bytes cannot match what an index accepted, so the guard
   refuses the rebuilt attempt — abandon it and return to the
   **original** workflow run, which remains recoverable (its draft and
-  artifact are preserved). A burn is asserted only when the index
-  deviates from the ORIGINAL accepted anchor, never merely from a
-  newly rebuilt one.
+  artifact are preserved). A burn is asserted only against the
+  ORIGINAL workflow build anchor, never merely against a newly
+  rebuilt one.
 
 ## Verifying the release
 
