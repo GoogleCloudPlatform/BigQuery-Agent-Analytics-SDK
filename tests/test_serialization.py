@@ -489,3 +489,31 @@ class TestPinWireEncoding:
         "$pin": "SQL_NULL",
         "x": 1,
     }
+
+
+class TestSessionIdsWireDurability:
+  """Mutated session_ids must stay valid on the JSON wire (round 8)."""
+
+  def test_mutation_serialize_json_reconstruction_round_trip(self):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    filt = TraceFilter(session_ids=["sess-1"])
+    filt.session_ids.append("sess-\U0001f600")  # astral scalar is valid
+    payload = json.loads(json.dumps(serialize(filt)))
+    assert payload["session_ids"] == ["sess-1", "sess-\U0001f600"]
+    restored = TraceFilter(session_ids=payload["session_ids"])
+    assert restored.session_ids == filt.session_ids
+
+  def test_ordinary_mutation_cannot_reach_the_wire_with_surrogates(self):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    filt = TraceFilter(session_ids=["sess-1"])
+    surrogate_spelling = "sess-" + "\ud83d" + "\ude00"
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.session_ids.append(surrogate_spelling)
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.append(7)
+    # The wire representation therefore always matches list[str].
+    payload = serialize(filt)
+    assert payload["session_ids"] == ["sess-1"]
+    json.dumps(payload)

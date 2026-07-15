@@ -2103,9 +2103,12 @@ class TestLabelKeyJsonPathQuoting:
   def test_bracket_key_quoted(self):
     assert self._key_param({"a[0]": "x"}) == '"a[0]"'
 
-  def test_quote_and_backslash_keys_escaped(self):
+  def test_quote_keys_escaped_backslash_keys_literal(self):
     assert self._key_param({'a"b': "x"}) == '"a\\"b"'
-    assert self._key_param({"a\\b": "x"}) == '"a\\\\b"'
+    # BigQuery's JSONPath grammar matches backslashes literally inside
+    # quoted members; doubling them silently matches nothing (verified
+    # against live BigQuery — see test_trace_identity_bigquery_live).
+    assert self._key_param({"a\\b": "x"}) == '"a\\b"'
 
   def test_empty_key_quoted(self):
     assert self._key_param({"": "x"}) == '""'
@@ -2519,19 +2522,30 @@ class TestFilterLabelMutationDurability:
     def replace(self, *args, **kwargs):
       return "hijacked"
 
-  def test_in_place_writes_rejected(self):
+  def test_dict_style_mutation_keeps_working(self):
+    # Base-commit compatibility: ordinary dict mutation is public
+    # behavior and must not raise.
     filt = TraceFilter(custom_labels={"k": "v"})
-    with pytest.raises(TypeError, match="read-only"):
-      filt.custom_labels["x"] = "y"
-    with pytest.raises(TypeError, match="read-only"):
-      filt.custom_labels.update({"x": "y"})
-    with pytest.raises(TypeError, match="read-only"):
-      filt.custom_labels.pop("k")
-    with pytest.raises(TypeError, match="read-only"):
-      filt.custom_labels.clear()
-    with pytest.raises(TypeError, match="read-only"):
-      filt.custom_labels.setdefault("x", "y")
-    assert filt.custom_labels == {"k": "v"}
+    filt.custom_labels["slice"] = "3"
+    filt.custom_labels.update({"run": "v1"})
+    filt.custom_labels |= {"extra": "e"}
+    assert filt.custom_labels.setdefault("k", "other") == "v"
+    filt.custom_labels.pop("extra")
+    assert filt.custom_labels == {"k": "v", "slice": "3", "run": "v1"}
+
+  def test_in_place_writes_validated(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels["n"] = 1
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.update({1: "v"})
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.custom_labels["s"] = "\ud800"
+    hijack = self._Redirect("x")
+    filt.custom_labels[hijack] = self._Redirect("y")
+    assert type(list(filt.custom_labels)[-1]) is str
+    assert type(filt.custom_labels["x"]) is str
+    assert filt.custom_labels == {"k": "v", "x": "y"}
 
   def test_low_level_injection_cannot_reach_sql(self):
     filt = TraceFilter(custom_labels={"k": "v"})
@@ -2549,17 +2563,19 @@ class TestFilterLabelMutationDurability:
     with pytest.raises(TypeError, match="must be strings"):
       filt.to_sql_conditions()
 
-  def test_frozen_labels_pickle_and_copy(self):
+  def test_labels_pickle_and_copy_keep_validating(self):
     import copy
     import pickle
 
     filt = TraceFilter(custom_labels={"k": "v"})
     restored = pickle.loads(pickle.dumps(filt))
     assert restored.custom_labels == {"k": "v"}
-    with pytest.raises(TypeError, match="read-only"):
-      restored.custom_labels["x"] = "y"
+    with pytest.raises(TypeError, match="must be strings"):
+      restored.custom_labels["x"] = 1
     cloned = copy.deepcopy(filt)
     assert cloned.custom_labels == {"k": "v"}
+    with pytest.raises(TypeError, match="must be strings"):
+      cloned.custom_labels["x"] = 1
 
 
 class TestFilterLabelDuplicateNormalization:
@@ -2620,12 +2636,21 @@ class TestSessionIdsIdentitySurface:
     with pytest.raises(ValueError, match="surrogate"):
       TraceFilter(session_ids=[surrogate])
 
-  def test_in_place_mutation_revalidated_at_sql_boundary(self):
+  def test_in_place_mutation_validated_at_write_and_boundary(self):
     filt = TraceFilter(session_ids=["sess-1"])
     filt.session_ids.append(self._Collider("sess-2"))
+    assert type(filt.session_ids[1]) is str
     _, params = filt.to_sql_conditions()
     array = next(p for p in params if p.name == "session_ids")
     assert [type(v) is str for v in array.values] == [True, True]
-    filt.session_ids.append(3)
+    # Ordinary mutation is validated at write time...
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.append(3)
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.session_ids.extend(["\ud800"])
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids[0] = 1
+    # ...and a low-level bypass is still caught at the SQL boundary.
+    list.append(filt.session_ids, 3)
     with pytest.raises(TypeError, match="entries must be strings"):
       filt.to_sql_conditions()

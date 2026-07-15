@@ -429,13 +429,19 @@ def _parse_time_window(window: str) -> datetime:
 def _jsonpath_member_segment(key: str) -> str:
   """Encode a label key as a quoted JSONPath member segment.
 
-  Label keys are user data: dots, brackets, quotes, backslashes, or
-  an empty key must select the literal member instead of changing the
-  path structure. BigQuery JSONPath quotes member names with double
-  quotes and backslash escapes, so ``a.b`` becomes ``"a.b"`` and is
-  appended to ``$.custom_tags.`` as one segment.
+  Label keys are user data: dots, brackets, quotes, or an empty key
+  must select the literal member instead of changing the path
+  structure, so every key is wrapped in double quotes and appended to
+  ``$.custom_tags.`` as one segment.
+
+  BigQuery's JSONPath grammar is NOT JSON-string escaping: inside a
+  quoted member only the double quote is escaped (``\\"``);
+  backslashes and control characters are matched literally. Doubling
+  backslashes here makes ``{"a\\\\b": ...}`` silently match nothing
+  (verified against live BigQuery), turning a valid exact-selector
+  retry into a false "not found".
   """
-  escaped = key.replace("\\", "\\\\").replace('"', '\\"')
+  escaped = key.replace('"', '\\"')
   return f'"{escaped}"'
 
 
@@ -488,9 +494,9 @@ class TraceFilter:
       # subclass overriding replace() could redirect the selected
       # member, so keys and values are copied to exact built-in
       # strings (with post-normalization duplicate detection) and
-      # stored read-only so in-place writes cannot bypass this
-      # validation.
-      value = _FrozenLabels(_normalized_filter_labels(value))
+      # stored in a validating mutable dict so ordinary in-place
+      # writes stay checked while dict-style mutation keeps working.
+      value = _ValidatedLabels(_normalized_filter_labels(value))
     if name == "session_ids" and value is not None:
       value = _normalized_session_ids(value)
     object.__setattr__(self, name, value)
@@ -832,34 +838,98 @@ def _exact_str(value: str) -> str:
   return copied
 
 
-class _FrozenLabels(dict):
-  """Read-only dict holding validated ``TraceFilter.custom_labels``.
+def _validated_label_item(key: Any, value: Any) -> tuple[str, str]:
+  """Validate and normalize one filter-label key/value pair."""
+  if not isinstance(key, str) or not isinstance(value, str):
+    raise TypeError(
+        "TraceFilter.custom_labels keys and values must be strings."
+    )
+  return _exact_str(key), _exact_str(value)
 
-  In-place mutation (``__setitem__``, ``update()``, ``|=`` …) would
-  bypass the ``__setattr__`` validation and reintroduce hostile
-  string subclasses, surrogates, or non-strings behind the SQL and
-  serialization boundaries; assign a whole new dict instead.
+
+class _ValidatedLabels(dict):
+  """Mutable ``dict[str, str]`` that validates every write.
+
+  Ordinary dict-style mutation (``f.custom_labels["slice"] = "3"``)
+  is part of the public ``TraceFilter`` contract and keeps working;
+  each write normalizes hostile ``str`` subclasses to exact built-in
+  strings and rejects non-strings and surrogates, so mutation cannot
+  smuggle values past the assignment-time validation. Removals need
+  no validation. Low-level ``dict.__setitem__`` bypasses are caught
+  by the SQL-boundary revalidation.
   """
 
-  def _readonly(self, *args: Any, **kwargs: Any) -> None:
-    raise TypeError(
-        "TraceFilter.custom_labels is read-only; assign a new dict to"
-        " the field instead of mutating it in place."
-    )
+  def __init__(self, mapping: dict[str, str]) -> None:
+    super().__init__()
+    for key, value in mapping.items():
+      self[key] = value
 
-  __setitem__ = _readonly
-  __delitem__ = _readonly
-  __ior__ = _readonly  # type: ignore[assignment]
-  clear = _readonly
-  pop = _readonly
-  popitem = _readonly
-  setdefault = _readonly
-  update = _readonly
+  def __setitem__(self, key: Any, value: Any) -> None:
+    key, value = _validated_label_item(key, value)
+    super().__setitem__(key, value)
+
+  def __ior__(self, other: Any) -> "_ValidatedLabels":
+    self.update(other)
+    return self
+
+  def setdefault(self, key: Any, default: Any = None) -> str:
+    key, default = _validated_label_item(key, default)
+    if key in self:
+      return self[key]
+    super().__setitem__(key, default)
+    return default
+
+  def update(self, *args: Any, **kwargs: Any) -> None:
+    for key, value in dict(*args, **kwargs).items():
+      self[key] = value
 
   def __reduce__(self) -> tuple[Any, tuple[dict]]:
-    # The default dict-subclass pickling repopulates via the blocked
-    # mutators; rebuild through the constructor instead.
     return (self.__class__, (dict(self),))
+
+
+class _ValidatedSessionIds(list):
+  """Mutable ``list[str]`` that validates every write.
+
+  ``session_ids`` is a legacy identity surface: ordinary in-place
+  mutation (``append``, ``extend``, slice assignment, ``+=``) keeps
+  working but every added entry is checked against the exact-string/
+  surrogate contract, so a mutated list cannot collapse identities on
+  the JSON wire or reach the BigQuery array parameter unchecked.
+  Removals and reordering need no validation.
+  """
+
+  def __init__(self, iterable: Any = ()) -> None:
+    super().__init__(_validated_session_id_entry(v) for v in iterable)
+
+  def append(self, value: Any) -> None:
+    super().append(_validated_session_id_entry(value))
+
+  def extend(self, iterable: Any) -> None:
+    super().extend(_validated_session_id_entry(v) for v in iterable)
+
+  def insert(self, index: int, value: Any) -> None:
+    super().insert(index, _validated_session_id_entry(value))
+
+  def __setitem__(self, index: Any, value: Any) -> None:
+    if isinstance(index, slice):
+      value = [_validated_session_id_entry(v) for v in value]
+    else:
+      value = _validated_session_id_entry(value)
+    super().__setitem__(index, value)
+
+  def __iadd__(self, iterable: Any) -> "_ValidatedSessionIds":
+    self.extend(iterable)
+    return self
+
+  def __reduce__(self) -> tuple[Any, tuple[list]]:
+    return (self.__class__, (list(self),))
+
+
+def _validated_session_id_entry(value: Any) -> str:
+  """Validate and normalize one session-id entry."""
+  if not isinstance(value, str):
+    raise TypeError("TraceFilter.session_ids entries must be strings.")
+  return _exact_str(value)
 
 
 def _normalized_filter_labels(labels: Any) -> dict[str, str]:
@@ -882,14 +952,10 @@ def _normalized_filter_labels(labels: Any) -> dict[str, str]:
     raise TypeError("TraceFilter.custom_labels must be a dict or None.")
   normalized: dict[str, str] = {}
   for key, value in labels.items():
-    if not isinstance(key, str) or not isinstance(value, str):
-      raise TypeError(
-          "TraceFilter.custom_labels keys and values must be strings."
-      )
-    key = _exact_str(key)
+    key, value = _validated_label_item(key, value)
     if key in normalized:
       raise ValueError(f"Duplicate custom label key: {key!r}.")
-    normalized[key] = _exact_str(value)
+    normalized[key] = value
   return normalized
 
 
@@ -899,19 +965,15 @@ def _normalized_session_ids(session_ids: Any) -> list[str]:
   ``session_ids`` is a legacy identity surface feeding a BigQuery
   array parameter and JSON serialization, so it follows the same
   exact-string/surrogate rules as the other identity dimensions.
-  Called on assignment and re-applied at the SQL boundary because the
-  stored list remains mutable for compatibility.
+  Called on assignment and re-applied at the SQL boundary; the stored
+  value is a validating list subclass so ordinary in-place mutation
+  is checked at write time as well.
   """
   if isinstance(session_ids, str) or not isinstance(session_ids, (list, tuple)):
     raise TypeError(
         "TraceFilter.session_ids must be a list of strings or None."
     )
-  normalized = []
-  for session_id in session_ids:
-    if not isinstance(session_id, str):
-      raise TypeError("TraceFilter.session_ids entries must be strings.")
-    normalized.append(_exact_str(session_id))
-  return normalized
+  return _ValidatedSessionIds(session_ids)
 
 
 _PIN_WIRE_KEY = "$pin"
