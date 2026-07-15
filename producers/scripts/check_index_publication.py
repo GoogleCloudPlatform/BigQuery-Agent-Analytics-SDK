@@ -21,18 +21,25 @@ bytes — a plain rerun of the failed upload job could never succeed at
 the same version. This gate makes the rerun viable without weakening
 the byte-identity contract:
 
-  absent     the index has no record for this version (explicit 404)
-             → proceed with the upload
-  satisfied  the index already carries EXACTLY the wheel + sdist about
-             to be uploaded (exact filename set, nothing yanked, byte
-             digests identical to the local files) → the upload stage
-             is already satisfied; skip it and continue the pipeline
-  conflict   anything else (subset, extras, yanked, digest mismatch,
-             zero-file release record, invalid schema) → the version is
-             burned on this index; bump + re-tag
+  absent        the index has no record for this version (explicit
+                404) → proceed with the upload
+  satisfied     the index already carries EXACTLY the wheel + sdist
+                about to be uploaded (exact filename set, nothing
+                yanked, byte digests identical to the local files) →
+                the upload stage is already satisfied; skip it and
+                continue the pipeline
+  conflict      a VALIDATED deviation (subset, extras, yanked, digest
+                mismatch, zero-file release record) → the version is
+                burned on this index; bump + re-tag
+  indeterminate the response or local inputs prove nothing (malformed
+                HTTP-200 body, schema violation, missing local dist
+                file) → refetch / investigate before acting; a
+                transient CDN or API glitch is NOT a version burn
+                (#356 round 13)
 
 Exit code is 0 for absent/satisfied and 1 otherwise, so the workflow
-step fails closed on any state that cannot lead to a valid release.
+step fails closed on any state that cannot lead to a valid release —
+but only `conflict` carries burn advice.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ import reconcile_release
 ABSENT = "absent"
 SATISFIED = "satisfied"
 CONFLICT = "conflict"
+INDETERMINATE = "indeterminate"
 
 
 def check(
@@ -65,7 +73,11 @@ def check(
   for name in (wheel, sdist):
     path = dist_dir / name
     if not path.is_file():
-      return CONFLICT, f"local distribution {name} is missing from {dist_dir}"
+      return (
+          INDETERMINATE,
+          f"local distribution {name} is missing from {dist_dir} —"
+          " investigate the build artifact; this is not an index burn",
+      )
     local[name] = hashlib.sha256(path.read_bytes()).hexdigest()
 
   if index is None:
@@ -73,7 +85,13 @@ def check(
 
   urls, why = reconcile_release._validated_urls(index)  # pylint: disable=protected-access
   if urls is None:
-    return CONFLICT, f"invalid index response schema: {why}"
+    # A malformed success body proves neither absence nor a burn — the
+    # operator must refetch, never bump + re-tag off a CDN glitch.
+    return (
+        INDETERMINATE,
+        f"invalid index response schema: {why} — refetch the index and"
+        " re-run before taking any recovery action",
+    )
   if set(urls) != set(local):
     missing = set(local) - set(urls)
     extra = set(urls) - set(local)
@@ -118,7 +136,11 @@ def main(
       if not isinstance(index, dict):
         raise ValueError(f"expected a JSON object, got {type(index).__name__}")
   except ValueError as exc:
-    status, detail = CONFLICT, f"unparseable index body: {exc}"
+    status, detail = (
+        INDETERMINATE,
+        f"unparseable index body: {exc} — refetch the index and re-run"
+        " before taking any recovery action",
+    )
   else:
     status, detail = check(
         version=args.version, dist_dir=args.dist_dir, index=index

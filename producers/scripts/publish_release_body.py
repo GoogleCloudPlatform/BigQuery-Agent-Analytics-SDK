@@ -12,33 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Snapshot-bound publish of the reconciled release (#356 round 12).
+"""Snapshot-bound publish of the reconciled release (#356 rounds 12-13).
 
 Publication must be bound to the exact release object that was
 reconciled, not to the mutable tag: anything holding ``contents:
 write`` can replace draft assets between reconciliation and publish.
-This helper therefore operates on the RELEASE ID and verifies the full
-asset snapshot against the anchor immediately before AND after the
-publish edit:
+This helper therefore operates on the RELEASE ID:
 
-  1. fetch the release by ID; require the same id/tag, ``draft=true``
-     (unless it is already published immutably — see below), and an
-     asset set exactly equal to the anchor: same names, each asset's
-     API ``digest`` equal to the sha256 of the anchor file;
-  2. extract the image digest from the ANCHOR wheel, render the
-     canonical body, and publish via ``PATCH /releases/{id}``
-     reasserting tag, title, body, ``draft=false``,
-     ``prerelease=false``, ``make_latest=false``;
-  3. re-fetch by ID and re-verify the snapshot on the published object;
-  4. assert the published release is IMMUTABLE — the repository setting
-     (Settings → General → Releases → immutable releases) is the only
-     thing that keeps published assets and SHA256SUMS non-replaceable,
-     so a mutable publication fails this job loudly.
+  0. PREREQUISITE: the repository's immutable-releases setting
+     (``GET /repos/{repo}/immutable-releases``) must be ENABLED before
+     anything becomes public — GitHub applies immutability only to
+     releases published while the setting is on, so enabling it later
+     can never retroactively protect an already-published release.
+     Nothing is published while the setting is off.
+  1. fetch the release by ID; require the same id/tag and an asset set
+     exactly equal to the anchor: same names, each asset's API
+     ``digest`` equal to the sha256 of the anchor file;
+  2. render the canonical body from the ANCHOR wheel and publish via
+     ``PATCH /releases/{id}`` with a JSON ``--input`` payload (never
+     ``-f field=@file`` — gh raw fields do not read files, they send
+     the literal string; reproduced in review round 13) reasserting
+     tag, title, body, ``draft=false``, ``prerelease=false``,
+     ``make_latest="false"``;
+  3. re-fetch by ID and re-verify the snapshot AND the canonical
+     editable metadata (title, body, prerelease) on the published
+     object, assert it is IMMUTABLE (defense in depth behind step 0),
+     and assert it did not become the repository's Latest.
 
-Idempotent rerun: a release that is already published, immutable, and
-snapshot-identical returns success WITHOUT an edit (an immutable
-release cannot be edited, and needs no re-anchor — its body was
-verified when it was published).
+Idempotent rerun: a published, immutable release with a verified asset
+snapshot is checked against the canonical metadata too — immutable
+releases still allow title/notes edits, so drift there is REPAIRED
+with a metadata-only PATCH (the fields GitHub permits editing);
+anything unrepairable fails with exact remediation. A release that was
+published while the setting was off is unrepairable by design: it
+fails with burn guidance, never with "enable and re-run".
 """
 
 from __future__ import annotations
@@ -138,19 +145,66 @@ def verify_snapshot(
   return problems
 
 
-def _fetch(
-    repo: str, release_id: int, run_gh: RunGh
-) -> tuple[dict | None, str]:
-  rc, out = run_gh(["gh", "api", f"repos/{repo}/releases/{release_id}"])
+def _normalized(text: str) -> str:
+  return text.replace("\r\n", "\n").rstrip("\n")
+
+
+def canonical_problems(
+    release: dict, *, expected_name: str, expected_body: str
+) -> list[str]:
+  """Drift in the metadata GitHub keeps EDITABLE even on immutable
+  releases (title, notes) plus the prerelease flag — the snapshot check
+  covers assets/tag; this covers everything customers read (#356 round
+  13)."""
+  problems: list[str] = []
+  if release.get("name") != expected_name:
+    problems.append(
+        f"title drifted: expected {expected_name!r}, got"
+        f" {release.get('name')!r}"
+    )
+  body = release.get("body")
+  if not isinstance(body, str) or _normalized(body) != _normalized(
+      expected_body
+  ):
+    problems.append("release body does not match the rendered canonical notes")
+  if release.get("prerelease") is not False:
+    problems.append(
+        f"prerelease flag is {release.get('prerelease')!r}, expected False"
+    )
+  return problems
+
+
+def _fetch_json(repo_path: str, run_gh: RunGh) -> tuple[dict | None, str]:
+  rc, out = run_gh(["gh", "api", repo_path])
   if rc != 0:
-    return None, f"release fetch failed (exit {rc})"
+    return None, f"fetch of {repo_path} failed (exit {rc})"
   try:
-    release = json.loads(out)
-    if not isinstance(release, dict):
-      raise ValueError(f"expected an object, got {type(release).__name__}")
+    obj = json.loads(out)
+    if not isinstance(obj, dict):
+      raise ValueError(f"expected an object, got {type(obj).__name__}")
   except ValueError as exc:
-    return None, f"unparseable release object: {exc}"
-  return release, ""
+    return None, f"unparseable response from {repo_path}: {exc}"
+  return obj, ""
+
+
+def _latest_problem(
+    repo: str, release_id: int, run_gh: RunGh, echo: Callable[[str], None]
+) -> str | None:
+  """The tracing release must never be the repository's Latest (that
+  belongs to the SDK's vX.Y.Z releases)."""
+  latest, why = _fetch_json(f"repos/{repo}/releases/latest", run_gh)
+  if latest is None:
+    # No readable Latest (e.g. no other published release yet) — the
+    # payload's make_latest="false" is the enforcement; note and go on.
+    echo(f"note: Latest lookup unavailable ({why}); relying on make_latest")
+    return None
+  if latest.get("id") == release_id:
+    return (
+        "this release became the repository's Latest — it must not"
+        " displace the SDK's vX.Y.Z Latest; point Latest back at the SDK"
+        " release"
+    )
+  return None
 
 
 def publish(
@@ -172,9 +226,36 @@ def publish(
   if not wheel.is_file():
     raise FileNotFoundError(f"anchor wheel not found: {wheel}")
   expected = expected_asset_digests(version, anchor_dir)
+  # Render the canonical metadata EARLY: it is both the publish payload
+  # and the comparison baseline for every fetched snapshot.
+  reference = release_image_tool.extract_from_wheel(wheel)
+  digest = reference.split("@", 1)[1]
+  expected_name = f"Tracing {tag}"
+  expected_body = render_release_notes.render(
+      version=version, digest=digest, public_image=public_image
+  )
+  body_path = out_dir / "release_body.md"
+  body_path.write_text(expected_body)
+
+  # 0. Immutability is a PREREQUISITE, not a postcondition: GitHub does
+  # not retroactively protect releases published while the setting was
+  # off, so nothing may become public until the policy is attested.
+  setting, why = _fetch_json(f"repos/{repo}/immutable-releases", run_gh)
+  if setting is None:
+    echo(f"::error::immutable-releases policy check failed: {why}")
+    return 1
+  if setting.get("enabled") is not True:
+    echo(
+        "::error::the repository's immutable-releases setting is DISABLED"
+        " — publishing now would create a permanently mutable release"
+        " (enabling the setting later is NOT retroactive). Enable it"
+        " (Settings → General → Releases → immutable releases) and re-run"
+        " finalize; the release is still an unpublished draft."
+    )
+    return 1
 
   # 1. The pre-publish snapshot: the exact object reconciliation saw.
-  release, why = _fetch(repo, release_id, run_gh)
+  release, why = _fetch_json(f"repos/{repo}/releases/{release_id}", run_gh)
   if release is None:
     echo(f"::error::{why}")
     return 1
@@ -187,24 +268,88 @@ def publish(
         f" publish — refusing to publish: {'; '.join(problems)}"
     )
     return 1
-  if release.get("draft") is False:
-    if release.get("immutable") is True:
-      echo(
-          "release is already published, immutable, and snapshot-identical"
-          " — nothing to edit (idempotent rerun)"
-      )
-      return 0
-    # Published but still mutable: fall through and re-assert the
-    # canonical metadata; the immutability assert below will then fail
-    # loudly until the repository setting is enabled.
 
-  # 2. Re-anchor the body and publish the EXACT object by ID.
-  reference = release_image_tool.extract_from_wheel(wheel)
-  digest = reference.split("@", 1)[1]
-  body_path = out_dir / "release_body.md"
-  body_path.write_text(
-      render_release_notes.render(
-          version=version, digest=digest, public_image=public_image
+  if release.get("draft") is False:
+    if release.get("immutable") is not True:
+      echo(
+          "::error::this release was PUBLISHED while the repository was"
+          " NOT enforcing immutable releases — immutability cannot be"
+          " applied retroactively, so its assets remain permanently"
+          " replaceable. Treat the version as burned: delete the release,"
+          " yank any index files, bump, re-tag, and re-release with the"
+          " setting enabled."
+      )
+      return 1
+    # Published + immutable + snapshot-verified. Title/notes stay
+    # EDITABLE on immutable releases, so verify the canonical metadata
+    # and repair drift with the only edit GitHub permits.
+    drift = canonical_problems(
+        release, expected_name=expected_name, expected_body=expected_body
+    )
+    prerelease_drift = [p for p in drift if p.startswith("prerelease")]
+    if prerelease_drift:
+      echo(
+          "::error::published immutable release has unrepairable metadata"
+          f" drift: {'; '.join(prerelease_drift)}"
+      )
+      return 1
+    if drift:
+      echo(f"repairing editable metadata drift: {'; '.join(drift)}")
+      repair_path = out_dir / "repair_payload.json"
+      repair_path.write_text(
+          json.dumps({"name": expected_name, "body": expected_body})
+      )
+      rc, _ = run_gh(
+          [
+              "gh",
+              "api",
+              "-X",
+              "PATCH",
+              f"repos/{repo}/releases/{release_id}",
+              "--input",
+              str(repair_path),
+          ]
+      )
+      if rc != 0:
+        return rc
+      release, why = _fetch_json(f"repos/{repo}/releases/{release_id}", run_gh)
+      if release is None:
+        echo(f"::error::post-repair verification failed: {why}")
+        return 1
+      problems = verify_snapshot(
+          release, release_id=release_id, tag=tag, expected=expected
+      ) + canonical_problems(
+          release, expected_name=expected_name, expected_body=expected_body
+      )
+      if problems:
+        echo(
+            f"::error::metadata repair did not converge: {'; '.join(problems)}"
+        )
+        return 1
+    latest_problem = _latest_problem(repo, release_id, run_gh, echo)
+    if latest_problem:
+      echo(f"::error::{latest_problem}")
+      return 1
+    echo(
+        "release already published, immutable, snapshot-identical, and"
+        " canonical — idempotent rerun"
+    )
+    return 0
+
+  # 2. Publish the EXACT object by ID with a JSON payload. Never
+  # `-f field=@file`: gh raw fields send the literal string, only a
+  # JSON --input body carries the rendered notes.
+  payload_path = out_dir / "publish_payload.json"
+  payload_path.write_text(
+      json.dumps(
+          {
+              "tag_name": tag,
+              "name": expected_name,
+              "body": expected_body,
+              "draft": False,
+              "prerelease": False,
+              "make_latest": "false",
+          }
       )
   )
   rc, _ = run_gh(
@@ -214,30 +359,24 @@ def publish(
           "-X",
           "PATCH",
           f"repos/{repo}/releases/{release_id}",
-          "-f",
-          f"tag_name={tag}",
-          "-f",
-          f"name=Tracing {tag}",
-          "-f",
-          f"body=@{body_path}",
-          "-F",
-          "draft=false",
-          "-F",
-          "prerelease=false",
-          "-f",
-          "make_latest=false",
+          "--input",
+          str(payload_path),
       ]
   )
   if rc != 0:
     return rc
 
-  # 3 + 4. Post-publish: same snapshot, now published — and immutable.
-  release, why = _fetch(repo, release_id, run_gh)
+  # 3. Post-publish: same snapshot AND canonical metadata, now
+  # published — and immutable (defense in depth behind the step-0
+  # prerequisite).
+  release, why = _fetch_json(f"repos/{repo}/releases/{release_id}", run_gh)
   if release is None:
     echo(f"::error::post-publish verification failed: {why}")
     return 1
   problems = verify_snapshot(
       release, release_id=release_id, tag=tag, expected=expected
+  ) + canonical_problems(
+      release, expected_name=expected_name, expected_body=expected_body
   )
   if release.get("draft") is not False:
     problems.append("release is still a draft after the publish edit")
@@ -249,14 +388,19 @@ def publish(
     return 1
   if release.get("immutable") is not True:
     echo(
-        "::error::the published release is NOT immutable — its assets and"
-        " SHA256SUMS remain replaceable by anything with contents:write."
-        " Enable immutable releases in the repository settings (Settings →"
-        " General → Releases) and re-run finalize; the published bytes"
-        " themselves were verified against the anchor."
+        "::error::the release published as MUTABLE despite the enabled"
+        " setting — treat as burned (immutability is not retroactive):"
+        " delete the release, yank any index files, bump and re-tag."
     )
     return 1
-  echo("release published; snapshot re-verified; immutability asserted")
+  latest_problem = _latest_problem(repo, release_id, run_gh, echo)
+  if latest_problem:
+    echo(f"::error::{latest_problem}")
+    return 1
+  echo(
+      "release published; snapshot + canonical metadata re-verified;"
+      " immutability asserted"
+  )
   return 0
 
 

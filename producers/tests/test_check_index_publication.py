@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Rerun-safe pre-upload gate (#356 round 12): absent → upload,
+"""Rerun-safe pre-upload gate (#356 rounds 12-13): absent → upload,
 byte-identical existing publication → satisfied (skip the upload),
-anything else → conflict (the version is burned on that index)."""
+VALIDATED deviations → conflict (the version is burned on that index),
+and malformed responses or broken local inputs → indeterminate (retry
+advice, never burn advice off a CDN glitch)."""
 
 import hashlib
 import json
@@ -114,21 +116,29 @@ def test_zero_file_release_record_is_conflict(tmp_path):
   assert status == "conflict"
 
 
-def test_invalid_schema_is_conflict(tmp_path):
+def test_invalid_schema_is_indeterminate_not_a_burn(tmp_path):
+  # A malformed HTTP-200 body proves neither absence nor incompatible
+  # published files (#356 round 13) — the operator must refetch, never
+  # bump + re-tag off a transient API/CDN glitch.
   for bad in ({"urls": None}, {}, {"urls": [{}]}):
-    status, _ = _check(tmp_path, bad)
-    assert status == "conflict", bad
+    status, detail = _check(tmp_path, bad)
+    assert status == "indeterminate", bad
+    assert "refetch" in detail
+    assert "burn" not in detail.replace("not an index burn", "")
 
 
-def test_missing_local_distribution_is_conflict(tmp_path):
+def test_missing_local_distribution_is_indeterminate(tmp_path):
+  # A broken build artifact is not an index burn either — investigate
+  # the artifact rather than re-tag.
   dist = tmp_path / "dist"
   dist.mkdir()
   (dist / WHEEL).write_bytes(b"wheel-bytes")  # no sdist
   status, detail = check_index_publication.check(
       version=VERSION, dist_dir=dist, index=None
   )
-  assert status == "conflict"
+  assert status == "indeterminate"
   assert SDIST in detail
+  assert "artifact" in detail
 
 
 class TestCli:
@@ -178,7 +188,7 @@ class TestCli:
     )
     assert rc != 0 and status == "conflict"
 
-  def test_unparseable_body_is_conflict(self, tmp_path):
+  def test_unparseable_body_is_indeterminate(self, tmp_path):
     dist = _dist(tmp_path)
     index_path = tmp_path / "index.json"
     index_path.write_bytes(b'{"urls": [{"filename"')
@@ -193,7 +203,7 @@ class TestCli:
             str(index_path),
         ],
     )
-    assert rc != 0 and status == "conflict"
+    assert rc != 0 and status == "indeterminate"
 
   def test_index_args_are_mutually_required(self, tmp_path):
     dist = _dist(tmp_path)

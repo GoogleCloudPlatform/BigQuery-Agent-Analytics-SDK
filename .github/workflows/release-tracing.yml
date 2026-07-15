@@ -37,11 +37,12 @@
 #                     digest-equality gate, write SHA256SUMS
 #   github-release  - DRAFT release with all artifacts + checksums; it
 #                     is published only by `finalize`, after BOTH
-#                     approvals and byte-identity reconciliation. A
-#                     stale draft from an earlier attempt is deleted
-#                     ONLY when PyPI AND TestPyPI both 404 for the
-#                     version (guard_existing_release.py): once an
-#                     index accepted files, the draft is their only
+#                     approvals and byte-identity reconciliation. The
+#                     guard (guard_existing_release.py) NEVER deletes
+#                     automatically (GET+DELETE is a TOCTOU race): a
+#                     stale draft with both indexes 404 fails the job
+#                     with manual verify-and-delete instructions; once
+#                     an index accepted files, the draft is their only
 #                     byte-identical counterpart — rerun the FAILED
 #                     jobs from the original attempt, never full-rerun
 #   publish-testpypi - upload wheel + sdist to TestPyPI via Trusted
@@ -74,10 +75,11 @@
 #
 # One-time GitHub setup: environments `testpypi`, `pypi`, and
 # `release-promote` (the latter two with required reviewers), and
-# ENABLE IMMUTABLE RELEASES (Settings → General → Releases): finalize
-# fails closed if a published release is still mutable, because mutable
-# published assets/SHA256SUMS remain replaceable by anything holding
-# contents:write.
+# ENABLE IMMUTABLE RELEASES (Settings → General → Releases) BEFORE the
+# first release: finalize verifies the setting BEFORE publishing —
+# GitHub does not apply immutability retroactively, so a release
+# published while the setting is off stays permanently mutable and can
+# only be burned, not repaired.
 #
 # Trusted Publishing setup (one-time, on the PyPI side):
 #   - https://docs.pypi.org/trusted-publishers/adding-a-publisher/
@@ -338,25 +340,26 @@ jobs:
       - name: Fail closed on existing-release state
         # A full rerun must never mutate something customers already see,
         # and an indeterminate lookup (auth/rate-limit/network) must fail,
-        # not fall through. The delete/preserve/fail decision lives in the
-        # PR-TESTED guard (scripts/guard_existing_release.py): a stale
-        # draft is deleted ONLY when BOTH package indexes return an
-        # explicit 404 for this version — a full rerun rebuilds the
-        # anchor with new timestamps, so once either index accepted
-        # files, the existing draft is their only byte-identical
-        # counterpart and must be preserved (rerun the FAILED jobs from
-        # the original attempt instead). A published release always
-        # fails: the version is burned.
+        # not fall through. The proceed/fail decision lives in the
+        # PR-TESTED guard (scripts/guard_existing_release.py). This
+        # workflow NEVER deletes a release automatically (#356 round 13):
+        # GitHub has no conditional delete, so any GET-then-DELETE pair
+        # is a race — the draft could be published between the two
+        # requests and the DELETE would remove a customer-visible
+        # release. A stale draft (both indexes 404) fails the job with
+        # instructions to verify + delete it MANUALLY and re-run; once
+        # either index accepted files, the draft is their only
+        # byte-identical counterpart and must be preserved (rerun the
+        # FAILED jobs from the original attempt instead). A published
+        # release always fails: the version is burned.
         #
         # Discovery uses authenticated LIST RELEASES, never the by-tag
         # endpoint: GET /releases/tags/{tag} returns only PUBLISHED
         # releases, so a draft would 404 and be misread as absent (#356
-        # round 12). The delete re-fetches the release BY ID immediately
-        # before deletion and requires it to still be the same draft —
-        # the guard's verdict must not act on a stale snapshot (TOCTOU).
-        # Index lookups carry a unique cache-busting query string: PyPI
-        # responses are CDN-cached (https://docs.pypi.org/api/), and a
-        # cached 404 is not a fresh absence proof.
+        # round 12). Index lookups carry a unique cache-busting query
+        # string: PyPI responses are CDN-cached
+        # (https://docs.pypi.org/api/), and a cached 404 is not a fresh
+        # absence proof.
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.verify.outputs.version }}
@@ -369,12 +372,10 @@ jobs:
           fi
           COUNT=$(jq length <<<"$MATCHES")
           RELEASE_STATE=absent
-          RELEASE_ID=""
           if [ "$COUNT" -gt 1 ]; then
             echo "::error::${COUNT} releases/drafts share tag ${GITHUB_REF_NAME} — ambiguous state, resolve manually"
             exit 1
           elif [ "$COUNT" = "1" ]; then
-            RELEASE_ID=$(jq -r '.[0].id' <<<"$MATCHES")
             if [ "$(jq -r '.[0].draft' <<<"$MATCHES")" = "true" ]; then
               RELEASE_STATE=draft
             else
@@ -413,20 +414,6 @@ jobs:
           if [ $RC -ne 0 ]; then
             echo "::error::$(grep '^message=' guard.out | cut -d= -f2-)"
             exit $RC
-          fi
-          if grep -q '^delete_draft=1$' guard.out; then
-            # TOCTOU guard: the same OBJECT must still be an unpublished
-            # draft on the same tag at deletion time; any change since
-            # discovery (e.g. someone published it) aborts the delete.
-            FRESH=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" 2> fresh.err) \
-              || { echo "::error::pre-delete re-fetch failed: $(head -1 fresh.err)"; exit 1; }
-            if [ "$(jq -r '.draft' <<<"$FRESH")" != "true" ] \
-                || [ "$(jq -r '.tag_name' <<<"$FRESH")" != "$GITHUB_REF_NAME" ]; then
-              echo "::error::release ${RELEASE_ID} changed between discovery and deletion — refusing to delete"
-              exit 1
-            fi
-            echo "stale draft from an earlier attempt — deleting release id ${RELEASE_ID} so assets cannot mix"
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"
           fi
 
       - name: Create DRAFT release with artifacts
@@ -744,12 +731,54 @@ jobs:
               PUBLISHED_ARG=--release-published
             fi
             mkdir -p release
-            jq -r '.[0].assets[] | "\(.id)\t\(.name)"' <<<"$MATCHES" \
-              | while IFS=$'\t' read -r asset_id asset_name; do
-                  gh api -H "Accept: application/octet-stream" \
-                    "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
-                    > "release/${asset_name}"
-                done
+            # Validate asset METADATA before any byte is streamed (#356
+            # round 13): release metadata is operator/attacker
+            # influencable, and downloading arbitrary extras could
+            # exhaust runner disk or the job timeout before the tested
+            # reconciler ever classifies the set. Only the four expected
+            # hardcoded names with sane sizes are downloaded, by asset
+            # ID, to hardcoded destinations; unexpected or oversized
+            # assets become EMPTY placeholders so the reconciler still
+            # sees the exact-set / byte-identity mismatch and emits its
+            # tested classification.
+            ASSETS=$(jq -c '.[0].assets | map({id, name, size})' <<<"$MATCHES")
+            if ! jq -e 'all(.[]; (.id | type == "number") and (.name | type == "string") and ((.name | length) > 0) and (.size | type == "number") and (.size >= 0))' >/dev/null <<<"$ASSETS"; then
+              echo "::error::release asset metadata is malformed — refusing to download"
+              exit 1
+            fi
+            if [ "$(jq -r '[.[].name] | length - (unique | length)' <<<"$ASSETS")" != "0" ]; then
+              echo "::error::duplicate asset names on the release — ambiguous, resolve manually"
+              exit 1
+            fi
+            if jq -r '.[].name' <<<"$ASSETS" | grep -qEv '^[A-Za-z0-9._+-]+$'; then
+              echo "::error::release carries an asset with an unsafe name — refusing to touch it"
+              exit 1
+            fi
+            WHEEL_A="bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl"
+            SDIST_A="bigquery_agent_analytics_tracing-${VERSION}.tar.gz"
+            PLUGIN_A="bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz"
+            MAX_ASSET_BYTES=104857600  # 100 MiB — far above any real artifact
+            jq -c '.[]' <<<"$ASSETS" | while read -r entry; do
+              asset_id=$(jq -r '.id' <<<"$entry")
+              asset_name=$(jq -r '.name' <<<"$entry")
+              asset_size=$(jq -r '.size' <<<"$entry")
+              case "$asset_name" in
+                "$WHEEL_A"|"$SDIST_A"|"$PLUGIN_A"|SHA256SUMS)
+                  if [ "$asset_size" -le "$MAX_ASSET_BYTES" ]; then
+                    gh api -H "Accept: application/octet-stream" \
+                      "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+                      > "release/${asset_name}"
+                  else
+                    echo "asset ${asset_name} exceeds the size cap — placeholder for classification"
+                    : > "release/${asset_name}"
+                  fi
+                  ;;
+                *)
+                  echo "unexpected asset ${asset_name} — not downloading (placeholder for exact-set classification)"
+                  : > "release/${asset_name}"
+                  ;;
+              esac
+            done
             RELEASE_ARG="--release-dir release/"
             echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
           fi
@@ -843,14 +872,15 @@ jobs:
           EXIT_CODE=$(echo "$VERDICT" | cut -d'|' -f2)
           MESSAGE=$(echo "$VERDICT" | cut -d'|' -f3-)
           if [ "$PUBLISH" = "1" ]; then
-            # Snapshot-bound publish via the PR-TESTED helper: fetch the
-            # exact RELEASE ID that was reconciled, verify every asset
-            # digest against the anchor immediately BEFORE and AFTER the
-            # ID-based publish edit, and assert the published release is
-            # IMMUTABLE — anything with contents:write could have swapped
-            # draft assets between reconciliation and this step, and only
-            # the repository's immutable-releases setting keeps them
-            # non-replaceable afterwards (#356 round 12).
+            # Snapshot-bound publish via the PR-TESTED helper: the
+            # immutable-releases policy is verified BEFORE anything
+            # becomes public (enabling it later is NOT retroactive);
+            # the exact RELEASE ID that was reconciled is fetched and
+            # every asset digest verified against the anchor immediately
+            # BEFORE and AFTER the ID-based publish edit (a JSON --input
+            # payload — gh raw fields do not read @files); canonical
+            # title/body/prerelease are verified on every snapshot and
+            # repaired where GitHub permits edits (#356 rounds 12-13).
             python3 producers/scripts/publish_release_body.py \
               --version "${{ needs.verify.outputs.version }}" \
               --public-image "${{ env.PUBLIC_IMAGE }}" \

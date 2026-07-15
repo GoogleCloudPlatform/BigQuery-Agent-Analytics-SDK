@@ -68,10 +68,13 @@ minutes; the release then WAITS at two manual approval gates
    draft is preserved and the failed jobs must be re-run from the
    **original** workflow attempt — never a full rerun. Drafts are
    discovered via the authenticated release LIST (the by-tag endpoint
-   returns only published releases), index absence uses fresh
-   cache-busted lookups (PyPI responses are CDN-cached), and deletion
-   re-fetches the release by ID immediately beforehand and aborts if
-   it is no longer the same unpublished draft.
+   returns only published releases) and index absence uses fresh
+   cache-busted lookups (PyPI responses are CDN-cached). The workflow
+   **never deletes a release automatically**: GitHub has no
+   conditional delete, so a GET-then-DELETE pair races publication.
+   When only a stale draft blocks a rerun (both indexes 404), the job
+   fails with instructions to verify the draft is still unpublished,
+   delete it manually, and re-run the job.
 5. **`publish-testpypi`** — uploads wheel + sdist to TestPyPI via
    Trusted Publishing. No `skip-existing`: if the version already
    exists there with ANY deviation, the job fails loudly — that
@@ -99,12 +102,15 @@ minutes; the release then WAITS at two manual approval gates
    assets, and the release's **visibility** (a draft accidentally
    published during an approval pause is classified
    `premature-publication` — contain it first, never "keep the
-   draft"); publishes ONLY on complete state via a snapshot-bound,
-   **ID-based** edit — the exact release object's asset digests are
-   re-verified against the anchor immediately before and after the
-   publish (never as the repository's Latest), reasserting the
-   canonical title, body, `prerelease=false`, and `latest=false`, and
-   asserting the published release is **immutable**; a partial
+   draft"); verifies the repository's **immutable-releases setting is
+   enabled BEFORE publishing anything** (GitHub does not apply
+   immutability retroactively, so a release published while the
+   setting is off stays permanently mutable and can only be burned);
+   publishes ONLY on complete state via a snapshot-bound, **ID-based**
+   edit — the exact release object's asset digests AND canonical
+   title/body/prerelease are re-verified against the anchor
+   immediately before and after the publish (never as the repository's
+   Latest); a partial
    publication is surfaced with the yank/version-burn recovery, and a
    partial TestPyPI upload (production absent) is surfaced as
    `testpypi-partial` — the version is burned there, so bump + re-tag
@@ -201,11 +207,14 @@ tar -tzf /tmp/plugin.tar.gz | head
   the upload (lost response)** — re-run the failed job from the
   original attempt: the pre-check verifies the index already carries
   the exact byte-identical files and skips the re-upload.
-- **`finalize` reports the published release is NOT immutable** — the
-  artifacts themselves were verified, but the repository's immutable
-  releases setting is disabled, so the published assets remain
-  replaceable. Enable it (Settings → General → Releases → immutable
+- **`finalize` refuses to publish because immutable releases are
+  disabled** — nothing was published (the release is still a draft):
+  enable the setting (Settings → General → Releases → immutable
   releases) and re-run `finalize` from the original attempt.
+- **a release was somehow published while the setting was off** —
+  immutability is NOT retroactive: enabling the setting cannot protect
+  it, so treat the version as burned (delete the release, yank any
+  index files, bump, re-tag) and re-release with the setting enabled.
 
 If a release ships a broken artifact, do **not** delete the tag.
 Yank the PyPI release and ship the next patch version
@@ -233,9 +242,11 @@ GitHub-side one-time setup: create environments `testpypi`, `pypi`,
 and `release-promote` in the repo settings, with required reviewers
 on `pypi` and `release-promote` (approving `release-promote` asserts
 the TestPyPI full-lifecycle gate passed), and **enable immutable
-releases** (Settings → General → Releases): `finalize` fails closed
-if a published release is still mutable, because mutable published
-assets and `SHA256SUMS` remain replaceable by anything holding
+releases BEFORE the first release** (Settings → General → Releases):
+`finalize` verifies the setting and refuses to publish while it is
+off, because GitHub applies immutability only at publish time — a
+release published while the setting is off keeps mutable assets and
+`SHA256SUMS` forever, replaceable by anything holding
 `contents: write`.
 
 Until both publishers are configured, the `publish-testpypi` and

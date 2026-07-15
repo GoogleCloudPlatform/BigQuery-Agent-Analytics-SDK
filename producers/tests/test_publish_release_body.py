@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Snapshot-bound publish path (#356 round 12): the release is fetched
-BY ID, every asset digest is verified against the anchor immediately
-before AND after the ID-based publish edit, and the published release
-must be immutable — publication is never bound to the mutable tag."""
+"""Snapshot-bound publish path (#356 rounds 12-13): the immutable
+policy is a PREREQUISITE checked before anything becomes public, the
+release is fetched BY ID, asset digests AND canonical editable metadata
+are verified on every snapshot, and the publish carries the rendered
+notes in a JSON --input payload (gh raw fields do not read @files)."""
 
 import hashlib
 import json
@@ -27,6 +28,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "scripts"))
 import publish_release_body
+import render_release_notes
 
 VERSION = "0.2.0"
 PUBLIC_IMAGE = "us-docker.pkg.dev/bqaa-releases/bqaa/otlp-receiver"
@@ -38,6 +40,11 @@ RELEASE_ID = 4242
 WHEEL = f"bigquery_agent_analytics_tracing-{VERSION}-py3-none-any.whl"
 SDIST = f"bigquery_agent_analytics_tracing-{VERSION}.tar.gz"
 PLUGIN = f"bigquery-agent-analytics-tracing-claude-code-{VERSION}.tar.gz"
+
+EXPECTED_NAME = f"Tracing {TAG}"
+EXPECTED_BODY = render_release_notes.render(
+    version=VERSION, digest=DIGEST, public_image=PUBLIC_IMAGE
+)
 
 
 def _anchor(tmp_path):
@@ -63,28 +70,31 @@ def _release_json(
     immutable=False,
     release_id=RELEASE_ID,
     tag=TAG,
+    name=EXPECTED_NAME,
+    body=EXPECTED_BODY,
+    prerelease=False,
     tamper=(),
     extra=(),
     omit=(),
 ):
   expected = publish_release_body.expected_asset_digests(VERSION, anchor_dir)
   assets = []
-  for i, name in enumerate(sorted(expected)):
-    if name in omit:
+  for i, asset_name in enumerate(sorted(expected)):
+    if asset_name in omit:
       continue
-    digest = "0" * 64 if name in tamper else expected[name]
+    digest = "0" * 64 if asset_name in tamper else expected[asset_name]
     assets.append(
         {
-            "name": name,
+            "name": asset_name,
             "id": 1000 + i,
             "digest": f"sha256:{digest}",
             "state": "uploaded",
         }
     )
-  for name in extra:
+  for asset_name in extra:
     assets.append(
         {
-            "name": name,
+            "name": asset_name,
             "id": 9999,
             "digest": "sha256:" + "1" * 64,
             "state": "uploaded",
@@ -95,17 +105,27 @@ def _release_json(
       "tag_name": tag,
       "draft": draft,
       "immutable": immutable,
+      "name": name,
+      "body": body,
+      "prerelease": prerelease,
       "assets": assets,
   }
 
 
 class FakeGh:
-  """Serves queued release objects for GET fetches; records every call.
+  """Routes fetches by path; records every call.
 
-  PATCH calls return ``patch_rc`` with empty output."""
+  ``releases`` is a queue served for /releases/{id} fetches. ``latest``
+  is the /releases/latest object (None → the endpoint errors).
+  ``setting`` is the /immutable-releases object (a tuple = raw (rc,
+  out)). PATCH calls return ``patch_rc``."""
 
-  def __init__(self, fetches, patch_rc=0):
-    self.fetches = list(fetches)
+  def __init__(self, releases=(), *, setting=None, latest="other", patch_rc=0):
+    self.releases = list(releases)
+    self.setting = {"enabled": True} if setting is None else setting
+    if latest == "other":
+      latest = {"id": RELEASE_ID + 1}
+    self.latest = latest
     self.patch_rc = patch_rc
     self.calls = []
 
@@ -113,7 +133,16 @@ class FakeGh:
     self.calls.append(argv)
     if "PATCH" in argv:
       return self.patch_rc, ""
-    item = self.fetches.pop(0)
+    path = argv[2]
+    if path.endswith("/immutable-releases"):
+      if isinstance(self.setting, tuple):
+        return self.setting
+      return 0, json.dumps(self.setting)
+    if path.endswith("/releases/latest"):
+      if self.latest is None:
+        return 1, ""
+      return 0, json.dumps(self.latest)
+    item = self.releases.pop(0)
     if isinstance(item, tuple):
       return item
     return 0, json.dumps(item)
@@ -137,7 +166,7 @@ def _publish(tmp_path, gh, out=None):
   )
 
 
-def test_happy_path_verifies_before_and_after_the_id_based_edit(tmp_path):
+def test_happy_path_publishes_by_id_with_json_payload(tmp_path):
   anchor = _anchor(tmp_path)
   gh = FakeGh(
       [
@@ -147,30 +176,69 @@ def test_happy_path_verifies_before_and_after_the_id_based_edit(tmp_path):
   )
   rc = _publish(tmp_path, gh)
   assert rc == 0
-  body = (tmp_path / "release_body.md").read_text()
-  assert f"{PUBLIC_IMAGE}:{VERSION}@{DIGEST}" in body
   (patch,) = gh.patch_calls
   assert f"repos/{REPO}/releases/{RELEASE_ID}" in patch  # by ID, not tag
-  assert f"tag_name={TAG}" in patch
-  assert f"name=Tracing {TAG}" in patch
-  assert "draft=false" in patch
-  assert "prerelease=false" in patch
-  assert "make_latest=false" in patch
-  assert any(a.startswith("body=@") for a in patch)
-  # Three gh calls total: fetch, PATCH, re-fetch.
-  assert len(gh.calls) == 3
+  assert "--input" in patch
+  payload = json.loads(
+      pathlib.Path(patch[patch.index("--input") + 1]).read_text()
+  )
+  assert payload == {
+      "tag_name": TAG,
+      "name": EXPECTED_NAME,
+      "body": EXPECTED_BODY,
+      "draft": False,
+      "prerelease": False,
+      "make_latest": "false",
+  }
 
 
-def test_expected_digests_come_from_anchor_bytes(tmp_path):
+def test_payload_carries_rendered_notes_not_a_filename(tmp_path):
+  # Reviewer reproduction (#356 round 13): `gh api -f body=@file`
+  # publishes the literal string "@file". The transmitted value must be
+  # the rendered notes themselves, via a JSON --input payload.
   anchor = _anchor(tmp_path)
-  expected = publish_release_body.expected_asset_digests(VERSION, anchor)
-  assert set(expected) == {WHEEL, SDIST, PLUGIN, "SHA256SUMS"}
-  assert expected[SDIST] == hashlib.sha256(b"sdist-bytes").hexdigest()
+  gh = FakeGh(
+      [
+          _release_json(anchor, draft=True),
+          _release_json(anchor, draft=False, immutable=True),
+      ]
+  )
+  assert _publish(tmp_path, gh) == 0
+  (patch,) = gh.patch_calls
+  assert not any("=@" in arg for arg in patch)
+  payload = json.loads(
+      pathlib.Path(patch[patch.index("--input") + 1]).read_text()
+  )
+  assert payload["body"] == EXPECTED_BODY
+  assert f"{PUBLIC_IMAGE}:{VERSION}@{DIGEST}" in payload["body"]
+  assert not payload["body"].startswith("@")
+
+
+def test_disabled_immutable_setting_blocks_before_anything_is_public(
+    tmp_path,
+):
+  # The prerequisite (#356 round 13): enabling the setting later is NOT
+  # retroactive, so nothing may be published while it is off. The
+  # release must not even be fetched, let alone PATCHed.
+  anchor = _anchor(tmp_path)
+  out = []
+  gh = FakeGh([_release_json(anchor, draft=True)], setting={"enabled": False})
+  rc = _publish(tmp_path, gh, out)
+  assert rc != 0
+  assert not gh.patch_calls
+  assert len(gh.calls) == 1  # only the policy check ran
+  assert any("NOT retroactive" in line for line in out)
+  assert any("still an unpublished draft" in line for line in out)
+
+
+def test_unreadable_immutable_setting_fails_closed(tmp_path):
+  _anchor(tmp_path)
+  gh = FakeGh([], setting=(1, ""))
+  assert _publish(tmp_path, gh) != 0
+  assert not gh.patch_calls
 
 
 def test_tampered_asset_before_publish_refuses_to_publish(tmp_path):
-  # The TOCTOU the reviewer flagged: assets replaced between
-  # reconciliation and publish must abort BEFORE the edit.
   anchor = _anchor(tmp_path)
   out = []
   gh = FakeGh([_release_json(anchor, tamper=(WHEEL,))])
@@ -180,18 +248,12 @@ def test_tampered_asset_before_publish_refuses_to_publish(tmp_path):
   assert any("snapshot changed" in line for line in out)
 
 
-def test_extra_asset_before_publish_refuses_to_publish(tmp_path):
+def test_extra_or_missing_asset_before_publish_refuses(tmp_path):
   anchor = _anchor(tmp_path)
   gh = FakeGh([_release_json(anchor, extra=("evil.bin",))])
   assert _publish(tmp_path, gh) != 0
-  assert not gh.patch_calls
-
-
-def test_missing_asset_before_publish_refuses_to_publish(tmp_path):
-  anchor = _anchor(tmp_path)
   gh = FakeGh([_release_json(anchor, omit=(PLUGIN,))])
   assert _publish(tmp_path, gh) != 0
-  assert not gh.patch_calls
 
 
 def test_wrong_release_id_or_tag_refuses_to_publish(tmp_path):
@@ -202,8 +264,20 @@ def test_wrong_release_id_or_tag_refuses_to_publish(tmp_path):
   assert _publish(tmp_path, gh) != 0
 
 
+def test_published_mutable_release_is_burned_not_repaired(tmp_path):
+  # Published while the setting was off: immutability cannot be applied
+  # retroactively, so "enable and re-run" would be false advice.
+  anchor = _anchor(tmp_path)
+  out = []
+  gh = FakeGh([_release_json(anchor, draft=False, immutable=False)])
+  rc = _publish(tmp_path, gh, out)
+  assert rc != 0
+  assert not gh.patch_calls
+  assert any("burned" in line for line in out)
+  assert any("retroactively" in line for line in out)
+
+
 def test_post_publish_tamper_is_detected(tmp_path):
-  # Assets swapped between the PATCH and the re-fetch.
   anchor = _anchor(tmp_path)
   out = []
   gh = FakeGh(
@@ -217,9 +291,31 @@ def test_post_publish_tamper_is_detected(tmp_path):
   assert any("post-publish" in line for line in out)
 
 
-def test_mutable_published_release_fails_the_immutability_assert(tmp_path):
-  # The repository setting is the only thing keeping published assets
-  # non-replaceable; a mutable publication must fail loudly.
+def test_post_publish_canonical_drift_is_detected(tmp_path):
+  # The canonical metadata must be verified on the published snapshot
+  # too (#356 round 13) — title/notes stay editable forever.
+  anchor = _anchor(tmp_path)
+  gh = FakeGh(
+      [
+          _release_json(anchor, draft=True),
+          _release_json(
+              anchor, draft=False, immutable=True, name="Renamed by someone"
+          ),
+      ]
+  )
+  assert _publish(tmp_path, gh) != 0
+  gh = FakeGh(
+      [
+          _release_json(anchor, draft=True),
+          _release_json(
+              anchor, draft=False, immutable=True, body="tampered notes"
+          ),
+      ]
+  )
+  assert _publish(tmp_path, gh) != 0
+
+
+def test_post_publish_mutable_fails_as_defense_in_depth(tmp_path):
   anchor = _anchor(tmp_path)
   out = []
   gh = FakeGh(
@@ -230,7 +326,7 @@ def test_mutable_published_release_fails_the_immutability_assert(tmp_path):
   )
   rc = _publish(tmp_path, gh, out)
   assert rc != 0
-  assert any("NOT immutable" in line for line in out)
+  assert any("MUTABLE" in line for line in out)
 
 
 def test_still_draft_after_edit_fails(tmp_path):
@@ -244,23 +340,104 @@ def test_still_draft_after_edit_fails(tmp_path):
   assert _publish(tmp_path, gh) != 0
 
 
-def test_already_published_immutable_and_identical_is_idempotent(tmp_path):
-  # A finalize rerun after a successful publish: the immutable release
-  # cannot (and need not) be edited.
+def test_becoming_repository_latest_fails(tmp_path):
   anchor = _anchor(tmp_path)
-  gh = FakeGh([_release_json(anchor, draft=False, immutable=True)])
-  rc = _publish(tmp_path, gh)
-  assert rc == 0
-  assert not gh.patch_calls
-
-
-def test_already_published_immutable_but_tampered_fails(tmp_path):
-  anchor = _anchor(tmp_path)
+  out = []
   gh = FakeGh(
-      [_release_json(anchor, draft=False, immutable=True, tamper=(WHEEL,))]
+      [
+          _release_json(anchor, draft=True),
+          _release_json(anchor, draft=False, immutable=True),
+      ],
+      latest={"id": RELEASE_ID},
   )
-  assert _publish(tmp_path, gh) != 0
-  assert not gh.patch_calls
+  rc = _publish(tmp_path, gh, out)
+  assert rc != 0
+  assert any("Latest" in line for line in out)
+
+
+def test_unreadable_latest_is_noted_not_fatal(tmp_path):
+  anchor = _anchor(tmp_path)
+  out = []
+  gh = FakeGh(
+      [
+          _release_json(anchor, draft=True),
+          _release_json(anchor, draft=False, immutable=True),
+      ],
+      latest=None,
+  )
+  rc = _publish(tmp_path, gh, out)
+  assert rc == 0
+  assert any("Latest lookup unavailable" in line for line in out)
+
+
+class TestIdempotentRerun:
+
+  def test_published_immutable_canonical_is_a_no_op(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh([_release_json(anchor, draft=False, immutable=True)])
+    rc = _publish(tmp_path, gh)
+    assert rc == 0
+    assert not gh.patch_calls
+
+  def test_editable_metadata_drift_is_repaired(self, tmp_path):
+    # Immutable releases still allow title/notes edits (#356 round 13):
+    # drift is repaired with a metadata-only PATCH.
+    anchor = _anchor(tmp_path)
+    out = []
+    gh = FakeGh(
+        [
+            _release_json(
+                anchor, draft=False, immutable=True, name="Defaced title"
+            ),
+            _release_json(anchor, draft=False, immutable=True),
+        ]
+    )
+    rc = _publish(tmp_path, gh, out)
+    assert rc == 0
+    (patch,) = gh.patch_calls
+    payload = json.loads(
+        pathlib.Path(patch[patch.index("--input") + 1]).read_text()
+    )
+    assert payload == {"name": EXPECTED_NAME, "body": EXPECTED_BODY}
+    assert any("repairing" in line for line in out)
+
+  def test_repair_that_does_not_converge_fails(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [
+            _release_json(anchor, draft=False, immutable=True, body="defaced"),
+            _release_json(
+                anchor, draft=False, immutable=True, body="still defaced"
+            ),
+        ]
+    )
+    assert _publish(tmp_path, gh) != 0
+
+  def test_prerelease_drift_is_unrepairable(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    out = []
+    gh = FakeGh(
+        [_release_json(anchor, draft=False, immutable=True, prerelease=True)]
+    )
+    rc = _publish(tmp_path, gh, out)
+    assert rc != 0
+    assert not gh.patch_calls
+    assert any("unrepairable" in line for line in out)
+
+  def test_tampered_assets_on_immutable_release_fail(self, tmp_path):
+    anchor = _anchor(tmp_path)
+    gh = FakeGh(
+        [_release_json(anchor, draft=False, immutable=True, tamper=(WHEEL,))]
+    )
+    assert _publish(tmp_path, gh) != 0
+    assert not gh.patch_calls
+
+
+def test_expected_digests_come_from_anchor_bytes(tmp_path):
+  anchor = _anchor(tmp_path)
+  expected = publish_release_body.expected_asset_digests(VERSION, anchor)
+  assert set(expected) == {WHEEL, SDIST, PLUGIN, "SHA256SUMS"}
+  assert expected[SDIST] == hashlib.sha256(b"sdist-bytes").hexdigest()
 
 
 def test_fails_when_anchor_wheel_is_absent(tmp_path):
