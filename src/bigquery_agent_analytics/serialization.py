@@ -34,6 +34,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+# Module-level on purpose: serialize() visits every value recursively,
+# and per-call relative imports measurably slow large payloads. trace
+# does not import this module, so there is no cycle.
+from .trace import _pin_sentinel_name
+from .trace import _PIN_WIRE_KEY
+from .trace import _PinSentinel
+from .trace import UNSET
+
 
 def serialize(obj: Any) -> Any:
   """Convert any SDK return type to a ``json.dumps()``-safe value.
@@ -46,10 +54,6 @@ def serialize(obj: Any) -> Any:
       A JSON-safe Python object (dict, list, str, int, float, bool,
       or None).
   """
-  from .trace import _pin_sentinel_name
-  from .trace import _PIN_WIRE_KEY
-  from .trace import _PinSentinel
-
   if obj is None:
     return None
   if isinstance(obj, _PinSentinel):
@@ -90,8 +94,6 @@ def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
   :func:`~bigquery_agent_analytics.trace.decode_pin` before
   reconstruction.
   """
-  from .trace import UNSET
-
   result: dict[str, Any] = {}
   for f in dataclasses.fields(obj):
     value = getattr(obj, f.name)

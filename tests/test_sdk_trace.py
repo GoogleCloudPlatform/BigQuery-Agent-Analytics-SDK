@@ -2229,13 +2229,22 @@ class TestExportsIndependentOfClient:
   """U1 contract must import without optional client deps (round 5)."""
 
   def test_identity_exports_survive_blocked_client_import(self):
+    import os
+    import pathlib
     import subprocess
     import sys
     import textwrap
 
+    # Pin this checkout's src so the subprocess cannot silently test
+    # another installed/checked-out copy of the package.
+    repo_src = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo_src + os.pathsep + env.get("PYTHONPATH", "")
+
     code = textwrap.dedent(
         """
         import importlib.abc
+        import pathlib
         import sys
 
         class Blocker(importlib.abc.MetaPathFinder):
@@ -2246,6 +2255,12 @@ class TestExportsIndependentOfClient:
 
         sys.meta_path.insert(0, Blocker())
         import bigquery_agent_analytics as bqaa
+
+        expected_src = pathlib.Path(sys.argv[1]).resolve()
+        actual = pathlib.Path(bqaa.__file__).resolve()
+        assert expected_src in actual.parents, (
+            f"imported {actual}, expected under {expected_src}"
+        )
 
         names = [
             "TraceIdentity", "TraceScope", "TraceSelector",
@@ -2263,10 +2278,11 @@ class TestExportsIndependentOfClient:
     """
     )
     result = subprocess.run(
-        [sys.executable, "-c", code],
+        [sys.executable, "-c", code, repo_src],
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
@@ -2493,3 +2509,123 @@ class TestAmbiguityStateReadOnly:
     assert err.to_dict()["candidate_count"] == 2
     restored = pickle.loads(pickle.dumps(err))
     assert restored.to_dict() == err.to_dict()
+
+
+class TestFilterLabelMutationDurability:
+  """In-place label mutation must not bypass validation (round 7)."""
+
+  class _Redirect(str):
+
+    def replace(self, *args, **kwargs):
+      return "hijacked"
+
+  def test_in_place_writes_rejected(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    with pytest.raises(TypeError, match="read-only"):
+      filt.custom_labels["x"] = "y"
+    with pytest.raises(TypeError, match="read-only"):
+      filt.custom_labels.update({"x": "y"})
+    with pytest.raises(TypeError, match="read-only"):
+      filt.custom_labels.pop("k")
+    with pytest.raises(TypeError, match="read-only"):
+      filt.custom_labels.clear()
+    with pytest.raises(TypeError, match="read-only"):
+      filt.custom_labels.setdefault("x", "y")
+    assert filt.custom_labels == {"k": "v"}
+
+  def test_low_level_injection_cannot_reach_sql(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    # dict.__setitem__ bypasses the subclass mutators; the SQL
+    # boundary revalidates a snapshot, so the hijacking key is
+    # normalized before JSONPath quoting.
+    dict.__setitem__(filt.custom_labels, self._Redirect("x"), "y")
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"k"', '"x"'}
+
+  def test_low_level_injected_garbage_fails_closed_at_sql(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    dict.__setitem__(filt.custom_labels, "n", 1)
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.to_sql_conditions()
+
+  def test_frozen_labels_pickle_and_copy(self):
+    import copy
+    import pickle
+
+    filt = TraceFilter(custom_labels={"k": "v"})
+    restored = pickle.loads(pickle.dumps(filt))
+    assert restored.custom_labels == {"k": "v"}
+    with pytest.raises(TypeError, match="read-only"):
+      restored.custom_labels["x"] = "y"
+    cloned = copy.deepcopy(filt)
+    assert cloned.custom_labels == {"k": "v"}
+
+
+class TestFilterLabelDuplicateNormalization:
+  """Keys colliding after normalization must fail closed (round 7)."""
+
+  def _distinct_subclass_keys(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    return KeyA("k"), KeyB("k")
+
+  def test_normalization_collision_raises(self):
+    key_a, key_b = self._distinct_subclass_keys()
+    source = {key_a: "first", key_b: "second"}
+    assert len(source) == 2  # distinct keys before normalization
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceFilter(custom_labels=source)
+
+
+class TestSessionIdsIdentitySurface:
+  """session_ids follows the exact-string contract (round 7)."""
+
+  class _Collider(str):
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return 0
+
+  def test_entries_normalized_and_copied_on_assignment(self):
+    source = [self._Collider("sess-1")]
+    filt = TraceFilter(session_ids=source)
+    assert type(filt.session_ids[0]) is str
+    # The stored list is a copy: mutating the source has no effect.
+    source.append("sess-2")
+    assert filt.session_ids == ["sess-1"]
+
+  def test_non_string_and_surrogate_entries_rejected(self):
+    with pytest.raises(TypeError, match="entries must be strings"):
+      TraceFilter(session_ids=["sess-1", 2])
+    with pytest.raises(TypeError, match="list of strings"):
+      TraceFilter(session_ids="sess-1")
+    surrogate = "\ud800"
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(session_ids=[surrogate])
+
+  def test_in_place_mutation_revalidated_at_sql_boundary(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    filt.session_ids.append(self._Collider("sess-2"))
+    _, params = filt.to_sql_conditions()
+    array = next(p for p in params if p.name == "session_ids")
+    assert [type(v) is str for v in array.values] == [True, True]
+    filt.session_ids.append(3)
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.to_sql_conditions()

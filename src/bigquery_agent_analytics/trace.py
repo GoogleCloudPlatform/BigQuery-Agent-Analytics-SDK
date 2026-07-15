@@ -456,9 +456,9 @@ class TraceFilter:
   start_time: Optional[datetime] = None
   end_time: Optional[datetime] = None
   agent_id: Optional[str] = None
-  user_id: _ScalarPin = None
+  user_id: _FilterPin = None
   session_ids: Optional[list[str]] = None
-  experiment_id: _ScalarPin = None
+  experiment_id: _FilterPin = None
   has_error: Optional[bool] = None
   error_type: Optional[str] = None
   custom_labels: Optional[dict[str, str]] = None
@@ -466,7 +466,7 @@ class TraceFilter:
   max_latency_ms: Optional[float] = None
   event_types: Optional[list[str]] = None
   tool_origin: Optional[str] = None
-  root_agent_name: _ScalarPin = None
+  root_agent_name: _FilterPin = None
   limit: int = 100
 
   def __setattr__(self, name: str, value: Any) -> None:
@@ -487,17 +487,12 @@ class TraceFilter:
       # Direct filter labels feed JSONPath construction; a str
       # subclass overriding replace() could redirect the selected
       # member, so keys and values are copied to exact built-in
-      # strings here, matching the selector/scope surfaces.
-      if not isinstance(value, dict):
-        raise TypeError("TraceFilter.custom_labels must be a dict or None.")
-      normalized: dict[str, str] = {}
-      for key, label_value in value.items():
-        if not isinstance(key, str) or not isinstance(label_value, str):
-          raise TypeError(
-              "TraceFilter.custom_labels keys and values must be strings."
-          )
-        normalized[_exact_str(key)] = _exact_str(label_value)
-      value = normalized
+      # strings (with post-normalization duplicate detection) and
+      # stored read-only so in-place writes cannot bypass this
+      # validation.
+      value = _FrozenLabels(_normalized_filter_labels(value))
+    if name == "session_ids" and value is not None:
+      value = _normalized_session_ids(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -606,7 +601,10 @@ class TraceFilter:
           bigquery.ArrayQueryParameter(
               "session_ids",
               "STRING",
-              self.session_ids,
+              # Revalidated: the stored list stays mutable for
+              # compatibility, so in-place edits must not reach the
+              # array parameter unchecked.
+              _normalized_session_ids(self.session_ids),
           )
       )
     if self.has_error is True:
@@ -668,7 +666,11 @@ class TraceFilter:
           )
       )
     if self.custom_labels:
-      for i, (key, value) in enumerate(self.custom_labels.items()):
+      # Revalidated snapshot: even low-level mutation of the stored
+      # mapping (e.g. dict.__setitem__ on the read-only subclass)
+      # cannot put a non-normalized key into the JSONPath.
+      labels = _normalized_filter_labels(self.custom_labels)
+      for i, (key, value) in enumerate(labels.items()):
         param_key = f"label_key_{i}"
         param_val = f"label_val_{i}"
         conditions.append(
@@ -766,10 +768,18 @@ class _PinSentinel:
     return (_resolve_pin_sentinel, (_pin_sentinel_name(self),))
 
 
-UNSET = _PinSentinel("UNSET")
+class _UnsetType(_PinSentinel):
+  """Type of :data:`UNSET` — valid only on the selector surface."""
+
+
+class _SqlNullType(_PinSentinel):
+  """Type of :data:`SQL_NULL` — valid only on the filter surface."""
+
+
+UNSET = _UnsetType("UNSET")
 """Selector pin state: this dimension is not pinned at all."""
 
-SQL_NULL = _PinSentinel("SQL_NULL")
+SQL_NULL = _SqlNullType("SQL_NULL")
 """Filter pin state: match only rows where this dimension is SQL NULL."""
 
 
@@ -822,6 +832,88 @@ def _exact_str(value: str) -> str:
   return copied
 
 
+class _FrozenLabels(dict):
+  """Read-only dict holding validated ``TraceFilter.custom_labels``.
+
+  In-place mutation (``__setitem__``, ``update()``, ``|=`` …) would
+  bypass the ``__setattr__`` validation and reintroduce hostile
+  string subclasses, surrogates, or non-strings behind the SQL and
+  serialization boundaries; assign a whole new dict instead.
+  """
+
+  def _readonly(self, *args: Any, **kwargs: Any) -> None:
+    raise TypeError(
+        "TraceFilter.custom_labels is read-only; assign a new dict to"
+        " the field instead of mutating it in place."
+    )
+
+  __setitem__ = _readonly
+  __delitem__ = _readonly
+  __ior__ = _readonly  # type: ignore[assignment]
+  clear = _readonly
+  pop = _readonly
+  popitem = _readonly
+  setdefault = _readonly
+  update = _readonly
+
+  def __reduce__(self) -> tuple[Any, tuple[dict]]:
+    # The default dict-subclass pickling repopulates via the blocked
+    # mutators; rebuild through the constructor instead.
+    return (self.__class__, (dict(self),))
+
+
+def _normalized_filter_labels(labels: Any) -> dict[str, str]:
+  """Validate and copy filter labels into exact built-in strings.
+
+  Called on every assignment and again on every consuming boundary,
+  so neither post-construction rebinding nor low-level in-place
+  mutation can smuggle a hostile key past JSONPath construction.
+
+  Raises:
+      TypeError: If ``labels`` is not a dict or a key/value is not a
+          string.
+      ValueError: If two source keys normalize to the same built-in
+          string (distinct ``str``-subclass keys with identical
+          character data would otherwise silently drop a predicate
+          instead of failing closed), or a string contains
+          surrogates.
+  """
+  if not isinstance(labels, dict):
+    raise TypeError("TraceFilter.custom_labels must be a dict or None.")
+  normalized: dict[str, str] = {}
+  for key, value in labels.items():
+    if not isinstance(key, str) or not isinstance(value, str):
+      raise TypeError(
+          "TraceFilter.custom_labels keys and values must be strings."
+      )
+    key = _exact_str(key)
+    if key in normalized:
+      raise ValueError(f"Duplicate custom label key: {key!r}.")
+    normalized[key] = _exact_str(value)
+  return normalized
+
+
+def _normalized_session_ids(session_ids: Any) -> list[str]:
+  """Validate and copy session IDs into exact built-in strings.
+
+  ``session_ids`` is a legacy identity surface feeding a BigQuery
+  array parameter and JSON serialization, so it follows the same
+  exact-string/surrogate rules as the other identity dimensions.
+  Called on assignment and re-applied at the SQL boundary because the
+  stored list remains mutable for compatibility.
+  """
+  if isinstance(session_ids, str) or not isinstance(session_ids, (list, tuple)):
+    raise TypeError(
+        "TraceFilter.session_ids must be a list of strings or None."
+    )
+  normalized = []
+  for session_id in session_ids:
+    if not isinstance(session_id, str):
+      raise TypeError("TraceFilter.session_ids entries must be strings.")
+    normalized.append(_exact_str(session_id))
+  return normalized
+
+
 _PIN_WIRE_KEY = "$pin"
 
 
@@ -846,9 +938,20 @@ def decode_pin(value: Any) -> Any:
   return value
 
 
-_ScalarPin = Union[str, "_PinSentinel", None]
+# Separate pin aliases per surface so the annotations match the
+# runtime contract: filters reject UNSET and selectors reject
+# SQL_NULL (issue #362 round 7).
+_FilterPin = Union[str, "_SqlNullType", None]
+_SelectorPin = Union[str, "_UnsetType", None]
 
-_LabelsInput = Union[dict[str, str], Sequence[tuple[str, str]], None]
+# Accepted label shapes include the JSON wire form (lists of two-item
+# lists) that serialization emits and the constructors normalize.
+_LabelsInput = Union[
+    dict[str, str],
+    Sequence[tuple[str, str]],
+    Sequence[list[str]],
+    None,
+]
 
 
 def _canonicalize_labels(
@@ -1014,9 +1117,9 @@ class TraceSelector:
   """
 
   session_id: str
-  user_id: _ScalarPin = UNSET
-  root_agent_name: _ScalarPin = UNSET
-  experiment_id: _ScalarPin = UNSET
+  user_id: _SelectorPin = UNSET
+  root_agent_name: _SelectorPin = UNSET
+  experiment_id: _SelectorPin = UNSET
   custom_labels: _LabelsInput = None
   scope_signature: Optional[str] = None
 
@@ -1047,7 +1150,7 @@ class TraceSelector:
     )
 
   @staticmethod
-  def _pin_to_filter_value(value: _ScalarPin) -> _ScalarPin:
+  def _pin_to_filter_value(value: _SelectorPin) -> _FilterPin:
     """Map a selector pin onto the TraceFilter three-state encoding."""
     if value is UNSET:
       return None
