@@ -2028,7 +2028,9 @@ class TestTraceComponentTypes:
     with pytest.raises(TypeError, match="must be a TraceScope"):
       trace.scope = object()
     trace.scope = TraceScope(custom_labels={"run": "v0"})
-    trace.scope = None
+    # Once attached, scope follows the attach-once contract
+    # (see TestScopeProvenanceInvariant).
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
 
 
 class TestResolvedSelectorComponentTypes:
@@ -2268,3 +2270,226 @@ class TestExportsIndependentOfClient:
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
+
+
+class TestResolvedSelectorExactType:
+  """Subclassed candidates must not reach dedup (round 6, P1)."""
+
+  class _EvilSelector(ResolvedTraceSelector):
+    """Bypasses component checks and collapses all comparisons."""
+
+    def __post_init__(self):
+      pass
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return 0
+
+  def _evil(self, user_id):
+    return self._EvilSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id)
+    )
+
+  def test_resolver_rejects_subclass_candidates(self):
+    with pytest.raises(TypeError, match="exact"):
+      resolve_singular_candidate([self._evil("alice"), self._evil("bob")])
+
+  def test_error_rejects_subclass_candidates(self):
+    real = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice")
+    )
+    with pytest.raises(TypeError, match="exact"):
+      AmbiguousSessionError(candidates=[real, self._evil("bob")])
+
+
+class TestTraceMirrorTypeEnforcement:
+  """Foreign mirror values must be rejected before comparison
+  (round 6, P1)."""
+
+  class _Sneaky:
+    """Comparison methods report equality with everything."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_foreign_user_id_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(TypeError, match="user_id must be a string"):
+      trace.user_id = self._Sneaky()
+    assert trace.user_id == "alice"
+
+  def test_foreign_session_id_rejected(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      trace.session_id = self._Sneaky()
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      Trace(trace_id="t1", session_id=self._Sneaky())
+
+  def test_none_session_id_rejected(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      Trace(trace_id="t1", session_id=None)
+
+
+class TestScopeProvenanceInvariant:
+  """Scope provenance follows the attach-once contract (round 6, P1)."""
+
+  def _scoped_trace(self):
+    return Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+
+  def test_replacement_rejected(self):
+    trace = self._scoped_trace()
+    with pytest.raises(ValueError, match="scope cannot be replaced"):
+      trace.scope = TraceScope(custom_labels={"run": "v1"})
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_clearing_and_deletion_rejected(self):
+    trace = self._scoped_trace()
+    with pytest.raises(ValueError, match="scope cannot be replaced"):
+      trace.scope = None
+    with pytest.raises(AttributeError, match="cannot be deleted"):
+      del trace.scope
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_late_attachment_and_idempotent_reassignment_allowed(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    assert trace.scope is None
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+
+class TestSurrogateRejection:
+  """Surrogate code units must fail closed (round 6, P2)."""
+
+  # Explicit high+low surrogate code units vs the astral scalar:
+  # Python treats them as distinct strings, but JSON escaping maps
+  # both to \ud83d\ude00, collapsing them on the wire.
+  _SURROGATE = "\ud83d" "\ude00"
+  _ASTRAL = "\U0001f600"
+
+  def test_python_distinguishes_the_two_forms(self):
+    assert self._SURROGATE != self._ASTRAL
+    assert len(self._SURROGATE) == 2
+    assert len(self._ASTRAL) == 1
+
+  def test_surrogates_rejected_at_every_boundary(self):
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceIdentity(session_id="sess-1", user_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceScope(custom_labels={"k": self._SURROGATE})
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceScope(experiment_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceSelector(session_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(user_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(custom_labels={"k": self._SURROGATE})
+    with pytest.raises(ValueError, match="surrogate"):
+      Trace(trace_id="t1", session_id=self._SURROGATE)
+
+  def test_astral_scalars_still_accepted(self):
+    scope = TraceScope(custom_labels={"k": self._ASTRAL})
+    assert scope.labels_dict == {"k": self._ASTRAL}
+
+  def test_ambiguity_payload_json_round_trip_stays_distinct(self):
+    import json as json_mod
+
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    err = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"k": self._ASTRAL}),
+            ),
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"k": "plain"}),
+            ),
+        ]
+    )
+    restored = json_mod.loads(json_mod.dumps(err.to_dict()))
+    selectors = [TraceSelector(**c["selector"]) for c in restored["candidates"]]
+    assert selectors[0] != selectors[1]
+    signatures = {c["scope_signature"] for c in restored["candidates"]}
+    assert len(signatures) == 2
+
+
+class TestTraceFilterLabelNormalization:
+  """Direct filter labels must not retain caller hooks (round 6)."""
+
+  class _Redirect(str):
+    """replace() rewrites content to hijack JSONPath quoting."""
+
+    def replace(self, *args, **kwargs):
+      return "hijacked"
+
+  def test_subclass_key_cannot_redirect_jsonpath(self):
+    filt = TraceFilter(custom_labels={self._Redirect("k"): "v"})
+    key = next(iter(filt.custom_labels))
+    assert type(key) is str
+    _, params = filt.to_sql_conditions()
+    key_param = next(p for p in params if p.name == "label_key_0")
+    assert key_param.value == '"k"'
+
+  def test_values_normalized_and_non_strings_rejected(self):
+    filt = TraceFilter(custom_labels={"k": self._Redirect("v")})
+    assert type(filt.custom_labels["k"]) is str
+    with pytest.raises(TypeError, match="keys and values must be strings"):
+      TraceFilter(custom_labels={"k": 1})
+    with pytest.raises(TypeError, match="must be a dict"):
+      TraceFilter(custom_labels=[("k", "v")])
+
+  def test_post_construction_label_assignment_normalized(self):
+    filt = TraceFilter()
+    filt.custom_labels = {self._Redirect("k"): "v"}
+    assert type(next(iter(filt.custom_labels))) is str
+
+
+class TestAmbiguityStateReadOnly:
+  """Validated error state must not be reassignable (round 6)."""
+
+  def _error(self):
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice")
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="bob")
+            ),
+        ]
+    )
+
+  def test_candidates_and_retry_dimensions_read_only(self):
+    err = self._error()
+    with pytest.raises(AttributeError):
+      err.candidates = (err.candidates[0],)
+    with pytest.raises(AttributeError):
+      err.retry_dimensions = ()
+    assert err.to_dict()["candidate_count"] == 2
+
+  def test_message_payload_and_pickle_stay_consistent(self):
+    import pickle
+
+    err = self._error()
+    assert "2" in str(err)
+    assert err.to_dict()["candidate_count"] == 2
+    restored = pickle.loads(pickle.dumps(err))
+    assert restored.to_dict() == err.to_dict()

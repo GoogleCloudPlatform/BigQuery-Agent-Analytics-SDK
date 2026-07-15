@@ -483,6 +483,21 @@ class TraceFilter:
         )
       if isinstance(value, str):
         value = _exact_str(value)
+    if name == "custom_labels" and value is not None:
+      # Direct filter labels feed JSONPath construction; a str
+      # subclass overriding replace() could redirect the selected
+      # member, so keys and values are copied to exact built-in
+      # strings here, matching the selector/scope surfaces.
+      if not isinstance(value, dict):
+        raise TypeError("TraceFilter.custom_labels must be a dict or None.")
+      normalized: dict[str, str] = {}
+      for key, label_value in value.items():
+        if not isinstance(key, str) or not isinstance(label_value, str):
+          raise TypeError(
+              "TraceFilter.custom_labels keys and values must be strings."
+          )
+        normalized[_exact_str(key)] = _exact_str(label_value)
+      value = normalized
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -784,10 +799,27 @@ def _exact_str(value: str) -> str:
   never run on caller-controlled semantics. ``str.join`` copies the
   character data through internal APIs without invoking any subclass
   hook.
+
+  Surrogate code units are rejected: Python distinguishes an astral
+  scalar from the equivalent explicit high+low surrogate string, but
+  JSON escaping maps both to the same wire bytes, so two distinct
+  accepted scopes would collapse into one signature and retry
+  selector after a round trip. Such strings are also not
+  representable in BigQuery, so no real identity can contain them.
+
+  Raises:
+      ValueError: If the string contains surrogate code units.
   """
-  if type(value) is str:
-    return value
-  return "".join((value,))
+  copied = value if type(value) is str else "".join((value,))
+  try:
+    copied.encode("utf-8")
+  except UnicodeEncodeError as exc:
+    raise ValueError(
+        "Identity-contract strings must not contain surrogate code"
+        " units; they cannot round-trip through JSON or BigQuery"
+        " without collapsing distinct values."
+    ) from exc
+  return copied
 
 
 _PIN_WIRE_KEY = "$pin"
@@ -1148,15 +1180,30 @@ class AmbiguousSessionError(ValueError):
           " candidates from different sessions are distinct lookups,"
           " not an ambiguity."
       )
-    self.candidates: tuple[ResolvedTraceSelector, ...] = deduped
-    self.retry_dimensions: tuple[str, ...] = self._differing_dimensions(
-        self.candidates
+    self._candidates: tuple[ResolvedTraceSelector, ...] = deduped
+    self._retry_dimensions: tuple[str, ...] = self._differing_dimensions(
+        deduped
     )
-    dims = ", ".join(self.retry_dimensions) or "scope"
+    dims = ", ".join(self._retry_dimensions) or "scope"
     super().__init__(
-        f"Ambiguous singular session lookup: {len(self.candidates)}"
+        f"Ambiguous singular session lookup: {len(deduped)}"
         f" candidates match. Retry with an explicit selector for: {dims}."
     )
+
+  @property
+  def candidates(self) -> tuple[ResolvedTraceSelector, ...]:
+    """The distinct colliding candidates (read-only).
+
+    Exposed as a property so the constructor-validated ambiguity
+    state cannot be reassigned into a shape that contradicts the
+    message, payload, or pickle behavior.
+    """
+    return self._candidates
+
+  @property
+  def retry_dimensions(self) -> tuple[str, ...]:
+    """Dimension names that disambiguate a retry (read-only)."""
+    return self._retry_dimensions
 
   def __reduce__(self) -> tuple[Any, tuple[Any]]:
     # Exception.args holds the redacted message, so default
@@ -1209,14 +1256,18 @@ def _validated_candidates(
 
   Foreign values that happen to compare equal (or hash together)
   would otherwise collapse silently inside ``dict.fromkeys()``
-  instead of failing clearly.
+  instead of failing clearly. Exact type is required — a
+  ``ResolvedTraceSelector`` subclass can override ``__post_init__``,
+  ``__eq__``, and ``__hash__``, so ``isinstance`` would still let
+  caller-controlled semantics drive the fail-closed ambiguity
+  decision.
   """
   validated = list(candidates)
   for candidate in validated:
-    if not isinstance(candidate, ResolvedTraceSelector):
+    if type(candidate) is not ResolvedTraceSelector:
       raise TypeError(
-          "Candidates must be ResolvedTraceSelector instances; got"
-          f" {type(candidate).__name__}."
+          "Candidates must be ResolvedTraceSelector instances (exact"
+          f" type); got {type(candidate).__name__}."
       )
   return validated
 
@@ -1285,11 +1336,28 @@ class Trace:
   scope: Optional[TraceScope] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
-    if name == "scope" and value is not None and type(value) is not TraceScope:
-      raise TypeError("Trace.scope must be a TraceScope or None.")
-    if name in ("session_id", "user_id") and isinstance(value, str):
-      # Exact-str normalization keeps mirror comparisons off
-      # caller-controlled __eq__/__ne__ semantics.
+    if name == "scope":
+      if value is not None and type(value) is not TraceScope:
+        raise TypeError("Trace.scope must be a TraceScope or None.")
+      # Scope carries the run's provenance: once attached it can only
+      # be re-assigned an equal value, never replaced or cleared, or
+      # serialized output would report a different pass (or none) for
+      # the same spans.
+      current = getattr(self, "scope", None)
+      if current is not None and value != current:
+        raise ValueError(
+            "Trace.scope cannot be replaced or detached once attached;"
+            " build a new Trace for a different scope."
+        )
+    if name == "session_id":
+      # Enforce types before any equality check: a foreign object's
+      # comparison methods must never drive the mirror validation.
+      if not isinstance(value, str):
+        raise TypeError("Trace.session_id must be a string.")
+      value = _exact_str(value)
+    elif name == "user_id" and value is not None:
+      if not isinstance(value, str):
+        raise TypeError("Trace.user_id must be a string or None.")
       value = _exact_str(value)
     if name in ("session_id", "user_id", "identity"):
       self._check_identity_write(name, value)
@@ -1301,10 +1369,11 @@ class Trace:
       object.__setattr__(self, "user_id", value.user_id)
 
   def __delattr__(self, name: str) -> None:
-    if name in ("session_id", "user_id", "identity"):
-      # Deleting an identity-authority field would fall back to the
-      # dataclass class-level default (None), silently detaching the
-      # identity and reopening the retag path the write guards close.
+    if name in ("session_id", "user_id", "identity", "scope"):
+      # Deleting an identity- or provenance-carrying field would fall
+      # back to the dataclass class-level default (None), silently
+      # detaching it and reopening the retag path the write guards
+      # close.
       raise AttributeError(
           f"Trace.{name} carries the identity contract and cannot be"
           " deleted."
