@@ -34,6 +34,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+# Module-level on purpose: serialize() visits every value recursively,
+# and per-call relative imports measurably slow large payloads. trace
+# does not import this module, so there is no cycle.
+from .trace import _pin_sentinel_name
+from .trace import _PIN_WIRE_KEY
+from .trace import SQL_NULL
+from .trace import UNSET
+
 
 def serialize(obj: Any) -> Any:
   """Convert any SDK return type to a ``json.dumps()``-safe value.
@@ -48,6 +56,14 @@ def serialize(obj: Any) -> Any:
   """
   if obj is None:
     return None
+  if obj is UNSET or obj is SQL_NULL:
+    # Tagged wire encoding (decode with trace.decode_pin): plain JSON
+    # null cannot carry SQL_NULL because None already means
+    # "unfiltered" on TraceFilter. UNSET only reaches here outside a
+    # dataclass field (those are omitted below). Identity comparison,
+    # not isinstance: a spoofed __class__ property must not divert a
+    # normal dataclass into the sentinel branch.
+    return {_PIN_WIRE_KEY: _pin_sentinel_name(obj)}
   if hasattr(obj, "model_dump"):
     return obj.model_dump(mode="json")
   if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
@@ -64,8 +80,25 @@ def serialize(obj: Any) -> Any:
 
 
 def _dataclass_to_dict(obj: Any) -> dict[str, Any]:
-  """Recursively convert a dataclass instance to a dict."""
+  """Recursively convert a dataclass instance to a dict.
+
+  Pin wire contract (issue #359): fields holding the
+  :data:`~bigquery_agent_analytics.trace.UNSET` pin sentinel are
+  omitted entirely — JSON has no third state, and encoding UNSET as
+  ``null`` would reconstruct as an explicit pin-to-SQL-NULL. Omission
+  round-trips: absent keyword arguments restore the UNSET default.
+  On ``TraceSelector``, explicit NULL pins serialize as ``null`` and
+  reconstruct unchanged. On ``TraceFilter``, a
+  :data:`~bigquery_agent_analytics.trace.SQL_NULL` pin serializes as
+  the tagged object ``{"$pin": "SQL_NULL"}`` (``null`` already means
+  "unfiltered" there) and must be passed through
+  :func:`~bigquery_agent_analytics.trace.decode_pin` before
+  reconstruction.
+  """
   result: dict[str, Any] = {}
   for f in dataclasses.fields(obj):
-    result[f.name] = serialize(getattr(obj, f.name))
+    value = getattr(obj, f.name)
+    if value is UNSET:
+      continue
+    result[f.name] = serialize(value)
   return result

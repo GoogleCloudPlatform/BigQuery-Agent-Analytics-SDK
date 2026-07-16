@@ -37,8 +37,11 @@ from bigquery_agent_analytics.serialization import serialize
 from bigquery_agent_analytics.trace import ContentPart
 from bigquery_agent_analytics.trace import EventType
 from bigquery_agent_analytics.trace import ObjectRef
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 _NOW = datetime(2026, 3, 12, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -330,3 +333,187 @@ class TestSerializeRoundTrip:
     dumped = json.dumps(serialized)
     loaded = json.loads(dumped)
     assert isinstance(loaded, dict)
+
+
+# ------------------------------------------------------------------ #
+# Identity contract (issue #359, U1)                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestSerializeIdentity:
+
+  def _trace(self, user_id, run_label):
+    return Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        user_id=user_id,
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id),
+        scope=TraceScope(custom_labels={"run": run_label}),
+    )
+
+  def test_trace_with_identity_json_safe_and_legacy_fields_unchanged(self):
+    result = serialize(self._trace("alice", "v0"))
+    # Legacy scalar fields keep their names and values.
+    assert result["trace_id"] == "t1"
+    assert result["session_id"] == "sess-1"
+    assert result["user_id"] == "alice"
+    # The identity is additive and nested.
+    assert result["identity"]["session_id"] == "sess-1"
+    assert result["identity"]["user_id"] == "alice"
+    json.dumps(result)
+
+  def test_identity_null_fields_serialize_stably(self):
+    identity = TraceIdentity(session_id="sess-1")
+    result = serialize(identity)
+    assert result == {
+        "session_id": "sess-1",
+        "user_id": None,
+        "root_agent_name": None,
+    }
+    json.dumps(result)
+
+  def test_scope_with_null_fields_json_safe(self):
+    result = serialize(TraceScope())
+    json.dumps(result)
+    result = serialize(TraceScope(custom_labels={"b": "2", "a": "1"}))
+    json.dumps(result)
+
+  def test_colliding_traces_stay_distinguishable_after_serialization(self):
+    a = serialize(self._trace("alice", "v0"))
+    b = serialize(self._trace("alice", "v1"))
+    assert a["session_id"] == b["session_id"]
+    assert a != b
+
+  def test_resolved_selector_serializes(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(experiment_id="exp-1"),
+    )
+    result = serialize(resolved)
+    assert result["identity"]["user_id"] == "alice"
+    assert result["scope"]["experiment_id"] == "exp-1"
+    json.dumps(result)
+
+
+class TestSelectorWireFormat:
+  """UNSET pins must serialize by omission (issue #359, round 3)."""
+
+  def test_default_selector_serializes_json_safe(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+    from bigquery_agent_analytics.trace import UNSET
+
+    payload = serialize(TraceSelector(session_id="sess-1"))
+    # UNSET dimensions are omitted; JSON null is reserved for
+    # explicit pin-to-SQL-NULL.
+    assert payload == {
+        "session_id": "sess-1",
+        "custom_labels": None,
+        "scope_signature": None,
+    }
+    json.dumps(payload)
+    restored = TraceSelector(**payload)
+    assert restored == TraceSelector(session_id="sess-1")
+    assert restored.user_id is UNSET
+
+  def test_explicit_null_pin_round_trips_as_null(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    original = TraceSelector(
+        session_id="sess-1", user_id=None, root_agent_name="root"
+    )
+    payload = serialize(original)
+    assert payload["user_id"] is None
+    assert payload["root_agent_name"] == "root"
+    assert "experiment_id" not in payload
+    restored = TraceSelector(**payload)
+    assert restored == original
+    assert restored.user_id is None
+
+  def test_format_output_json_handles_selector(self):
+    from bigquery_agent_analytics.formatter import format_output
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    rendered = format_output(TraceSelector(session_id="sess-1"), "json")
+    parsed = json.loads(rendered)
+    assert parsed["session_id"] == "sess-1"
+    assert "user_id" not in parsed
+
+  def test_labeled_selector_labels_round_trip(self):
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    original = TraceSelector(session_id="sess-1", custom_labels={"run": "v1"})
+    payload = serialize(original)
+    assert payload["custom_labels"] == [["run", "v1"]]
+    assert TraceSelector(**payload) == original
+
+
+class TestPinWireEncoding:
+  """SQL_NULL must have a tagged, decodable wire form (round 4)."""
+
+  def test_sql_null_filter_serializes_json_safe(self):
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    payload = serialize(TraceFilter(user_id=SQL_NULL))
+    assert payload["user_id"] == {"$pin": "SQL_NULL"}
+    json.dumps(payload)
+
+  def test_format_output_json_handles_sql_null_filter(self):
+    from bigquery_agent_analytics.formatter import format_output
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    rendered = format_output(TraceFilter(user_id=SQL_NULL), "json")
+    assert json.loads(rendered)["user_id"] == {"$pin": "SQL_NULL"}
+
+  def test_decode_pin_round_trips_null_safe_filter(self):
+    from bigquery_agent_analytics.trace import decode_pin
+    from bigquery_agent_analytics.trace import SQL_NULL
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    payload = serialize(TraceFilter(user_id=SQL_NULL))
+    restored = TraceFilter(user_id=decode_pin(payload["user_id"]))
+    assert restored.user_id is SQL_NULL
+    where, _ = restored.to_sql_conditions()
+    assert "user_id IS NULL" in where
+
+  def test_decode_pin_passes_ordinary_values_through(self):
+    from bigquery_agent_analytics.trace import decode_pin
+    from bigquery_agent_analytics.trace import UNSET
+
+    assert decode_pin(None) is None
+    assert decode_pin("alice") == "alice"
+    assert decode_pin({"$pin": "UNSET"}) is UNSET
+    assert decode_pin({"$pin": "bogus"}) == {"$pin": "bogus"}
+    assert decode_pin({"$pin": "SQL_NULL", "x": 1}) == {
+        "$pin": "SQL_NULL",
+        "x": 1,
+    }
+
+
+class TestSessionIdsWireDurability:
+  """Mutated session_ids must stay valid on the JSON wire (round 8)."""
+
+  def test_mutation_serialize_json_reconstruction_round_trip(self):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    filt = TraceFilter(session_ids=["sess-1"])
+    filt.session_ids.append("sess-\U0001f600")  # astral scalar is valid
+    payload = json.loads(json.dumps(serialize(filt)))
+    assert payload["session_ids"] == ["sess-1", "sess-\U0001f600"]
+    restored = TraceFilter(session_ids=payload["session_ids"])
+    assert restored.session_ids == filt.session_ids
+
+  def test_ordinary_mutation_cannot_reach_the_wire_with_surrogates(self):
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    filt = TraceFilter(session_ids=["sess-1"])
+    surrogate_spelling = "sess-" + "\ud83d" + "\ude00"
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.session_ids.append(surrogate_spelling)
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.append(7)
+    # The wire representation therefore always matches list[str].
+    payload = serialize(filt)
+    assert payload["session_ids"] == ["sess-1"]
+    json.dumps(payload)

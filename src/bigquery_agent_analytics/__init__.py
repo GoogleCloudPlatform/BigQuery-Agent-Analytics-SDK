@@ -62,6 +62,35 @@ __all__.extend(
     ]
 )
 
+# --- Identity/selector contract (issue #359, stdlib-only) ---
+# Exported unconditionally: the trace module imports BigQuery lazily,
+# so the identity value objects, selectors, sentinels, and the
+# ambiguity error must stay importable even when optional client
+# dependencies are unavailable.
+from .trace import AmbiguousSessionError
+from .trace import decode_pin
+from .trace import resolve_singular_candidate
+from .trace import ResolvedTraceSelector
+from .trace import SQL_NULL
+from .trace import TraceIdentity
+from .trace import TraceScope
+from .trace import TraceSelector
+from .trace import UNSET
+
+__all__.extend(
+    [
+        "TraceIdentity",
+        "TraceScope",
+        "TraceSelector",
+        "ResolvedTraceSelector",
+        "AmbiguousSessionError",
+        "resolve_singular_candidate",
+        "UNSET",
+        "SQL_NULL",
+        "decode_pin",
+    ]
+)
+
 # --- SDK Client & Core ---
 try:
   from .client import Client
