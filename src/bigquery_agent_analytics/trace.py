@@ -39,6 +39,7 @@ import functools
 import json
 import logging
 import re
+from types import MappingProxyType
 from typing import Any, Optional, Sequence, Union
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
@@ -428,6 +429,24 @@ def _parse_time_window(window: str) -> datetime:
   return datetime.now(timezone.utc) - delta
 
 
+def _validated_filter_pin(name: str, value: Any) -> Any:
+  """Validate one TraceFilter scalar pin (tri-state, exact string).
+
+  Applied on every attribute write AND again at the SQL boundary,
+  because ``vars(filt)`` writes bypass ``__setattr__`` and would
+  otherwise bind a non-string (e.g. the UNSET sentinel) as a STRING
+  query parameter that fails at submission.
+  """
+  if not (value is None or value is SQL_NULL or isinstance(value, str)):
+    raise TypeError(
+        f"TraceFilter.{name} must be a string, None (unfiltered),"
+        " or SQL_NULL."
+    )
+  if isinstance(value, str):
+    value = _exact_str(value)
+  return value
+
+
 def _is_unaddressable_label_key(key: str) -> bool:
   """True if BigQuery JSONPath cannot encode this member key.
 
@@ -524,13 +543,7 @@ class TraceFilter:
     # parameter. UNSET (and any foreign value) belongs to the
     # selector surface.
     if name in ("user_id", "root_agent_name", "experiment_id"):
-      if not (value is None or value is SQL_NULL or isinstance(value, str)):
-        raise TypeError(
-            f"TraceFilter.{name} must be a string, None (unfiltered),"
-            " or SQL_NULL."
-        )
-      if isinstance(value, str):
-        value = _exact_str(value)
+      value = _validated_filter_pin(name, value)
     if name == "custom_labels" and value is not None:
       # Direct filter labels feed JSONPath construction; a str
       # subclass overriding replace() could redirect the selected
@@ -640,15 +653,22 @@ class TraceFilter:
               self.agent_id,
           )
       )
-    if self.user_id is SQL_NULL:
+    # Boundary revalidation: __dict__-level writes bypass __setattr__,
+    # and a foreign value must not reach parameter construction.
+    user_id = _validated_filter_pin("user_id", self.user_id)
+    root_agent_name = _validated_filter_pin(
+        "root_agent_name", self.root_agent_name
+    )
+    experiment_id = _validated_filter_pin("experiment_id", self.experiment_id)
+    if user_id is SQL_NULL:
       conditions.append("user_id IS NULL")
-    elif self.user_id is not None:
+    elif user_id is not None:
       conditions.append("user_id = @user_id")
       params.append(
           bigquery.ScalarQueryParameter(
               "user_id",
               "STRING",
-              self.user_id,
+              user_id,
           )
       )
     if self.session_ids:
@@ -708,9 +728,9 @@ class TraceFilter:
               self.max_latency_ms,
           )
       )
-    if self.experiment_id is SQL_NULL:
+    if experiment_id is SQL_NULL:
       conditions.append("JSON_VALUE(attributes, '$.experiment_id') IS NULL")
-    elif self.experiment_id is not None:
+    elif experiment_id is not None:
       conditions.append(
           "JSON_VALUE(attributes, '$.experiment_id')" " = @experiment_id"
       )
@@ -718,7 +738,7 @@ class TraceFilter:
           bigquery.ScalarQueryParameter(
               "experiment_id",
               "STRING",
-              self.experiment_id,
+              experiment_id,
           )
       )
     if self.custom_labels:
@@ -758,9 +778,9 @@ class TraceFilter:
               self.tool_origin,
           )
       )
-    if self.root_agent_name is SQL_NULL:
+    if root_agent_name is SQL_NULL:
       conditions.append("JSON_VALUE(attributes, '$.root_agent_name') IS NULL")
-    elif self.root_agent_name is not None:
+    elif root_agent_name is not None:
       conditions.append(
           "JSON_VALUE(attributes, '$.root_agent_name')" " = @root_agent_name"
       )
@@ -768,7 +788,7 @@ class TraceFilter:
           bigquery.ScalarQueryParameter(
               "root_agent_name",
               "STRING",
-              self.root_agent_name,
+              root_agent_name,
           )
       )
 
@@ -969,7 +989,10 @@ def _class_hash_slot(tp: type) -> Any:
 # memoryview both fail when actually hashed), and custom __hash__
 # implementations are caller code; only these unconditional builtin
 # slots may reach native hashing.
-_UNCONDITIONAL_HASH_SLOTS = frozenset(
+# Tuple + identity comparison: frozenset membership would hash (and
+# possibly compare) the foreign slot object itself, executing caller
+# code during classification.
+_UNCONDITIONAL_HASH_SLOTS = tuple(
     slot
     for slot in (
         object.__dict__.get("__hash__"),
@@ -1013,7 +1036,7 @@ def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
     slot = _class_hash_slot(tp)
     if slot is None:
       raise TypeError(f"unhashable type: {_safe_type_name(value)!r}")
-    if slot not in _UNCONDITIONAL_HASH_SLOTS:
+    if not any(slot is trusted for trusted in _UNCONDITIONAL_HASH_SLOTS):
       # Conditional (tuple/memoryview) or custom hash implementations
       # would have to actually execute to know whether they hash;
       # reject them without running caller code. This deliberately
@@ -1026,21 +1049,129 @@ def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
   return _NON_STRING_OPERAND
 
 
-class _SafeKeysView(collections.abc.KeysView):
-  """Snapshot keys view with operand-normalized membership.
+class _SafeSetComparisonsMixin:
+  """Trusted rich comparisons for the set-like label views.
 
-  Built over a plain copied dict, so it does not reflect later
-  container mutation (a deliberate narrowing of the live-view
-  contract); membership never runs caller comparison hooks.
+  The inherited ``collections.abc.Set`` comparisons test membership
+  inside the caller's counterpart set, whose hostile elements would
+  drive hashing/equality with their own hooks and could report false
+  equality. Each comparison instead normalizes the counterpart once
+  (exact strings via each view's element normalizer; anything else is
+  a foreign element that can never match this view's contents) and
+  compares plain trusted sets. Cardinality is preserved: distinct
+  counterpart elements that collapse to one normalized element make
+  the counterpart strictly larger, never equal.
   """
+
+  __slots__ = ()
+
+  def _normalized_counterpart(self, other: Any) -> Any:
+    if not isinstance(other, collections.abc.Set):
+      return None
+    exact: set = set()
+    foreign = 0
+    for element in iter(other):
+      normalized = self._normalize_element(element)
+      if normalized is _NON_STRING_OPERAND:
+        foreign += 1
+      else:
+        exact.add(normalized)
+    return exact, foreign, len(other)
+
+  def _own_elements(self) -> set:
+    return set(iter(self))
+
+  def __eq__(self, other: Any) -> Any:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return NotImplemented
+    exact, foreign, size = counterpart
+    return foreign == 0 and len(exact) == size and self._own_elements() == exact
+
+  def __ne__(self, other: Any) -> Any:
+    result = self.__eq__(other)
+    return result if result is NotImplemented else not result
+
+  def __le__(self, other: Any) -> Any:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return NotImplemented
+    exact, _, _ = counterpart
+    return self._own_elements() <= exact
+
+  def __lt__(self, other: Any) -> Any:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return NotImplemented
+    exact, foreign, _ = counterpart
+    own = self._own_elements()
+    return own <= exact and (foreign > 0 or own != exact)
+
+  def __ge__(self, other: Any) -> Any:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return NotImplemented
+    exact, foreign, size = counterpart
+    return foreign == 0 and len(exact) == size and exact <= self._own_elements()
+
+  def __gt__(self, other: Any) -> Any:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return NotImplemented
+    exact, foreign, size = counterpart
+    own = self._own_elements()
+    return foreign == 0 and len(exact) == size and exact <= own and exact != own
+
+  def isdisjoint(self, other: Any) -> bool:
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return not any(element in self for element in iter(other))
+    exact, _, _ = counterpart
+    return self._own_elements().isdisjoint(exact)
+
+  __hash__ = None  # type: ignore[assignment]
+
+
+class _SafeKeysView(_SafeSetComparisonsMixin, collections.abc.KeysView):
+  """Live keys view with operand-normalized membership.
+
+  Backed directly by the validating container — live, allocation-free
+  iteration, with ``reversed()`` and ``.mapping`` supported like
+  native dict views — while membership and set comparisons never run
+  caller comparison hooks.
+  """
+
+  @staticmethod
+  def _normalize_element(element: Any) -> Any:
+    return _exact_lookup_str(element)
 
   def __contains__(self, key: Any) -> bool:
     lookup = _exact_lookup_str(key, require_hashable=True)
-    return lookup is not _NON_STRING_OPERAND and lookup in self._mapping
+    return lookup is not _NON_STRING_OPERAND and dict.__contains__(
+        self._mapping, lookup
+    )
+
+  def __reversed__(self) -> Any:
+    return reversed(dict.keys(self._mapping))
+
+  @property
+  def mapping(self) -> Any:
+    return MappingProxyType(self._mapping)
 
 
-class _SafeItemsView(collections.abc.ItemsView):
-  """Snapshot items view with operand-normalized membership."""
+class _SafeItemsView(_SafeSetComparisonsMixin, collections.abc.ItemsView):
+  """Live items view with operand-normalized membership."""
+
+  @staticmethod
+  def _normalize_element(element: Any) -> Any:
+    if type(element) is not tuple or len(element) != 2:
+      return _NON_STRING_OPERAND
+    key, value = element
+    lookup_key = _exact_lookup_str(key)
+    lookup_value = _exact_lookup_str(value)
+    if lookup_key is _NON_STRING_OPERAND or lookup_value is _NON_STRING_OPERAND:
+      return _NON_STRING_OPERAND
+    return (lookup_key, lookup_value)
 
   def __contains__(self, item: Any) -> bool:
     if type(item) is not tuple or len(item) != 2:
@@ -1050,21 +1181,38 @@ class _SafeItemsView(collections.abc.ItemsView):
     lookup_value = _exact_lookup_str(value)
     if lookup_key is _NON_STRING_OPERAND or lookup_value is _NON_STRING_OPERAND:
       return False
-    return self._mapping.get(lookup_key, _NON_STRING_OPERAND) == lookup_value
+    sentinel = _NON_STRING_OPERAND
+    stored = dict.get(self._mapping, lookup_key, sentinel)
+    return stored is not sentinel and stored == lookup_value
+
+  def __reversed__(self) -> Any:
+    return reversed(dict.items(self._mapping))
+
+  @property
+  def mapping(self) -> Any:
+    return MappingProxyType(self._mapping)
 
 
 class _SafeValuesView(collections.abc.ValuesView):
-  """Snapshot values view with operand-normalized membership.
+  """Live values view with operand-normalized membership.
 
-  Plain-dict values views compare rather than hash, so non-string
-  operands miss instead of raising.
+  Plain-dict values views compare rather than hash (and support
+  neither set operations nor value-based equality), so non-string
+  operands miss instead of raising and no comparison mixin applies.
   """
 
   def __contains__(self, value: Any) -> bool:
     lookup = _exact_lookup_str(value)
     if lookup is _NON_STRING_OPERAND:
       return False
-    return any(stored == lookup for stored in self._mapping.values())
+    return any(stored == lookup for stored in dict.values(self._mapping))
+
+  def __reversed__(self) -> Any:
+    return reversed(dict.values(self._mapping))
+
+  @property
+  def mapping(self) -> Any:
+    return MappingProxyType(self._mapping)
 
 
 class _ValidatedLabels(dict):
@@ -1144,7 +1292,9 @@ class _ValidatedLabels(dict):
     if args:
       source = args[0]
       if isinstance(source, dict):
-        raw_items.extend(source.items())
+        # Trusted read for real dict (sub)classes; a hidden entry
+        # would silently erase a pin.
+        raw_items.extend(dict.items(source))
       elif hasattr(source, "keys"):
         raw_items.extend((key, source[key]) for key in source.keys())
       else:
@@ -1167,15 +1317,17 @@ class _ValidatedLabels(dict):
       super().__setitem__(key, value)
 
   def keys(self) -> "_SafeKeysView":
-    # Snapshot views: inherited live views would hash/compare hostile
-    # operands with caller hooks, bypassing the normalized methods.
-    return _SafeKeysView(dict(self))
+    # Hardened LIVE views over self: they reflect later mutation and
+    # support reversed()/.mapping like native dict views, while
+    # membership and set comparisons normalize operands instead of
+    # running caller hooks.
+    return _SafeKeysView(self)
 
   def items(self) -> "_SafeItemsView":
-    return _SafeItemsView(dict(self))
+    return _SafeItemsView(self)
 
   def values(self) -> "_SafeValuesView":
-    return _SafeValuesView(dict(self))
+    return _SafeValuesView(self)
 
   def __eq__(self, other: Any) -> Any:
     # Equality is part of the trusted read surface: comparing against
@@ -1195,6 +1347,10 @@ class _ValidatedLabels(dict):
       ):
         return False
       normalized[lookup_key] = lookup_value
+    if len(normalized) != dict.__len__(other):
+      # Distinct counterpart keys that collapse to one normalized key
+      # must stay unequal, matching native cardinality semantics.
+      return False
     return dict.__eq__(dict(self), normalized)
 
   def __ne__(self, other: Any) -> Any:
@@ -1315,7 +1471,8 @@ def _normalized_filter_labels(labels: Any) -> dict[str, str]:
   if not isinstance(labels, dict):
     raise TypeError("TraceFilter.custom_labels must be a dict or None.")
   normalized: dict[str, str] = {}
-  for key, value in labels.items():
+  # Trusted read: a subclass items() override must not hide entries.
+  for key, value in dict.items(labels):
     key, value = _validated_label_item(key, value)
     if key in normalized:
       raise ValueError(f"Duplicate custom label key: {key!r}.")
@@ -1478,7 +1635,9 @@ def _canonicalize_labels(
   """
   if labels is None:
     return None
-  items = list(labels.items() if isinstance(labels, dict) else labels)
+  # dict.items(...) descriptor: a dict subclass overriding .items()
+  # could hide entries and silently erase label pins.
+  items = list(dict.items(labels) if isinstance(labels, dict) else labels)
   if not items:
     return None
   seen: set[str] = set()
@@ -1504,26 +1663,68 @@ def _sealed_value_type(cls: type) -> type:
   """Make a frozen slotted dataclass one-shot initializable.
 
   ``frozen=True`` blocks ``setattr`` but the generated ``__init__``
-  writes through ``object.__setattr__``, so calling ``__init__``
-  again on a published instance would rewrite fields (changing the
-  hash of a dict key, desynchronizing attached Trace mirrors, or
-  partially committing before validation raises). The wrapper rejects
-  any re-initialization before a single field is written; pickle and
-  deepcopy use ``__getstate__``/``__setstate__`` and are unaffected.
+  and ``__setstate__`` write through ``object.__setattr__``, so
+  either could rewrite a published instance (changing the hash of a
+  dict key, desynchronizing attached Trace mirrors, or partially
+  committing before validation raises). Both are guarded:
+
+  * Initialized-state detection reads the first field's slot through
+    its trusted member descriptor — never ``hasattr``, whose lookup a
+    subclass ``__getattribute__`` could spoof.
+  * The guarded ``__init__`` does not use ``functools.wraps``, so the
+    generated mutating initializer is not republished as
+    ``__wrapped__``.
+  * ``__setstate__`` still populates a blank object (pickle/deepcopy)
+    but rejects initialized instances and re-runs ``__post_init__``
+    validation on the restored state, so hostile state cannot install
+    invalid component types.
   """
   generated_init = cls.__init__
+  generated_setstate = cls.__dict__.get("__setstate__")
   first_field = next(iter(cls.__dataclass_fields__))
+  first_member = cls.__dict__[first_field]
+  post_init = getattr(cls, "__post_init__", None)
 
-  @functools.wraps(generated_init)
+  def _is_initialized(self: Any) -> bool:
+    try:
+      first_member.__get__(self, cls)
+    except AttributeError:
+      return False
+    return True
+
   def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-    if hasattr(self, first_field):
+    if _is_initialized(self):
       raise TypeError(
           f"{cls.__name__} is immutable; __init__ cannot be called"
           " on an initialized instance."
       )
     generated_init(self, *args, **kwargs)
 
+  __init__.__name__ = "__init__"
+  __init__.__qualname__ = f"{cls.__qualname__}.__init__"
+  __init__.__doc__ = generated_init.__doc__
+  __init__.__module__ = cls.__module__
   cls.__init__ = __init__
+
+  if generated_setstate is not None:
+
+    def __setstate__(self: Any, state: Any) -> None:
+      if _is_initialized(self):
+        raise TypeError(
+            f"{cls.__name__} is immutable; __setstate__ cannot be"
+            " called on an initialized instance."
+        )
+      generated_setstate(self, state)
+      if post_init is not None:
+        # Restored state is untrusted input: re-run the same
+        # validation/normalization construction applies.
+        post_init(self)
+
+    __setstate__.__name__ = "__setstate__"
+    __setstate__.__qualname__ = f"{cls.__qualname__}.__setstate__"
+    __setstate__.__module__ = cls.__module__
+    cls.__setstate__ = __setstate__
+
   return cls
 
 
@@ -1979,7 +2180,7 @@ def resolve_singular_candidate(
   return resolved[0]
 
 
-@dataclass
+@dataclass(slots=True)
 class Trace:
   """A complete agent trace for a session.
 
@@ -2001,7 +2202,10 @@ class Trace:
   detached (only re-assigned an equal value), so a trace can never be
   retagged to a different identity. Downstream code keyed on either
   surface therefore never sees two different identities for one
-  trace. To change identity, build a new ``Trace``.
+  trace. To change identity, build a new ``Trace``. The class is
+  slot-backed, so there is no writable instance ``__dict__`` through
+  which ``vars(trace)`` could retag the identity behind the guards
+  (ad-hoc attributes are consequently not supported).
   """
 
   trace_id: str

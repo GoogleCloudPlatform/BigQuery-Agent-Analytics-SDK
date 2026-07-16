@@ -2001,10 +2001,15 @@ class TestIdentityFieldDeletion:
     with pytest.raises(AttributeError, match="cannot be deleted"):
       del trace.session_id
 
-  def test_other_fields_remain_deletable(self):
+  def test_non_identity_fields_remain_deletable(self):
     trace = Trace(trace_id="t1", session_id="sess-1")
-    trace.extra_note = "x"
-    del trace.extra_note
+    del trace.start_time  # non-identity field: deletion still allowed
+    # Trace is slot-backed (round 14): ad-hoc attributes and
+    # vars(trace) writes are sealed.
+    with pytest.raises(AttributeError):
+      trace.extra_note = "x"
+    with pytest.raises(TypeError):
+      vars(trace)
 
 
 class TestTraceComponentTypes:
@@ -3525,3 +3530,258 @@ class TestQuotedTypeNameInErrors:
     message = str(exc_info.value)
     assert "\n" not in message
     assert "\\n" in message
+
+
+class TestSealedEscapeHatches:
+  """Generated __wrapped__/__setstate__ paths are sealed
+  (round 14, P1)."""
+
+  def test_no_wrapped_attribute_published(self):
+    for cls in (
+        TraceIdentity,
+        TraceScope,
+        TraceSelector,
+        ResolvedTraceSelector,
+    ):
+      assert not hasattr(cls.__init__, "__wrapped__")
+
+  def test_setstate_rejected_on_initialized_instance(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    trace = Trace(trace_id="t1", session_id="sess-1", identity=identity)
+    table = {identity: "v"}
+    before = hash(identity)
+    with pytest.raises(TypeError, match="cannot be called"):
+      identity.__setstate__(["other", "bob", None])
+    assert trace.identity.session_id == "sess-1"
+    assert hash(identity) == before
+    assert table[identity] == "v"
+
+  def test_setstate_on_blank_object_validates_types(self):
+    blank = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    with pytest.raises(TypeError, match="TraceIdentity"):
+      blank.__setstate__([1, True])
+    # A valid state restores fine (the pickle path).
+    blank2 = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    blank2.__setstate__([TraceIdentity(session_id="sess-1"), TraceScope()])
+    assert blank2.identity.session_id == "sess-1"
+
+  def test_setstate_normalizes_restored_strings(self):
+    class Collider(str):
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return 0
+
+    blank = TraceIdentity.__new__(TraceIdentity)
+    blank.__setstate__([Collider("sess-1"), Collider("alice"), None])
+    assert type(blank.session_id) is str
+    assert type(blank.user_id) is str
+
+
+class TestTraceDictSealing:
+  """vars(trace) cannot retag identity (round 14, P1)."""
+
+  def test_no_instance_dict(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(TypeError):
+      vars(trace)
+    with pytest.raises(AttributeError):
+      trace.__dict__
+
+
+class TestTrustedDictReads:
+  """dict-subclass items() overrides cannot hide pins
+  (round 14, P1)."""
+
+  class _Liar(dict):
+    """Real contents hidden from the overridable read surface."""
+
+    def items(self):
+      return []
+
+    def keys(self):
+      return []
+
+  def test_scope_and_selector_read_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    assert TraceScope(custom_labels=liar).labels_dict == {"tenant": "a"}
+    selector = TraceSelector(session_id="s", custom_labels=liar)
+    assert dict(selector.custom_labels) == {"tenant": "a"}
+
+  def test_filter_reads_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    filt = TraceFilter(custom_labels=liar)
+    assert filt.custom_labels == {"tenant": "a"}
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"tenant"'}
+
+  def test_update_reads_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update(liar)
+    assert filt.custom_labels == {"tenant": "a"}
+
+
+class TestScalarPinBoundaryRevalidation:
+  """__dict__-level pin writes are caught at SQL build
+  (round 14, P2)."""
+
+  def test_vars_injected_sentinel_fails_closed(self):
+    filt = TraceFilter()
+    vars(filt)["user_id"] = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      filt.to_sql_conditions()
+
+  def test_vars_injected_non_string_fails_closed(self):
+    filt = TraceFilter()
+    vars(filt)["experiment_id"] = 7
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      filt.to_sql_conditions()
+
+
+class TestInitCheckTrustedDescriptor:
+  """Subclass __getattribute__ cannot spoof the one-shot check
+  (round 14, P2)."""
+
+  def test_lying_getattribute_cannot_enable_reinit(self):
+    lies = {"armed": False}
+
+    class Sneaky(TraceSelector):
+
+      def __getattribute__(self, name):
+        if name == "session_id" and lies["armed"]:
+          raise AttributeError(name)
+        return super().__getattribute__(name)
+
+    selector = Sneaky(session_id="s1")
+    lies["armed"] = True  # spoof active during the reinit attempt
+    with pytest.raises(TypeError, match="cannot be called"):
+      selector.__init__("s2")
+    lies["armed"] = False
+    assert selector.session_id == "s1"
+
+
+class TestHashSlotClassificationHookFree:
+  """Allowlist classification never touches the foreign slot
+  (round 14, P2)."""
+
+  def test_hostile_slot_object_not_hashed_or_compared(self):
+    calls = []
+
+    class EvilSlot:
+
+      def __call__(self, *args):
+        calls.append("call")
+        return 0
+
+      def __hash__(self):
+        calls.append("hash")
+        raise RuntimeError("slot must not be hashed")
+
+      def __eq__(self, other):
+        calls.append("eq")
+        return True
+
+    class Operand:
+      __hash__ = EvilSlot()
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="conditional or custom"):
+      filt.custom_labels.get(Operand())
+    assert calls == []
+
+
+class TestViewSetComparisons:
+  """View set comparisons are trusted (round 14, P2)."""
+
+  class _Evil:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_keys_comparisons_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    assert not (filt.custom_labels.keys() == {evil})
+    assert not (filt.custom_labels.keys() <= {evil})
+    assert not (filt.custom_labels.keys() < {evil, "extra"})
+    assert filt.custom_labels.keys().isdisjoint({evil})
+    # Genuine comparisons still hold.
+    assert filt.custom_labels.keys() == {"run"}
+    assert filt.custom_labels.keys() <= {"run", "more"}
+    assert filt.custom_labels.keys() < {"run", "more"}
+
+  def test_items_comparisons_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    assert not (filt.custom_labels.items() == {(evil, "v1")})
+    assert not (filt.custom_labels.items() <= {(evil, "v1")})
+    assert filt.custom_labels.items() == {("run", "v1")}
+
+  def test_collapsing_counterpart_cardinality(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    filt = TraceFilter(custom_labels={"run": "v2"})
+    counterpart = {KeyA("run"): "v2", KeyB("run"): "v2"}
+    assert len(counterpart) == 2
+    # Mapping equality: distinct keys collapsing to one normalized
+    # key must not compare equal to the one-entry container.
+    assert not (filt.custom_labels == counterpart)
+    # Keys-view equality: same cardinality rule.
+    assert not (filt.custom_labels.keys() == set(counterpart))
+
+
+class TestNativeViewContract:
+  """Views are live and keep the native dict-view surface
+  (round 14, P2)."""
+
+  def test_views_are_live(self):
+    filt = TraceFilter(custom_labels={"a": "1"})
+    keys = filt.custom_labels.keys()
+    items = filt.custom_labels.items()
+    values = filt.custom_labels.values()
+    filt.custom_labels["b"] = "2"
+    assert set(keys) == {"a", "b"}
+    assert set(items) == {("a", "1"), ("b", "2")}
+    assert sorted(values) == ["1", "2"]
+    assert len(keys) == 2
+
+  def test_reversed_and_mapping_supported(self):
+    filt = TraceFilter(custom_labels={"a": "1", "b": "2"})
+    assert list(reversed(filt.custom_labels.keys())) == ["b", "a"]
+    assert list(reversed(filt.custom_labels.items())) == [
+        ("b", "2"),
+        ("a", "1"),
+    ]
+    assert list(reversed(filt.custom_labels.values())) == ["2", "1"]
+    proxy = filt.custom_labels.keys().mapping
+    assert proxy["a"] == "1"
+    with pytest.raises(TypeError):
+      proxy["a"] = "x"
