@@ -28,12 +28,14 @@ Example usage::
 
 from __future__ import annotations
 
+import collections.abc
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from enum import Enum
+import functools
 import json
 import logging
 import re
@@ -798,6 +800,18 @@ class _PinSentinel:
   __slots__ = ("_name",)
 
   def __init__(self, name: str) -> None:
+    # One-shot: __setattr__ raises, but a direct second __init__ call
+    # would rewrite process-global display state through
+    # object.__setattr__; reject it, and validate the canonical name
+    # so a first call can never install a foreign value either.
+    try:
+      object.__getattribute__(self, "_name")
+    except AttributeError:
+      pass
+    else:
+      raise TypeError("Pin sentinels are immutable.")
+    if type(name) is not str or name not in ("UNSET", "SQL_NULL"):
+      raise ValueError("Unknown pin sentinel name.")
     object.__setattr__(self, "_name", name)
 
   def __setattr__(self, name: str, value: Any) -> None:
@@ -949,6 +963,27 @@ def _class_hash_slot(tp: type) -> Any:
   return None
 
 
+# Hash slots that can never fail or run caller code when invoked by
+# the native dict. A class hash slot being non-None does NOT prove an
+# instance is hashable (a tuple holding a list and a writable
+# memoryview both fail when actually hashed), and custom __hash__
+# implementations are caller code; only these unconditional builtin
+# slots may reach native hashing.
+_UNCONDITIONAL_HASH_SLOTS = frozenset(
+    slot
+    for slot in (
+        object.__dict__.get("__hash__"),
+        int.__dict__.get("__hash__"),
+        float.__dict__.get("__hash__"),
+        complex.__dict__.get("__hash__"),
+        bytes.__dict__.get("__hash__"),
+        frozenset.__dict__.get("__hash__"),
+        type(None).__dict__.get("__hash__"),
+    )
+    if slot is not None
+)
+
+
 def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
   """Copy a str (or subclass) read-operand into an exact ``str``.
 
@@ -974,9 +1009,62 @@ def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
     return value
   if issubclass(tp, str):
     return "".join((value,))
-  if require_hashable and _class_hash_slot(tp) is None:
-    raise TypeError(f"unhashable type: {_safe_type_name(value)!r}")
+  if require_hashable:
+    slot = _class_hash_slot(tp)
+    if slot is None:
+      raise TypeError(f"unhashable type: {_safe_type_name(value)!r}")
+    if slot not in _UNCONDITIONAL_HASH_SLOTS:
+      # Conditional (tuple/memoryview) or custom hash implementations
+      # would have to actually execute to know whether they hash;
+      # reject them without running caller code. This deliberately
+      # narrows the native contract for exotic key types.
+      raise TypeError(
+          "TraceFilter.custom_labels keys are strings; non-string"
+          " operands with conditional or custom __hash__"
+          f" implementations are rejected: {_safe_type_name(value)!r}."
+      )
   return _NON_STRING_OPERAND
+
+
+class _SafeKeysView(collections.abc.KeysView):
+  """Snapshot keys view with operand-normalized membership.
+
+  Built over a plain copied dict, so it does not reflect later
+  container mutation (a deliberate narrowing of the live-view
+  contract); membership never runs caller comparison hooks.
+  """
+
+  def __contains__(self, key: Any) -> bool:
+    lookup = _exact_lookup_str(key, require_hashable=True)
+    return lookup is not _NON_STRING_OPERAND and lookup in self._mapping
+
+
+class _SafeItemsView(collections.abc.ItemsView):
+  """Snapshot items view with operand-normalized membership."""
+
+  def __contains__(self, item: Any) -> bool:
+    if type(item) is not tuple or len(item) != 2:
+      return False
+    key, value = item
+    lookup_key = _exact_lookup_str(key, require_hashable=True)
+    lookup_value = _exact_lookup_str(value)
+    if lookup_key is _NON_STRING_OPERAND or lookup_value is _NON_STRING_OPERAND:
+      return False
+    return self._mapping.get(lookup_key, _NON_STRING_OPERAND) == lookup_value
+
+
+class _SafeValuesView(collections.abc.ValuesView):
+  """Snapshot values view with operand-normalized membership.
+
+  Plain-dict values views compare rather than hash, so non-string
+  operands miss instead of raising.
+  """
+
+  def __contains__(self, value: Any) -> bool:
+    lookup = _exact_lookup_str(value)
+    if lookup is _NON_STRING_OPERAND:
+      return False
+    return any(stored == lookup for stored in self._mapping.values())
 
 
 class _ValidatedLabels(dict):
@@ -1019,9 +1107,12 @@ class _ValidatedLabels(dict):
     return super().get(_exact_lookup_str(key, require_hashable=True), default)
 
   def pop(self, key: Any, *args: Any) -> Any:
-    # Delegation preserves native arity validation (at most one
-    # default) and native miss errors carrying only the safe-repr
-    # sentinel, never the caller object.
+    # Native precedence: dict.pop reports excess defaults BEFORE
+    # touching the key, so arity is validated ahead of hashability.
+    # Delegation then preserves native miss errors carrying only the
+    # safe-repr sentinel, never the caller object.
+    if len(args) > 1:
+      raise TypeError(f"pop expected at most 2 arguments, got {1 + len(args)}")
     return super().pop(_exact_lookup_str(key, require_hashable=True), *args)
 
   def __ior__(self, other: Any) -> "_ValidatedLabels":
@@ -1074,6 +1165,44 @@ class _ValidatedLabels(dict):
       exact_raw[key] = is_exact
     for key, value in batch.items():
       super().__setitem__(key, value)
+
+  def keys(self) -> "_SafeKeysView":
+    # Snapshot views: inherited live views would hash/compare hostile
+    # operands with caller hooks, bypassing the normalized methods.
+    return _SafeKeysView(dict(self))
+
+  def items(self) -> "_SafeItemsView":
+    return _SafeItemsView(dict(self))
+
+  def values(self) -> "_SafeValuesView":
+    return _SafeValuesView(dict(self))
+
+  def __eq__(self, other: Any) -> Any:
+    # Equality is part of the trusted read surface: comparing against
+    # a dict containing hostile operands must not run their hooks. A
+    # counterpart containing any non-string entry can never equal
+    # this container; str subclasses are copied and compared by
+    # character data, matching well-behaved native semantics.
+    if not issubclass(type(other), dict):
+      return NotImplemented
+    normalized: dict[str, str] = {}
+    for key, value in dict.items(other):
+      lookup_key = _exact_lookup_str(key)
+      lookup_value = _exact_lookup_str(value)
+      if (
+          lookup_key is _NON_STRING_OPERAND
+          or lookup_value is _NON_STRING_OPERAND
+      ):
+        return False
+      normalized[lookup_key] = lookup_value
+    return dict.__eq__(dict(self), normalized)
+
+  def __ne__(self, other: Any) -> Any:
+    # dict.__ne__ is a C slot that would bypass the trusted __eq__.
+    result = self.__eq__(other)
+    return result if result is NotImplemented else not result
+
+  __hash__ = None  # type: ignore[assignment]
 
   def __reduce__(self) -> tuple[Any, tuple[dict]]:
     return (self.__class__, (dict(self),))
@@ -1135,6 +1264,26 @@ class _ValidatedSessionIds(list):
 
   def count(self, value: Any) -> int:
     return super().count(_exact_lookup_str(value))
+
+  def __eq__(self, other: Any) -> Any:
+    # Trusted equality: hostile elements in the counterpart must not
+    # drive comparisons (see _ValidatedLabels.__eq__).
+    if not issubclass(type(other), list):
+      return NotImplemented
+    normalized = []
+    for value in list.__iter__(other):
+      lookup = _exact_lookup_str(value)
+      if lookup is _NON_STRING_OPERAND:
+        return False
+      normalized.append(lookup)
+    return list.__eq__(list(self), normalized)
+
+  def __ne__(self, other: Any) -> Any:
+    # list.__ne__ is a C slot that would bypass the trusted __eq__.
+    result = self.__eq__(other)
+    return result if result is NotImplemented else not result
+
+  __hash__ = None  # type: ignore[assignment]
 
   def __reduce__(self) -> tuple[Any, tuple[list]]:
     return (self.__class__, (list(self),))
@@ -1351,7 +1500,35 @@ def _canonicalize_labels(
   return tuple(sorted(normalized))
 
 
-@dataclass(frozen=True)
+def _sealed_value_type(cls: type) -> type:
+  """Make a frozen slotted dataclass one-shot initializable.
+
+  ``frozen=True`` blocks ``setattr`` but the generated ``__init__``
+  writes through ``object.__setattr__``, so calling ``__init__``
+  again on a published instance would rewrite fields (changing the
+  hash of a dict key, desynchronizing attached Trace mirrors, or
+  partially committing before validation raises). The wrapper rejects
+  any re-initialization before a single field is written; pickle and
+  deepcopy use ``__getstate__``/``__setstate__`` and are unaffected.
+  """
+  generated_init = cls.__init__
+  first_field = next(iter(cls.__dataclass_fields__))
+
+  @functools.wraps(generated_init)
+  def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+    if hasattr(self, first_field):
+      raise TypeError(
+          f"{cls.__name__} is immutable; __init__ cannot be called"
+          " on an initialized instance."
+      )
+    generated_init(self, *args, **kwargs)
+
+  cls.__init__ = __init__
+  return cls
+
+
+@_sealed_value_type
+@dataclass(frozen=True, slots=True)
 class TraceIdentity:
   """Intrinsic identity of a scoped multi-turn session (issue #359).
 
@@ -1385,7 +1562,8 @@ class TraceIdentity:
       object.__setattr__(self, dim, _exact_str(value))
 
 
-@dataclass(frozen=True)
+@_sealed_value_type
+@dataclass(frozen=True, slots=True)
 class TraceScope:
   """Caller-selected scope pinning one recorded pass of a session.
 
@@ -1439,7 +1617,8 @@ class TraceScope:
     return "v1:" + json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-@dataclass(frozen=True)
+@_sealed_value_type
+@dataclass(frozen=True, slots=True)
 class TraceSelector:
   """Optional caller pins for resolving a scoped session.
 
@@ -1573,7 +1752,8 @@ class TraceSelector:
     )
 
 
-@dataclass(frozen=True)
+@_sealed_value_type
+@dataclass(frozen=True, slots=True)
 class ResolvedTraceSelector:
   """A fully resolved candidate: intrinsic identity plus scope."""
 
@@ -1766,7 +1946,7 @@ def _validated_candidates(
     if type(candidate) is not ResolvedTraceSelector:
       raise TypeError(
           "Candidates must be ResolvedTraceSelector instances (exact"
-          f" type); got {_safe_type_name(candidate)}."
+          f" type); got {_safe_type_name(candidate)!r}."
       )
   return validated
 

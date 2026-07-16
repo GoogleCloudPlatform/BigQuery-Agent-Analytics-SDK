@@ -39,7 +39,7 @@ from typing import Any
 # does not import this module, so there is no cycle.
 from .trace import _pin_sentinel_name
 from .trace import _PIN_WIRE_KEY
-from .trace import _PinSentinel
+from .trace import SQL_NULL
 from .trace import UNSET
 
 
@@ -56,12 +56,13 @@ def serialize(obj: Any) -> Any:
   """
   if obj is None:
     return None
-  if isinstance(obj, _PinSentinel):
+  if obj is UNSET or obj is SQL_NULL:
     # Tagged wire encoding (decode with trace.decode_pin): plain JSON
     # null cannot carry SQL_NULL because None already means
     # "unfiltered" on TraceFilter. UNSET only reaches here outside a
-    # dataclass field (those are omitted below). The tag name is
-    # derived from singleton identity, never display state.
+    # dataclass field (those are omitted below). Identity comparison,
+    # not isinstance: a spoofed __class__ property must not divert a
+    # normal dataclass into the sentinel branch.
     return {_PIN_WIRE_KEY: _pin_sentinel_name(obj)}
   if hasattr(obj, "model_dump"):
     return obj.model_dump(mode="json")

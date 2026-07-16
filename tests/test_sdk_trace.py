@@ -2962,18 +2962,21 @@ class TestNonStringOperandShortCircuit:
     def __hash__(self):
       return hash("run")
 
-  def test_mapping_misses_without_comparison(self):
+  def test_mapping_rejects_custom_hash_without_comparison(self):
+    # Round 13 narrowed the contract: a custom __hash__ would have to
+    # execute to be trusted, so mapping surfaces reject it with
+    # TypeError instead of hashing it — still without running hooks.
     filt = TraceFilter(custom_labels={"run": "v1"})
     evil = self._EvilObject()
-    assert evil not in filt.custom_labels
-    assert filt.custom_labels.get(evil) is None
-    assert filt.custom_labels.get(evil, "d") == "d"
-    with pytest.raises(KeyError):
+    with pytest.raises(TypeError, match="custom __hash__"):
+      evil in filt.custom_labels
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(evil)
+    with pytest.raises(TypeError, match="custom __hash__"):
       filt.custom_labels[evil]
-    with pytest.raises(KeyError):
-      filt.custom_labels.pop(evil)
-    assert filt.custom_labels.pop(evil, "d") == "d"
-    with pytest.raises(KeyError):
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.pop(evil, "d")
+    with pytest.raises(TypeError, match="custom __hash__"):
       del filt.custom_labels[evil]
     assert filt.custom_labels == {"run": "v1"}
 
@@ -3100,17 +3103,20 @@ class TestMissPathsAvoidCallerHooks:
     def __hash__(self):
       return hash("run")
 
-  def test_mapping_misses_never_invoke_repr(self):
+  def test_mapping_rejections_never_invoke_repr(self):
+    # Custom-__hash__ operands are rejected (round 13); the rejection
+    # itself must not execute __repr__ or any other hook.
     filt = TraceFilter(custom_labels={"run": "v1"})
     loud = self._LoudRepr()
-    assert loud not in filt.custom_labels
-    assert filt.custom_labels.get(loud) is None
-    with pytest.raises(KeyError):
-      filt.custom_labels[loud]
-    with pytest.raises(KeyError):
-      filt.custom_labels.pop(loud)
-    with pytest.raises(KeyError):
-      del filt.custom_labels[loud]
+    for op in (
+        lambda: loud in filt.custom_labels,
+        lambda: filt.custom_labels.get(loud),
+        lambda: filt.custom_labels[loud],
+        lambda: filt.custom_labels.pop(loud),
+        lambda: filt.custom_labels.__delitem__(loud),
+    ):
+      with pytest.raises(TypeError, match="custom __hash__"):
+        op()
     assert loud.repr_calls == 0
     assert filt.custom_labels == {"run": "v1"}
 
@@ -3195,12 +3201,16 @@ class TestSpoofedClassProperty:
     def __repr__(self):
       raise RuntimeError("repr hook must not run")
 
-  def test_label_lookups_miss_without_hooks(self):
+  def test_label_lookups_reject_without_hooks(self):
     filt = TraceFilter(custom_labels={"run": "v1"})
     fake = self._FakeStr()
     assert isinstance(fake, str)  # the spoof works on isinstance
-    assert fake not in filt.custom_labels
-    assert filt.custom_labels.get(fake) is None
+    # type()-based detection routes it to the non-string branch; its
+    # custom __hash__ is then rejected without execution (round 13).
+    with pytest.raises(TypeError, match="custom __hash__"):
+      fake in filt.custom_labels
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(fake)
     assert filt.custom_labels == {"run": "v1"}
 
   def test_session_lookups_miss_without_hooks(self):
@@ -3302,3 +3312,216 @@ class TestHostileMetaclassNameRetrieval:
 
     with pytest.raises(TypeError, match="Hostile"):
       resolve_singular_candidate([Hostile()])
+
+
+class TestSealedValueTypes:
+  """Value objects are slot-backed and one-shot (round 13, P1)."""
+
+  ALL_TYPES = None  # populated in tests
+
+  def _instances(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    scope = TraceScope(custom_labels={"run": "v1"})
+    selector = TraceSelector(session_id="sess-1")
+    resolved = ResolvedTraceSelector(identity=identity, scope=scope)
+    return identity, scope, selector, resolved
+
+  def test_no_writable_dict(self):
+    for obj in self._instances():
+      with pytest.raises(AttributeError):
+        obj.__dict__
+
+  def test_reinitialization_rejected(self):
+    identity, scope, selector, resolved = self._instances()
+    with pytest.raises(TypeError, match="cannot be called"):
+      identity.__init__("other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      scope.__init__(experiment_id="other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      selector.__init__("other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      resolved.__init__(identity=TraceIdentity(session_id="other"))
+    # Nothing changed, including on failed attempts.
+    assert identity.session_id == "sess-1"
+    assert resolved.identity.session_id == "sess-1"
+
+  def test_hash_stable_and_dict_key_reachable(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    before = hash(identity)
+    table = {identity: "value"}
+    with pytest.raises(TypeError):
+      identity.__init__("other")
+    assert hash(identity) == before
+    assert table[identity] == "value"
+
+  def test_attached_identity_cannot_be_reinitialized(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    trace = Trace(trace_id="t1", session_id="sess-1", identity=identity)
+    with pytest.raises(TypeError):
+      trace.identity.__init__("sess-2")
+    assert trace.identity.session_id == trace.session_id == "sess-1"
+
+  def test_pickle_and_deepcopy_still_work(self):
+    import copy
+    import pickle
+
+    for obj in self._instances():
+      assert pickle.loads(pickle.dumps(obj)) == obj
+      assert copy.deepcopy(obj) == obj
+
+
+class TestSentinelOneShotInit:
+  """Sentinel display state is sealed against re-init (round 13)."""
+
+  def test_reinit_rejected(self):
+    with pytest.raises(TypeError, match="immutable"):
+      UNSET.__init__("SQL_NULL")
+    with pytest.raises(TypeError, match="immutable"):
+      SQL_NULL.__init__(123)
+    assert repr(UNSET) == "UNSET"
+    assert repr(SQL_NULL) == "SQL_NULL"
+
+  def test_fresh_construction_validates_canonical_name(self):
+    from bigquery_agent_analytics.trace import _PinSentinel
+
+    with pytest.raises(ValueError, match="Unknown pin sentinel"):
+      _PinSentinel("bogus")
+    with pytest.raises(ValueError, match="Unknown pin sentinel"):
+      _PinSentinel(123)
+
+
+class TestTrustedReadSurfaces:
+  """Views and equality must not run hostile hooks (round 13, P2)."""
+
+  class _EvilKey:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+    def __repr__(self):
+      raise RuntimeError("repr hook must not run")
+
+  def test_view_membership_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilKey()
+    with pytest.raises(TypeError, match="custom __hash__"):
+      evil in filt.custom_labels.keys()
+    # Items membership hashes the key component: same narrowed
+    # rejection as direct mapping lookups.
+    with pytest.raises(TypeError, match="custom __hash__"):
+      (evil, "v1") in filt.custom_labels.items()
+    # Value-position operands are compared, not hashed: safe miss.
+    assert ("run", evil) not in filt.custom_labels.items()
+    assert evil not in filt.custom_labels.values()
+    # Genuine members are still found.
+    assert "run" in filt.custom_labels.keys()
+    assert ("run", "v1") in filt.custom_labels.items()
+    assert "v1" in filt.custom_labels.values()
+    assert set(filt.custom_labels.keys()) == {"run"}
+    assert list(filt.custom_labels.items()) == [("run", "v1")]
+
+  def test_mapping_equality_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilKey()
+    assert filt.custom_labels != {evil: "v1"}
+    assert filt.custom_labels == {"run": "v1"}
+    assert filt.custom_labels != {"run": "v2"}
+
+    # Well-behaved str subclasses compare by character data.
+    class Plain(str):
+      pass
+
+    assert filt.custom_labels == {Plain("run"): Plain("v1")}
+
+  def test_list_equality_safe(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    evil = self._EvilKey()
+    assert filt.session_ids != [evil]
+    assert filt.session_ids == ["sess-1"]
+    assert filt.session_ids != ["sess-2"]
+    assert filt.session_ids != ("sess-1",)  # native: list != tuple
+
+
+class TestConditionalHashRejection:
+  """Conditionally hashable operands are rejected without hashing
+  (round 13, P2)."""
+
+  def test_conditional_builtin_hash_slots_rejected(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in ((1, []), memoryview(bytearray(b"x"))):
+      with pytest.raises(TypeError, match="conditional or custom"):
+        filt.custom_labels.get(operand)
+
+  def test_custom_hash_never_executes(self):
+    calls = []
+
+    class Custom:
+
+      def __hash__(self):
+        calls.append(1)
+        return 0
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(Custom())
+    assert not calls
+
+  def test_unconditional_builtins_still_miss_natively(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in (3, 3.5, b"x", None, frozenset(), object()):
+      assert operand not in filt.custom_labels
+      assert filt.custom_labels.get(operand) is None
+
+  def test_unhashable_still_raises_native_type_error(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="unhashable"):
+      filt.custom_labels.get([])
+
+
+class TestSentinelSerializationIdentity:
+  """serialize() must identify sentinels by identity (round 13)."""
+
+  def test_spoofed_class_dataclass_serializes_normally(self):
+    import dataclasses as dc
+
+    from bigquery_agent_analytics.serialization import serialize
+    from bigquery_agent_analytics.trace import _UnsetType
+
+    @dc.dataclass
+    class Spoofed:
+      x: int = 1
+
+      @property
+      def __class__(self):
+        return _UnsetType
+
+    result = serialize(Spoofed())
+    assert result == {"x": 1}
+
+
+class TestPopArityPrecedence:
+  """Excess pop defaults are reported before hashability
+  (round 13, P3)."""
+
+  def test_unhashable_key_with_excess_defaults(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="at most 2 arguments"):
+      filt.custom_labels.pop([], "d1", "d2")
+
+
+class TestQuotedTypeNameInErrors:
+  """Hostile class names are quoted in error text (round 13, P3)."""
+
+  def test_newline_class_name_quoted(self):
+    Hostile = type("evil\nname\x1b[31m", (), {})
+    with pytest.raises(TypeError) as exc_info:
+      resolve_singular_candidate([Hostile()])
+    message = str(exc_info.value)
+    assert "\n" not in message
+    assert "\\n" in message
