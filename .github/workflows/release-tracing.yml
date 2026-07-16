@@ -55,7 +55,8 @@
 #                     write the public repo): crane-copy staging@digest →
 #                     public coordinate (idempotent; digest unchanged),
 #                     assert public digest equals the packaged constant
-#   publish-pypi    - PyPI (gated by the `pypi` environment). Version-burn
+#   publish-pypi    - PyPI (gated by the `tracing-pypi` environment).
+#                     Version-burn
 #                     rule: a candidate that failed the gate burns its
 #                     version; never re-tag — bump and rebuild.
 #   finalize        - always() but gated on github-release success (a
@@ -73,8 +74,12 @@
 #                     surfaces partial publication with the
 #                     yank/version-burn recovery.
 #
-# One-time GitHub setup: environments `testpypi`, `pypi`, and
-# `release-promote` (the latter two with required reviewers), and
+# One-time GitHub setup: environments `tracing-testpypi`,
+# `tracing-pypi`, and `release-promote` (the latter two with required
+# reviewers; all three restricted to tag `tracing-v*`). The names are
+# tracing-PREFIXED on purpose: the root SDK's release.yml publishes
+# through the shared `pypi`/`testpypi` environments on `v*` tags, and a
+# `tracing-v*` restriction there would block root releases. And
 # ENABLE IMMUTABLE RELEASES (Settings → General → Releases) BEFORE the
 # first release: finalize verifies the setting BEFORE publishing —
 # GitHub does not apply immutability retroactively, so a release
@@ -87,7 +92,8 @@
 #   - Owner:   GoogleCloudPlatform
 #   - Repo:    BigQuery-Agent-Analytics-SDK
 #   - Workflow: release-tracing.yml
-#   - Environment: testpypi / pypi (match the `environment:` blocks
+#   - Environment: tracing-testpypi / tracing-pypi (match the
+#     `environment:` blocks
 #     below). Until the project + trusted publisher are configured on
 #     TestPyPI/PyPI, the publish jobs will fail with a clear error —
 #     `build` and `github-release` still produce + attach artifacts so
@@ -479,7 +485,7 @@ jobs:
     # publish-pypi inherits the guard transitively via needs: publish-testpypi.
     needs: [verify, build, github-release]
     environment:
-      name: testpypi
+      name: tracing-testpypi
       url: https://test.pypi.org/p/bigquery-agent-analytics-tracing
     permissions:
       id-token: write
@@ -632,7 +638,7 @@ jobs:
     timeout-minutes: 15
     needs: [verify, build, promote, publish-testpypi]
     environment:
-      name: pypi
+      name: tracing-pypi
       url: https://pypi.org/p/bigquery-agent-analytics-tracing
     permissions:
       id-token: write
