@@ -48,6 +48,7 @@ import asyncio
 import concurrent.futures
 from datetime import datetime
 from datetime import timezone
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -104,9 +105,17 @@ from .insights import parse_facet_response
 from .insights import run_analysis_prompt
 from .insights import SessionFacet
 from .insights import SessionMetadata
+from .trace import _jsonpath_member_segment
+from .trace import AmbiguousSessionError
+from .trace import resolve_singular_candidate
+from .trace import ResolvedTraceSelector
 from .trace import Span
 from .trace import Trace
 from .trace import TraceFilter
+from .trace import TraceIdentity
+from .trace import TraceScope
+from .trace import TraceSelector
+from .trace import UNSET
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
@@ -138,13 +147,23 @@ WHERE trace_id = @trace_id
 ORDER BY timestamp ASC
 """
 
+# Issue #359 (U2): candidate sessions are anchored to their complete
+# intrinsic identity, and the outer row fetch joins NULL-safely on
+# every anchor dimension, so a reused session_id cannot absorb rows
+# from another user or root agent even when the filter pins nothing.
+# {row_where} re-applies caller-selected label/experiment scope to
+# the fetched rows (see TraceFilter.row_scope_where).
 _LIST_TRACES_QUERY = """\
 WITH trace_sessions AS (
-  SELECT session_id
+  SELECT
+    session_id,
+    user_id,
+    JSON_VALUE(attributes, '$.root_agent_name') AS root_agent_name,
+    MAX(timestamp) AS last_event_ts
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
-  GROUP BY session_id
-  ORDER BY MAX(timestamp) DESC, session_id
+  GROUP BY session_id, user_id, root_agent_name
+  ORDER BY last_event_ts DESC, session_id
   LIMIT @trace_limit
 )
 SELECT
@@ -165,7 +184,12 @@ SELECT
   e.error_message,
   e.is_truncated
 FROM `{project}.{dataset}.{table}` e
-JOIN trace_sessions ts ON e.session_id = ts.session_id
+JOIN trace_sessions ts
+  ON e.session_id = ts.session_id
+  AND e.user_id IS NOT DISTINCT FROM ts.user_id
+  AND JSON_VALUE(e.attributes, '$.root_agent_name')
+      IS NOT DISTINCT FROM ts.root_agent_name
+WHERE {row_where}
 ORDER BY e.session_id, e.timestamp ASC
 """
 
@@ -242,27 +266,51 @@ GROUP BY event_type
 ORDER BY event_count DESC
 """
 
-_GET_SESSION_TRACE_QUERY = """\
+# Issue #359 (U2): singular session reads resolve candidates first.
+# One row per (identity, tag payload, experiment) combination present
+# in the session; Python-side resolution derives scope candidates
+# from the distinct payloads (see _resolve_scope_candidates).
+_RESOLVE_SESSION_CANDIDATES_QUERY = """\
 SELECT
-  event_type,
-  agent,
-  timestamp,
   session_id,
-  invocation_id,
   user_id,
-  trace_id,
-  span_id,
-  parent_span_id,
-  content,
-  content_parts,
-  attributes,
-  latency_ms,
-  status,
-  error_message,
-  is_truncated
+  JSON_VALUE(attributes, '$.root_agent_name') AS root_agent_name,
+  JSON_VALUE(attributes, '$.experiment_id') AS experiment_id,
+  TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')) AS tag_payload,
+  COUNT(*) AS row_count
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id
-ORDER BY timestamp ASC
+GROUP BY 1, 2, 3, 4, 5
+"""
+
+# Anchored singular fetch: rows are pinned to the RESOLVED identity
+# NULL-safely, and {row_where} applies the resolved scope so foreign
+# passes sharing the session id stay excluded.
+_GET_SESSION_TRACE_QUERY = """\
+SELECT
+  e.event_type,
+  e.agent,
+  e.timestamp,
+  e.session_id,
+  e.invocation_id,
+  e.user_id,
+  e.trace_id,
+  e.span_id,
+  e.parent_span_id,
+  e.content,
+  e.content_parts,
+  e.attributes,
+  e.latency_ms,
+  e.status,
+  e.error_message,
+  e.is_truncated
+FROM `{project}.{dataset}.{table}` e
+WHERE e.session_id = @session_id
+  AND e.user_id IS NOT DISTINCT FROM @anchor_user_id
+  AND JSON_VALUE(e.attributes, '$.root_agent_name')
+      IS NOT DISTINCT FROM @anchor_root_agent_name
+  AND {row_where}
+ORDER BY e.timestamp ASC
 """
 
 
@@ -770,22 +818,70 @@ class Client:
         total_latency_ms=total_ms,
     )
 
-  def get_session_trace(self, session_id: str) -> Trace:
-    """Fetches all spans for a specific session by ``session_id``.
+  def get_session_trace(
+      self,
+      session_id: str,
+      *,
+      user_id: Any = UNSET,
+      root_agent_name: Any = UNSET,
+      experiment_id: Any = UNSET,
+      custom_labels: Optional[dict] = None,
+      scope_signature: Optional[str] = None,
+  ) -> Trace:
+    """Fetches all spans for one resolved session identity.
 
     Unlike :meth:`get_trace` which queries by ``trace_id``, this
-    method filters by ``session_id``.
+    method resolves a session by identity. ``session_id`` alone is a
+    conversation-thread identifier and may be reused across users,
+    root agents, and evaluation passes (issue #359): candidates are
+    resolved first, and an ambiguous population raises
+    :class:`AmbiguousSessionError` carrying retry-ready selectors —
+    no implicit newest-wins fallback exists.
 
     Args:
         session_id: The session ID to retrieve.
+        user_id: Optional identity pin. Explicit ``None`` pins a
+            NULL user (matched NULL-safely); leave UNSET to let
+            resolution decide.
+        root_agent_name: Optional identity pin (same three-state
+            semantics).
+        experiment_id: Optional scope pin.
+        custom_labels: Optional subset label pins.
+        scope_signature: Optional exact-scope pin (as carried by
+            ambiguity retry payloads).
 
     Returns:
-        A Trace object with all spans for the session.
+        A Trace for the single resolved identity/scope, with
+        ``identity`` and ``scope`` attached.
 
     Raises:
-        ValueError: If no events found for the session ID.
+        ValueError: If no events match the session/selector.
+        AmbiguousSessionError: If more than one candidate remains.
     """
-    query = _GET_SESSION_TRACE_QUERY.format(
+    selector = TraceSelector(
+        session_id=session_id,
+        user_id=user_id,
+        root_agent_name=root_agent_name,
+        experiment_id=experiment_id,
+        custom_labels=custom_labels,
+        scope_signature=scope_signature,
+    )
+    return self.get_trace_by_selector(selector)
+
+  def get_trace_by_selector(self, selector: TraceSelector) -> Trace:
+    """Fetches the single trace pinned by a :class:`TraceSelector`.
+
+    This is the one-step retry surface for
+    :meth:`AmbiguousSessionError.to_dict` payloads:
+    ``get_trace_by_selector(TraceSelector(**candidate["selector"]))``
+    returns exactly the chosen candidate.
+
+    Raises:
+        ValueError: If no events match the selector.
+        AmbiguousSessionError: If the selector still matches more
+            than one resolved candidate.
+    """
+    resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
@@ -793,45 +889,82 @@ class Client:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter(
-                "session_id",
-                "STRING",
-                session_id,
+                "session_id", "STRING", selector.session_id
             ),
         ]
     )
     job_config = with_sdk_labels(job_config, feature="trace-read")
+    candidate_rows = [
+        dict(row)
+        for row in self.bq_client.query(
+            resolve_query, job_config=job_config
+        ).result()
+    ]
+    if not candidate_rows:
+      raise ValueError(f"No events found for session_id={selector.session_id}")
+    candidates = _resolve_scope_candidates(candidate_rows)
+    matching = _candidates_matching_selector(candidates, selector)
+    resolved = resolve_singular_candidate(matching)
 
-    results = list(self.bq_client.query(query, job_config=job_config).result())
-
-    if not results:
-      raise ValueError(f"No events found for session_id={session_id}")
-
-    spans = [Span.from_bigquery_row(dict(row)) for row in results]
-
-    user_id = None
-    trace_id = None
-    for row in results:
-      if not user_id:
-        user_id = row.get("user_id")
-      if not trace_id:
-        trace_id = row.get("trace_id")
-
-    timestamps = [s.timestamp for s in spans if s.timestamp]
-    start = min(timestamps) if timestamps else None
-    end = max(timestamps) if timestamps else None
-    total_ms = None
-    if start and end:
-      total_ms = (end - start).total_seconds() * 1000
-
-    return Trace(
-        trace_id=trace_id or session_id,
-        session_id=session_id,
-        spans=spans,
-        user_id=user_id,
-        start_time=start,
-        end_time=end,
-        total_latency_ms=total_ms,
+    row_filter = TraceFilter(
+        experiment_id=resolved.scope.experiment_id,
+        custom_labels=resolved.scope.labels_dict or None,
     )
+    row_where = row_filter.row_scope_where()
+    params = [
+        bigquery.ScalarQueryParameter(
+            "session_id", "STRING", resolved.identity.session_id
+        ),
+        bigquery.ScalarQueryParameter(
+            "anchor_user_id", "STRING", resolved.identity.user_id
+        ),
+        bigquery.ScalarQueryParameter(
+            "anchor_root_agent_name",
+            "STRING",
+            resolved.identity.root_agent_name,
+        ),
+    ]
+    if resolved.scope.experiment_id is not None:
+      params.append(
+          bigquery.ScalarQueryParameter(
+              "experiment_id", "STRING", resolved.scope.experiment_id
+          )
+      )
+    for i, (key, value) in enumerate((resolved.scope.custom_labels or ())):
+      params.append(
+          bigquery.ScalarQueryParameter(
+              f"label_key_{i}",
+              "STRING",
+              _jsonpath_member_segment(key),
+          )
+      )
+      params.append(
+          bigquery.ScalarQueryParameter(f"label_val_{i}", "STRING", value)
+      )
+
+    fetch_query = _GET_SESSION_TRACE_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=self.table_id,
+        row_where=row_where,
+    )
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
+    job_config = with_sdk_labels(job_config, feature="trace-read")
+    results = list(
+        self.bq_client.query(fetch_query, job_config=job_config).result()
+    )
+    if not results:
+      raise ValueError(f"No events found for session_id={selector.session_id}")
+    traces = _build_traces_from_rows(results)
+    for trace in traces:
+      if trace.identity == resolved.identity and (
+          trace.scope is None
+          or trace.scope.scope_signature == resolved.scope_signature
+      ):
+        return trace
+    # Anchored, scope-filtered rows should always reconstruct the
+    # resolved candidate; fall back to the first trace defensively.
+    return traces[0]
 
   def list_traces(
       self,
@@ -854,6 +987,7 @@ class Client:
         dataset=self.dataset_id,
         table=self.table_id,
         where=where,
+        row_where=filt.row_scope_where(),
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=params,
@@ -997,6 +1131,12 @@ class Client:
       report.details["execution_mode"] = "no_op"
       return report
 
+    # Issue #359: the API-fallback trace fetch applies the caller's
+    # label/experiment scope to fetched rows, matching list_traces.
+    row_where = (
+        trace_filter.row_scope_where() if trace_filter is not None else "TRUE"
+    )
+
     fallback_reasons: list[str] = []
 
     # Try AI.GENERATE (new path) when endpoint is not a legacy ref
@@ -1064,7 +1204,9 @@ class Client:
       fallback_reasons.append(f"ml_generate_text: {e}")
 
     # Fallback: fetch traces using same table/filter, evaluate via API
-    api_report = self._api_judge(evaluator, table, where, params)
+    api_report = self._api_judge(
+        evaluator, table, where, params, row_where=row_where
+    )
     api_report.details["execution_mode"] = "api_fallback"
     if fallback_reasons:
       api_report.details["fallback_reason"] = "; ".join(fallback_reasons)
@@ -1216,6 +1358,7 @@ class Client:
       table,
       where,
       params,
+      row_where: str = "TRUE",
   ) -> EvaluationReport:
     """Evaluates using the Gemini API (fallback).
 
@@ -1228,6 +1371,7 @@ class Client:
         dataset=self.dataset_id,
         table=table,
         where=where,
+        row_where=row_where,
     )
     job_config = with_sdk_labels(
         bigquery.QueryJobConfig(query_parameters=params),
@@ -2499,46 +2643,289 @@ def _merge_criterion_reports(
   )
 
 
+def _parse_tag_payload(payload: Any) -> Optional[dict[str, str]]:
+  """Parse one custom-tags payload into canonical scalar labels.
+
+  Accepts the ``TO_JSON_STRING(JSON_QUERY(...))`` string form used by
+  candidate resolution and the already-parsed dict form found on
+  ``Span.attributes``. Non-string scalar values are canonicalized via
+  compact JSON so equal payloads always produce equal labels.
+  Returns ``None`` for absent/empty payloads.
+  """
+  if payload is None:
+    return None
+  if isinstance(payload, str):
+    if payload == "null":
+      return None
+    try:
+      payload = json.loads(payload)
+    except (json.JSONDecodeError, ValueError):
+      return None
+  if not isinstance(payload, dict) or not payload:
+    return None
+  labels: dict[str, str] = {}
+  for key, value in payload.items():
+    if isinstance(value, str):
+      labels[str(key)] = value
+    else:
+      labels[str(key)] = json.dumps(value, sort_keys=True)
+  return labels
+
+
+def _minimal_payloads(payloads: list[dict[str, str]]) -> list[dict[str, str]]:
+  """Distinct payloads that are not proper supersets of another.
+
+  Live-data evidence (issue #361): rows within one pass share a base
+  payload with occasional additive per-row enrichment keys (e.g.
+  ``subagent_id``). A payload that strictly extends another therefore
+  belongs to the smaller payload's pass instead of forming its own
+  scope candidate — while genuinely conflicting payloads (V0 vs V1
+  run labels) share no subset relation and stay distinct candidates.
+  """
+  distinct: list[dict[str, str]] = []
+  for payload in payloads:
+    if payload not in distinct:
+      distinct.append(payload)
+  minimal = []
+  for payload in distinct:
+    items = set(payload.items())
+    if not any(
+        other is not payload and set(other.items()) < items
+        for other in distinct
+    ):
+      minimal.append(payload)
+  return minimal
+
+
+def _base_payload_for(
+    payload: Optional[dict[str, str]],
+    bases: list[dict[str, str]],
+) -> Optional[dict[str, str]]:
+  """Map one row payload to the scope base it extends.
+
+  Rows with no payload are shared conversation rows and match every
+  base (``None`` return means "all"). A payload extends the largest
+  base contained in it; ties break on the canonical signature so the
+  mapping is deterministic.
+  """
+  if payload is None or not bases:
+    return None
+  containing = [
+      base for base in bases if set(base.items()) <= set(payload.items())
+  ]
+  if not containing:
+    return None
+  containing.sort(
+      key=lambda base: (
+          -len(base),
+          TraceScope(custom_labels=base).scope_signature,
+      )
+  )
+  return containing[0]
+
+
+def _resolve_scope_candidates(rows: list[dict]) -> list[ResolvedTraceSelector]:
+  """Derive resolved candidates from per-session aggregation rows.
+
+  Each input row is one distinct ``(user_id, root_agent_name,
+  experiment_id, tag_payload)`` combination observed in the session
+  (see ``_RESOLVE_SESSION_CANDIDATES_QUERY``). Identity dimensions
+  are row-uniform in live data, so candidates split by intrinsic
+  identity, then by experiment, then by minimal tag payload.
+  """
+  groups: dict[tuple, dict] = {}
+  for row in rows:
+    identity_key = (
+        row.get("session_id"),
+        row.get("user_id"),
+        row.get("root_agent_name"),
+    )
+    group = groups.setdefault(identity_key, {})
+    experiment = row.get("experiment_id")
+    subgroup = group.setdefault(experiment, [])
+    payload = _parse_tag_payload(row.get("tag_payload"))
+    if payload is not None:
+      subgroup.append(payload)
+
+  candidates: list[ResolvedTraceSelector] = []
+  for (session_id, user_id, root_agent_name), group in groups.items():
+    identity = TraceIdentity(
+        session_id=session_id,
+        user_id=user_id,
+        root_agent_name=root_agent_name,
+    )
+    for experiment, payloads in group.items():
+      bases = _minimal_payloads(payloads)
+      if not bases:
+        candidates.append(
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(experiment_id=experiment),
+            )
+        )
+        continue
+      for base in bases:
+        candidates.append(
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(experiment_id=experiment, custom_labels=base),
+            )
+        )
+  return candidates
+
+
+def _candidates_matching_selector(
+    candidates: list[ResolvedTraceSelector],
+    selector: TraceSelector,
+) -> list[ResolvedTraceSelector]:
+  """Filter resolved candidates by the caller's selector pins.
+
+  UNSET dimensions are unpinned; explicit ``None`` pins match only
+  NULL identity values; label pins are subset requirements on the
+  candidate scope; ``scope_signature`` pins the exact scope.
+  """
+  matching = []
+  for candidate in candidates:
+    if (
+        selector.user_id is not UNSET
+        and candidate.identity.user_id != selector.user_id
+    ):
+      continue
+    if (
+        selector.root_agent_name is not UNSET
+        and candidate.identity.root_agent_name != selector.root_agent_name
+    ):
+      continue
+    if (
+        selector.experiment_id is not UNSET
+        and candidate.scope.experiment_id != selector.experiment_id
+    ):
+      continue
+    if selector.custom_labels:
+      scope_labels = candidate.scope.labels_dict
+      if any(
+          scope_labels.get(key) != value
+          for key, value in selector.custom_labels
+      ):
+        continue
+    if (
+        selector.scope_signature is not None
+        and candidate.scope_signature != selector.scope_signature
+    ):
+      continue
+    matching.append(candidate)
+  return matching
+
+
 def _build_traces_from_rows(results: list) -> list[Trace]:
   """Groups BigQuery result rows into Trace objects.
 
-  Shared by ``list_traces`` and ``_api_judge`` to ensure
-  consistent trace construction.
+  Shared by ``list_traces`` and ``_api_judge`` to ensure consistent
+  trace construction. Issue #359 (U2): rows are grouped by the FULL
+  resolved selector — intrinsic identity (session, user, root agent)
+  plus resolved scope (experiment, minimal tag payload) — instead of
+  ``session_id`` alone, so two identities or evaluation passes that
+  reuse one session id yield two Trace objects rather than silently
+  merging. Shared rows carrying no tag payload appear in every pass
+  of their identity (complete-trace semantics within each scope).
   """
-  sessions: dict[str, list[Span]] = {}
-  meta: dict[str, dict[str, Any]] = {}
+  identity_groups: dict[tuple, dict] = {}
 
   for row in results:
     row_dict = dict(row)
     sid = row_dict.get("session_id", "unknown")
     span = Span.from_bigquery_row(row_dict)
-    sessions.setdefault(sid, []).append(span)
-    if sid not in meta:
-      meta[sid] = {
-          "user_id": row_dict.get("user_id"),
-          "trace_id": row_dict.get("trace_id"),
-      }
+    attributes = span.attributes or {}
+    identity_key = (
+        sid,
+        row_dict.get("user_id"),
+        attributes.get("root_agent_name"),
+    )
+    group = identity_groups.setdefault(
+        identity_key, {"subgroups": {}, "trace_id": None}
+    )
+    if not group["trace_id"]:
+      group["trace_id"] = row_dict.get("trace_id")
+    experiment = attributes.get("experiment_id")
+    subgroup = group["subgroups"].setdefault(
+        experiment, {"spans": [], "payloads": []}
+    )
+    payload = _parse_tag_payload(attributes.get("custom_tags"))
+    subgroup["spans"].append((span, payload))
+    if payload is not None:
+      subgroup["payloads"].append(payload)
 
   traces = []
-  for sid, spans in sessions.items():
-    timestamps = [s.timestamp for s in spans if s.timestamp]
-    start = min(timestamps) if timestamps else None
-    end = max(timestamps) if timestamps else None
-    total_ms = None
-    if start and end:
-      total_ms = (end - start).total_seconds() * 1000
-
-    traces.append(
-        Trace(
-            trace_id=meta[sid].get("trace_id") or sid,
+  for (sid, user_id, root_agent_name), group in identity_groups.items():
+    identity = None
+    if isinstance(sid, str):
+      try:
+        identity = TraceIdentity(
             session_id=sid,
-            spans=spans,
-            user_id=meta[sid].get("user_id"),
-            start_time=start,
-            end_time=end,
-            total_latency_ms=total_ms,
+            user_id=user_id if isinstance(user_id, str) else None,
+            root_agent_name=(
+                root_agent_name if isinstance(root_agent_name, str) else None
+            ),
         )
-    )
+      except (TypeError, ValueError):
+        identity = None
+    for experiment, subgroup in group["subgroups"].items():
+      bases = _minimal_payloads(subgroup["payloads"])
+      scoped_spans: dict[Optional[str], tuple] = {}
+      scope_options = bases if bases else [None]
+      for base in scope_options:
+        scope = None
+        try:
+          scope = TraceScope(
+              experiment_id=(
+                  experiment if isinstance(experiment, str) else None
+              ),
+              custom_labels=base,
+          )
+        except (TypeError, ValueError):
+          scope = None
+        key = scope.scope_signature if scope is not None else None
+        scoped_spans[key] = (scope, base, [])
+      for span, payload in subgroup["spans"]:
+        base = _base_payload_for(payload, bases)
+        if base is None and payload is None:
+          # Shared conversation row: complete within every pass.
+          for _, (_, _, spans) in scoped_spans.items():
+            spans.append(span)
+        else:
+          target = base if base is not None else payload
+          matched = False
+          for _, (scope, scope_base, spans) in scoped_spans.items():
+            if scope_base == target:
+              spans.append(span)
+              matched = True
+              break
+          if not matched:
+            for _, (_, _, spans) in scoped_spans.items():
+              spans.append(span)
+      for _, (scope, _, spans) in scoped_spans.items():
+        if not spans:
+          continue
+        timestamps = [s.timestamp for s in spans if s.timestamp]
+        start = min(timestamps) if timestamps else None
+        end = max(timestamps) if timestamps else None
+        total_ms = None
+        if start and end:
+          total_ms = (end - start).total_seconds() * 1000
+        trace_id = group["trace_id"] or sid
+        traces.append(
+            Trace(
+                trace_id=trace_id,
+                session_id=sid,
+                spans=spans,
+                user_id=identity.user_id if identity else user_id,
+                start_time=start,
+                end_time=end,
+                total_latency_ms=total_ms,
+                identity=identity,
+                scope=scope if identity is not None else None,
+            )
+        )
 
   return traces
 

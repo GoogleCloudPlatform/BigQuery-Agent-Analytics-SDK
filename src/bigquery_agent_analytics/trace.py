@@ -814,6 +814,63 @@ class TraceFilter:
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
 
+  def row_scope_where(self, alias: str = "e") -> str:
+    """Alias-qualified row-scope predicates for the outer row fetch.
+
+    Issue #359: ``to_sql_conditions()`` selects candidate SESSIONS;
+    the composite anchor join then fetches every anchored row, so
+    caller-selected scope (custom labels and experiment) must be
+    re-applied to the fetched rows or a reused session id merges
+    foreign evaluation passes into one trace.
+
+    Semantics are conflict-excluding, per the live-data
+    characterization recorded on issue #361: real sessions carry
+    untagged rows and per-row enrichment keys alongside a consistent
+    base payload, so a pinned label ``k=v`` excludes rows whose ``k``
+    carries a DIFFERENT non-NULL value (foreign-pass rows) while
+    keeping rows that lack ``k`` (shared conversation rows) —
+    preserving complete-trace semantics (R6) within the selected
+    scope. The emitted fragment reuses the query parameters that
+    ``to_sql_conditions()`` already declares (``@experiment_id``,
+    ``@label_key_N``/``@label_val_N``), so both must be rendered into
+    the same query.
+
+    Args:
+        alias: Table alias of the outer event-row fetch.
+
+    Returns:
+        A SQL boolean expression (``TRUE`` when no row-scope
+        dimension is pinned).
+    """
+    conditions = []
+    experiment_id = _validated_filter_pin("experiment_id", self.experiment_id)
+    if experiment_id is SQL_NULL:
+      conditions.append(
+          f"JSON_VALUE({alias}.attributes, '$.experiment_id') IS NULL"
+      )
+    elif experiment_id is not None:
+      conditions.append(
+          f"(JSON_VALUE({alias}.attributes, '$.experiment_id')"
+          " = @experiment_id"
+          f" OR JSON_VALUE({alias}.attributes, '$.experiment_id')"
+          " IS NULL)"
+      )
+    labels = (
+        _normalized_filter_labels(self.custom_labels)
+        if self.custom_labels is not None
+        else None
+    )
+    if labels:
+      for i in range(len(labels)):
+        conditions.append(
+            f"(JSON_VALUE({alias}.attributes,"
+            f" CONCAT('$.custom_tags.', @label_key_{i}))"
+            f" = @label_val_{i}"
+            f" OR JSON_VALUE({alias}.attributes,"
+            f" CONCAT('$.custom_tags.', @label_key_{i})) IS NULL)"
+        )
+    return " AND ".join(conditions) if conditions else "TRUE"
+
 
 class _PinSentinel:
   """Singleton marker for selector/filter pin states (issue #359).
