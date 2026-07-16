@@ -3986,3 +3986,89 @@ class TestTraceWeakref:
     assert ref() is trace
     del trace
     assert ref() is None
+
+
+class TestViewAlgebraIterableOperands:
+  """Set algebra accepts native-view operand types (round 16, P2)."""
+
+  def _keys(self):
+    return TraceFilter(custom_labels={"run": "v1"}).custom_labels.keys()
+
+  def test_list_and_tuple_operands(self):
+    assert self._keys() & ["run"] == {"run"}
+    assert self._keys() | ("more",) == {"run", "more"}
+    assert self._keys() - ["other"] == {"run"}
+    assert self._keys() ^ ["run", "more"] == {"more"}
+
+  def test_dict_operand_uses_keys(self):
+    # Native dict-view algebra iterates a dict operand's keys.
+    assert self._keys() & {"run": "anything"} == {"run"}
+    assert self._keys() - {"run": 1} == set()
+
+  def test_generator_operand(self):
+    assert self._keys() & (k for k in ["run", "more"]) == {"run"}
+
+  def test_reflected_operations_with_iterables(self):
+    assert ["run", "x"] - self._keys() == {"x"}
+    assert ["more"] | self._keys() == {"run", "more"}
+
+  def test_items_view_pair_operands(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert filt.custom_labels.items() & [("run", "v1")] == {("run", "v1")}
+    assert filt.custom_labels.items() | [("extra", "e")] == {
+        ("run", "v1"),
+        ("extra", "e"),
+    }
+
+  def test_hostile_protection_retained_for_iterables(self):
+    class Evil:
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return hash("run")
+
+    keys = self._keys()
+    assert keys - [Evil()] == {"run"}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      keys | [Evil()]
+
+  def test_lying_list_operand_read_via_trusted_storage(self):
+    class LiarList(list):
+
+      def __iter__(self):
+        return iter([])
+
+    assert self._keys() & LiarList(["run"]) == {"run"}
+
+  def test_non_iterable_still_type_errors(self):
+    with pytest.raises(TypeError):
+      self._keys() & 42
+
+
+class TestSetstateDescriptorWrites:
+  """Restoration writes slots directly, not through subclass
+  descriptors (round 16, P3)."""
+
+  def test_subclass_property_cannot_intercept_restore(self):
+    calls = []
+
+    class Interceptor(TraceIdentity):
+
+      @property
+      def user_id(self):
+        calls.append("get")
+        return "intercepted"
+
+      @user_id.setter
+      def user_id(self, value):
+        calls.append("set")
+        raise RuntimeError("property setter must not run")
+
+    blank = Interceptor.__new__(Interceptor)
+    blank.__setstate__(["sess-1", "alice", None])
+    # The slot was written directly; the property still shadows reads
+    # on the subclass, but restoration neither invoked it nor broke.
+    assert TraceIdentity.__dict__["user_id"].__get__(blank) == "alice"
+    assert "set" not in calls

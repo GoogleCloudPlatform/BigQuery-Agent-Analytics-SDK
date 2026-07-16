@@ -1172,16 +1172,37 @@ class _SafeSetComparisonsMixin:
   def _algebra_counterpart(self, other: Any, keep_foreign: bool) -> Any:
     """Normalized elements for set algebra, failing closed as needed.
 
-    Results of ``&``/``-`` are subsets of this view's own trusted
-    elements, so foreign counterpart elements simply cannot match and
-    are ignored. Results of ``|``/``^`` and the reflected ``-`` would
-    have to CONTAIN the foreign elements; emitting hostile objects in
-    a trusted result is refused instead.
+    Native dict views accept ANY iterable operand in set algebra
+    (lists, tuples, dicts, generators), not just sets, so this
+    accepts the same — reading real container (sub)classes through
+    trusted descriptors. Results of ``&``/``-`` are subsets of this
+    view's own trusted elements, so foreign counterpart elements
+    simply cannot match and are ignored. Results of ``|``/``^`` and
+    the reflected ``-`` would have to CONTAIN the foreign elements;
+    emitting hostile objects in a trusted result is refused instead.
     """
-    counterpart = self._normalized_counterpart(other)
-    if counterpart is None:
-      return None
-    exact, foreign, _ = counterpart
+    if isinstance(other, frozenset):
+      elements: Any = frozenset.__iter__(other)
+    elif isinstance(other, set):
+      elements = set.__iter__(other)
+    elif isinstance(other, dict):
+      # Native view algebra iterates a dict operand's keys.
+      elements = dict.keys(other)
+    elif isinstance(other, (list, tuple)):
+      elements = _trusted_sequence_snapshot(other)
+    else:
+      try:
+        elements = iter(other)
+      except TypeError:
+        return None
+    exact: set = set()
+    foreign = 0
+    for element in elements:
+      normalized = self._normalize_element(element)
+      if normalized is _NON_STRING_OPERAND:
+        foreign += 1
+      else:
+        exact.add(normalized)
     if foreign and not keep_foreign:
       raise TypeError(
           "set operation would include non-conforming elements from"
@@ -1844,8 +1865,11 @@ def _sealed_value_type(cls: type) -> type:
         # Restored state is untrusted input: re-run the same
         # validation/normalization construction applies.
         post_init(probe)
-      for name, member in zip(field_names, members):
-        object.__setattr__(self, name, member.__get__(probe, cls))
+      for member in members:
+        # member.__set__ writes the slot directly: object.__setattr__
+        # would consult the MRO and could invoke a subclass property
+        # setter, breaking restoration atomicity.
+        member.__set__(self, member.__get__(probe, cls))
 
     __setstate__.__name__ = "__setstate__"
     __setstate__.__qualname__ = f"{cls.__qualname__}.__setstate__"
