@@ -42,7 +42,7 @@ git push origin "tracing-v${VERSION}"
 
 The workflow takes over from there. Automated stages run in ~10
 minutes; the release then WAITS at two manual approval gates
-(`release-promote`, then `pypi`) — see the gate section below.
+(`release-promote`, then `tracing-pypi`) — see the gate section below.
 
 ## What CI does (issue #349 release contract)
 
@@ -98,7 +98,7 @@ minutes; the release then WAITS at two manual approval gates
    coordinate (idempotent — an existing tag is accepted only with the
    exact expected digest) and asserts public digest == packaged
    constant. It does NOT publish the release.
-7. **`publish-pypi`** — PyPI, gated by the `pypi` environment;
+7. **`publish-pypi`** — PyPI, gated by the `tracing-pypi` environment;
    requires `promote`.
 8. **`finalize`** — runs `always()` but is gated on `github-release`
    succeeding (when the rerun guard deliberately fails, its "rerun the
@@ -161,7 +161,8 @@ bqaa-otel teardown ... --confirm   # WITH --confirm: the gate evidence must
 
 (The staging ref + digest are in the `build-image` job output.) All
 green → approve `release-promote`, then run the post-promotion smoke
-WITHOUT `--image` (embedded public default), then approve `pypi`.
+WITHOUT `--image` (embedded public default), then approve
+`tracing-pypi`.
 Post evidence on the release issue.
 
 ## Version-burn rule
@@ -267,31 +268,51 @@ TestPyPI) and add a publisher with:
 | Owner | `GoogleCloudPlatform` |
 | Repository | `BigQuery-Agent-Analytics-SDK` |
 | Workflow filename | `release-tracing.yml` |
-| Environment | `pypi` (or `testpypi` on TestPyPI) |
+| Environment | `tracing-pypi` (or `tracing-testpypi` on TestPyPI) |
 
 These names must match exactly — the `environment:` blocks in the
 workflow are the binding contract.
 
-GitHub-side one-time setup: create environments `testpypi`, `pypi`,
-and `release-promote` in the repo settings —
+GitHub-side one-time setup: create environments `tracing-testpypi`,
+`tracing-pypi`, and `release-promote` in the repo settings. The
+tracing-PREFIXED names are deliberate: the root SDK's `release.yml`
+publishes through the shared `pypi`/`testpypi` environments on `v*`
+tags, so a `tracing-v*` restriction on those would block root
+releases — the tracing pipeline must never reuse them.
 
-- restrict **all three** environments to tag `tracing-v*`
+- restrict **all three** tracing environments to tag `tracing-v*`
   (Settings → Environments → Deployment branches and tags → Selected →
-  Tag rule `tracing-v*`); the `testpypi` rule matters even without a
-  reviewer, because it stops a branch-modified copy of the workflow
-  from using the TestPyPI OIDC identity and burning a version;
-- required reviewers on `pypi` and `release-promote` ONLY (approving
-  `release-promote` asserts the TestPyPI full-lifecycle gate passed);
-  `testpypi` gets no reviewer — the manual lifecycle verdict is the
-  later `release-promote` approval —
+  Tag rule `tracing-v*`); the `tracing-testpypi` rule matters even
+  without a reviewer, because it stops a branch-modified copy of the
+  workflow from using the TestPyPI OIDC identity and burning a
+  version; the root SDK's `pypi`/`testpypi` environments keep their
+  own `v*`-appropriate rules;
+- required reviewers on `tracing-pypi` and `release-promote` ONLY
+  (approving `release-promote` asserts the TestPyPI full-lifecycle
+  gate passed); `tracing-testpypi` gets no reviewer — the manual
+  lifecycle verdict is the later `release-promote` approval —
 
-and **enable immutable releases BEFORE the first release**
+and **enable immutable releases BEFORE tagging**
 (Settings → General → Releases):
 `finalize` verifies the setting and refuses to publish while it is
 off, because GitHub applies immutability only at publish time — a
 release published while the setting is off keeps mutable assets and
 `SHA256SUMS` forever, replaceable by anything holding
 `contents: write`.
+
+Immutable-releases toggle protocol (until the root SDK flow is
+hardened): the repository setting is repo-wide, and the root SDK's
+current `release.yml` starts from an already-published GitHub release
+and has previously recovered versions by re-running a tag from a new
+SHA — permanent immutability would break that recovery. For each
+tracing release: (1) complete the App and publisher setup, (2) enable
+immutable releases immediately before pushing the tag
+(`PUT /repos/{repo}/immutable-releases`), (3) publish and verify the
+tracing release reports `immutable: true`, then (4) disable the
+setting again. Disabling does NOT make releases published while it
+was enabled mutable again. Longer term, harden the root SDK flow so
+verification/build precedes public release publication, then leave
+the setting permanently enabled.
 
 Policy-read credential (one-time): the immutable-releases check calls
 `GET /repos/{repo}/immutable-releases`, which requires repository
