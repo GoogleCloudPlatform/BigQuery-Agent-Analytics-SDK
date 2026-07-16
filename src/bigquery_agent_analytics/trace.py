@@ -814,6 +814,23 @@ class TraceFilter:
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
 
+  def to_query_fragments(self, alias: str = "e") -> tuple[str, str, list]:
+    """Session WHERE, row-scope WHERE, and parameters from ONE snapshot.
+
+    ``to_sql_conditions()`` and ``row_scope_where()`` read the mutable
+    filter separately; a mutation between the two calls could leave
+    the candidate CTE pinned while the outer row fetch degrades to
+    ``TRUE`` and admits foreign scopes. This method copies the filter
+    into an immutable-by-construction snapshot first and derives both
+    fragments plus the parameters from that snapshot.
+    """
+    import dataclasses as _dataclasses
+
+    snapshot = _dataclasses.replace(self)
+    where, params = snapshot.to_sql_conditions()
+    row_where = snapshot.row_scope_where(alias=alias)
+    return where, row_where, params
+
   def row_scope_where(self, alias: str = "e") -> str:
     """Alias-qualified row-scope predicates for the outer row fetch.
 
@@ -844,17 +861,25 @@ class TraceFilter:
         dimension is pinned).
     """
     conditions = []
+    untagged = (
+        f"COALESCE(TO_JSON_STRING(JSON_QUERY({alias}.attributes,"
+        " '$.custom_tags')), 'null') IN ('null', '{}')"
+    )
     experiment_id = _validated_filter_pin("experiment_id", self.experiment_id)
     if experiment_id is SQL_NULL:
       conditions.append(
           f"JSON_VALUE({alias}.attributes, '$.experiment_id') IS NULL"
       )
     elif experiment_id is not None:
+      # NULL-experiment rows are shared conversation rows only when
+      # they carry no tag payload; a tagged NULL-experiment row is a
+      # genuine NULL-scope pass and stays out of e1 reads (symmetric
+      # with _scope_subgroups).
       conditions.append(
           f"(JSON_VALUE({alias}.attributes, '$.experiment_id')"
           " = @experiment_id"
-          f" OR JSON_VALUE({alias}.attributes, '$.experiment_id')"
-          " IS NULL)"
+          f" OR (JSON_VALUE({alias}.attributes, '$.experiment_id')"
+          f" IS NULL AND {untagged}))"
       )
     labels = (
         _normalized_filter_labels(self.custom_labels)
@@ -862,13 +887,15 @@ class TraceFilter:
         else None
     )
     if labels:
+      # Untagged shared rows appear as a missing custom_tags member,
+      # an explicit JSON null, or an empty object — IS NULL alone
+      # misses the latter two (verified against live BigQuery).
       for i in range(len(labels)):
         conditions.append(
             f"(JSON_VALUE({alias}.attributes,"
             f" CONCAT('$.custom_tags.', @label_key_{i}))"
             f" = @label_val_{i}"
-            f" OR JSON_QUERY({alias}.attributes, '$.custom_tags')"
-            " IS NULL)"
+            f" OR {untagged})"
         )
     return " AND ".join(conditions) if conditions else "TRUE"
 
@@ -2437,6 +2464,10 @@ class Trace(_WeakrefableSlotted):
   total_latency_ms: Optional[float] = None
   identity: Optional[TraceIdentity] = None
   scope: Optional[TraceScope] = None
+  # KTD4 coverage metadata for allow_mixed_scope reads: the scope
+  # signatures whose rows this conversation-complete trace contains
+  # (None on ordinary scoped reads, or when coverage was truncated).
+  scope_coverage: Optional[tuple[str, ...]] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
     if name == "scope":

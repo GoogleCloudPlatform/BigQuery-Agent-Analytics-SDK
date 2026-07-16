@@ -283,6 +283,7 @@ class TestIdentityQueriesDryRun:
             query_parameters=[
                 bq.ScalarQueryParameter("session_id", "STRING", "collide"),
                 bq.ScalarQueryParameter("pin_user_id", "STRING", "alice"),
+                bq.ScalarQueryParameter("candidate_limit", "INT64", 65),
             ],
             dry_run=True,
         ),

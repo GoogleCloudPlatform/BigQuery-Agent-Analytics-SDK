@@ -100,11 +100,21 @@ def _candidate_row(
     tag_payload=None,
     row_count=1,
 ):
+  import json as json_mod
+
+  # The candidates query reads TO_JSON_STRING forms so scalar types
+  # survive to Python validation.
   return {
       "session_id": session_id,
       "user_id": user_id,
-      "root_agent_name": root_agent_name,
-      "experiment_id": experiment_id,
+      "root_agent_name": (
+          json_mod.dumps(root_agent_name)
+          if root_agent_name is not None
+          else None
+      ),
+      "experiment_id": (
+          json_mod.dumps(experiment_id) if experiment_id is not None else None
+      ),
       "tag_payload": tag_payload,
       "row_count": row_count,
   }
@@ -140,14 +150,18 @@ class TestListTracesQueryShape:
     # Session selection keeps the label predicate...
     assert "CONCAT('$.custom_tags.', @label_key_0)" in query
     # ...and the outer row fetch re-applies it, conflict-excluding.
+    untagged = (
+        "COALESCE(TO_JSON_STRING(JSON_QUERY(e.attributes,"
+        " '$.custom_tags')), 'null') IN ('null', '{}')"
+    )
     assert (
         "(JSON_VALUE(e.attributes, CONCAT('$.custom_tags.', @label_key_0))"
-        " = @label_val_0 OR JSON_QUERY(e.attributes, '$.custom_tags')"
-        " IS NULL)" in query
+        f" = @label_val_0 OR {untagged})" in query
     )
     assert (
         "(JSON_VALUE(e.attributes, '$.experiment_id') = @experiment_id"
-        " OR JSON_VALUE(e.attributes, '$.experiment_id') IS NULL)" in query
+        " OR (JSON_VALUE(e.attributes, '$.experiment_id') IS NULL AND"
+        f" {untagged}))" in query
     )
 
   def test_singular_fetch_query_anchors_identity(self):
@@ -566,8 +580,12 @@ class TestRowScopeSharedRowRule:
   def test_missing_pinned_key_on_tagged_row_excluded(self):
     where = TraceFilter(custom_labels={"run": "v1"}).row_scope_where()
     # The shared-row branch checks the WHOLE payload, not the key:
-    # {"slice": "secret"} rows (tagged, missing "run") are excluded.
-    assert "JSON_QUERY(e.attributes, '$.custom_tags') IS NULL" in where
+    # {"slice": "secret"} rows (tagged, missing "run") are excluded,
+    # while missing/JSON-null/empty payloads all count as untagged.
+    assert (
+        "COALESCE(TO_JSON_STRING(JSON_QUERY(e.attributes,"
+        " '$.custom_tags')), 'null') IN ('null', '{}')" in where
+    )
     assert (
         "JSON_VALUE(e.attributes, CONCAT('$.custom_tags.', @label_key_0))"
         " IS NULL" not in where
@@ -742,14 +760,15 @@ class TestSelectorPushdownAndCap:
     resolve_query = mock_bq.query.call_args_list[0][0][0]
     assert "AND user_id IS NULL" in resolve_query
 
-  def test_candidate_cap_raises_bounded_ambiguity(self):
+  def test_candidate_cap_bounded_in_sql_and_redacted(self):
     from unittest.mock import MagicMock
 
     from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
 
+    # SQL truncates at cap+1 rows; Python sees the truncation marker.
     candidate_batch = [
         _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
-        for i in range(_MAX_SCOPE_CANDIDATES + 10)
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
     ]
     mock_bq = MagicMock()
     job = MagicMock()
@@ -761,9 +780,15 @@ class TestSelectorPushdownAndCap:
         verify_schema=False,
         bq_client=mock_bq,
     )
-    with pytest.raises(AmbiguousSessionError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
       client.get_session_trace("sess-1")
-    assert len(exc_info.value.candidates) == _MAX_SCOPE_CANDIDATES + 1
+    message = str(exc_info.value)
+    assert f"More than {_MAX_SCOPE_CANDIDATES}" in message
+    # Redacted: no label values in the printable form.
+    assert "v0" not in message
+    # The SQL itself is bounded.
+    query = mock_bq.query.call_args[0][0]
+    assert "LIMIT @candidate_limit" in query
 
 
 class TestAllowMixedScope:
@@ -776,6 +801,15 @@ class TestAllowMixedScope:
         _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
         _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
     ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
         _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
@@ -783,7 +817,7 @@ class TestAllowMixedScope:
     ]
     mock_bq = MagicMock()
     jobs = []
-    for batch in [candidate_batch, fetch_batch]:
+    for batch in [candidate_batch, identity_batch, fetch_batch]:
       job = MagicMock()
       job.result.return_value = batch
       jobs.append(job)
@@ -795,9 +829,12 @@ class TestAllowMixedScope:
         bq_client=mock_bq,
     )
     trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
-    assert {s.span_id for s in trace.spans} == {"p0", "p1", "shared"}
+    assert [s.span_id for s in trace.spans] == ["p0", "p1", "shared"]
     assert trace.identity.user_id == "alice"
     assert trace.scope is None  # no single resolved scope describes it
+    # KTD4 coverage metadata names the covered scope signatures.
+    assert trace.scope_coverage is not None
+    assert len(trace.scope_coverage) == 2
 
   def test_mixed_scope_still_ambiguous_across_identities(self):
     from unittest.mock import MagicMock
@@ -818,3 +855,218 @@ class TestAllowMixedScope:
     )
     with pytest.raises(AmbiguousSessionError):
       client.get_session_trace("sess-1", allow_mixed_scope=True)
+
+
+class TestRound3Regressions:
+  """PR #371 review round 3 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_mixed_read_preserves_duplicate_span_ids_and_order(self):
+    # P1-1: no span_id dedup, no chronology loss — one span per row
+    # in producer order, even when span ids repeat.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="dup")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="dup")),
+        _mock_row(_event_row(span_id="tail")),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
+    assert [s.span_id for s in trace.spans] == ["dup", "dup", "tail"]
+
+  def test_exact_selector_wins_over_mixed_scope_flag(self):
+    # P1-3: a signature-pinned selector returns its exact candidate
+    # even with allow_mixed_scope=True.
+    v0_signature = TraceScope(custom_labels={"run": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+    ]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace(
+        "sess-1", scope_signature=v0_signature, allow_mixed_scope=True
+    )
+    assert trace.scope is not None
+    assert trace.scope.labels_dict == {"run": "v0"}
+    assert trace.scope_coverage is None
+
+  def test_deep_copy_isolates_span_contents(self):
+    # P1-2: shared rows must not alias content/attributes dicts.
+    rows = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+        _mock_row(_event_row(span_id="shared")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    shared_copies = [
+        s for t in traces for s in t.spans if s.span_id == "shared"
+    ]
+    assert len(shared_copies) == 2
+    assert shared_copies[0] is not shared_copies[1]
+    shared_copies[0].content["poison"] = True
+    assert "poison" not in shared_copies[1].content
+
+  def test_null_experiment_shared_rows_isolated_across_subgroups(self):
+    # P1-2 second shape: a NULL-experiment row shared into e1/e2 is
+    # not the same object in both traces.
+    rows = [
+        _mock_row(_event_row(experiment_id="e1", span_id="a")),
+        _mock_row(_event_row(experiment_id="e2", span_id="b")),
+        _mock_row(_event_row(span_id="nullrow")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    assert len(traces) == 2
+    null_spans = [s for t in traces for s in t.spans if s.span_id == "nullrow"]
+    assert len(null_spans) == 2
+    assert null_spans[0] is not null_spans[1]
+
+  def test_genuine_null_experiment_scope_selectable(self):
+    # P1-5: a tagged NULL-experiment pass keeps its own candidate.
+    rows = [
+        _candidate_row(experiment_id="e1", tag_payload=None),
+        _candidate_row(experiment_id=None, tag_payload='{"run": "v9"}'),
+    ]
+    candidates = _resolve_scope_candidates(rows)
+    experiments = {c.scope.experiment_id for c in candidates}
+    assert experiments == {"e1", None}
+    null_candidate = next(
+        c for c in candidates if c.scope.experiment_id is None
+    )
+    assert null_candidate.scope.labels_dict == {"run": "v9"}
+    matching = _candidates_matching_selector(
+        candidates, TraceSelector(session_id="sess-1", experiment_id=None)
+    )
+    assert matching == [null_candidate]
+
+  def test_max_traces_bounds_expansion(self):
+    # P2-11 / P1-7: construction stops at the bound.
+    rows = [
+        _mock_row(_event_row(custom_tags={"k": f"v{i}"}, span_id=f"s{i}"))
+        for i in range(6)
+    ]
+    bounded = _build_traces_from_rows(rows, max_traces=2)
+    assert len(bounded) == 2
+    unbounded = _build_traces_from_rows(rows)
+    assert len(unbounded) == 6
+
+  def test_trace_id_ignores_earlier_shared_row(self):
+    # P2-10: an early untagged row's trace id must not shadow the
+    # scoped producer ids.
+    rows = [
+        _mock_row(_event_row(span_id="shared", trace_id="trace-shared")),
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v0"}, span_id="p0", trace_id="tr-v0"
+            )
+        ),
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v1"}, span_id="p1", trace_id="tr-v1"
+            )
+        ),
+    ]
+    traces = _build_traces_from_rows(rows)
+    ids = {t.scope.labels_dict["run"]: t.trace_id for t in traces}
+    assert ids == {"v0": "tr-v0", "v1": "tr-v1"}
+
+  def test_null_and_empty_string_identities_order_distinctly(self):
+    # P2-12: NULL and '' must not tie in deterministic ordering.
+    from bigquery_agent_analytics.client import _ordered_limited_traces
+
+    rows_forward = [
+        _mock_row(_event_row(user_id=None, span_id="n")),
+        _mock_row(_event_row(user_id="", span_id="e")),
+    ]
+    rows_reverse = list(reversed(rows_forward))
+    kept_forward = _ordered_limited_traces(
+        _build_traces_from_rows(rows_forward), 1
+    )[0].identity.user_id
+    kept_reverse = _ordered_limited_traces(
+        _build_traces_from_rows(rows_reverse), 1
+    )[0].identity.user_id
+    assert kept_forward == kept_reverse
+
+  def test_schema_type_mismatch_raises(self):
+    # P1-8: a STRING-backed attributes column is a hard error.
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = [
+        _mock_row({"column_name": name, "data_type": dtype})
+        for name, dtype in [
+            ("attributes", "STRING"),
+            ("content", "JSON"),
+            ("session_id", "STRING"),
+        ]
+    ]
+    mock_bq.query.return_value = job
+    with pytest.raises(ValueError, match="incompatible column types"):
+      Client(
+          project_id="proj",
+          dataset_id="ds",
+          verify_schema=True,
+          bq_client=mock_bq,
+      )
+
+  def test_error_messages_redact_scope_values(self):
+    # P1-9: malformed-payload and consistency errors carry no values.
+    with pytest.raises(ValueError) as exc_info:
+      _parse_tag_payload('{"secret-key": 42}')
+    message = str(exc_info.value)
+    assert "secret-key" not in message
+    assert "42" not in message
+
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"secret": "value"}')),
+    ]
+    fetch_batch = [_mock_row(_event_row(span_id="shared"))]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    with pytest.raises(ValueError) as exc_info:
+      client.get_session_trace("sess-1")
+    message = str(exc_info.value)
+    assert "consistency failure" in message
+    assert "secret" not in message and "value" not in message
+
+  def test_query_fragments_snapshot_consistent(self):
+    # P2-13: fragments and params come from one snapshot.
+    filt = TraceFilter(custom_labels={"run": "v0"})
+    where, row_where, params = filt.to_query_fragments()
+    assert "@label_key_0" in where
+    assert "@label_key_0" in row_where
+    names = {p.name for p in params}
+    assert {"label_key_0", "label_val_0"} <= names
