@@ -3785,3 +3785,204 @@ class TestNativeViewContract:
     assert proxy["a"] == "1"
     with pytest.raises(TypeError):
       proxy["a"] = "x"
+
+
+class TestLyingSequenceSubclasses:
+  """list/tuple subclasses cannot hide pins during iteration
+  (round 15, P1)."""
+
+  class _LiarList(list):
+    """Real storage hidden from every overridable read."""
+
+    def __iter__(self):
+      return iter([])
+
+    def __len__(self):
+      return 0
+
+    def __getitem__(self, index):
+      raise IndexError(index)
+
+  class _LiarPair(list):
+    """Pretends to be a different pair than it stores."""
+
+    def __iter__(self):
+      return iter(["fake", "pair"])
+
+  def test_session_ids_read_real_storage(self):
+    liar = self._LiarList(["secret-session"])
+    filt = TraceFilter(session_ids=liar)
+    assert list.__len__(filt.session_ids) == 1
+    where, params = filt.to_sql_conditions()
+    assert "session_id IN UNNEST(@session_ids)" in where
+    array = next(p for p in params if p.name == "session_ids")
+    assert list(array.values) == ["secret-session"]
+
+  def test_sequence_form_labels_read_real_storage(self):
+    liar = self._LiarList([("tenant", "a")])
+    assert TraceScope(custom_labels=liar).labels_dict == {"tenant": "a"}
+    selector = TraceSelector(session_id="s", custom_labels=liar)
+    assert dict(selector.custom_labels) == {"tenant": "a"}
+
+  def test_pair_entries_read_real_storage(self):
+    pair = self._LiarPair(["tenant", "a"])
+    scope = TraceScope(custom_labels=[pair])
+    assert scope.labels_dict == {"tenant": "a"}
+
+  def test_extend_reads_real_storage(self):
+    filt = TraceFilter(session_ids=["a"])
+    filt.session_ids.extend(self._LiarList(["b"]))
+    assert filt.session_ids == ["a", "b"]
+
+
+class TestFalseyContainerBoundary:
+  """Falsey containers cannot skip boundary revalidation
+  (round 15, P1)."""
+
+  class _FalseyList(list):
+
+    def __bool__(self):
+      return False
+
+    def __len__(self):
+      return 0
+
+  class _FalseyDict(dict):
+
+    def __bool__(self):
+      return False
+
+    def __len__(self):
+      return 0
+
+  def test_falsey_session_ids_still_filter(self):
+    filt = TraceFilter()
+    vars_bypass = self._FalseyList(["secret-session"])
+    object.__setattr__(filt, "session_ids", vars_bypass)
+    where, params = filt.to_sql_conditions()
+    assert "session_id IN UNNEST(@session_ids)" in where
+    array = next(p for p in params if p.name == "session_ids")
+    assert list(array.values) == ["secret-session"]
+
+  def test_falsey_labels_still_filter(self):
+    filt = TraceFilter()
+    object.__setattr__(filt, "custom_labels", self._FalseyDict({"tenant": "a"}))
+    where, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"tenant"'}
+
+  def test_genuinely_empty_containers_stay_unfiltered(self):
+    filt = TraceFilter(session_ids=[], custom_labels={})
+    where, _ = filt.to_sql_conditions()
+    assert "session_id" not in where
+    assert "custom_tags" not in where
+
+
+class TestAtomicSetstate:
+  """A failed restore leaves the target blank and retryable
+  (round 15, P2)."""
+
+  def test_failed_restore_leaves_blank(self):
+    blank = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    with pytest.raises(TypeError, match="TraceIdentity"):
+      blank.__setstate__([1, True])
+    # Nothing committed: no field slot is set...
+    with pytest.raises(AttributeError):
+      blank.identity
+    # ...so the object is retryable with valid state.
+    blank.__setstate__([TraceIdentity(session_id="sess-1"), TraceScope()])
+    assert blank.identity.session_id == "sess-1"
+
+  def test_wrong_shape_state_rejected(self):
+    blank = TraceIdentity.__new__(TraceIdentity)
+    with pytest.raises(TypeError, match="field values"):
+      blank.__setstate__(["only-one"])
+    with pytest.raises(TypeError, match="field values"):
+      blank.__setstate__("not-a-sequence")
+    with pytest.raises(AttributeError):
+      blank.session_id
+
+  def test_all_four_types_restore_atomically(self):
+    cases = [
+        (TraceIdentity, [1, None, None]),
+        (TraceScope, [1, None]),
+        (TraceSelector, [1, UNSET, UNSET, UNSET, None, None]),
+        (ResolvedTraceSelector, [1, True]),
+    ]
+    for cls, bad_state in cases:
+      blank = cls.__new__(cls)
+      with pytest.raises((TypeError, ValueError)):
+        blank.__setstate__(bad_state)
+      first_field = next(iter(cls.__dataclass_fields__))
+      with pytest.raises(AttributeError):
+        getattr(blank, first_field)
+
+
+class TestViewSetAlgebra:
+  """Binary/reflected set algebra is trusted (round 15, P2)."""
+
+  class _Evil:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_difference_does_not_execute_hooks(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    # Foreign elements can never match trusted keys: difference keeps
+    # the real key instead of falsely returning an empty set.
+    assert filt.custom_labels.keys() - {evil} == {"run"}
+    assert filt.custom_labels.keys() & {evil} == set()
+
+  def test_union_and_xor_fail_closed_on_foreign_elements(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    with pytest.raises(TypeError, match="refuses to emit"):
+      filt.custom_labels.keys() | {evil}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      filt.custom_labels.keys() ^ {evil}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      {evil} - filt.custom_labels.keys()
+
+  def test_clean_algebra_still_works(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    keys = filt.custom_labels.keys()
+    assert keys | {"more"} == {"run", "more"}
+    assert keys & {"run", "more"} == {"run"}
+    assert keys ^ {"run", "more"} == {"more"}
+    assert keys - {"other"} == {"run"}
+    assert {"run", "x"} - keys == {"x"}
+
+  def test_lying_set_subclass_cannot_fake_equality(self):
+    class LiarSet(set):
+      """Real storage {'different'}; presents {'run'}."""
+
+      def __iter__(self):
+        return iter(["run"])
+
+      def __len__(self):
+        return 1
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    liar = LiarSet({"different"})
+    assert not (filt.custom_labels.keys() == liar)
+    assert filt.custom_labels.keys() != liar
+
+
+class TestTraceWeakref:
+  """Slotted Trace remains weak-referenceable (round 15, P3)."""
+
+  def test_weakref_supported(self):
+    import weakref
+
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    ref = weakref.ref(trace)
+    assert ref() is trace
+    del trace
+    assert ref() is None

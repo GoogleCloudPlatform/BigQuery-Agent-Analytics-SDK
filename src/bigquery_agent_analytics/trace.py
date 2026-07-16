@@ -671,16 +671,23 @@ class TraceFilter:
               user_id,
           )
       )
-    if self.session_ids:
+    # Normalize BEFORE testing truthiness: a falsey container
+    # subclass injected through vars(filt) could hide real contents
+    # from an `if self.session_ids` check and silently emit an
+    # unfiltered predicate. The normalizers read real storage through
+    # trusted descriptors, so the snapshot's truthiness is honest.
+    session_ids = (
+        _normalized_session_ids(self.session_ids)
+        if self.session_ids is not None
+        else None
+    )
+    if session_ids:
       conditions.append("session_id IN UNNEST(@session_ids)")
       params.append(
           bigquery.ArrayQueryParameter(
               "session_ids",
               "STRING",
-              # Revalidated: the stored list stays mutable for
-              # compatibility, so in-place edits must not reach the
-              # array parameter unchecked.
-              _normalized_session_ids(self.session_ids),
+              session_ids,
           )
       )
     if self.has_error is True:
@@ -741,11 +748,15 @@ class TraceFilter:
               experiment_id,
           )
       )
-    if self.custom_labels:
-      # Revalidated snapshot: even low-level mutation of the stored
-      # mapping (e.g. dict.__setitem__ on the read-only subclass)
-      # cannot put a non-normalized key into the JSONPath.
-      labels = _normalized_filter_labels(self.custom_labels)
+    # Same normalize-before-truthiness rule as session_ids: the
+    # trusted snapshot also revalidates low-level mutation (e.g.
+    # dict.__setitem__ bypassing the validating subclass).
+    labels = (
+        _normalized_filter_labels(self.custom_labels)
+        if self.custom_labels is not None
+        else None
+    )
+    if labels:
       for i, (key, value) in enumerate(labels.items()):
         param_key = f"label_key_{i}"
         param_val = f"label_val_{i}"
@@ -1007,6 +1018,23 @@ _UNCONDITIONAL_HASH_SLOTS = tuple(
 )
 
 
+def _trusted_sequence_snapshot(source: Any) -> Any:
+  """Copy a real list/tuple (subclass) through trusted descriptors.
+
+  A list or tuple subclass can override ``__iter__``/``__len__``/
+  ``__getitem__`` to present contents that differ from its real
+  storage, silently erasing identity or scope pins during
+  normalization. ``list.copy`` and ``tuple.__iter__`` read the actual
+  C-level storage without invoking any subclass hook. Non-list/tuple
+  values pass through for the caller's own validation.
+  """
+  if isinstance(source, list):
+    return list.copy(source)
+  if isinstance(source, tuple):
+    return list(tuple.__iter__(source))
+  return source
+
+
 def _exact_lookup_str(value: Any, require_hashable: bool = False) -> Any:
   """Copy a str (or subclass) read-operand into an exact ``str``.
 
@@ -1068,15 +1096,27 @@ class _SafeSetComparisonsMixin:
   def _normalized_counterpart(self, other: Any) -> Any:
     if not isinstance(other, collections.abc.Set):
       return None
+    # Trusted reads for real set/frozenset (sub)classes: overridden
+    # __iter__/__len__ could present contents differing from the real
+    # storage and fake equality with this view.
+    if isinstance(other, frozenset):
+      elements = frozenset.__iter__(other)
+      size = frozenset.__len__(other)
+    elif isinstance(other, set):
+      elements = set.__iter__(other)
+      size = set.__len__(other)
+    else:
+      elements = iter(other)
+      size = len(other)
     exact: set = set()
     foreign = 0
-    for element in iter(other):
+    for element in elements:
       normalized = self._normalize_element(element)
       if normalized is _NON_STRING_OPERAND:
         foreign += 1
       else:
         exact.add(normalized)
-    return exact, foreign, len(other)
+    return exact, foreign, size
 
   def _own_elements(self) -> set:
     return set(iter(self))
@@ -1128,6 +1168,62 @@ class _SafeSetComparisonsMixin:
       return not any(element in self for element in iter(other))
     exact, _, _ = counterpart
     return self._own_elements().isdisjoint(exact)
+
+  def _algebra_counterpart(self, other: Any, keep_foreign: bool) -> Any:
+    """Normalized elements for set algebra, failing closed as needed.
+
+    Results of ``&``/``-`` are subsets of this view's own trusted
+    elements, so foreign counterpart elements simply cannot match and
+    are ignored. Results of ``|``/``^`` and the reflected ``-`` would
+    have to CONTAIN the foreign elements; emitting hostile objects in
+    a trusted result is refused instead.
+    """
+    counterpart = self._normalized_counterpart(other)
+    if counterpart is None:
+      return None
+    exact, foreign, _ = counterpart
+    if foreign and not keep_foreign:
+      raise TypeError(
+          "set operation would include non-conforming elements from"
+          " the counterpart; the trusted view refuses to emit them."
+      )
+    return exact
+
+  def __and__(self, other: Any) -> Any:
+    exact = self._algebra_counterpart(other, keep_foreign=True)
+    if exact is None:
+      return NotImplemented
+    return self._own_elements() & exact
+
+  __rand__ = __and__
+
+  def __sub__(self, other: Any) -> Any:
+    exact = self._algebra_counterpart(other, keep_foreign=True)
+    if exact is None:
+      return NotImplemented
+    return self._own_elements() - exact
+
+  def __rsub__(self, other: Any) -> Any:
+    exact = self._algebra_counterpart(other, keep_foreign=False)
+    if exact is None:
+      return NotImplemented
+    return exact - self._own_elements()
+
+  def __or__(self, other: Any) -> Any:
+    exact = self._algebra_counterpart(other, keep_foreign=False)
+    if exact is None:
+      return NotImplemented
+    return self._own_elements() | exact
+
+  __ror__ = __or__
+
+  def __xor__(self, other: Any) -> Any:
+    exact = self._algebra_counterpart(other, keep_foreign=False)
+    if exact is None:
+      return NotImplemented
+    return self._own_elements() ^ exact
+
+  __rxor__ = __xor__
 
   __hash__ = None  # type: ignore[assignment]
 
@@ -1298,11 +1394,13 @@ class _ValidatedLabels(dict):
       elif hasattr(source, "keys"):
         raw_items.extend((key, source[key]) for key in source.keys())
       else:
-        raw_items.extend(source)
+        raw_items.extend(_trusted_sequence_snapshot(source))
     raw_items.extend(kwargs.items())
     batch: dict[str, str] = {}
     exact_raw: dict[str, bool] = {}
     for item in raw_items:
+      if isinstance(item, (list, tuple)):
+        item = _trusted_sequence_snapshot(item)
       raw_key, raw_value = item
       key, value = _validated_label_item(raw_key, raw_value)
       is_exact = type(raw_key) is str
@@ -1380,6 +1478,7 @@ class _ValidatedSessionIds(list):
   """
 
   def __init__(self, iterable: Any = ()) -> None:
+    iterable = _trusted_sequence_snapshot(iterable)
     super().__init__([_validated_session_id_entry(v) for v in iterable])
 
   def append(self, value: Any) -> None:
@@ -1389,7 +1488,10 @@ class _ValidatedSessionIds(list):
     # Materialize BEFORE extending: a lazy generator over `self`
     # (f.session_ids.extend(f.session_ids)) would observe every newly
     # appended entry and never terminate; materializing also makes a
-    # failed batch atomic instead of committing a valid prefix.
+    # failed batch atomic instead of committing a valid prefix. Real
+    # list/tuple inputs are snapshotted through trusted descriptors
+    # so a lying __iter__ cannot hide entries.
+    iterable = _trusted_sequence_snapshot(iterable)
     values = [_validated_session_id_entry(v) for v in iterable]
     super().extend(values)
 
@@ -1635,19 +1737,30 @@ def _canonicalize_labels(
   """
   if labels is None:
     return None
-  # dict.items(...) descriptor: a dict subclass overriding .items()
-  # could hide entries and silently erase label pins.
-  items = list(dict.items(labels) if isinstance(labels, dict) else labels)
+  # Trusted reads: a dict subclass overriding .items(), or a list/
+  # tuple subclass overriding __iter__, could hide entries and
+  # silently erase label pins.
+  if isinstance(labels, dict):
+    items = list(dict.items(labels))
+  else:
+    items = list(_trusted_sequence_snapshot(labels))
   if not items:
     return None
   seen: set[str] = set()
   normalized: list[tuple[str, str]] = []
   for item in items:
-    if not isinstance(item, (tuple, list)) or len(item) != 2:
+    if not isinstance(item, (tuple, list)):
       raise TypeError(
           "Each custom label entry must be a two-item (key, value)" " pair."
       )
-    key, value = item
+    # Snapshot the pair too: unpacking would call a subclass
+    # __iter__, which could yield different values than it stores.
+    pair = _trusted_sequence_snapshot(item)
+    if len(pair) != 2:
+      raise TypeError(
+          "Each custom label entry must be a two-item (key, value)" " pair."
+      )
+    key, value = pair
     if not isinstance(key, str) or not isinstance(value, str):
       raise TypeError("Custom label keys and values must be strings.")
     key = _exact_str(key)
@@ -1706,6 +1819,9 @@ def _sealed_value_type(cls: type) -> type:
   __init__.__module__ = cls.__module__
   cls.__init__ = __init__
 
+  field_names = tuple(cls.__dataclass_fields__)
+  members = tuple(cls.__dict__[name] for name in field_names)
+
   if generated_setstate is not None:
 
     def __setstate__(self: Any, state: Any) -> None:
@@ -1714,11 +1830,22 @@ def _sealed_value_type(cls: type) -> type:
             f"{cls.__name__} is immutable; __setstate__ cannot be"
             " called on an initialized instance."
         )
-      generated_setstate(self, state)
+      if type(state) not in (list, tuple) or len(state) != len(field_names):
+        raise TypeError(
+            f"{cls.__name__}.__setstate__ expected"
+            f" {len(field_names)} field values."
+        )
+      # Atomic restore: validate/normalize on a blank probe first so
+      # a failing state leaves `self` blank and retryable instead of
+      # permanently initialized with invalid contents.
+      probe = cls.__new__(cls)
+      generated_setstate(probe, state)
       if post_init is not None:
         # Restored state is untrusted input: re-run the same
         # validation/normalization construction applies.
-        post_init(self)
+        post_init(probe)
+      for name, member in zip(field_names, members):
+        object.__setattr__(self, name, member.__get__(probe, cls))
 
     __setstate__.__name__ = "__setstate__"
     __setstate__.__qualname__ = f"{cls.__qualname__}.__setstate__"
@@ -2180,8 +2307,19 @@ def resolve_singular_candidate(
   return resolved[0]
 
 
+class _WeakrefableSlotted:
+  """Base adding weak-reference support to slotted dataclasses.
+
+  ``dataclass(slots=True)`` alone would drop ``__weakref__``;
+  ``weakref_slot=True`` requires Python 3.11, so a slotted base
+  carries the slot for the 3.10 floor.
+  """
+
+  __slots__ = ("__weakref__",)
+
+
 @dataclass(slots=True)
-class Trace:
+class Trace(_WeakrefableSlotted):
   """A complete agent trace for a session.
 
   Contains all spans (events) for the session and provides
