@@ -823,14 +823,15 @@ class TraceFilter:
     re-applied to the fetched rows or a reused session id merges
     foreign evaluation passes into one trace.
 
-    Semantics are conflict-excluding, per the live-data
-    characterization recorded on issue #361: real sessions carry
-    untagged rows and per-row enrichment keys alongside a consistent
-    base payload, so a pinned label ``k=v`` excludes rows whose ``k``
-    carries a DIFFERENT non-NULL value (foreign-pass rows) while
-    keeping rows that lack ``k`` (shared conversation rows) —
-    preserving complete-trace semantics (R6) within the selected
-    scope. The emitted fragment reuses the query parameters that
+    Label semantics, per the live-data characterization recorded on
+    issue #361: a pinned label ``k=v`` admits rows whose ``k`` equals
+    ``v`` and rows carrying NO custom-tag payload at all (fully
+    untagged shared conversation rows) — preserving complete-trace
+    semantics (R6) within the selected scope. A row that has OTHER
+    tags but lacks ``k`` belongs to a different pass and is excluded:
+    missing one key does not make a tagged row shared (PR #371
+    review, P1-1). The emitted fragment reuses the query parameters
+    that
     ``to_sql_conditions()`` already declares (``@experiment_id``,
     ``@label_key_N``/``@label_val_N``), so both must be rendered into
     the same query.
@@ -866,8 +867,8 @@ class TraceFilter:
             f"(JSON_VALUE({alias}.attributes,"
             f" CONCAT('$.custom_tags.', @label_key_{i}))"
             f" = @label_val_{i}"
-            f" OR JSON_VALUE({alias}.attributes,"
-            f" CONCAT('$.custom_tags.', @label_key_{i})) IS NULL)"
+            f" OR JSON_QUERY({alias}.attributes, '$.custom_tags')"
+            " IS NULL)"
         )
     return " AND ".join(conditions) if conditions else "TRUE"
 

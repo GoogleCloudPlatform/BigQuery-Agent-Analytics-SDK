@@ -160,7 +160,9 @@ def collision_dataset(bq_client):
     * ``nulls``: reused id where one candidate has NULL user and
       root agent and the other has both set.
     * ``passes``: one identity carrying run=v0 rows, run=v1 rows,
-      an enrichment row (v0 + subagent), and one untagged shared row.
+      an enrichment row (v0 + subagent — its own exact scope), one
+      untagged shared row, and one foreign-tagged row whose payload
+      lacks the run key entirely.
   """
   import uuid
 
@@ -215,7 +217,11 @@ def collision_dataset(bq_client):
          'eve', 'tr-p', 'p1', JSON '{{}}',
          JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
         ('2026-07-01 13:00:03', 'USER_MESSAGE_RECEIVED', 'a', 'passes',
-         'eve', 'tr-p', 'shared', JSON '{{}}', JSON '{{}}', 'OK')
+         'eve', 'tr-p', 'shared', JSON '{{}}', JSON '{{}}', 'OK'),
+        -- foreign-tagged row: tags present but no 'run' key (P1-1)
+        ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
+         'eve', 'tr-p', 'foreign', JSON '{{}}',
+         JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK')
   """
   ).result()
   yield project, dataset_id
@@ -266,13 +272,17 @@ class TestIdentityQueriesDryRun:
 
     project, dataset_id = collision_dataset
     resolve = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
-        project=project, dataset=dataset_id, table="agent_events"
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="\n  AND user_id = @pin_user_id",
     )
     bq_client.query(
         resolve,
         job_config=bq.QueryJobConfig(
             query_parameters=[
-                bq.ScalarQueryParameter("session_id", "STRING", "collide")
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("pin_user_id", "STRING", "alice"),
             ],
             dry_run=True,
         ),
@@ -354,19 +364,42 @@ class TestLiveCollisionFixture:
 
   def test_pass_selection_and_ambiguity(self, sdk_client):
     from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceScope
 
     with pytest.raises(AmbiguousSessionError) as exc_info:
       sdk_client.get_session_trace("passes")
     assert "custom_labels" in exc_info.value.retry_dimensions
 
-    v0 = sdk_client.get_session_trace("passes", custom_labels={"run": "v0"})
-    # v0 pass: its rows, the enrichment row, and the shared row —
-    # never the v1 row.
-    assert {s.span_id for s in v0.spans} == {"p0", "p0e", "shared"}
+    # Exact scope splitting: the subset label pin run=v0 matches both
+    # the {run:v0} scope and its {run:v0, subagent} superset scope,
+    # so it stays ambiguous; the exact signature pin resolves it.
+    with pytest.raises(AmbiguousSessionError):
+      sdk_client.get_session_trace("passes", custom_labels={"run": "v0"})
+    v0 = sdk_client.get_session_trace(
+        "passes",
+        scope_signature=TraceScope(custom_labels={"run": "v0"}).scope_signature,
+    )
+    # The v0 scope: its own rows plus the untagged shared row — never
+    # the v1 row, never the enrichment scope's row, and never the
+    # foreign-tagged row that merely lacks the run key (P1-1).
+    assert {s.span_id for s in v0.spans} == {"p0", "shared"}
     assert v0.scope.labels_dict == {"run": "v0"}
 
     v1 = sdk_client.get_session_trace("passes", custom_labels={"run": "v1"})
     assert {s.span_id for s in v1.spans} == {"p1", "shared"}
+
+  def test_mixed_scope_escape_hatch(self, sdk_client):
+    # KTD4: the conversation-complete read for one identity.
+    trace = sdk_client.get_session_trace("passes", allow_mixed_scope=True)
+    assert {s.span_id for s in trace.spans} == {
+        "p0",
+        "p0e",
+        "p1",
+        "shared",
+        "foreign",
+    }
+    assert trace.identity.user_id == "eve"
+    assert trace.scope is None
 
   def test_ambiguity_payload_retry_round_trip(self, sdk_client):
     from bigquery_agent_analytics.trace import AmbiguousSessionError

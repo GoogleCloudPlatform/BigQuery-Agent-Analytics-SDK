@@ -31,7 +31,6 @@ from bigquery_agent_analytics.client import _build_traces_from_rows
 from bigquery_agent_analytics.client import _candidates_matching_selector
 from bigquery_agent_analytics.client import _GET_SESSION_TRACE_QUERY
 from bigquery_agent_analytics.client import _LIST_TRACES_QUERY
-from bigquery_agent_analytics.client import _minimal_payloads
 from bigquery_agent_analytics.client import _parse_tag_payload
 from bigquery_agent_analytics.client import _resolve_scope_candidates
 from bigquery_agent_analytics.client import Client
@@ -143,8 +142,8 @@ class TestListTracesQueryShape:
     # ...and the outer row fetch re-applies it, conflict-excluding.
     assert (
         "(JSON_VALUE(e.attributes, CONCAT('$.custom_tags.', @label_key_0))"
-        " = @label_val_0 OR JSON_VALUE(e.attributes,"
-        " CONCAT('$.custom_tags.', @label_key_0)) IS NULL)" in query
+        " = @label_val_0 OR JSON_QUERY(e.attributes, '$.custom_tags')"
+        " IS NULL)" in query
     )
     assert (
         "(JSON_VALUE(e.attributes, '$.experiment_id') = @experiment_id"
@@ -171,19 +170,16 @@ class TestTagPayloadParsing:
     assert _parse_tag_payload("{}") is None
     assert _parse_tag_payload('{"run": "v1"}') == {"run": "v1"}
     assert _parse_tag_payload({"run": "v1"}) == {"run": "v1"}
-    # Non-string scalars canonicalize deterministically.
-    assert _parse_tag_payload('{"n": 3}') == {"n": "3"}
 
-  def test_minimal_payloads_superset_collapse(self):
-    # Live-data evidence: additive enrichment keys collapse into the
-    # base payload; conflicting pass labels stay distinct.
-    base = {"assistant": "cc"}
-    enriched = {"assistant": "cc", "subagent_id": "x"}
-    assert _minimal_payloads([base, enriched, enriched]) == [base]
-    v0 = {"run": "v0"}
-    v1 = {"run": "v1"}
-    result = _minimal_payloads([v0, v1])
-    assert v0 in result and v1 in result
+  def test_persisted_schema_enforced_fail_closed(self):
+    # {"run": 3} must not canonicalize into the {"run": "3"} scope,
+    # and malformed shapes must not become unscoped candidates.
+    with pytest.raises(ValueError, match="string values"):
+      _parse_tag_payload('{"run": 3}')
+    with pytest.raises(ValueError, match="JSON object"):
+      _parse_tag_payload('["run", "v1"]')
+    with pytest.raises(ValueError, match="Malformed"):
+      _parse_tag_payload("{not json")
 
 
 class TestCandidateResolution:
@@ -223,16 +219,42 @@ class TestCandidateResolution:
     assert (("run", "v0"),) in labels
     assert (("run", "v1"),) in labels
 
-  def test_enrichment_payloads_single_candidate(self):
+  def test_exact_payload_splitting_no_superset_merge(self):
+    # Fail-closed pass splitting (U1 scope_signature contract): a
+    # strict payload superset is its own scope candidate, never
+    # silently merged as "enrichment".
     rows = [
-        _candidate_row(tag_payload='{"assistant": "cc"}'),
-        _candidate_row(tag_payload='{"assistant": "cc", "subagent_id": "a1"}'),
-        _candidate_row(tag_payload='{"assistant": "cc", "subagent_id": "a2"}'),
-        _candidate_row(tag_payload=None),
+        _candidate_row(tag_payload='{"run": "v1"}'),
+        _candidate_row(tag_payload='{"run": "v1", "slice": "3"}'),
+    ]
+    candidates = _resolve_scope_candidates(rows)
+    assert len(candidates) == 2
+    label_sets = {
+        tuple(sorted(c.scope.labels_dict.items())) for c in candidates
+    }
+    assert (("run", "v1"),) in label_sets
+    assert (("run", "v1"), ("slice", "3")) in label_sets
+
+  def test_candidate_ordering_deterministic(self):
+    rows_forward = [
+        _candidate_row(user_id="alice"),
+        _candidate_row(user_id="bob"),
+    ]
+    rows_reverse = list(reversed(rows_forward))
+    forward = _resolve_scope_candidates(rows_forward)
+    reverse = _resolve_scope_candidates(rows_reverse)
+    assert forward == reverse
+
+  def test_null_experiment_rows_shared_into_experiments(self):
+    # Mirrors the SQL row-scope semantics: NULL-experiment rows are
+    # shared, not a separate candidate, when experiments exist.
+    rows = [
+        _candidate_row(experiment_id="e1", tag_payload=None),
+        _candidate_row(experiment_id=None, tag_payload=None),
     ]
     candidates = _resolve_scope_candidates(rows)
     assert len(candidates) == 1
-    assert candidates[0].scope.labels_dict == {"assistant": "cc"}
+    assert candidates[0].scope.experiment_id == "e1"
 
   def test_untagged_only_session_single_empty_scope(self):
     candidates = _resolve_scope_candidates([_candidate_row()])
@@ -337,7 +359,7 @@ class TestSelectorGroupedConstruction:
     assert v0_spans == {"p0", "shared"}
     assert v1_spans == {"p1", "shared"}
 
-  def test_enrichment_rows_stay_one_trace(self):
+  def test_exact_payloads_split_into_traces(self):
     rows = [
         _mock_row(_event_row(custom_tags={"assistant": "cc"}, span_id="s1")),
         _mock_row(
@@ -348,9 +370,67 @@ class TestSelectorGroupedConstruction:
         ),
     ]
     traces = _build_traces_from_rows(rows)
+    assert len(traces) == 2
+    payloads = {
+        tuple(sorted(t.scope.labels_dict.items())): {s.span_id for s in t.spans}
+        for t in traces
+    }
+    assert payloads[(("assistant", "cc"),)] == {"s1"}
+    assert payloads[(("assistant", "cc"), ("subagent_id", "x"))] == {"s2"}
+
+  def test_shared_spans_are_copied_per_trace(self):
+    # Trace._build_tree mutates Span.children; sibling traces must
+    # not share the same span object (review P1-6).
+    rows = [
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": "v0"}, span_id="c0"),
+                parent_span_id="shared",
+            )
+        ),
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": "v1"}, span_id="c1"),
+                parent_span_id="shared",
+            )
+        ),
+        _mock_row(_event_row(span_id="shared")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    by_run = {t.scope.labels_dict["run"]: t for t in traces}
+    by_run["v0"]._build_tree()
+    shared_v0 = next(s for s in by_run["v0"].spans if s.span_id == "shared")
+    assert [c.span_id for c in shared_v0.children] == ["c0"]
+    by_run["v1"]._build_tree()
+    # v1's tree build must not have rewritten v0's shared parent.
+    assert [c.span_id for c in shared_v0.children] == ["c0"]
+
+  def test_trace_id_derived_per_scope(self):
+    rows = [
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v0"}, span_id="p0", trace_id="tr-v0"
+            )
+        ),
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v1"}, span_id="p1", trace_id="tr-v1"
+            )
+        ),
+    ]
+    traces = _build_traces_from_rows(rows)
+    ids = {t.scope.labels_dict["run"]: t.trace_id for t in traces}
+    assert ids == {"v0": "tr-v0", "v1": "tr-v1"}
+
+  def test_null_experiment_rows_shared_in_grouping(self):
+    rows = [
+        _mock_row(_event_row(experiment_id="e1", span_id="e1row")),
+        _mock_row(_event_row(span_id="nullrow")),
+    ]
+    traces = _build_traces_from_rows(rows)
     assert len(traces) == 1
-    assert traces[0].scope.labels_dict == {"assistant": "cc"}
-    assert {s.span_id for s in traces[0].spans} == {"s1", "s2"}
+    assert traces[0].scope.experiment_id == "e1"
+    assert {s.span_id for s in traces[0].spans} == {"e1row", "nullrow"}
 
   def test_legacy_rows_get_identity_and_empty_scope(self):
     traces = _build_traces_from_rows([_mock_row(_event_row())])
@@ -478,3 +558,263 @@ class TestSingularReadResolution:
     client2, _ = self._client([candidate_batch_2, fetch_batch])
     trace = client2.get_trace_by_selector(TraceSelector(**chosen))
     assert trace.identity.user_id == "alice"
+
+
+class TestRowScopeSharedRowRule:
+  """Only fully untagged rows are shared (review P1-1)."""
+
+  def test_missing_pinned_key_on_tagged_row_excluded(self):
+    where = TraceFilter(custom_labels={"run": "v1"}).row_scope_where()
+    # The shared-row branch checks the WHOLE payload, not the key:
+    # {"slice": "secret"} rows (tagged, missing "run") are excluded.
+    assert "JSON_QUERY(e.attributes, '$.custom_tags') IS NULL" in where
+    assert (
+        "JSON_VALUE(e.attributes, CONCAT('$.custom_tags.', @label_key_0))"
+        " IS NULL" not in where
+    )
+
+
+class TestResolvedSelectorFilterConversion:
+  """The anchored fetch uses U1's retry conversion (review P1-3)."""
+
+  def _client_with_batches(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_null_experiment_pins_sql_null_predicate(self):
+    candidate_batch = [_mock_row(_candidate_row(experiment_id=None))]
+    fetch_batch = [_mock_row(_event_row())]
+    client, mock_bq = self._client_with_batches([candidate_batch, fetch_batch])
+    client.get_session_trace("sess-1")
+    fetch_query = mock_bq.query.call_args[0][0]
+    # A resolved NULL experiment is an SQL_NULL pin, not unfiltered.
+    assert "JSON_VALUE(e.attributes, '$.experiment_id') IS NULL" in (
+        fetch_query
+    )
+
+  def test_unaddressable_label_retry_supported(self):
+    # BigQuery JSON can store this member; the retry must drop it
+    # from SQL under signature attestation instead of raising.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"a\\\\": "x"}')),
+    ]
+    fetch_batch = [_mock_row(_event_row(custom_tags={"a\\": "x"}))]
+    client, mock_bq = self._client_with_batches([candidate_batch, fetch_batch])
+    trace = client.get_session_trace("sess-1")
+    assert trace.scope.labels_dict == {"a\\": "x"}
+    fetch_params = {
+        p.name
+        for p in mock_bq.query.call_args[1]["job_config"].query_parameters
+    }
+    assert "label_key_0" not in fetch_params  # dropped, attested
+
+
+class TestSingularConsistencyFailClosed:
+  """Resolution/fetch disagreement raises (review P1-4)."""
+
+  def test_stale_scope_raises_instead_of_substituting(self):
+    from unittest.mock import MagicMock
+
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+    ]
+    # Fetch returns only untagged rows: the resolved v0 scope is gone.
+    fetch_batch = [_mock_row(_event_row(span_id="shared"))]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [candidate_batch, fetch_batch]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(ValueError, match="consistency failure"):
+      client.get_session_trace("sess-1")
+
+
+class TestLimitAfterScopeExpansion:
+  """TraceFilter.limit bounds the returned traces (review P1-8)."""
+
+  def test_limit_applies_after_expansion(self):
+    from unittest.mock import MagicMock
+
+    rows = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = rows
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    traces = client.list_traces(TraceFilter(limit=1))
+    assert len(traces) == 1
+
+  def test_ordering_is_deterministic(self):
+    from bigquery_agent_analytics.client import _ordered_limited_traces
+
+    rows_a = [
+        _mock_row(_event_row(user_id="alice", span_id="a")),
+        _mock_row(_event_row(user_id="bob", span_id="b")),
+    ]
+    rows_b = list(reversed(rows_a))
+    order_a = [
+        t.identity.user_id
+        for t in _ordered_limited_traces(_build_traces_from_rows(rows_a), None)
+    ]
+    order_b = [
+        t.identity.user_id
+        for t in _ordered_limited_traces(_build_traces_from_rows(rows_b), None)
+    ]
+    assert order_a == order_b
+
+
+class TestSelectorPushdownAndCap:
+  """Identity pins reach SQL; candidates are capped (review P2-11)."""
+
+  def test_identity_pins_pushed_into_resolution_query(self):
+    from unittest.mock import MagicMock
+
+    candidate_batch = [_mock_row(_candidate_row(user_id="alice"))]
+    fetch_batch = [_mock_row(_event_row(user_id="alice"))]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [candidate_batch, fetch_batch]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    client.get_session_trace("sess-1", user_id="alice")
+    resolve_query = mock_bq.query.call_args_list[0][0][0]
+    assert "AND user_id = @pin_user_id" in resolve_query
+
+  def test_null_pin_pushdown(self):
+    from unittest.mock import MagicMock
+
+    candidate_batch = [_mock_row(_candidate_row(user_id=None))]
+    fetch_batch = [_mock_row(_event_row(user_id=None))]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [candidate_batch, fetch_batch]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    client.get_session_trace("sess-1", user_id=None)
+    resolve_query = mock_bq.query.call_args_list[0][0][0]
+    assert "AND user_id IS NULL" in resolve_query
+
+  def test_candidate_cap_raises_bounded_ambiguity(self):
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
+        for i in range(_MAX_SCOPE_CANDIDATES + 10)
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = candidate_batch
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    assert len(exc_info.value.candidates) == _MAX_SCOPE_CANDIDATES + 1
+
+
+class TestAllowMixedScope:
+  """The KTD4 escape hatch returns conversation-complete reads."""
+
+  def test_mixed_scope_read_merges_one_identity(self):
+    from unittest.mock import MagicMock
+
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+        _mock_row(_event_row(span_id="shared")),
+    ]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [candidate_batch, fetch_batch]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
+    assert {s.span_id for s in trace.spans} == {"p0", "p1", "shared"}
+    assert trace.identity.user_id == "alice"
+    assert trace.scope is None  # no single resolved scope describes it
+
+  def test_mixed_scope_still_ambiguous_across_identities(self):
+    from unittest.mock import MagicMock
+
+    candidate_batch = [
+        _mock_row(_candidate_row(user_id="alice")),
+        _mock_row(_candidate_row(user_id="bob")),
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = candidate_batch
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(AmbiguousSessionError):
+      client.get_session_trace("sess-1", allow_mixed_scope=True)
