@@ -1479,6 +1479,7 @@ class TestAmbiguousSessionError:
     assert payload == {
         "error": "ambiguous_session",
         "candidate_count": 2,
+        "population_truncated": False,
         "retry_dimensions": ["user_id", "custom_labels", "scope_signature"],
         "candidates": [
             {

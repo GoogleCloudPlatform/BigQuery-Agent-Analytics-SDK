@@ -825,17 +825,26 @@ class TraceFilter:
     """
     import dataclasses as _dataclasses
 
+    # Trusted reads (PR #371 review round 5, P1-5): public
+    # list()/dict() iteration would re-open the lying-container
+    # bypass — a hostile subclass injected through vars(filt) could
+    # present empty contents and erase filters from the snapshot.
+    session_ids = self.session_ids
+    if isinstance(session_ids, (list, tuple)):
+      session_ids = _trusted_sequence_snapshot(session_ids)
+    custom_labels = self.custom_labels
+    if isinstance(custom_labels, dict):
+      custom_labels = dict(dict.items(custom_labels))
+    event_types = self.event_types
+    if isinstance(event_types, (list, tuple)):
+      event_types = _trusted_sequence_snapshot(event_types)
+    elif event_types is not None:
+      event_types = list(event_types)
     return _dataclasses.replace(
         self,
-        session_ids=(
-            list(self.session_ids) if self.session_ids is not None else None
-        ),
-        custom_labels=(
-            dict(self.custom_labels) if self.custom_labels is not None else None
-        ),
-        event_types=(
-            list(self.event_types) if self.event_types is not None else None
-        ),
+        session_ids=session_ids,
+        custom_labels=custom_labels,
+        event_types=event_types,
     )
 
   def to_query_fragments(self, alias: str = "e") -> tuple[str, str, list]:
@@ -2303,7 +2312,11 @@ class AmbiguousSessionError(ValueError):
   are allowed to return identity dimensions and scope signatures.
   """
 
-  def __init__(self, candidates: Sequence[ResolvedTraceSelector]):
+  def __init__(
+      self,
+      candidates: Sequence[ResolvedTraceSelector],
+      population_truncated: bool = False,
+  ):
     deduped = tuple(dict.fromkeys(_validated_candidates(candidates)))
     if len(deduped) < 2:
       raise ValueError(
@@ -2318,13 +2331,22 @@ class AmbiguousSessionError(ValueError):
           " not an ambiguity."
       )
     self._candidates: tuple[ResolvedTraceSelector, ...] = deduped
+    self._population_truncated = bool(population_truncated)
     self._retry_dimensions: tuple[str, ...] = self._differing_dimensions(
         deduped
     )
     dims = ", ".join(self._retry_dimensions) or "scope"
+    quantifier = "At least" if self._population_truncated else "Exactly"
+    truncation_note = (
+        " (candidate population truncated; the enumerated candidates"
+        " are a lower bound)"
+        if self._population_truncated
+        else ""
+    )
     super().__init__(
-        f"Ambiguous singular session lookup: {len(deduped)}"
-        f" candidates match. Retry with an explicit selector for: {dims}."
+        f"Ambiguous singular session lookup: {quantifier}"
+        f" {len(deduped)} candidates match{truncation_note}. Retry"
+        f" with an explicit selector for: {dims}."
     )
 
   @property
@@ -2342,12 +2364,19 @@ class AmbiguousSessionError(ValueError):
     """Dimension names that disambiguate a retry (read-only)."""
     return self._retry_dimensions
 
-  def __reduce__(self) -> tuple[Any, tuple[Any]]:
+  @property
+  def population_truncated(self) -> bool:
+    """True when the candidate population exceeded the enumeration
+    bound: the carried candidates are a lower bound, not the exact
+    ambiguity set (read-only)."""
+    return self._population_truncated
+
+  def __reduce__(self) -> tuple[Any, tuple[Any, bool]]:
     # Exception.args holds the redacted message, so default
     # copy/deepcopy/pickle reconstruction would call __init__ with a
     # string instead of the candidate sequence. Rebuild from the
     # stored candidates instead.
-    return (self.__class__, (self.candidates,))
+    return (self.__class__, (self.candidates, self._population_truncated))
 
   @staticmethod
   def _differing_dimensions(
@@ -2381,6 +2410,7 @@ class AmbiguousSessionError(ValueError):
     return {
         "error": "ambiguous_session",
         "candidate_count": len(self.candidates),
+        "population_truncated": self._population_truncated,
         "retry_dimensions": list(self.retry_dimensions),
         "candidates": [c.to_retry_payload() for c in self.candidates],
     }

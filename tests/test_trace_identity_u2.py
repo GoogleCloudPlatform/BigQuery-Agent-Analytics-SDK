@@ -785,20 +785,47 @@ class TestSelectorPushdownAndCap:
     with pytest.raises(AmbiguousSessionError) as exc_info:
       client.get_session_trace("sess-1")
     assert len(exc_info.value.candidates) <= _MAX_SCOPE_CANDIDATES + 1
+    # Round 5 P2-10: the capped set is marked as a lower bound.
+    assert exc_info.value.population_truncated is True
+    assert "At least" in str(exc_info.value)
+    assert exc_info.value.to_dict()["population_truncated"] is True
     query = mock_bq.query.call_args[0][0]
     assert "LIMIT @candidate_limit" in query
 
-  def test_exact_selector_resolves_within_truncated_page(self):
+  def test_truncated_single_match_cannot_prove_uniqueness(self):
     from unittest.mock import MagicMock
 
     from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
 
-    # Round 4 P1-2: an exact signature present in the enumerated page
-    # resolves even though the total population is truncated.
+    # Round 5 P1-1 (supersedes round 4): a truncated page with one
+    # match cannot prove uniqueness — another matching candidate may
+    # sort beyond the page — so the read fails with the bound error.
     target_signature = TraceScope(custom_labels={"k": "v0"}).scope_signature
     candidate_batch = [
         _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
         for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = candidate_batch
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(ValueError, match="neither uniqueness nor absence"):
+      client.get_session_trace("sess-1", scope_signature=target_signature)
+
+  def test_exact_selector_resolves_on_complete_page(self):
+    from unittest.mock import MagicMock
+
+    # A complete (non-truncated) page with one match resolves.
+    target_signature = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"k": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"k": "v1"}')),
     ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
@@ -1293,12 +1320,16 @@ class TestRound4Regressions:
             {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
         ),
     ]
-    real_candidates_batch = [
+    # Per-identity bounded discovery (round 5, P1-6): one query per
+    # ambiguous identity.
+    alice_batch = [
         _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
+    ]
+    bob_batch = [
         _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
     ]
     client, _ = self._client(
-        [candidate_batch, identity_batch, real_candidates_batch]
+        [candidate_batch, identity_batch, alice_batch, bob_batch]
     )
     with pytest.raises(AmbiguousSessionError) as exc_info:
       client.get_session_trace("sess-1", allow_mixed_scope=True)
@@ -1361,3 +1392,247 @@ class TestRound4Regressions:
     snap = filt.snapshot()
     filt.event_types.append("B")
     assert snap.event_types == ["A"]
+
+
+class TestRound5Regressions:
+  """PR #371 review round 5 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_mixed_read_validates_python_only_signature_pin(self):
+    # P1-2: a nonexistent scope_signature with allow_mixed_scope must
+    # fail not-found, not return the whole identity.
+    missing = TraceScope(custom_labels={"k": "missing"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    with pytest.raises(ValueError, match="No candidates match"):
+      client.get_session_trace(
+          "sess-1", scope_signature=missing, allow_mixed_scope=True
+      )
+
+  def test_mixed_read_validates_unaddressable_label_pin(self):
+    # P1-2: an unaddressable label pin (not SQL-pushable) must be
+    # verified against the fetched population.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    with pytest.raises(ValueError, match="No candidates match"):
+      client.get_session_trace(
+          "sess-1",
+          custom_labels={"a\\": "absent"},
+          allow_mixed_scope=True,
+      )
+
+  def test_experiment_none_pin_not_pushed_down(self):
+    # P1-3: experiment_id=None stays Python-side so shared NULL rows
+    # cannot masquerade as a genuine NULL-experiment scope.
+    candidate_batch = [
+        _mock_row(_candidate_row(experiment_id="e1", tag_payload=None)),
+        _mock_row(_candidate_row(experiment_id=None, tag_payload=None)),
+    ]
+    client, mock_bq = self._client([candidate_batch])
+    with pytest.raises(ValueError, match="No candidates match"):
+      client.get_session_trace("sess-1", experiment_id=None)
+    resolve_query = mock_bq.query.call_args[0][0]
+    assert "'$.experiment_id') IS NULL" not in resolve_query
+
+  def test_filtered_listing_drops_unmatched_sibling_scopes(self):
+    # P1-4: a run=v1 filter must not return an unrelated unlabeled
+    # experiment scope reconstructed from admitted shared rows.
+    from unittest.mock import MagicMock
+
+    rows = [
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="v1row")),
+        _mock_row(_event_row(experiment_id="e9", span_id="e9row")),
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = rows
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    traces = client.list_traces(TraceFilter(custom_labels={"run": "v1"}))
+    assert len(traces) == 1
+    assert traces[0].scope.labels_dict == {"run": "v1"}
+
+  def test_snapshot_defeats_lying_event_types(self):
+    # P1-5: a lying list subclass injected past __setattr__ cannot
+    # erase filters from the snapshot.
+    class Liar(list):
+
+      def __iter__(self):
+        return iter([])
+
+      def __len__(self):
+        return 0
+
+    filt = TraceFilter()
+    object.__setattr__(filt, "event_types", Liar(["A"]))
+    snap = filt.snapshot()
+    assert snap.event_types == ["A"]
+
+  def test_identity_ambiguity_candidates_selector_constrained(self):
+    # P1-6: an excluded pass must not be advertised as a retry; every
+    # ambiguous identity is represented via per-identity discovery.
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(
+                user_id="alice", tag_payload='{"team": "x", "s": "1"}'
+            )
+        ),
+        _mock_row(
+            _candidate_row(
+                user_id="alice", tag_payload='{"team": "x", "s": "2"}'
+            )
+        ),
+        _mock_row(
+            _candidate_row(user_id="bob", tag_payload='{"team": "x", "s": "3"}')
+        ),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        ),
+        _mock_row(
+            {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
+        ),
+    ]
+    alice_batch = [
+        _mock_row(
+            _candidate_row(
+                user_id="alice", tag_payload='{"team": "x", "s": "1"}'
+            )
+        ),
+        _mock_row(
+            _candidate_row(user_id="alice", tag_payload='{"excluded": "y"}')
+        ),
+    ]
+    bob_batch = [
+        _mock_row(
+            _candidate_row(user_id="bob", tag_payload='{"team": "x", "s": "3"}')
+        ),
+    ]
+    client, _ = self._client(
+        [candidate_batch, identity_batch, alice_batch, bob_batch]
+    )
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace(
+          "sess-1", custom_labels={"team": "x"}, allow_mixed_scope=True
+      )
+    payload = exc_info.value.to_dict()
+    users = {c["selector"]["user_id"] for c in payload["candidates"]}
+    assert users == {"alice", "bob"}  # identity-complete
+    for candidate in payload["candidates"]:
+      labels = candidate["selector"]["custom_labels"] or {}
+      assert labels.get("team") == "x"  # selector-constrained
+
+  def test_factored_shared_spans_not_materialized_for_discarded(self):
+    # P1-7: shared spans are attached only to retained slots.
+    from datetime import timedelta
+
+    rows = [
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": f"v{i}"}, span_id=f"s{i}"),
+                timestamp=_TS + timedelta(minutes=i),
+            )
+        )
+        for i in range(4)
+    ] + [_mock_row(_event_row(span_id="shared"))]
+    bounded = _build_traces_from_rows(rows, max_traces=1)
+    assert len(bounded) == 1
+    # The retained (most recent) slot carries the shared row once.
+    assert [s.span_id for s in bounded[0].spans] == ["s3", "shared"]
+
+  def test_scope_with_no_own_id_does_not_inherit_sibling_id(self):
+    # P2-9: shared-row ids are trusted only in single-scope subgroups.
+    rows = [
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v0"}, span_id="p0", trace_id="tr-v0"
+            )
+        ),
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": "v1"}, span_id="p1"),
+                trace_id=None,
+            )
+        ),
+        _mock_row(_event_row(span_id="shared", trace_id="tr-v0")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    ids = {t.scope.labels_dict["run"]: t.trace_id for t in traces}
+    assert ids["v0"] == "tr-v0"
+    # v1 has no own id and siblings exist: falls back to session id.
+    assert ids["v1"] == "sess-1"
+
+  def test_single_scope_subgroup_still_uses_shared_id(self):
+    rows = [
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": "v0"}, span_id="p0"),
+                trace_id=None,
+            )
+        ),
+        _mock_row(_event_row(span_id="shared", trace_id="tr-shared")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    assert len(traces) == 1
+    assert traces[0].trace_id == "tr-shared"
