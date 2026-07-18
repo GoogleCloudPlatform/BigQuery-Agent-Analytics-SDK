@@ -814,21 +814,42 @@ class TraceFilter:
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
 
+  def snapshot(self) -> "TraceFilter":
+    """Fully detached copy: later mutation of this filter (or its
+    container fields) cannot affect queries built from the snapshot.
+
+    A shallow ``dataclasses.replace`` is not enough — plain list
+    fields like ``event_types`` would stay aliased, and an
+    ``ArrayQueryParameter`` holds its list by reference until job
+    submission (PR #371 review round 4, P1-6).
+    """
+    import dataclasses as _dataclasses
+
+    return _dataclasses.replace(
+        self,
+        session_ids=(
+            list(self.session_ids) if self.session_ids is not None else None
+        ),
+        custom_labels=(
+            dict(self.custom_labels) if self.custom_labels is not None else None
+        ),
+        event_types=(
+            list(self.event_types) if self.event_types is not None else None
+        ),
+    )
+
   def to_query_fragments(self, alias: str = "e") -> tuple[str, str, list]:
     """Session WHERE, row-scope WHERE, and parameters from ONE snapshot.
 
     ``to_sql_conditions()`` and ``row_scope_where()`` read the mutable
     filter separately; a mutation between the two calls could leave
     the candidate CTE pinned while the outer row fetch degrades to
-    ``TRUE`` and admits foreign scopes. This method copies the filter
-    into an immutable-by-construction snapshot first and derives both
-    fragments plus the parameters from that snapshot.
+    ``TRUE`` and admits foreign scopes. Both fragments and the
+    parameters derive from one :meth:`snapshot`.
     """
-    import dataclasses as _dataclasses
-
-    snapshot = _dataclasses.replace(self)
-    where, params = snapshot.to_sql_conditions()
-    row_where = snapshot.row_scope_where(alias=alias)
+    detached = self.snapshot()
+    where, params = detached.to_sql_conditions()
+    row_where = detached.row_scope_where(alias=alias)
     return where, row_where, params
 
   def row_scope_where(self, alias: str = "e") -> str:

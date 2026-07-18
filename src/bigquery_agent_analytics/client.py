@@ -107,6 +107,7 @@ from .insights import parse_facet_response
 from .insights import run_analysis_prompt
 from .insights import SessionFacet
 from .insights import SessionMetadata
+from .trace import _is_unaddressable_label_key
 from .trace import _jsonpath_member_segment
 from .trace import AmbiguousSessionError
 from .trace import resolve_singular_candidate
@@ -335,7 +336,7 @@ WHERE e.session_id = @session_id
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM @anchor_root_agent_name
   AND {row_where}
-ORDER BY e.timestamp ASC
+ORDER BY e.timestamp ASC, e.span_id
 """
 
 
@@ -928,34 +929,36 @@ class Client:
     returns exactly the chosen candidate.
 
     Args:
-        selector: The identity/scope pins. An exactly-resolving
-            selector (e.g. a ``scope_signature`` pin) always returns
-            its exact scoped candidate — ``allow_mixed_scope`` never
-            overrides an unambiguous selector.
+        selector: The identity/scope pins. Identity pins and
+            addressable label/experiment pins are pushed into
+            candidate discovery SQL, so exact retries resolve even
+            for sessions whose total scope population exceeds the
+            enumeration bound. An exactly-resolving selector always
+            returns its exact scoped candidate — ``allow_mixed_scope``
+            never overrides it.
         allow_mixed_scope: Opt-in escape hatch (plan KTD4): when the
-            selector remains scope-ambiguous but resolves to ONE
-            intrinsic identity, return the conversation-complete row
-            set for that identity in producer row order. The trace
-            carries ``identity``, ``scope=None``, and
-            ``scope_coverage`` naming the covered scope signatures
-            (``None`` when the scope population was too large to
-            enumerate).
+            selector remains scope-ambiguous but its selector-aware
+            population resolves to ONE intrinsic identity, return the
+            conversation-complete row set for that identity in
+            producer row order. The trace carries ``identity``,
+            ``scope=None``, and ``scope_coverage`` derived from the
+            scopes actually fetched (``None`` when that population
+            was too large to enumerate).
 
     Raises:
-        ValueError: If no events match the selector, if the scope
-            population exceeds the candidate cap without
-            ``allow_mixed_scope``, or if the fetched rows cannot
-            reconstruct the resolved candidate (a resolution/fetch
-            consistency failure — never silently substituted).
+        ValueError: If no events match the selector, if the
+            selector-matching population is truncated with no match
+            in the enumerated page, or if the fetched rows cannot
+            reconstruct the resolved candidate.
         AmbiguousSessionError: If the selector still matches more
             than one resolved candidate.
     """
-    identity_pins, pin_params = self._selector_identity_pins(selector)
+    pushdown, pin_params = self._selector_pushdown_pins(selector)
     resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        identity_pins=identity_pins,
+        identity_pins=pushdown,
     )
     resolve_params = [
         bigquery.ScalarQueryParameter(
@@ -980,50 +983,52 @@ class Client:
     candidates = _resolve_scope_candidates(candidate_rows)
     matching = _candidates_matching_selector(candidates, selector)
 
-    if len(matching) == 1 and not truncated:
-      # An exactly-resolving selector always returns its exact scoped
-      # candidate; allow_mixed_scope never overrides it.
+    # The cap applies AFTER selector matching (PR #371 review round
+    # 4, P1-2): an exact selector that matches one candidate in the
+    # enumerated page resolves even when the total population is
+    # truncated.
+    if len(matching) == 1:
       return self._fetch_identity_trace(
           matching[0].identity, resolved_scope=matching[0]
       )
     if allow_mixed_scope:
-      return self._fetch_mixed_scope_trace(
-          selector,
-          coverage=(
-              tuple(sorted(candidate.scope_signature for candidate in matching))
-              if not truncated and matching
-              else None
-          ),
+      return self._fetch_mixed_scope_trace(selector)
+    if matching:
+      # More than one match: the typed ambiguity surface, bounded by
+      # the SQL page. Candidates are real, executable retries.
+      raise AmbiguousSessionError(
+          candidates=matching[: _MAX_SCOPE_CANDIDATES + 1]
       )
     if truncated:
       raise ValueError(
-          "More than"
-          f" {_MAX_SCOPE_CANDIDATES} scope candidates match this"
-          " session (further candidates not enumerated). Refine the"
-          " selector with identity pins, labels, or scope_signature,"
-          " or use allow_mixed_scope=True for a conversation-complete"
+          "The scope-candidate population exceeds the enumeration"
+          f" bound ({_MAX_SCOPE_CANDIDATES}) and no candidate in the"
+          " enumerated page matched the selector. Add identity,"
+          " experiment, or label pins (they narrow the SQL page), or"
+          " use allow_mixed_scope=True for a conversation-complete"
           " read."
       )
-    resolved = resolve_singular_candidate(matching)
-    return self._fetch_identity_trace(
-        resolved.identity, resolved_scope=resolved
-    )
+    raise ValueError("No candidates match the requested session.")
 
-  def _selector_identity_pins(
+  def _selector_pushdown_pins(
       self, selector: TraceSelector
   ) -> tuple[str, list]:
-    """SQL pushdown fragment + params for the selector identity pins.
+    """SQL pushdown fragment + params for the selector's pins.
 
-    NULL pins use IS NULL; UNSET pins add no predicate (PR #371
-    review, P2-11).
+    Identity pins and ADDRESSABLE scope pins (experiment, JSONPath-
+    addressable label keys) narrow discovery in SQL so exact retries
+    stay resolvable under the enumeration bound (PR #371 review
+    round 4, P1-2). NULL pins use IS NULL; UNSET pins add no
+    predicate; unaddressable label keys and scope_signature remain
+    Python-side.
     """
-    identity_pins = ""
+    fragment = ""
     params: list = []
     if selector.user_id is not UNSET:
       if selector.user_id is None:
-        identity_pins += "\n  AND user_id IS NULL"
+        fragment += "\n  AND user_id IS NULL"
       else:
-        identity_pins += "\n  AND user_id = @pin_user_id"
+        fragment += "\n  AND user_id = @pin_user_id"
         params.append(
             bigquery.ScalarQueryParameter(
                 "pin_user_id", "STRING", selector.user_id
@@ -1031,11 +1036,11 @@ class Client:
         )
     if selector.root_agent_name is not UNSET:
       if selector.root_agent_name is None:
-        identity_pins += (
+        fragment += (
             "\n  AND JSON_VALUE(attributes, '$.root_agent_name') IS NULL"
         )
       else:
-        identity_pins += (
+        fragment += (
             "\n  AND JSON_VALUE(attributes, '$.root_agent_name')"
             " = @pin_root_agent_name"
         )
@@ -1044,27 +1049,60 @@ class Client:
                 "pin_root_agent_name", "STRING", selector.root_agent_name
             )
         )
-    return identity_pins, params
+    if selector.experiment_id is not UNSET:
+      if selector.experiment_id is None:
+        fragment += "\n  AND JSON_VALUE(attributes, '$.experiment_id') IS NULL"
+      else:
+        fragment += (
+            "\n  AND JSON_VALUE(attributes, '$.experiment_id')"
+            " = @pin_experiment_id"
+        )
+        params.append(
+            bigquery.ScalarQueryParameter(
+                "pin_experiment_id", "STRING", selector.experiment_id
+            )
+        )
+    if selector.custom_labels:
+      index = 0
+      for key, value in selector.custom_labels:
+        if _is_unaddressable_label_key(key):
+          continue  # Python-side matching still applies this pin.
+        fragment += (
+            f"\n  AND JSON_VALUE(attributes,"
+            f" CONCAT('$.custom_tags.', @pin_label_key_{index}))"
+            f" = @pin_label_val_{index}"
+        )
+        params.append(
+            bigquery.ScalarQueryParameter(
+                f"pin_label_key_{index}",
+                "STRING",
+                _jsonpath_member_segment(key),
+            )
+        )
+        params.append(
+            bigquery.ScalarQueryParameter(
+                f"pin_label_val_{index}", "STRING", value
+            )
+        )
+        index += 1
+    return fragment, params
 
-  def _fetch_mixed_scope_trace(
-      self,
-      selector: TraceSelector,
-      coverage: Optional[tuple],
-  ) -> Trace:
+  def _fetch_mixed_scope_trace(self, selector: TraceSelector) -> Trace:
     """Conversation-complete read for one intrinsic identity.
 
-    Identity uniqueness is established by a dedicated bounded
-    DISTINCT-identity query — never from a possibly truncated scope
-    candidate list — so the escape hatch works regardless of how many
-    scope payloads the session carries (PR #371 review, P1-6), and
-    cannot merge two identities (P1-1/P1-3).
+    Identity uniqueness is established by a bounded DISTINCT-identity
+    query carrying the FULL selector pushdown — identity pins AND
+    addressable scope pins — so scope pins that select a single
+    identity cannot produce a false cross-identity ambiguity, and a
+    selector matching nothing fails with not-found instead of
+    returning the whole identity (PR #371 review round 4, P1-1).
     """
-    identity_pins, pin_params = self._selector_identity_pins(selector)
+    pushdown, pin_params = self._selector_pushdown_pins(selector)
     query = _RESOLVE_SESSION_IDENTITIES_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
-        identity_pins=identity_pins,
+        identity_pins=pushdown,
     )
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -1093,11 +1131,12 @@ class Client:
       if identity not in identities:
         identities.append(identity)
     if len(identities) > 1:
+      # Executable retry contract (PR #371 review round 4, P1-7):
+      # enumerate REAL scope candidates for the ambiguous identities
+      # instead of synthesizing empty-scope selectors that may not
+      # exist.
       raise AmbiguousSessionError(
-          candidates=[
-              ResolvedTraceSelector(identity=identity)
-              for identity in identities
-          ]
+          candidates=self._real_candidates_for_identities(selector, identities)
       )
     identity = identities[0]
 
@@ -1128,9 +1167,54 @@ class Client:
     if not results:
       raise ValueError(f"No events found for session_id={identity.session_id}")
     # Producer row order, one span per row: no cross-scope merging,
-    # no span_id-based dedup, no chronology loss (PR #371 review,
-    # P1-1).
-    spans = [Span.from_bigquery_row(dict(row)) for row in results]
+    # no span_id-based dedup, no chronology loss. Every fetched row
+    # is revalidated against the resolved identity with
+    # type-preserving comparison (PR #371 review round 4, P2-8) —
+    # JSON_VALUE anchors erase scalar types, so a numeric root agent
+    # inserted between discovery and fetch must not slip through.
+    spans = []
+    fetched_entries = []
+    for row in results:
+      row_dict = dict(row)
+      span = Span.from_bigquery_row(row_dict)
+      attributes = span.attributes or {}
+      row_user = row_dict.get("user_id")
+      row_root = attributes.get("root_agent_name")
+      if (
+          row_user != identity.user_id
+          or not (row_root is None or isinstance(row_root, str))
+          or row_root != identity.root_agent_name
+      ):
+        raise ValueError(
+            "Resolution/fetch consistency failure: a fetched row does"
+            " not match the resolved identity (identifiers redacted)."
+            " The underlying data changed between resolution and"
+            " fetch; retry the lookup."
+        )
+      spans.append(span)
+      fetched_entries.append(
+          (
+              _validated_identity_attr(
+                  "experiment_id", attributes.get("experiment_id")
+              ),
+              _parse_tag_payload(attributes.get("custom_tags")),
+              None,
+          )
+      )
+    # Coverage from the scopes ACTUALLY fetched (PR #371 review round
+    # 4, P1-3), bounded: None when too many to enumerate.
+    coverage_signatures: set = set()
+    coverage: Optional[tuple] = None
+    for experiment, subgroup in _scope_subgroups(fetched_entries).items():
+      payload_options = list(subgroup["payloads"].values()) or [None]
+      for payload in payload_options:
+        coverage_signatures.add(
+            TraceScope(
+                experiment_id=experiment, custom_labels=payload
+            ).scope_signature
+        )
+    if len(coverage_signatures) <= _MAX_SCOPE_CANDIDATES:
+      coverage = tuple(sorted(coverage_signatures))
     timestamps = [s.timestamp for s in spans if s.timestamp]
     start = min(timestamps) if timestamps else None
     end = max(timestamps) if timestamps else None
@@ -1147,6 +1231,42 @@ class Client:
         identity=identity,
         scope_coverage=coverage,
     )
+
+  def _real_candidates_for_identities(
+      self,
+      selector: TraceSelector,
+      identities: list,
+  ) -> list:
+    """Real, executable scope candidates for ambiguous identities."""
+    pushdown, pin_params = self._selector_pushdown_pins(selector)
+    resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=self.table_id,
+        identity_pins=pushdown,
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(
+                "session_id", "STRING", selector.session_id
+            ),
+            bigquery.ScalarQueryParameter(
+                "candidate_limit", "INT64", _MAX_SCOPE_CANDIDATES + 1
+            ),
+            *pin_params,
+        ]
+    )
+    job_config = with_sdk_labels(job_config, feature="trace-read")
+    rows = [
+        dict(row)
+        for row in self.bq_client.query(
+            resolve_query, job_config=job_config
+        ).result()
+    ]
+    candidates = _resolve_scope_candidates(rows)
+    identity_set = set(identities)
+    filtered = [c for c in candidates if c.identity in identity_set]
+    return (filtered or candidates)[: _MAX_SCOPE_CANDIDATES + 1]
 
   def _fetch_identity_trace(
       self,
@@ -1229,11 +1349,13 @@ class Client:
     Returns:
         List of Trace objects, one per session.
     """
-    filt = filter_criteria or TraceFilter()
-    # One immutable snapshot feeds both fragments and the parameters,
-    # so concurrent filter mutation cannot desynchronize the session
-    # CTE from the outer row scope (PR #371 review round 3, P2-13).
-    where, row_where, params = filt.to_query_fragments()
+    # One fully detached snapshot feeds the fragments, parameters,
+    # AND the post-query limit, so concurrent filter mutation cannot
+    # desynchronize any part of the read (PR #371 review round 4,
+    # P1-6).
+    filt = (filter_criteria or TraceFilter()).snapshot()
+    where, params = filt.to_sql_conditions()
+    row_where = filt.row_scope_where()
 
     query = _LIST_TRACES_QUERY.format(
         project=self.project_id,
@@ -1289,7 +1411,10 @@ class Client:
         EvaluationReport with per-session and aggregate scores.
     """
     table = dataset or self.table_id
-    filt = filters or TraceFilter()
+    # One detached snapshot for the whole evaluation: candidate
+    # predicates, the fallback row predicate, and the limit all come
+    # from the same immutable state (PR #371 review round 4, P1-6).
+    filt = (filters or TraceFilter()).snapshot()
     where, params = filt.to_sql_conditions()
 
     if isinstance(evaluator, SystemEvaluator):
@@ -1391,12 +1516,12 @@ class Client:
 
     # Issue #359: the API-fallback trace fetch applies the caller's
     # label/experiment scope to fetched rows, matching list_traces.
-    # Snapshot read: fragments must not desynchronize under
-    # concurrent filter mutation.
-    if trace_filter is not None:
-      _, row_where, _ = trace_filter.to_query_fragments()
-    else:
-      row_where = "TRUE"
+    # trace_filter is the detached snapshot captured by evaluate(),
+    # so this read cannot desynchronize from the candidate
+    # predicates derived there (PR #371 review round 4, P1-6).
+    row_where = (
+        trace_filter.row_scope_where() if trace_filter is not None else "TRUE"
+    )
 
     fallback_reasons: list[str] = []
 
@@ -3204,6 +3329,21 @@ def _ordered_limited_traces(
   return ordered
 
 
+def _slot_sort_key(slot: dict) -> tuple:
+  """Ranking for scope slots, mirroring _ordered_limited_traces."""
+  end = slot["max_ts"]
+  recency = -(end.timestamp()) if end is not None else float("inf")
+  return (
+      recency,
+      slot["session_id"],
+      slot["user_id"] is not None,
+      slot["user_id"] or "",
+      slot["root_agent_name"] is not None,
+      slot["root_agent_name"] or "",
+      slot["signature"],
+  )
+
+
 def _build_traces_from_rows(
     results: list, max_traces: Optional[int] = None
 ) -> list[Trace]:
@@ -3215,13 +3355,16 @@ def _build_traces_from_rows(
   plus resolved scope (experiment, EXACT tag payload) — instead of
   ``session_id`` alone, so two identities or evaluation passes that
   reuse one session id yield two Trace objects rather than silently
-  merging. Rows attributed to more than one trace are appended as
-  isolated deep copies, so sibling traces never share span state.
+  merging.
 
-  ``max_traces`` bounds construction work (PR #371 review round 3,
-  P2-11): identity groups arrive in the SQL anchor's recency order,
-  so stopping early keeps the most recent traces; the caller re-sorts
-  and slices the bounded result.
+  Construction is rank-before-retain (PR #371 review round 4,
+  P1-4/P1-5): scope slots are assigned span REFERENCES first (indexed
+  by canonical payload, no pairwise scans), ranked by the same
+  deterministic key ``_ordered_limited_traces`` uses, and only the
+  retained top ``max_traces`` slots are materialized — shared rows
+  are deep-copied once per RETAINED extra destination, never for
+  discarded slots, so the bound limits both which traces survive and
+  how much work is done.
   """
   identity_groups: dict[tuple, list] = {}
 
@@ -3245,10 +3388,9 @@ def _build_traces_from_rows(
         (experiment, payload, span)
     )
 
-  traces: list[Trace] = []
+  # Phase 1: define slots and assign span references (no copies).
+  slots: list[dict] = []
   for (sid, user_id, root_agent_name), entries in identity_groups.items():
-    if max_traces is not None and len(traces) >= max_traces:
-      break
     identity = None
     if isinstance(sid, str):
       try:
@@ -3259,80 +3401,102 @@ def _build_traces_from_rows(
         )
       except (TypeError, ValueError):
         identity = None
-    subgroups = _scope_subgroups(entries)
-    # Two-pass isolation (P1-2): count each span's destinations
-    # across the ENTIRE identity group first — NULL-experiment shared
-    # rows appear in several subgroups — then append deep copies for
-    # any span with more than one destination.
-    all_appends: list[tuple] = []
-    for experiment, subgroup in subgroups.items():
-      payload_options = list(subgroup["payloads"].values()) or [None]
-      scoped: list[tuple] = []
-      for payload in payload_options:
+    for experiment, subgroup in _scope_subgroups(entries).items():
+      payload_items = list(subgroup["payloads"].items())
+      slot_index: dict = {}
+      subgroup_slots: list[dict] = []
+      scope_options = payload_items or [(None, None)]
+      for signature_key, payload in scope_options:
         scope = None
         if identity is not None:
           scope = TraceScope(experiment_id=experiment, custom_labels=payload)
-        scoped.append((scope, payload, []))
-      subgroup["scoped"] = scoped
+        slot = {
+            "identity": identity,
+            "scope": scope,
+            "payload": payload,
+            "session_id": sid,
+            "user_id": user_id if isinstance(user_id, str) else None,
+            "root_agent_name": (
+                root_agent_name if isinstance(root_agent_name, str) else None
+            ),
+            "signature": scope.scope_signature if scope is not None else "",
+            "spans": [],
+            "own_trace_ids": [],
+            "max_ts": None,
+        }
+        slot_index[signature_key] = slot
+        subgroup_slots.append(slot)
+        slots.append(slot)
       for payload, span in subgroup["items"]:
         if payload is None:
-          for slot in scoped:
-            all_appends.append((span, slot))
+          targets = subgroup_slots
         else:
-          for slot in scoped:
-            if slot[1] == payload:
-              all_appends.append((span, slot))
-              break
-    destination_counts: dict[int, int] = {}
-    for span, _ in all_appends:
+          target = slot_index.get(tuple(sorted(payload.items())))
+          targets = [target] if target is not None else []
+        for slot in targets:
+          slot["spans"].append(span)
+          if payload is not None and payload == slot["payload"]:
+            # Per-slot own trace ids (PR #371 review round 4, P2-9):
+            # only rows whose payload EQUALS this scope contribute.
+            if span.trace_id:
+              slot["own_trace_ids"].append(span.trace_id)
+          if span.timestamp is not None and (
+              slot["max_ts"] is None or span.timestamp > slot["max_ts"]
+          ):
+            slot["max_ts"] = span.timestamp
+
+  # Phase 2: rank and retain BEFORE materializing.
+  slots = [slot for slot in slots if slot["spans"]]
+  slots.sort(key=_slot_sort_key)
+  if max_traces is not None:
+    slots = slots[:max_traces]
+
+  # Phase 3: materialize with copies only where a span lands in more
+  # than one RETAINED slot.
+  destination_counts: dict[int, int] = {}
+  for slot in slots:
+    for span in slot["spans"]:
       destination_counts[id(span)] = destination_counts.get(id(span), 0) + 1
-    for span, slot in all_appends:
-      if destination_counts[id(span)] > 1:
-        slot[2].append(_isolated_span_copy(span))
+  seen: set[int] = set()
+  traces: list[Trace] = []
+  for slot in slots:
+    spans = []
+    for span in slot["spans"]:
+      marker = id(span)
+      if destination_counts[marker] > 1:
+        if marker in seen:
+          spans.append(_isolated_span_copy(span))
+        else:
+          seen.add(marker)
+          spans.append(span)
       else:
-        slot[2].append(span)
-    for experiment, subgroup in subgroups.items():
-      if max_traces is not None and len(traces) >= max_traces:
-        break
-      scoped = subgroup["scoped"]
-      for scope, _, spans in scoped:
-        if not spans:
-          continue
-        if max_traces is not None and len(traces) >= max_traces:
-          break
-        timestamps = [s.timestamp for s in spans if s.timestamp]
-        start = min(timestamps) if timestamps else None
-        end = max(timestamps) if timestamps else None
-        total_ms = None
-        if start and end:
-          total_ms = (end - start).total_seconds() * 1000
-        # Per-scope trace id from the scope's OWN rows first; shared
-        # rows only as a fallback (P2-10).
-        own_ids = [
-            s.trace_id
-            for (payload, s) in subgroup["items"]
-            if payload is not None and s.trace_id
-        ]
-        span_trace_ids = [s.trace_id for s in spans if s.trace_id]
-        own_in_scope = [t for t in span_trace_ids if t in own_ids]
-        trace_id = (
-            own_in_scope[0]
-            if own_in_scope
-            else (span_trace_ids[0] if span_trace_ids else sid)
+        spans.append(span)
+    timestamps = [s.timestamp for s in spans if s.timestamp]
+    start = min(timestamps) if timestamps else None
+    end = max(timestamps) if timestamps else None
+    total_ms = None
+    if start and end:
+      total_ms = (end - start).total_seconds() * 1000
+    fallback_ids = [s.trace_id for s in spans if s.trace_id]
+    trace_id = (
+        slot["own_trace_ids"][0]
+        if slot["own_trace_ids"]
+        else (fallback_ids[0] if fallback_ids else slot["session_id"])
+    )
+    identity = slot["identity"]
+    traces.append(
+        Trace(
+            trace_id=trace_id,
+            session_id=slot["session_id"],
+            spans=spans,
+            user_id=identity.user_id if identity else slot["user_id"],
+            start_time=start,
+            end_time=end,
+            total_latency_ms=total_ms,
+            identity=identity,
+            scope=slot["scope"] if identity is not None else None,
         )
-        traces.append(
-            Trace(
-                trace_id=trace_id,
-                session_id=sid,
-                spans=spans,
-                user_id=identity.user_id if identity else user_id,
-                start_time=start,
-                end_time=end,
-                total_latency_ms=total_ms,
-                identity=identity,
-                scope=scope if identity is not None else None,
-            )
-        )
+    )
 
   return traces
 

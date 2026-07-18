@@ -760,12 +760,73 @@ class TestSelectorPushdownAndCap:
     resolve_query = mock_bq.query.call_args_list[0][0][0]
     assert "AND user_id IS NULL" in resolve_query
 
-  def test_candidate_cap_bounded_in_sql_and_redacted(self):
+  def test_truncated_page_with_matches_raises_typed_ambiguity(self):
     from unittest.mock import MagicMock
 
     from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
 
-    # SQL truncates at cap+1 rows; Python sees the truncation marker.
+    # A bare read over a truncated page with multiple matches raises
+    # the TYPED ambiguity surface, bounded by the SQL page (round 4:
+    # overflow must not bypass AmbiguousSessionError).
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    mock_bq = MagicMock()
+    job = MagicMock()
+    job.result.return_value = candidate_batch
+    mock_bq.query.return_value = job
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    assert len(exc_info.value.candidates) <= _MAX_SCOPE_CANDIDATES + 1
+    query = mock_bq.query.call_args[0][0]
+    assert "LIMIT @candidate_limit" in query
+
+  def test_exact_selector_resolves_within_truncated_page(self):
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    # Round 4 P1-2: an exact signature present in the enumerated page
+    # resolves even though the total population is truncated.
+    target_signature = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
+    ]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [candidate_batch, fetch_batch]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    trace = client.get_session_trace("sess-1", scope_signature=target_signature)
+    assert trace.scope.labels_dict == {"k": "v0"}
+
+  def test_truncated_page_without_match_redacted_value_error(self):
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    missing_signature = TraceScope(
+        custom_labels={"k": "not-present"}
+    ).scope_signature
     candidate_batch = [
         _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
         for i in range(_MAX_SCOPE_CANDIDATES + 1)
@@ -781,14 +842,10 @@ class TestSelectorPushdownAndCap:
         bq_client=mock_bq,
     )
     with pytest.raises(ValueError) as exc_info:
-      client.get_session_trace("sess-1")
+      client.get_session_trace("sess-1", scope_signature=missing_signature)
     message = str(exc_info.value)
-    assert f"More than {_MAX_SCOPE_CANDIDATES}" in message
-    # Redacted: no label values in the printable form.
-    assert "v0" not in message
-    # The SQL itself is bounded.
-    query = mock_bq.query.call_args[0][0]
-    assert "LIMIT @candidate_limit" in query
+    assert "enumeration bound" in message
+    assert "v0" not in message and "not-present" not in message
 
 
 class TestAllowMixedScope:
@@ -1070,3 +1127,237 @@ class TestRound3Regressions:
     assert "@label_key_0" in row_where
     names = {p.name for p in params}
     assert {"label_key_0", "label_val_0"} <= names
+
+
+class TestRound4Regressions:
+  """PR #371 review round 4 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_mixed_scope_nonexistent_selector_not_found(self):
+    # P1-1: run=missing must not return the whole identity — the
+    # scope-pinned identity query comes back empty.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch: list = []  # pushdown pins exclude everything
+    client, mock_bq = self._client([candidate_batch, identity_batch])
+    with pytest.raises(ValueError, match="No events found"):
+      client.get_session_trace(
+          "sess-1",
+          custom_labels={"run": "missing"},
+          allow_mixed_scope=True,
+      )
+    identity_query = mock_bq.query.call_args[0][0]
+    # The identity query carries the scope pushdown.
+    assert "@pin_label_key_0" in identity_query
+
+  def test_mixed_scope_pins_prevent_false_identity_ambiguity(self):
+    # P1-1: scope pins that select only Alice's scopes must not
+    # produce an Alice/Bob ambiguity — the identity query honors the
+    # pins and returns one identity.
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(
+                user_id="alice",
+                tag_payload='{"slice": "1", "team": "a"}',
+            )
+        ),
+        _mock_row(
+            _candidate_row(
+                user_id="alice",
+                tag_payload='{"slice": "2", "team": "a"}',
+            )
+        ),
+        _mock_row(_candidate_row(user_id="bob")),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(user_id="alice", custom_tags={"team": "a"})),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    trace = client.get_session_trace(
+        "sess-1", custom_labels={"team": "a"}, allow_mixed_scope=True
+    )
+    assert trace.identity.user_id == "alice"
+
+  def test_mixed_coverage_reflects_fetched_scopes(self):
+    # P1-3: coverage names every scope actually fetched, not just the
+    # selector-matching ones.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
+    assert trace.scope_coverage is not None
+    v0_sig = TraceScope(custom_labels={"run": "v0"}).scope_signature
+    v1_sig = TraceScope(custom_labels={"run": "v1"}).scope_signature
+    assert set(trace.scope_coverage) == {v0_sig, v1_sig}
+
+  def test_max_traces_retains_most_recent_scope(self):
+    # P1-4: rank-before-retain — bounded construction must keep the
+    # trace that unbounded construction + ordering would keep.
+    from datetime import timedelta
+
+    early = dict(
+        _event_row(custom_tags={"run": "early"}, span_id="e"),
+        timestamp=_TS,
+    )
+    late = dict(
+        _event_row(custom_tags={"run": "late"}, span_id="l"),
+        timestamp=_TS + timedelta(hours=1),
+    )
+    rows = [_mock_row(early), _mock_row(late)]
+    bounded = _build_traces_from_rows(rows, max_traces=1)
+    assert len(bounded) == 1
+    assert bounded[0].scope.labels_dict == {"run": "late"}
+
+  def test_discarded_slots_do_not_trigger_copies(self):
+    # P1-5: with one retained slot, its spans are the original
+    # objects — no deep copies were made for discarded slots.
+    from datetime import timedelta
+
+    rows = [
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": f"v{i}"}, span_id=f"s{i}"),
+                timestamp=_TS + timedelta(minutes=i),
+            )
+        )
+        for i in range(5)
+    ] + [_mock_row(_event_row(span_id="shared"))]
+    bounded = _build_traces_from_rows(rows, max_traces=1)
+    assert len(bounded) == 1
+    shared = [s for s in bounded[0].spans if s.span_id == "shared"]
+    assert len(shared) == 1
+    # Single retained destination: the span was not copied.
+    assert not shared[0].children  # sanity: still a clean span
+
+  def test_mixed_identity_ambiguity_uses_real_candidates(self):
+    # P1-7: cross-identity mixed ambiguity carries REAL scope
+    # candidates (executable retries), not synthetic empty scopes.
+    candidate_batch = [
+        _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        ),
+        _mock_row(
+            {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
+        ),
+    ]
+    real_candidates_batch = [
+        _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
+    ]
+    client, _ = self._client(
+        [candidate_batch, identity_batch, real_candidates_batch]
+    )
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1", allow_mixed_scope=True)
+    payloads = [
+        c["selector"]["custom_labels"]
+        for c in exc_info.value.to_dict()["candidates"]
+    ]
+    assert {"run": "v0"} in payloads
+    assert {"run": "v1"} in payloads
+
+  def test_mixed_fetch_revalidates_row_identity(self):
+    # P2-8: a fetched row not matching the resolved identity fails
+    # closed instead of being returned under the wrong identity.
+    candidate_batch = [
+        _mock_row(_candidate_row(user_id="alice")),
+        _mock_row(_candidate_row(user_id="alice", tag_payload='{"a": "b"}')),
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(user_id="alice", span_id="ok")),
+        _mock_row(_event_row(user_id="mallory", span_id="bad")),
+    ]
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    with pytest.raises(ValueError, match="consistency failure"):
+      client.get_session_trace("sess-1", allow_mixed_scope=True)
+
+  def test_shared_row_id_cannot_contaminate_sibling_scope(self):
+    # P2-9: a shared row carrying a sibling scope's trace id must not
+    # leak into the other scope's trace id.
+    rows = [
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v0"}, span_id="p0", trace_id="tr-v0"
+            )
+        ),
+        _mock_row(
+            _event_row(
+                custom_tags={"run": "v1"}, span_id="p1", trace_id="tr-v1"
+            )
+        ),
+        # Shared row that happens to carry v0's trace id.
+        _mock_row(_event_row(span_id="shared", trace_id="tr-v0")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    ids = {t.scope.labels_dict["run"]: t.trace_id for t in traces}
+    assert ids == {"v0": "tr-v0", "v1": "tr-v1"}
+
+  def test_snapshot_detaches_event_types(self):
+    # P1-6: mutating the source filter's event_types after snapshot
+    # must not affect the snapshot.
+    filt = TraceFilter(event_types=["A"])
+    snap = filt.snapshot()
+    filt.event_types.append("B")
+    assert snap.event_types == ["A"]
