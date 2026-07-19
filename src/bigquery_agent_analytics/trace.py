@@ -562,6 +562,22 @@ class TraceFilter:
       # Same identity-skip as custom_labels, for += on the list.
       if value is not getattr(self, "session_ids", None):
         value = _normalized_session_ids(value)
+    if name == "event_types" and value is not None:
+      # Trusted finite list/tuple of exact strings (PR #371 review
+      # round 6, P2-9): arbitrary iterables are read through their
+      # public iterator, which a hostile container could use to
+      # erase the filter into WHERE TRUE.
+      if not isinstance(value, (list, tuple)):
+        raise TypeError(
+            "TraceFilter.event_types must be a list of strings or None."
+        )
+      snapshot = _trusted_sequence_snapshot(value)
+      normalized_events = []
+      for entry in snapshot:
+        if not isinstance(entry, str):
+          raise TypeError("TraceFilter.event_types entries must be strings.")
+        normalized_events.append(_exact_str(entry))
+      value = normalized_events
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -839,7 +855,12 @@ class TraceFilter:
     if isinstance(event_types, (list, tuple)):
       event_types = _trusted_sequence_snapshot(event_types)
     elif event_types is not None:
-      event_types = list(event_types)
+      # __setattr__ validation only admits list/tuple; anything else
+      # was injected past the guards and is rejected closed rather
+      # than iterated (PR #371 review round 6, P2-9).
+      raise TypeError(
+          "TraceFilter.event_types must be a list of strings or None."
+      )
     return _dataclasses.replace(
         self,
         session_ids=session_ids,
@@ -897,9 +918,13 @@ class TraceFilter:
     )
     experiment_id = _validated_filter_pin("experiment_id", self.experiment_id)
     if experiment_id is SQL_NULL:
-      conditions.append(
-          f"JSON_VALUE({alias}.attributes, '$.experiment_id') IS NULL"
-      )
+      # No row predicate (PR #371 review round 6, P1-4): restricting
+      # the fetch to NULL-experiment rows would erase the non-NULL
+      # context needed to classify shared untagged NULL rows, letting
+      # them masquerade as a genuine empty NULL scope. The slot-level
+      # scope predicate selects NULL-experiment scopes after
+      # classification over the full identity context.
+      pass
     elif experiment_id is not None:
       # NULL-experiment rows are shared conversation rows only when
       # they carry no tag payload; a tagged NULL-experiment row is a

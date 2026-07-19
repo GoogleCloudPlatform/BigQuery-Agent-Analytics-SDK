@@ -113,6 +113,7 @@ from .trace import AmbiguousSessionError
 from .trace import resolve_singular_candidate
 from .trace import ResolvedTraceSelector
 from .trace import Span
+from .trace import SQL_NULL
 from .trace import Trace
 from .trace import TraceFilter
 from .trace import TraceIdentity
@@ -306,7 +307,7 @@ SELECT DISTINCT
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
 ORDER BY session_id, user_id, root_agent_name
-LIMIT 8
+LIMIT @identity_limit
 """
 
 # Anchored singular fetch: rows are pinned to the RESOLVED identity
@@ -336,8 +337,15 @@ WHERE e.session_id = @session_id
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM @anchor_root_agent_name
   AND {row_where}
-ORDER BY e.timestamp ASC, e.span_id
+ORDER BY e.timestamp ASC, e.span_id, e.invocation_id, e.event_type
 """
+
+# NOTE (PR #371 review round 6, P2-11): the persisted schema carries
+# no producer/ingest sequence column, so rows that tie on every
+# ordered column above have no reconstructable total order. Order-
+# sensitive consumers (e.g. final_response) should treat such ties as
+# unordered; adding a producer sequence column is a schema follow-up
+# outside U2.
 
 
 def _run_sync(coro):
@@ -980,6 +988,30 @@ class Client:
     if not candidate_rows:
       raise ValueError(f"No events found for session_id={selector.session_id}")
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
+    if truncated:
+      # The SQL limit truncates grouped rows, not whole identities:
+      # the boundary identity's classification context may be
+      # incomplete (e.g. its shared NULL row made the page but its
+      # experiment row did not), which would manufacture a
+      # nonexistent scope into retry payloads (PR #371 review round
+      # 6, P1-5). Exclude the boundary identity from classification;
+      # truncation reporting still covers it.
+      boundary = candidate_rows[-1]
+      boundary_key = (
+          boundary.get("session_id"),
+          boundary.get("user_id"),
+          boundary.get("root_agent_name"),
+      )
+      candidate_rows = [
+          row
+          for row in candidate_rows
+          if (
+              row.get("session_id"),
+              row.get("user_id"),
+              row.get("root_agent_name"),
+          )
+          != boundary_key
+      ]
     candidates = _resolve_scope_candidates(candidate_rows)
     matching = _candidates_matching_selector(candidates, selector)
 
@@ -1118,6 +1150,9 @@ class Client:
             bigquery.ScalarQueryParameter(
                 "session_id", "STRING", selector.session_id
             ),
+            bigquery.ScalarQueryParameter(
+                "identity_limit", "INT64", _MAX_IDENTITIES + 1
+            ),
             *pin_params,
         ]
     )
@@ -1128,6 +1163,11 @@ class Client:
     ]
     if not identity_rows:
       raise ValueError(f"No events found for session_id={selector.session_id}")
+    # Cap-plus-one sentinel (PR #371 review round 6, P2-7): more than
+    # _MAX_IDENTITIES identities means the enumeration is a lower
+    # bound and must be reported as truncated.
+    identity_page_truncated = len(identity_rows) > _MAX_IDENTITIES
+    identity_rows = identity_rows[:_MAX_IDENTITIES]
     identities = []
     for row in identity_rows:
       identity = TraceIdentity(
@@ -1140,16 +1180,32 @@ class Client:
       if identity not in identities:
         identities.append(identity)
     if len(identities) > 1:
-      # Executable retry contract (PR #371 review round 4, P1-7):
-      # enumerate REAL scope candidates for the ambiguous identities
-      # instead of synthesizing empty-scope selectors that may not
-      # exist.
+      # Python-only pins are applied BEFORE deciding identity
+      # ambiguity (PR #371 review round 6, P1-3): the SQL-pushable
+      # pins alone may keep several identities whose scopes the full
+      # selector actually excludes.
       ambiguous, truncated = self._real_candidates_for_identities(
           selector, identities
       )
-      raise AmbiguousSessionError(
-          candidates=ambiguous, population_truncated=truncated
+      truncated = truncated or identity_page_truncated
+      matched_identities = list(
+          dict.fromkeys(candidate.identity for candidate in ambiguous)
       )
+      if len(matched_identities) >= 2:
+        raise AmbiguousSessionError(
+            candidates=ambiguous, population_truncated=truncated
+        )
+      if len(matched_identities) == 1 and not truncated:
+        identities = matched_identities
+      elif truncated:
+        raise ValueError(
+            "The identity/scope population exceeds the enumeration"
+            " bound; neither uniqueness nor absence can be proven."
+            " Add identity, experiment, or label pins to narrow the"
+            " lookup."
+        )
+      else:
+        raise ValueError("No candidates match the requested session.")
     identity = identities[0]
 
     params = [
@@ -1227,7 +1283,7 @@ class Client:
     # must verify them against the fetched population instead of
     # silently returning the whole identity (PR #371 review round 5,
     # P1-2).
-    self._verify_python_only_pins(selector, fetched_scopes, coverage)
+    self._verify_python_only_pins(selector, identity, fetched_scopes)
     timestamps = [s.timestamp for s in spans if s.timestamp]
     start = min(timestamps) if timestamps else None
     end = max(timestamps) if timestamps else None
@@ -1304,7 +1360,13 @@ class Client:
           ).result()
       ]
       if len(rows) > per_identity_limit:
+        # A truncated per-identity page cannot be classified soundly
+        # (its experiment/payload context may be split at the
+        # boundary); report truncation without emitting potentially
+        # manufactured retry candidates for it (PR #371 review round
+        # 6, P1-5).
         truncated = True
+        continue
       candidates = _candidates_matching_selector(
           _resolve_scope_candidates(rows), selector
       )
@@ -1314,39 +1376,32 @@ class Client:
   @staticmethod
   def _verify_python_only_pins(
       selector: TraceSelector,
+      identity: TraceIdentity,
       fetched_scopes: list,
-      coverage: Optional[tuple],
   ) -> None:
-    """Verify non-SQL-pushable pins against the fetched population.
+    """Verify the COMPLETE selector conjunctively against one scope.
 
-    Raises ValueError (not-found) when a pinned ``scope_signature``
-    or a JSONPath-unaddressable label pin matches none of the scopes
-    actually present; raises when the population is too large to
-    verify a signature pin at all (PR #371 review round 5, P1-2).
+    At least one fetched scope must satisfy EVERY selector pin
+    simultaneously — signature, all labels (addressable or not), and
+    the experiment pin including ``None`` — or the mixed read fails
+    not-found: a signature matching scope A while a label matches
+    scope B is no match at all (PR #371 review round 6, P1-2). The
+    verification runs over the materialized ``fetched_scopes``
+    regardless of whether the additive coverage metadata was omitted
+    for size (round 6, P2-10).
     """
-    unaddressable_pins = [
-        (key, value)
-        for key, value in (selector.custom_labels or ())
-        if _is_unaddressable_label_key(key)
-    ]
-    if selector.scope_signature is None and not unaddressable_pins:
-      return
-    if coverage is None:
-      raise ValueError(
-          "The fetched scope population is too large to verify"
-          " Python-only selector pins (scope_signature or"
-          " JSONPath-unaddressable labels); drop those pins or narrow"
-          " the selector."
-      )
-    if selector.scope_signature is not None and (
-        selector.scope_signature not in coverage
+    if (
+        selector.scope_signature is None
+        and not selector.custom_labels
+        and selector.experiment_id is UNSET
     ):
+      return
+    scope_candidates = [
+        ResolvedTraceSelector(identity=identity, scope=scope)
+        for scope in fetched_scopes
+    ]
+    if not _candidates_matching_selector(scope_candidates, selector):
       raise ValueError("No candidates match the requested session.")
-    for key, value in unaddressable_pins:
-      if not any(
-          scope.labels_dict.get(key) == value for scope in fetched_scopes
-      ):
-        raise ValueError("No candidates match the requested session.")
 
   def _fetch_identity_trace(
       self,
@@ -3224,6 +3279,11 @@ def _validated_identity_attr(name: str, value: Any) -> Optional[str]:
 
 _MAX_SCOPE_CANDIDATES = 64
 
+# Identity enumeration bound for mixed reads: identities are
+# row-uniform and few in live data; the cap-plus-one sentinel marks
+# larger populations as truncated.
+_MAX_IDENTITIES = 8
+
 
 def _candidate_sort_key(candidate: ResolvedTraceSelector) -> tuple:
   """Canonical, NULL-safe ordering for resolved candidates."""
@@ -3240,25 +3300,25 @@ def _candidate_sort_key(candidate: ResolvedTraceSelector) -> tuple:
   )
 
 
-def _scope_subgroups(
-    entries: list,
-) -> dict:
+def _scope_subgroups(entries: list) -> tuple[dict, list]:
   """Partition one identity's rows into experiment/scope subgroups.
 
   ``entries`` are ``(experiment_id, payload, item)`` triples,
-  mirroring the SQL row-scope semantics exactly:
+  mirroring the SQL row-scope semantics:
 
   * Distinct non-NULL experiments are separate subgroups.
-  * A NULL-experiment entry that CARRIES a tag payload is a genuine
-    NULL-experiment scope row and keeps its own NULL subgroup, so
-    ``TraceSelector(experiment_id=None)`` can retrieve that pass
-    (PR #371 review round 3, P1-5).
+  * A NULL-experiment entry that CARRIES a tag payload keeps its own
+    NULL subgroup (a genuine NULL-experiment scope).
   * An untagged NULL-experiment entry is shared conversation
-    infrastructure and is distributed into every subgroup.
-  * Within each subgroup, every DISTINCT tag payload is its own exact
-    scope (fail-closed pass splitting per the U1 ``scope_signature``
-    contract); untagged rows are shared into every scope of their
-    subgroup. Payload dedup is hash-keyed, not pairwise.
+    infrastructure. It is NOT expanded into every subgroup here —
+    the identity-level shared pool is returned separately so callers
+    attach it only to retained slots (PR #371 review round 6, P1-6:
+    eager expansion was O(experiments x shared_rows)).
+  * Untagged entries WITH an experiment stay local to that subgroup.
+
+  Returns ``(subgroups, identity_shared)`` where ``identity_shared``
+  is the list of untagged NULL-experiment ``(payload, item)`` pairs
+  shared by every subgroup of the identity.
   """
   non_null = sorted(
       {experiment for experiment, _, _ in entries if experiment is not None}
@@ -3267,23 +3327,36 @@ def _scope_subgroups(
       experiment is None and payload is not None
       for experiment, payload, _ in entries
   )
+  has_null_shared_rows = any(
+      experiment is None and payload is None
+      for experiment, payload, _ in entries
+  )
   keys: list = list(non_null)
   if has_null_scope_rows or not non_null:
     keys.append(None)
   subgroups: dict = {key: {"payloads": {}, "items": []} for key in keys}
+  identity_shared: list = []
   for experiment, payload, item in entries:
-    if experiment is not None:
-      targets = [experiment]
-    elif payload is not None:
-      targets = [None]
-    else:
-      targets = keys
-    for target in targets:
-      subgroups[target]["items"].append((payload, item))
-      if payload is not None:
-        signature = tuple(sorted(payload.items()))
-        subgroups[target]["payloads"].setdefault(signature, payload)
-  return subgroups
+    if experiment is None and payload is None:
+      identity_shared.append((payload, item))
+      continue
+    target = experiment if experiment is not None else None
+    if target not in subgroups:
+      continue
+    subgroups[target]["items"].append((payload, item))
+    if payload is not None:
+      signature = tuple(sorted(payload.items()))
+      subgroups[target]["payloads"].setdefault(signature, payload)
+  # A NULL subgroup that exists only because of shared rows (no
+  # non-NULL experiments at all) represents the identity's sole
+  # empty scope; mark it so candidate derivation still emits it.
+  if (
+      None in subgroups
+      and not subgroups[None]["items"]
+      and (not non_null and has_null_shared_rows)
+  ):
+    subgroups[None]["items"] = []  # empty own items; shared carries rows
+  return subgroups, identity_shared
 
 
 def _resolve_scope_candidates(rows: list[dict]) -> list[ResolvedTraceSelector]:
@@ -3322,8 +3395,17 @@ def _resolve_scope_candidates(rows: list[dict]) -> list[ResolvedTraceSelector]:
         user_id=user_id,
         root_agent_name=root_agent_name,
     )
-    for experiment, subgroup in _scope_subgroups(entries).items():
-      payload_options = list(subgroup["payloads"].values()) or [None]
+    subgroups, identity_shared = _scope_subgroups(entries)
+    for experiment, subgroup in subgroups.items():
+      payload_options = list(subgroup["payloads"].values())
+      if not payload_options:
+        # An empty-scope candidate exists when the subgroup has its
+        # own untagged rows, or when the identity consists solely of
+        # shared rows (no experiments anywhere).
+        if subgroup["items"] or (experiment is None and identity_shared):
+          payload_options = [None]
+        else:
+          continue
       for payload in payload_options:
         candidates.append(
             ResolvedTraceSelector(
@@ -3555,7 +3637,9 @@ def _build_traces_from_rows(
         (experiment, payload, span)
     )
 
-  # Phase 1: define slots; shared rows stay factored per subgroup.
+  # Phase 1: define slots; shared rows stay factored — subgroup-local
+  # untagged rows per subgroup, and untagged NULL-experiment rows in
+  # ONE identity-level pool (PR #371 review round 6, P1-6).
   slots: list[dict] = []
   for (sid, user_id, root_agent_name), entries in identity_groups.items():
     identity = None
@@ -3568,32 +3652,53 @@ def _build_traces_from_rows(
         )
       except (TypeError, ValueError):
         identity = None
-    for experiment, subgroup in _scope_subgroups(entries).items():
+    indexed_entries = list(enumerate(entries))
+    subgroups, identity_shared_raw = _scope_subgroups(
+        [
+            (exp, payload, (index, span))
+            for index, (exp, payload, span) in indexed_entries
+        ]
+    )
+    identity_shared = [item for _, item in identity_shared_raw]
+    shared_max_ts = None
+    shared_trace_ids = []
+    for _, span in identity_shared:
+      if span.trace_id:
+        shared_trace_ids.append(span.trace_id)
+      if span.timestamp is not None and (
+          shared_max_ts is None or span.timestamp > shared_max_ts
+      ):
+        shared_max_ts = span.timestamp
+    identity_slots: list[dict] = []
+    for experiment, subgroup in subgroups.items():
       items = subgroup["items"]
-      shared = {
-          "spans": [
-              (index, span)
-              for index, (payload, span) in enumerate(items)
-              if payload is None
-          ],
-      }
-      shared_max_ts = None
-      shared_trace_ids = []
-      for _, span in shared["spans"]:
+      local_shared = [item for payload, item in items if payload is None]
+      local_shared_max = None
+      local_shared_ids = []
+      for _, span in local_shared:
         if span.trace_id:
-          shared_trace_ids.append(span.trace_id)
+          local_shared_ids.append(span.trace_id)
         if span.timestamp is not None and (
-            shared_max_ts is None or span.timestamp > shared_max_ts
+            local_shared_max is None or span.timestamp > local_shared_max
         ):
-          shared_max_ts = span.timestamp
+          local_shared_max = span.timestamp
       payload_items = list(subgroup["payloads"].items())
-      scope_options = payload_items or [(None, None)]
+      scope_options = payload_items
+      if not scope_options:
+        if items or (experiment is None and identity_shared):
+          scope_options = [(None, None)]
+        else:
+          continue
       slot_index: dict = {}
-      subgroup_slot_count = len(scope_options)
       for signature_key, payload in scope_options:
         scope = None
         if identity is not None:
           scope = TraceScope(experiment_id=experiment, custom_labels=payload)
+        base_ts = shared_max_ts
+        if local_shared_max is not None and (
+            base_ts is None or local_shared_max > base_ts
+        ):
+          base_ts = local_shared_max
         slot = {
             "identity": identity,
             "scope": scope,
@@ -3606,19 +3711,23 @@ def _build_traces_from_rows(
             "signature": scope.scope_signature if scope is not None else "",
             "own": [],
             "own_trace_ids": [],
-            "shared": shared,
-            "shared_trace_ids": shared_trace_ids,
-            "sibling_count": subgroup_slot_count,
-            "max_ts": shared_max_ts,
+            "local_shared": local_shared,
+            "local_shared_ids": local_shared_ids,
+            "identity_shared": identity_shared,
+            "identity_shared_ids": shared_trace_ids,
+            "identity_slots": identity_slots,
+            "max_ts": base_ts,
         }
         slot_index[signature_key] = slot
+        identity_slots.append(slot)
         slots.append(slot)
-      for index, (payload, span) in enumerate(items):
+      for payload, item in items:
         if payload is None:
           continue
         slot = slot_index.get(tuple(sorted(payload.items())))
         if slot is None:
           continue
+        index, span = item
         slot["own"].append((index, span))
         if span.trace_id:
           slot["own_trace_ids"].append(span.trace_id)
@@ -3629,28 +3738,35 @@ def _build_traces_from_rows(
 
   # Phase 2: scope-filter, rank, and retain BEFORE attaching shared
   # rows — the caller's scope pins drop non-matching slots here so
-  # the retained count is both correct and bounded (PR #371 review
-  # round 5, P1-4/P1-7).
-  slots = [slot for slot in slots if slot["own"] or slot["shared"]["spans"]]
+  # the retained count is both correct and bounded.
+  slots = [
+      slot
+      for slot in slots
+      if slot["own"] or slot["local_shared"] or slot["identity_shared"]
+  ]
   if scope_predicate is not None:
     slots = [slot for slot in slots if scope_predicate(slot["scope"])]
   slots.sort(key=_slot_sort_key)
   if max_traces is not None:
     slots = slots[:max_traces]
 
-  # Phase 3: materialize retained slots only; deep copies only where
-  # a span lands in more than one RETAINED slot.
+  # Phase 3: materialize retained slots only; the identity-level
+  # shared pool is attached here for the first time, and deep copies
+  # happen only where a span lands in more than one RETAINED slot.
   destination_counts: dict[int, int] = {}
   for slot in slots:
     for _, span in slot["own"]:
       destination_counts[id(span)] = destination_counts.get(id(span), 0) + 1
-    for _, span in slot["shared"]["spans"]:
+    for _, span in slot["local_shared"]:
+      destination_counts[id(span)] = destination_counts.get(id(span), 0) + 1
+    for _, span in slot["identity_shared"]:
       destination_counts[id(span)] = destination_counts.get(id(span), 0) + 1
   seen: set[int] = set()
   traces: list[Trace] = []
   for slot in slots:
     ordered = sorted(
-        slot["own"] + slot["shared"]["spans"], key=lambda pair: pair[0]
+        slot["own"] + slot["local_shared"] + slot["identity_shared"],
+        key=lambda pair: pair[0],
     )
     spans = []
     for _, span in ordered:
@@ -3669,13 +3785,18 @@ def _build_traces_from_rows(
     total_ms = None
     if start and end:
       total_ms = (end - start).total_seconds() * 1000
-    # Per-scope trace id (PR #371 review round 5, P2-9): the scope's
-    # OWN rows first; a shared row's id is trusted only when the
-    # subgroup has a single scope (no sibling whose id it could be).
+    # Per-scope trace id (PR #371 review round 6, P2-8): the scope's
+    # OWN rows first; a shared row's id is trusted only when this
+    # slot is the identity's ONLY slot — shared rows are distributed
+    # across every subgroup, so subgroup-local sibling counting would
+    # let two experiments inherit the same id.
+    identity_slot_total = len(slot["identity_slots"])
     if slot["own_trace_ids"]:
       trace_id = slot["own_trace_ids"][0]
-    elif slot["sibling_count"] == 1 and slot["shared_trace_ids"]:
-      trace_id = slot["shared_trace_ids"][0]
+    elif identity_slot_total == 1 and (
+        slot["local_shared_ids"] or slot["identity_shared_ids"]
+    ):
+      trace_id = (slot["local_shared_ids"] + slot["identity_shared_ids"])[0]
     else:
       trace_id = slot["session_id"]
     identity = slot["identity"]
