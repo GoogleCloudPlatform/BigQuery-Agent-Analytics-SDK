@@ -194,7 +194,8 @@ JOIN trace_sessions ts
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM ts.root_agent_name
 WHERE {row_where}
-ORDER BY e.session_id, e.timestamp ASC, e.span_id
+ORDER BY e.session_id, e.timestamp ASC, e.span_id, e.invocation_id,
+  e.event_type
 """
 
 _VERIFY_SCHEMA_QUERY = """\
@@ -293,6 +294,31 @@ WHERE session_id = @session_id{identity_pins}
 GROUP BY 1, 2, 3, 4, 5
 ORDER BY session_id, user_id, root_agent_name, experiment_id, tag_payload
 LIMIT @candidate_limit
+"""
+
+# Batched per-identity candidate discovery (PR #371 review round 7,
+# P2): one query enumerates a bounded scope page for EVERY ambiguous
+# identity via a window partition, replacing sequential per-identity
+# scans.
+_RESOLVE_CANDIDATES_BATCH_QUERY = """\
+SELECT
+  session_id,
+  user_id,
+  TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name'))
+      AS root_agent_name,
+  TO_JSON_STRING(JSON_QUERY(attributes, '$.experiment_id'))
+      AS experiment_id,
+  TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')) AS tag_payload,
+  COUNT(*) AS row_count
+FROM `{project}.{dataset}.{table}`
+WHERE session_id = @session_id{identity_pins}
+  AND ({identity_disjunction})
+GROUP BY 1, 2, 3, 4, 5
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY user_id, root_agent_name
+  ORDER BY experiment_id, tag_payload
+) <= @per_identity_capped
+ORDER BY session_id, user_id, root_agent_name, experiment_id, tag_payload
 """
 
 # Bounded intrinsic-identity discovery for allow_mixed_scope reads:
@@ -989,29 +1015,36 @@ class Client:
       raise ValueError(f"No events found for session_id={selector.session_id}")
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
     if truncated:
-      # The SQL limit truncates grouped rows, not whole identities:
-      # the boundary identity's classification context may be
-      # incomplete (e.g. its shared NULL row made the page but its
-      # experiment row did not), which would manufacture a
-      # nonexistent scope into retry payloads (PR #371 review round
-      # 6, P1-5). Exclude the boundary identity from classification;
-      # truncation reporting still covers it.
+      # Sound boundary handling (PR #371 review round 7, P1-1/P1-2):
+      # tagged rows independently prove their scope exists, so they
+      # stay classifiable even for the boundary identity. Only
+      # context-DEPENDENT classifications — untagged rows, whose
+      # shared-vs-empty-scope meaning needs the identity's full
+      # experiment/payload context — are excluded for the boundary
+      # identity, whose page may have split that context. The
+      # boundary key is canonicalized with the same parsers candidate
+      # resolution uses, so raw missing vs explicit-JSON-null
+      # encodings cannot split one semantic identity.
       boundary = candidate_rows[-1]
-      boundary_key = (
-          boundary.get("session_id"),
-          boundary.get("user_id"),
-          boundary.get("root_agent_name"),
-      )
-      candidate_rows = [
-          row
-          for row in candidate_rows
-          if (
-              row.get("session_id"),
-              row.get("user_id"),
-              row.get("root_agent_name"),
-          )
-          != boundary_key
-      ]
+
+      def _canonical_key(row: dict) -> tuple:
+        return (
+            row.get("session_id"),
+            _validated_identity_attr("user_id", row.get("user_id")),
+            _parse_identity_attr_json(
+                "root_agent_name", row.get("root_agent_name")
+            ),
+        )
+
+      boundary_key = _canonical_key(boundary)
+      kept_rows = []
+      for row in candidate_rows:
+        if _canonical_key(row) == boundary_key:
+          payload = _parse_tag_payload(row.get("tag_payload"))
+          if payload is None:
+            continue  # context-dependent: unsound on a split page
+        kept_rows.append(row)
+      candidate_rows = kept_rows
     candidates = _resolve_scope_candidates(candidate_rows)
     matching = _candidates_matching_selector(candidates, selector)
 
@@ -1020,7 +1053,12 @@ class Client:
     # prove neither uniqueness (another match may sort later) nor
     # absence — single-match and no-match truncated pages both fail
     # with the enumeration-bound error.
-    if len(matching) == 1 and not truncated:
+    if len(matching) == 1 and (not truncated or allow_mixed_scope):
+      # A single sound match resolves exactly. Under truncation the
+      # strict path refuses (uniqueness unprovable), but a caller who
+      # opted into allow_mixed_scope accepts best-effort — and the
+      # selected scope beats a mixed read full of sibling scopes
+      # (PR #371 review round 7, P1-1).
       return self._fetch_identity_trace(
           matching[0].identity, resolved_scope=matching[0]
       )
@@ -1308,67 +1346,82 @@ class Client:
   ) -> tuple[list, bool]:
     """Selector-constrained candidates covering EVERY ambiguous identity.
 
-    One bounded discovery query runs per identity (identities are
-    capped by the identity query), so a shared global page cannot
-    omit an entire identity, and Python selector matching is applied
-    so an excluded pass is never advertised as an executable retry
-    (PR #371 review round 5, P1-6). Returns the candidates and
-    whether any per-identity page was truncated.
+    ONE batched query enumerates a bounded scope page per identity
+    via a window partition (PR #371 review round 7, P2), so no
+    identity is starved by a shared global page and no sequential
+    per-identity scans run. Python selector matching is applied so an
+    excluded pass is never advertised as an executable retry; a
+    truncated per-identity page reports truncation without emitting
+    potentially manufactured candidates for that identity.
     """
     per_identity_limit = max(
         2, _MAX_SCOPE_CANDIDATES // max(1, len(identities))
     )
+    pushdown, pin_params = self._selector_pushdown_pins(selector)
+    disjunction_terms = []
+    identity_params = []
+    for index, identity in enumerate(identities):
+      disjunction_terms.append(
+          f"(user_id IS NOT DISTINCT FROM @batch_user_{index}"
+          " AND JSON_VALUE(attributes, '$.root_agent_name')"
+          f" IS NOT DISTINCT FROM @batch_root_{index})"
+      )
+      identity_params.append(
+          bigquery.ScalarQueryParameter(
+              f"batch_user_{index}", "STRING", identity.user_id
+          )
+      )
+      identity_params.append(
+          bigquery.ScalarQueryParameter(
+              f"batch_root_{index}", "STRING", identity.root_agent_name
+          )
+      )
+    resolve_query = _RESOLVE_CANDIDATES_BATCH_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=self.table_id,
+        identity_pins=pushdown,
+        identity_disjunction=" OR ".join(disjunction_terms),
+    )
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter(
+                "session_id", "STRING", selector.session_id
+            ),
+            bigquery.ScalarQueryParameter(
+                "per_identity_capped", "INT64", per_identity_limit + 1
+            ),
+            *identity_params,
+            *pin_params,
+        ]
+    )
+    job_config = with_sdk_labels(job_config, feature="trace-read")
+    rows = [
+        dict(row)
+        for row in self.bq_client.query(
+            resolve_query, job_config=job_config
+        ).result()
+    ]
+    rows_by_identity: dict[tuple, list] = {}
+    for row in rows:
+      key = (
+          row.get("session_id"),
+          _validated_identity_attr("user_id", row.get("user_id")),
+          _parse_identity_attr_json(
+              "root_agent_name", row.get("root_agent_name")
+          ),
+      )
+      rows_by_identity.setdefault(key, []).append(row)
     all_candidates: list = []
     truncated = False
-    for identity in identities:
-      pushdown, pin_params = self._selector_pushdown_pins(selector)
-      pushdown += "\n  AND user_id IS NOT DISTINCT FROM @identity_user_id"
-      pushdown += (
-          "\n  AND JSON_VALUE(attributes, '$.root_agent_name')"
-          " IS NOT DISTINCT FROM @identity_root_agent_name"
-      )
-      resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
-          project=self.project_id,
-          dataset=self.dataset_id,
-          table=self.table_id,
-          identity_pins=pushdown,
-      )
-      job_config = bigquery.QueryJobConfig(
-          query_parameters=[
-              bigquery.ScalarQueryParameter(
-                  "session_id", "STRING", selector.session_id
-              ),
-              bigquery.ScalarQueryParameter(
-                  "candidate_limit", "INT64", per_identity_limit + 1
-              ),
-              bigquery.ScalarQueryParameter(
-                  "identity_user_id", "STRING", identity.user_id
-              ),
-              bigquery.ScalarQueryParameter(
-                  "identity_root_agent_name",
-                  "STRING",
-                  identity.root_agent_name,
-              ),
-              *pin_params,
-          ]
-      )
-      job_config = with_sdk_labels(job_config, feature="trace-read")
-      rows = [
-          dict(row)
-          for row in self.bq_client.query(
-              resolve_query, job_config=job_config
-          ).result()
-      ]
-      if len(rows) > per_identity_limit:
-        # A truncated per-identity page cannot be classified soundly
-        # (its experiment/payload context may be split at the
-        # boundary); report truncation without emitting potentially
-        # manufactured retry candidates for it (PR #371 review round
-        # 6, P1-5).
+    for key, identity_rows in rows_by_identity.items():
+      if len(identity_rows) > per_identity_limit:
+        # A truncated per-identity page cannot be classified soundly;
+        # report truncation without emitting manufactured candidates.
         truncated = True
         continue
       candidates = _candidates_matching_selector(
-          _resolve_scope_candidates(rows), selector
+          _resolve_scope_candidates(identity_rows), selector
       )
       all_candidates.extend(candidates[:per_identity_limit])
     return all_candidates, truncated
@@ -1454,12 +1507,25 @@ class Client:
     )
     if not results:
       raise ValueError(f"No events found for session_id={identity.session_id}")
-    traces = _build_traces_from_rows(results)
+    # Materialize ONLY the resolved scope (PR #371 review round 7,
+    # P1-4): without the predicate and bound, every sibling scope
+    # admitted by the row fetch would be built and its shared rows
+    # deep-copied just to be discarded.
+    resolved_signature = resolved_scope.scope_signature
+    traces = _build_traces_from_rows(
+        results,
+        max_traces=1,
+        scope_predicate=(
+            lambda scope: scope is not None
+            and scope.scope_signature == resolved_signature
+        ),
+        population_complete=False,
+    )
     for trace in traces:
       if (
           trace.identity == identity
           and trace.scope is not None
-          and trace.scope.scope_signature == resolved_scope.scope_signature
+          and trace.scope.scope_signature == resolved_signature
       ):
         return trace
     # Fail closed: never substitute a different scope for the one
@@ -1482,7 +1548,12 @@ class Client:
             recent traces (default limit 100).
 
     Returns:
-        List of Trace objects, one per session.
+        List of Trace objects, one per resolved identity AND scope
+        (issue #359): a session id reused across users, root agents,
+        or evaluation passes yields multiple Trace objects, each
+        carrying ``identity``/``scope``. Scope-filtered listings may
+        over-fetch identity anchors to fill the limit with valid
+        scopes; the limit bounds the returned traces.
     """
     # One fully detached snapshot feeds the fragments, parameters,
     # AND the post-query limit, so concurrent filter mutation cannot
@@ -1499,24 +1570,40 @@ class Client:
         where=where,
         row_where=row_where,
     )
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=params,
-    )
-    job_config = with_sdk_labels(job_config, feature="trace-read")
-
-    results = list(self.bq_client.query(query, job_config=job_config).result())
-    # The SQL LIMIT bounds identity anchors; scope splitting can
-    # expand one identity into several traces, so the caller-facing
-    # limit is re-applied after expansion, deterministically ordered.
-    # Scope pins re-apply at slot level: identity-anchored expansion
-    # can rebuild sibling scopes that never matched the filter, and
-    # filtering before retention keeps the limit correct AND bounds
-    # materialization (PR #371 review round 5, P1-4/P1-7).
-    traces = _build_traces_from_rows(
-        results,
-        max_traces=filt.limit,
-        scope_predicate=_filter_scope_predicate(filt),
-    )
+    scope_predicate = _filter_scope_predicate(filt)
+    population_complete = row_where == "TRUE" and scope_predicate is None
+    # Scope-filtered listings can reject anchored identities whose
+    # scopes never matched (e.g. an SQL_NULL experiment filter over an
+    # identity whose NULL rows are shared infrastructure), so a plain
+    # SQL LIMIT could starve genuine older results (PR #371 review
+    # round 7, P1-3). Escalate the anchor limit until enough valid
+    # scopes are classified or the anchors are exhausted.
+    sql_limit = filt.limit
+    attempts = 3 if scope_predicate is not None else 1
+    traces: list[Trace] = []
+    for _ in range(attempts):
+      attempt_params = [
+          (
+              bigquery.ScalarQueryParameter("trace_limit", "INT64", sql_limit)
+              if param.name == "trace_limit"
+              else param
+          )
+          for param in params
+      ]
+      job_config = bigquery.QueryJobConfig(query_parameters=attempt_params)
+      job_config = with_sdk_labels(job_config, feature="trace-read")
+      results = list(
+          self.bq_client.query(query, job_config=job_config).result()
+      )
+      traces = _build_traces_from_rows(
+          results,
+          max_traces=filt.limit,
+          scope_predicate=scope_predicate,
+          population_complete=population_complete,
+      )
+      if len(traces) >= filt.limit or not results or sql_limit >= 4096:
+        break
+      sql_limit = min(sql_limit * 8, 4096)
     return _ordered_limited_traces(traces, filt.limit)
 
   # -------------------------------------------------------------- #
@@ -1919,14 +2006,16 @@ class Client:
     # sibling scopes that never matched the filter must not be
     # judged (PR #371 review rounds 3-5). Slot-level filtering keeps
     # the limit correct and bounds materialization.
+    judge_predicate = (
+        _filter_scope_predicate(trace_filter)
+        if trace_filter is not None
+        else None
+    )
     traces = _build_traces_from_rows(
         results,
         max_traces=limit,
-        scope_predicate=(
-            _filter_scope_predicate(trace_filter)
-            if trace_filter is not None
-            else None
-        ),
+        scope_predicate=judge_predicate,
+        population_complete=(row_where == "TRUE" and judge_predicate is None),
     )
     traces = _ordered_limited_traces(traces, limit)
 
@@ -3597,6 +3686,7 @@ def _build_traces_from_rows(
     results: list,
     max_traces: Optional[int] = None,
     scope_predicate: Optional[Any] = None,
+    population_complete: bool = True,
 ) -> list[Trace]:
   """Groups BigQuery result rows into Trace objects.
 
@@ -3621,7 +3711,15 @@ def _build_traces_from_rows(
     row_dict = dict(row)
     sid = row_dict.get("session_id", "unknown")
     span = Span.from_bigquery_row(row_dict)
-    attributes = span.attributes or {}
+    attributes = span.attributes
+    if attributes is None:
+      attributes = {}
+    elif not isinstance(attributes, dict):
+      # A falsey non-object (e.g. []) must not silently become an
+      # empty valid scope (PR #371 review round 7, P2).
+      raise ValueError(
+          "Persisted attributes must be a JSON object (contents" " redacted)."
+      )
     identity_key = (
         sid,
         _validated_identity_attr("user_id", row_dict.get("user_id")),
@@ -3793,9 +3891,16 @@ def _build_traces_from_rows(
     identity_slot_total = len(slot["identity_slots"])
     if slot["own_trace_ids"]:
       trace_id = slot["own_trace_ids"][0]
-    elif identity_slot_total == 1 and (
-        slot["local_shared_ids"] or slot["identity_shared_ids"]
+    elif (
+        population_complete
+        and identity_slot_total == 1
+        and (slot["local_shared_ids"] or slot["identity_shared_ids"])
     ):
+      # A shared row's id is trusted only when the fetched rows are
+      # the identity's COMPLETE population — after scope prefiltering
+      # the single visible slot may have invisible siblings that the
+      # shared row's id actually belongs to (PR #371 review round 7,
+      # P1-5).
       trace_id = (slot["local_shared_ids"] + slot["identity_shared_ids"])[0]
     else:
       trace_id = slot["session_id"]

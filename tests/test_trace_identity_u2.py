@@ -1331,17 +1331,13 @@ class TestRound4Regressions:
             {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
         ),
     ]
-    # Per-identity bounded discovery (round 5, P1-6): one query per
-    # ambiguous identity.
-    alice_batch = [
+    # Batched per-identity discovery (round 7, P2): ONE query
+    # enumerates every ambiguous identity's scope page.
+    batch = [
         _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
-    ]
-    bob_batch = [
         _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
     ]
-    client, _ = self._client(
-        [candidate_batch, identity_batch, alice_batch, bob_batch]
-    )
+    client, mock_bq = self._client([candidate_batch, identity_batch, batch])
     with pytest.raises(AmbiguousSessionError) as exc_info:
       client.get_session_trace("sess-1", allow_mixed_scope=True)
     payloads = [
@@ -1350,6 +1346,10 @@ class TestRound4Regressions:
     ]
     assert {"run": "v0"} in payloads
     assert {"run": "v1"} in payloads
+    # One batched query, not per-identity scans (round 7, P2).
+    batch_query = mock_bq.query.call_args[0][0]
+    assert "QUALIFY ROW_NUMBER() OVER" in batch_query
+    assert mock_bq.query.call_count == 3
 
   def test_mixed_fetch_revalidates_row_identity(self):
     # P2-8: a fetched row not matching the resolved identity fails
@@ -1565,7 +1565,7 @@ class TestRound5Regressions:
             {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
         ),
     ]
-    alice_batch = [
+    batch = [
         _mock_row(
             _candidate_row(
                 user_id="alice", tag_payload='{"team": "x", "s": "1"}'
@@ -1574,15 +1574,11 @@ class TestRound5Regressions:
         _mock_row(
             _candidate_row(user_id="alice", tag_payload='{"excluded": "y"}')
         ),
-    ]
-    bob_batch = [
         _mock_row(
             _candidate_row(user_id="bob", tag_payload='{"team": "x", "s": "3"}')
         ),
     ]
-    client, _ = self._client(
-        [candidate_batch, identity_batch, alice_batch, bob_batch]
-    )
+    client, _ = self._client([candidate_batch, identity_batch, batch])
     with pytest.raises(AmbiguousSessionError) as exc_info:
       client.get_session_trace(
           "sess-1", custom_labels={"team": "x"}, allow_mixed_scope=True
@@ -1833,13 +1829,16 @@ class TestRound6Regressions:
     assert filt.event_types == ["A"]
 
   def test_signature_pin_verified_beyond_coverage_bound(self):
-    # P2-10: with >64 fetched scopes, a valid signature pin resolves
-    # against the materialized scope list even though coverage
-    # metadata is omitted.
+    # P2-10 (round 6) + P1-1 flag exactness (round 7): when the
+    # candidate page misses the target scope entirely, the mixed
+    # read's conjunctive verification over the MATERIALIZED fetched
+    # scopes still finds it, even though coverage metadata is omitted
+    # for size.
     from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
 
     n = _MAX_SCOPE_CANDIDATES + 1
-    target_sig = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    target_sig = TraceScope(custom_labels={"zz": "target"}).scope_signature
+    # Page contains only k-scopes; the zz-scope sorts beyond it.
     candidate_batch = [
         _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
         for i in range(n)
@@ -1856,10 +1855,233 @@ class TestRound6Regressions:
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"k": f"v{i}"}, span_id=f"s{i}"))
         for i in range(n)
-    ]
+    ] + [_mock_row(_event_row(custom_tags={"zz": "target"}, span_id="tz"))]
     client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
     trace = client.get_session_trace(
         "sess-1", scope_signature=target_sig, allow_mixed_scope=True
     )
     assert trace.scope_coverage is None  # metadata omitted for size
     assert trace.identity.user_id == "alice"  # but the read verified
+
+  def test_flag_with_unique_truncated_match_resolves_exactly(self):
+    # Round 7 P1-1: exact signature + allow_mixed_scope returns THE
+    # selected scope, never a mixed trace of sibling scopes.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    n = _MAX_SCOPE_CANDIDATES + 1
+    target_sig = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
+        for i in range(n)
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
+    ]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace(
+        "sess-1", scope_signature=target_sig, allow_mixed_scope=True
+    )
+    assert trace.scope is not None
+    assert trace.scope.labels_dict == {"k": "v0"}
+    assert [s.span_id for s in trace.spans] == ["p0"]
+
+
+class TestRound7Regressions:
+  """PR #371 review round 7 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_single_identity_truncated_page_proves_ambiguity(self):
+    # P1-1: 65 tagged scopes under ONE identity — the tagged rows
+    # independently prove their scopes, so the typed ambiguity fires
+    # (marked truncated) instead of a plain ValueError.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    client, _ = self._client([candidate_batch])
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    assert exc_info.value.population_truncated is True
+    assert len(exc_info.value.candidates) >= 2
+
+  def test_boundary_key_canonicalized(self):
+    # P1-2: raw missing vs explicit-JSON-null root encodings are ONE
+    # semantic identity; the boundary exclusion must not split them
+    # and fabricate an empty-scope retry for the partial half.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(user_id="alice", tag_payload=f'{{"k": "v{i}"}}')
+        )
+        for i in range(_MAX_SCOPE_CANDIDATES - 1)
+    ] + [
+        # Bob's identity split across encodings: raw missing root on
+        # one row, explicit JSON null on the boundary row. Both are
+        # untagged — context-dependent — and must BOTH be excluded.
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "bob",
+                "root_agent_name": None,
+                "experiment_id": '"e1"',
+                "tag_payload": None,
+                "row_count": 1,
+            }
+        ),
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "bob",
+                "root_agent_name": "null",
+                "experiment_id": None,
+                "tag_payload": None,
+                "row_count": 1,
+            }
+        ),
+    ]
+    client, _ = self._client([candidate_batch])
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    payload = exc_info.value.to_dict()
+    bob_candidates = [
+        c for c in payload["candidates"] if c["selector"]["user_id"] == "bob"
+    ]
+    assert bob_candidates == []  # no fabricated empty-scope retry
+
+  def test_flag_with_unique_match_returns_selected_scope(self):
+    # P1-1 second shape: exact signature + allow_mixed_scope under
+    # truncation returns THE selected scope (covered above in
+    # test_flag_with_unique_truncated_match_resolves_exactly); here
+    # the non-truncated variant sanity-checks precedence.
+    target_sig = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"k": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"k": "v1"}')),
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
+    ]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace(
+        "sess-1", scope_signature=target_sig, allow_mixed_scope=True
+    )
+    assert trace.scope.labels_dict == {"k": "v0"}
+
+  def test_singular_fetch_materializes_only_resolved_scope(self):
+    # P1-4: sibling scopes admitted by the row fetch are not built —
+    # shared rows in the returned trace are original objects (single
+    # retained destination means no deep copies were made).
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
+        _mock_row(_event_row(span_id="shared")),
+    ]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace("sess-1")
+    assert {s.span_id for s in trace.spans} == {"p0", "shared"}
+    shared = next(s for s in trace.spans if s.span_id == "shared")
+    assert not shared.children  # untouched original
+
+  def test_prefiltered_read_does_not_trust_shared_id(self):
+    # P1-5: a scope-prefiltered singular read must not inherit a
+    # shared row's trace id — the invisible sibling may own it.
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    fetch_batch = [
+        _mock_row(
+            dict(
+                _event_row(custom_tags={"run": "v0"}, span_id="p0"),
+                trace_id=None,
+            )
+        ),
+        _mock_row(_event_row(span_id="shared", trace_id="tr-sibling")),
+    ]
+    client, _ = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace("sess-1", custom_labels={"run": "v0"})
+    assert trace.trace_id == "sess-1"  # session fallback, not tr-sibling
+
+  def test_non_object_attributes_fail_closed(self):
+    # P2: a falsey non-object attributes value ([]) must not become
+    # a valid empty scope.
+    row = _event_row(span_id="bad")
+    row["attributes"] = "[]"
+    with pytest.raises(ValueError, match="JSON object"):
+      _build_traces_from_rows([_mock_row(row)])
+
+  def test_list_query_has_full_tie_breakers(self):
+    from bigquery_agent_analytics.client import _LIST_TRACES_QUERY
+
+    assert "e.span_id, e.invocation_id," in _LIST_TRACES_QUERY
+    assert "e.event_type" in _LIST_TRACES_QUERY
+
+  def test_scope_filtered_listing_escalates_anchor_limit(self):
+    # P1-3: when the first page's identities all classify to invalid
+    # scopes, the anchor limit escalates instead of starving results.
+    from unittest.mock import MagicMock
+
+    from bigquery_agent_analytics.trace import SQL_NULL
+
+    # First attempt: only an e1 identity with a shared NULL row
+    # (manufactured NULL scope rejected). Second attempt: includes
+    # the older genuine NULL-scope identity.
+    first_rows = [
+        _mock_row(_event_row(experiment_id="e1", span_id="a")),
+        _mock_row(_event_row(span_id="sharednull")),
+    ]
+    second_rows = first_rows + [
+        _mock_row(
+            _event_row(
+                session_id="older",
+                custom_tags={"run": "v9"},
+                span_id="genuine",
+            )
+        ),
+    ]
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in [first_rows, second_rows]:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    traces = client.list_traces(TraceFilter(experiment_id=SQL_NULL, limit=1))
+    assert len(traces) == 1
+    assert traces[0].session_id == "older"
+    assert mock_bq.query.call_count == 2
+    second_params = {
+        p.name: p.value
+        for p in mock_bq.query.call_args[1]["job_config"].query_parameters
+    }
+    assert second_params["trace_limit"] == 8  # escalated from 1

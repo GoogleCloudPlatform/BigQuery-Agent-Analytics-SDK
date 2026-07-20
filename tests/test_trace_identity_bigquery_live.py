@@ -174,56 +174,64 @@ def collision_dataset(bq_client):
   dataset.location = os.environ.get("BQAA_LIVE_BQ_LOCATION", "US")
   bq_client.create_dataset(dataset)
   table = f"{project}.{dataset_id}.agent_events"
-  bq_client.query(
-      f"""
-      CREATE TABLE `{table}` (
-        timestamp TIMESTAMP, event_type STRING, agent STRING,
-        session_id STRING, invocation_id STRING, user_id STRING,
-        trace_id STRING, span_id STRING, parent_span_id STRING,
-        content JSON, content_parts ARRAY<STRUCT<mime_type STRING>>,
-        attributes JSON, latency_ms JSON, status STRING,
-        error_message STRING, is_truncated BOOL
-      )
-  """
-  ).result()
-  bq_client.query(
-      f"""
-      INSERT INTO `{table}`
-        (timestamp, event_type, agent, session_id, user_id, trace_id,
-         span_id, content, attributes, status)
-      VALUES
-        -- collide: alice vs bob
-        ('2026-07-01 10:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
-         'alice', 'tr-a', 'a1', JSON '{{}}', JSON '{{}}', 'OK'),
-        ('2026-07-01 10:00:01', 'LLM_RESPONSE', 'a', 'collide',
-         'alice', 'tr-a', 'a2', JSON '{{}}', JSON '{{}}', 'OK'),
-        ('2026-07-01 11:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
-         'bob', 'tr-b', 'b1', JSON '{{}}', JSON '{{}}', 'OK'),
-        -- nulls: NULL identity vs fully set identity
-        ('2026-07-01 12:00:00', 'LLM_RESPONSE', 'a', 'nulls',
-         NULL, 'tr-n', 'n1', JSON '{{}}', JSON '{{}}', 'OK'),
-        ('2026-07-01 12:00:01', 'LLM_RESPONSE', 'a', 'nulls',
-         'carol', 'tr-c', 'c1', JSON '{{}}',
-         JSON '{{"root_agent_name": "rooty"}}', 'OK'),
-        -- passes: v0 rows, v1 rows, enrichment, shared untagged
-        ('2026-07-01 13:00:00', 'LLM_RESPONSE', 'a', 'passes',
-         'eve', 'tr-p', 'p0', JSON '{{}}',
-         JSON '{{"custom_tags": {{"run": "v0"}}}}', 'OK'),
-        ('2026-07-01 13:00:01', 'LLM_RESPONSE', 'a', 'passes',
-         'eve', 'tr-p', 'p0e', JSON '{{}}',
-         JSON '{{"custom_tags": {{"run": "v0", "subagent_id": "sx"}}}}',
-         'OK'),
-        ('2026-07-01 13:00:02', 'LLM_RESPONSE', 'a', 'passes',
-         'eve', 'tr-p', 'p1', JSON '{{}}',
-         JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
-        ('2026-07-01 13:00:03', 'USER_MESSAGE_RECEIVED', 'a', 'passes',
-         'eve', 'tr-p', 'shared', JSON '{{}}', JSON '{{}}', 'OK'),
-        -- foreign-tagged row: tags present but no 'run' key (P1-1)
-        ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
-         'eve', 'tr-p', 'foreign', JSON '{{}}',
-         JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK')
-  """
-  ).result()
+  # Cleanup must survive setup failure: any exception below would
+  # otherwise leak the scratch dataset (PR #371 review round 7, P3).
+  try:
+    bq_client.query(
+        f"""
+        CREATE TABLE `{table}` (
+          timestamp TIMESTAMP, event_type STRING, agent STRING,
+          session_id STRING, invocation_id STRING, user_id STRING,
+          trace_id STRING, span_id STRING, parent_span_id STRING,
+          content JSON, content_parts ARRAY<STRUCT<mime_type STRING>>,
+          attributes JSON, latency_ms JSON, status STRING,
+          error_message STRING, is_truncated BOOL
+        )
+    """
+    ).result()
+    bq_client.query(
+        f"""
+        INSERT INTO `{table}`
+          (timestamp, event_type, agent, session_id, user_id, trace_id,
+           span_id, content, attributes, status)
+        VALUES
+          -- collide: alice vs bob
+          ('2026-07-01 10:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
+           'alice', 'tr-a', 'a1', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 10:00:01', 'LLM_RESPONSE', 'a', 'collide',
+           'alice', 'tr-a', 'a2', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 11:00:00', 'USER_MESSAGE_RECEIVED', 'a', 'collide',
+           'bob', 'tr-b', 'b1', JSON '{{}}', JSON '{{}}', 'OK'),
+          -- nulls: NULL identity vs fully set identity
+          ('2026-07-01 12:00:00', 'LLM_RESPONSE', 'a', 'nulls',
+           NULL, 'tr-n', 'n1', JSON '{{}}', JSON '{{}}', 'OK'),
+          ('2026-07-01 12:00:01', 'LLM_RESPONSE', 'a', 'nulls',
+           'carol', 'tr-c', 'c1', JSON '{{}}',
+           JSON '{{"root_agent_name": "rooty"}}', 'OK'),
+          -- passes: v0 rows, v1 rows, enrichment, shared untagged
+          ('2026-07-01 13:00:00', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p0', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0"}}}}', 'OK'),
+          ('2026-07-01 13:00:01', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p0e', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0", "subagent_id": "sx"}}}}',
+           'OK'),
+          ('2026-07-01 13:00:02', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'p1', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
+          ('2026-07-01 13:00:03', 'USER_MESSAGE_RECEIVED', 'a', 'passes',
+           'eve', 'tr-p', 'shared', JSON '{{}}', JSON '{{}}', 'OK'),
+          -- foreign-tagged row: tags present but no 'run' key (P1-1)
+          ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
+           'eve', 'tr-p', 'foreign', JSON '{{}}',
+           JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK')
+    """
+    ).result()
+  except Exception:
+    bq_client.delete_dataset(
+        f"{project}.{dataset_id}", delete_contents=True, not_found_ok=True
+    )
+    raise
   yield project, dataset_id
   bq_client.delete_dataset(
       f"{project}.{dataset_id}", delete_contents=True, not_found_ok=True
