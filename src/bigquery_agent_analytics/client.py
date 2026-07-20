@@ -278,16 +278,28 @@ ORDER BY event_count DESC
 # Identity attributes are read as TO_JSON_STRING forms so scalar
 # types survive to Python validation — JSON_VALUE would erase the
 # difference between "rooty" and a persisted numeric/boolean. The
-# LIMIT bounds SQL and Python work for pathological sessions.
+# NULLIF folds the explicit-JSON-null encoding ('null') into the
+# raw-missing encoding (SQL NULL) AT THE SOURCE (PR #371 review
+# round 8, P1-1): one semantic value would otherwise occupy two
+# non-adjacent runs of the ordered page (NULL sorts first, 'null'
+# sorts after every '"..."' name), letting a truncated page split a
+# NON-boundary identity's classification context. With canonical
+# encodings every identity is one contiguous run, so only the
+# boundary identity can straddle the cut. The LIMIT bounds SQL and
+# Python work for pathological sessions.
 _RESOLVE_SESSION_CANDIDATES_QUERY = """\
 SELECT
   session_id,
   user_id,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name'))
-      AS root_agent_name,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.experiment_id'))
-      AS experiment_id,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')) AS tag_payload,
+  NULLIF(
+      TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name')), 'null'
+  ) AS root_agent_name,
+  NULLIF(
+      TO_JSON_STRING(JSON_QUERY(attributes, '$.experiment_id')), 'null'
+  ) AS experiment_id,
+  NULLIF(
+      TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')), 'null'
+  ) AS tag_payload,
   COUNT(*) AS row_count
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
@@ -299,21 +311,34 @@ LIMIT @candidate_limit
 # Batched per-identity candidate discovery (PR #371 review round 7,
 # P2): one query enumerates a bounded scope page for EVERY ambiguous
 # identity via a window partition, replacing sequential per-identity
-# scans.
+# scans. The window runs over a plain subquery (not SELECT-list
+# aliases of the grouped query) so alias resolution inside QUALIFY
+# is never exercised, and it partitions by the CANONICAL identity
+# encodings (see the NULLIF note above), so a dual-encoded identity
+# gets ONE capped page instead of two — Python's canonical-key
+# truncation check then counts exactly what SQL capped (PR #371
+# review round 8, P2-4/P3-9).
 _RESOLVE_CANDIDATES_BATCH_QUERY = """\
-SELECT
-  session_id,
-  user_id,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name'))
-      AS root_agent_name,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.experiment_id'))
-      AS experiment_id,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')) AS tag_payload,
-  COUNT(*) AS row_count
-FROM `{project}.{dataset}.{table}`
-WHERE session_id = @session_id{identity_pins}
-  AND ({identity_disjunction})
-GROUP BY 1, 2, 3, 4, 5
+SELECT * FROM (
+  SELECT
+    session_id,
+    user_id,
+    NULLIF(
+        TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name')), 'null'
+    ) AS root_agent_name,
+    NULLIF(
+        TO_JSON_STRING(JSON_QUERY(attributes, '$.experiment_id')), 'null'
+    ) AS experiment_id,
+    NULLIF(
+        TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')), 'null'
+    ) AS tag_payload,
+    COUNT(*) AS row_count
+  FROM `{project}.{dataset}.{table}`
+  WHERE session_id = @session_id{identity_pins}
+    AND ({identity_disjunction})
+  GROUP BY 1, 2, 3, 4, 5
+)
+WHERE TRUE
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY user_id, root_agent_name
   ORDER BY experiment_id, tag_payload
@@ -323,13 +348,15 @@ ORDER BY session_id, user_id, root_agent_name, experiment_id, tag_payload
 
 # Bounded intrinsic-identity discovery for allow_mixed_scope reads:
 # identities are row-uniform and few, so this stays tiny even when a
-# session carries thousands of scope payloads.
+# session carries thousands of scope payloads. DISTINCT runs over the
+# canonical root encoding, so a dual-encoded identity yields one row.
 _RESOLVE_SESSION_IDENTITIES_QUERY = """\
 SELECT DISTINCT
   session_id,
   user_id,
-  TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name'))
-      AS root_agent_name
+  NULLIF(
+      TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name')), 'null'
+  ) AS root_agent_name
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
 ORDER BY session_id, user_id, root_agent_name
@@ -928,6 +955,13 @@ class Client:
         custom_labels: Optional subset label pins.
         scope_signature: Optional exact-scope pin (as carried by
             ambiguity retry payloads).
+        allow_mixed_scope: KTD4 escape hatch. When ``True``, a
+            selector that cannot be narrowed to a single scope
+            returns a conversation-complete read of the single
+            matching intrinsic identity instead of raising:
+            ``scope`` is ``None`` and ``scope_coverage`` names the
+            scope signatures merged into the trace. Ambiguity ACROSS
+            identities still raises.
 
     Returns:
         A Trace for the single resolved identity/scope, with
@@ -935,7 +969,9 @@ class Client:
 
     Raises:
         ValueError: If no events match the session/selector.
-        AmbiguousSessionError: If more than one candidate remains.
+        AmbiguousSessionError: If more than one candidate remains
+            and ``allow_mixed_scope`` is False (with the flag set,
+            only cross-identity ambiguity raises).
     """
     selector = TraceSelector(
         session_id=session_id,
@@ -1012,7 +1048,7 @@ class Client:
         ).result()
     ]
     if not candidate_rows:
-      raise ValueError(f"No events found for session_id={selector.session_id}")
+      raise _no_matching_events_error(selector, bool(pushdown))
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
     if truncated:
       # Sound boundary handling (PR #371 review round 7, P1-1/P1-2):
@@ -1021,10 +1057,12 @@ class Client:
       # context-DEPENDENT classifications — untagged rows, whose
       # shared-vs-empty-scope meaning needs the identity's full
       # experiment/payload context — are excluded for the boundary
-      # identity, whose page may have split that context. The
-      # boundary key is canonicalized with the same parsers candidate
-      # resolution uses, so raw missing vs explicit-JSON-null
-      # encodings cannot split one semantic identity.
+      # identity, whose page may have split that context. The SQL
+      # page folds explicit-JSON-null encodings into raw-missing
+      # (PR #371 review round 8, P1-1), so every canonical identity
+      # is one contiguous run and only the boundary identity can
+      # straddle the cut; the canonical-key comparison below is kept
+      # as defense in depth for callers feeding non-canonical rows.
       boundary = candidate_rows[-1]
 
       def _canonical_key(row: dict) -> tuple:
@@ -1200,7 +1238,7 @@ class Client:
         for row in self.bq_client.query(query, job_config=job_config).result()
     ]
     if not identity_rows:
-      raise ValueError(f"No events found for session_id={selector.session_id}")
+      raise _no_matching_events_error(selector, bool(pushdown))
     # Cap-plus-one sentinel (PR #371 review round 6, P2-7): more than
     # _MAX_IDENTITIES identities means the enumeration is a lower
     # bound and must be reported as truncated.
@@ -1283,7 +1321,17 @@ class Client:
     for row in results:
       row_dict = dict(row)
       span = Span.from_bigquery_row(row_dict)
-      attributes = span.attributes or {}
+      attributes = span.attributes
+      if attributes is None:
+        attributes = {}
+      elif not isinstance(attributes, dict):
+        # The same fail-closed guard every sibling read path applies
+        # (PR #371 review round 8, P2-2): a persisted non-object must
+        # not silently classify as an untagged shared row, nor crash
+        # with an unredacted AttributeError.
+        raise ValueError(
+            "Persisted attributes must be a JSON object (contents redacted)."
+        )
       row_user = row_dict.get("user_id")
       row_root = attributes.get("root_agent_name")
       if (
@@ -1303,7 +1351,9 @@ class Client:
               _validated_identity_attr(
                   "experiment_id", attributes.get("experiment_id")
               ),
-              _parse_tag_payload(attributes.get("custom_tags")),
+              _parse_tag_payload(
+                  attributes.get("custom_tags"), source="attributes"
+              ),
               None,
           )
       )
@@ -1554,6 +1604,19 @@ class Client:
         carrying ``identity``/``scope``. Scope-filtered listings may
         over-fetch identity anchors to fill the limit with valid
         scopes; the limit bounds the returned traces.
+
+        Ordering is deterministic (trace ``end_time`` descending with
+        stable tie-breakers) WITHIN a result set. Across different
+        ``limit`` values, scope-filtered listings are not guaranteed
+        prefix-stable: the SQL anchor page ranks identities by the
+        recency of their FILTER-MATCHING rows, while returned traces
+        rank by ``end_time`` over all scope-admitted rows (which may
+        include later untagged enrichment rows), so a larger limit
+        can surface an identity that outranks a smaller limit's
+        results. Computing anchor recency over scope-admitted rows
+        would require an unpruned full-table aggregation per listing;
+        callers needing a stable prefix should list once with the
+        larger limit and slice.
     """
     # One fully detached snapshot feeds the fragments, parameters,
     # AND the post-query limit, so concurrent filter mutation cannot
@@ -1563,48 +1626,93 @@ class Client:
     where, params = filt.to_sql_conditions()
     row_where = filt.row_scope_where()
 
-    query = _LIST_TRACES_QUERY.format(
-        project=self.project_id,
-        dataset=self.dataset_id,
+    return self._fetch_filtered_traces(
         table=self.table_id,
         where=where,
         row_where=row_where,
+        params=params,
+        limit=filt.limit,
+        scope_predicate=_filter_scope_predicate(filt),
+        feature="trace-read",
     )
-    scope_predicate = _filter_scope_predicate(filt)
-    population_complete = row_where == "TRUE" and scope_predicate is None
-    # Scope-filtered listings can reject anchored identities whose
-    # scopes never matched (e.g. an SQL_NULL experiment filter over an
-    # identity whose NULL rows are shared infrastructure), so a plain
-    # SQL LIMIT could starve genuine older results (PR #371 review
-    # round 7, P1-3). Escalate the anchor limit until enough valid
-    # scopes are classified or the anchors are exhausted.
-    sql_limit = filt.limit
-    attempts = 3 if scope_predicate is not None else 1
+
+  def _fetch_filtered_traces(
+      self,
+      *,
+      table: str,
+      where: str,
+      row_where: str,
+      params: list,
+      limit: Optional[int],
+      scope_predicate: Optional[Any],
+      feature: str,
+  ) -> list[Trace]:
+    """Anchor-escalating listing fetch shared by every bulk read path.
+
+    Scope-filtered listings can reject anchored identities whose
+    scopes never matched (e.g. an SQL_NULL experiment filter over an
+    identity whose NULL rows are shared infrastructure), so a plain
+    SQL LIMIT could starve genuine older results (PR #371 review
+    round 7, P1-3). The anchor limit escalates until enough valid
+    scopes are classified, the anchors are provably exhausted (the
+    page returned fewer distinct identities than requested — PR #371
+    review round 8, P2-8), or the escalation bound is hit. Both
+    ``list_traces`` and the LLM-judge API fallback route through
+    here, so evaluation sets cannot silently starve while listings
+    escalate (PR #371 review round 8, P1-2).
+    """
+    query = _LIST_TRACES_QUERY.format(
+        project=self.project_id,
+        dataset=self.dataset_id,
+        table=table,
+        where=where,
+        row_where=row_where,
+    )
+    # Shared-row trace ids are trusted whenever the ROW fetch is
+    # unfiltered: the identity slot census in the builder runs before
+    # the slot-level scope predicate, so a Python-side predicate does
+    # not blind the census the way SQL row prefiltering does
+    # (PR #371 review round 8, P3-10).
+    population_complete = row_where == "TRUE"
+    sql_limit = limit
+    # A None limit (judge path with no filter) keeps the caller's
+    # trace_limit parameter untouched and cannot escalate — there is
+    # no fill target to escalate toward.
+    attempts = 3 if (scope_predicate is not None and limit is not None) else 1
     traces: list[Trace] = []
     for _ in range(attempts):
       attempt_params = [
           (
               bigquery.ScalarQueryParameter("trace_limit", "INT64", sql_limit)
-              if param.name == "trace_limit"
+              if param.name == "trace_limit" and sql_limit is not None
               else param
           )
           for param in params
       ]
       job_config = bigquery.QueryJobConfig(query_parameters=attempt_params)
-      job_config = with_sdk_labels(job_config, feature="trace-read")
+      job_config = with_sdk_labels(job_config, feature=feature)
       results = list(
           self.bq_client.query(query, job_config=job_config).result()
       )
+      stats: dict = {}
       traces = _build_traces_from_rows(
           results,
-          max_traces=filt.limit,
+          max_traces=limit,
           scope_predicate=scope_predicate,
           population_complete=population_complete,
+          on_malformed="quarantine",
+          stats=stats,
       )
-      if len(traces) >= filt.limit or not results or sql_limit >= 4096:
+      if (
+          sql_limit is None
+          or len(traces) >= limit
+          or not results
+          or stats.get("identity_count", 0) < sql_limit
+          or sql_limit >= 4096
+      ):
         break
       sql_limit = min(sql_limit * 8, 4096)
-    return _ordered_limited_traces(traces, filt.limit)
+    return _ordered_limited_traces(traces, limit)
 
   # -------------------------------------------------------------- #
   # Evaluation                                                       #
@@ -1989,35 +2097,28 @@ class Client:
     evaluation paths, then evaluates each session via the
     Gemini API.
     """
-    query = _LIST_TRACES_QUERY.format(
-        project=self.project_id,
-        dataset=self.dataset_id,
-        table=table,
-        where=where,
-        row_where=row_where,
-    )
-    job_config = with_sdk_labels(
-        bigquery.QueryJobConfig(query_parameters=params),
-        feature="eval-llm-judge",
-    )
-    results = list(self.bq_client.query(query, job_config=job_config).result())
     # Post-expansion scope filter + limit: one identity can expand
     # into several scoped traces (each a paid model call), and
     # sibling scopes that never matched the filter must not be
     # judged (PR #371 review rounds 3-5). Slot-level filtering keeps
-    # the limit correct and bounds materialization.
+    # the limit correct and bounds materialization. The shared
+    # escalating fetch keeps the evaluation set from silently
+    # starving on scope-filtered anchors (PR #371 review round 8,
+    # P1-2).
     judge_predicate = (
         _filter_scope_predicate(trace_filter)
         if trace_filter is not None
         else None
     )
-    traces = _build_traces_from_rows(
-        results,
-        max_traces=limit,
+    traces = self._fetch_filtered_traces(
+        table=table,
+        where=where,
+        row_where=row_where,
+        params=params,
+        limit=limit,
         scope_predicate=judge_predicate,
-        population_complete=(row_where == "TRUE" and judge_predicate is None),
+        feature="eval-llm-judge",
     )
-    traces = _ordered_limited_traces(traces, limit)
 
     session_scores = _run_sync(self._run_api_judge(evaluator, traces))
 
@@ -2046,6 +2147,19 @@ class Client:
           final,
       )
       score.session_id = trace.session_id
+      # Per-scope expansion attribution (PR #371 review round 8,
+      # P2-7): a session id reused across identities or evaluation
+      # passes yields several judged traces; without identity/scope
+      # attribution their score rows collide on session_id and
+      # cross-criterion merging would overwrite one pass with
+      # another.
+      if trace.identity is not None:
+        score.details.setdefault("user_id", trace.identity.user_id)
+        score.details.setdefault(
+            "root_agent_name", trace.identity.root_agent_name
+        )
+      if trace.scope is not None:
+        score.details.setdefault("scope_signature", trace.scope.scope_signature)
       scores.append(score)
 
     return scores
@@ -3203,7 +3317,14 @@ def _build_report(
     dataset: str,
     session_scores: list[SessionScore],
 ) -> EvaluationReport:
-  """Builds an EvaluationReport from session scores."""
+  """Builds an EvaluationReport from session scores.
+
+  ``total_sessions`` counts EVALUATION UNITS: a session id reused
+  across identities or evaluation passes (issue #359) contributes one
+  attributed row per judged trace, distinguishable via
+  ``SessionScore.details`` (``user_id``, ``root_agent_name``,
+  ``scope_signature``).
+  """
   total = len(session_scores)
   passed = sum(1 for s in session_scores if s.passed)
   failed = total - passed
@@ -3242,24 +3363,36 @@ def _merge_criterion_reports(
   ``passed`` is recalculated requiring every criterion to meet
   its threshold.
   """
-  session_data: dict[str, dict[str, Any]] = {}
+  # Merge on the ATTRIBUTED evaluation unit, not session_id alone
+  # (PR #371 review round 8, P2-7): per-scope expanded traces emit
+  # several score rows sharing one session id, and a session_id key
+  # would silently overwrite one pass's scores with another's.
+  session_data: dict[tuple, dict[str, Any]] = {}
 
   for criterion, report in criterion_reports:
     for ss in report.session_scores:
-      if ss.session_id not in session_data:
-        session_data[ss.session_id] = {
+      key = (
+          ss.session_id,
+          ss.details.get("user_id"),
+          ss.details.get("root_agent_name"),
+          ss.details.get("scope_signature"),
+      )
+      if key not in session_data:
+        session_data[key] = {
+            "session_id": ss.session_id,
             "scores": {},
             "feedback": [],
+            "details": dict(ss.details),
         }
-      session_data[ss.session_id]["scores"].update(ss.scores)
+      session_data[key]["scores"].update(ss.scores)
       if ss.llm_feedback:
-        session_data[ss.session_id]["feedback"].append(ss.llm_feedback)
+        session_data[key]["feedback"].append(ss.llm_feedback)
 
   # Build threshold lookup from criteria
   thresholds = {c.name: c.threshold for c in criteria}
 
   session_scores = []
-  for sid, data in session_data.items():
+  for data in session_data.values():
     scores = data["scores"]
     # Must have at least one score AND all criteria above threshold.
     # Missing criteria default to 0.0 (guaranteed fail).
@@ -3268,10 +3401,11 @@ def _merge_criterion_reports(
     )
     session_scores.append(
         SessionScore(
-            session_id=sid,
+            session_id=data["session_id"],
             scores=scores,
             passed=passed,
             llm_feedback="\n".join(data["feedback"]) or None,
+            details=data["details"],
         )
     )
 
@@ -3282,17 +3416,43 @@ def _merge_criterion_reports(
   )
 
 
-def _parse_tag_payload(payload: Any) -> Optional[dict[str, str]]:
+def _no_matching_events_error(
+    selector: TraceSelector, has_pins: bool
+) -> ValueError:
+  """Typed not-found error distinguishing absence from pin mismatch.
+
+  A discovery query whose selector pins exclude every row must not
+  claim the session itself is absent (PR #371 review round 8, P3-12):
+  callers distinguishing a missing session from a scope mismatch
+  would get the wrong signal.
+  """
+  if has_pins:
+    return ValueError(
+        "No events match"
+        f" session_id={selector.session_id} under the selector's"
+        " pins; the session may exist with rows that do not match."
+        " Remove pins to enumerate the session's candidates."
+    )
+  return ValueError(f"No events found for session_id={selector.session_id}")
+
+
+def _parse_tag_payload(
+    payload: Any, source: str = "resolution"
+) -> Optional[dict[str, str]]:
   """Parse one custom-tags payload into canonical labels, fail-closed.
 
-  Accepts the ``TO_JSON_STRING(JSON_QUERY(...))`` string form used by
-  candidate resolution and the already-parsed dict form found on
-  ``Span.attributes``. The persisted schema is enforced exactly: the
-  payload must be a JSON object whose values are strings. Anything
-  else raises instead of silently becoming an unscoped or colliding
-  candidate — ``{"run": 3}`` must not canonicalize into the same
-  scope as ``{"run": "3"}``. Returns ``None`` for absent/empty
-  payloads.
+  ``source="resolution"`` accepts the ``TO_JSON_STRING(JSON_QUERY())``
+  string encoding used by the candidate queries; ``source=
+  "attributes"`` accepts only the already-parsed object form found on
+  ``Span.attributes`` — there a str value means the producer
+  double-encoded the payload, and decoding it here would advertise a
+  scope that SQL matching and candidate resolution both reject for
+  the same persisted row (PR #371 review round 8, P3-11). The
+  persisted schema is enforced exactly: the payload must be a JSON
+  object whose values are strings. Anything else raises instead of
+  silently becoming an unscoped or colliding candidate — ``{"run":
+  3}`` must not canonicalize into the same scope as ``{"run": "3"}``.
+  Returns ``None`` for absent/empty payloads.
 
   Raises:
       ValueError: If the payload is not a JSON object of strings.
@@ -3300,6 +3460,11 @@ def _parse_tag_payload(payload: Any) -> Optional[dict[str, str]]:
   if payload is None:
     return None
   if isinstance(payload, str):
+    if source != "resolution":
+      raise ValueError(
+          "custom_tags must be a JSON object of string values; got a"
+          " double-encoded string (contents redacted)."
+      )
     if payload == "null":
       return None
     try:
@@ -3687,6 +3852,8 @@ def _build_traces_from_rows(
     max_traces: Optional[int] = None,
     scope_predicate: Optional[Any] = None,
     population_complete: bool = True,
+    on_malformed: str = "raise",
+    stats: Optional[dict] = None,
 ) -> list[Trace]:
   """Groups BigQuery result rows into Trace objects.
 
@@ -3704,35 +3871,106 @@ def _build_traces_from_rows(
   and are attached — and deep-copied where needed — only for the
   retained top ``max_traces`` slots, so the bound limits time and
   memory, not just the returned count.
+
+  ``on_malformed`` bounds the blast radius of malformed persisted
+  rows (PR #371 review round 8, P2-6). ``"raise"`` (singular reads)
+  keeps the fail-closed typed error. ``"quarantine"`` (bulk listings
+  and evaluation fetches) excludes ONLY the identity the malformed
+  row belongs to — at the finest granularity its readable fields
+  prove — so one poison row cannot brick reads for every session in
+  the table; quarantined identities are counted and logged (contents
+  redacted), never silently classified.
+
+  ``stats`` (optional out-param) receives ``identity_count``: the
+  number of distinct fetched identities INCLUDING quarantined ones,
+  which the escalating listing fetch uses to detect anchor
+  exhaustion.
   """
   identity_groups: dict[tuple, list] = {}
+  # Quarantine keys, coarsest-first: a row whose user_id cannot be
+  # validated poisons its session; an unreadable attributes object or
+  # root agent poisons (session, user); a malformed experiment or tag
+  # payload poisons the fully-identified identity.
+  poisoned_sessions: set = set()
+  poisoned_users: set = set()
+  poisoned_identities: set = set()
 
   for row in results:
     row_dict = dict(row)
     sid = row_dict.get("session_id", "unknown")
     span = Span.from_bigquery_row(row_dict)
-    attributes = span.attributes
-    if attributes is None:
-      attributes = {}
-    elif not isinstance(attributes, dict):
-      # A falsey non-object (e.g. []) must not silently become an
-      # empty valid scope (PR #371 review round 7, P2).
-      raise ValueError(
-          "Persisted attributes must be a JSON object (contents" " redacted)."
+    try:
+      user_id = _validated_identity_attr("user_id", row_dict.get("user_id"))
+    except ValueError:
+      if on_malformed != "quarantine":
+        raise
+      poisoned_sessions.add(sid)
+      continue
+    try:
+      attributes = span.attributes
+      if attributes is None:
+        attributes = {}
+      elif not isinstance(attributes, dict):
+        # A falsey non-object (e.g. []) must not silently become an
+        # empty valid scope (PR #371 review round 7, P2).
+        raise ValueError(
+            "Persisted attributes must be a JSON object (contents" " redacted)."
+        )
+      root_agent_name = _validated_identity_attr(
+          "root_agent_name", attributes.get("root_agent_name")
       )
-    identity_key = (
-        sid,
-        _validated_identity_attr("user_id", row_dict.get("user_id")),
-        _validated_identity_attr(
-            "root_agent_name", attributes.get("root_agent_name")
-        ),
-    )
-    experiment = _validated_identity_attr(
-        "experiment_id", attributes.get("experiment_id")
-    )
-    payload = _parse_tag_payload(attributes.get("custom_tags"))
+    except ValueError:
+      if on_malformed != "quarantine":
+        raise
+      poisoned_users.add((sid, user_id))
+      continue
+    identity_key = (sid, user_id, root_agent_name)
+    try:
+      experiment = _validated_identity_attr(
+          "experiment_id", attributes.get("experiment_id")
+      )
+      payload = _parse_tag_payload(
+          attributes.get("custom_tags"), source="attributes"
+      )
+    except ValueError:
+      if on_malformed != "quarantine":
+        raise
+      poisoned_identities.add(identity_key)
+      continue
     identity_groups.setdefault(identity_key, []).append(
         (experiment, payload, span)
+    )
+
+  if stats is not None:
+    # Counted BEFORE quarantine deletion, and poison keys are added
+    # on top: for anchor-exhaustion detection an OVERcount only costs
+    # one extra escalation attempt, while an undercount would end
+    # escalation while unfetched anchors remain.
+    stats["identity_count"] = (
+        len(identity_groups)
+        + len(poisoned_sessions)
+        + len(poisoned_users)
+        + len(poisoned_identities)
+    )
+  if poisoned_sessions or poisoned_users or poisoned_identities:
+    contaminated = [
+        key
+        for key in identity_groups
+        if key[0] in poisoned_sessions
+        or (key[0], key[1]) in poisoned_users
+        or key in poisoned_identities
+    ]
+    for key in contaminated:
+      del identity_groups[key]
+    quarantined_count = (
+        len(poisoned_sessions) + len(poisoned_users) + len(poisoned_identities)
+    )
+    logging.getLogger(__name__).warning(
+        "Quarantined %d identity group(s) carrying malformed persisted"
+        " attributes (identifiers and contents redacted); remaining"
+        " results are unaffected. Use a singular read on the affected"
+        " session for the typed validation error.",
+        quarantined_count,
     )
 
   # Phase 1: define slots; shared rows stay factored — subgroup-local
@@ -3814,6 +4052,7 @@ def _build_traces_from_rows(
             "identity_shared": identity_shared,
             "identity_shared_ids": shared_trace_ids,
             "identity_slots": identity_slots,
+            "subgroup_slot_total": len(scope_options),
             "max_ts": base_ts,
         }
         slot_index[signature_key] = slot
@@ -3884,24 +4123,31 @@ def _build_traces_from_rows(
     if start and end:
       total_ms = (end - start).total_seconds() * 1000
     # Per-scope trace id (PR #371 review round 6, P2-8): the scope's
-    # OWN rows first; a shared row's id is trusted only when this
-    # slot is the identity's ONLY slot — shared rows are distributed
-    # across every subgroup, so subgroup-local sibling counting would
-    # let two experiments inherit the same id.
+    # OWN rows first. Shared-row ids are trusted only when the
+    # fetched rows are the identity's COMPLETE population (PR #371
+    # review round 7, P1-5) AND the sharing pool is unambiguous —
+    # judged at the pool's OWN granularity (PR #371 review round 8,
+    # P2-3): a subgroup-local untagged row carries its experiment id,
+    # so it can only belong to a slot of ITS subgroup and its id is
+    # sound whenever that subgroup has a single slot, even when
+    # sibling experiments exist. Only the identity-level pool
+    # (untagged NULL-experiment rows), which is distributed across
+    # every subgroup, needs the identity-level slot census.
     identity_slot_total = len(slot["identity_slots"])
     if slot["own_trace_ids"]:
       trace_id = slot["own_trace_ids"][0]
     elif (
         population_complete
-        and identity_slot_total == 1
-        and (slot["local_shared_ids"] or slot["identity_shared_ids"])
+        and slot["subgroup_slot_total"] == 1
+        and slot["local_shared_ids"]
     ):
-      # A shared row's id is trusted only when the fetched rows are
-      # the identity's COMPLETE population — after scope prefiltering
-      # the single visible slot may have invisible siblings that the
-      # shared row's id actually belongs to (PR #371 review round 7,
-      # P1-5).
-      trace_id = (slot["local_shared_ids"] + slot["identity_shared_ids"])[0]
+      trace_id = slot["local_shared_ids"][0]
+    elif (
+        population_complete
+        and identity_slot_total == 1
+        and slot["identity_shared_ids"]
+    ):
+      trace_id = slot["identity_shared_ids"][0]
     else:
       trace_id = slot["session_id"]
     identity = slot["identity"]

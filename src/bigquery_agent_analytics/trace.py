@@ -563,21 +563,7 @@ class TraceFilter:
       if value is not getattr(self, "session_ids", None):
         value = _normalized_session_ids(value)
     if name == "event_types" and value is not None:
-      # Trusted finite list/tuple of exact strings (PR #371 review
-      # round 6, P2-9): arbitrary iterables are read through their
-      # public iterator, which a hostile container could use to
-      # erase the filter into WHERE TRUE.
-      if not isinstance(value, (list, tuple)):
-        raise TypeError(
-            "TraceFilter.event_types must be a list of strings or None."
-        )
-      snapshot = _trusted_sequence_snapshot(value)
-      normalized_events = []
-      for entry in snapshot:
-        if not isinstance(entry, str):
-          raise TypeError("TraceFilter.event_types entries must be strings.")
-        normalized_events.append(_exact_str(entry))
-      value = normalized_events
+      value = _normalized_event_types(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -787,13 +773,22 @@ class TraceFilter:
             )
         )
         params.append(bigquery.ScalarQueryParameter(param_val, "STRING", value))
-    if self.event_types:
+    # Same normalize-before-truthiness rule as session_ids and
+    # custom_labels (PR #371 review round 8, P2-5): the SQL boundary
+    # re-reads real storage through trusted paths so a lying
+    # container cannot erase or rewrite the predicate.
+    event_types = (
+        _normalized_event_types(self.event_types)
+        if self.event_types is not None
+        else None
+    )
+    if event_types:
       conditions.append("event_type IN UNNEST(@event_types)")
       params.append(
           bigquery.ArrayQueryParameter(
               "event_types",
               "STRING",
-              self.event_types,
+              event_types,
           )
       )
     if self.tool_origin:
@@ -1758,6 +1753,31 @@ def _normalized_session_ids(session_ids: Any) -> list[str]:
         "TraceFilter.session_ids must be a list of strings or None."
     )
   return _ValidatedSessionIds(session_ids)
+
+
+def _normalized_event_types(event_types: Any) -> list[str]:
+  """Normalize ``event_types`` into a trusted list of exact strings.
+
+  Trusted finite list/tuple of exact strings (PR #371 review round 6,
+  P2-9): arbitrary iterables are read through their public iterator,
+  which a hostile container could use to erase the filter into WHERE
+  TRUE. Called on assignment AND re-applied at the SQL boundary
+  (PR #371 review round 8, P2-5) — the same normalize-before-
+  truthiness rule as ``session_ids`` — so a ``vars()``-injected lying
+  container can neither hide real contents from the ``if`` check nor
+  feed a rewriting iterator into the array parameter.
+  """
+  if not isinstance(event_types, (list, tuple)):
+    raise TypeError(
+        "TraceFilter.event_types must be a list of strings or None."
+    )
+  snapshot = _trusted_sequence_snapshot(event_types)
+  normalized_events = []
+  for entry in snapshot:
+    if not isinstance(entry, str):
+      raise TypeError("TraceFilter.event_types entries must be strings.")
+    normalized_events.append(_exact_str(entry))
+  return normalized_events
 
 
 def _parse_scope_signature_labels(

@@ -1199,7 +1199,9 @@ class TestRound4Regressions:
     ]
     identity_batch: list = []  # pushdown pins exclude everything
     client, mock_bq = self._client([candidate_batch, identity_batch])
-    with pytest.raises(ValueError, match="No events found"):
+    # Round 8, P3-12: a pin-excluded page names the pins, not a
+    # false session absence.
+    with pytest.raises(ValueError, match="under the selector's pins"):
       client.get_session_trace(
           "sess-1",
           custom_labels={"run": "missing"},
@@ -2085,3 +2087,324 @@ class TestRound7Regressions:
         for p in mock_bq.query.call_args[1]["job_config"].query_parameters
     }
     assert second_params["trace_limit"] == 8  # escalated from 1
+
+
+class TestRound8Regressions:
+  """PR #371 review round 8 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def test_discovery_queries_fold_explicit_null_encoding(self):
+    # P1-1: every discovery query folds the explicit-JSON-null
+    # encoding into raw-missing AT THE SOURCE, so one semantic
+    # identity is one contiguous run of the ordered page.
+    from bigquery_agent_analytics.client import _RESOLVE_CANDIDATES_BATCH_QUERY
+    from bigquery_agent_analytics.client import _RESOLVE_SESSION_CANDIDATES_QUERY
+    from bigquery_agent_analytics.client import _RESOLVE_SESSION_IDENTITIES_QUERY
+
+    for query in (
+        _RESOLVE_SESSION_CANDIDATES_QUERY,
+        _RESOLVE_CANDIDATES_BATCH_QUERY,
+    ):
+      for attr in ("root_agent_name", "experiment_id", "custom_tags"):
+        assert f"JSON_QUERY(attributes, '$.{attr}')" in query
+      assert query.count("'null'") == 3, "each attribute folds 'null'"
+      assert "NULLIF(" in query
+    assert "NULLIF(" in _RESOLVE_SESSION_IDENTITIES_QUERY
+    # The batch window runs over a plain subquery (never SELECT-list
+    # aliases of the grouped query) and QUALIFY has its required
+    # sibling clause.
+    assert "SELECT * FROM (" in _RESOLVE_CANDIDATES_BATCH_QUERY
+    assert "WHERE TRUE" in _RESOLVE_CANDIDATES_BATCH_QUERY
+    assert (
+        "PARTITION BY user_id, root_agent_name"
+        in _RESOLVE_CANDIDATES_BATCH_QUERY
+    )
+
+  def test_truncated_page_cannot_manufacture_phantom_scope(self):
+    # P1-1: with canonical encodings a non-boundary identity's rows
+    # are contiguous and fully classified — its untagged shared row
+    # must NOT surface as a phantom sole-empty-scope candidate.
+    identity_a_rows = [
+        _mock_row(_candidate_row(user_id="u1")),  # untagged NULL-exp
+        _mock_row(_candidate_row(user_id="u1", experiment_id="E1")),
+    ]
+    boundary_rows = [
+        _mock_row(
+            _candidate_row(
+                user_id="u1",
+                root_agent_name="m",
+                tag_payload='{"run": "v%d"}' % i,
+            )
+        )
+        for i in range(63)
+    ]
+    client, _ = self._client([identity_a_rows + boundary_rows])
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    a_candidates = [
+        c
+        for c in exc_info.value.candidates
+        if c.identity.user_id == "u1" and c.identity.root_agent_name is None
+    ]
+    # Identity A classifies completely: its untagged row is shared
+    # infrastructure for the E1 pass, never an empty-scope phantom.
+    assert [c.scope.experiment_id for c in a_candidates] == ["E1"]
+
+  def test_api_judge_escalates_anchor_limit(self):
+    # P1-2: the LLM-judge API fallback shares the escalating fetch,
+    # so a scope-filtered evaluation set cannot silently starve.
+    import dataclasses as dc
+
+    from bigquery_agent_analytics.evaluators import SessionScore
+    from bigquery_agent_analytics.trace import SQL_NULL
+
+    first_rows = [
+        _mock_row(_event_row(experiment_id="e1", span_id="a")),
+        _mock_row(_event_row(span_id="sharednull")),
+    ]
+    second_rows = first_rows + [
+        _mock_row(
+            _event_row(
+                session_id="older",
+                custom_tags={"run": "v9"},
+                span_id="genuine",
+            )
+        ),
+    ]
+    client, mock_bq = self._client([first_rows, second_rows])
+
+    class _StubJudge:
+      name = "stub"
+
+      async def evaluate_session(self, trace_text, final):
+        return SessionScore(
+            session_id="pending", scores={"q": 1.0}, passed=True
+        )
+
+    from google.cloud import bigquery as bq
+
+    filt = TraceFilter(experiment_id=SQL_NULL, limit=1)
+    report = client._api_judge(
+        _StubJudge(),
+        "tbl",
+        "TRUE",
+        [bq.ScalarQueryParameter("trace_limit", "INT64", 1)],
+        row_where=filt.row_scope_where(),
+        limit=1,
+        trace_filter=filt,
+    )
+    assert mock_bq.query.call_count == 2
+    assert report.total_sessions == 1
+    assert report.session_scores[0].session_id == "older"
+
+  def test_experiment_only_subgroups_keep_local_trace_ids(self):
+    # P2-3: a session tagged only via experiment_id keeps each
+    # pass's genuine trace id — the local pool is judged at subgroup
+    # granularity, not the identity-level slot census.
+    rows = [
+        _mock_row(_event_row(experiment_id="A", trace_id="TA", span_id="a1")),
+        _mock_row(_event_row(experiment_id="A", trace_id="TA", span_id="a2")),
+        _mock_row(_event_row(experiment_id="B", trace_id="TB", span_id="b1")),
+    ]
+    traces = _build_traces_from_rows([dict(r.items()) for r in rows])
+    by_exp = {t.scope.experiment_id: t.trace_id for t in traces}
+    assert by_exp == {"A": "TA", "B": "TB"}
+
+  def test_local_shared_id_untrusted_with_sibling_payload_scopes(self):
+    # P2-3 soundness bound: a subgroup-local untagged row with two
+    # sibling payload scopes could belong to either — fall back.
+    rows = [
+        dict(
+            _event_row(
+                experiment_id="A",
+                custom_tags={"r": "1"},
+                trace_id=None,
+                span_id="p1",
+            )
+        ),
+        dict(
+            _event_row(
+                experiment_id="A",
+                custom_tags={"r": "2"},
+                trace_id=None,
+                span_id="p2",
+            )
+        ),
+        dict(_event_row(experiment_id="A", trace_id="TL", span_id="sh")),
+    ]
+    traces = _build_traces_from_rows(rows)
+    assert sorted(t.trace_id for t in traces) == ["sess-1", "sess-1"]
+
+  def test_mixed_read_rejects_non_object_attributes(self):
+    # P2-2: the mixed-scope read applies the same fail-closed guard
+    # as every sibling path — no silent [] scope, no AttributeError.
+    import json as json_mod
+
+    for bad_attributes in ("[]", '["x"]'):
+      identity_batch = [
+          _mock_row(
+              {
+                  "session_id": "sess-1",
+                  "user_id": "alice",
+                  "root_agent_name": None,
+              }
+          )
+      ]
+      good = _event_row(span_id="ok")
+      bad = _event_row(span_id="bad")
+      bad["attributes"] = bad_attributes
+      client, _ = self._client(
+          [identity_batch, [_mock_row(good), _mock_row(bad)]]
+      )
+      with pytest.raises(ValueError, match="JSON object"):
+        client._fetch_mixed_scope_trace(TraceSelector(session_id="sess-1"))
+
+  def test_event_types_renormalized_at_sql_boundary(self):
+    # P2-5: a vars()-injected lying container can neither erase the
+    # event_type predicate nor rewrite the emitted parameter.
+    class _FalseyList(list):
+
+      def __bool__(self):
+        return False
+
+    class _RewritingList(list):
+
+      def __iter__(self):
+        return iter(["INNOCUOUS"])
+
+    filt = TraceFilter()
+    vars(filt)["event_types"] = _FalseyList(["TOOL_ERROR"])
+    where, params = filt.to_sql_conditions()
+    assert "event_type IN UNNEST(@event_types)" in where
+    by_name = {p.name: p for p in params}
+    assert list(by_name["event_types"].values) == ["TOOL_ERROR"]
+
+    filt2 = TraceFilter()
+    vars(filt2)["event_types"] = _RewritingList(["TOOL_ERROR"])
+    where2, params2 = filt2.to_sql_conditions()
+    assert "event_type IN UNNEST(@event_types)" in where2
+    by_name2 = {p.name: p for p in params2}
+    assert list(by_name2["event_types"].values) == ["TOOL_ERROR"]
+
+  def test_poison_row_quarantines_only_its_identity(self, caplog):
+    # P2-6: one malformed row excludes only its own identity from
+    # bulk listings; other sessions are unaffected and the exclusion
+    # is logged. Singular construction stays fail-closed.
+    import logging
+
+    good = _event_row(session_id="s-good", trace_id="TG", span_id="g1")
+    bad = _event_row(session_id="s-bad", span_id="b1")
+    bad["attributes"] = '{"experiment_id": 7}'
+    client, _ = self._client([[_mock_row(good), _mock_row(bad)]])
+    with caplog.at_level(logging.WARNING):
+      traces = client.list_traces(TraceFilter(limit=10))
+    assert [t.session_id for t in traces] == ["s-good"]
+    assert any("Quarantined" in r.message for r in caplog.records)
+    with pytest.raises(ValueError, match="experiment_id"):
+      _build_traces_from_rows([dict(bad.items()) for bad in [_mock_row(bad)]])
+
+  def test_session_scores_attributed_and_merged_without_overwrite(self):
+    # P2-7: per-scope expanded score rows carry identity/scope
+    # attribution, and cross-criterion merging keys on the attributed
+    # unit instead of overwriting one pass with another.
+    from bigquery_agent_analytics.client import _build_report
+    from bigquery_agent_analytics.client import _merge_criterion_reports
+    from bigquery_agent_analytics.evaluators import SessionScore
+
+    class _Criterion:
+      name = "quality"
+      threshold = 0.5
+
+    def _score(sig, value):
+      return SessionScore(
+          session_id="sess-1",
+          scores={"quality": value},
+          passed=True,
+          details={"scope_signature": sig},
+      )
+
+    report = _merge_criterion_reports(
+        "judge",
+        "ds",
+        [_Criterion()],
+        [
+            (
+                _Criterion(),
+                _build_report(
+                    evaluator_name="judge",
+                    dataset="ds",
+                    session_scores=[
+                        _score("v1:a", 0.9),
+                        _score("v1:b", 0.2),
+                    ],
+                ),
+            )
+        ],
+    )
+    assert report.total_sessions == 2
+    by_sig = {
+        ss.details["scope_signature"]: ss.scores["quality"]
+        for ss in report.session_scores
+    }
+    assert by_sig == {"v1:a": 0.9, "v1:b": 0.2}
+
+  def test_filtered_listing_stops_when_anchors_exhausted(self):
+    # P2-8: matches under-filling the limit do not trigger blind
+    # re-scans once the page proves the anchors are exhausted.
+    rows = [
+        _mock_row(_event_row(experiment_id="E", trace_id="T1", span_id="a"))
+    ]
+    client, mock_bq = self._client([rows, rows, rows])
+    traces = client.list_traces(TraceFilter(experiment_id="E", limit=100))
+    assert len(traces) == 1
+    assert mock_bq.query.call_count == 1
+
+  def test_sql_null_filtered_listing_keeps_sound_shared_trace_id(self):
+    # P3-10: a Python-side scope predicate does not blind the slot
+    # census — the same trace reports the same id filtered or not.
+    from bigquery_agent_analytics.trace import SQL_NULL
+
+    rows = [_mock_row(_event_row(trace_id="TS", span_id="x1"))]
+    client, _ = self._client([rows])
+    filtered = client.list_traces(TraceFilter(experiment_id=SQL_NULL))
+    client2, _ = self._client([rows])
+    unfiltered = client2.list_traces(TraceFilter())
+    assert [t.trace_id for t in filtered] == ["TS"]
+    assert [t.trace_id for t in unfiltered] == ["TS"]
+
+  def test_attributes_path_rejects_double_encoded_custom_tags(self):
+    # P3-11: a double-encoded custom_tags string must not advertise
+    # a scope that SQL matching and candidate resolution reject.
+    with pytest.raises(ValueError, match="double-encoded"):
+      _parse_tag_payload('{"run": "v1"}', source="attributes")
+    # The resolution encoding still accepts its TO_JSON_STRING form.
+    assert _parse_tag_payload('{"run": "v1"}') == {"run": "v1"}
+
+  def test_pinned_no_match_error_names_pins(self):
+    # P3-12: pins excluding every row must not report the session as
+    # absent.
+    client, _ = self._client([[]])
+    with pytest.raises(ValueError, match="under the selector's pins"):
+      client.get_session_trace("sess-1", user_id="nobody")
+    client2, _ = self._client([[]])
+    with pytest.raises(ValueError, match="No events found"):
+      client2.get_session_trace("sess-1")

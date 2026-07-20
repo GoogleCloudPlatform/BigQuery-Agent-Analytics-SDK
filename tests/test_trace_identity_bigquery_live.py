@@ -319,6 +319,65 @@ class TestIdentityQueriesDryRun:
         ),
     )
 
+  def test_batched_discovery_queries_dry_run(
+      self, collision_dataset, bq_client
+  ):
+    # PR #371 review round 8, P2-4: the QUALIFY-windowed batch query
+    # and the DISTINCT-identity query are the only discovery queries
+    # that had no grammar coverage; both bind here with the exact
+    # fragment/parameter shapes the client generates.
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.client import _RESOLVE_CANDIDATES_BATCH_QUERY
+    from bigquery_agent_analytics.client import _RESOLVE_SESSION_IDENTITIES_QUERY
+
+    project, dataset_id = collision_dataset
+    batch = _RESOLVE_CANDIDATES_BATCH_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="\n    AND user_id = @pin_user_id",
+        identity_disjunction=(
+            "(user_id IS NOT DISTINCT FROM @batch_user_0"
+            " AND JSON_VALUE(attributes, '$.root_agent_name')"
+            " IS NOT DISTINCT FROM @batch_root_0)"
+            " OR (user_id IS NOT DISTINCT FROM @batch_user_1"
+            " AND JSON_VALUE(attributes, '$.root_agent_name')"
+            " IS NOT DISTINCT FROM @batch_root_1)"
+        ),
+    )
+    bq_client.query(
+        batch,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("per_identity_capped", "INT64", 33),
+                bq.ScalarQueryParameter("pin_user_id", "STRING", "alice"),
+                bq.ScalarQueryParameter("batch_user_0", "STRING", "alice"),
+                bq.ScalarQueryParameter("batch_root_0", "STRING", None),
+                bq.ScalarQueryParameter("batch_user_1", "STRING", "bob"),
+                bq.ScalarQueryParameter("batch_root_1", "STRING", "root-b"),
+            ],
+            dry_run=True,
+        ),
+    )
+    identities = _RESOLVE_SESSION_IDENTITIES_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        identity_pins="",
+    )
+    bq_client.query(
+        identities,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "collide"),
+                bq.ScalarQueryParameter("identity_limit", "INT64", 9),
+            ],
+            dry_run=True,
+        ),
+    )
+
 
 class TestLiveCollisionFixture:
   """Reused session ids must not cross-contaminate (issue #359)."""
