@@ -1,0 +1,39 @@
+# Example Grafana provisioning config for the BigQuery data source.
+#
+# OPTIONAL — only for self-managed Grafana (Docker, k8s, bare metal).
+# On Grafana Cloud, add the data source through the UI instead
+# (Connections -> Data sources -> Add data source -> "Google BigQuery");
+# see grafana/README.md.
+#
+# Usage (self-managed):
+#   1. Install the plugin:  grafana-cli plugins install grafana-bigquery-datasource
+#   2. Copy this file to /etc/grafana/provisioning/datasources/bqaa-bigquery.yaml
+#   3. Replace the placeholders below, then restart Grafana.
+#
+# SECURITY: never commit a real service-account key. Keep the placeholder
+# here and inject the actual key at deploy time (secret manager, mounted
+# secret, or environment-templated provisioning). The service account only
+# needs the "BigQuery Data Viewer" and "BigQuery Job User" roles.
+
+apiVersion: 1
+
+datasources:
+  - name: BQAA BigQuery
+    type: grafana-bigquery-datasource
+    access: proxy
+    isDefault: false
+    editable: true
+    jsonData:
+      authenticationType: jwt
+      defaultProject: YOUR_GCP_PROJECT_ID
+      clientEmail: YOUR_SERVICE_ACCOUNT@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com
+      tokenUri: https://oauth2.googleapis.com/token
+      processingLocation: US # match your dataset's location, e.g. US, EU
+    secureJsonData:
+      # Paste ONLY the private_key field from the service-account JSON key
+      # (keep the \n escapes exactly as they appear in the JSON file).
+      # Do NOT commit a real key to version control.
+      privateKey: |
+        -----BEGIN PRIVATE KEY-----
+        REPLACE_WITH_YOUR_SERVICE_ACCOUNT_PRIVATE_KEY
+        -----END PRIVATE KEY-----
