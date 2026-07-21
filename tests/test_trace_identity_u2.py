@@ -1876,10 +1876,21 @@ class TestRound6Regressions:
         _mock_row(_candidate_row(tag_payload=f'{{"k": "v{i}"}}'))
         for i in range(n)
     ]
+    # Round 9 P1-1: the truncated singleton is returned only after
+    # the bounded identity page proves intrinsic-identity uniqueness.
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
     ]
-    client, _ = self._client([candidate_batch, fetch_batch])
+    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
     trace = client.get_session_trace(
         "sess-1", scope_signature=target_sig, allow_mixed_scope=True
     )
@@ -1970,7 +1981,10 @@ class TestRound7Regressions:
     bob_candidates = [
         c for c in payload["candidates"] if c["selector"]["user_id"] == "bob"
     ]
-    assert bob_candidates == []  # no fabricated empty-scope retry
+    # Round 9 P1-2 refines round 7: bob's COMPLETE e1 experiment
+    # group is proven and stays a real retry, while the split NULL
+    # context still must not fabricate an empty-scope candidate.
+    assert [c["selector"]["experiment_id"] for c in bob_candidates] == ["e1"]
 
   def test_flag_with_unique_match_returns_selected_scope(self):
     # P1-1 second shape: exact signature + allow_mixed_scope under
@@ -2408,3 +2422,263 @@ class TestRound8Regressions:
     client2, _ = self._client([[]])
     with pytest.raises(ValueError, match="No events found"):
       client2.get_session_trace("sess-1")
+
+
+class TestRound9Regressions:
+  """PR #371 review round 9 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def _anchored(self, row):
+    row["anchor_user_id"] = row.get("user_id")
+    row["anchor_root_agent_name"] = None
+    return row
+
+  def test_truncated_singleton_requires_identity_uniqueness(self):
+    # P1-1: a truncated page with one matching signature must not
+    # bypass cross-identity ambiguity — an unseen identity may carry
+    # the same signature beyond the cut.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    n = _MAX_SCOPE_CANDIDATES + 1
+    target_sig = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(user_id="alice", tag_payload=f'{{"k": "v{i}"}}')
+        )
+        for i in range(n)
+    ]
+    two_identities = [
+        _mock_row(
+            {"session_id": "sess-1", "user_id": u, "root_agent_name": None}
+        )
+        for u in ("alice", "bob")
+    ]
+    # The mixed-path fallback re-discovers identities, then resolves
+    # per-identity candidates; bob carries the SAME signature.
+    batch_candidates = [
+        _mock_row(_candidate_row(user_id="alice", tag_payload='{"k": "v0"}')),
+        _mock_row(_candidate_row(user_id="bob", tag_payload='{"k": "v0"}')),
+    ]
+    client, mock_bq = self._client(
+        [candidate_batch, two_identities, two_identities, batch_candidates]
+    )
+    with pytest.raises(AmbiguousSessionError):
+      client.get_session_trace(
+          "sess-1", scope_signature=target_sig, allow_mixed_scope=True
+      )
+
+  def test_truncated_singleton_with_full_identity_pins_skips_discovery(self):
+    # P1-1 companion: a fully pinned intrinsic identity is unique by
+    # construction — no identity-discovery query runs.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    n = _MAX_SCOPE_CANDIDATES + 1
+    target_sig = TraceScope(custom_labels={"k": "v0"}).scope_signature
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(user_id="alice", tag_payload=f'{{"k": "v{i}"}}')
+        )
+        for i in range(n)
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={"k": "v0"}, span_id="p0")),
+    ]
+    client, mock_bq = self._client([candidate_batch, fetch_batch])
+    trace = client.get_session_trace(
+        "sess-1",
+        user_id="alice",
+        root_agent_name=None,
+        scope_signature=target_sig,
+        allow_mixed_scope=True,
+    )
+    assert trace.scope is not None
+    assert trace.scope.labels_dict == {"k": "v0"}
+    assert mock_bq.query.call_count == 2  # candidates + fetch only
+
+  def test_truncated_experiment_groups_prove_typed_ambiguity(self):
+    # P1-2: 65 untagged distinct experiments must surface the 64
+    # complete groups as typed retry candidates, not collapse into a
+    # generic enumeration-bound ValueError.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    n = _MAX_SCOPE_CANDIDATES + 1
+    candidate_batch = [
+        _mock_row(_candidate_row(experiment_id=f"E{i:03d}")) for i in range(n)
+    ]
+    client, _ = self._client([candidate_batch])
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+    assert exc_info.value.population_truncated
+    experiments = [c.scope.experiment_id for c in exc_info.value.candidates]
+    assert len(experiments) == _MAX_SCOPE_CANDIDATES
+    assert f"E{_MAX_SCOPE_CANDIDATES:03d}" not in experiments  # cut group
+
+  def test_batched_truncated_partition_keeps_complete_groups(self):
+    # P1-2 batched path: a truncated per-identity partition retains
+    # its proven candidates instead of discarding the identity.
+    alice = TraceIdentity(session_id="sess-1", user_id="alice")
+    bob = TraceIdentity(session_id="sess-1", user_id="bob")
+    # per_identity_limit = max(2, 64 // 2) = 32; 33 rows => truncated.
+    rows = [
+        _mock_row(_candidate_row(user_id="alice", experiment_id=f"E{i:03d}"))
+        for i in range(33)
+    ] + [_mock_row(_candidate_row(user_id="bob", experiment_id="B0"))]
+    client, _ = self._client([rows])
+    candidates, truncated = client._real_candidates_for_identities(
+        TraceSelector(session_id="sess-1"), [alice, bob]
+    )
+    assert truncated
+    alice_exps = [
+        c.scope.experiment_id
+        for c in candidates
+        if c.identity.user_id == "alice"
+    ]
+    assert len(alice_exps) == 32  # complete groups retained
+    assert "E032" not in alice_exps  # the cut final group is not
+    assert [
+        c.scope.experiment_id for c in candidates if c.identity.user_id == "bob"
+    ] == ["B0"]
+
+  def test_escalation_reaches_the_documented_ceiling(self):
+    # P1-3: with limit=1 the anchor page must keep escalating past 64
+    # while pages stay saturated — a match at anchor 65+ is found.
+    def page(count, with_match):
+      rows = [
+          _mock_row(
+              self._anchored(
+                  _event_row(
+                      session_id=f"s{i}",
+                      custom_tags={"k": "x"},
+                      span_id=f"sp{i}",
+                  )
+              )
+          )
+          for i in range(count)
+      ]
+      if with_match:
+        rows.append(
+            _mock_row(
+                self._anchored(
+                    _event_row(
+                        session_id="s-match",
+                        custom_tags={"k": "v"},
+                        span_id="hit",
+                    )
+                )
+            )
+        )
+      return rows
+
+    client, mock_bq = self._client(
+        [page(1, False), page(8, False), page(64, False), page(512, True)]
+    )
+    traces = client.list_traces(TraceFilter(custom_labels={"k": "v"}, limit=1))
+    assert [t.session_id for t in traces] == ["s-match"]
+    limits = [
+        {p.name: p.value for p in call.kwargs["job_config"].query_parameters}[
+            "trace_limit"
+        ]
+        for call in mock_bq.query.call_args_list
+    ]
+    assert limits == [1, 8, 64, 512]
+
+  def test_quarantined_anchors_do_not_fake_exhaustion(self):
+    # P1-4: two SQL-distinct malformed anchors collapsing into one
+    # quarantine key must not end escalation above valid results.
+    bad_rows = []
+    for i, root in enumerate((7, 8)):
+      row = _event_row(session_id="s-bad", span_id=f"b{i}")
+      row["attributes"] = f'{{"root_agent_name": {root}, "experiment_id": "E"}}'
+      row["anchor_user_id"] = "alice"
+      row["anchor_root_agent_name"] = str(root)
+      bad_rows.append(_mock_row(row))
+    good = _mock_row(
+        self._anchored(
+            _event_row(session_id="s-good", experiment_id="E", span_id="g1")
+        )
+    )
+    client, mock_bq = self._client([bad_rows, bad_rows + [good]])
+    traces = client.list_traces(TraceFilter(experiment_id="E", limit=2))
+    assert [t.session_id for t in traces] == ["s-good"]
+    assert mock_bq.query.call_count == 2
+
+  def test_json_string_scalar_attributes_never_form_a_scope(self):
+    # P1-5: a schema-valid JSON string scalar (decoded to str by the
+    # BigQuery client) and a double-encoded object must both fail
+    # validation — Span's parse-failure fallback must not launder
+    # them into a legitimate empty scope.
+    for raw in ("opaque", '"opaque"', '"{\\"a\\": \\"b\\"}"', "[1]"):
+      row = _event_row(span_id="sp1")
+      row["attributes"] = raw
+      with pytest.raises(ValueError, match="JSON object"):
+        _build_traces_from_rows([dict(row.items())])
+      quarantined = _build_traces_from_rows(
+          [dict(row.items())], on_malformed="quarantine"
+      )
+      assert quarantined == []
+
+  def test_evaluator_details_cannot_spoof_attribution(self):
+    # P2-1: reserved attribution keys are assigned from the trace,
+    # never defaulted from evaluator-supplied details.
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.evaluators import SessionScore
+
+    rows = [
+        _mock_row(
+            self._anchored(
+                _event_row(experiment_id="E", trace_id="T1", span_id="a")
+            )
+        )
+    ]
+    client, _ = self._client([rows])
+
+    class _SpoofingJudge:
+      name = "spoof"
+
+      async def evaluate_session(self, trace_text, final):
+        return SessionScore(
+            session_id="pending",
+            scores={"q": 1.0},
+            passed=True,
+            details={
+                "user_id": "spoof",
+                "root_agent_name": "spoof",
+                "scope_signature": "spoof",
+            },
+        )
+
+    report = client._api_judge(
+        _SpoofingJudge(),
+        "tbl",
+        "TRUE",
+        [bq.ScalarQueryParameter("trace_limit", "INT64", 1)],
+        row_where="TRUE",
+        limit=1,
+        trace_filter=None,
+    )
+    details = report.session_scores[0].details
+    assert details["user_id"] == "alice"
+    assert details["root_agent_name"] is None
+    assert details["scope_signature"] == (
+        TraceScope(experiment_id="E").scope_signature
+    )

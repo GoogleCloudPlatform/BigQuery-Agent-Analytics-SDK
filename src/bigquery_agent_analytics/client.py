@@ -47,7 +47,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import copy
-import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
@@ -110,7 +109,6 @@ from .insights import SessionMetadata
 from .trace import _is_unaddressable_label_key
 from .trace import _jsonpath_member_segment
 from .trace import AmbiguousSessionError
-from .trace import resolve_singular_candidate
 from .trace import ResolvedTraceSelector
 from .trace import Span
 from .trace import SQL_NULL
@@ -186,7 +184,9 @@ SELECT
   e.latency_ms,
   e.status,
   e.error_message,
-  e.is_truncated
+  e.is_truncated,
+  ts.user_id AS anchor_user_id,
+  ts.root_agent_name AS anchor_root_agent_name
 FROM `{project}.{dataset}.{table}` e
 JOIN trace_sessions ts
   ON e.session_id = ts.session_id
@@ -1051,18 +1051,18 @@ class Client:
       raise _no_matching_events_error(selector, bool(pushdown))
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
     if truncated:
-      # Sound boundary handling (PR #371 review round 7, P1-1/P1-2):
-      # tagged rows independently prove their scope exists, so they
-      # stay classifiable even for the boundary identity. Only
-      # context-DEPENDENT classifications — untagged rows, whose
-      # shared-vs-empty-scope meaning needs the identity's full
-      # experiment/payload context — are excluded for the boundary
-      # identity, whose page may have split that context. The SQL
+      # Sound boundary handling (PR #371 review rounds 7-9): the SQL
       # page folds explicit-JSON-null encodings into raw-missing
-      # (PR #371 review round 8, P1-1), so every canonical identity
-      # is one contiguous run and only the boundary identity can
-      # straddle the cut; the canonical-key comparison below is kept
-      # as defense in depth for callers feeding non-canonical rows.
+      # (round 8, P1-1), so every canonical identity is one
+      # contiguous run and only the boundary identity can straddle
+      # the cut. The boundary identity's rows go through the shared
+      # partial-page classifier (round 9, P1-2): tagged rows and
+      # every COMPLETE experiment group stay classifiable — proven
+      # ambiguity must surface as typed retries, not a generic
+      # enumeration error — while only the final (possibly cut)
+      # experiment group and unprovable empty-scope context are
+      # dropped. The canonical-key comparison is kept as defense in
+      # depth for callers feeding non-canonical rows.
       boundary = candidate_rows[-1]
 
       def _canonical_key(row: dict) -> tuple:
@@ -1075,14 +1075,17 @@ class Client:
         )
 
       boundary_key = _canonical_key(boundary)
-      kept_rows = []
-      for row in candidate_rows:
-        if _canonical_key(row) == boundary_key:
-          payload = _parse_tag_payload(row.get("tag_payload"))
-          if payload is None:
-            continue  # context-dependent: unsound on a split page
-        kept_rows.append(row)
-      candidate_rows = kept_rows
+      boundary_rows = [
+          row for row in candidate_rows if _canonical_key(row) == boundary_key
+      ]
+      sound_ids = {
+          id(row) for row in _sound_truncated_identity_rows(boundary_rows)
+      }
+      candidate_rows = [
+          row
+          for row in candidate_rows
+          if _canonical_key(row) != boundary_key or id(row) in sound_ids
+      ]
     candidates = _resolve_scope_candidates(candidate_rows)
     matching = _candidates_matching_selector(candidates, selector)
 
@@ -1091,15 +1094,40 @@ class Client:
     # prove neither uniqueness (another match may sort later) nor
     # absence — single-match and no-match truncated pages both fail
     # with the enumeration-bound error.
-    if len(matching) == 1 and (not truncated or allow_mixed_scope):
-      # A single sound match resolves exactly. Under truncation the
-      # strict path refuses (uniqueness unprovable), but a caller who
-      # opted into allow_mixed_scope accepts best-effort — and the
-      # selected scope beats a mixed read full of sibling scopes
-      # (PR #371 review round 7, P1-1).
+    if len(matching) == 1 and not truncated:
       return self._fetch_identity_trace(
           matching[0].identity, resolved_scope=matching[0]
       )
+    if len(matching) == 1 and truncated and allow_mixed_scope:
+      # A caller who opted into allow_mixed_scope accepts best-effort
+      # SCOPE resolution — the selected scope beats a mixed read full
+      # of sibling scopes (round 7, P1-1) — but cross-identity
+      # ambiguity must still raise (round 9, P1-1): the cut page
+      # cannot prove the matching identity is the only one carrying a
+      # matching scope. A fully pinned intrinsic identity is unique
+      # by construction; otherwise uniqueness is proven through the
+      # bounded identity page before returning the singleton, and any
+      # other outcome falls through to the mixed path, which enforces
+      # the cross-identity ambiguity surface.
+      if (
+          selector.user_id is not UNSET
+          and selector.root_agent_name is not UNSET
+      ):
+        return self._fetch_identity_trace(
+            matching[0].identity, resolved_scope=matching[0]
+        )
+      identities, identity_page_truncated = self._discover_session_identities(
+          selector
+      )
+      if (
+          not identity_page_truncated
+          and len(identities) == 1
+          and identities[0] == matching[0].identity
+      ):
+        return self._fetch_identity_trace(
+            matching[0].identity, resolved_scope=matching[0]
+        )
+      return self._fetch_mixed_scope_trace(selector)
     if allow_mixed_scope:
       return self._fetch_mixed_scope_trace(selector)
     if len(matching) >= 2:
@@ -1204,15 +1232,17 @@ class Client:
         index += 1
     return fragment, params
 
-  def _fetch_mixed_scope_trace(self, selector: TraceSelector) -> Trace:
-    """Conversation-complete read for one intrinsic identity.
+  def _discover_session_identities(
+      self, selector: TraceSelector
+  ) -> tuple[list, bool]:
+    """Bounded DISTINCT-identity page for the selector's pushdown.
 
-    Identity uniqueness is established by a bounded DISTINCT-identity
-    query carrying the FULL selector pushdown — identity pins AND
-    addressable scope pins — so scope pins that select a single
-    identity cannot produce a false cross-identity ambiguity, and a
-    selector matching nothing fails with not-found instead of
-    returning the whole identity (PR #371 review round 4, P1-1).
+    Returns the deduplicated identities and whether the page was
+    truncated (cap-plus-one sentinel, PR #371 review round 6, P2-7:
+    more than ``_MAX_IDENTITIES`` identities means the enumeration is
+    a lower bound). Shared by the mixed-scope read and the truncated
+    single-match proof in ``get_trace_by_selector`` (PR #371 review
+    round 9, P1-1).
     """
     pushdown, pin_params = self._selector_pushdown_pins(selector)
     query = _RESOLVE_SESSION_IDENTITIES_QUERY.format(
@@ -1239,12 +1269,9 @@ class Client:
     ]
     if not identity_rows:
       raise _no_matching_events_error(selector, bool(pushdown))
-    # Cap-plus-one sentinel (PR #371 review round 6, P2-7): more than
-    # _MAX_IDENTITIES identities means the enumeration is a lower
-    # bound and must be reported as truncated.
     identity_page_truncated = len(identity_rows) > _MAX_IDENTITIES
     identity_rows = identity_rows[:_MAX_IDENTITIES]
-    identities = []
+    identities: list = []
     for row in identity_rows:
       identity = TraceIdentity(
           session_id=row.get("session_id"),
@@ -1255,6 +1282,21 @@ class Client:
       )
       if identity not in identities:
         identities.append(identity)
+    return identities, identity_page_truncated
+
+  def _fetch_mixed_scope_trace(self, selector: TraceSelector) -> Trace:
+    """Conversation-complete read for one intrinsic identity.
+
+    Identity uniqueness is established by a bounded DISTINCT-identity
+    query carrying the FULL selector pushdown — identity pins AND
+    addressable scope pins — so scope pins that select a single
+    identity cannot produce a false cross-identity ambiguity, and a
+    selector matching nothing fails with not-found instead of
+    returning the whole identity (PR #371 review round 4, P1-1).
+    """
+    identities, identity_page_truncated = self._discover_session_identities(
+        selector
+    )
     if len(identities) > 1:
       # Python-only pins are applied BEFORE deciding identity
       # ambiguity (PR #371 review round 6, P1-3): the SQL-pushable
@@ -1321,17 +1363,12 @@ class Client:
     for row in results:
       row_dict = dict(row)
       span = Span.from_bigquery_row(row_dict)
-      attributes = span.attributes
-      if attributes is None:
-        attributes = {}
-      elif not isinstance(attributes, dict):
-        # The same fail-closed guard every sibling read path applies
-        # (PR #371 review round 8, P2-2): a persisted non-object must
-        # not silently classify as an untagged shared row, nor crash
-        # with an unredacted AttributeError.
-        raise ValueError(
-            "Persisted attributes must be a JSON object (contents redacted)."
-        )
+      # Validated from the RAW cell (PR #371 review rounds 8 P2-2 and
+      # 9 P1-5): a persisted non-object — including a JSON string
+      # scalar the BigQuery decoder hands over as str — must not
+      # silently classify as an untagged shared row, masquerade as an
+      # empty scope, or crash with an unredacted AttributeError.
+      attributes = _validated_attributes_object(row_dict.get("attributes"))
       row_user = row_dict.get("user_id")
       row_root = attributes.get("root_agent_name")
       if (
@@ -1466,10 +1503,17 @@ class Client:
     truncated = False
     for key, identity_rows in rows_by_identity.items():
       if len(identity_rows) > per_identity_limit:
-        # A truncated per-identity page cannot be classified soundly;
-        # report truncation without emitting manufactured candidates.
+        # A truncated per-identity page still classifies its SOUND
+        # subset (PR #371 review round 9, P1-2): tagged rows and
+        # complete experiment groups are proven candidates and must
+        # surface as typed retries; only the final (possibly cut)
+        # group and unprovable empty-scope context are dropped.
+        # Truncation is still reported so the set reads as a lower
+        # bound.
         truncated = True
-        continue
+        identity_rows = _sound_truncated_identity_rows(identity_rows)
+        if not identity_rows:
+          continue
       candidates = _candidates_matching_selector(
           _resolve_scope_candidates(identity_rows), selector
       )
@@ -1675,12 +1719,19 @@ class Client:
     # (PR #371 review round 8, P3-10).
     population_complete = row_where == "TRUE"
     sql_limit = limit
+    # Escalation runs until the result fills, the anchors are
+    # provably exhausted, or the 4096-anchor ceiling has ACTUALLY
+    # been queried (PR #371 review round 9, P1-3) — a fixed attempt
+    # count silently stopped at 64 anchors for limit=1. Exhaustion is
+    # judged on distinct SQL anchors projected from the CTE into the
+    # fetched rows (round 9, P1-4): quarantine keys are coarser than
+    # anchors, so counting them could collapse two malformed anchors
+    # into one and falsely end escalation above valid older results.
     # A None limit (judge path with no filter) keeps the caller's
     # trace_limit parameter untouched and cannot escalate — there is
     # no fill target to escalate toward.
-    attempts = 3 if (scope_predicate is not None and limit is not None) else 1
     traces: list[Trace] = []
-    for _ in range(attempts):
+    while True:
       attempt_params = [
           (
               bigquery.ScalarQueryParameter("trace_limit", "INT64", sql_limit)
@@ -1694,20 +1745,35 @@ class Client:
       results = list(
           self.bq_client.query(query, job_config=job_config).result()
       )
-      stats: dict = {}
       traces = _build_traces_from_rows(
           results,
           max_traces=limit,
           scope_predicate=scope_predicate,
           population_complete=population_complete,
           on_malformed="quarantine",
-          stats=stats,
       )
+      anchors: set = set()
+      for index, row in enumerate(results):
+        row_dict = dict(row)
+        if "anchor_user_id" in row_dict:
+          anchors.add(
+              (
+                  row_dict.get("session_id"),
+                  row_dict.get("anchor_user_id"),
+                  row_dict.get("anchor_root_agent_name"),
+              )
+          )
+        else:
+          # Rows without the projected anchor columns (foreign row
+          # sources) count one anchor per row: an OVERcount can only
+          # cost extra escalation attempts, never a false exhaustion.
+          anchors.add(("__row__", index))
       if (
-          sql_limit is None
+          scope_predicate is None
+          or sql_limit is None
           or len(traces) >= limit
           or not results
-          or stats.get("identity_count", 0) < sql_limit
+          or len(anchors) < sql_limit
           or sql_limit >= 4096
       ):
         break
@@ -2152,14 +2218,20 @@ class Client:
       # passes yields several judged traces; without identity/scope
       # attribution their score rows collide on session_id and
       # cross-criterion merging would overwrite one pass with
-      # another.
-      if trace.identity is not None:
-        score.details.setdefault("user_id", trace.identity.user_id)
-        score.details.setdefault(
-            "root_agent_name", trace.identity.root_agent_name
-        )
-      if trace.scope is not None:
-        score.details.setdefault("scope_signature", trace.scope.scope_signature)
+      # another. Reserved keys are ASSIGNED from the trace — the
+      # authoritative source — never defaulted, so a custom evaluator
+      # returning stale or spoofed attribution cannot make distinct
+      # score rows collide under the merge key (PR #371 review round
+      # 9, P2-1).
+      score.details["user_id"] = (
+          trace.identity.user_id if trace.identity is not None else None
+      )
+      score.details["root_agent_name"] = (
+          trace.identity.root_agent_name if trace.identity is not None else None
+      )
+      score.details["scope_signature"] = (
+          trace.scope.scope_signature if trace.scope is not None else None
+      )
       scores.append(score)
 
     return scores
@@ -3416,6 +3488,96 @@ def _merge_criterion_reports(
   )
 
 
+def _validated_attributes_object(raw: Any) -> dict:
+  """Strictly validated attributes object from the RAW BigQuery cell.
+
+  The BigQuery decoder yields Python objects for JSON columns: an
+  object cell arrives as ``dict``, but a schema-valid JSON string
+  scalar such as ``"opaque"`` arrives as ``str`` — and so does the
+  TEXT-stored encoding of a real object. ``Span.from_bigquery_row``
+  replaces parse failures with ``{}`` (a display convenience), which
+  would let a string scalar masquerade as a legitimate empty scope
+  and a double-encoded object be read differently from the SQL
+  predicates (PR #371 review round 9, P1-5). Here a ``str`` is
+  accepted ONLY if it parses to a JSON object (or null); everything
+  else raises the redacted validation error, which bulk readers
+  quarantine and singular readers surface.
+  """
+  if raw is None:
+    return {}
+  if isinstance(raw, dict):
+    return raw
+  if isinstance(raw, str):
+    try:
+      parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+      raise ValueError(
+          "Persisted attributes must be a JSON object (contents redacted)."
+      ) from exc
+    if parsed is None:
+      return {}
+    if isinstance(parsed, dict):
+      return parsed
+  raise ValueError(
+      "Persisted attributes must be a JSON object (contents redacted)."
+  )
+
+
+def _sound_truncated_identity_rows(rows: list) -> list:
+  """Soundly classifiable subset of ONE identity's cut candidate page.
+
+  ``rows`` are one identity's candidate rows in page order —
+  ``(experiment_id, tag_payload)`` with canonical encodings, untagged
+  (NULL payload) first within each experiment group — whose tail may
+  have been cut by a page boundary. Shared by the boundary-identity
+  handling in ``get_trace_by_selector`` and the batched per-identity
+  pages (PR #371 review round 9, P1-2).
+
+  Kept: tagged rows (they independently prove their scopes) and
+  untagged rows of every experiment group OTHER than the final one —
+  the sort order guarantees only the final group can be incomplete,
+  so earlier groups are complete and classify exactly as they would
+  on a full page.
+
+  Dropped: the final group's untagged row when no payload row of that
+  group is visible (its shared-vs-sole-scope meaning depends on
+  context the cut may hide), and untagged NULL-experiment rows when
+  that drop removed the identity's only visible scope evidence — an
+  empty-scope candidate would otherwise be manufactured for an
+  identity that provably has a non-NULL experiment.
+  """
+  if not rows:
+    return rows
+  final_exp = rows[-1].get("experiment_id")
+  final_group_has_payload = any(
+      row.get("experiment_id") == final_exp
+      and _parse_tag_payload(row.get("tag_payload")) is not None
+      for row in rows
+  )
+  kept = []
+  dropped_scope_evidence = False
+  for row in rows:
+    payload = _parse_tag_payload(row.get("tag_payload"))
+    if payload is not None:
+      kept.append(row)
+      continue
+    if row.get("experiment_id") == final_exp and not final_group_has_payload:
+      if final_exp is not None:
+        dropped_scope_evidence = True
+      continue
+    kept.append(row)
+  if dropped_scope_evidence and not any(
+      row.get("experiment_id") is not None
+      or _parse_tag_payload(row.get("tag_payload")) is not None
+      for row in kept
+  ):
+    # Every remaining row is untagged NULL-experiment context, but a
+    # dropped non-NULL experiment proves the identity has real
+    # scopes: the empty-scope classification is unprovable.
+    kept = []
+  return kept
+
+
 def _no_matching_events_error(
     selector: TraceSelector, has_pins: bool
 ) -> ValueError:
@@ -3853,7 +4015,6 @@ def _build_traces_from_rows(
     scope_predicate: Optional[Any] = None,
     population_complete: bool = True,
     on_malformed: str = "raise",
-    stats: Optional[dict] = None,
 ) -> list[Trace]:
   """Groups BigQuery result rows into Trace objects.
 
@@ -3880,11 +4041,6 @@ def _build_traces_from_rows(
   prove — so one poison row cannot brick reads for every session in
   the table; quarantined identities are counted and logged (contents
   redacted), never silently classified.
-
-  ``stats`` (optional out-param) receives ``identity_count``: the
-  number of distinct fetched identities INCLUDING quarantined ones,
-  which the escalating listing fetch uses to detect anchor
-  exhaustion.
   """
   identity_groups: dict[tuple, list] = {}
   # Quarantine keys, coarsest-first: a row whose user_id cannot be
@@ -3907,15 +4063,12 @@ def _build_traces_from_rows(
       poisoned_sessions.add(sid)
       continue
     try:
-      attributes = span.attributes
-      if attributes is None:
-        attributes = {}
-      elif not isinstance(attributes, dict):
-        # A falsey non-object (e.g. []) must not silently become an
-        # empty valid scope (PR #371 review round 7, P2).
-        raise ValueError(
-            "Persisted attributes must be a JSON object (contents" " redacted)."
-        )
+      # Validated from the RAW cell, not Span's lenient display
+      # normalization (PR #371 review round 9, P1-5): the BigQuery
+      # decoder hands a schema-valid JSON string scalar to Python as
+      # str, and Span's parse-failure fallback would silently turn it
+      # into a legitimate-looking empty scope.
+      attributes = _validated_attributes_object(row_dict.get("attributes"))
       root_agent_name = _validated_identity_attr(
           "root_agent_name", attributes.get("root_agent_name")
       )
@@ -3941,17 +4094,6 @@ def _build_traces_from_rows(
         (experiment, payload, span)
     )
 
-  if stats is not None:
-    # Counted BEFORE quarantine deletion, and poison keys are added
-    # on top: for anchor-exhaustion detection an OVERcount only costs
-    # one extra escalation attempt, while an undercount would end
-    # escalation while unfetched anchors remain.
-    stats["identity_count"] = (
-        len(identity_groups)
-        + len(poisoned_sessions)
-        + len(poisoned_users)
-        + len(poisoned_identities)
-    )
   if poisoned_sessions or poisoned_users or poisoned_identities:
     contaminated = [
         key
@@ -4051,7 +4193,6 @@ def _build_traces_from_rows(
             "local_shared_ids": local_shared_ids,
             "identity_shared": identity_shared,
             "identity_shared_ids": shared_trace_ids,
-            "identity_slots": identity_slots,
             "subgroup_slot_total": len(scope_options),
             "max_ts": base_ts,
         }
@@ -4072,6 +4213,12 @@ def _build_traces_from_rows(
             slot["max_ts"] is None or span.timestamp > slot["max_ts"]
         ):
           slot["max_ts"] = span.timestamp
+    # Store the census as an integer, not the shared list: a slot
+    # holding the list that holds the slot is a reference cycle, so
+    # unretained slots and their spans would outlive materialization
+    # until cyclic GC (PR #371 review round 9, P3-1).
+    for identity_slot in identity_slots:
+      identity_slot["identity_slot_total"] = len(identity_slots)
 
   # Phase 2: scope-filter, rank, and retain BEFORE attaching shared
   # rows — the caller's scope pins drop non-matching slots here so
@@ -4133,7 +4280,7 @@ def _build_traces_from_rows(
     # sibling experiments exist. Only the identity-level pool
     # (untagged NULL-experiment rows), which is distributed across
     # every subgroup, needs the identity-level slot census.
-    identity_slot_total = len(slot["identity_slots"])
+    identity_slot_total = slot["identity_slot_total"]
     if slot["own_trace_ids"]:
       trace_id = slot["own_trace_ids"][0]
     elif (
