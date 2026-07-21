@@ -1,0 +1,4 @@
+# Generator env for regen-locks.sh: resolver + the build backend needed
+# to read producers/pyproject.toml metadata without isolation.
+pip-tools
+hatchling

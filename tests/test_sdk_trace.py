@@ -16,14 +16,24 @@
 
 from datetime import datetime
 from datetime import timezone
+import json
 
 import pytest
 
+from bigquery_agent_analytics import trace as trace_module
+from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import ContentPart
 from bigquery_agent_analytics.trace import ObjectRef
+from bigquery_agent_analytics.trace import resolve_singular_candidate
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import SQL_NULL
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceFilter
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.trace import TraceSelector
+from bigquery_agent_analytics.trace import UNSET
 
 
 class TestSpan:
@@ -1102,3 +1112,2963 @@ class TestTraceFilterNewFields:
     assert "agent = @agent_id" in where
     assert "tool_origin" in where
     assert "root_agent_name" in where
+
+
+class TestTraceFilterNullSafePins:
+  """Three-state identity pins on TraceFilter (issue #359, U1)."""
+
+  def test_sql_null_pin_emits_is_null_predicates(self):
+    filt = TraceFilter(
+        user_id=SQL_NULL,
+        root_agent_name=SQL_NULL,
+        experiment_id=SQL_NULL,
+    )
+    where, params = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.root_agent_name') IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.experiment_id') IS NULL" in where
+    # NULL pins bind no equality parameters.
+    param_names = {p.name for p in params}
+    assert param_names == {"trace_limit"}
+
+  def test_none_still_means_unfiltered(self):
+    where, _ = TraceFilter().to_sql_conditions()
+    assert "user_id" not in where
+    assert "root_agent_name" not in where
+    assert "experiment_id" not in where
+
+  def test_empty_string_values_filter_by_equality(self):
+    filt = TraceFilter(user_id="", root_agent_name="", experiment_id="")
+    where, params = filt.to_sql_conditions()
+    assert "user_id = @user_id" in where
+    assert (
+        "JSON_VALUE(attributes, '$.root_agent_name') = @root_agent_name"
+        in where
+    )
+    assert "JSON_VALUE(attributes, '$.experiment_id') = @experiment_id" in where
+    values = {p.name: p.value for p in params if p.name != "trace_limit"}
+    assert values == {"user_id": "", "root_agent_name": "", "experiment_id": ""}
+
+  def test_null_and_empty_string_pins_are_distinct_predicates(self):
+    null_where, _ = TraceFilter(user_id=SQL_NULL).to_sql_conditions()
+    empty_where, _ = TraceFilter(user_id="").to_sql_conditions()
+    assert null_where != empty_where
+
+
+class TestTraceIdentity:
+  """Tests for the intrinsic TraceIdentity value object (issue #359, U1)."""
+
+  def test_equality_and_hash_dedup(self):
+    a = TraceIdentity(
+        session_id="sess-1", user_id="alice", root_agent_name="root"
+    )
+    b = TraceIdentity(
+        session_id="sess-1", user_id="alice", root_agent_name="root"
+    )
+    assert a == b
+    assert len({a, b}) == 1
+
+  def test_same_session_different_user_distinct(self):
+    a = TraceIdentity(session_id="sess-1", user_id="alice")
+    b = TraceIdentity(session_id="sess-1", user_id="bob")
+    c = TraceIdentity(session_id="sess-1", user_id=None)
+    assert len({a, b, c}) == 3
+
+  def test_immutable(self):
+    identity = TraceIdentity(session_id="sess-1")
+    with pytest.raises(AttributeError):
+      identity.session_id = "sess-2"
+
+
+class TestTraceScope:
+  """Tests for the caller-selected TraceScope value object."""
+
+  def test_label_canonicalization_dict_order_irrelevant(self):
+    a = TraceScope(
+        experiment_id="exp-1", custom_labels={"run": "v1", "slice": "3"}
+    )
+    b = TraceScope(
+        experiment_id="exp-1", custom_labels={"slice": "3", "run": "v1"}
+    )
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a.scope_signature == b.scope_signature
+
+  def test_scope_signature_distinguishes_passes(self):
+    v0 = TraceScope(custom_labels={"run": "v0"})
+    v1 = TraceScope(custom_labels={"run": "v1"})
+    assert v0.scope_signature != v1.scope_signature
+
+  def test_empty_scope_stable(self):
+    empty = TraceScope()
+    assert empty == TraceScope()
+    assert isinstance(empty.scope_signature, str)
+
+  def test_labels_dict_round_trip(self):
+    scope = TraceScope(custom_labels={"b": "2", "a": "1"})
+    assert scope.labels_dict == {"a": "1", "b": "2"}
+
+  def test_empty_labels_normalize_to_no_labels(self):
+    assert TraceScope(custom_labels={}) == TraceScope()
+    assert TraceScope(custom_labels=()) == TraceScope(custom_labels=None)
+    assert (
+        TraceScope(custom_labels={}).scope_signature
+        == TraceScope().scope_signature
+    )
+
+  def test_scope_signature_is_versioned(self):
+    assert TraceScope().scope_signature.startswith("v1:")
+
+  def test_scope_signature_delimiter_values_do_not_collide(self):
+    # A label value containing the old "k=v;k=v" delimiters must not
+    # collide with the scope that spells the same payload as two
+    # separate labels.
+    packed = TraceScope(custom_labels={"a": "b;c=d"})
+    split = TraceScope(custom_labels={"a": "b", "c": "d"})
+    assert packed.scope_signature != split.scope_signature
+
+  def test_scope_signature_experiment_id_cannot_smuggle_labels(self):
+    packed = TraceScope(experiment_id="x;a=b")
+    split = TraceScope(experiment_id="x", custom_labels={"a": "b"})
+    assert packed.scope_signature != split.scope_signature
+
+  def test_scope_signature_key_value_boundary_stable(self):
+    a = TraceScope(custom_labels={"ab": "c"})
+    b = TraceScope(custom_labels={"a": "bc"})
+    assert a.scope_signature != b.scope_signature
+
+  def test_scope_signature_unicode_labels_distinct_and_stable(self):
+    quoted = TraceScope(custom_labels={"k": 'v"w'})
+    escaped = TraceScope(custom_labels={"k": "v\\u0022w"})
+    assert quoted.scope_signature != escaped.scope_signature
+    accented = TraceScope(custom_labels={"k": "café"})
+    assert accented.scope_signature == accented.scope_signature
+    assert (
+        accented.scope_signature
+        != TraceScope(custom_labels={"k": "cafe"}).scope_signature
+    )
+
+  def test_non_string_label_keys_or_values_rejected(self):
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceScope(custom_labels={1: "v"})
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceScope(custom_labels={"k": 1})
+
+  def test_duplicate_label_keys_rejected(self):
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceScope(custom_labels=(("run", "v0"), ("run", "v1")))
+
+
+class TestTraceSelector:
+  """Tests for caller-pin selectors and their TraceFilter mapping."""
+
+  def test_selector_dedup_keeps_collision_candidates(self):
+    a = TraceSelector(session_id="sess-1", user_id="alice")
+    a_dup = TraceSelector(session_id="sess-1", user_id="alice")
+    b = TraceSelector(session_id="sess-1", user_id="bob")
+    c = TraceSelector(
+        session_id="sess-1", user_id="alice", custom_labels={"run": "v1"}
+    )
+    deduped = {a, a_dup, b, c}
+    assert len(deduped) == 3
+
+  def test_to_trace_filter_maps_pins(self):
+    selector = TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name="root",
+        experiment_id="exp-1",
+        custom_labels={"run": "v1"},
+    )
+    filt = selector.to_trace_filter(limit=7)
+    assert filt.session_ids == ["sess-1"]
+    assert filt.user_id == "alice"
+    assert filt.root_agent_name == "root"
+    assert filt.experiment_id == "exp-1"
+    assert filt.custom_labels == {"run": "v1"}
+    assert filt.limit == 7
+
+  def test_to_trace_filter_unpinned_fields_absent(self):
+    filt = TraceSelector(session_id="sess-1").to_trace_filter()
+    assert filt.session_ids == ["sess-1"]
+    assert filt.user_id is None
+    assert filt.root_agent_name is None
+    assert filt.experiment_id is None
+    assert filt.custom_labels is None
+
+  def test_duplicate_label_keys_rejected(self):
+    # A duplicate key would silently drop one value in the dict-based
+    # to_trace_filter() conversion, so it is rejected at construction.
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceSelector(
+          session_id="sess-1", custom_labels=(("run", "v0"), ("run", "v1"))
+      )
+
+  def test_non_string_label_values_rejected(self):
+    with pytest.raises(TypeError, match="must be strings"):
+      TraceSelector(session_id="sess-1", custom_labels={"slice": 3})
+
+  def test_empty_labels_equal_unlabeled_selector(self):
+    assert TraceSelector(session_id="sess-1", custom_labels={}) == (
+        TraceSelector(session_id="sess-1")
+    )
+    filt = TraceSelector(
+        session_id="sess-1", custom_labels={}
+    ).to_trace_filter()
+    assert filt.custom_labels is None
+
+  def test_unset_and_explicit_null_pins_are_distinct(self):
+    unpinned = TraceSelector(session_id="sess-1")
+    null_pinned = TraceSelector(session_id="sess-1", user_id=None)
+    assert unpinned.user_id is UNSET
+    assert null_pinned.user_id is None
+    assert unpinned != null_pinned
+    assert len({unpinned, null_pinned}) == 2
+
+  def test_to_trace_filter_maps_three_pin_states(self):
+    filt = TraceSelector(
+        session_id="sess-1",
+        user_id=None,
+        root_agent_name="root",
+    ).to_trace_filter()
+    # Explicit NULL pin becomes the NULL-safe filter sentinel.
+    assert filt.user_id is SQL_NULL
+    # Concrete pins pass through; UNSET dimensions stay unfiltered.
+    assert filt.root_agent_name == "root"
+    assert filt.experiment_id is None
+
+  def test_empty_string_pin_survives_to_sql(self):
+    # An empty-string identity value is a concrete value, not an
+    # absent one; it must not collapse into an unpinned dimension.
+    filt = TraceSelector(session_id="sess-1", user_id="").to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    assert "user_id = @user_id" in where
+    user_param = next(p for p in params if p.name == "user_id")
+    assert user_param.value == ""
+
+  def test_sql_null_sentinel_rejected_as_selector_pin(self):
+    # The selector spells a NULL pin as explicit None; accepting the
+    # filter-side sentinel too would create two unequal spellings of
+    # the same pin.
+    with pytest.raises(TypeError, match="pin to SQL"):
+      TraceSelector(session_id="sess-1", user_id=SQL_NULL)
+
+
+class TestResolvedTraceSelector:
+  """Tests for resolved identity + scope combinations."""
+
+  def test_exposes_identity_scope_and_signature(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+    assert resolved.identity.session_id == "sess-1"
+    assert resolved.scope_signature == resolved.scope.scope_signature
+
+  def test_same_identity_different_scope_distinct(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    v0 = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v0"})
+    )
+    v1 = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v1"})
+    )
+    assert len({v0, v1}) == 2
+
+  def test_to_selector_round_trips_all_pins(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(
+            session_id="sess-1", user_id="alice", root_agent_name="root"
+        ),
+        scope=TraceScope(experiment_id="exp-1", custom_labels={"run": "v0"}),
+    )
+    selector = resolved.to_selector()
+    assert selector == TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name="root",
+        experiment_id="exp-1",
+        custom_labels={"run": "v0"},
+        scope_signature=resolved.scope_signature,
+    )
+
+  def test_to_selector_pins_null_identity_dimensions(self):
+    # AE2: a resolved NULL user/root-agent candidate retries as an
+    # explicit NULL pin, not as an unpinned session-only request.
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+        scope=TraceScope(),
+    )
+    selector = resolved.to_selector()
+    assert selector.user_id is None
+    assert selector.root_agent_name is None
+    assert selector.experiment_id is None
+    assert selector != TraceSelector(session_id="sess-1")
+    filt = selector.to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.root_agent_name') IS NULL" in where
+    assert "JSON_VALUE(attributes, '$.experiment_id') IS NULL" in where
+    param_names = {p.name for p in params}
+    assert "user_id" not in param_names
+    assert "root_agent_name" not in param_names
+    assert "experiment_id" not in param_names
+
+  def test_to_selector_distinguishes_subset_and_superset_scopes(self):
+    # AE3: the retry selector for the {'run': 'v1'} pass must not
+    # also select the {'run': 'v1', 'slice': '3'} pass, and an
+    # unlabeled candidate must not retry as an unpinned scope.
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    subset = ResolvedTraceSelector(
+        identity=identity, scope=TraceScope(custom_labels={"run": "v1"})
+    )
+    superset = ResolvedTraceSelector(
+        identity=identity,
+        scope=TraceScope(custom_labels={"run": "v1", "slice": "3"}),
+    )
+    unlabeled = ResolvedTraceSelector(identity=identity, scope=TraceScope())
+    selectors = {
+        subset.to_selector(),
+        superset.to_selector(),
+        unlabeled.to_selector(),
+    }
+    assert len(selectors) == 3
+    assert subset.to_selector().scope_signature == subset.scope_signature
+    assert unlabeled.to_selector().scope_signature == unlabeled.scope_signature
+
+
+class TestAmbiguousSessionError:
+  """Tests for the typed ambiguity error (KTD3 redaction contract)."""
+
+  def _candidates(self):
+    return [
+        ResolvedTraceSelector(
+            identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            scope=TraceScope(custom_labels={"run": "v0"}),
+        ),
+        ResolvedTraceSelector(
+            identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+            scope=TraceScope(custom_labels={"run": "v1"}),
+        ),
+    ]
+
+  def test_subclasses_value_error(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    assert isinstance(err, ValueError)
+
+  def test_printable_form_redacts_candidate_values(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    printable = str(err)
+    assert "2" in printable
+    assert "user_id" in printable
+    # Candidate values, session ids, and label values must not leak.
+    for leaked in ("alice", "bob", "sess-1", "v0", "v1"):
+      assert leaked not in printable
+
+  def test_retry_dimensions_name_differing_fields(self):
+    err = AmbiguousSessionError(candidates=self._candidates())
+    assert "user_id" in err.retry_dimensions
+    assert "custom_labels" in err.retry_dimensions
+    assert "root_agent_name" not in err.retry_dimensions
+
+  def test_structured_candidates_full_json_shape(self):
+    candidates = self._candidates()
+    err = AmbiguousSessionError(candidates=candidates)
+    assert err.candidates == tuple(candidates)
+    payload = err.to_dict()
+    assert payload == {
+        "error": "ambiguous_session",
+        "candidate_count": 2,
+        "retry_dimensions": ["user_id", "custom_labels", "scope_signature"],
+        "candidates": [
+            {
+                "selector": {
+                    "session_id": "sess-1",
+                    "user_id": "alice",
+                    "root_agent_name": None,
+                    "experiment_id": None,
+                    "custom_labels": {"run": "v0"},
+                    "scope_signature": candidates[0].scope_signature,
+                },
+                "scope_signature": candidates[0].scope_signature,
+            },
+            {
+                "selector": {
+                    "session_id": "sess-1",
+                    "user_id": "bob",
+                    "root_agent_name": None,
+                    "experiment_id": None,
+                    "custom_labels": {"run": "v1"},
+                    "scope_signature": candidates[1].scope_signature,
+                },
+                "scope_signature": candidates[1].scope_signature,
+            },
+        ],
+    }
+    json.dumps(payload)
+
+  def test_candidate_payload_selector_is_retry_ready(self):
+    candidates = self._candidates()
+    payload = AmbiguousSessionError(candidates=candidates).to_dict()
+    for entry, original in zip(payload["candidates"], candidates):
+      assert TraceSelector(**entry["selector"]) == original.to_selector()
+
+  def test_null_and_non_null_identity_ambiguity_round_trips(self):
+    # AE2: a NULL-user candidate and a non-NULL-user candidate are a
+    # real ambiguity, and the NULL candidate's payload retries as an
+    # explicit NULL pin — not as the same session-only request that
+    # was ambiguous in the first place.
+    null_user = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+    )
+    named_user = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    err = AmbiguousSessionError(candidates=[null_user, named_user])
+    assert err.retry_dimensions == ("user_id",)
+    payload = err.to_dict()
+    null_selector = payload["candidates"][0]["selector"]
+    assert null_selector["user_id"] is None
+    assert null_selector["custom_labels"] is None
+    retried = TraceSelector(**null_selector)
+    assert retried == null_user.to_selector()
+    assert retried != TraceSelector(session_id="sess-1")
+    where, _ = retried.to_trace_filter().to_sql_conditions()
+    assert "user_id IS NULL" in where
+
+  def test_constructor_rejects_non_ambiguous_populations(self):
+    single = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="at least two distinct"):
+      AmbiguousSessionError(candidates=[single])
+    duplicate = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="at least two distinct"):
+      AmbiguousSessionError(candidates=[single, duplicate])
+
+  def test_constructor_rejects_cross_session_candidates(self):
+    a = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    b = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-2", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="share one session_id"):
+      AmbiguousSessionError(candidates=[a, b])
+
+  def test_constructor_dedupes_before_counting(self):
+    a = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    a_dup = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    b = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+    )
+    err = AmbiguousSessionError(candidates=[a, a_dup, b])
+    assert err.candidates == (a, b)
+    assert err.to_dict()["candidate_count"] == 2
+
+
+class TestResolveSingularCandidate:
+  """Tests for legacy session-only key validation (R5/R7 rules)."""
+
+  def _candidate(self, user_id):
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id),
+        scope=TraceScope(),
+    )
+
+  def test_single_candidate_accepted(self):
+    only = self._candidate("alice")
+    assert resolve_singular_candidate([only]) is only
+
+  def test_multiple_candidates_rejected(self):
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate(
+          [self._candidate("alice"), self._candidate("bob")]
+      )
+
+  def test_zero_candidates_raise_value_error(self):
+    with pytest.raises(ValueError, match="No candidates"):
+      resolve_singular_candidate([])
+
+  def test_never_picks_newest_implicitly(self):
+    # Ordering must not matter: ambiguity is raised regardless of the
+    # candidates' order, so no "latest wins" fallback can exist.
+    candidates = [self._candidate("bob"), self._candidate("alice")]
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate(list(reversed(candidates)))
+
+  def test_duplicate_rows_of_one_candidate_stay_unambiguous(self):
+    # Candidate discovery may return the same resolved selector more
+    # than once; duplicates count as one candidate, not an ambiguity.
+    only = self._candidate("alice")
+    duplicate = self._candidate("alice")
+    assert resolve_singular_candidate([only, duplicate]) == only
+
+  def test_duplicates_do_not_mask_distinct_candidates(self):
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      resolve_singular_candidate(
+          [
+              self._candidate("alice"),
+              self._candidate("alice"),
+              self._candidate("bob"),
+          ]
+      )
+    err = exc_info.value
+    assert len(err.candidates) == 2
+    assert err.retry_dimensions == ("user_id",)
+
+
+class TestTraceAdditiveIdentity:
+  """Trace gains an additive identity without breaking legacy fields."""
+
+  def test_trace_accepts_identity_and_scope(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        user_id="alice",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+    assert trace.session_id == "sess-1"
+    assert trace.user_id == "alice"
+    assert trace.trace_id == "t1"
+    assert trace.identity.user_id == "alice"
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_trace_identity_defaults_to_none(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    assert trace.identity is None
+    assert trace.scope is None
+
+  def test_contradictory_session_id_rejected(self):
+    # The identity is the single authority: mirrored legacy scalars
+    # must agree with it so downstream code keyed on either surface
+    # sees one identity.
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="legacy-session",
+          identity=TraceIdentity(session_id="different-session"),
+      )
+
+  def test_contradictory_user_id_rejected(self):
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="sess-1",
+          user_id="legacy-user",
+          identity=TraceIdentity(session_id="sess-1", user_id="other-user"),
+      )
+    # An identity resolved with a NULL user also contradicts a
+    # non-NULL legacy scalar.
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id="sess-1",
+          user_id="legacy-user",
+          identity=TraceIdentity(session_id="sess-1"),
+      )
+
+  def test_unset_user_id_backfilled_from_identity(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    assert trace.user_id == "alice"
+
+  def test_mutating_session_id_against_identity_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      trace.session_id = "sess-2"
+    # The failed write must not leave a desynchronized object behind.
+    assert trace.session_id == "sess-1"
+
+  def test_mutating_user_id_against_identity_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(ValueError, match="user_id contradicts"):
+      trace.user_id = "mallory"
+    with pytest.raises(ValueError, match="cannot be cleared"):
+      trace.user_id = None
+    assert trace.user_id == "alice"
+
+  def test_identity_immutable_once_attached(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    # Any replacement is rejected, even when the new identity would
+    # be consistent with the current scalar mirrors.
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(session_id="sess-2", user_id="alice")
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(session_id="sess-1", user_id="bob")
+    # Detaching would let the mirrors be retagged afterwards.
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = None
+    # Idempotent equal re-assignment stays allowed.
+    trace.identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.user_id == "alice"
+
+  def test_null_user_identity_cannot_be_retagged(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1"),
+    )
+    # A NULL-user identity must not upgrade to a named user, and a
+    # root-agent-only swap must not slip past the scalar mirrors.
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(session_id="sess-1", user_id="mallory")
+    assert trace.user_id is None
+
+  def test_root_agent_only_replacement_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", root_agent_name="root-a"),
+    )
+    with pytest.raises(ValueError, match="cannot be replaced"):
+      trace.identity = TraceIdentity(
+          session_id="sess-1", root_agent_name="root-b"
+      )
+    assert trace.identity.root_agent_name == "root-a"
+
+  def test_consistent_writes_and_serialization_stay_aligned(self):
+    from bigquery_agent_analytics.serialization import serialize
+
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    # Legacy traces without identity remain freely mutable.
+    trace.user_id = "temp"
+    trace.user_id = None
+    # Attaching an identity later backfills the mirror.
+    trace.identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.user_id == "alice"
+    # Idempotent consistent writes are allowed.
+    trace.user_id = "alice"
+    trace.session_id = "sess-1"
+    result = serialize(trace)
+    assert result["session_id"] == result["identity"]["session_id"]
+    assert result["user_id"] == result["identity"]["user_id"]
+
+
+class TestPinSentinelDurability:
+  """Sentinels must keep singleton identity through pickle (round 3)."""
+
+  def test_sentinels_survive_pickle(self):
+    import pickle
+
+    assert pickle.loads(pickle.dumps(UNSET)) is UNSET
+    assert pickle.loads(pickle.dumps(SQL_NULL)) is SQL_NULL
+
+  def test_pickled_selector_keeps_unset_semantics(self):
+    import pickle
+
+    restored = pickle.loads(pickle.dumps(TraceSelector(session_id="sess-1")))
+    assert restored.user_id is UNSET
+    assert restored == TraceSelector(session_id="sess-1")
+    filt = restored.to_trace_filter()
+    where, _ = filt.to_sql_conditions()
+    assert "user_id" not in where
+
+  def test_pickled_filter_keeps_null_pin_semantics(self):
+    import pickle
+
+    restored = pickle.loads(pickle.dumps(TraceFilter(user_id=SQL_NULL)))
+    where, params = restored.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert all(p.name != "user_id" for p in params)
+
+  def test_sentinels_survive_copy_and_deepcopy(self):
+    import copy
+
+    assert copy.copy(UNSET) is UNSET
+    assert copy.deepcopy(SQL_NULL) is SQL_NULL
+    cloned = copy.deepcopy(TraceSelector(session_id="sess-1"))
+    assert cloned.user_id is UNSET
+
+
+class TestAmbiguousSessionErrorDurability:
+  """The error must survive copy/deepcopy/pickle intact (round 3)."""
+
+  def _error(self):
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1"),
+            ),
+        ]
+    )
+
+  def test_copy_and_deepcopy_preserve_candidates(self):
+    import copy
+
+    err = self._error()
+    for clone in (copy.copy(err), copy.deepcopy(err)):
+      assert clone.candidates == err.candidates
+      assert clone.retry_dimensions == err.retry_dimensions
+      assert clone.to_dict() == err.to_dict()
+
+  def test_pickle_round_trip_preserves_payload(self):
+    import pickle
+
+    err = self._error()
+    restored = pickle.loads(pickle.dumps(err))
+    assert restored.candidates == err.candidates
+    assert restored.to_dict() == err.to_dict()
+    assert str(restored) == str(err)
+
+
+class TestScopeSignatureRetryGuidance:
+  """scope_signature must be hinted when only scope payloads differ."""
+
+  def _colliding(self, labels_a, labels_b):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=identity, scope=TraceScope(custom_labels=labels_a)
+            ),
+            ResolvedTraceSelector(
+                identity=identity, scope=TraceScope(custom_labels=labels_b)
+            ),
+        ]
+    )
+
+  def test_subset_superset_collision_hints_scope_signature(self):
+    err = self._colliding({"run": "v1"}, {"run": "v1", "slice": "3"})
+    assert "scope_signature" in err.retry_dimensions
+    assert "custom_labels" in err.retry_dimensions
+    assert "scope_signature" in str(err)
+
+  def test_unlabeled_labeled_collision_hints_scope_signature(self):
+    err = self._colliding(None, {"run": "v1"})
+    assert "scope_signature" in err.retry_dimensions
+    assert "scope_signature" in str(err)
+
+  def test_identity_only_collision_does_not_hint_scope_signature(self):
+    err = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="bob"),
+            ),
+        ]
+    )
+    assert err.retry_dimensions == ("user_id",)
+
+
+class TestLabelPairNormalization:
+  """Canonical labels must be rebuilt pairs, not caller containers."""
+
+  def test_json_round_trip_normalizes_and_hashes(self):
+    from bigquery_agent_analytics.serialization import serialize
+
+    original = TraceScope(custom_labels=(("a", "b"),))
+    payload = serialize(original)
+    assert payload["custom_labels"] == [["a", "b"]]
+    restored = TraceScope(custom_labels=payload["custom_labels"])
+    assert restored == original
+    assert hash(restored) == hash(original)
+    assert restored.scope_signature == original.scope_signature
+
+  def test_string_entry_rejected(self):
+    # "ab" would unpack into ("a", "b") but is not a (key, value) pair.
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=["ab"])
+
+  def test_wrong_arity_entries_rejected(self):
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=(("a", "b", "c"),))
+    with pytest.raises(TypeError, match="two-item"):
+      TraceScope(custom_labels=(("a",),))
+
+
+class TestConstructorTypeBoundaries:
+  """Public models reject values that break value semantics (round 3)."""
+
+  def test_trace_identity_rejects_non_string_fields(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      TraceIdentity(session_id=1)
+    with pytest.raises(TypeError, match="user_id must be a string"):
+      TraceIdentity(session_id="sess-1", user_id=True)
+    with pytest.raises(TypeError, match="root_agent_name must be a string"):
+      TraceIdentity(session_id="sess-1", root_agent_name=3)
+
+  def test_trace_scope_rejects_non_string_experiment_id(self):
+    # 1 and True compare equal but sign differently, so both must be
+    # rejected instead of silently deduplicating distinct scopes.
+    with pytest.raises(TypeError, match="experiment_id must be a string"):
+      TraceScope(experiment_id=1)
+    with pytest.raises(TypeError, match="experiment_id must be a string"):
+      TraceScope(experiment_id=True)
+
+  def test_trace_filter_rejects_unset_and_foreign_values(self):
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      TraceFilter(user_id=UNSET)
+    with pytest.raises(TypeError, match="TraceFilter.root_agent_name"):
+      TraceFilter(root_agent_name=UNSET)
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      TraceFilter(experiment_id=1)
+    # The supported states still construct.
+    TraceFilter(user_id=None, root_agent_name=SQL_NULL, experiment_id="e")
+
+  def test_trace_selector_rejects_non_string_session_and_signature(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      TraceSelector(session_id=1)
+    with pytest.raises(TypeError, match="scope_signature must be a string"):
+      TraceSelector(session_id="sess-1", scope_signature=1)
+
+
+class TestScopeSignatureGolden:
+  """Exact golden encoding of the v1 scope signature."""
+
+  def test_full_signature_golden(self):
+    scope = TraceScope(
+        experiment_id="exp-1", custom_labels={"b": "2", "a": "1"}
+    )
+    assert scope.scope_signature == (
+        'v1:{"custom_labels":[["a","1"],["b","2"]],"experiment_id":"exp-1"}'
+    )
+
+  def test_empty_signature_golden(self):
+    assert TraceScope().scope_signature == (
+        'v1:{"custom_labels":[],"experiment_id":null}'
+    )
+
+
+class TestPackageRootExports:
+  """The identity contract is importable from the package root."""
+
+  def test_all_identity_names_exported(self):
+    import bigquery_agent_analytics as bqaa
+
+    for name in (
+        "TraceIdentity",
+        "TraceScope",
+        "TraceSelector",
+        "ResolvedTraceSelector",
+        "AmbiguousSessionError",
+        "resolve_singular_candidate",
+        "UNSET",
+        "SQL_NULL",
+    ):
+      assert hasattr(bqaa, name), name
+      assert name in bqaa.__all__, name
+    assert bqaa.UNSET is UNSET
+    assert bqaa.SQL_NULL is SQL_NULL
+
+
+class TestIdentityFieldDeletion:
+  """del must not bypass the lifetime identity invariant (round 4)."""
+
+  def test_delete_detach_retag_blocked(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    for name in ("identity", "session_id", "user_id"):
+      with pytest.raises(AttributeError, match="cannot be deleted"):
+        delattr(trace, name)
+    # The object is untouched and still guarded after the attempts.
+    assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      trace.session_id = "sess-2"
+
+  def test_delete_blocked_without_identity_too(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(AttributeError, match="cannot be deleted"):
+      del trace.session_id
+
+  def test_non_identity_fields_remain_deletable(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    del trace.start_time  # non-identity field: deletion still allowed
+    # Trace is slot-backed (round 14): ad-hoc attributes and
+    # vars(trace) writes are sealed.
+    with pytest.raises(AttributeError):
+      trace.extra_note = "x"
+    with pytest.raises(TypeError):
+      vars(trace)
+
+
+class TestTraceComponentTypes:
+  """Trace requires the concrete immutable value objects (round 4)."""
+
+  def test_duck_typed_identity_rejected(self):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        session_id="sess-1", user_id="alice", root_agent_name=None
+    )
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      Trace(trace_id="t1", session_id="sess-1", user_id="alice", identity=fake)
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      trace.identity = fake
+
+  def test_duck_typed_scope_rejected(self):
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      Trace(trace_id="t1", session_id="sess-1", scope={"run": "v0"})
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      trace.scope = object()
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    # Once attached, scope follows the attach-once contract
+    # (see TestScopeProvenanceInvariant).
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+
+
+class TestResolvedSelectorComponentTypes:
+  """Candidates must be real value objects before dedup (round 4)."""
+
+  def test_foreign_identity_rejected_at_construction(self):
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=1, scope=TraceScope())
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=True, scope=TraceScope())
+    with pytest.raises(TypeError, match="must be a TraceScope"):
+      ResolvedTraceSelector(
+          identity=TraceIdentity(session_id="sess-1"), scope="scope"
+      )
+
+  def test_resolver_rejects_foreign_candidates_before_dedup(self):
+    real = ResolvedTraceSelector(identity=TraceIdentity(session_id="sess-1"))
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      resolve_singular_candidate([real, "sess-1"])
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      resolve_singular_candidate([1, True])
+
+  def test_error_rejects_foreign_candidates(self):
+    real = ResolvedTraceSelector(identity=TraceIdentity(session_id="sess-1"))
+    with pytest.raises(TypeError, match="ResolvedTraceSelector instances"):
+      AmbiguousSessionError(candidates=[real, object()])
+
+
+class TestTraceFilterLifetimeValidation:
+  """Tri-state pin validation must survive mutation (round 4)."""
+
+  def test_post_construction_unset_assignment_rejected(self):
+    filt = TraceFilter()
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      filt.user_id = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.root_agent_name"):
+      filt.root_agent_name = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      filt.experiment_id = 1
+    # Failed writes leave the filter unchanged and SQL clean.
+    where, params = filt.to_sql_conditions()
+    assert "user_id" not in where
+    assert all(p.name == "trace_limit" for p in params)
+
+  def test_valid_mutations_still_allowed(self):
+    filt = TraceFilter()
+    filt.user_id = SQL_NULL
+    filt.root_agent_name = "root"
+    filt.experiment_id = None
+    where, _ = filt.to_sql_conditions()
+    assert "user_id IS NULL" in where
+    assert "@root_agent_name" in where
+
+
+class TestLabelKeyJsonPathQuoting:
+  """Label keys must be quoted JSONPath segments (round 5, P1)."""
+
+  def _key_param(self, labels):
+    _, params = TraceFilter(custom_labels=labels).to_sql_conditions()
+    return next(p for p in params if p.name == "label_key_0").value
+
+  def test_simple_key_is_quoted(self):
+    assert self._key_param({"run": "v1"}) == '"run"'
+
+  def test_dotted_key_stays_one_segment(self):
+    # $.custom_tags."a.b" selects the literal member; the unquoted
+    # form would traverse into a nested object and return NULL.
+    assert self._key_param({"a.b": "x"}) == '"a.b"'
+
+  def test_bracket_key_quoted(self):
+    assert self._key_param({"a[0]": "x"}) == '"a[0]"'
+
+  def test_quote_keys_escaped_backslash_keys_literal(self):
+    assert self._key_param({'a"b': "x"}) == '"a\\"b"'
+    # BigQuery's JSONPath grammar matches backslashes literally inside
+    # quoted members; doubling them silently matches nothing (verified
+    # against live BigQuery — see test_trace_identity_bigquery_live).
+    assert self._key_param({"a\\b": "x"}) == '"a\\b"'
+
+  def test_empty_key_quoted(self):
+    assert self._key_param({"": "x"}) == '""'
+
+  def test_value_not_quoted(self):
+    _, params = TraceFilter(custom_labels={"a.b": "v.w"}).to_sql_conditions()
+    val = next(p for p in params if p.name == "label_val_0").value
+    assert val == "v.w"
+
+
+class TestStrSubclassNormalization:
+  """Equality-overriding str subclasses must not drive identity
+  decisions (round 5)."""
+
+  class _Collider(str):
+    """Compares equal to everything; hashes into one bucket."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_identity_fields_normalized_to_exact_str(self):
+    identity = TraceIdentity(
+        session_id=self._Collider("sess-1"),
+        user_id=self._Collider("alice"),
+        root_agent_name=self._Collider("root"),
+    )
+    for value in (
+        identity.session_id,
+        identity.user_id,
+        identity.root_agent_name,
+    ):
+      assert type(value) is str
+    assert identity.user_id == "alice"
+
+  def test_colliding_user_ids_still_ambiguous(self):
+    alice = ResolvedTraceSelector(
+        identity=TraceIdentity("sess-1", user_id=self._Collider("alice"))
+    )
+    bob = ResolvedTraceSelector(
+        identity=TraceIdentity("sess-1", user_id=self._Collider("bob"))
+    )
+    with pytest.raises(AmbiguousSessionError):
+      resolve_singular_candidate([alice, bob])
+
+  def test_trace_mirror_check_uses_exact_str(self):
+    with pytest.raises(ValueError, match="session_id contradicts"):
+      Trace(
+          trace_id="t1",
+          session_id=self._Collider("legacy"),
+          identity=TraceIdentity(session_id="different"),
+      )
+
+  def test_scope_and_selector_and_filter_normalized(self):
+    scope = TraceScope(
+        experiment_id=self._Collider("exp"),
+        custom_labels={self._Collider("k"): self._Collider("v")},
+    )
+    assert type(scope.experiment_id) is str
+    key, value = scope.custom_labels[0]
+    assert type(key) is str and type(value) is str
+    selector = TraceSelector(
+        session_id=self._Collider("sess-1"),
+        user_id=self._Collider("alice"),
+    )
+    assert type(selector.session_id) is str
+    assert type(selector.user_id) is str
+    filt = TraceFilter(user_id=self._Collider("alice"))
+    assert type(filt.user_id) is str
+
+  def test_value_object_subclasses_rejected(self):
+    class EvilIdentity(TraceIdentity):
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return 0
+
+    evil = EvilIdentity(session_id="sess-1")
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      ResolvedTraceSelector(identity=evil)
+    with pytest.raises(TypeError, match="must be a TraceIdentity"):
+      Trace(trace_id="t1", session_id="sess-1", identity=evil)
+
+
+class TestPinSentinelImmutability:
+  """Sentinel state must be sealed (round 5)."""
+
+  def test_name_writes_rejected(self):
+    with pytest.raises(AttributeError, match="immutable"):
+      UNSET._name = "SQL_NULL"
+    with pytest.raises(AttributeError, match="immutable"):
+      SQL_NULL._name = "UNSET"
+    with pytest.raises(AttributeError, match="immutable"):
+      del UNSET._name
+
+  def test_pickle_and_wire_names_derived_from_identity(self):
+    import pickle
+
+    from bigquery_agent_analytics.serialization import serialize
+
+    # Force the display name out of sync through the object protocol
+    # escape hatch; encodings must still follow singleton identity.
+    object.__setattr__(UNSET, "_name", "SQL_NULL")
+    try:
+      assert pickle.loads(pickle.dumps(UNSET)) is UNSET
+      assert serialize(SQL_NULL) == {"$pin": "SQL_NULL"}
+      restored = pickle.loads(pickle.dumps(TraceSelector(session_id="sess-1")))
+      assert restored.user_id is UNSET
+    finally:
+      object.__setattr__(UNSET, "_name", "UNSET")
+
+
+class TestExportsIndependentOfClient:
+  """U1 contract must import without optional client deps (round 5)."""
+
+  def test_identity_exports_survive_blocked_client_import(self):
+    import os
+    import pathlib
+    import subprocess
+    import sys
+    import textwrap
+
+    # Pin this checkout's src so the subprocess cannot silently test
+    # another installed/checked-out copy of the package.
+    repo_src = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = repo_src + os.pathsep + env.get("PYTHONPATH", "")
+
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import pathlib
+        import sys
+
+        class Blocker(importlib.abc.MetaPathFinder):
+          def find_spec(self, fullname, path=None, target=None):
+            if fullname == "bigquery_agent_analytics.client":
+              raise ImportError("blocked for test")
+            return None
+
+        sys.meta_path.insert(0, Blocker())
+        import bigquery_agent_analytics as bqaa
+
+        expected_src = pathlib.Path(sys.argv[1]).resolve()
+        actual = pathlib.Path(bqaa.__file__).resolve()
+        assert expected_src in actual.parents, (
+            f"imported {actual}, expected under {expected_src}"
+        )
+
+        names = [
+            "TraceIdentity", "TraceScope", "TraceSelector",
+            "ResolvedTraceSelector", "AmbiguousSessionError",
+            "resolve_singular_candidate", "UNSET", "SQL_NULL",
+            "decode_pin",
+        ]
+        missing = [
+            n for n in names
+            if not hasattr(bqaa, n) or n not in bqaa.__all__
+        ]
+        assert not missing, f"missing: {missing}"
+        assert not hasattr(bqaa, "Client")
+        print("OK")
+    """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code, repo_src],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
+
+
+class TestResolvedSelectorExactType:
+  """Subclassed candidates must not reach dedup (round 6, P1)."""
+
+  class _EvilSelector(ResolvedTraceSelector):
+    """Bypasses component checks and collapses all comparisons."""
+
+    def __post_init__(self):
+      pass
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return 0
+
+  def _evil(self, user_id):
+    return self._EvilSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id=user_id)
+    )
+
+  def test_resolver_rejects_subclass_candidates(self):
+    with pytest.raises(TypeError, match="exact"):
+      resolve_singular_candidate([self._evil("alice"), self._evil("bob")])
+
+  def test_error_rejects_subclass_candidates(self):
+    real = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice")
+    )
+    with pytest.raises(TypeError, match="exact"):
+      AmbiguousSessionError(candidates=[real, self._evil("bob")])
+
+
+class TestTraceMirrorTypeEnforcement:
+  """Foreign mirror values must be rejected before comparison
+  (round 6, P1)."""
+
+  class _Sneaky:
+    """Comparison methods report equality with everything."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_foreign_user_id_rejected(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(TypeError, match="user_id must be a string"):
+      trace.user_id = self._Sneaky()
+    assert trace.user_id == "alice"
+
+  def test_foreign_session_id_rejected(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      trace.session_id = self._Sneaky()
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      Trace(trace_id="t1", session_id=self._Sneaky())
+
+  def test_none_session_id_rejected(self):
+    with pytest.raises(TypeError, match="session_id must be a string"):
+      Trace(trace_id="t1", session_id=None)
+
+
+class TestScopeProvenanceInvariant:
+  """Scope provenance follows the attach-once contract (round 6, P1)."""
+
+  def _scoped_trace(self):
+    return Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        scope=TraceScope(custom_labels={"run": "v0"}),
+    )
+
+  def test_replacement_rejected(self):
+    trace = self._scoped_trace()
+    with pytest.raises(ValueError, match="scope cannot be replaced"):
+      trace.scope = TraceScope(custom_labels={"run": "v1"})
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_clearing_and_deletion_rejected(self):
+    trace = self._scoped_trace()
+    with pytest.raises(ValueError, match="scope cannot be replaced"):
+      trace.scope = None
+    with pytest.raises(AttributeError, match="cannot be deleted"):
+      del trace.scope
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+  def test_late_attachment_and_idempotent_reassignment_allowed(self):
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    assert trace.scope is None
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    trace.scope = TraceScope(custom_labels={"run": "v0"})
+    assert trace.scope.labels_dict == {"run": "v0"}
+
+
+class TestSurrogateRejection:
+  """Surrogate code units must fail closed (round 6, P2)."""
+
+  # Explicit high+low surrogate code units vs the astral scalar:
+  # Python treats them as distinct strings, but JSON escaping maps
+  # both to \ud83d\ude00, collapsing them on the wire.
+  _SURROGATE = "\ud83d" "\ude00"
+  _ASTRAL = "\U0001f600"
+
+  def test_python_distinguishes_the_two_forms(self):
+    assert self._SURROGATE != self._ASTRAL
+    assert len(self._SURROGATE) == 2
+    assert len(self._ASTRAL) == 1
+
+  def test_surrogates_rejected_at_every_boundary(self):
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceIdentity(session_id="sess-1", user_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceScope(custom_labels={"k": self._SURROGATE})
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceScope(experiment_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceSelector(session_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(user_id=self._SURROGATE)
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(custom_labels={"k": self._SURROGATE})
+    with pytest.raises(ValueError, match="surrogate"):
+      Trace(trace_id="t1", session_id=self._SURROGATE)
+
+  def test_astral_scalars_still_accepted(self):
+    scope = TraceScope(custom_labels={"k": self._ASTRAL})
+    assert scope.labels_dict == {"k": self._ASTRAL}
+
+  def test_ambiguity_payload_json_round_trip_stays_distinct(self):
+    import json as json_mod
+
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    err = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"k": self._ASTRAL}),
+            ),
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"k": "plain"}),
+            ),
+        ]
+    )
+    restored = json_mod.loads(json_mod.dumps(err.to_dict()))
+    selectors = [TraceSelector(**c["selector"]) for c in restored["candidates"]]
+    assert selectors[0] != selectors[1]
+    signatures = {c["scope_signature"] for c in restored["candidates"]}
+    assert len(signatures) == 2
+
+
+class TestTraceFilterLabelNormalization:
+  """Direct filter labels must not retain caller hooks (round 6)."""
+
+  class _Redirect(str):
+    """replace() rewrites content to hijack JSONPath quoting."""
+
+    def replace(self, *args, **kwargs):
+      return "hijacked"
+
+  def test_subclass_key_cannot_redirect_jsonpath(self):
+    filt = TraceFilter(custom_labels={self._Redirect("k"): "v"})
+    key = next(iter(filt.custom_labels))
+    assert type(key) is str
+    _, params = filt.to_sql_conditions()
+    key_param = next(p for p in params if p.name == "label_key_0")
+    assert key_param.value == '"k"'
+
+  def test_values_normalized_and_non_strings_rejected(self):
+    filt = TraceFilter(custom_labels={"k": self._Redirect("v")})
+    assert type(filt.custom_labels["k"]) is str
+    with pytest.raises(TypeError, match="keys and values must be strings"):
+      TraceFilter(custom_labels={"k": 1})
+    with pytest.raises(TypeError, match="must be a dict"):
+      TraceFilter(custom_labels=[("k", "v")])
+
+  def test_post_construction_label_assignment_normalized(self):
+    filt = TraceFilter()
+    filt.custom_labels = {self._Redirect("k"): "v"}
+    assert type(next(iter(filt.custom_labels))) is str
+
+
+class TestAmbiguityStateReadOnly:
+  """Validated error state must not be reassignable (round 6)."""
+
+  def _error(self):
+    return AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="alice")
+            ),
+            ResolvedTraceSelector(
+                identity=TraceIdentity(session_id="sess-1", user_id="bob")
+            ),
+        ]
+    )
+
+  def test_candidates_and_retry_dimensions_read_only(self):
+    err = self._error()
+    with pytest.raises(AttributeError):
+      err.candidates = (err.candidates[0],)
+    with pytest.raises(AttributeError):
+      err.retry_dimensions = ()
+    assert err.to_dict()["candidate_count"] == 2
+
+  def test_message_payload_and_pickle_stay_consistent(self):
+    import pickle
+
+    err = self._error()
+    assert "2" in str(err)
+    assert err.to_dict()["candidate_count"] == 2
+    restored = pickle.loads(pickle.dumps(err))
+    assert restored.to_dict() == err.to_dict()
+
+
+class TestFilterLabelMutationDurability:
+  """In-place label mutation must not bypass validation (round 7)."""
+
+  class _Redirect(str):
+
+    def replace(self, *args, **kwargs):
+      return "hijacked"
+
+  def test_dict_style_mutation_keeps_working(self):
+    # Base-commit compatibility: ordinary dict mutation is public
+    # behavior and must not raise.
+    filt = TraceFilter(custom_labels={"k": "v"})
+    filt.custom_labels["slice"] = "3"
+    filt.custom_labels.update({"run": "v1"})
+    filt.custom_labels |= {"extra": "e"}
+    assert filt.custom_labels.setdefault("k", "other") == "v"
+    filt.custom_labels.pop("extra")
+    assert filt.custom_labels == {"k": "v", "slice": "3", "run": "v1"}
+
+  def test_in_place_writes_validated(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels["n"] = 1
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.update({1: "v"})
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.custom_labels["s"] = "\ud800"
+    hijack = self._Redirect("x")
+    filt.custom_labels[hijack] = self._Redirect("y")
+    assert type(list(filt.custom_labels)[-1]) is str
+    assert type(filt.custom_labels["x"]) is str
+    assert filt.custom_labels == {"k": "v", "x": "y"}
+
+  def test_low_level_injection_cannot_reach_sql(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    # dict.__setitem__ bypasses the subclass mutators; the SQL
+    # boundary revalidates a snapshot, so the hijacking key is
+    # normalized before JSONPath quoting.
+    dict.__setitem__(filt.custom_labels, self._Redirect("x"), "y")
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"k"', '"x"'}
+
+  def test_low_level_injected_garbage_fails_closed_at_sql(self):
+    filt = TraceFilter(custom_labels={"k": "v"})
+    dict.__setitem__(filt.custom_labels, "n", 1)
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.to_sql_conditions()
+
+  def test_labels_pickle_and_copy_keep_validating(self):
+    import copy
+    import pickle
+
+    filt = TraceFilter(custom_labels={"k": "v"})
+    restored = pickle.loads(pickle.dumps(filt))
+    assert restored.custom_labels == {"k": "v"}
+    with pytest.raises(TypeError, match="must be strings"):
+      restored.custom_labels["x"] = 1
+    cloned = copy.deepcopy(filt)
+    assert cloned.custom_labels == {"k": "v"}
+    with pytest.raises(TypeError, match="must be strings"):
+      cloned.custom_labels["x"] = 1
+
+
+class TestFilterLabelDuplicateNormalization:
+  """Keys colliding after normalization must fail closed (round 7)."""
+
+  def _distinct_subclass_keys(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    return KeyA("k"), KeyB("k")
+
+  def test_normalization_collision_raises(self):
+    key_a, key_b = self._distinct_subclass_keys()
+    source = {key_a: "first", key_b: "second"}
+    assert len(source) == 2  # distinct keys before normalization
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      TraceFilter(custom_labels=source)
+
+
+class TestSessionIdsIdentitySurface:
+  """session_ids follows the exact-string contract (round 7)."""
+
+  class _Collider(str):
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return 0
+
+  def test_entries_normalized_and_copied_on_assignment(self):
+    source = [self._Collider("sess-1")]
+    filt = TraceFilter(session_ids=source)
+    assert type(filt.session_ids[0]) is str
+    # The stored list is a copy: mutating the source has no effect.
+    source.append("sess-2")
+    assert filt.session_ids == ["sess-1"]
+
+  def test_non_string_and_surrogate_entries_rejected(self):
+    with pytest.raises(TypeError, match="entries must be strings"):
+      TraceFilter(session_ids=["sess-1", 2])
+    with pytest.raises(TypeError, match="list of strings"):
+      TraceFilter(session_ids="sess-1")
+    surrogate = "\ud800"
+    with pytest.raises(ValueError, match="surrogate"):
+      TraceFilter(session_ids=[surrogate])
+
+  def test_in_place_mutation_validated_at_write_and_boundary(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    filt.session_ids.append(self._Collider("sess-2"))
+    assert type(filt.session_ids[1]) is str
+    _, params = filt.to_sql_conditions()
+    array = next(p for p in params if p.name == "session_ids")
+    assert [type(v) is str for v in array.values] == [True, True]
+    # Ordinary mutation is validated at write time...
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.append(3)
+    with pytest.raises(ValueError, match="surrogate"):
+      filt.session_ids.extend(["\ud800"])
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids[0] = 1
+    # ...and a low-level bypass is still caught at the SQL boundary.
+    list.append(filt.session_ids, 3)
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.to_sql_conditions()
+
+
+class TestUnaddressableLabelKeys:
+  """Keys BigQuery JSONPath cannot encode fail closed (round 9, P1)."""
+
+  # Live-verified parity rule: only ODD-length backslash runs before
+  # a quote or at the end of the key are invalid in BigQuery JSONPath.
+  UNADDRESSABLE = ["a\\", 'a\\"b', "a\\\\\\", 'a\\\\\\"b']
+  ADDRESSABLE = [
+      "a\\b",
+      "a\\\\b",
+      "\\a",
+      'a"b',
+      "a.b",
+      "",
+      "a\\\\",  # even trailing run: valid (live-verified)
+      'a\\\\"b',  # even run before quote: valid (live-verified)
+  ]
+
+  def test_rejected_at_segment_construction(self):
+    for key in self.UNADDRESSABLE:
+      with pytest.raises(ValueError, match="cannot be addressed"):
+        trace_module._jsonpath_member_segment(key)
+
+  def test_rejected_at_filter_label_validation(self):
+    for key in self.UNADDRESSABLE:
+      with pytest.raises(ValueError, match="cannot be addressed"):
+        TraceFilter(custom_labels={key: "x"})
+    filt = TraceFilter(custom_labels={"k": "v"})
+    with pytest.raises(ValueError, match="cannot be addressed"):
+      filt.custom_labels["a\\"] = "x"
+
+  def test_addressable_backslash_shapes_still_accepted(self):
+    for key in self.ADDRESSABLE:
+      filt = TraceFilter(custom_labels={key: "x"})
+      _, params = filt.to_sql_conditions()
+      segment = next(p for p in params if p.name == "label_key_0").value
+      assert segment == trace_module._jsonpath_member_segment(key)
+
+
+class TestSessionIdsSelfExtension:
+  """Batch writes terminate and are atomic (round 9, P1)."""
+
+  def test_self_extend_terminates_and_doubles(self):
+    filt = TraceFilter(session_ids=["a", "b"])
+    filt.session_ids.extend(filt.session_ids)
+    assert filt.session_ids == ["a", "b", "a", "b"]
+
+  def test_self_iadd_terminates(self):
+    filt = TraceFilter(session_ids=["a"])
+    filt.session_ids += filt.session_ids
+    assert filt.session_ids == ["a", "a"]
+
+  def test_failed_batch_commits_nothing(self):
+    filt = TraceFilter(session_ids=["a"])
+    with pytest.raises(TypeError, match="entries must be strings"):
+      filt.session_ids.extend(["ok", 3])
+    assert filt.session_ids == ["a"]
+
+
+class TestLabelBatchUpdateAtomicity:
+  """update()/|= normalize the whole batch first (round 9, P2)."""
+
+  def _colliding_keys(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    return KeyA("k"), KeyB("k")
+
+  def test_update_detects_normalized_collision(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    key_a, key_b = self._colliding_keys()
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update({key_a: "first", key_b: "second"})
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_update_failure_commits_nothing(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.update([("good", "y"), ("bad", 1)])
+    assert "good" not in filt.custom_labels
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_ior_shares_the_atomic_path(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels |= {"bad": 1}
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_legitimate_batch_update_overwrites_existing(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    filt.custom_labels.update({"run": "v2", "slice": "3"})
+    assert filt.custom_labels == {"run": "v2", "slice": "3"}
+
+
+class TestValidatedContainersStdlibCompat:
+  """The containers must behave like dict/list to stdlib (round 9)."""
+
+  def test_dataclasses_asdict_round_trips(self):
+    import dataclasses
+
+    filt = TraceFilter(custom_labels={"k": "v"}, session_ids=["s1"])
+    plain = dataclasses.asdict(filt)
+    assert plain["custom_labels"] == {"k": "v"}
+    assert plain["session_ids"] == ["s1"]
+
+  def test_labels_constructor_matches_dict_forms(self):
+    from bigquery_agent_analytics.trace import _ValidatedLabels
+
+    assert _ValidatedLabels() == {}
+    assert _ValidatedLabels({"a": "1"}) == {"a": "1"}
+    assert _ValidatedLabels([("a", "1")]) == {"a": "1"}
+    assert _ValidatedLabels((pair for pair in [("a", "1")])) == {"a": "1"}
+    assert _ValidatedLabels(a="1") == {"a": "1"}
+
+
+class TestRemovalOperandNormalization:
+  """Equality-overriding operands must not misdirect removals
+  (round 9, P2)."""
+
+  class _Evil(str):
+    """Claims equality with everything; hash collides broadly."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_lookup_and_removal_normalized(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil("unrelated")
+    assert evil not in filt.custom_labels
+    assert filt.custom_labels.get(evil) is None
+    with pytest.raises(KeyError):
+      filt.custom_labels[evil]
+    with pytest.raises(KeyError):
+      filt.custom_labels.pop(evil)
+    with pytest.raises(KeyError):
+      del filt.custom_labels[evil]
+    assert filt.custom_labels == {"run": "v1"}
+    # A well-behaved subclass operand still finds the real entry.
+    assert filt.custom_labels.pop(self._Evil("run")) == "v1"
+
+  def test_list_membership_and_removal_normalized(self):
+    filt = TraceFilter(session_ids=["sess-1", "sess-2"])
+    evil = self._Evil("unrelated")
+    assert evil not in filt.session_ids
+    assert filt.session_ids.count(evil) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(evil)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(evil)
+    assert filt.session_ids == ["sess-1", "sess-2"]
+    filt.session_ids.remove(self._Evil("sess-1"))
+    assert filt.session_ids == ["sess-2"]
+
+
+class TestDecodePinExactness:
+  """Hostile equality must never mint a sentinel (round 9, P2)."""
+
+  class _FakeTag(str):
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("UNSET")
+
+  def test_fake_tag_passes_through_unchanged(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    payload = {"$pin": self._FakeTag("not-a-pin")}
+    result = decode_pin(payload)
+    assert result is payload
+    assert result is not UNSET
+
+  def test_fake_key_passes_through_unchanged(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    payload = {self._FakeTag("not-the-key"): "UNSET"}
+    assert decode_pin(payload) is payload
+
+  def test_exact_wire_form_still_resolves(self):
+    from bigquery_agent_analytics.trace import decode_pin
+
+    assert decode_pin({"$pin": "UNSET"}) is UNSET
+    assert decode_pin({"$pin": "SQL_NULL"}) is SQL_NULL
+    assert decode_pin({"$pin": "bogus"}) == {"$pin": "bogus"}
+
+
+class TestAugmentedAssignmentAliasing:
+  """+=/|= must keep aliases attached and avoid rewrap (round 9)."""
+
+  def test_ior_preserves_container_identity(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    alias = filt.custom_labels
+    filt.custom_labels |= {"slice": "3"}
+    assert filt.custom_labels is alias
+    assert alias == {"run": "v1", "slice": "3"}
+
+  def test_iadd_preserves_container_identity(self):
+    filt = TraceFilter(session_ids=["a"])
+    alias = filt.session_ids
+    filt.session_ids += ["b"]
+    assert filt.session_ids is alias
+    assert alias == ["a", "b"]
+
+  def test_external_assignment_still_copies(self):
+    filt_a = TraceFilter(session_ids=["a"])
+    filt_b = TraceFilter(session_ids=["b"])
+    filt_a.session_ids = filt_b.session_ids
+    assert filt_a.session_ids == ["b"]
+    assert filt_a.session_ids is not filt_b.session_ids
+
+
+class TestSetdefaultLookupFirst:
+  """setdefault must not validate an unused default (round 9, P3)."""
+
+  def test_existing_key_ignores_default(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert filt.custom_labels.setdefault("run") == "v1"
+    assert filt.custom_labels.setdefault("run", 123) == "v1"
+
+  def test_missing_key_validates_default(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="must be strings"):
+      filt.custom_labels.setdefault("new")
+    assert filt.custom_labels.setdefault("new", "x") == "x"
+    assert filt.custom_labels["new"] == "x"
+
+
+class TestRetryableUnaddressableScopeLabels:
+  """Resolved candidates with unaddressable label keys must still
+  produce an executable one-step retry (round 10, P1)."""
+
+  def _candidate(self):
+    # BigQuery JSON can store this member even though its quoted
+    # JSONPath form does not exist.
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+        scope=TraceScope(custom_labels={"a\\": "x", "run": "v1"}),
+    )
+
+  def test_retry_payload_round_trip_is_executable(self):
+    payload = json.loads(json.dumps(self._candidate().to_retry_payload()))
+    selector = TraceSelector(**payload["selector"])
+    filt = selector.to_trace_filter()
+    where, params = filt.to_sql_conditions()
+    # The addressable label still pre-filters; the unaddressable one
+    # is excluded from SQL (the signature pin preserves exactness).
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"run"'}
+    assert selector.scope_signature == self._candidate().scope_signature
+    assert filt.session_ids == ["sess-1"]
+    assert "session_id IN UNNEST(@session_ids)" in where
+
+  def test_signatureless_selector_fails_closed(self):
+    selector = TraceSelector(session_id="sess-1", custom_labels={"a\\": "x"})
+    with pytest.raises(ValueError, match="scope_signature"):
+      selector.to_trace_filter()
+
+  def test_all_labels_unaddressable_drops_predicates_entirely(self):
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="sess-1"),
+        scope=TraceScope(custom_labels={"a\\": "x"}),
+    )
+    filt = resolved.to_selector().to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    assert not [p for p in params if p.name.startswith("label_key")]
+
+
+class TestNonStringOperandShortCircuit:
+  """Hostile non-string operands must never drive comparisons
+  (round 10, P2)."""
+
+  class _EvilObject:
+    """Not a string; hash collides with 'run', equality matches all."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_rejects_custom_hash_without_comparison(self):
+    # Round 13 narrowed the contract: a custom __hash__ would have to
+    # execute to be trusted, so mapping surfaces reject it with
+    # TypeError instead of hashing it — still without running hooks.
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilObject()
+    with pytest.raises(TypeError, match="custom __hash__"):
+      evil in filt.custom_labels
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(evil)
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels[evil]
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.pop(evil, "d")
+    with pytest.raises(TypeError, match="custom __hash__"):
+      del filt.custom_labels[evil]
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_list_misses_without_comparison(self):
+    filt = TraceFilter(session_ids=["sess-1", "sess-2"])
+    evil = self._EvilObject()
+    assert evil not in filt.session_ids
+    assert filt.session_ids.count(evil) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(evil)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(evil)
+    assert filt.session_ids == ["sess-1", "sess-2"]
+
+
+class TestUpdateRawPairParsing:
+  """Hostile equality must not collapse distinct keys before
+  normalization (round 10, P2)."""
+
+  class _E(str):
+    """Colliding hash, always-true equality — but distinct chars."""
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return 0
+
+  def test_distinct_character_keys_survive_hostile_equality(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update([(self._E("a"), "1"), (self._E("b"), "2")])
+    assert filt.custom_labels == {"a": "1", "b": "2"}
+
+  def test_same_character_hostile_keys_still_fail_closed(self):
+    filt = TraceFilter(custom_labels={})
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([(self._E("k"), "1"), (self._E("k"), "2")])
+    assert filt.custom_labels == {}
+
+  def test_mapping_protocol_and_kwargs_still_work(self):
+    filt = TraceFilter(custom_labels={})
+
+    class MappingLike:
+
+      def keys(self):
+        return ["m"]
+
+      def __getitem__(self, key):
+        return "1"
+
+    filt.custom_labels.update(MappingLike(), extra="2")
+    assert filt.custom_labels == {"m": "1", "extra": "2"}
+    with pytest.raises(TypeError, match="at most 1 argument"):
+      filt.custom_labels.update({}, {})
+
+
+class TestSignatureAttestedLabelDrop:
+  """Only a signature attesting the dropped pins may drop them
+  (round 11, P1)."""
+
+  UNADDRESSABLE = {"a\\": "x"}
+
+  def test_mismatched_signature_cannot_erase_pin(self):
+    victim = TraceScope(custom_labels={"other": "y"})
+    selector = TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=victim.scope_signature,
+    )
+    with pytest.raises(ValueError, match="does not attest"):
+      selector.to_trace_filter()
+
+  def test_signature_with_wrong_value_rejected(self):
+    wrong_value = TraceScope(custom_labels={"a\\": "DIFFERENT"})
+    selector = TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=wrong_value.scope_signature,
+    )
+    with pytest.raises(ValueError, match="does not attest"):
+      selector.to_trace_filter()
+
+  def test_malformed_signature_rejected(self):
+    for bogus in ("v1:not-json", "v2:{}", 'v1:{"custom_labels":"x"}'):
+      selector = TraceSelector(
+          session_id="s",
+          custom_labels=self.UNADDRESSABLE,
+          scope_signature=bogus,
+      )
+      with pytest.raises(ValueError, match="does not attest"):
+        selector.to_trace_filter()
+
+  def test_attesting_signature_still_drops(self):
+    scope = TraceScope(custom_labels={"a\\": "x", "run": "v1"})
+    resolved = ResolvedTraceSelector(
+        identity=TraceIdentity(session_id="s"), scope=scope
+    )
+    filt = resolved.to_selector().to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"run"'}
+
+
+class TestMissPathsAvoidCallerHooks:
+  """Miss behavior must not run caller __repr__ and must keep native
+  arity validation (round 11, P2)."""
+
+  class _LoudRepr:
+    """Counts (and could raise in) __repr__; equality matches all."""
+
+    def __init__(self):
+      self.repr_calls = 0
+
+    def __repr__(self):
+      self.repr_calls += 1
+      raise RuntimeError("repr must not be invoked")
+
+    def __eq__(self, other):
+      return True
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_mapping_rejections_never_invoke_repr(self):
+    # Custom-__hash__ operands are rejected (round 13); the rejection
+    # itself must not execute __repr__ or any other hook.
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    loud = self._LoudRepr()
+    for op in (
+        lambda: loud in filt.custom_labels,
+        lambda: filt.custom_labels.get(loud),
+        lambda: filt.custom_labels[loud],
+        lambda: filt.custom_labels.pop(loud),
+        lambda: filt.custom_labels.__delitem__(loud),
+    ):
+      with pytest.raises(TypeError, match="custom __hash__"):
+        op()
+    assert loud.repr_calls == 0
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_list_misses_never_invoke_repr(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    loud = self._LoudRepr()
+    assert loud not in filt.session_ids
+    assert filt.session_ids.count(loud) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove(loud)
+    with pytest.raises(ValueError):
+      filt.session_ids.index(loud)
+    assert loud.repr_calls == 0
+
+  def test_pop_arity_validated_on_miss_path(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError):
+      filt.custom_labels.pop(object(), "d1", "d2")
+    assert filt.custom_labels.pop(object(), "d1") == "d1"
+
+  def test_index_bounds_arity_validated_on_miss_path(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    with pytest.raises(TypeError):
+      filt.session_ids.index(object(), 0, 1, 2)
+    # Native start/stop bounds still apply on the miss path.
+    with pytest.raises(ValueError):
+      filt.session_ids.index(object(), 0, 1)
+
+
+class TestExactDuplicateLastWriteWins:
+  """Ordinary exact-str duplicates keep dict semantics (round 11)."""
+
+  def test_mapping_plus_kwargs_last_write_wins(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update({"run": "v1"}, run="v2")
+    assert filt.custom_labels == {"run": "v2"}
+
+  def test_pair_iterable_last_write_wins(self):
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update([("run", "v1"), ("run", "v2")])
+    assert filt.custom_labels == {"run": "v2"}
+
+  def test_constructor_pairs_last_write_wins(self):
+    from bigquery_agent_analytics.trace import _ValidatedLabels
+
+    assert _ValidatedLabels([("run", "v1"), ("run", "v2")]) == {"run": "v2"}
+
+  def test_hostile_subclass_collisions_still_fail_closed(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    filt = TraceFilter(custom_labels={})
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([(KeyA("run"), "v1"), ("run", "v2")])
+    with pytest.raises(ValueError, match="Duplicate custom label key"):
+      filt.custom_labels.update([("run", "v1"), (KeyA("run"), "v2")])
+    assert filt.custom_labels == {}
+
+
+class TestSpoofedClassProperty:
+  """A spoofed __class__ must not reach the str copy path
+  (round 12, P2)."""
+
+  class _FakeStr:
+    """Claims to be a str via __class__; hooks would raise."""
+
+    @property
+    def __class__(self):
+      return str
+
+    def __eq__(self, other):
+      raise RuntimeError("comparison hook must not run")
+
+    def __hash__(self):
+      return hash("run")
+
+    def __repr__(self):
+      raise RuntimeError("repr hook must not run")
+
+  def test_label_lookups_reject_without_hooks(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    fake = self._FakeStr()
+    assert isinstance(fake, str)  # the spoof works on isinstance
+    # type()-based detection routes it to the non-string branch; its
+    # custom __hash__ is then rejected without execution (round 13).
+    with pytest.raises(TypeError, match="custom __hash__"):
+      fake in filt.custom_labels
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(fake)
+    assert filt.custom_labels == {"run": "v1"}
+
+  def test_session_lookups_miss_without_hooks(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    fake = self._FakeStr()
+    assert fake not in filt.session_ids
+    assert filt.session_ids.count(fake) == 0
+    assert filt.session_ids == ["sess-1"]
+
+
+class TestStrictCanonicalSignatureAttestation:
+  """Only signatures a real TraceScope generates attest label drops
+  (round 12, P2)."""
+
+  UNADDRESSABLE = {"a\\": "x"}
+
+  def _selector(self, signature):
+    return TraceSelector(
+        session_id="s",
+        custom_labels=self.UNADDRESSABLE,
+        scope_signature=signature,
+    )
+
+  def test_impossible_signatures_rejected(self):
+    labels_json = '[["a\\\\","x"]]'
+    impossible = [
+        # Missing / extra schema fields.
+        'v1:{"custom_labels":%s}' % labels_json,
+        'v1:{"custom_labels":%s,"experiment_id":null,"extra":1}' % labels_json,
+        # Duplicate label keys.
+        'v1:{"custom_labels":[["a\\\\","x"],["a\\\\","x"]],'
+        '"experiment_id":null}',
+        # Non-canonical encoding: unsorted keys / added whitespace.
+        'v1:{"experiment_id":null,"custom_labels":%s}' % labels_json,
+        'v1:{"custom_labels": %s,"experiment_id":null}' % labels_json,
+        # Wrong types.
+        'v1:{"custom_labels":%s,"experiment_id":1}' % labels_json,
+    ]
+    for signature in impossible:
+      with pytest.raises(ValueError, match="does not attest"):
+        self._selector(signature).to_trace_filter()
+
+  def test_deeply_nested_signature_rejected_not_crashing(self):
+    deep = "v1:" + "[" * 200000
+    with pytest.raises(ValueError, match="does not attest"):
+      self._selector(deep).to_trace_filter()
+
+  def test_genuine_signature_still_attests(self):
+    genuine = TraceScope(custom_labels=self.UNADDRESSABLE).scope_signature
+    filt = self._selector(genuine).to_trace_filter()
+    _, params = filt.to_sql_conditions()
+    assert not [p for p in params if p.name.startswith("label_key")]
+
+
+class TestUnhashableOperandNativeBehavior:
+  """Mappings raise TypeError for unhashable operands like a plain
+  dict; lists keep native comparison-miss semantics (round 12, P2)."""
+
+  def test_mapping_raises_type_error(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in ([], {}, set()):
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels[operand]
+      with pytest.raises(TypeError, match="unhashable"):
+        operand in filt.custom_labels
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels.get(operand)
+      with pytest.raises(TypeError, match="unhashable"):
+        filt.custom_labels.pop(operand, "default")
+
+  def test_list_keeps_native_miss_semantics(self):
+    # Plain lists compare rather than hash: `[] in ['a']` is False.
+    filt = TraceFilter(session_ids=["sess-1"])
+    assert [] not in filt.session_ids
+    assert filt.session_ids.count([]) == 0
+    with pytest.raises(ValueError):
+      filt.session_ids.remove([])
+
+  def test_hashable_non_string_still_misses(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert 3 not in filt.custom_labels
+    with pytest.raises(KeyError):
+      filt.custom_labels[3]
+
+
+class TestHostileMetaclassNameRetrieval:
+  """Error formatting must not execute metaclass hooks
+  (round 12, P3)."""
+
+  def test_candidate_type_error_avoids_metaclass_name(self):
+    class Meta(type):
+
+      @property
+      def __name__(cls):
+        raise RuntimeError("metaclass hook must not run")
+
+    class Hostile(metaclass=Meta):
+      pass
+
+    with pytest.raises(TypeError, match="Hostile"):
+      resolve_singular_candidate([Hostile()])
+
+
+class TestSealedValueTypes:
+  """Value objects are slot-backed and one-shot (round 13, P1)."""
+
+  ALL_TYPES = None  # populated in tests
+
+  def _instances(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    scope = TraceScope(custom_labels={"run": "v1"})
+    selector = TraceSelector(session_id="sess-1")
+    resolved = ResolvedTraceSelector(identity=identity, scope=scope)
+    return identity, scope, selector, resolved
+
+  def test_no_writable_dict(self):
+    for obj in self._instances():
+      with pytest.raises(AttributeError):
+        obj.__dict__
+
+  def test_reinitialization_rejected(self):
+    identity, scope, selector, resolved = self._instances()
+    with pytest.raises(TypeError, match="cannot be called"):
+      identity.__init__("other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      scope.__init__(experiment_id="other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      selector.__init__("other")
+    with pytest.raises(TypeError, match="cannot be called"):
+      resolved.__init__(identity=TraceIdentity(session_id="other"))
+    # Nothing changed, including on failed attempts.
+    assert identity.session_id == "sess-1"
+    assert resolved.identity.session_id == "sess-1"
+
+  def test_hash_stable_and_dict_key_reachable(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    before = hash(identity)
+    table = {identity: "value"}
+    with pytest.raises(TypeError):
+      identity.__init__("other")
+    assert hash(identity) == before
+    assert table[identity] == "value"
+
+  def test_attached_identity_cannot_be_reinitialized(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    trace = Trace(trace_id="t1", session_id="sess-1", identity=identity)
+    with pytest.raises(TypeError):
+      trace.identity.__init__("sess-2")
+    assert trace.identity.session_id == trace.session_id == "sess-1"
+
+  def test_pickle_and_deepcopy_still_work(self):
+    import copy
+    import pickle
+
+    for obj in self._instances():
+      assert pickle.loads(pickle.dumps(obj)) == obj
+      assert copy.deepcopy(obj) == obj
+
+
+class TestSentinelOneShotInit:
+  """Sentinel display state is sealed against re-init (round 13)."""
+
+  def test_reinit_rejected(self):
+    with pytest.raises(TypeError, match="immutable"):
+      UNSET.__init__("SQL_NULL")
+    with pytest.raises(TypeError, match="immutable"):
+      SQL_NULL.__init__(123)
+    assert repr(UNSET) == "UNSET"
+    assert repr(SQL_NULL) == "SQL_NULL"
+
+  def test_fresh_construction_validates_canonical_name(self):
+    from bigquery_agent_analytics.trace import _PinSentinel
+
+    with pytest.raises(ValueError, match="Unknown pin sentinel"):
+      _PinSentinel("bogus")
+    with pytest.raises(ValueError, match="Unknown pin sentinel"):
+      _PinSentinel(123)
+
+
+class TestTrustedReadSurfaces:
+  """Views and equality must not run hostile hooks (round 13, P2)."""
+
+  class _EvilKey:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+    def __repr__(self):
+      raise RuntimeError("repr hook must not run")
+
+  def test_view_membership_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilKey()
+    with pytest.raises(TypeError, match="custom __hash__"):
+      evil in filt.custom_labels.keys()
+    # Items membership hashes the key component: same narrowed
+    # rejection as direct mapping lookups.
+    with pytest.raises(TypeError, match="custom __hash__"):
+      (evil, "v1") in filt.custom_labels.items()
+    # Value-position operands are compared, not hashed: safe miss.
+    assert ("run", evil) not in filt.custom_labels.items()
+    assert evil not in filt.custom_labels.values()
+    # Genuine members are still found.
+    assert "run" in filt.custom_labels.keys()
+    assert ("run", "v1") in filt.custom_labels.items()
+    assert "v1" in filt.custom_labels.values()
+    assert set(filt.custom_labels.keys()) == {"run"}
+    assert list(filt.custom_labels.items()) == [("run", "v1")]
+
+  def test_mapping_equality_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._EvilKey()
+    assert filt.custom_labels != {evil: "v1"}
+    assert filt.custom_labels == {"run": "v1"}
+    assert filt.custom_labels != {"run": "v2"}
+
+    # Well-behaved str subclasses compare by character data.
+    class Plain(str):
+      pass
+
+    assert filt.custom_labels == {Plain("run"): Plain("v1")}
+
+  def test_list_equality_safe(self):
+    filt = TraceFilter(session_ids=["sess-1"])
+    evil = self._EvilKey()
+    assert filt.session_ids != [evil]
+    assert filt.session_ids == ["sess-1"]
+    assert filt.session_ids != ["sess-2"]
+    assert filt.session_ids != ("sess-1",)  # native: list != tuple
+
+
+class TestConditionalHashRejection:
+  """Conditionally hashable operands are rejected without hashing
+  (round 13, P2)."""
+
+  def test_conditional_builtin_hash_slots_rejected(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in ((1, []), memoryview(bytearray(b"x"))):
+      with pytest.raises(TypeError, match="conditional or custom"):
+        filt.custom_labels.get(operand)
+
+  def test_custom_hash_never_executes(self):
+    calls = []
+
+    class Custom:
+
+      def __hash__(self):
+        calls.append(1)
+        return 0
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="custom __hash__"):
+      filt.custom_labels.get(Custom())
+    assert not calls
+
+  def test_unconditional_builtins_still_miss_natively(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    for operand in (3, 3.5, b"x", None, frozenset(), object()):
+      assert operand not in filt.custom_labels
+      assert filt.custom_labels.get(operand) is None
+
+  def test_unhashable_still_raises_native_type_error(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="unhashable"):
+      filt.custom_labels.get([])
+
+
+class TestSentinelSerializationIdentity:
+  """serialize() must identify sentinels by identity (round 13)."""
+
+  def test_spoofed_class_dataclass_serializes_normally(self):
+    import dataclasses as dc
+
+    from bigquery_agent_analytics.serialization import serialize
+    from bigquery_agent_analytics.trace import _UnsetType
+
+    @dc.dataclass
+    class Spoofed:
+      x: int = 1
+
+      @property
+      def __class__(self):
+        return _UnsetType
+
+    result = serialize(Spoofed())
+    assert result == {"x": 1}
+
+
+class TestPopArityPrecedence:
+  """Excess pop defaults are reported before hashability
+  (round 13, P3)."""
+
+  def test_unhashable_key_with_excess_defaults(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="at most 2 arguments"):
+      filt.custom_labels.pop([], "d1", "d2")
+
+
+class TestQuotedTypeNameInErrors:
+  """Hostile class names are quoted in error text (round 13, P3)."""
+
+  def test_newline_class_name_quoted(self):
+    Hostile = type("evil\nname\x1b[31m", (), {})
+    with pytest.raises(TypeError) as exc_info:
+      resolve_singular_candidate([Hostile()])
+    message = str(exc_info.value)
+    assert "\n" not in message
+    assert "\\n" in message
+
+
+class TestSealedEscapeHatches:
+  """Generated __wrapped__/__setstate__ paths are sealed
+  (round 14, P1)."""
+
+  def test_no_wrapped_attribute_published(self):
+    for cls in (
+        TraceIdentity,
+        TraceScope,
+        TraceSelector,
+        ResolvedTraceSelector,
+    ):
+      assert not hasattr(cls.__init__, "__wrapped__")
+
+  def test_setstate_rejected_on_initialized_instance(self):
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    trace = Trace(trace_id="t1", session_id="sess-1", identity=identity)
+    table = {identity: "v"}
+    before = hash(identity)
+    with pytest.raises(TypeError, match="cannot be called"):
+      identity.__setstate__(["other", "bob", None])
+    assert trace.identity.session_id == "sess-1"
+    assert hash(identity) == before
+    assert table[identity] == "v"
+
+  def test_setstate_on_blank_object_validates_types(self):
+    blank = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    with pytest.raises(TypeError, match="TraceIdentity"):
+      blank.__setstate__([1, True])
+    # A valid state restores fine (the pickle path).
+    blank2 = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    blank2.__setstate__([TraceIdentity(session_id="sess-1"), TraceScope()])
+    assert blank2.identity.session_id == "sess-1"
+
+  def test_setstate_normalizes_restored_strings(self):
+    class Collider(str):
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return 0
+
+    blank = TraceIdentity.__new__(TraceIdentity)
+    blank.__setstate__([Collider("sess-1"), Collider("alice"), None])
+    assert type(blank.session_id) is str
+    assert type(blank.user_id) is str
+
+
+class TestTraceDictSealing:
+  """vars(trace) cannot retag identity (round 14, P1)."""
+
+  def test_no_instance_dict(self):
+    trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        identity=TraceIdentity(session_id="sess-1", user_id="alice"),
+    )
+    with pytest.raises(TypeError):
+      vars(trace)
+    with pytest.raises(AttributeError):
+      trace.__dict__
+
+
+class TestTrustedDictReads:
+  """dict-subclass items() overrides cannot hide pins
+  (round 14, P1)."""
+
+  class _Liar(dict):
+    """Real contents hidden from the overridable read surface."""
+
+    def items(self):
+      return []
+
+    def keys(self):
+      return []
+
+  def test_scope_and_selector_read_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    assert TraceScope(custom_labels=liar).labels_dict == {"tenant": "a"}
+    selector = TraceSelector(session_id="s", custom_labels=liar)
+    assert dict(selector.custom_labels) == {"tenant": "a"}
+
+  def test_filter_reads_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    filt = TraceFilter(custom_labels=liar)
+    assert filt.custom_labels == {"tenant": "a"}
+    _, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"tenant"'}
+
+  def test_update_reads_hidden_entries(self):
+    liar = self._Liar({"tenant": "a"})
+    filt = TraceFilter(custom_labels={})
+    filt.custom_labels.update(liar)
+    assert filt.custom_labels == {"tenant": "a"}
+
+
+class TestScalarPinBoundaryRevalidation:
+  """__dict__-level pin writes are caught at SQL build
+  (round 14, P2)."""
+
+  def test_vars_injected_sentinel_fails_closed(self):
+    filt = TraceFilter()
+    vars(filt)["user_id"] = UNSET
+    with pytest.raises(TypeError, match="TraceFilter.user_id"):
+      filt.to_sql_conditions()
+
+  def test_vars_injected_non_string_fails_closed(self):
+    filt = TraceFilter()
+    vars(filt)["experiment_id"] = 7
+    with pytest.raises(TypeError, match="TraceFilter.experiment_id"):
+      filt.to_sql_conditions()
+
+
+class TestInitCheckTrustedDescriptor:
+  """Subclass __getattribute__ cannot spoof the one-shot check
+  (round 14, P2)."""
+
+  def test_lying_getattribute_cannot_enable_reinit(self):
+    lies = {"armed": False}
+
+    class Sneaky(TraceSelector):
+
+      def __getattribute__(self, name):
+        if name == "session_id" and lies["armed"]:
+          raise AttributeError(name)
+        return super().__getattribute__(name)
+
+    selector = Sneaky(session_id="s1")
+    lies["armed"] = True  # spoof active during the reinit attempt
+    with pytest.raises(TypeError, match="cannot be called"):
+      selector.__init__("s2")
+    lies["armed"] = False
+    assert selector.session_id == "s1"
+
+
+class TestHashSlotClassificationHookFree:
+  """Allowlist classification never touches the foreign slot
+  (round 14, P2)."""
+
+  def test_hostile_slot_object_not_hashed_or_compared(self):
+    calls = []
+
+    class EvilSlot:
+
+      def __call__(self, *args):
+        calls.append("call")
+        return 0
+
+      def __hash__(self):
+        calls.append("hash")
+        raise RuntimeError("slot must not be hashed")
+
+      def __eq__(self, other):
+        calls.append("eq")
+        return True
+
+    class Operand:
+      __hash__ = EvilSlot()
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    with pytest.raises(TypeError, match="conditional or custom"):
+      filt.custom_labels.get(Operand())
+    assert calls == []
+
+
+class TestViewSetComparisons:
+  """View set comparisons are trusted (round 14, P2)."""
+
+  class _Evil:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_keys_comparisons_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    assert not (filt.custom_labels.keys() == {evil})
+    assert not (filt.custom_labels.keys() <= {evil})
+    assert not (filt.custom_labels.keys() < {evil, "extra"})
+    assert filt.custom_labels.keys().isdisjoint({evil})
+    # Genuine comparisons still hold.
+    assert filt.custom_labels.keys() == {"run"}
+    assert filt.custom_labels.keys() <= {"run", "more"}
+    assert filt.custom_labels.keys() < {"run", "more"}
+
+  def test_items_comparisons_safe(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    assert not (filt.custom_labels.items() == {(evil, "v1")})
+    assert not (filt.custom_labels.items() <= {(evil, "v1")})
+    assert filt.custom_labels.items() == {("run", "v1")}
+
+  def test_collapsing_counterpart_cardinality(self):
+    class KeyA(str):
+
+      def __hash__(self):
+        return 11
+
+      def __eq__(self, other):
+        return self is other
+
+    class KeyB(str):
+
+      def __hash__(self):
+        return 22
+
+      def __eq__(self, other):
+        return self is other
+
+    filt = TraceFilter(custom_labels={"run": "v2"})
+    counterpart = {KeyA("run"): "v2", KeyB("run"): "v2"}
+    assert len(counterpart) == 2
+    # Mapping equality: distinct keys collapsing to one normalized
+    # key must not compare equal to the one-entry container.
+    assert not (filt.custom_labels == counterpart)
+    # Keys-view equality: same cardinality rule.
+    assert not (filt.custom_labels.keys() == set(counterpart))
+
+
+class TestNativeViewContract:
+  """Views are live and keep the native dict-view surface
+  (round 14, P2)."""
+
+  def test_views_are_live(self):
+    filt = TraceFilter(custom_labels={"a": "1"})
+    keys = filt.custom_labels.keys()
+    items = filt.custom_labels.items()
+    values = filt.custom_labels.values()
+    filt.custom_labels["b"] = "2"
+    assert set(keys) == {"a", "b"}
+    assert set(items) == {("a", "1"), ("b", "2")}
+    assert sorted(values) == ["1", "2"]
+    assert len(keys) == 2
+
+  def test_reversed_and_mapping_supported(self):
+    filt = TraceFilter(custom_labels={"a": "1", "b": "2"})
+    assert list(reversed(filt.custom_labels.keys())) == ["b", "a"]
+    assert list(reversed(filt.custom_labels.items())) == [
+        ("b", "2"),
+        ("a", "1"),
+    ]
+    assert list(reversed(filt.custom_labels.values())) == ["2", "1"]
+    proxy = filt.custom_labels.keys().mapping
+    assert proxy["a"] == "1"
+    with pytest.raises(TypeError):
+      proxy["a"] = "x"
+
+
+class TestLyingSequenceSubclasses:
+  """list/tuple subclasses cannot hide pins during iteration
+  (round 15, P1)."""
+
+  class _LiarList(list):
+    """Real storage hidden from every overridable read."""
+
+    def __iter__(self):
+      return iter([])
+
+    def __len__(self):
+      return 0
+
+    def __getitem__(self, index):
+      raise IndexError(index)
+
+  class _LiarPair(list):
+    """Pretends to be a different pair than it stores."""
+
+    def __iter__(self):
+      return iter(["fake", "pair"])
+
+  def test_session_ids_read_real_storage(self):
+    liar = self._LiarList(["secret-session"])
+    filt = TraceFilter(session_ids=liar)
+    assert list.__len__(filt.session_ids) == 1
+    where, params = filt.to_sql_conditions()
+    assert "session_id IN UNNEST(@session_ids)" in where
+    array = next(p for p in params if p.name == "session_ids")
+    assert list(array.values) == ["secret-session"]
+
+  def test_sequence_form_labels_read_real_storage(self):
+    liar = self._LiarList([("tenant", "a")])
+    assert TraceScope(custom_labels=liar).labels_dict == {"tenant": "a"}
+    selector = TraceSelector(session_id="s", custom_labels=liar)
+    assert dict(selector.custom_labels) == {"tenant": "a"}
+
+  def test_pair_entries_read_real_storage(self):
+    pair = self._LiarPair(["tenant", "a"])
+    scope = TraceScope(custom_labels=[pair])
+    assert scope.labels_dict == {"tenant": "a"}
+
+  def test_extend_reads_real_storage(self):
+    filt = TraceFilter(session_ids=["a"])
+    filt.session_ids.extend(self._LiarList(["b"]))
+    assert filt.session_ids == ["a", "b"]
+
+
+class TestFalseyContainerBoundary:
+  """Falsey containers cannot skip boundary revalidation
+  (round 15, P1)."""
+
+  class _FalseyList(list):
+
+    def __bool__(self):
+      return False
+
+    def __len__(self):
+      return 0
+
+  class _FalseyDict(dict):
+
+    def __bool__(self):
+      return False
+
+    def __len__(self):
+      return 0
+
+  def test_falsey_session_ids_still_filter(self):
+    filt = TraceFilter()
+    vars_bypass = self._FalseyList(["secret-session"])
+    object.__setattr__(filt, "session_ids", vars_bypass)
+    where, params = filt.to_sql_conditions()
+    assert "session_id IN UNNEST(@session_ids)" in where
+    array = next(p for p in params if p.name == "session_ids")
+    assert list(array.values) == ["secret-session"]
+
+  def test_falsey_labels_still_filter(self):
+    filt = TraceFilter()
+    object.__setattr__(filt, "custom_labels", self._FalseyDict({"tenant": "a"}))
+    where, params = filt.to_sql_conditions()
+    keys = {p.value for p in params if p.name.startswith("label_key")}
+    assert keys == {'"tenant"'}
+
+  def test_genuinely_empty_containers_stay_unfiltered(self):
+    filt = TraceFilter(session_ids=[], custom_labels={})
+    where, _ = filt.to_sql_conditions()
+    assert "session_id" not in where
+    assert "custom_tags" not in where
+
+
+class TestAtomicSetstate:
+  """A failed restore leaves the target blank and retryable
+  (round 15, P2)."""
+
+  def test_failed_restore_leaves_blank(self):
+    blank = ResolvedTraceSelector.__new__(ResolvedTraceSelector)
+    with pytest.raises(TypeError, match="TraceIdentity"):
+      blank.__setstate__([1, True])
+    # Nothing committed: no field slot is set...
+    with pytest.raises(AttributeError):
+      blank.identity
+    # ...so the object is retryable with valid state.
+    blank.__setstate__([TraceIdentity(session_id="sess-1"), TraceScope()])
+    assert blank.identity.session_id == "sess-1"
+
+  def test_wrong_shape_state_rejected(self):
+    blank = TraceIdentity.__new__(TraceIdentity)
+    with pytest.raises(TypeError, match="field values"):
+      blank.__setstate__(["only-one"])
+    with pytest.raises(TypeError, match="field values"):
+      blank.__setstate__("not-a-sequence")
+    with pytest.raises(AttributeError):
+      blank.session_id
+
+  def test_all_four_types_restore_atomically(self):
+    cases = [
+        (TraceIdentity, [1, None, None]),
+        (TraceScope, [1, None]),
+        (TraceSelector, [1, UNSET, UNSET, UNSET, None, None]),
+        (ResolvedTraceSelector, [1, True]),
+    ]
+    for cls, bad_state in cases:
+      blank = cls.__new__(cls)
+      with pytest.raises((TypeError, ValueError)):
+        blank.__setstate__(bad_state)
+      first_field = next(iter(cls.__dataclass_fields__))
+      with pytest.raises(AttributeError):
+        getattr(blank, first_field)
+
+
+class TestViewSetAlgebra:
+  """Binary/reflected set algebra is trusted (round 15, P2)."""
+
+  class _Evil:
+
+    def __eq__(self, other):
+      return True
+
+    def __ne__(self, other):
+      return False
+
+    def __hash__(self):
+      return hash("run")
+
+  def test_difference_does_not_execute_hooks(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    # Foreign elements can never match trusted keys: difference keeps
+    # the real key instead of falsely returning an empty set.
+    assert filt.custom_labels.keys() - {evil} == {"run"}
+    assert filt.custom_labels.keys() & {evil} == set()
+
+  def test_union_and_xor_fail_closed_on_foreign_elements(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    evil = self._Evil()
+    with pytest.raises(TypeError, match="refuses to emit"):
+      filt.custom_labels.keys() | {evil}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      filt.custom_labels.keys() ^ {evil}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      {evil} - filt.custom_labels.keys()
+
+  def test_clean_algebra_still_works(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    keys = filt.custom_labels.keys()
+    assert keys | {"more"} == {"run", "more"}
+    assert keys & {"run", "more"} == {"run"}
+    assert keys ^ {"run", "more"} == {"more"}
+    assert keys - {"other"} == {"run"}
+    assert {"run", "x"} - keys == {"x"}
+
+  def test_lying_set_subclass_cannot_fake_equality(self):
+    class LiarSet(set):
+      """Real storage {'different'}; presents {'run'}."""
+
+      def __iter__(self):
+        return iter(["run"])
+
+      def __len__(self):
+        return 1
+
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    liar = LiarSet({"different"})
+    assert not (filt.custom_labels.keys() == liar)
+    assert filt.custom_labels.keys() != liar
+
+
+class TestTraceWeakref:
+  """Slotted Trace remains weak-referenceable (round 15, P3)."""
+
+  def test_weakref_supported(self):
+    import weakref
+
+    trace = Trace(trace_id="t1", session_id="sess-1")
+    ref = weakref.ref(trace)
+    assert ref() is trace
+    del trace
+    assert ref() is None
+
+
+class TestViewAlgebraIterableOperands:
+  """Set algebra accepts native-view operand types (round 16, P2)."""
+
+  def _keys(self):
+    return TraceFilter(custom_labels={"run": "v1"}).custom_labels.keys()
+
+  def test_list_and_tuple_operands(self):
+    assert self._keys() & ["run"] == {"run"}
+    assert self._keys() | ("more",) == {"run", "more"}
+    assert self._keys() - ["other"] == {"run"}
+    assert self._keys() ^ ["run", "more"] == {"more"}
+
+  def test_dict_operand_uses_keys(self):
+    # Native dict-view algebra iterates a dict operand's keys.
+    assert self._keys() & {"run": "anything"} == {"run"}
+    assert self._keys() - {"run": 1} == set()
+
+  def test_generator_operand(self):
+    assert self._keys() & (k for k in ["run", "more"]) == {"run"}
+
+  def test_reflected_operations_with_iterables(self):
+    assert ["run", "x"] - self._keys() == {"x"}
+    assert ["more"] | self._keys() == {"run", "more"}
+
+  def test_items_view_pair_operands(self):
+    filt = TraceFilter(custom_labels={"run": "v1"})
+    assert filt.custom_labels.items() & [("run", "v1")] == {("run", "v1")}
+    assert filt.custom_labels.items() | [("extra", "e")] == {
+        ("run", "v1"),
+        ("extra", "e"),
+    }
+
+  def test_hostile_protection_retained_for_iterables(self):
+    class Evil:
+
+      def __eq__(self, other):
+        return True
+
+      def __hash__(self):
+        return hash("run")
+
+    keys = self._keys()
+    assert keys - [Evil()] == {"run"}
+    with pytest.raises(TypeError, match="refuses to emit"):
+      keys | [Evil()]
+
+  def test_lying_list_operand_read_via_trusted_storage(self):
+    class LiarList(list):
+
+      def __iter__(self):
+        return iter([])
+
+    assert self._keys() & LiarList(["run"]) == {"run"}
+
+  def test_non_iterable_still_type_errors(self):
+    with pytest.raises(TypeError):
+      self._keys() & 42
+
+
+class TestSetstateDescriptorWrites:
+  """Restoration writes slots directly, not through subclass
+  descriptors (round 16, P3)."""
+
+  def test_subclass_property_cannot_intercept_restore(self):
+    calls = []
+
+    class Interceptor(TraceIdentity):
+
+      @property
+      def user_id(self):
+        calls.append("get")
+        return "intercepted"
+
+      @user_id.setter
+      def user_id(self, value):
+        calls.append("set")
+        raise RuntimeError("property setter must not run")
+
+    blank = Interceptor.__new__(Interceptor)
+    blank.__setstate__(["sess-1", "alice", None])
+    # The slot was written directly; the property still shadows reads
+    # on the subclass, but restoration neither invoked it nor broke.
+    assert TraceIdentity.__dict__["user_id"].__get__(blank) == "alice"
+    assert "set" not in calls
