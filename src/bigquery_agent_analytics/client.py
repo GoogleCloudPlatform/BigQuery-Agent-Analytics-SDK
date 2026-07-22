@@ -186,7 +186,8 @@ SELECT
   e.error_message,
   e.is_truncated,
   ts.user_id AS anchor_user_id,
-  ts.root_agent_name AS anchor_root_agent_name
+  ts.root_agent_name AS anchor_root_agent_name,
+  JSON_TYPE(e.attributes) AS attributes_type
 FROM `{project}.{dataset}.{table}` e
 JOIN trace_sessions ts
   ON e.session_id = ts.session_id
@@ -383,7 +384,8 @@ SELECT
   e.latency_ms,
   e.status,
   e.error_message,
-  e.is_truncated
+  e.is_truncated,
+  JSON_TYPE(e.attributes) AS attributes_type
 FROM `{project}.{dataset}.{table}` e
 WHERE e.session_id = @session_id
   AND e.user_id IS NOT DISTINCT FROM @anchor_user_id
@@ -1099,16 +1101,19 @@ class Client:
           matching[0].identity, resolved_scope=matching[0]
       )
     if len(matching) == 1 and truncated and allow_mixed_scope:
-      # A caller who opted into allow_mixed_scope accepts best-effort
-      # SCOPE resolution — the selected scope beats a mixed read full
-      # of sibling scopes (round 7, P1-1) — but cross-identity
-      # ambiguity must still raise (round 9, P1-1): the cut page
-      # cannot prove the matching identity is the only one carrying a
-      # matching scope. A fully pinned intrinsic identity is unique
-      # by construction; otherwise uniqueness is proven through the
-      # bounded identity page before returning the singleton, and any
-      # other outcome falls through to the mixed path, which enforces
-      # the cross-identity ambiguity surface.
+      # Under truncation the singleton needs TWO proofs (rounds 7-10).
+      # Identity uniqueness: a fully pinned intrinsic identity is
+      # unique by construction; otherwise it is proven through the
+      # bounded identity page, and any other outcome goes to the
+      # mixed path, which enforces the cross-identity ambiguity
+      # surface (round 9, P1-1). Scope uniqueness: only an exact
+      # scope_signature pin proves the one visible match IS the
+      # requested scope — a subset pin (labels, experiment) can match
+      # another scope beyond the cut, so without the signature the
+      # flag's promise is the conversation-complete mixed read, not
+      # the first visible match (round 10, P1-2).
+      if selector.scope_signature is None:
+        return self._fetch_mixed_scope_trace(selector)
       if (
           selector.user_id is not UNSET
           and selector.root_agent_name is not UNSET
@@ -1116,9 +1121,8 @@ class Client:
         return self._fetch_identity_trace(
             matching[0].identity, resolved_scope=matching[0]
         )
-      identities, identity_page_truncated = self._discover_session_identities(
-          selector
-      )
+      discovered = self._discover_session_identities(selector)
+      identities, identity_page_truncated = discovered
       if (
           not identity_page_truncated
           and len(identities) == 1
@@ -1127,7 +1131,9 @@ class Client:
         return self._fetch_identity_trace(
             matching[0].identity, resolved_scope=matching[0]
         )
-      return self._fetch_mixed_scope_trace(selector)
+      # Reuse the page just fetched — the mixed path would otherwise
+      # rerun the identical discovery query (round 10, P3-1).
+      return self._fetch_mixed_scope_trace(selector, discovered=discovered)
     if allow_mixed_scope:
       return self._fetch_mixed_scope_trace(selector)
     if len(matching) >= 2:
@@ -1284,7 +1290,11 @@ class Client:
         identities.append(identity)
     return identities, identity_page_truncated
 
-  def _fetch_mixed_scope_trace(self, selector: TraceSelector) -> Trace:
+  def _fetch_mixed_scope_trace(
+      self,
+      selector: TraceSelector,
+      discovered: Optional[tuple] = None,
+  ) -> Trace:
     """Conversation-complete read for one intrinsic identity.
 
     Identity uniqueness is established by a bounded DISTINCT-identity
@@ -1294,8 +1304,13 @@ class Client:
     selector matching nothing fails with not-found instead of
     returning the whole identity (PR #371 review round 4, P1-1).
     """
-    identities, identity_page_truncated = self._discover_session_identities(
-        selector
+    # ``discovered`` carries a caller's just-fetched identity page so
+    # pathological sessions do not pay a duplicate discovery query
+    # (PR #371 review round 10, P3-1).
+    identities, identity_page_truncated = (
+        discovered
+        if discovered is not None
+        else self._discover_session_identities(selector)
     )
     if len(identities) > 1:
       # Python-only pins are applied BEFORE deciding identity
@@ -1363,12 +1378,21 @@ class Client:
     for row in results:
       row_dict = dict(row)
       span = Span.from_bigquery_row(row_dict)
-      # Validated from the RAW cell (PR #371 review rounds 8 P2-2 and
-      # 9 P1-5): a persisted non-object — including a JSON string
-      # scalar the BigQuery decoder hands over as str — must not
-      # silently classify as an untagged shared row, masquerade as an
-      # empty scope, or crash with an unredacted AttributeError.
-      attributes = _validated_attributes_object(row_dict.get("attributes"))
+      # Validated from the RAW cell (PR #371 review rounds 8 P2-2,
+      # 9 P1-5, 10 P1-1): a persisted non-object — including a JSON
+      # string scalar the BigQuery decoder hands over as str, even
+      # one whose text is serialized object syntax — must not
+      # silently classify, fabricate an identity, or crash with an
+      # unredacted AttributeError. The JSON_TYPE attestation is
+      # authoritative when projected.
+      attributes = _validated_attributes_object(
+          row_dict.get("attributes"),
+          sql_type=(
+              row_dict.get("attributes_type")
+              if "attributes_type" in row_dict
+              else _NO_ATTESTATION
+          ),
+      )
       row_user = row_dict.get("user_id")
       row_root = attributes.get("root_agent_name")
       if (
@@ -1768,9 +1792,15 @@ class Client:
           # sources) count one anchor per row: an OVERcount can only
           # cost extra escalation attempts, never a false exhaustion.
           anchors.add(("__row__", index))
+      # Refill on ANY saturated page that yielded fewer traces than
+      # requested — scope-predicate rejection and per-identity
+      # quarantine both shrink the yield (PR #371 review round 10,
+      # P1-3): a malformed newest anchor must not starve unfiltered
+      # listings of valid older traces. Healthy unfiltered pages
+      # yield at least one trace per anchor, so they always fill or
+      # short-page and never re-query.
       if (
-          scope_predicate is None
-          or sql_limit is None
+          sql_limit is None
           or len(traces) >= limit
           or not results
           or len(anchors) < sql_limit
@@ -3488,21 +3518,39 @@ def _merge_criterion_reports(
   )
 
 
-def _validated_attributes_object(raw: Any) -> dict:
+# Sentinel: the row carries no SQL-side JSON_TYPE attestation (foreign
+# row sources or pre-attestation fixtures).
+_NO_ATTESTATION = object()
+
+
+def _validated_attributes_object(
+    raw: Any, sql_type: Any = _NO_ATTESTATION
+) -> dict:
   """Strictly validated attributes object from the RAW BigQuery cell.
 
   The BigQuery decoder yields Python objects for JSON columns: an
-  object cell arrives as ``dict``, but a schema-valid JSON string
-  scalar such as ``"opaque"`` arrives as ``str`` — and so does the
-  TEXT-stored encoding of a real object. ``Span.from_bigquery_row``
-  replaces parse failures with ``{}`` (a display convenience), which
-  would let a string scalar masquerade as a legitimate empty scope
-  and a double-encoded object be read differently from the SQL
-  predicates (PR #371 review round 9, P1-5). Here a ``str`` is
-  accepted ONLY if it parses to a JSON object (or null); everything
-  else raises the redacted validation error, which bulk readers
-  quarantine and singular readers surface.
+  object cell arrives as ``dict``, but a schema-valid JSON STRING
+  scalar arrives as the decoded Python ``str`` — including one whose
+  TEXT is itself serialized object syntax, which a bare reparse would
+  accept while every SQL predicate (``JSON_VALUE`` anchors, tag
+  paths) still sees a top-level string and returns NULL (PR #371
+  review round 10, P1-1). ``sql_type`` is the SQL-side
+  ``JSON_TYPE(attributes)`` attestation projected into the row: when
+  present it is authoritative — only ``'object'`` (or absent/JSON
+  null) attributes classify, so a decoded string scalar can never
+  fabricate an identity or scope that SQL anchoring cannot see. Rows
+  without the attestation (foreign sources) fall back to accepting a
+  ``str`` only if it parses to a JSON object or null (PR #371 review
+  round 9, P1-5). Everything else raises the redacted validation
+  error, which bulk readers quarantine and singular readers surface.
   """
+  if sql_type is not _NO_ATTESTATION:
+    if sql_type is None or sql_type == "null":
+      return {}
+    if sql_type != "object":
+      raise ValueError(
+          "Persisted attributes must be a JSON object (contents redacted)."
+      )
   if raw is None:
     return {}
   if isinstance(raw, dict):
@@ -4064,11 +4112,19 @@ def _build_traces_from_rows(
       continue
     try:
       # Validated from the RAW cell, not Span's lenient display
-      # normalization (PR #371 review round 9, P1-5): the BigQuery
-      # decoder hands a schema-valid JSON string scalar to Python as
-      # str, and Span's parse-failure fallback would silently turn it
-      # into a legitimate-looking empty scope.
-      attributes = _validated_attributes_object(row_dict.get("attributes"))
+      # normalization (PR #371 review round 9, P1-5), under the
+      # SQL-side JSON_TYPE attestation when the row carries it
+      # (PR #371 review round 10, P1-1): a decoded string scalar
+      # whose text is serialized object syntax must not fabricate an
+      # identity or scope the SQL anchors cannot see.
+      attributes = _validated_attributes_object(
+          row_dict.get("attributes"),
+          sql_type=(
+              row_dict.get("attributes_type")
+              if "attributes_type" in row_dict
+              else _NO_ATTESTATION
+          ),
+      )
       root_agent_name = _validated_identity_attr(
           "root_agent_name", attributes.get("root_agent_name")
       )

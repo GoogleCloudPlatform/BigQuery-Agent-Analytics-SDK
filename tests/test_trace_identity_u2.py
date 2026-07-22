@@ -2479,12 +2479,15 @@ class TestRound9Regressions:
         _mock_row(_candidate_row(user_id="bob", tag_payload='{"k": "v0"}')),
     ]
     client, mock_bq = self._client(
-        [candidate_batch, two_identities, two_identities, batch_candidates]
+        [candidate_batch, two_identities, batch_candidates]
     )
     with pytest.raises(AmbiguousSessionError):
       client.get_session_trace(
           "sess-1", scope_signature=target_sig, allow_mixed_scope=True
       )
+    # Round 10, P3-1: the mixed-path fallback reuses the discovery
+    # page instead of rerunning the identical query.
+    assert mock_bq.query.call_count == 3
 
   def test_truncated_singleton_with_full_identity_pins_skips_discovery(self):
     # P1-1 companion: a fully pinned intrinsic identity is unique by
@@ -2682,3 +2685,132 @@ class TestRound9Regressions:
     assert details["scope_signature"] == (
         TraceScope(experiment_id="E").scope_signature
     )
+
+
+class TestRound10Regressions:
+  """PR #371 review round 10 reproduced findings."""
+
+  def _client(self, batches):
+    from unittest.mock import MagicMock
+
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  def _anchored(self, row):
+    row["anchor_user_id"] = row.get("user_id")
+    row["anchor_root_agent_name"] = None
+    return row
+
+  def test_attested_string_scalar_cannot_fabricate_identity(self):
+    # P1-1: the BigQuery decoder hands a JSON STRING scalar over as
+    # the decoded inner str; when its text is serialized object
+    # syntax a bare reparse accepts it while every SQL path sees a
+    # top-level string. The JSON_TYPE attestation is authoritative.
+    decoded = '{"root_agent_name": "fabricated", "custom_tags": {"run": "v1"}}'
+    row = _event_row(span_id="x1")
+    row["attributes"] = decoded
+    row["attributes_type"] = "string"
+    with pytest.raises(ValueError, match="JSON object"):
+      _build_traces_from_rows([dict(row.items())])
+    assert (
+        _build_traces_from_rows([dict(row.items())], on_malformed="quarantine")
+        == []
+    )
+    # The attestation accepts real objects and JSON null.
+    good = _event_row(span_id="g1", custom_tags={"run": "v1"})
+    good["attributes_type"] = "object"
+    built = _build_traces_from_rows([dict(good.items())])
+    assert built[0].scope.labels_dict == {"run": "v1"}
+    null_attrs = _event_row(span_id="n1")
+    null_attrs["attributes"] = None
+    null_attrs["attributes_type"] = None
+    assert len(_build_traces_from_rows([dict(null_attrs.items())])) == 1
+    # Rows without the attestation keep the round-9 fallback: object
+    # text parses, non-object text fails.
+    legacy = _event_row(span_id="l1", custom_tags={"run": "v1"})
+    assert len(_build_traces_from_rows([dict(legacy.items())])) == 1
+
+  def test_list_query_projects_attributes_type(self):
+    from bigquery_agent_analytics.client import _GET_SESSION_TRACE_QUERY
+    from bigquery_agent_analytics.client import _LIST_TRACES_QUERY
+
+    for query in (_LIST_TRACES_QUERY, _GET_SESSION_TRACE_QUERY):
+      assert "JSON_TYPE(e.attributes) AS attributes_type" in query
+
+  def test_truncated_singleton_without_signature_uses_mixed_read(self):
+    # P1-2: full identity pins prove identity uniqueness, not scope
+    # uniqueness — a Python-only subset pin (unaddressable label key)
+    # with one VISIBLE match may match another scope beyond the cut,
+    # so without a scope_signature the flag's promise is the
+    # conversation-complete mixed read.
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    n = _MAX_SCOPE_CANDIDATES + 1
+    unaddressable = "k\\"  # odd trailing backslash: Python-side pin
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(
+                user_id="alice",
+                tag_payload=(
+                    '{"k\\\\": "v"}' if i == 0 else f'{{"j": "v{i}"}}'
+                ),
+            )
+        )
+        for i in range(n)
+    ]
+    identity_batch = [
+        _mock_row(
+            {
+                "session_id": "sess-1",
+                "user_id": "alice",
+                "root_agent_name": None,
+            }
+        )
+    ]
+    fetch_batch = [
+        _mock_row(_event_row(custom_tags={unaddressable: "v"}, span_id="m0")),
+        _mock_row(_event_row(custom_tags={"j": "v1"}, span_id="m1")),
+    ]
+    client, mock_bq = self._client(
+        [candidate_batch, identity_batch, fetch_batch]
+    )
+    trace = client.get_session_trace(
+        "sess-1",
+        user_id="alice",
+        root_agent_name=None,
+        custom_labels={unaddressable: "v"},
+        allow_mixed_scope=True,
+    )
+    # Conversation-complete mixed read, not the first visible match.
+    assert trace.scope is None
+    assert [s.span_id for s in trace.spans] == ["m0", "m1"]
+
+  def test_quarantined_newest_anchor_does_not_starve_listing(self):
+    # P1-3: an unfiltered listing must refill past a quarantined
+    # newest anchor instead of returning [] after one query.
+    bad = _event_row(session_id="s-bad", span_id="b1")
+    bad["attributes"] = '{"experiment_id": 7}'
+    bad = self._anchored(bad)
+    good = self._anchored(
+        _event_row(session_id="s-old", trace_id="TG", span_id="g1")
+    )
+    client, mock_bq = self._client(
+        [[_mock_row(bad)], [_mock_row(bad), _mock_row(good)]]
+    )
+    traces = client.list_traces(TraceFilter(limit=1))
+    assert [t.session_id for t in traces] == ["s-old"]
+    assert mock_bq.query.call_count == 2

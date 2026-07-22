@@ -224,7 +224,17 @@ def collision_dataset(bq_client):
           -- foreign-tagged row: tags present but no 'run' key (P1-1)
           ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
            'eve', 'tr-p', 'foreign', JSON '{{}}',
-           JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK')
+           JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK'),
+          -- poison-scalar: attributes is a JSON STRING scalar whose
+          -- text is serialized object syntax; the Python decoder
+          -- yields the inner str while every SQL path sees NULL
+          -- (round 10, P1-1)
+          ('2026-07-01 14:00:00', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-x', 'x1', JSON '{{}}',
+           TO_JSON(TO_JSON_STRING(JSON_OBJECT(
+               'root_agent_name', 'fabricated',
+               'custom_tags', JSON_OBJECT('run', 'v1')))),
+           'OK')
     """
     ).result()
   except Exception:
@@ -482,3 +492,20 @@ class TestLiveCollisionFixture:
       trace = sdk_client.get_trace_by_selector(selector)
       seen_users.add(trace.identity.user_id)
     assert seen_users == {"alice", "bob"}
+
+  def test_string_scalar_attributes_quarantined_live(self, sdk_client):
+    # PR #371 review round 10, P1-1: the REAL BigQuery decoder hands
+    # the poison-scalar row's attributes over as the decoded inner
+    # str; the JSON_TYPE attestation must quarantine it in listings
+    # and fail the singular read closed — never fabricate the
+    # 'fabricated' identity or the run=v1 scope that SQL cannot see.
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    traces = [
+        t
+        for t in sdk_client.list_traces(TraceFilter(limit=50))
+        if t.session_id == "poison-scalar"
+    ]
+    assert traces == []
+    with pytest.raises(ValueError, match="JSON object"):
+      sdk_client.get_session_trace("poison-scalar")
