@@ -743,7 +743,9 @@ GRAPH `{project}.{dataset}.{graph_name}`
 MATCH
   (parent:TechNode)-[c:Caused]->(child:TechNode)
 WHERE parent.session_id = @session_id
-   OR child.session_id = @session_id
+  AND child.session_id = @session_id
+  AND parent.span_id IN UNNEST(@span_ids)
+  AND child.span_id IN UNNEST(@span_ids)
 RETURN
   parent.span_id AS parent_span_id,
   parent.event_type AS parent_event_type,
@@ -1730,6 +1732,7 @@ class ContextGraphManager:
   def reconstruct_trace_gql(
       self,
       session_id: str,
+      span_ids: set[str] | tuple[str, ...] | list[str] | None = None,
       graph_name: Optional[str] = None,
       result_limit: int = 1000,
   ) -> list[dict[str, Any]]:
@@ -1741,6 +1744,12 @@ class ContextGraphManager:
 
     Args:
         session_id: Session to reconstruct.
+        span_ids: Exact span population from an already-resolved trace.
+            Both ends of every returned edge must be members, preventing
+            graph traversal from widening an identity/scope-safe flat read
+            back to the session-only population. When omitted for backward
+            compatibility, the shared SDK client resolves ``session_id``
+            first; ambiguity therefore raises instead of broadening GQL.
         graph_name: Override graph name.
         result_limit: Maximum result rows.
 
@@ -1748,6 +1757,26 @@ class ContextGraphManager:
         List of dicts with parent/child span pairs ordered by
         timestamp, suitable for building a Trace tree.
     """
+    if span_ids is None:
+      # Preserve the original manager-level convenience API without
+      # preserving its unsafe session-only graph traversal. Import lazily to
+      # avoid the Client -> ContextGraphManager module cycle.
+      from .client import Client
+
+      resolved_trace = Client(
+          project_id=self.project_id,
+          dataset_id=self.dataset_id,
+          table_id=self.table_id,
+          location=self.location,
+          verify_schema=False,
+          bq_client=self.client,
+      ).get_session_trace(session_id)
+      span_ids = [span.span_id for span in resolved_trace.spans if span.span_id]
+
+    resolved_span_ids = sorted(set(span_ids))
+    if not resolved_span_ids:
+      return []
+
     gname = graph_name or self.config.graph_name
     query = _GQL_TRACE_RECONSTRUCTION_QUERY.format(
         project=self.project_id,
@@ -1759,6 +1788,9 @@ class ContextGraphManager:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("session_id", "STRING", session_id),
+            bigquery.ArrayQueryParameter(
+                "span_ids", "STRING", resolved_span_ids
+            ),
             bigquery.ScalarQueryParameter(
                 "result_limit", "INT64", result_limit
             ),

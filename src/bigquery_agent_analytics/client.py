@@ -3378,6 +3378,13 @@ class Client:
       self,
       session_id: str,
       config: Optional[Any] = None,
+      *,
+      user_id: Any = UNSET,
+      root_agent_name: Any = UNSET,
+      experiment_id: Any = UNSET,
+      custom_labels: Optional[dict] = None,
+      scope_signature: Optional[str] = None,
+      allow_mixed_scope: bool = False,
   ) -> Trace:
     """Reconstructs a session trace using GQL graph traversal.
 
@@ -3394,85 +3401,108 @@ class Client:
     Args:
         session_id: The session ID to reconstruct.
         config: Optional :class:`ContextGraphConfig`.
+        user_id: Optional identity pin, with the same three-state
+            semantics as :meth:`get_session_trace`.
+        root_agent_name: Optional root-agent identity pin.
+        experiment_id: Optional experiment scope pin.
+        custom_labels: Optional subset label pins.
+        scope_signature: Optional exact-scope signature pin.
+        allow_mixed_scope: Opt in to the same mixed-scope escape hatch
+            as :meth:`get_session_trace`.
 
     Returns:
-        A Trace object with all spans for the session.
+        A Trace object for the resolved identity/scope.
     """
-    mgr = self.context_graph(config=config)
-    rows = mgr.reconstruct_trace_gql(session_id=session_id)
+    selector = TraceSelector(
+        session_id=session_id,
+        user_id=user_id,
+        root_agent_name=root_agent_name,
+        experiment_id=experiment_id,
+        custom_labels=custom_labels,
+        scope_signature=scope_signature,
+    )
+    return self.get_trace_by_selector_gql(
+        selector,
+        config=config,
+        allow_mixed_scope=allow_mixed_scope,
+    )
 
-    # Always fetch the flat trace to capture isolated events
-    flat_trace = self.get_session_trace(session_id)
+  def get_trace_by_selector_gql(
+      self,
+      selector: TraceSelector,
+      config: Optional[Any] = None,
+      *,
+      allow_mixed_scope: bool = False,
+  ) -> Trace:
+    """Reconstructs one selector-resolved trace using GQL edges.
+
+    The shared flat resolver runs exactly once and defines the complete
+    allowed span population. GQL receives those exact span IDs, so graph
+    traversal cannot broaden the read to another identity or scope that
+    happens to reuse the same ``session_id``. The GQL result supplies only
+    parent relationships; span content and trace metadata remain sourced
+    from the authoritative flat trace.
+
+    Args:
+        selector: Identity and scope pins for the singular read.
+        config: Optional :class:`ContextGraphConfig`.
+        allow_mixed_scope: Pass through the U2 mixed-scope escape hatch.
+
+    Returns:
+        The resolved flat trace when no graph edges exist, otherwise an
+        equivalent trace whose copied spans carry GQL parent links and are
+        ordered chronologically.
+    """
+    flat_trace = self.get_trace_by_selector(
+        selector, allow_mixed_scope=allow_mixed_scope
+    )
+    span_ids = tuple(
+        sorted({span.span_id for span in flat_trace.spans if span.span_id})
+    )
+    if not span_ids:
+      return flat_trace
+
+    mgr = self.context_graph(config=config)
+    rows = mgr.reconstruct_trace_gql(
+        session_id=selector.session_id,
+        span_ids=span_ids,
+    )
 
     if not rows:
       logger.info(
           "No GQL edges for session_id=%s (flat/sparse trace); "
           "using flat SQL query.",
-          session_id,
+          selector.session_id,
       )
       return flat_trace
 
-    # Build spans from GQL edge pairs.
-    # A span may appear as parent_ first (no parent link) then as
-    # child_ later — backfill parent_span_id when that happens.
-    seen: dict[str, dict[str, Any]] = {}
+    # Graph rows are permitted to contribute relationships only. The
+    # authoritative flat trace contributes every span and all payload data,
+    # so a stale or unexpectedly broad graph can never fabricate an event.
+    spans = [copy.deepcopy(span) for span in flat_trace.spans]
+    by_id = {span.span_id: span for span in spans if span.span_id}
     for row in rows:
-      for prefix in ("parent_", "child_"):
-        sid = row.get(f"{prefix}span_id")
-        if not sid:
-          continue
-        if sid not in seen:
-          seen[sid] = {
-              "span_id": sid,
-              "event_type": row.get(f"{prefix}event_type", "UNKNOWN"),
-              "agent": row.get(f"{prefix}agent"),
-              "timestamp": row.get(f"{prefix}timestamp"),
-              "session_id": row.get("session_id"),
-              "invocation_id": row.get(f"{prefix}invocation_id"),
-              "content": row.get(f"{prefix}content") or {},
-              "latency_ms": row.get(f"{prefix}latency_ms"),
-              "status": row.get(f"{prefix}status", "OK"),
-              "error_message": row.get(f"{prefix}error_message"),
-              "parent_span_id": (
-                  row.get("parent_span_id") if prefix == "child_" else None
-              ),
-          }
-        elif prefix == "child_" and not seen[sid].get("parent_span_id"):
-          # Backfill parent link from this child_ edge
-          seen[sid]["parent_span_id"] = row.get("parent_span_id")
-
-    gql_spans = [Span.from_bigquery_row(v) for v in seen.values()]
-
-    # Merge: add any flat-trace spans not already covered by GQL
-    gql_span_ids = {s.span_id for s in gql_spans if s.span_id}
-    for span in flat_trace.spans:
-      if span.span_id and span.span_id not in gql_span_ids:
-        gql_spans.append(span)
+      parent_id = row.get("parent_span_id")
+      child_id = row.get("child_span_id")
+      if parent_id in by_id and child_id in by_id:
+        by_id[child_id].parent_span_id = parent_id
 
     # Sort by timestamp for deterministic chronological order.
     # Use epoch as fallback (timezone-aware to avoid naive/aware conflicts).
     _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    gql_spans.sort(key=lambda s: (s.timestamp or _epoch, s.span_id or ""))
-
-    spans = gql_spans
-    user_id = flat_trace.user_id
-    trace_id = flat_trace.trace_id
-
-    timestamps = [s.timestamp for s in spans if s.timestamp]
-    start = min(timestamps) if timestamps else None
-    end = max(timestamps) if timestamps else None
-    total_ms = None
-    if start and end:
-      total_ms = (end - start).total_seconds() * 1000
+    spans.sort(key=lambda s: (s.timestamp or _epoch, s.span_id or ""))
 
     return Trace(
-        trace_id=trace_id or session_id,
-        session_id=session_id,
+        trace_id=flat_trace.trace_id,
+        session_id=flat_trace.session_id,
         spans=spans,
-        user_id=user_id,
-        start_time=start,
-        end_time=end,
-        total_latency_ms=total_ms,
+        user_id=flat_trace.user_id,
+        start_time=flat_trace.start_time,
+        end_time=flat_trace.end_time,
+        total_latency_ms=flat_trace.total_latency_ms,
+        identity=flat_trace.identity,
+        scope=flat_trace.scope,
+        scope_coverage=flat_trace.scope_coverage,
     )
 
 

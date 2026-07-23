@@ -154,7 +154,7 @@ class TestGqlLabels:
   def test_reconstruct_trace_gql_labels_context_graph(self):
     mock_bq = _mock_bq_client()
     mgr = _make_manager(mock_bq)
-    mgr.reconstruct_trace_gql(session_id="sess-1")
+    mgr.reconstruct_trace_gql(session_id="sess-1", span_ids={"s1", "s2"})
     _sql, labels = _labels_per_call(mock_bq)[0]
     assert labels.get("sdk_feature") == "context-graph"
     assert "sdk_ai_function" not in labels
