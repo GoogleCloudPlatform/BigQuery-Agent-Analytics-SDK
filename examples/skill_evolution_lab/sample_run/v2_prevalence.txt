@@ -1,0 +1,3 @@
+Prevalence across 6 independent analyst patches:
+  RESPONSE_PATTERN: 6/6 (100%) -- VERY STRONG
+Strength is a consensus flag: weak = 1 analyst, moderate = 2, STRONG = >=3 independently converged, VERY STRONG = >=3 and a strict majority (more than half) of all patches.

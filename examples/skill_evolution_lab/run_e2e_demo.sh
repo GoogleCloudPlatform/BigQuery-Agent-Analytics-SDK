@@ -90,7 +90,6 @@ JUDGE_MODEL="${_ENV_JUDGE_MODEL:-${JUDGE_MODEL:-gemini-2.5-flash}}"
 JUDGE_LOCATION="${_ENV_JUDGE_LOCATION:-${JUDGE_LOCATION:-us-central1}}"
 CONCURRENCY="${_ENV_CONCURRENCY:-${CONCURRENCY:-3}}"
 ROUNDS="${ROUNDS:-1}"
-FROM_BIGQUERY="${FROM_BIGQUERY:-0}"
 WITH_REGISTRY="${WITH_REGISTRY:-0}"
 SKILL_ID="${SKILL_ID:-}"
 # Skill Registry region is independent of the judge region (the registry only
@@ -138,10 +137,6 @@ while [[ $# -gt 0 ]]; do
       ROUNDS="$2"
       shift 2
       ;;
-    --from-bigquery)
-      FROM_BIGQUERY=1
-      shift
-      ;;
     --with-registry)
       WITH_REGISTRY=1
       shift
@@ -163,10 +158,6 @@ while [[ $# -gt 0 ]]; do
       echo "  --rounds N         Evolution rounds: 1 = V0->V1, 2 = V0->V1->V2"
       echo "                     (round 2 runs only when V1 wins; V2 is kept"
       echo "                     only when it beats V1 on the held-out set)"
-      echo "  --from-bigquery    Log every session to a BQAA agent_events table and"
-      echo "                     score by reading it back from BigQuery (production"
-      echo "                     wiring). Uses DATASET_ID/TABLE_ID from .env"
-      echo "                     (defaults: agent_analytics.agent_events)"
       echo "  --with-registry    Mirror the winning version to the Skill Registry"
       echo "                     (only after it beats the incumbent on the held-out set)"
       echo "  --skill-id ID      Skill Registry id (required with --with-registry)"
@@ -253,51 +244,59 @@ separator() {
 restore() { cp "$V0" "$SKILL"; }
 trap restore EXIT
 
-# Unique per-run label for --from-bigquery: rows carry custom_tags
-# {run, slice} so scoring can select exactly this run's sessions from a
-# shared, append-only events table.
-RUN_LABEL="lab_${RUN_TIMESTAMP}"
+# Unique per-run label: every logged row carries custom_tags {run, slice} so
+# scoring can select exactly this run's sessions from a shared, append-only
+# events table. PID + RANDOM make the label collision-safe when several runs
+# start within the same second (e.g. a parallel sweep).
+RUN_LABEL="lab_${RUN_TIMESTAMP}_$$${RANDOM}"
 
 # slice <traffic-path> -> "v0_evolve" / "v1_test" / ... (the metric slice name)
 slice_of() { local b; b="$(basename "$1")"; echo "${b%_traffic.json}"; }
 
 # run_agent <skill> <out> <qfile...>  -- run questions through the agent.
-# With --from-bigquery, every session is also logged to the BQAA events table.
+# EVERY session is logged to the BQAA agent_events table -- BigQuery is the
+# data path: scoring reads the sessions back from it, and the execution spans
+# that power the scorecards' Before/After trace trees live there. The
+# conversations JSON is written alongside as a committed-artifact convenience.
 run_agent() {
   local skill="$1" out="$2"; shift 2
   local qargs=() q
   for q in "$@"; do qargs+=(--questions "$q"); done
-  local bqargs=()
-  if [[ "$FROM_BIGQUERY" == "1" ]]; then
-    bqargs=(--log-bigquery --app-name skill-evolution-lab
-            --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
-  fi
-  $PY run_agent.py --skill "$skill" "${qargs[@]}" \
-    --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
+  # TODO(#360): collapse back to the single shared agent_events table once
+  # SDK issue #359 lands (trace rows scoped by labels + identity). Until
+  # then each slice logs to its own table: the demo reuses the same session
+  # ids across slices, and an id-only trace fetch would mix V0/V1 spans.
+  local slice_table="agent_events_${RUN_LABEL}_$(slice_of "$out")"
+  local bqargs=(--log-bigquery --app-name skill-evolution-lab
+                --bq-label "run=$RUN_LABEL" --bq-label "slice=$(slice_of "$out")")
+  TABLE_ID="$slice_table" \
+    $PY run_agent.py --skill "$skill" "${qargs[@]}" \
+      --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
 }
 
 # score <traffic> <report>  -- golden-grounded LLM judge. Full dimensions: the two
 # primary metrics (verdict + grounding) plus the five 0-2 quality dimensions.
-# Default: score the local conversations file directly. With --from-bigquery:
-# read the same sessions back from the BigQuery events table instead (the
-# production wiring), selected by this run's {run, slice} labels.
+# TODO(#360): return to server-side BigQuery scoring once SDK issue #358
+# lands (per-session judge context). Until then the judge runs on the
+# conversations file, because that is the only path where each session's
+# matched GOLDEN EXPECTED ANSWER reaches the judge -- correctness (and the
+# promotion gate built on it) is answer-key-graded rather than estimated.
+# Every session is still logged to BigQuery (production write path), and the
+# scorecards' execution-span trees are fetched from this slice's table.
+# Every score writes BOTH artifacts: <name>.json (machine input for the
+# engine/compare) and its human-readable twin <name>.md (--report renders the
+# markdown scorecard next to the JSON, same basename).
 score() {
-  if [[ "$FROM_BIGQUERY" == "1" ]]; then
-    GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
-    PROJECT_ID="$GOOGLE_CLOUD_PROJECT" \
-    DATASET_ID="${DATASET_ID:-agent_analytics}" \
-    TABLE_ID="${TABLE_ID:-agent_events}" \
-    DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
-      $PY "$REPO_ROOT/scripts/quality_report.py" \
-        --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" --limit 500 \
-        --eval-spec "$SPEC" --dimensions full \
-        --tag-turns --output-json "$2"
-  else
-    GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
-      $PY "$REPO_ROOT/scripts/quality_report.py" \
-        --conversations-file "$1" --eval-spec "$SPEC" --dimensions full \
-        --tag-turns --concurrency "$CONCURRENCY" --output-json "$2"
-  fi
+  GOOGLE_CLOUD_LOCATION="$JUDGE_LOCATION" EVAL_MODEL_ID="$JUDGE_MODEL" \
+  PROJECT_ID="$GOOGLE_CLOUD_PROJECT" \
+  DATASET_ID="${DATASET_ID:-agent_analytics}" \
+  TABLE_ID="agent_events_${RUN_LABEL}_$(slice_of "$1")" \
+  DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
+    $PY "$REPO_ROOT/scripts/quality_report.py" \
+      --conversations-file "$1" \
+      --trajectory-samples 500 \
+      --eval-spec "$SPEC" --dimensions full \
+      --tag-turns --report --concurrency "$CONCURRENCY" --output-json "$2"
 }
 
 # rate <report>  -> "X% (n/N golden-matched)"
@@ -323,11 +322,8 @@ echo "  Analyst:    $ANALYST_MODEL"
 echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"
 echo "  Concurrency:$CONCURRENCY"
 echo "  Rounds:     $ROUNDS"
-if [[ "$FROM_BIGQUERY" == "1" ]]; then
-  echo "  Traces:     BigQuery (${DATASET_ID:-agent_analytics}.${TABLE_ID:-agent_events}, run=$RUN_LABEL)"
-else
-  echo "  Traces:     local JSON (same schema; use --from-bigquery for the BQ path)"
-fi
+echo "  Events:     BigQuery ${DATASET_ID:-agent_analytics}.agent_events_${RUN_LABEL}_<slice> (per-slice pending SDK #359)"
+echo "  Judge:      API judge, golden-answer-grounded (server-side judge pending SDK #358)"
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   echo "  Registry:   on  (skill-id=$SKILL_ID, @ $REGISTRY_LOCATION)"
 else
@@ -431,6 +427,7 @@ GATE_RC=0
 $PY compare_runs.py \
   --v0 "$REPORTS_DIR/v0_test_report.json" \
   --v1 "$REPORTS_DIR/v1_test_report.json" \
+  --questions "$TEST" --questions "$CORR_HO" --questions "$OOS_HO" \
   --model "$AGENT_MODEL" --gate \
   -o "$REPORTS_DIR/RESULT.md" | tee "$REPORTS_DIR/RESULT.txt" || GATE_RC=$?
 if [[ "$GATE_RC" -eq 3 ]]; then
@@ -499,6 +496,7 @@ if [[ "$ROUNDS" -ge 2 ]]; then
     $PY compare_runs.py \
       --v0 "$REPORTS_DIR/v1_test_report.json" \
       --v1 "$REPORTS_DIR/v2_test_report.json" \
+      --questions "$TEST" --questions "$CORR_HO" --questions "$OOS_HO" \
       --label0 "V1 (evolved)" --label1 "V2 (round 2)" \
       --model "$AGENT_MODEL" --gate \
       -o "$REPORTS_DIR/RESULT_ROUND2.md" | tee "$REPORTS_DIR/RESULT_ROUND2.txt" || GATE2_RC=$?

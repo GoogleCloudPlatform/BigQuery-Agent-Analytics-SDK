@@ -20,10 +20,11 @@ scenario: the user asks a question, then pushes a *wrong* "correction"; a good
 agent re-verifies with its tool and holds the right figure instead of parroting
 the user's number.
 
-Output is ``{"conversations": [...]}`` in the schema consumed by the SDK's
-``quality_report.py --conversations-file`` (session_id, question,
-final_response, conversation[], tool_calls), so scoring is identical whether
-the traces come from here or from BigQuery.
+Every session is logged to the BQAA ``agent_events`` table (``--log-bigquery``)
+-- BigQuery is the data path scoring reads from. The
+``{"conversations": [...]}`` JSON written alongside (session_id, question,
+final_response, conversation[], tool_calls) is the committed-artifact
+convenience that makes runs diffable and seedable.
 
 Usage:
   python run_agent.py --skill skills/SKILL.md \
@@ -116,8 +117,8 @@ def _tool_calls_detail(chat) -> list[dict]:
   return calls
 
 
-def _session_events(chat) -> list[tuple[str, dict]]:
-  """Ordered ``(event_type, content)`` pairs in the BQAA plugin's schema.
+def _session_events(chat, conversation=None) -> list[tuple[str, dict, int]]:
+  """Ordered ``(event_type, content, turn_index)`` triples (BQAA schema).
 
   Walks the full chat history in chronological order and emits the same
   event types (and ``content`` shapes) the BigQuery Agent Analytics plugin
@@ -125,21 +126,26 @@ def _session_events(chat) -> list[tuple[str, dict]]:
   TOOL_COMPLETED -- so a session written to the events table reads back
   through the SDK exactly like plugin-logged traffic (span order included,
   which is what the parroting sub-trajectory check leans on).
+  ``turn_index`` groups each event under the user turn (invocation) that
+  produced it, so the writer can assign real per-turn timestamps,
+  invocation ids, and parent spans.
   """
   try:
     history = chat.get_history(curated=False)
   except TypeError:
     history = chat.get_history()
   events = []
+  turn = -1
   for content in history or []:
     role = getattr(content, "role", "") or ""
     for part in getattr(content, "parts", None) or []:
       text = getattr(part, "text", None)
       if text:
         if role == "user":
-          events.append(("USER_MESSAGE_RECEIVED", {"text": text}))
+          turn += 1
+          events.append(("USER_MESSAGE_RECEIVED", {"text": text}, turn))
         else:
-          events.append(("LLM_RESPONSE", {"response": text}))
+          events.append(("LLM_RESPONSE", {"response": text}, max(turn, 0)))
       fc = getattr(part, "function_call", None)
       if fc:
         args = getattr(fc, "args", None)
@@ -150,6 +156,7 @@ def _session_events(chat) -> list[tuple[str, dict]]:
                     "tool": getattr(fc, "name", "") or "",
                     "args": dict(args) if args else {},
                 },
+                max(turn, 0),
             )
         )
       fr = getattr(part, "function_response", None)
@@ -163,21 +170,54 @@ def _session_events(chat) -> list[tuple[str, dict]]:
             (
                 "TOOL_COMPLETED",
                 {"tool": getattr(fr, "name", "") or "", "result": resp},
+                max(turn, 0),
             )
         )
+  # get_history() sometimes omits the final model text part (observed with
+  # thinking models: the answer exists on the response object but not in the
+  # history), leaving the trace without its final LLM_RESPONSE -- the judge
+  # then scores an answerless conversation. Backfill from the captured
+  # conversation so the trace always ends with the agent's actual reply.
+  if conversation:
+    final_text = next(
+        (
+            t["text"]
+            for t in reversed(conversation)
+            if t["role"] == "agent" and t["text"]
+        ),
+        "",
+    )
+    # Only the FINAL turn's events count: an identical answer repeated from
+    # an earlier turn must not suppress the backfill of the actual final
+    # reply (e.g. the agent giving the same figure before and after a
+    # correction, with history dropping only the last text part).
+    last_turn = max((t for _, _, t in events), default=0)
+    has_final = any(
+        et == "LLM_RESPONSE" and c.get("response") == final_text
+        for et, c, t in events
+        if t == last_turn
+    )
+    if final_text and not has_final:
+      events.append(("LLM_RESPONSE", {"response": final_text}, last_turn))
   return events
 
 
 def _run_one(client, model, skill_text, question, collect_events=False):
   """Run a single (possibly multi-turn) question through the agent."""
+  from datetime import datetime
+  from datetime import timezone
+
   turns = _turns_of(question)
   config = build_config(skill_text)
   chat = client.chats.create(model=model, config=config)
   conversation = []
   final = ""
+  turn_times = []  # real (start, end) wall-clock per user turn, for telemetry
   t0 = time.monotonic()
   for turn in turns:
+    turn_start = datetime.now(timezone.utc)
     resp = chat.send_message(turn)
+    turn_times.append((turn_start, datetime.now(timezone.utc)))
     text = _response_text(resp)
     conversation.append({"role": "user", "text": turn})
     conversation.append({"role": "agent", "text": text})
@@ -196,7 +236,8 @@ def _run_one(client, model, skill_text, question, collect_events=False):
       "category": question.get("category", ""),
   }
   if collect_events:
-    record["_events"] = _session_events(chat)
+    record["_events"] = _session_events(chat, conversation)
+    record["_turn_times"] = turn_times
   return record
 
 
@@ -285,29 +326,64 @@ def _write_bigquery(results, app_name, labels):
   for r in results:
     if r.get("error"):
       continue
-    ts = now
-    for event_type, content in r.get("_events", []):
-      # 1ms increments keep span order stable under BigQuery's timestamp sort.
-      ts = ts + timedelta(milliseconds=1)
-      rows.append(
-          {
-              "timestamp": ts.isoformat(),
-              "event_type": event_type,
-              "agent": app_name,
-              "session_id": r["session_id"],
-              "invocation_id": uuid.uuid4().hex,
-              "user_id": "lab-user",
-              "trace_id": r["session_id"],
-              "span_id": uuid.uuid4().hex[:16],
-              "parent_span_id": None,
-              "status": "ok",
-              "error_message": None,
-              "is_truncated": False,
-              "content": json.dumps(content),
-              "attributes": attributes,
-              "latency_ms": "{}",
-          }
-      )
+    events = r.get("_events", [])
+    turn_times = r.get("_turn_times") or []
+    # Plugin-equivalent identity: one unique trace id per session per run
+    # (never a reusable case id), one invocation id per user turn (shared by
+    # that turn's events), and per-turn parent spans (the USER_MESSAGE span
+    # is the turn root; the turn's TOOL_*/LLM_RESPONSE events nest under it).
+    trace_id = uuid.uuid4().hex
+    n_turns = max((t for _, _, t in events), default=0) + 1
+    invocation_ids = [uuid.uuid4().hex for _ in range(n_turns)]
+    root_span_ids: dict[int, str] = {}
+    # Real timestamps: each event lands inside its turn's measured
+    # (start, end) window -- USER at the start, LLM_RESPONSE at the end,
+    # tool events interpolated between. Sessions without measured windows
+    # (older traffic files) fall back to 1ms spacing from `now`.
+    events_by_turn: dict[int, list] = {}
+    for event_type, content, turn in events:
+      events_by_turn.setdefault(turn, []).append((event_type, content))
+    fallback_ts = now
+    for turn in sorted(events_by_turn):
+      turn_events = events_by_turn[turn]
+      if turn < len(turn_times):
+        start, end = turn_times[turn]
+      else:
+        start = fallback_ts
+        end = start + timedelta(milliseconds=len(turn_events))
+        fallback_ts = end + timedelta(milliseconds=1)
+      duration_ms = max((end - start).total_seconds() * 1000.0, 1.0)
+      step = duration_ms / max(len(turn_events) - 1, 1)
+      for i, (event_type, content) in enumerate(turn_events):
+        ts = start + timedelta(milliseconds=round(i * step, 3))
+        span_id = uuid.uuid4().hex[:16]
+        parent_span_id = root_span_ids.get(turn)
+        if event_type == "USER_MESSAGE_RECEIVED" and turn not in root_span_ids:
+          root_span_ids[turn] = span_id
+          parent_span_id = None
+        latency = "{}"
+        if event_type == "LLM_RESPONSE":
+          # The turn's measured wall-clock: request sent -> answer received.
+          latency = json.dumps({"total_ms": round(duration_ms, 1)})
+        rows.append(
+            {
+                "timestamp": ts.isoformat(),
+                "event_type": event_type,
+                "agent": app_name,
+                "session_id": r["session_id"],
+                "invocation_id": invocation_ids[min(turn, n_turns - 1)],
+                "user_id": "lab-user",
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "parent_span_id": parent_span_id,
+                "status": "ok",
+                "error_message": None,
+                "is_truncated": False,
+                "content": json.dumps(content),
+                "attributes": attributes,
+                "latency_ms": latency,
+            }
+        )
   errors = bq.insert_rows_json(table_ref, rows)
   if errors:
     raise RuntimeError(f"BigQuery insert failed: {errors[:3]}")
@@ -317,6 +393,145 @@ def _write_bigquery(results, app_name, labels):
       sum(1 for r in results if not r.get("error")),
       table_ref,
       labels,
+  )
+
+
+def _events_from_record(record, sub_trajectories=None):
+  """Reconstruct the ordered BQAA event stream for a RECORDED session.
+
+  The traffic file preserves the dialogue and the ordered tool calls
+  (``tool_calls_detail``); what it drops is the interleaving. Placement rule:
+  all calls sit in the turn that produced the first agent reply -- except when
+  the scored report's ``sub_trajectories`` certify a ``recovered`` outcome,
+  which by definition means the re-query happened in that post-correction
+  segment (``parroted`` / ``not_recovered`` certify its absence there).
+  """
+  conversation = record.get("conversation") or []
+  calls = list(record.get("tool_calls_detail") or [])
+
+  pairs = []  # (user_text, agent_text) per turn
+  current_user = None
+  for turn in conversation:
+    if turn.get("role") == "user":
+      current_user = turn.get("text") or ""
+    else:
+      pairs.append((current_user or "", turn.get("text") or ""))
+      current_user = None
+
+  call_pair = 0
+  for st in sub_trajectories or []:
+    if st.get("outcome") == "recovered" and st.get("start_turn") is not None:
+      call_pair = min(st["start_turn"] // 2, max(len(pairs) - 1, 0))
+
+  events = []
+  for i, (user_text, agent_text) in enumerate(pairs):
+    events.append(("USER_MESSAGE_RECEIVED", {"text": user_text}, i))
+    if i == call_pair:
+      for c in calls:
+        events.append(
+            (
+                "TOOL_STARTING",
+                {"tool": c.get("name", ""), "args": c.get("args") or {}},
+                i,
+            )
+        )
+        events.append(("TOOL_COMPLETED", {"tool": c.get("name", "")}, i))
+    events.append(("LLM_RESPONSE", {"response": agent_text}, i))
+  return events
+
+
+def _already_seeded(traffic_basename) -> bool:
+  """True when the target table already has rows seeded from this file."""
+  from google.api_core import exceptions as gcp_exceptions
+  from google.cloud import bigquery
+
+  project = os.getenv("PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+  dataset = os.getenv("DATASET_ID", "agent_analytics")
+  table_id = os.getenv("TABLE_ID", "agent_events")
+  bq = bigquery.Client(project=project)
+  query = (
+      f"SELECT COUNT(*) AS n FROM `{project}.{dataset}.{table_id}` "
+      "WHERE JSON_VALUE(attributes, '$.custom_tags.seeded') = @src"
+  )
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("src", "STRING", traffic_basename)
+      ]
+  )
+  try:
+    rows = list(bq.query(query, job_config=job_config).result())
+    return rows[0]["n"] > 0
+  except gcp_exceptions.NotFound:
+    return False  # table does not exist yet -- nothing seeded
+
+
+def seed_bigquery(traffic_path, report_path, app_name, labels):
+  """Seed the BQAA events table from an already-recorded traffic file.
+
+  Rebuilds each session's event stream from the recorded dialogue and tool
+  calls (see ``_events_from_record``) and inserts the same row shape the
+  live ``--log-bigquery`` path writes -- so execution traces become
+  available for runs that were recorded before span logging existed,
+  without re-running the agent. Rows are tagged
+  ``custom_tags.seeded=<traffic file>`` so seeded sessions stay
+  distinguishable from live-logged ones.
+
+  IDEMPOTENT: if the target table already contains rows seeded from this
+  traffic file, the seeding is skipped -- re-running the documented command
+  never duplicates spans. To re-seed, use a fresh TABLE_ID or delete the
+  previously seeded rows first.
+  """
+  from datetime import datetime
+  from datetime import timedelta
+  from datetime import timezone
+
+  basename = os.path.basename(traffic_path)
+  if _already_seeded(basename):
+    logger.info(
+        "Table already contains rows seeded from %s -- skipping (idempotent)."
+        " Use a fresh TABLE_ID or delete those rows to re-seed.",
+        basename,
+    )
+    return
+  with open(traffic_path) as f:
+    conversations = json.load(f).get("conversations", [])
+  sub_by_sid = {}
+  if report_path:
+    with open(report_path) as f:
+      for s in json.load(f).get("sessions", []):
+        sub_by_sid[s.get("session_id")] = s.get("sub_trajectories") or []
+
+  results = []
+  seed_time = datetime.now(timezone.utc)
+  for r in conversations:
+    if r.get("error"):
+      continue
+    r = dict(r)
+    r["_events"] = _events_from_record(r, sub_by_sid.get(r.get("session_id")))
+    # Reconstruct per-turn windows from the RECORDED total latency, split
+    # evenly across turns and anchored at seed time -- proportional rather
+    # than measured, which is exactly what the custom_tags.seeded label (and
+    # the scorecard's 'reconstructed' note) discloses.
+    n_turns = max((t for _, _, t in r["_events"]), default=0) + 1
+    total_s = float(r.get("latency_s") or n_turns)
+    per_turn = total_s / n_turns
+    start = seed_time - timedelta(seconds=total_s)
+    r["_turn_times"] = [
+        (
+            start + timedelta(seconds=i * per_turn),
+            start + timedelta(seconds=(i + 1) * per_turn),
+        )
+        for i in range(n_turns)
+    ]
+    results.append(r)
+
+  labels = dict(labels or {})
+  labels.setdefault("seeded", os.path.basename(traffic_path))
+  _write_bigquery(results, app_name, labels)
+  logger.info(
+      "Seeded %d session(s) from %s into the events table.",
+      len(results),
+      traffic_path,
   )
 
 
@@ -369,12 +584,24 @@ def run(
         }
 
   if log_bigquery:
-    _write_bigquery(results, app_name, labels or {})
+    # BigQuery is the data path -- scoring reads the sessions back from the
+    # events table -- so a logging failure is fatal, with the cause up front.
+    try:
+      _write_bigquery(results, app_name, labels or {})
+    except Exception as exc:  # pylint: disable=broad-except
+      logger.error(
+          "BigQuery logging failed: %s -- scoring reads sessions from the"
+          " events table, so this run cannot continue. Check PROJECT_ID /"
+          " DATASET_ID / TABLE_ID and BigQuery permissions.",
+          exc,
+      )
+      raise SystemExit(1)
 
-  # The events list is a write-path detail; keep the conversations file in
-  # the exact schema quality_report.py --conversations-file consumes.
+  # The events list is a write-path detail; the conversations file keeps the
+  # plain dialogue schema (the committed, diffable artifact).
   for r in results:
     r.pop("_events", None)
+    r.pop("_turn_times", None)
   with open(out_path, "w") as f:
     json.dump({"conversations": results}, f, indent=2)
   ok = sum(1 for r in results if not r.get("error"))
@@ -386,17 +613,33 @@ def run(
 
 def _main():
   parser = argparse.ArgumentParser(description=__doc__)
-  parser.add_argument("--skill", required=True, help="Path to SKILL.md")
+  parser.add_argument("--skill", help="Path to SKILL.md")
   parser.add_argument(
       "--questions",
       action="append",
-      required=True,
       help="Question JSON file (repeatable; files are concatenated)",
   )
   parser.add_argument(
       "--model", default="gemini-3.1-flash-lite", help="Gemini model"
   )
-  parser.add_argument("-o", "--out", required=True, help="Output JSON path")
+  parser.add_argument("-o", "--out", help="Output JSON path")
+  parser.add_argument(
+      "--seed-bigquery",
+      metavar="TRAFFIC_JSON",
+      help=(
+          "Seed the BQAA events table from an already-recorded traffic file"
+          " (no agent runs); reconstructs each session's event stream from"
+          " the recorded dialogue + tool calls"
+      ),
+  )
+  parser.add_argument(
+      "--seed-report",
+      metavar="REPORT_JSON",
+      help=(
+          "Scored report for --seed-bigquery: its sub_trajectories pin"
+          " post-correction tool calls to the right turn"
+      ),
+  )
   parser.add_argument("--concurrency", type=int, default=8)
   parser.add_argument(
       "--log-bigquery",
@@ -429,6 +672,11 @@ def _main():
     if not sep:
       parser.error(f"--bq-label expects KEY=VALUE, got: {item}")
     labels[key] = value
+  if args.seed_bigquery:
+    seed_bigquery(args.seed_bigquery, args.seed_report, args.app_name, labels)
+    return
+  if not (args.skill and args.questions and args.out):
+    parser.error("--skill, --questions, and -o/--out are required")
   run(
       args.skill,
       args.questions,

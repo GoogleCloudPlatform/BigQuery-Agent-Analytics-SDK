@@ -17,7 +17,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.68,
+      "latency_s": 1.71,
       "category": "pto"
     },
     {
@@ -37,7 +37,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.69,
+      "latency_s": 3.41,
       "category": "pto"
     },
     {
@@ -64,7 +64,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 2.41,
+      "latency_s": 2.96,
       "category": "pto"
     },
     {
@@ -84,7 +84,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.64,
+      "latency_s": 0.65,
       "category": "pto"
     },
     {
@@ -104,7 +104,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.62,
+      "latency_s": 0.7,
       "category": "sick_leave"
     },
     {
@@ -124,7 +124,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.78,
+      "latency_s": 0.56,
       "category": "sick_leave"
     },
     {
@@ -144,7 +144,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.75,
+      "latency_s": 1.08,
       "category": "sick_leave"
     },
     {
@@ -164,7 +164,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.81,
       "category": "remote_work"
     },
     {
@@ -184,7 +184,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.71,
+      "latency_s": 0.63,
       "category": "remote_work"
     },
     {
@@ -204,7 +204,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.51,
+      "latency_s": 0.57,
       "category": "remote_work"
     },
     {
@@ -224,7 +224,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.6,
+      "latency_s": 0.55,
       "category": "remote_work"
     },
     {
@@ -244,7 +244,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.68,
+      "latency_s": 0.64,
       "category": "expenses"
     },
     {
@@ -264,7 +264,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.54,
+      "latency_s": 0.7,
       "category": "expenses"
     },
     {
@@ -291,7 +291,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.35,
+      "latency_s": 1.34,
       "category": "expenses"
     },
     {
@@ -311,7 +311,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.61,
+      "latency_s": 0.55,
       "category": "expenses"
     },
     {
@@ -331,7 +331,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.78,
+      "latency_s": 0.6,
       "category": "benefits"
     },
     {
@@ -351,7 +351,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.77,
+      "latency_s": 0.63,
       "category": "benefits"
     },
     {
@@ -371,7 +371,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.54,
+      "latency_s": 0.5,
       "category": "benefits"
     },
     {
@@ -391,7 +391,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.63,
+      "latency_s": 0.72,
       "category": "benefits"
     },
     {
@@ -411,7 +411,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.49,
+      "latency_s": 0.56,
       "category": "benefits"
     },
     {
@@ -431,7 +431,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.6,
+      "latency_s": 0.64,
       "category": "benefits"
     },
     {
@@ -451,7 +451,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.71,
+      "latency_s": 0.96,
       "category": "benefits"
     },
     {
@@ -471,7 +471,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.64,
+      "latency_s": 0.56,
       "category": "benefits"
     },
     {
@@ -491,7 +491,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.65,
+      "latency_s": 0.72,
       "category": "benefits"
     },
     {
@@ -511,7 +511,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.79,
+      "latency_s": 0.71,
       "category": "benefits"
     },
     {
@@ -531,7 +531,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.62,
       "category": "benefits"
     },
     {
@@ -551,7 +551,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.64,
+      "latency_s": 0.69,
       "category": "benefits"
     },
     {
@@ -571,7 +571,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.56,
+      "latency_s": 0.65,
       "category": "benefits"
     },
     {
@@ -591,7 +591,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.54,
+      "latency_s": 0.69,
       "category": "benefits"
     },
     {
@@ -611,7 +611,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.68,
+      "latency_s": 0.59,
       "category": "benefits"
     },
     {
@@ -651,7 +651,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.59,
+      "latency_s": 0.69,
       "category": "holidays"
     },
     {
@@ -671,7 +671,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.62,
+      "latency_s": 0.69,
       "category": "holidays"
     },
     {
@@ -698,7 +698,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.58,
+      "latency_s": 1.22,
       "category": "holidays"
     },
     {
@@ -725,7 +725,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.36,
+      "latency_s": 1.19,
       "category": "bereavement"
     },
     {
@@ -745,7 +745,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.63,
+      "latency_s": 0.6,
       "category": "bereavement"
     },
     {
@@ -765,7 +765,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.58,
+      "latency_s": 0.6,
       "category": "bereavement"
     },
     {
@@ -785,7 +785,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.58,
+      "latency_s": 0.5,
       "category": "jury_duty"
     },
     {
@@ -805,7 +805,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.55,
+      "latency_s": 0.65,
       "category": "eap"
     },
     {
@@ -825,7 +825,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.49,
+      "latency_s": 0.48,
       "category": "eap"
     },
     {
@@ -845,7 +845,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.75,
+      "latency_s": 0.63,
       "category": "flex_time"
     },
     {
@@ -865,7 +865,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.61,
+      "latency_s": 0.63,
       "category": "flex_time"
     },
     {
@@ -885,7 +885,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.52,
+      "latency_s": 0.6,
       "category": "tuition_reimbursement"
     },
     {
@@ -905,7 +905,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.55,
+      "latency_s": 0.7,
       "category": "tuition_reimbursement"
     },
     {
@@ -932,7 +932,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.37,
+      "latency_s": 1.42,
       "category": "short_term_disability"
     },
     {
@@ -959,7 +959,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.13,
+      "latency_s": 1.59,
       "category": "short_term_disability"
     },
     {
@@ -986,7 +986,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.29,
+      "latency_s": 1.53,
       "category": "short_term_disability"
     },
     {
@@ -1006,7 +1006,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.44,
+      "latency_s": 0.51,
       "category": "benefits"
     },
     {
@@ -1026,7 +1026,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.54,
+      "latency_s": 0.53,
       "category": "tuition_reimbursement"
     },
     {
@@ -1046,7 +1046,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.52,
+      "latency_s": 0.53,
       "category": "sick_leave"
     },
     {
@@ -1068,13 +1068,13 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "weeks_out": 6,
-            "annual_salary": 104000
+            "annual_salary": 104000,
+            "weeks_out": 6
           }
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.32,
+      "latency_s": 1.34,
       "category": "calc"
     },
     {
@@ -1096,13 +1096,13 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "weeks_out": 1,
-            "annual_salary": 130000
+            "annual_salary": 130000,
+            "weeks_out": 1
           }
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.39,
+      "latency_s": 1.19,
       "category": "calc"
     },
     {
@@ -1130,7 +1130,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.58,
+      "latency_s": 1.34,
       "category": "calc"
     },
     {
@@ -1158,7 +1158,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.19,
+      "latency_s": 1.09,
       "category": "calc"
     },
     {
@@ -1186,7 +1186,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.31,
+      "latency_s": 1.44,
       "category": "calc"
     },
     {
@@ -1214,7 +1214,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.56,
+      "latency_s": 1.26,
       "category": "correction"
     },
     {
@@ -1242,7 +1242,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.47,
+      "latency_s": 1.07,
       "category": "correction"
     },
     {
@@ -1270,7 +1270,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.57,
+      "latency_s": 1.27,
       "category": "correction"
     },
     {
@@ -1298,7 +1298,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.42,
+      "latency_s": 1.39,
       "category": "correction"
     },
     {
@@ -1326,7 +1326,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.41,
+      "latency_s": 1.45,
       "category": "correction"
     },
     {
@@ -1346,7 +1346,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.58,
+      "latency_s": 0.63,
       "category": "out_of_scope"
     },
     {
@@ -1366,7 +1366,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.82,
+      "latency_s": 0.66,
       "category": "out_of_scope"
     },
     {
@@ -1386,7 +1386,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.52,
+      "latency_s": 0.65,
       "category": "out_of_scope"
     },
     {
@@ -1406,7 +1406,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.6,
+      "latency_s": 0.57,
       "category": "out_of_scope"
     },
     {
@@ -1426,7 +1426,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.64,
+      "latency_s": 0.52,
       "category": "out_of_scope"
     },
     {
@@ -1446,7 +1446,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.55,
       "category": "out_of_scope"
     },
     {
@@ -1466,7 +1466,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.92,
+      "latency_s": 0.78,
       "category": "out_of_scope"
     },
     {
@@ -1486,7 +1486,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.59,
+      "latency_s": 0.67,
       "category": "out_of_scope"
     }
   ]

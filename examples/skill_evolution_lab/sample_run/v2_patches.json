@@ -1,0 +1,32 @@
+[
+  {
+    "index": 1,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive Context\n\n## Analysis\nThe agent successfully provided a comprehensive answer by not only addressing the user's specific question (manager approval for remote work) but also proactively including related critical policy details (weekly limits and core collaboration hours). This proactive approach anticipates user needs, reduces follow-up questions, and provides a much better employee experience.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Comprehensive Policy Details:** When answering a specific question about a policy, do not just give a minimal yes/no answer. Proactively include other critical, related details from the policy (e.g., core hours, limits, or conditions) to provide a complete and helpful response."
+  },
+  {
+    "index": 2,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive Context Integration\n\n## Analysis\nThe agent successfully answered a specific question about remote work overlap hours by querying the lookup tool, and then proactively included related general rules from its immediate knowledge (the 3-day limit and manager approval). Reinforcing this pattern ensures users receive comprehensive answers that seamlessly combine retrieved specifics with foundational policy rules.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Proactive Context Integration:** When answering a specific question about a policy using the lookup tool, proactively include any related general rules from your immediate knowledge to provide a comprehensive answer (e.g., mentioning the maximum days and manager approval requirements when asked about remote work hours)."
+  },
+  {
+    "index": 3,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive Context\n\n## Analysis\nThe agent successfully answered the specific question about the expense report deadline and proactively included related, highly relevant policy details (receipt thresholds and pre-approval limits) retrieved from the tool. This improves the user experience by anticipating follow-up questions and providing a complete picture of the policy rather than just a minimal answer.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Proactive Context:** When answering a specific policy question (e.g., a deadline), proactively include other highly relevant details from the retrieved policy (such as monetary thresholds, receipt requirements, or approval limits) to provide a complete answer and anticipate follow-up questions."
+  },
+  {
+    "index": 4,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Explicitly resolving the user's specific scenario against policy limits.\n\n## Analysis\nThe agent successfully answered a question about a specific scenario (working remote 4 days) by first stating the policy limit (3 days) and then explicitly concluding that the user's scenario is not permitted. This ensures clarity and directly answers the user's question rather than just quoting the policy and leaving the user to infer the answer.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Scenario Resolution:** When a user asks if a specific scenario or request is allowed (e.g., working a certain number of days), state the relevant policy limit and explicitly confirm or deny their specific scenario based on that limit."
+  },
+  {
+    "index": 5,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive inclusion of related policy constraints.\n\n## Analysis\nThe user asked specifically about the meal per-diem amount, but the agent proactively included related expense rules (receipt thresholds, submission deadlines, and pre-approval limits) retrieved from the tool. This is a highly effective pattern because it anticipates the user's next steps, prevents follow-up questions, and ensures the employee is fully informed of the requirements to actually use the policy.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Comprehensive Policy Details:** When answering a specific policy question (e.g., an allowance amount or per-diem), proactively include related constraints, requirements, or deadlines (such as receipt thresholds, submission timeframes, or approval limits) retrieved from the tool to provide a complete and actionable answer."
+  },
+  {
+    "index": 6,
+    "category": "RESPONSE_PATTERN",
+    "patch": "## Pattern\nRESPONSE_PATTERN: Proactive Policy Details\n\n## Analysis\nThe agent successfully anticipated the next logical step in the user's workflow by providing the 30-day receipt submission deadline when answering a question about expense approval. Reinforcing this pattern encourages the agent to provide comprehensive answers that include highly relevant, adjacent policy requirements, reducing the need for follow-up questions.\n\n## Proposed Patch\nSection: Response Guidelines\nAction: add_rule\nContent:\n- **Proactive Policy Details:** When answering a specific policy question, proactively include highly relevant adjacent details from the retrieved policy (e.g., mentioning receipt submission deadlines when discussing expense approvals) to provide a comprehensive and helpful answer."
+  }
+]

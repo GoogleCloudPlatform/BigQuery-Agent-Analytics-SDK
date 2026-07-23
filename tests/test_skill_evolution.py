@@ -255,6 +255,23 @@ def test_prevalence_counts_categories():
   out = compute_prevalence_summary(patches)
   assert "HALLUCINATION: 2/3" in out
   assert "STRONG" in out or "moderate" in out
+  assert "consensus flag" in out
+
+
+def test_prevalence_very_strong_needs_consensus_and_majority():
+  majority = ["## Root Cause\n[TOOL_USAGE]: x"] * 3 + [
+      "## Root Cause\n[PARROTING]: y"
+  ]
+  out = compute_prevalence_summary(majority)
+  assert "TOOL_USAGE: 3/4 (75%) -- VERY STRONG" in out
+  assert "PARROTING: 1/4 (25%) -- weak" in out
+
+  minority = ["## Root Cause\n[TOOL_USAGE]: x"] * 3 + [
+      "## Root Cause\n[PARROTING]: y"
+  ] * 7
+  out = compute_prevalence_summary(minority)
+  assert "TOOL_USAGE: 3/10 (30%) -- STRONG" in out
+  assert "PARROTING: 7/10 (70%) -- VERY STRONG" in out
 
 
 def test_prevalence_empty_when_no_categories():
@@ -388,3 +405,15 @@ def test_write_evolution_artifacts_version_label_and_selection(tmp_path):
   assert os.listdir(os.path.join(out, "v2_candidates")) == []
   note = open(os.path.join(out, "v2_selection.txt")).read()
   assert note.startswith("kept incumbent:")
+
+
+def test_prevalence_exact_tie_stays_strong():
+  # Review P3 #11: an exact 50/50 split is consensus for NEITHER side --
+  # VERY STRONG requires a strict majority (> half).
+  patch_a = "## Root Cause\nA: x\n## Proposed Patch\nContent: y"
+  patch_b = "## Root Cause\nB: x\n## Proposed Patch\nContent: y"
+  out = compute_prevalence_summary([patch_a] * 3 + [patch_b] * 3)
+  assert "A: 3/6 (50%) -- STRONG" in out
+  assert "B: 3/6 (50%) -- STRONG" in out
+  out = compute_prevalence_summary([patch_a] * 4 + [patch_b] * 2)
+  assert "A: 4/6 (67%) -- VERY STRONG" in out

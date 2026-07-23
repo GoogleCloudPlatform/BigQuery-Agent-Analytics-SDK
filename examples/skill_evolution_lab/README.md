@@ -21,12 +21,15 @@ Why BQAA makes this reusable: the Agent Analytics plugin captures the whole
 improvement substrate — the conversation, the **tool calls (name + args)**, the
 user corrections, and the outcome labels — in one analyzable place. The evolution
 engine turns those traces into behavioral skill rules and validates them on
-held-out traffic before creating a new skill revision. (This lab writes that same
-schema to local JSON so it runs without BigQuery; in production the traces come
-straight from the BQAA tables.)
+held-out traffic before creating a new skill revision. This lab runs that wiring
+end to end: every session is logged to real BigQuery event tables, and the
+scorecards' execution-span trees are read back through the SDK's trace path
+(judging temporarily runs on the conversations file so it stays
+golden-answer-grounded -- see the workarounds section below).
 
-This is the runnable companion to the blog post *"Your Agent Can Write Its Own
-Skill"* (BigQuery Agent Analytics Series). See
+This is the runnable companion to the blog post
+[*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/@evekhm/your-agent-can-learn-from-its-own-conversations-26f7d46ac325)
+(BigQuery Agent Analytics Series). See
 [`VERIFICATION.md`](VERIFICATION.md) for a recorded end-to-end run.
 
 ## What it shows
@@ -83,8 +86,8 @@ skill_evolution_lab/
   run_sweep.sh          # run_e2e across models x seeds -> mean[range] table
   aggregate_sweep.py    # aggregate a sweep into the VERIFICATION table
   setup.sh / reset.sh   # write .env / revert to V0 (local + registry)
-  sample_run/           # a committed end-to-end run (scored reports, V0 + evolved
-                        #   skill, RESULT) + round2/ companion (V1->V2 gate) + README
+  sample_run/           # a committed end-to-end --rounds 2 run (scored reports,
+                        #   V0 + evolved skills, RESULT + RESULT_ROUND2) + README
 ```
 
 A complete recorded run lives in [`sample_run/`](sample_run/) — the scored V0/V1
@@ -94,8 +97,11 @@ outputs (and what each file means) without running anything. Live runs write to
 
 ## Prerequisites
 
-- A GCP project; `roles/aiplatform.user` (plus rights to enable services on the
-  first run — `setup.sh` enables the **Vertex AI API** for you).
+- A GCP project; `roles/aiplatform.user` and BigQuery read/write + job
+  permissions (e.g. `roles/bigquery.dataEditor` + `roles/bigquery.jobUser`) —
+  every session is logged to an `agent_events` table and scoring reads it back.
+  `setup.sh` enables the **Vertex AI** and **BigQuery** APIs for you (needs
+  rights to enable services on the first run).
 - `gcloud auth application-default login`.
 - [`uv`](https://github.com/astral-sh/uv) — the scripts run via `uv run`, which
   installs the repo's dependencies from the root `pyproject.toml` automatically
@@ -129,14 +135,14 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   28.6% (20/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   27.1% (19/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
      V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
-| Overall                   | 37.5% (30/80) | 97.5% (78/80)  | +60.0pp  |
+| Overall                   | 36.2% (29/80) | 97.5% (78/80)  | +61.3pp  |
 | Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
 ```
 
@@ -156,31 +162,33 @@ learning signal: what does V1 *still* get wrong?), evolves V1 -> V2 with
 them), measures V2 on the same held-out set, and keeps V2 **only when it beats
 V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
-a gain proves the loop compounds; a kept incumbent proves the guard holds. A
-recorded round-2 run is committed at
-[`sample_run/round2/`](sample_run/round2/) — its V2 *tied* V1 and the gate
-kept the incumbent.
+a gain proves the loop compounds; a kept incumbent proves the guard holds. The
+committed [`sample_run/`](sample_run/) is a `--rounds 2` recording — its V2
+*tied* V1 and the gate kept the incumbent (`sample_run/RESULT_ROUND2.md`).
 
-### Score from BigQuery (the production wiring)
+### BigQuery is the write path; two disclosed workarounds pending SDK fixes
 
-```bash
-./run_e2e_demo.sh --from-bigquery
-```
+Every session is logged to real BigQuery event tables in the plugin's row
+shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` / `TOOL_COMPLETED` /
+`LLM_RESPONSE` spans in true chronological order, with per-turn invocation
+ids, parent spans, measured latencies, `root_agent_name`, and per-run
+`custom_tags` — and the execution-span trees in the markdown scorecards are
+read back from those tables. Two deliberate workarounds apply until their SDK
+issues land (cleanup checklist: issue #360):
 
-By default the demo writes traces to local JSON in the exact schema the Agent
-Analytics plugin logs, so it runs without BigQuery. `--from-bigquery` exercises
-the production wiring instead: `run_agent.py --log-bigquery` inserts every
-session into a real `agent_events` table (created on first use;
-`DATASET_ID`/`TABLE_ID` from `.env`, defaults `agent_analytics.agent_events`)
-in the plugin's row shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` /
-`TOOL_COMPLETED` / `LLM_RESPONSE` spans in true chronological order, with
-`root_agent_name` and per-run `custom_tags` — and scoring reads the sessions
-back through the SDK's BigQuery trace path (`quality_report.py --label
-run=<id> --label slice=<set>`). The scorecards come back identical to the
-local path: verdicts, parroting sub-trajectories, and structured tool calls
-(the BigQuery path now populates `tool_calls_detail` from the `TOOL_*` spans).
+- **Judging** runs on the conversations file via the SDK's API judge, because
+  that is the only path whose judge receives each session's matched **golden
+  expected answer** — correctness, and the promotion gate built on it, is
+  answer-key-graded rather than judge-estimated. Server-side BigQuery judging
+  returns when issue #358 lands.
+- **Per-slice tables** (`agent_events_<run>_<slice>`): the demo reuses the
+  same session ids across slices, and the SDK's trace fetch selects rows by
+  session id alone — separate tables make V0/V1 span mixing physically
+  impossible. Collapses back to one shared `agent_events` table when issue
+  #359 lands.
+
 Requires the BigQuery API enabled and table read/write + job permissions on
-the project.
+the project (`setup.sh` takes care of the APIs).
 
 ### With the Skill Registry
 
@@ -258,6 +266,64 @@ each session's structured tool calls (`tool_calls_detail: [{name, args}]`), whic
 the scorer carries through so the analysts — and `compare_runs.py`'s tool-selection
 table — can reason about *which* tool was chosen, not just how many calls happened.
 
+Three conventions to know:
+
+- **`session_id` prefixes drive the metric slicing.** The scorer and
+  `compare_runs.py` key off prefixes (like `oos_`) and the correction tags to
+  split *Overall* into single-turn / corrections / out-of-scope — name your
+  sessions accordingly and the slices come for free.
+- **`eval_spec.tools` is freeform prose.** It's a plain description the judge
+  and analysts read, so write what each tool covers and when to reach for it,
+  in sentences.
+- **The root-cause taxonomy is fixed.** Analysts diagnose into a closed set
+  (`TOOL_USAGE`, `MISSING_RULE`, `PARROTING`, ...) — that's what keeps patches
+  consolidatable; add a new category in code if you need one.
+
+Before shipping an evolved skill, skim it for the usual red flags: keyword
+tables where a rule belongs, a dropped section, a missing version bump, or
+baked-in numbers that should come from a tool.
+
+## The evolution pipeline
+
+The engine ([`scripts/skill_evolution.py`](../../scripts/skill_evolution.py))
+takes the scored report plus the current skill and writes a new one — roughly,
+"how a human expert writes an operational manual":
+
+```text
+Quality report (scored conversations)
+   |
+   v
+Partition: successes (meaningful/declined) vs failures (unhelpful/partial)
+   |   (a "meaningful" session with a PARROTED correction is moved to failures)
+   |
+   +-- Error analysts   (one per failure):  root cause + "what rule prevents it?"
+   +-- Success analysts (sampled):          "what worked? should we reinforce it?"
+   |          (each analyst sees ONE trajectory on a FROZEN copy of the skill)
+   v
+Quality gate (drop weak / category-less patches)
+   |
+   v
+Consolidator (prevalence-weighted) x N candidates -> pick one (median-size, or best via score_fn)
+   |
+   v
+Compaction if the skill is over the size cap
+   |
+   v
+Evolved SKILL.md (version bumped, evolved_from recorded)
+```
+
+Three design choices matter:
+
+- **Parallel and independent.** Each analyst sees one trajectory on a *frozen*
+  copy of the skill — no cross-contamination, no ordering problems.
+- **Learn from successes too.** Error analysts find *what to stop doing*;
+  success analysts find *what to keep doing*. You need both, or you get a skill
+  that's all "don'ts."
+- **Inductive consolidation.** Rules are ranked by how many analysts proposed
+  them, so a strong recurring signal leads the skill — prevalence decides, on
+  the numbers. Ranking is soft: a concrete, non-conflicting one-off can still
+  make the cut.
+
 ## How it relates to the research
 
 The engine follows [Trace2Skill](https://arxiv.org/abs/2603.25158) (parallel
@@ -308,3 +374,44 @@ than a pile of baked facts:
     the user's own wording itself.
 12. Generalize, do not enumerate: prefer ONE rule over a long list of specific topics.
 ```
+
+## Taking it to production
+
+Every role — judge, analyst, consolidator — is domain-blind machinery. You
+point it at your own agent with three inputs: your golden Q&A (plus a one-line
+scope), your current skill, and your tool descriptions. What the machinery
+can't supply is the *quality* of those inputs, so the caveats are about keeping
+them honest:
+
+- **The judge is only as honest as the golden Q&A.** It's an LLM, so spot-check
+  verdicts and grow the golden set over time. A full scorecard is several model
+  calls per session, so budget for it (or score just the primary dimensions).
+  For scale: a full round at this demo's size is roughly 68 pro-class analyst
+  calls, a handful of consolidation calls, and a few flash-class judge calls
+  per session — single-digit dollars on current pricing.
+- **The analyst is a diagnostician** — it proposes, the consolidator disposes —
+  and it reasons over text, so a *broken* tool and a *misused* one look
+  identical to it. Its diagnoses are only as sharp as your tool descriptions
+  (the analysts' tool-awareness comes entirely from `eval_spec.tools`).
+- **The consolidator is the stochastic bottleneck.** The same patches can merge
+  into very different skills — hence best-of-N, the incumbent gate, and the
+  anti-bloat rules above.
+
+**More than one tool?** The demo's two tools force a *choice*, and the evolved
+V1 grows a real routing rule (lookup for facts, calculator for personalized
+math). As the tool count climbs the mechanism holds, but two things matter more
+with every tool you add: sharp tool descriptions (vague ones produce
+confident-but-wrong diagnoses, and "skipped the tool" splits from "picked the
+*wrong* tool") and compaction (per-tool rules are how a skill bloats).
+
+**The production shape.** Swap simulated traffic for the real sessions your
+agent already logs, filtered to the deployed skill version. Run the engine as a
+scheduled job (for example a Cloud Run Job over recent BigQuery sessions), and
+turn its output into a PR for the skill fix plus labeled issues for what a
+skill can't touch (knowledge and tool gaps) — a human reviews and merges. Treat
+the golden Q&A and the tool descriptions as living artifacts.
+
+**Known limitation.** The evolved V1 still *opens* with V0's four baked facts.
+The engine's mandate is behavioral rules, so it leaves the inherited fact block
+alone; migrating those base facts into the lookup tool (so the skill is pure
+behavior) is future work.

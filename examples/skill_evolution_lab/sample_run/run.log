@@ -8,9 +8,11 @@
   Analyst:    gemini-3.1-pro-preview
   Judge:      gemini-2.5-flash  (@ us-central1)
   Concurrency:3
-  Rounds:     1
+  Rounds:     2
+  Events:     BigQuery agent_analytics.agent_events_lab_20260710_210901_10380244954_<slice> (per-slice pending SDK #359)
+  Judge:      API judge, golden-answer-grounded (server-side judge pending SDK #358)
   Registry:   off
-  Output dir: runs/20260707_085745_gemini_3_1_flash_lite
+  Output dir: runs/20260710_210901_gemini_3_1_flash_lite
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -25,9 +27,11 @@
   Method:  Deploy SKILL.v0.md, run traffic, score vs the golden Q&A
   Sets:    evolve (study) + held-out (test), each with corrections + out-of-scope
 
-  [08:57:45] Running + scoring the evolve set...
+  [21:09:01] Running + scoring the evolve set...
 Running 68 question(s) on gemini-3.1-flash-lite (skill=SKILL.md)...
-Wrote 68 conversation(s) (68 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v0_evolve_traffic.json
+Logged 170 event row(s) for 68 session(s) -> agent-skill-lab-01.agent_analytics.agent_events_lab_20260710_210901_10380244954_v0_evolve (labels: {'run': 'lab_20260710_210901_10380244954', 'slice': 'v0_evolve'})
+Wrote 68 conversation(s) (68 ok) -> runs/20260710_210901_gemini_3_1_flash_lite/v0_evolve_traffic.json
+21:09:57 [WARNING] Categorical API classification EXCEPTION for e14_expenses: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
 
 ──────────────────────────────────────────────────────────────────────
   UNHELPFUL Sessions (showing 10 of 41)
@@ -155,7 +159,7 @@ Wrote 68 conversation(s) (68 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 20)
+  MEANINGFUL Sessions (showing 3 of 19)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     e01_pto  → policy_agent
@@ -186,12 +190,25 @@ Wrote 68 conversation(s) (68 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
+  UNCLASSIFIED (parse errors) Sessions (showing 1 of 1)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     e14_expenses  → policy_agent
+  Question:    Does booking a $700 flight need approval first?
+  Response:    "Yes, travel expenses over $500 require pre-approval. Since your flight is $700, you will need to get approval before booking."
+  Usefulness:    ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Grounding:     ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
+
+──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
 ──────────────────────────────────────────────────────────────────────
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     68       🔴   20+7d (40%)      41 (60%)        0       0      100%      100%
+  policy_agent                     68       🔴   19+7d (39%)      41 (61%)        0       1      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
@@ -202,24 +219,25 @@ Wrote 68 conversation(s) (68 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 68
-  Meaningful               : 20
+  Meaningful               : 19
   Declined (out-of-scope)  : 7
   Partial                  : 0
   Unhelpful                : 41
   Unhelpful rate           : 60.3%
+  Parse errors             : 1 session(s) (8 metric evals)
   Failure causes           : skill=41 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 39.7%  (excludes 0 unaddressable gaps)
+  Addressable meaningful   : 38.2%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.84 / 2.00  #####################
+    Correctness         : 0.82 / 2.00  ####################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.82 / 2.00  ####################
+    Tool Usage          : 0.81 / 2.00  ####################
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.88 / 2.00  ######################
+    Specificity         : 0.87 / 2.00  #####################
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.82 / 2.00  ####################
+    Scope               : 0.81 / 2.00  ####################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.79 / 2.00  ###################
+    First-Time Right    : 0.78 / 2.00  ###################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
@@ -232,31 +250,35 @@ QUALITY SUMMARY
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   41  ( 60.3%) ##############################
-    ✅ HELPFUL         :   20  ( 29.4%) ##############
-    ✅ DECLINED (OK)   :    7  ( 10.3%) #####
+    ❌ NOT HELPFUL     :   41  ( 61.2%) ##############################
+    ✅ HELPFUL         :   19  ( 28.4%) ##############
+    ✅ DECLINED (OK)   :    7  ( 10.4%) #####
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   37  ( 54.4%) ###########################
-    ✅ GROUNDED        :   21  ( 30.9%) ###############
-    ➖ NO TOOL NEEDED  :   10  ( 14.7%) #######
+    ❌ NOT GROUNDED    :   37  ( 55.2%) ###########################
+    ✅ GROUNDED        :   20  ( 29.9%) ##############
+    ➖ NO TOOL NEEDED  :   10  ( 14.9%) #######
 
   Execution Details:
-    elapsed_seconds: 125.8
+    elapsed_seconds: 149.5
     project: agent-skill-lab-01
-    dataset: local.conversations
+    dataset: agent_analytics.agent_events_lab_20260710_210901_10380244954_v0_evolve
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-07T09:00:12.878352+00:00
+    created_at: 2026-07-10T21:11:55.249088+00:00
 ======================================================================
 
   WARNING: Unhelpful rate (60.3%) exceeds 10% threshold!
 
-  JSON report: runs/20260707_085745_gemini_3_1_flash_lite/v0_evolve_report.json
-  [09:00:13] Running + scoring the held-out test set...
+  Markdown report: runs/20260710_210901_gemini_3_1_flash_lite/v0_evolve_report.md
+
+  JSON report: runs/20260710_210901_gemini_3_1_flash_lite/v0_evolve_report.json
+  [21:11:59] Running + scoring the held-out test set...
 Running 80 question(s) on gemini-3.1-flash-lite (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v0_test_traffic.json
+Logged 218 event row(s) for 80 session(s) -> agent-skill-lab-01.agent_analytics.agent_events_lab_20260710_210901_10380244954_v0_test (labels: {'run': 'lab_20260710_210901_10380244954', 'slice': 'v0_test'})
+Wrote 80 conversation(s) (80 ok) -> runs/20260710_210901_gemini_3_1_flash_lite/v0_test_traffic.json
+21:12:50 [WARNING] Categorical API classification EXCEPTION for t07_sick_leave: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}} (type=ClientError)
 
 ──────────────────────────────────────────────────────────────────────
   UNHELPFUL Sessions (showing 10 of 50)
@@ -384,7 +406,7 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
-  MEANINGFUL Sessions (showing 3 of 20)
+  MEANINGFUL Sessions (showing 3 of 19)
 ──────────────────────────────────────────────────────────────────────
 
   Session:     t01_pto  → policy_agent
@@ -415,12 +437,25 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
+  UNCLASSIFIED (parse errors) Sessions (showing 1 of 1)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     t07_sick_leave  → policy_agent
+  Question:    If I'm out sick for 4 days, do I need a doctor's note?
+  Response:    "Yes, according to company policy, a doctor's note is required for sick leave absences longer than 3 consecutive days. Since you are planning to be out for 4 days, you will need to provide one."
+  Usefulness:    ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Grounding:     ?  [parse error]
+  Raw LLM out:   "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'Resource exhausted. Please try again later. Please refer to https://cloud.google.com/vertex-ai/generative-ai/docs/error-code-429 for more details.', 'status': 'RESOURCE_EXHAUSTED'}}"
+  Dimensions:    Correctness: ? | Tool Usage: ? | Specificity: ? | Scope: ? | First-Time Right: ? | failure_attribution: ?
+
+──────────────────────────────────────────────────────────────────────
   PER-AGENT QUALITY
 ──────────────────────────────────────────────────────────────────────
   Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
                                                                                              Helpful  Unhelpful
   ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-  policy_agent                     80       🔴  20+10d (38%)      50 (62%)        0       0      100%      100%
+  policy_agent                     80       🔴  19+10d (37%)      50 (63%)        0       1      100%      100%
 
   ──────────────────────────────────────────────────
   UNHELPFUL CONTRIBUTION RANKING (worst first):
@@ -431,24 +466,25 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
 QUALITY SUMMARY
 ======================================================================
   Total sessions evaluated : 80
-  Meaningful               : 20
+  Meaningful               : 19
   Declined (out-of-scope)  : 10
   Partial                  : 0
   Unhelpful                : 50
   Unhelpful rate           : 62.5%
+  Parse errors             : 1 session(s) (8 metric evals)
   Failure causes           : skill=50 (evolution)  knowledge=0 (add data)  tool=0 (build tool)
-  Addressable meaningful   : 37.5%  (excludes 0 unaddressable gaps)
+  Addressable meaningful   : 36.2%  (excludes 0 unaddressable gaps)
 
   Quality Dimensions (0-2 scale):
-    Correctness         : 0.75 / 2.00  ##################
+    Correctness         : 0.73 / 2.00  ##################
                           ↳ Are the facts in the response accurate?
-    Tool Usage          : 0.76 / 2.00  ###################
+    Tool Usage          : 0.75 / 2.00  ##################
                           ↳ Did the agent use its tools to verify facts?
-    Specificity         : 0.95 / 2.00  #######################
+    Specificity         : 0.94 / 2.00  #######################
                           ↳ Does the response include specific numbers, dates, limits?
-    Scope               : 0.85 / 2.00  #####################
+    Scope               : 0.84 / 2.00  #####################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 0.85 / 2.00  #####################
+    First-Time Right    : 0.84 / 2.00  #####################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
@@ -461,33 +497,35 @@ QUALITY SUMMARY
   Category Distributions:
 
   [response_usefulness]
-    ❌ NOT HELPFUL     :   50  ( 62.5%) ###############################
-    ✅ HELPFUL         :   20  ( 25.0%) ############
-    ✅ DECLINED (OK)   :   10  ( 12.5%) ######
+    ❌ NOT HELPFUL     :   50  ( 63.3%) ###############################
+    ✅ HELPFUL         :   19  ( 24.1%) ############
+    ✅ DECLINED (OK)   :   10  ( 12.7%) ######
 
   [task_grounding]
-    ❌ NOT GROUNDED    :   50  ( 62.5%) ###############################
-    ✅ GROUNDED        :   20  ( 25.0%) ############
-    ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
+    ❌ NOT GROUNDED    :   50  ( 63.3%) ###############################
+    ✅ GROUNDED        :   19  ( 24.1%) ############
+    ➖ NO TOOL NEEDED  :   10  ( 12.7%) ######
 
   Execution Details:
-    elapsed_seconds: 128.9
+    elapsed_seconds: 123.4
     project: agent-skill-lab-01
-    dataset: local.conversations
+    dataset: agent_analytics.agent_events_lab_20260710_210901_10380244954_v0_test
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-07T09:02:48.844560+00:00
+    created_at: 2026-07-10T21:14:34.063896+00:00
 ======================================================================
 
   WARNING: Unhelpful rate (62.5%) exceeds 10% threshold!
 
-  JSON report: runs/20260707_085745_gemini_3_1_flash_lite/v0_test_report.json
+  Markdown report: runs/20260710_210901_gemini_3_1_flash_lite/v0_test_report.md
+
+  JSON report: runs/20260710_210901_gemini_3_1_flash_lite/v0_test_report.json
 
   V0 evolve: 46.2% (12/26 matched to the answer key, of 68 total; 8 out-of-scope; 34 unmatched)
-  V0 test:   28.6% (20/70 matched to the answer key, of 80 total; 10 out-of-scope)
+  V0 test:   27.1% (19/70 matched to the answer key, of 80 total; 10 out-of-scope)
 
-  ✔ V0 baseline completed in 304s.
+  ✔ V0 baseline completed in 337s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -497,19 +535,19 @@ QUALITY SUMMARY
   Method:  Analyst fleet reads the scored evolve set; best-of-3 candidates
   Model:   analyst=gemini-3.1-pro-preview  (this is the slow step)
 
-  [09:02:49] Analysts proposing patches, consolidating candidates...
+  [21:14:38] Analysts proposing patches, consolidating candidates...
 Evolving SKILL.md from v0_evolve_report.json (analyst=gemini-3.1-pro-preview)...
-Trajectories: 27 successes, 41 failures
+Trajectories: 26 successes, 41 failures
 Collected 48 patches (48 passed the quality gate).
 Generating 3 candidate(s)...
-Selected median-size candidate (2416 chars).
-Wrote evolution artifacts to runs/20260707_085745_gemini_3_1_flash_lite (48 patches, 3 candidates).
-Wrote evolved skill -> runs/20260707_085745_gemini_3_1_flash_lite/v1_skill.md (2417B, changed)
+Selected median-size candidate (2383 chars).
+Wrote evolution artifacts to runs/20260710_210901_gemini_3_1_flash_lite (48 patches, 3 candidates).
+Wrote evolved skill -> runs/20260710_210901_gemini_3_1_flash_lite/v1_skill.md (2383B, changed)
 Updated working copy: skills/SKILL.md
 
-  V1 skill: 2417B  (V0 was 820B)
+  V1 skill: 2383B  (V0 was 820B)
 
-  ✔ Evolution completed in 78s.
+  ✔ Evolution completed in 76s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -518,9 +556,10 @@ Updated working copy: skills/SKILL.md
   Goal:    Score the evolved skill on the SAME held-out set V0 was judged on
   Method:  Deploy V1, run held-out traffic, score vs the golden Q&A
 
-  [09:04:07] Running + scoring the held-out test set with V1...
+  [21:15:54] Running + scoring the held-out test set with V1...
 Running 80 question(s) on gemini-3.1-flash-lite (skill=SKILL.md)...
-Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v1_test_traffic.json
+Logged 348 event row(s) for 80 session(s) -> agent-skill-lab-01.agent_analytics.agent_events_lab_20260710_210901_10380244954_v1_test (labels: {'run': 'lab_20260710_210901_10380244954', 'slice': 'v1_test'})
+Wrote 80 conversation(s) (80 ok) -> runs/20260710_210901_gemini_3_1_flash_lite/v1_test_traffic.json
 
 ──────────────────────────────────────────────────────────────────────
   DECLINED (out-of-scope) Sessions (showing 3 of 8)
@@ -528,29 +567,29 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
 
   Session:     oos_vpn  → policy_agent
   Question:    My VPN keeps dropping at home -- how do I fix the connection?
-  Response:    "I'm sorry to hear you're having trouble with your VPN connection. Since this is a technical issue related to your network and company systems, please reach out to the IT department for assistance. They will be able to help you troubleshoot your connection."
+  Response:    "I'm sorry to hear you're having trouble with your VPN connection. Since this is a technical issue, please contact IT Support for assistance with troubleshooting your home connection."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of its HR scope and politely directed the user to the appropriate department (IT).
+  Reason:        The agent correctly identified the question as out of scope (technical issue) and politely declined to answer, directing the user to the appropriate department.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of the agent's scope, so no tool usage was required or appropriate. The response is based on the agent's understanding of its own limitations.
+  Reason:        The question was out of scope and did not require tool usage; the agent's response was based on its internal scope definition.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
-  Session:     oos_stock  → policy_agent
-  Question:    What's our stock price today, and is it a good time to buy?
-  Response:    "I do not have access to real-time stock market data, and I cannot provide financial advice or recommendations on whether to buy or sell stock. If you have questions regarding company stock options or equity compensation, I recommend checking our internal benefits portal or reaching out to the Finance or HR department for guidance."
+  Session:     oos_peer_review  → policy_agent
+  Question:    What rating did my coworker Dana get on her last performance review?
+  Response:    "I do not have access to individual employee performance review records. You would need to speak with your manager or the HR department regarding specific performance review information."
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified that the question about stock price and financial advice is outside its scope and politely declined to answer, which is a useful response in this context.
+  Reason:        The agent correctly identified that it could not provide individual employee performance review data, which is outside its scope, and politely declined.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The agent's response is a statement about its capabilities and scope, not requiring tool usage to retrieve data. It correctly identified the question as out of scope.
+  Reason:        The agent's response is a meta-statement about its capabilities and scope, not requiring tool usage.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
-  Session:     oos_merger  → policy_agent
-  Question:    Are the rumors true that we're acquiring a competitor?
-  Response:    "I do not have access to information regarding company acquisitions or internal strategic rumors. My purpose is to assist with company policies, benefits, and related HR information. If you have questions about company news or official announcements, I recommend checking the company intranet or reaching out to the Communications department."
+  Session:     oos_restaurant  → policy_agent
+  Question:    Can you recommend a good lunch spot near the Austin office?
+  Response:    "I'm sorry, but I don't have information about local restaurants or lunch spots near the office. My purpose is to assist with company HR policies and benefits. You might want to check a local review site or ask some of your colleagues for their favorite spots!"
   Usefulness:    ✅ DECLINED (OK)
-  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, directing the user to the appropriate resource.
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, explaining its limitations.
   Grounding:     ➖ NO TOOL NEEDED
-  Reason:        The question was out of scope, so no tool usage was required. The agent responded based on its defined capabilities.
+  Reason:        The question was out of scope and did not require tool usage. The agent's response was based on its internal programming regarding its scope.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
@@ -559,11 +598,11 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
 
   Session:     t01_pto  → policy_agent
   Question:    How many PTO days do I get per year?
-  Response:    "You get 20 days of PTO per year. These days are accrued monthly, and you can roll over up to 5 unused days into the next year."
+  Response:    "You get 20 days of PTO per year, which accrue monthly. This means you accrue approximately 1.67 days per month. Additionally, you can roll over up to 5 unused days into the next year."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent directly and substantively answered the user's question about PTO days per year, providing specific details.
+  Reason:        The agent provided a direct and substantive answer to the user's question about PTO days, including accrual and rollover details.
   Grounding:     ✅ GROUNDED
-  Reason:        The response provides specific policy details (20 days, accrued monthly, 5 days rollover) that would be retrieved from a company policy lookup tool.
+  Reason:        The response contains specific numbers and policy details (20 days, monthly accrual, 5-day rollover) which would be retrieved from a company policy lookup tool.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
   Session:     t02_pto  → policy_agent
@@ -577,11 +616,11 @@ Wrote 80 conversation(s) (80 ok) -> runs/20260707_085745_gemini_3_1_flash_lite/v
 
   Session:     t03_pto  → policy_agent
   Question:    Roughly how much PTO do I accrue each month?
-  Response:    "You accrue 1.67 days of PTO per month (20 days divided by 12 months)."
+  Response:    "You accrue 20 days of PTO per year. Since this is accrued monthly, you accrue approximately 1.67 days per month (20 days divided by 12 months)."
   Usefulness:    ✅ HELPFUL
-  Reason:        The agent provided a direct and specific answer to the user's question about PTO accrual.
+  Reason:        The agent directly answers the user's question about monthly PTO accrual with specific details.
   Grounding:     ✅ GROUNDED
-  Reason:        The response is based on company policy data (20 days/year PTO) which would be retrieved via a tool.
+  Reason:        The information about 20 days of PTO per year would be retrieved from a tool like `lookup_company_policy`, and the monthly calculation is derived from this grounded data.
   Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
 
 ──────────────────────────────────────────────────────────────────────
@@ -611,15 +650,15 @@ QUALITY SUMMARY
                           ↳ Does the response include specific numbers, dates, limits?
     Scope               : 2.00 / 2.00  ##################################################
                           ↳ Did the agent correctly handle in-scope vs out-of-scope?
-    First-Time Right    : 1.99 / 2.00  #################################################
+    First-Time Right    : 1.96 / 2.00  #################################################
                           ↳ Was the first response correct without user corrections?
 
   Multi-Turn Efficiency:
     Avg user turns       : 1.2
-    Avg tool calls       : 0.9
+    Avg tool calls       : 1.0
     Multi-turn sessions  : 15
-    Correction rate      : 8.8%
-    Verification rate    : 10.0%
+    Correction rate      : 15.0%
+    Verification rate    : 3.8%
 
   Category Distributions:
 
@@ -632,22 +671,24 @@ QUALITY SUMMARY
     ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
 
   Execution Details:
-    elapsed_seconds: 136.1
+    elapsed_seconds: 146.2
     project: agent-skill-lab-01
-    dataset: local.conversations
+    dataset: agent_analytics.agent_events_lab_20260710_210901_10380244954_v1_test
     location: us-central1
     eval_model: gemini-2.5-flash
     samples: None
-    created_at: 2026-07-07T09:07:04.743090+00:00
+    created_at: 2026-07-10T21:19:05.782945+00:00
 ======================================================================
 
   All responses were meaningful.
 
-  JSON report: runs/20260707_085745_gemini_3_1_flash_lite/v1_test_report.json
+  Markdown report: runs/20260710_210901_gemini_3_1_flash_lite/v1_test_report.md
+
+  JSON report: runs/20260710_210901_gemini_3_1_flash_lite/v1_test_report.json
 
   V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
 
-  ✔ V1 measurement completed in 178s.
+  ✔ V1 measurement completed in 195s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -662,8 +703,8 @@ Correctness on the held-out set: in-scope answers matched & meaningful, out-of-s
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 37.5% (30/80) | 97.5% (78/80) | +60.0pp |
-| Single-turn | 36.4% (20/55) | 100.0% (55/55) | +63.6pp |
+| Overall | 36.2% (29/80) | 97.5% (78/80) | +61.3pp |
+| Single-turn | 34.5% (19/55) | 100.0% (55/55) | +65.5pp |
 | Corrections (anti-parrot) | 0.0% (0/15) | 100.0% (15/15) | +100.0pp |
 | Out-of-scope (declined) | 100.0% (10/10) | 80.0% (8/10) | -20.0pp |
 
@@ -673,46 +714,403 @@ Parroted sub-trajectories: V0=11  V1=0 (lower is better -- the agent re-verified
 
 | Behavior | V0 | V1 |
 | --- | --- | --- |
-| Called any tool | 14/80 | 61/80 |
+| Called any tool | 14/80 | 62/80 |
 | `calculate_disability_pay` | 5/80 | 5/80 |
-| `lookup_company_policy` | 9/80 | 56/80 |
+| `lookup_company_policy` | 9/80 | 57/80 |
 
 ## Quality dimensions (average 0-2, held-out set)
 
 | Dimension | V0 | V1 | Delta |
 | --- | --- | --- | --- |
-| Correctness | 0.75 | 1.99 | +1.24 |
-| Tool use | 0.76 | 2.00 | +1.24 |
-| Specificity | 0.95 | 2.00 | +1.05 |
-| Scope compliance | 0.85 | 2.00 | +1.15 |
-| First-time-right | 0.85 | 1.99 | +1.14 |
+| Correctness | 0.73 | 1.99 | +1.26 |
+| Tool use | 0.75 | 2.00 | +1.25 |
+| Specificity | 0.94 | 2.00 | +1.06 |
+| Scope compliance | 0.84 | 2.00 | +1.16 |
+| First-time-right | 0.84 | 1.96 | +1.12 |
 
 
   ✔ Comparison completed in 0s.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  DONE  (total wall time: 9m 20s)
+  ▶ ROUND 2a: RE-RUN THE EVOLVE SET ON V1
 
-  Result table:   runs/20260707_085745_gemini_3_1_flash_lite/RESULT.md
+  Goal:    Fresh learning signal -- what does V1 still get wrong?
+  Method:  Same evolve traffic, scored the same way; input to round 2
+
+Running 68 question(s) on gemini-3.1-flash-lite (skill=SKILL.md)...
+Logged 268 event row(s) for 68 session(s) -> agent-skill-lab-01.agent_analytics.agent_events_lab_20260710_210901_10380244954_v1_evolve (labels: {'run': 'lab_20260710_210901_10380244954', 'slice': 'v1_evolve'})
+Wrote 68 conversation(s) (68 ok) -> runs/20260710_210901_gemini_3_1_flash_lite/v1_evolve_traffic.json
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 7)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_password  → policy_agent
+  Question:    I'm locked out of my laptop -- how do I reset my login password?
+  Response:    "I'm sorry to hear you're locked out of your laptop. Since this is a technical issue, please contact IT Support for assistance with resetting your password."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of its HR scope and politely directed the user to the appropriate department (IT Support).
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require tool usage; the agent's response was based on its understanding of its own scope.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_mgr_salary  → policy_agent
+  Question:    How much does my manager get paid?
+  Response:    "I do not have access to information regarding individual employee salaries or compensation packages. You may want to reach out to your manager or the HR department if you have questions regarding compensation structures."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The question about an individual's salary is outside the agent's scope of company policies and benefits, and the agent correctly declined to answer due to lack of access to such information.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is a statement about its own capabilities and data access limitations, not a fact retrieved from a tool or general knowledge about the manager's salary. No tool was needed to state this limitation.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_invest  → policy_agent
+  Question:    Which index funds are the best investment right now?
+  Response:    "I am unable to provide financial advice or recommendations on specific investment products like index funds. My role is to assist with company-specific HR policies, benefits, and internal information. If you have questions regarding the company's 401(k) plan or other financial benefits offered by the company, I would be happy to look up those policies for you."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified the question as out of scope and politely declined to answer, while offering to help with in-scope topics.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response was based on its internal scope definition and did not require tool usage.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 61)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     e01_pto  → policy_agent
+  Question:    How many vacation days do I get a year?
+  Response:    "You receive 20 days of PTO per year. These days accrue monthly, which means you earn approximately 1.67 days per month. Additionally, you can roll over up to 5 unused days into the next year."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a specific number of PTO days, accrual details, and rollover policy, directly answering the user's question about vacation days.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response contains specific policy details (number of days, accrual, rollover) that would be retrieved from the `lookup_company_policy` tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     e02_pto  → policy_agent
+  Question:    How many unused vacation days carry into next year?
+  Response:    "You can carry over up to 5 unused vacation days into the next year."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a direct and specific answer to the user's question about vacation day carry-over.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response provides a specific policy detail, indicating it was likely retrieved from a tool like `lookup_company_policy`.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     e03_pto  → policy_agent
+  Question:    At what rate does my PTO accrue?
+  Response:    "You accrue 20 days of PTO per year. Since this accrues monthly, you earn 1.67 days of PTO per month (20 days divided by 12 months)."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a direct, specific, and actionable answer to the user's question about PTO accrual rate, including both annual and monthly figures.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response contains specific numerical data (20 days, 1.67 days, 12 months) which would be retrieved from a company policy lookup tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  PER-AGENT QUALITY
+──────────────────────────────────────────────────────────────────────
+  Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
+                                                                                             Helpful  Unhelpful
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  policy_agent                     68       🟢  61+7d (100%)        0 (0%)        0       0      100%        0%
+
+======================================================================
+QUALITY SUMMARY
+======================================================================
+  Total sessions evaluated : 68
+  Meaningful               : 61
+  Declined (out-of-scope)  : 7
+  Partial                  : 0
+  Unhelpful                : 0
+  Unhelpful rate           : 0.0%
+
+  Quality Dimensions (0-2 scale):
+    Correctness         : 2.00 / 2.00  ##################################################
+                          ↳ Are the facts in the response accurate?
+    Tool Usage          : 1.94 / 2.00  ################################################
+                          ↳ Did the agent use its tools to verify facts?
+    Specificity         : 2.00 / 2.00  ##################################################
+                          ↳ Does the response include specific numbers, dates, limits?
+    Scope               : 1.97 / 2.00  #################################################
+                          ↳ Did the agent correctly handle in-scope vs out-of-scope?
+    First-Time Right    : 1.97 / 2.00  #################################################
+                          ↳ Was the first response correct without user corrections?
+
+  Multi-Turn Efficiency:
+    Avg user turns       : 1.1
+    Avg tool calls       : 0.9
+    Multi-turn sessions  : 5
+    Correction rate      : 2.9%
+    Verification rate    : 4.4%
+
+  Category Distributions:
+
+  [response_usefulness]
+    ✅ HELPFUL         :   61  ( 89.7%) ############################################
+    ✅ DECLINED (OK)   :    7  ( 10.3%) #####
+
+  [task_grounding]
+    ✅ GROUNDED        :   59  ( 86.8%) ###########################################
+    ➖ NO TOOL NEEDED  :    7  ( 10.3%) #####
+    ❌ NOT GROUNDED    :    2  (  2.9%) #
+
+  Execution Details:
+    elapsed_seconds: 90.7
+    project: agent-skill-lab-01
+    dataset: agent_analytics.agent_events_lab_20260710_210901_10380244954_v1_evolve
+    location: us-central1
+    eval_model: gemini-2.5-flash
+    samples: None
+    created_at: 2026-07-10T21:21:22.363726+00:00
+======================================================================
+
+  All responses were meaningful.
+
+  Markdown report: runs/20260710_210901_gemini_3_1_flash_lite/v1_evolve_report.md
+
+  JSON report: runs/20260710_210901_gemini_3_1_flash_lite/v1_evolve_report.json
+
+  V1 evolve: 100.0% (26/26 matched to the answer key, of 68 total; 8 out-of-scope; 34 unmatched)
+
+  ✔ Round 2 traffic completed in 137s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ ROUND 2b: EVOLVE V1 -> V2
+
+  Goal:    Merge what round 1 missed into V2 (nothing learned is lost)
+  Method:  Same engine, --version-label v2 (v2_* artifacts + selection record)
+
+Evolving SKILL.md from v1_evolve_report.json (analyst=gemini-3.1-pro-preview)...
+Trajectories: 68 successes, 0 failures
+Collected 6 patches (6 passed the quality gate).
+Generating 3 candidate(s)...
+Selected median-size candidate (3171 chars).
+Wrote evolution artifacts to runs/20260710_210901_gemini_3_1_flash_lite (6 patches, 3 candidates).
+Wrote evolved skill -> runs/20260710_210901_gemini_3_1_flash_lite/v2_skill.md (3172B, changed)
+Updated working copy: skills/SKILL.md
+
+  V2 skill: 3172B  (V1 was 2383B)
+  Selection: selected candidate 3 of 3 viable (3171 chars, median size)
+
+  ✔ Round 2 evolution completed in 31s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ▶ ROUND 2c: MEASURE V2 (held-out) AND GATE V2 vs V1
+
+  Goal:    Keep V2 only when it beats the incumbent V1
+  Method:  Same held-out set, same judge; compare_runs --gate
+
+Running 80 question(s) on gemini-3.1-flash-lite (skill=SKILL.md)...
+Logged 348 event row(s) for 80 session(s) -> agent-skill-lab-01.agent_analytics.agent_events_lab_20260710_210901_10380244954_v2_test (labels: {'run': 'lab_20260710_210901_10380244954', 'slice': 'v2_test'})
+Wrote 80 conversation(s) (80 ok) -> runs/20260710_210901_gemini_3_1_flash_lite/v2_test_traffic.json
+
+──────────────────────────────────────────────────────────────────────
+  DECLINED (out-of-scope) Sessions (showing 3 of 8)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     oos_vpn  → policy_agent
+  Question:    My VPN keeps dropping at home -- how do I fix the connection?
+  Response:    "I'm sorry to hear you're having trouble with your VPN connection. Since this is a technical issue related to your home network or software access, please contact IT Support for assistance, as they are best equipped to troubleshoot and resolve VPN connectivity problems."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The user's question about VPN connectivity is a technical issue, which is outside the agent's defined scope of HR policy and benefits. The agent correctly declined to answer by directing the user to IT Support.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The question was out of scope and did not require tool usage. The agent's response was a direct LLM response based on understanding the scope.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_peer_review  → policy_agent
+  Question:    What rating did my coworker Dana get on her last performance review?
+  Response:    "I do not have access to individual employee performance review records. Please contact your manager or the HR department if you have questions regarding performance reviews."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified that it could not provide individual employee performance review records, which is outside its scope, and politely declined while directing the user to the appropriate contact.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response is based on its inherent limitations and scope, not on data retrieved from a tool. No tool was needed or called for this type of out-of-scope query.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     oos_stock  → policy_agent
+  Question:    What's our stock price today, and is it a good time to buy?
+  Response:    "I do not have access to real-time stock market data, and I cannot provide financial advice or recommendations on whether it is a good time to buy stock. If you have questions regarding our company's stock, employee stock purchase plans, or equity compensation, I recommend checking our internal benefits portal or contacting the HR department for official information."
+  Usefulness:    ✅ DECLINED (OK)
+  Reason:        The agent correctly identified that the question about stock price and financial advice was out of its scope and politely declined to answer.
+  Grounding:     ➖ NO TOOL NEEDED
+  Reason:        The agent's response was a statement about its capabilities and scope, not requiring tool usage to retrieve data.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ➖ NO TOOL NEEDED | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  MEANINGFUL Sessions (showing 3 of 72)
+──────────────────────────────────────────────────────────────────────
+
+  Session:     t01_pto  → policy_agent
+  Question:    How many PTO days do I get per year?
+  Response:    "You receive 20 days of PTO per year. These days are accrued on a monthly basis, which means you accrue approximately 1.67 days per month. Additionally, please note that you can roll over up to 5 unused PTO days into the next year."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent provided a direct, specific, and actionable answer to the user's question about PTO days, including details on accrual and rollover.
+  Grounding:     ✅ GROUNDED
+  Reason:        The response contains specific policy details (20 days, monthly accrual, 5-day rollover) that would be retrieved from a company policy lookup tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     t02_pto  → policy_agent
+  Question:    How many unused PTO days can I roll over to next year?
+  Response:    "You can roll over up to 5 unused PTO days to the next year. As a reminder, you are allotted 20 days of PTO per year, which accrue monthly (at a rate of 1.67 days per month)."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly and specifically answers the user's question about PTO rollover days.
+  Grounding:     ✅ GROUNDED
+  Reason:        The information provided (PTO rollover and accrual) would be retrieved from the `lookup_company_policy` tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+  Session:     t03_pto  → policy_agent
+  Question:    Roughly how much PTO do I accrue each month?
+  Response:    "You accrue 1.67 days of PTO per month. Since the company policy provides 20 days of PTO per year, which accrues monthly, this is calculated by dividing the 20 days by 12 months. As a reminder, you can roll over up to 5 unused PTO days into the next year."
+  Usefulness:    ✅ HELPFUL
+  Reason:        The agent directly answers the user's question about monthly PTO accrual with a specific number and provides additional relevant policy information.
+  Grounding:     ✅ GROUNDED
+  Reason:        The information about PTO accrual (20 days/year, 1.67 days/month) and rollover (5 days) would be retrieved from the `lookup_company_policy` tool.
+  Dimensions:    Correctness: ✅ CORRECT | Tool Usage: ✅ PROPER | Specificity: ✅ SPECIFIC | Scope: ✅ COMPLIANT | First-Time Right: ✅ CORRECT | failure_attribution: NOT_A_FAILURE
+
+──────────────────────────────────────────────────────────────────────
+  PER-AGENT QUALITY
+──────────────────────────────────────────────────────────────────────
+  Agent                          Sess  Status       Helpful     Unhelpful  Partial  Errors  % of All  % of All
+                                                                                             Helpful  Unhelpful
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+  policy_agent                     80       🟢  72+8d (100%)        0 (0%)        0       0      100%        0%
+
+======================================================================
+QUALITY SUMMARY
+======================================================================
+  Total sessions evaluated : 80
+  Meaningful               : 72
+  Declined (out-of-scope)  : 8
+  Partial                  : 0
+  Unhelpful                : 0
+  Unhelpful rate           : 0.0%
+
+  Quality Dimensions (0-2 scale):
+    Correctness         : 2.00 / 2.00  ##################################################
+                          ↳ Are the facts in the response accurate?
+    Tool Usage          : 2.00 / 2.00  ##################################################
+                          ↳ Did the agent use its tools to verify facts?
+    Specificity         : 2.00 / 2.00  ##################################################
+                          ↳ Does the response include specific numbers, dates, limits?
+    Scope               : 2.00 / 2.00  ##################################################
+                          ↳ Did the agent correctly handle in-scope vs out-of-scope?
+    First-Time Right    : 2.00 / 2.00  ##################################################
+                          ↳ Was the first response correct without user corrections?
+
+  Multi-Turn Efficiency:
+    Avg user turns       : 1.2
+    Avg tool calls       : 1.0
+    Multi-turn sessions  : 15
+    Correction rate      : 12.5%
+    Verification rate    : 5.0%
+
+  Category Distributions:
+
+  [response_usefulness]
+    ✅ HELPFUL         :   72  ( 90.0%) #############################################
+    ✅ DECLINED (OK)   :    8  ( 10.0%) #####
+
+  [task_grounding]
+    ✅ GROUNDED        :   70  ( 87.5%) ###########################################
+    ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
+
+  Execution Details:
+    elapsed_seconds: 127.7
+    project: agent-skill-lab-01
+    dataset: agent_analytics.agent_events_lab_20260710_210901_10380244954_v2_test
+    location: us-central1
+    eval_model: gemini-2.5-flash
+    samples: None
+    created_at: 2026-07-10T21:24:52.348210+00:00
+======================================================================
+
+  All responses were meaningful.
+
+  Markdown report: runs/20260710_210901_gemini_3_1_flash_lite/v2_test_report.md
+
+  JSON report: runs/20260710_210901_gemini_3_1_flash_lite/v2_test_report.json
+
+  V2 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+
+GATE: V2 overall 97.5% <= V1 97.5% -- V2 should not be kept.
+# Skill Evolution Result (gemini-3.1-flash-lite)
+
+Correctness on the held-out set: in-scope answers matched & meaningful, out-of-scope questions cleanly declined.
+
+| Metric | V1 (evolved) | V2 (round 2) | Delta |
+| --- | --- | --- | --- |
+| Overall | 97.5% (78/80) | 97.5% (78/80) | +0.0pp |
+| Single-turn | 100.0% (55/55) | 100.0% (55/55) | +0.0pp |
+| Corrections (anti-parrot) | 100.0% (15/15) | 100.0% (15/15) | +0.0pp |
+| Out-of-scope (declined) | 80.0% (8/10) | 80.0% (8/10) | +0.0pp |
+
+Parroted sub-trajectories: V1=0  V2=0 (lower is better -- the agent re-verified instead of caving).
+
+## Tool selection (sessions that called each tool, held-out set)
+
+| Behavior | V1 | V2 |
+| --- | --- | --- |
+| Called any tool | 62/80 | 61/80 |
+| `calculate_disability_pay` | 5/80 | 5/80 |
+| `lookup_company_policy` | 57/80 | 56/80 |
+
+## Quality dimensions (average 0-2, held-out set)
+
+| Dimension | V1 | V2 | Delta |
+| --- | --- | --- | --- |
+| Correctness | 1.99 | 2.00 | +0.01 |
+| Tool use | 2.00 | 2.00 | +0.0 |
+| Specificity | 2.00 | 2.00 | +0.0 |
+| Scope compliance | 2.00 | 2.00 | +0.0 |
+| First-time-right | 1.96 | 2.00 | +0.04 |
+
+
+  V2 did not beat V1 on the held-out set -- the incumbent V1 stays.
+  This is the safety property doing its job: a round with nothing new
+  to teach cannot replace a proven skill (see v2_selection.txt).
+
+  ✔ Round 2 measurement + gate completed in 179s.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DONE  (total wall time: 15m 55s)
+
+  Result table:   runs/20260710_210901_gemini_3_1_flash_lite/RESULT.md
+  Round 2 table:  runs/20260710_210901_gemini_3_1_flash_lite/RESULT_ROUND2.md  (kept version: V1)
 
   Artifacts (runs/):
     RESULT.json
     RESULT.md
     RESULT.txt
+    RESULT_ROUND2.json
+    RESULT_ROUND2.md
+    RESULT_ROUND2.txt
     run.log
     v0_evolve_report.json
+    v0_evolve_report.md
     v0_evolve_traffic.json
     v0_skill.md
     v0_test_report.json
+    v0_test_report.md
     v0_test_traffic.json
     v1_candidates
+    v1_evolve_report.json
+    v1_evolve_report.md
+    v1_evolve_traffic.json
     v1_patches.json
     v1_prevalence.txt
     v1_selection.txt
     v1_skill.md
     v1_test_report.json
+    v1_test_report.md
     v1_test_traffic.json
+    v2_candidates
+    v2_patches.json
+    v2_prevalence.txt
+    v2_selection.txt
+    v2_skill.md
+    v2_test_report.json
+    v2_test_report.md
+    v2_test_traffic.json
 
   Local skill restored to V0.
   Reproduce the multi-model table: ./run_sweep.sh
@@ -720,5 +1118,5 @@ Parroted sub-trajectories: V0=11  V1=0 (lower is better -- the agent re-verified
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Total wall time: 9m 20s
+  Total wall time: 15m 55s
 

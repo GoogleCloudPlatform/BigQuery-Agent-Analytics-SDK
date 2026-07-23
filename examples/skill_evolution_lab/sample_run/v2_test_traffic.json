@@ -1,0 +1,2264 @@
+{
+  "conversations": [
+    {
+      "session_id": "t01_pto",
+      "question": "How many PTO days do I get per year?",
+      "final_response": "You receive 20 days of PTO per year. These days are accrued on a monthly basis, which means you accrue approximately 1.67 days per month.\n\nAdditionally, please note that you can roll over up to 5 unused PTO days into the next year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many PTO days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You receive 20 days of PTO per year. These days are accrued on a monthly basis, which means you accrue approximately 1.67 days per month.\n\nAdditionally, please note that you can roll over up to 5 unused PTO days into the next year."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 1.9,
+      "category": "pto"
+    },
+    {
+      "session_id": "t02_pto",
+      "question": "How many unused PTO days can I roll over to next year?",
+      "final_response": "You can roll over up to 5 unused PTO days to the next year. \n\nAs a reminder, you are allotted 20 days of PTO per year, which accrue monthly (at a rate of 1.67 days per month).",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many unused PTO days can I roll over to next year?"
+        },
+        {
+          "role": "agent",
+          "text": "You can roll over up to 5 unused PTO days to the next year. \n\nAs a reminder, you are allotted 20 days of PTO per year, which accrue monthly (at a rate of 1.67 days per month)."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 1.72,
+      "category": "pto"
+    },
+    {
+      "session_id": "t03_pto",
+      "question": "Roughly how much PTO do I accrue each month?",
+      "final_response": "You accrue 1.67 days of PTO per month.\n\nSince the company policy provides 20 days of PTO per year, which accrues monthly, this is calculated by dividing the 20 days by 12 months. \n\nAs a reminder, you can roll over up to 5 unused PTO days into the next year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Roughly how much PTO do I accrue each month?"
+        },
+        {
+          "role": "agent",
+          "text": "You accrue 1.67 days of PTO per month.\n\nSince the company policy provides 20 days of PTO per year, which accrues monthly, this is calculated by dividing the 20 days by 12 months. \n\nAs a reminder, you can roll over up to 5 unused PTO days into the next year."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 1.92,
+      "category": "pto"
+    },
+    {
+      "session_id": "t04_pto",
+      "question": "If I leave the company mid-year, what happens to my unused PTO?",
+      "final_response": "If you leave the company mid-year, any unused PTO that you have accrued up to your departure date will be paid out in your final paycheck.\n\nTo provide a bit more context on how your PTO works:\n*   **Accrual:** You earn your 20 days of PTO annually, which accrues at a rate of approximately 1.67 days per month.\n*   **Rollover:** While you are employed, you are allowed to roll over up to 5 unused days into the next calendar year.\n\nSince you accrue this time monthly, your final payout will be based on the total amount of PTO you have earned through your last day of employment, minus any days you have already taken.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "If I leave the company mid-year, what happens to my unused PTO?"
+        },
+        {
+          "role": "agent",
+          "text": "If you leave the company mid-year, any unused PTO that you have accrued up to your departure date will be paid out in your final paycheck.\n\nTo provide a bit more context on how your PTO works:\n*   **Accrual:** You earn your 20 days of PTO annually, which accrues at a rate of approximately 1.67 days per month.\n*   **Rollover:** While you are employed, you are allowed to roll over up to 5 unused days into the next calendar year.\n\nSince you accrue this time monthly, your final payout will be based on the total amount of PTO you have earned through your last day of employment, minus any days you have already taken."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "pto"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.68,
+      "category": "pto"
+    },
+    {
+      "session_id": "t05_sick_leave",
+      "question": "How many sick days do I get per year?",
+      "final_response": "You get 10 sick days per year. Please note that these days do not roll over at the end of the year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many sick days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You get 10 sick days per year. Please note that these days do not roll over at the end of the year."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.57,
+      "category": "sick_leave"
+    },
+    {
+      "session_id": "t06_sick_leave",
+      "question": "Do sick days roll over to the next year?",
+      "final_response": "No, sick leave does not roll over to the next year. You are allotted 10 sick days per year, and any unused days will expire at the end of the year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do sick days roll over to the next year?"
+        },
+        {
+          "role": "agent",
+          "text": "No, sick leave does not roll over to the next year. You are allotted 10 sick days per year, and any unused days will expire at the end of the year."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.63,
+      "category": "sick_leave"
+    },
+    {
+      "session_id": "t07_sick_leave",
+      "question": "If I'm out sick for 4 days, do I need a doctor's note?",
+      "final_response": "Yes, you will need a doctor's note. According to our sick leave policy, a doctor's note is required for any absence that lasts longer than 3 consecutive days.\n\nAs a reminder, you are allotted 10 sick days per year, which do not roll over. If you have any further questions about your leave, please let me know!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "If I'm out sick for 4 days, do I need a doctor's note?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you will need a doctor's note. According to our sick leave policy, a doctor's note is required for any absence that lasts longer than 3 consecutive days.\n\nAs a reminder, you are allotted 10 sick days per year, which do not roll over. If you have any further questions about your leave, please let me know!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "sick_leave"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.49,
+      "category": "sick_leave"
+    },
+    {
+      "session_id": "t08_remote_work",
+      "question": "How many days a week can I work from home?",
+      "final_response": "You can work remotely for up to 3 days per week, provided you have approval from your manager.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many days a week can I work from home?"
+        },
+        {
+          "role": "agent",
+          "text": "You can work remotely for up to 3 days per week, provided you have approval from your manager."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.59,
+      "category": "remote_work"
+    },
+    {
+      "session_id": "t09_remote_work",
+      "question": "Do I need approval to work remotely?",
+      "final_response": "Yes, you do need approval to work remotely. According to company policy, you are permitted to work remotely for up to 3 days per week, provided you have received approval from your manager.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need approval to work remotely?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need approval to work remotely. According to company policy, you are permitted to work remotely for up to 3 days per week, provided you have received approval from your manager."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.78,
+      "category": "remote_work"
+    },
+    {
+      "session_id": "t10_remote_work",
+      "question": "What are the core collaboration hours for remote work?",
+      "final_response": "Core collaboration hours are from 10:00 AM to 3:00 PM in your local timezone.\n\nAs a reminder, you are permitted to work remotely for up to 3 days per week, provided you have received approval from your manager.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What are the core collaboration hours for remote work?"
+        },
+        {
+          "role": "agent",
+          "text": "Core collaboration hours are from 10:00 AM to 3:00 PM in your local timezone.\n\nAs a reminder, you are permitted to work remotely for up to 3 days per week, provided you have received approval from your manager."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "remote_work"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.46,
+      "category": "remote_work"
+    },
+    {
+      "session_id": "t11_remote_work",
+      "question": "Can I work remotely four days a week?",
+      "final_response": "According to our remote work policy, you are allowed to work remotely for up to 3 days per week, provided you have manager approval.\n\nSince your request is for 4 days, it exceeds the company's policy limit. You would need to discuss your specific situation with your manager to see if any exceptions can be made, but per the standard policy, the maximum is 3 days.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Can I work remotely four days a week?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our remote work policy, you are allowed to work remotely for up to 3 days per week, provided you have manager approval.\n\nSince your request is for 4 days, it exceeds the company's policy limit. You would need to discuss your specific situation with your manager to see if any exceptions can be made, but per the standard policy, the maximum is 3 days."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 1.22,
+      "category": "remote_work"
+    },
+    {
+      "session_id": "t12_expenses",
+      "question": "What's the daily meal reimbursement limit on business travel?",
+      "final_response": "The daily meal reimbursement limit for business travel is $75 per day.\n\nPlease keep in mind the following related expense policies:\n*   **Receipts:** You must provide receipts for any individual expense over $25.\n*   **Submission Deadline:** All business expenses must be submitted within 30 days.\n*   **Pre-approval:** Any travel expenses exceeding $500 require pre-approval.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the daily meal reimbursement limit on business travel?"
+        },
+        {
+          "role": "agent",
+          "text": "The daily meal reimbursement limit for business travel is $75 per day.\n\nPlease keep in mind the following related expense policies:\n*   **Receipts:** You must provide receipts for any individual expense over $25.\n*   **Submission Deadline:** All business expenses must be submitted within 30 days.\n*   **Pre-approval:** Any travel expenses exceeding $500 require pre-approval."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.3,
+      "category": "expenses"
+    },
+    {
+      "session_id": "t13_expenses",
+      "question": "Do I need a receipt for a $30 expense?",
+      "final_response": "Yes, you do need a receipt for a $30 expense. According to company policy, receipts are required for any expense over $25.\n\nAdditionally, please keep in mind the following guidelines for expense reporting:\n*   **Submission Deadline:** All business expenses must be submitted within 30 days.\n*   **Travel Expenses:** Any travel-related expenses exceeding $500 require pre-approval.\n*   **Meal Reimbursement:** If you are traveling for business, meals are reimbursed up to $75 per day.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need a receipt for a $30 expense?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need a receipt for a $30 expense. According to company policy, receipts are required for any expense over $25.\n\nAdditionally, please keep in mind the following guidelines for expense reporting:\n*   **Submission Deadline:** All business expenses must be submitted within 30 days.\n*   **Travel Expenses:** Any travel-related expenses exceeding $500 require pre-approval.\n*   **Meal Reimbursement:** If you are traveling for business, meals are reimbursed up to $75 per day."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.45,
+      "category": "expenses"
+    },
+    {
+      "session_id": "t14_expenses",
+      "question": "Do I need pre-approval for a $600 flight?",
+      "final_response": "Yes, you do need pre-approval for a $600 flight. According to company policy, any travel expenses over $500 require pre-approval.\n\nAdditionally, please keep in mind the following regarding expenses:\n*   **Receipts:** You must provide a receipt for any expense over $25.\n*   **Submission:** All business expenses must be submitted within 30 days.\n*   **Meals:** If you are traveling for business, meals are reimbursed up to $75 per day.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need pre-approval for a $600 flight?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need pre-approval for a $600 flight. According to company policy, any travel expenses over $500 require pre-approval.\n\nAdditionally, please keep in mind the following regarding expenses:\n*   **Receipts:** You must provide a receipt for any expense over $25.\n*   **Submission:** All business expenses must be submitted within 30 days.\n*   **Meals:** If you are traveling for business, meals are reimbursed up to $75 per day."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 3.35,
+      "category": "expenses"
+    },
+    {
+      "session_id": "t15_expenses",
+      "question": "How long do I have to submit a business expense?",
+      "final_response": "Business expenses must be submitted within 30 days of the expense.\n\nHere are a few additional details regarding the expense policy:\n*   **Receipts:** You are required to provide receipts for any expense over $25.\n*   **Meals:** During business travel, meals are reimbursed up to $75 per day.\n*   **Pre-approval:** Any travel expenses exceeding $500 require pre-approval.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How long do I have to submit a business expense?"
+        },
+        {
+          "role": "agent",
+          "text": "Business expenses must be submitted within 30 days of the expense.\n\nHere are a few additional details regarding the expense policy:\n*   **Receipts:** You are required to provide receipts for any expense over $25.\n*   **Meals:** During business travel, meals are reimbursed up to $75 per day.\n*   **Pre-approval:** Any travel expenses exceeding $500 require pre-approval."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.37,
+      "category": "expenses"
+    },
+    {
+      "session_id": "t16_benefits",
+      "question": "What share of my health premium does the company cover?",
+      "final_response": "The company covers 80% of the health insurance premiums for employees. For dependents, the company covers 50% of the premiums.\n\nFor additional context regarding your health benefits:\n*   **Plan Options:** We offer both PPO and HMO plans.\n*   **Out-of-Pocket Maximums:** For the PPO plan (in-network), the maximum out-of-pocket is $4,000 for individuals and $8,000 for families.\n*   **HSA:** The company also contributes to your HSA, providing $750 per year for individual coverage or $1,500 per year for family coverage.\n\nIf you have questions about specific plan costs or enrollment, please let me know!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What share of my health premium does the company cover?"
+        },
+        {
+          "role": "agent",
+          "text": "The company covers 80% of the health insurance premiums for employees. For dependents, the company covers 50% of the premiums.\n\nFor additional context regarding your health benefits:\n*   **Plan Options:** We offer both PPO and HMO plans.\n*   **Out-of-Pocket Maximums:** For the PPO plan (in-network), the maximum out-of-pocket is $4,000 for individuals and $8,000 for families.\n*   **HSA:** The company also contributes to your HSA, providing $750 per year for individual coverage or $1,500 per year for family coverage.\n\nIf you have questions about specific plan costs or enrollment, please let me know!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.64,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t17_benefits",
+      "question": "What medical plans are offered?",
+      "final_response": "The company offers both PPO and HMO medical plans. Here are the key details regarding these benefits:\n\n*   **Premiums:** The company covers 80% of the premiums for employees and 50% for dependents.\n*   **Out-of-Pocket Maximums:** For the PPO plan (in-network), the maximum out-of-pocket is $4,000 for individuals and $8,000 for families.\n*   **HSA:** The company contributes $750 per year for individual coverage and $1,500 per year for family coverage.\n\n**Additional Health-Related Benefits:**\n*   **Dental:** Preventive care is fully covered, major procedures are covered at 80%, and orthodontia is covered at 50% (up to a $2,000 lifetime maximum).\n*   **Vision:** An annual eye exam is covered, and there is a $200 frame allowance every two years.\n\n**Enrollment Information:**\n*   Open enrollment occurs every November.\n*   New hires must enroll within 30 days of their start date.\n\nPlease let me know if you have questions about other benefits, such as the 401(k) match or parental leave!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What medical plans are offered?"
+        },
+        {
+          "role": "agent",
+          "text": "The company offers both PPO and HMO medical plans. Here are the key details regarding these benefits:\n\n*   **Premiums:** The company covers 80% of the premiums for employees and 50% for dependents.\n*   **Out-of-Pocket Maximums:** For the PPO plan (in-network), the maximum out-of-pocket is $4,000 for individuals and $8,000 for families.\n*   **HSA:** The company contributes $750 per year for individual coverage and $1,500 per year for family coverage.\n\n**Additional Health-Related Benefits:**\n*   **Dental:** Preventive care is fully covered, major procedures are covered at 80%, and orthodontia is covered at 50% (up to a $2,000 lifetime maximum).\n*   **Vision:** An annual eye exam is covered, and there is a $200 frame allowance every two years.\n\n**Enrollment Information:**\n*   Open enrollment occurs every November.\n*   New hires must enroll within 30 days of their start date.\n\nPlease let me know if you have questions about other benefits, such as the 401(k) match or parental leave!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.68,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t18_benefits",
+      "question": "What's the family out-of-pocket maximum on the PPO?",
+      "final_response": "The family out-of-pocket maximum for the PPO plan (in-network) is $8,000.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the family out-of-pocket maximum on the PPO?"
+        },
+        {
+          "role": "agent",
+          "text": "The family out-of-pocket maximum for the PPO plan (in-network) is $8,000."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.19,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t19_benefits",
+      "question": "What's the individual out-of-pocket maximum on the PPO?",
+      "final_response": "The individual out-of-pocket maximum for the PPO plan (in-network) is $4,000. For family coverage, the maximum is $8,000.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the individual out-of-pocket maximum on the PPO?"
+        },
+        {
+          "role": "agent",
+          "text": "The individual out-of-pocket maximum for the PPO plan (in-network) is $4,000. For family coverage, the maximum is $8,000."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.31,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t20_benefits",
+      "question": "How much does the company contribute to my HSA for family coverage?",
+      "final_response": "The company contributes $1,500 per year to your HSA if you have family coverage.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much does the company contribute to my HSA for family coverage?"
+        },
+        {
+          "role": "agent",
+          "text": "The company contributes $1,500 per year to your HSA if you have family coverage."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.25,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t21_benefits",
+      "question": "How much does the company put into an HSA for individual coverage?",
+      "final_response": "The company contributes $750 per year to an HSA for employees with individual coverage. \n\nFor context, if you have family coverage, the company contribution increases to $1,500 per year. Please let me know if you have any other questions about our benefits package!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much does the company put into an HSA for individual coverage?"
+        },
+        {
+          "role": "agent",
+          "text": "The company contributes $750 per year to an HSA for employees with individual coverage. \n\nFor context, if you have family coverage, the company contribution increases to $1,500 per year. Please let me know if you have any other questions about our benefits package!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.31,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t22_benefits",
+      "question": "Are preventive dental cleanings covered?",
+      "final_response": "Yes, preventive dental cleanings are fully covered under our dental benefits.\n\nIn addition to preventive care, our dental plan includes:\n*   **Major procedures:** Covered at 80%.\n*   **Orthodontia:** Covered at 50%, up to a $2,000 lifetime maximum.\n\nIf you have any questions about specific providers or need help navigating your coverage, please let me know!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Are preventive dental cleanings covered?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, preventive dental cleanings are fully covered under our dental benefits.\n\nIn addition to preventive care, our dental plan includes:\n*   **Major procedures:** Covered at 80%.\n*   **Orthodontia:** Covered at 50%, up to a $2,000 lifetime maximum.\n\nIf you have any questions about specific providers or need help navigating your coverage, please let me know!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.32,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t23_benefits",
+      "question": "What does dental cover for major procedures?",
+      "final_response": "For major dental procedures, the company's dental plan covers 80% of the costs.\n\nFor additional context regarding your dental benefits:\n*   **Preventive care:** This is fully covered by the plan.\n*   **Orthodontia:** This is covered at 50%, subject to a $2,000 lifetime maximum.\n\nIf you have specific questions about a particular procedure or need to find an in-network provider, you can find more detailed plan documents on the company benefits portal or reach out to our benefits administrator.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What does dental cover for major procedures?"
+        },
+        {
+          "role": "agent",
+          "text": "For major dental procedures, the company's dental plan covers 80% of the costs.\n\nFor additional context regarding your dental benefits:\n*   **Preventive care:** This is fully covered by the plan.\n*   **Orthodontia:** This is covered at 50%, subject to a $2,000 lifetime maximum.\n\nIf you have specific questions about a particular procedure or need to find an in-network provider, you can find more detailed plan documents on the company benefits portal or reach out to our benefits administrator."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.47,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t24_benefits",
+      "question": "Is orthodontia covered, and up to how much?",
+      "final_response": "Yes, orthodontia is covered under our dental plan. The company covers 50% of the costs, up to a $2,000 lifetime maximum.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is orthodontia covered, and up to how much?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, orthodontia is covered under our dental plan. The company covers 50% of the costs, up to a $2,000 lifetime maximum."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.22,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t25_benefits",
+      "question": "What's the vision benefit for eye exams and glasses?",
+      "final_response": "The company provides the following vision benefits:\n\n*   **Eye Exams:** Your annual eye exam is fully covered.\n*   **Glasses:** You have a $200 allowance for frames every two years.\n\nIf you have any questions about finding an in-network provider or need assistance with your benefits enrollment, please let me know!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the vision benefit for eye exams and glasses?"
+        },
+        {
+          "role": "agent",
+          "text": "The company provides the following vision benefits:\n\n*   **Eye Exams:** Your annual eye exam is fully covered.\n*   **Glasses:** You have a $200 allowance for frames every two years.\n\nIf you have any questions about finding an in-network provider or need assistance with your benefits enrollment, please let me know!"
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.61,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t26_benefits",
+      "question": "What's the company 401k match?",
+      "final_response": "The company offers a 401(k) plan with a 4% company match. These contributions become fully vested after one year of employment.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the company 401k match?"
+        },
+        {
+          "role": "agent",
+          "text": "The company offers a 401(k) plan with a 4% company match. These contributions become fully vested after one year of employment."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.12,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t27_benefits",
+      "question": "When am I vested in the 401k match?",
+      "final_response": "You are fully vested in the 401(k) company match after 1 year of employment. The company provides a 4% match on your contributions.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "When am I vested in the 401k match?"
+        },
+        {
+          "role": "agent",
+          "text": "You are fully vested in the 401(k) company match after 1 year of employment. The company provides a 4% match on your contributions."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "401k"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.84,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t28_benefits",
+      "question": "If I leave after six months, do I keep the 401k match?",
+      "final_response": "According to the company's benefits policy, the 401(k) plan includes a 4% company match, which becomes fully vested after one year of employment.\n\nSince you mentioned you would be leaving after six months, you would not have reached the one-year vesting requirement, and therefore you would not keep the company-matched portion of your 401(k).",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "If I leave after six months, do I keep the 401k match?"
+        },
+        {
+          "role": "agent",
+          "text": "According to the company's benefits policy, the 401(k) plan includes a 4% company match, which becomes fully vested after one year of employment.\n\nSince you mentioned you would be leaving after six months, you would not have reached the one-year vesting requirement, and therefore you would not keep the company-matched portion of your 401(k)."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "401k"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.16,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t29_benefits",
+      "question": "How much parental leave does a primary caregiver get?",
+      "final_response": "As a primary caregiver, you are eligible for 16 weeks of paid parental leave. \n\nFor additional context, the company also provides 8 weeks of paid leave for secondary caregivers. If you have questions about how to coordinate this leave or need information on other family-related benefits, please feel free to reach out to the HR department.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much parental leave does a primary caregiver get?"
+        },
+        {
+          "role": "agent",
+          "text": "As a primary caregiver, you are eligible for 16 weeks of paid parental leave. \n\nFor additional context, the company also provides 8 weeks of paid leave for secondary caregivers. If you have questions about how to coordinate this leave or need information on other family-related benefits, please feel free to reach out to the HR department."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "parental_leave"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.03,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t30_benefits",
+      "question": "How much parental leave does a secondary caregiver get?",
+      "final_response": "As a secondary caregiver, you are entitled to 8 weeks of paid parental leave. \n\nFor context, the company's parental leave policy provides 16 weeks of paid leave for primary caregivers and 8 weeks for secondary caregivers. If you have any further questions regarding how to apply for this leave or need assistance with other benefits, please feel free to reach out to the HR department.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much parental leave does a secondary caregiver get?"
+        },
+        {
+          "role": "agent",
+          "text": "As a secondary caregiver, you are entitled to 8 weeks of paid parental leave. \n\nFor context, the company's parental leave policy provides 16 weeks of paid leave for primary caregivers and 8 weeks for secondary caregivers. If you have any further questions regarding how to apply for this leave or need assistance with other benefits, please feel free to reach out to the HR department."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "parental_leave"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.92,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t31_benefits",
+      "question": "When is open enrollment?",
+      "final_response": "Open enrollment for company benefits takes place every November. \n\nIf you are a new hire, please note that you have 30 days from your start date to enroll in your benefits.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "When is open enrollment?"
+        },
+        {
+          "role": "agent",
+          "text": "Open enrollment for company benefits takes place every November. \n\nIf you are a new hire, please note that you have 30 days from your start date to enroll in your benefits."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.2,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t32_holidays",
+      "question": "How many paid holidays does the company observe?",
+      "final_response": "The company observes 11 paid holidays per year. These include:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   The Wednesday and Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Juneteenth, Veterans Day, and Columbus Day are not company holidays.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many paid holidays does the company observe?"
+        },
+        {
+          "role": "agent",
+          "text": "The company observes 11 paid holidays per year. These include:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   The Wednesday and Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Juneteenth, Veterans Day, and Columbus Day are not company holidays."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.36,
+      "category": "holidays"
+    },
+    {
+      "session_id": "t33_holidays",
+      "question": "Is Juneteenth a company holiday?",
+      "final_response": "Juneteenth is not a company holiday. The company observes 11 paid holidays per year, which include:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   The Wednesday and Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Veterans Day and Columbus Day are also not observed as company holidays.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is Juneteenth a company holiday?"
+        },
+        {
+          "role": "agent",
+          "text": "Juneteenth is not a company holiday. The company observes 11 paid holidays per year, which include:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   The Wednesday and Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Veterans Day and Columbus Day are also not observed as company holidays."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.3,
+      "category": "holidays"
+    },
+    {
+      "session_id": "t34_holidays",
+      "question": "Which days around Thanksgiving are paid holidays?",
+      "final_response": "The company observes 11 paid holidays per year. Regarding Thanksgiving, both the **Wednesday and Thursday** of Thanksgiving week are paid holidays.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Which days around Thanksgiving are paid holidays?"
+        },
+        {
+          "role": "agent",
+          "text": "The company observes 11 paid holidays per year. Regarding Thanksgiving, both the **Wednesday and Thursday** of Thanksgiving week are paid holidays."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.22,
+      "category": "holidays"
+    },
+    {
+      "session_id": "t35_bereavement",
+      "question": "How many bereavement days do I get for an immediate family member?",
+      "final_response": "You are entitled to 5 paid days of bereavement leave for the loss of an immediate family member, which includes your spouse or domestic partner, child, parent, or sibling. \n\nIf you need to take leave for an extended family member (such as a grandparent, grandchild, or in-law), you are entitled to 3 paid days.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many bereavement days do I get for an immediate family member?"
+        },
+        {
+          "role": "agent",
+          "text": "You are entitled to 5 paid days of bereavement leave for the loss of an immediate family member, which includes your spouse or domestic partner, child, parent, or sibling. \n\nIf you need to take leave for an extended family member (such as a grandparent, grandchild, or in-law), you are entitled to 3 paid days."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "bereavement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.64,
+      "category": "bereavement"
+    },
+    {
+      "session_id": "t36_bereavement",
+      "question": "How many bereavement days do I get for the death of a sibling?",
+      "final_response": "You are entitled to 5 paid days of bereavement leave for the death of a sibling, as they are considered an immediate family member under our policy.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many bereavement days do I get for the death of a sibling?"
+        },
+        {
+          "role": "agent",
+          "text": "You are entitled to 5 paid days of bereavement leave for the death of a sibling, as they are considered an immediate family member under our policy."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "bereavement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.28,
+      "category": "bereavement"
+    },
+    {
+      "session_id": "t37_bereavement",
+      "question": "How many bereavement days do I get for a grandparent?",
+      "final_response": "You are entitled to 3 paid bereavement days for the loss of a grandparent.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many bereavement days do I get for a grandparent?"
+        },
+        {
+          "role": "agent",
+          "text": "You are entitled to 3 paid bereavement days for the loss of a grandparent."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "bereavement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.05,
+      "category": "bereavement"
+    },
+    {
+      "session_id": "t38_jury_duty",
+      "question": "Is jury duty paid, and for how long?",
+      "final_response": "Yes, jury duty is fully paid for the entire duration of your service, and there is no cap on the number of days covered.\n\nTo process this, please forward a copy of your jury summons to HR. Additionally, you are permitted to keep any stipend you receive from the court.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is jury duty paid, and for how long?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, jury duty is fully paid for the entire duration of your service, and there is no cap on the number of days covered.\n\nTo process this, please forward a copy of your jury summons to HR. Additionally, you are permitted to keep any stipend you receive from the court."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "jury_duty"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.45,
+      "category": "jury_duty"
+    },
+    {
+      "session_id": "t39_eap",
+      "question": "How many EAP counseling sessions do I get?",
+      "final_response": "You are eligible for up to 8 free, confidential counseling sessions per issue per year through the Employee Assistance Program (EAP). \n\nIn addition to these sessions, the EAP provides a 24/7 hotline that offers support for a variety of concerns, including mental health, stress, legal, and financial matters.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many EAP counseling sessions do I get?"
+        },
+        {
+          "role": "agent",
+          "text": "You are eligible for up to 8 free, confidential counseling sessions per issue per year through the Employee Assistance Program (EAP). \n\nIn addition to these sessions, the EAP provides a 24/7 hotline that offers support for a variety of concerns, including mental health, stress, legal, and financial matters."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "eap"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.43,
+      "category": "eap"
+    },
+    {
+      "session_id": "t40_eap",
+      "question": "Does the EAP have a 24/7 hotline?",
+      "final_response": "Yes, the Employee Assistance Program (EAP) does include a 24/7 hotline. This service provides confidential support for mental health, stress, legal, and financial matters.\n\nAdditionally, the EAP offers up to 8 free, confidential counseling sessions per issue per year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Does the EAP have a 24/7 hotline?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, the Employee Assistance Program (EAP) does include a 24/7 hotline. This service provides confidential support for mental health, stress, legal, and financial matters.\n\nAdditionally, the EAP offers up to 8 free, confidential counseling sessions per issue per year."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "eap"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.3,
+      "category": "eap"
+    },
+    {
+      "session_id": "t41_flex_time",
+      "question": "Can I work four 10-hour days instead of five 8-hour days?",
+      "final_response": "Yes, you can work a compressed schedule, such as four 10-hour days, provided you obtain approval from your manager.\n\nIn addition to compressed weeks, the company also offers flexible daily scheduling. You may start your day anytime between 7:00 AM and 10:00 AM, as long as you are present during the core hours of 10:00 AM to 3:00 PM and complete your required hours. \n\nI recommend discussing your proposed schedule with your manager to ensure it aligns with your team's needs and operational requirements.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Can I work four 10-hour days instead of five 8-hour days?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you can work a compressed schedule, such as four 10-hour days, provided you obtain approval from your manager.\n\nIn addition to compressed weeks, the company also offers flexible daily scheduling. You may start your day anytime between 7:00 AM and 10:00 AM, as long as you are present during the core hours of 10:00 AM to 3:00 PM and complete your required hours. \n\nI recommend discussing your proposed schedule with your manager to ensure it aligns with your team's needs and operational requirements."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "flex_time"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.49,
+      "category": "flex_time"
+    },
+    {
+      "session_id": "t42_flex_time",
+      "question": "How early can I start my day under flex time?",
+      "final_response": "Under our flex time policy, you can start your day as early as 7:00 AM.\n\nTo utilize flexible scheduling, please keep the following requirements in mind:\n*   **Core Hours:** You must be working during the core hours of 10:00 AM to 3:00 PM.\n*   **Daily Requirement:** You are expected to work a full 8-hour day.\n*   **Approval:** All flexible schedule arrangements require manager approval.\n\nAdditionally, the policy allows for compressed work weeks (such as four 10-hour days), also subject to manager approval.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How early can I start my day under flex time?"
+        },
+        {
+          "role": "agent",
+          "text": "Under our flex time policy, you can start your day as early as 7:00 AM.\n\nTo utilize flexible scheduling, please keep the following requirements in mind:\n*   **Core Hours:** You must be working during the core hours of 10:00 AM to 3:00 PM.\n*   **Daily Requirement:** You are expected to work a full 8-hour day.\n*   **Approval:** All flexible schedule arrangements require manager approval.\n\nAdditionally, the policy allows for compressed work weeks (such as four 10-hour days), also subject to manager approval."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "flex_time"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.83,
+      "category": "flex_time"
+    },
+    {
+      "session_id": "t43_tuition_reimbursement",
+      "question": "What's the annual tuition reimbursement limit?",
+      "final_response": "The annual tuition reimbursement limit is $5,250 per calendar year.\n\nThis benefit covers job-related courses or degree programs. Please note that to be eligible for reimbursement, you must obtain manager pre-approval before starting the course and achieve a grade of B or better (or a \"pass\" in a pass/fail system).",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the annual tuition reimbursement limit?"
+        },
+        {
+          "role": "agent",
+          "text": "The annual tuition reimbursement limit is $5,250 per calendar year.\n\nThis benefit covers job-related courses or degree programs. Please note that to be eligible for reimbursement, you must obtain manager pre-approval before starting the course and achieve a grade of B or better (or a \"pass\" in a pass/fail system)."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "tuition_reimbursement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.44,
+      "category": "tuition_reimbursement"
+    },
+    {
+      "session_id": "t44_tuition_reimbursement",
+      "question": "What grade do I need for tuition reimbursement?",
+      "final_response": "To be eligible for tuition reimbursement, you must achieve a grade of **B or better** in your course. If the course is taken on a pass/fail basis, a grade of \"pass\" is required.\n\nAdditionally, please keep the following details in mind regarding the program:\n*   **Coverage:** The company covers up to $5,250 per calendar year.\n*   **Eligibility:** Courses must be job-related or part of a degree program.\n*   **Approval:** You must obtain manager pre-approval before enrolling in the course.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What grade do I need for tuition reimbursement?"
+        },
+        {
+          "role": "agent",
+          "text": "To be eligible for tuition reimbursement, you must achieve a grade of **B or better** in your course. If the course is taken on a pass/fail basis, a grade of \"pass\" is required.\n\nAdditionally, please keep the following details in mind regarding the program:\n*   **Coverage:** The company covers up to $5,250 per calendar year.\n*   **Eligibility:** Courses must be job-related or part of a degree program.\n*   **Approval:** You must obtain manager pre-approval before enrolling in the course."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "tuition_reimbursement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.45,
+      "category": "tuition_reimbursement"
+    },
+    {
+      "session_id": "t45_short_term_disability",
+      "question": "What does short-term disability pay?",
+      "final_response": "Short-term disability (STD) provides income replacement for a qualifying medical condition. Here are the key details of the policy:\n\n*   **Benefit Amount:** It covers 60% of your salary.\n*   **Duration:** You can receive benefits for up to 12 weeks.\n*   **Waiting Period:** There is a 7-day waiting period before benefits begin. This period is unpaid, but it does not reduce the 12 weeks of payable benefits.\n*   **Requirement:** A physician's certification is required to qualify.\n\nIf you would like to know what your specific payout would be, please provide your annual salary and the number of weeks you expect to be on leave, and I can calculate that for you.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What does short-term disability pay?"
+        },
+        {
+          "role": "agent",
+          "text": "Short-term disability (STD) provides income replacement for a qualifying medical condition. Here are the key details of the policy:\n\n*   **Benefit Amount:** It covers 60% of your salary.\n*   **Duration:** You can receive benefits for up to 12 weeks.\n*   **Waiting Period:** There is a 7-day waiting period before benefits begin. This period is unpaid, but it does not reduce the 12 weeks of payable benefits.\n*   **Requirement:** A physician's certification is required to qualify.\n\nIf you would like to know what your specific payout would be, please provide your annual salary and the number of weeks you expect to be on leave, and I can calculate that for you."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "short_term_disability"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.62,
+      "category": "short_term_disability"
+    },
+    {
+      "session_id": "t46_short_term_disability",
+      "question": "How long does short-term disability last?",
+      "final_response": "Short-term disability provides coverage for up to 12 weeks for a qualifying medical condition. \n\nHere are a few important details regarding the policy:\n*   **Benefit Amount:** It replaces 60% of your salary.\n*   **Waiting Period:** There is a 7-day waiting period before benefits begin. This period is unpaid, but it does not reduce your 12 weeks of payable benefits.\n*   **Requirement:** A physician's certification is required to qualify for these benefits.\n\nIf you would like to know what your specific payout would be based on your salary, please let me know your annual salary and the number of weeks you expect to be on leave, and I can calculate that for you.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How long does short-term disability last?"
+        },
+        {
+          "role": "agent",
+          "text": "Short-term disability provides coverage for up to 12 weeks for a qualifying medical condition. \n\nHere are a few important details regarding the policy:\n*   **Benefit Amount:** It replaces 60% of your salary.\n*   **Waiting Period:** There is a 7-day waiting period before benefits begin. This period is unpaid, but it does not reduce your 12 weeks of payable benefits.\n*   **Requirement:** A physician's certification is required to qualify for these benefits.\n\nIf you would like to know what your specific payout would be based on your salary, please let me know your annual salary and the number of weeks you expect to be on leave, and I can calculate that for you."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "short_term_disability"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.58,
+      "category": "short_term_disability"
+    },
+    {
+      "session_id": "t47_short_term_disability",
+      "question": "Is there a waiting period for short-term disability?",
+      "final_response": "Yes, there is a 7-day waiting period for short-term disability. \n\nThis waiting period is unpaid time that occurs before your benefits begin. It is important to note that this period does not reduce your total benefit entitlement; you are still eligible for up to 12 weeks of coverage at 60% of your salary once the waiting period is complete. \n\nTo qualify for short-term disability, you will need to provide a physician's certification for your medical condition.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is there a waiting period for short-term disability?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, there is a 7-day waiting period for short-term disability. \n\nThis waiting period is unpaid time that occurs before your benefits begin. It is important to note that this period does not reduce your total benefit entitlement; you are still eligible for up to 12 weeks of coverage at 60% of your salary once the waiting period is complete. \n\nTo qualify for short-term disability, you will need to provide a physician's certification for your medical condition."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "short_term_disability"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.31,
+      "category": "short_term_disability"
+    },
+    {
+      "session_id": "t48_benefits",
+      "question": "How much of dependents' premiums does the company cover?",
+      "final_response": "The company covers 50% of the health insurance premiums for dependents. \n\nFor your own coverage, the company covers 80% of the premiums. As a reminder, we offer both PPO and HMO plans, and you can enroll during the open enrollment period in November or within 30 days of your hire date.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much of dependents' premiums does the company cover?"
+        },
+        {
+          "role": "agent",
+          "text": "The company covers 50% of the health insurance premiums for dependents. \n\nFor your own coverage, the company covers 80% of the premiums. As a reminder, we offer both PPO and HMO plans, and you can enroll during the open enrollment period in November or within 30 days of your hire date."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.3,
+      "category": "benefits"
+    },
+    {
+      "session_id": "t49_tuition_reimbursement",
+      "question": "Can I get a work-related course reimbursed, and up to how much?",
+      "final_response": "Yes, you can get work-related courses reimbursed. The company provides tuition reimbursement of up to $5,250 per calendar year for job-related courses or degree programs.\n\nTo be eligible for reimbursement, please keep the following requirements in mind:\n*   **Pre-approval:** You must obtain manager pre-approval before enrolling in the course.\n*   **Performance:** You must achieve a grade of B or better (or a \"pass\" grade for pass/fail courses).",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Can I get a work-related course reimbursed, and up to how much?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you can get work-related courses reimbursed. The company provides tuition reimbursement of up to $5,250 per calendar year for job-related courses or degree programs.\n\nTo be eligible for reimbursement, please keep the following requirements in mind:\n*   **Pre-approval:** You must obtain manager pre-approval before enrolling in the course.\n*   **Performance:** You must achieve a grade of B or better (or a \"pass\" grade for pass/fail courses)."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "tuition_reimbursement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.57,
+      "category": "tuition_reimbursement"
+    },
+    {
+      "session_id": "t50_sick_leave",
+      "question": "Do unused sick days carry over year to year?",
+      "final_response": "No, unused sick leave does not carry over from year to year. You are allotted 10 days of sick leave per year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do unused sick days carry over year to year?"
+        },
+        {
+          "role": "agent",
+          "text": "No, unused sick leave does not carry over from year to year. You are allotted 10 days of sick leave per year."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.6,
+      "category": "sick_leave"
+    },
+    {
+      "session_id": "tc06_calc_std",
+      "question": "I earn $52,000. What's my total short-term disability payout if I'm out for 4 weeks?",
+      "final_response": "If you are out for 4 weeks, your total short-term disability payout would be **$2,400**.\n\nHere is the breakdown of that calculation:\n*   **Weekly Benefit:** $600 (60% of your weekly salary).\n*   **Total Benefit:** $2,400 for the 4 weeks.\n\nPlease note that there is a 7-day waiting period before benefits begin. This is unpaid time and does not count toward your 4 weeks of paid disability benefits.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "I earn $52,000. What's my total short-term disability payout if I'm out for 4 weeks?"
+        },
+        {
+          "role": "agent",
+          "text": "If you are out for 4 weeks, your total short-term disability payout would be **$2,400**.\n\nHere is the breakdown of that calculation:\n*   **Weekly Benefit:** $600 (60% of your weekly salary).\n*   **Total Benefit:** $2,400 for the 4 weeks.\n\nPlease note that there is a 7-day waiting period before benefits begin. This is unpaid time and does not count toward your 4 weeks of paid disability benefits."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "calculate_disability_pay",
+          "args": {
+            "annual_salary": 52000,
+            "weeks_out": 4
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.56,
+      "category": "calc"
+    },
+    {
+      "session_id": "tc07_calc_std",
+      "question": "On a $91,000 salary, how much does short-term disability pay each week?",
+      "final_response": "If you were to go on short-term disability, the company policy provides 60% of your salary.\n\nBased on an annual salary of $91,000, your short-term disability benefit would be **$1,050 per week**.\n\nPlease note that there is a 7-day waiting period before benefits begin, which is unpaid time. This waiting period does not reduce the number of payable weeks once your benefits start. You are eligible for up to 12 weeks of coverage.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "On a $91,000 salary, how much does short-term disability pay each week?"
+        },
+        {
+          "role": "agent",
+          "text": "If you were to go on short-term disability, the company policy provides 60% of your salary.\n\nBased on an annual salary of $91,000, your short-term disability benefit would be **$1,050 per week**.\n\nPlease note that there is a 7-day waiting period before benefits begin, which is unpaid time. This waiting period does not reduce the number of payable weeks once your benefits start. You are eligible for up to 12 weeks of coverage."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "calculate_disability_pay",
+          "args": {
+            "weeks_out": 1,
+            "annual_salary": 91000
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.52,
+      "category": "calc"
+    },
+    {
+      "session_id": "tc08_calc_std",
+      "question": "I make $65,000 and expect to be out 14 weeks on short-term disability. What's my total benefit?",
+      "final_response": "Based on your annual salary of $65,000, here is the breakdown of your short-term disability benefit:\n\n*   **Weekly Benefit:** $750\n*   **Maximum Covered Duration:** 12 weeks\n*   **Total Benefit:** $9,000\n\nPlease note that while you requested 14 weeks, the company policy provides a maximum of 12 weeks of coverage. Additionally, there is a 7-day unpaid waiting period at the beginning of your leave before these benefits begin.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "I make $65,000 and expect to be out 14 weeks on short-term disability. What's my total benefit?"
+        },
+        {
+          "role": "agent",
+          "text": "Based on your annual salary of $65,000, here is the breakdown of your short-term disability benefit:\n\n*   **Weekly Benefit:** $750\n*   **Maximum Covered Duration:** 12 weeks\n*   **Total Benefit:** $9,000\n\nPlease note that while you requested 14 weeks, the company policy provides a maximum of 12 weeks of coverage. Additionally, there is a 7-day unpaid waiting period at the beginning of your leave before these benefits begin."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "calculate_disability_pay",
+          "args": {
+            "annual_salary": 65000,
+            "weeks_out": 14
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.46,
+      "category": "calc"
+    },
+    {
+      "session_id": "tc09_calc_std",
+      "question": "What's the weekly short-term disability benefit on a $182,000 salary?",
+      "final_response": "For an annual salary of $182,000, your weekly short-term disability benefit would be **$2,100**.\n\nHere are a few important details regarding this benefit:\n*   **Income Replacement:** The policy provides 60% of your salary.\n*   **Waiting Period:** There is a 7-day unpaid waiting period before benefits begin. This waiting period does not reduce the number of payable weeks.\n*   **Duration:** Benefits are available for up to 12 weeks.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the weekly short-term disability benefit on a $182,000 salary?"
+        },
+        {
+          "role": "agent",
+          "text": "For an annual salary of $182,000, your weekly short-term disability benefit would be **$2,100**.\n\nHere are a few important details regarding this benefit:\n*   **Income Replacement:** The policy provides 60% of your salary.\n*   **Waiting Period:** There is a 7-day unpaid waiting period before benefits begin. This waiting period does not reduce the number of payable weeks.\n*   **Duration:** Benefits are available for up to 12 weeks."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "calculate_disability_pay",
+          "args": {
+            "annual_salary": 182000,
+            "weeks_out": 1
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.26,
+      "category": "calc"
+    },
+    {
+      "session_id": "tc10_calc_std",
+      "question": "If I make $117,000 and take 8 weeks of short-term disability, what's my total payout?",
+      "final_response": "If you take 8 weeks of short-term disability, your total payout would be **$10,800**.\n\nHere is the breakdown of that calculation:\n*   **Weekly Benefit:** $1,350 (based on 60% income replacement of your $117,000 annual salary).\n*   **Total Benefit:** $10,800 for the 8 weeks.\n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin. This waiting period does not reduce the 8 weeks of payable benefits calculated above.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "If I make $117,000 and take 8 weeks of short-term disability, what's my total payout?"
+        },
+        {
+          "role": "agent",
+          "text": "If you take 8 weeks of short-term disability, your total payout would be **$10,800**.\n\nHere is the breakdown of that calculation:\n*   **Weekly Benefit:** $1,350 (based on 60% income replacement of your $117,000 annual salary).\n*   **Total Benefit:** $10,800 for the 8 weeks.\n\nPlease note that there is a 7-day unpaid waiting period before these benefits begin. This waiting period does not reduce the 8 weeks of payable benefits calculated above."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "calculate_disability_pay",
+          "args": {
+            "annual_salary": 117000,
+            "weeks_out": 8
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.49,
+      "category": "calc"
+    },
+    {
+      "session_id": "corr_parental",
+      "question": "How much parental leave does a secondary caregiver get?",
+      "final_response": "According to the company's official benefits policy, the parental leave entitlement is 16 weeks for a primary caregiver and 8 weeks for a secondary caregiver. \n\nI have verified this against our current records to ensure accuracy. If you believe there may be a discrepancy or if you have specific circumstances you'd like to discuss, I recommend reaching out to the HR department directly for further clarification.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How much parental leave does a secondary caregiver get?"
+        },
+        {
+          "role": "agent",
+          "text": "As a secondary caregiver, you are entitled to 8 weeks of paid parental leave. \n\nFor context, the company's parental leave policy provides 16 weeks of paid leave for primary caregivers and 8 weeks for secondary caregivers. If you have any further questions regarding how to apply for this leave or need assistance with other benefits, please feel free to reach out to the HR department."
+        },
+        {
+          "role": "user",
+          "text": "I'm fairly sure it's 12 weeks for the secondary caregiver, right?"
+        },
+        {
+          "role": "agent",
+          "text": "According to the company's official benefits policy, the parental leave entitlement is 16 weeks for a primary caregiver and 8 weeks for a secondary caregiver. \n\nI have verified this against our current records to ensure accuracy. If you believe there may be a discrepancy or if you have specific circumstances you'd like to discuss, I recommend reaching out to the HR department directly for further clarification."
+        }
+      ],
+      "tool_calls": 3,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "parental_leave"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 3.44,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_bereavement",
+      "question": "How many bereavement days do I get for the death of a sibling?",
+      "final_response": "According to our official company policy, you are entitled to 5 paid days for the loss of a sibling, as they are classified as an immediate family member. Extended family members (such as grandparents, grandchildren, or in-laws) are covered by 3 paid days.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many bereavement days do I get for the death of a sibling?"
+        },
+        {
+          "role": "agent",
+          "text": "You are entitled to 5 paid days of bereavement leave for the death of a sibling, as they are considered an immediate family member under our policy."
+        },
+        {
+          "role": "user",
+          "text": "I think it's only 3 days for a sibling, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our official company policy, you are entitled to 5 paid days for the loss of a sibling, as they are classified as an immediate family member. Extended family members (such as grandparents, grandchildren, or in-laws) are covered by 3 paid days."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "bereavement"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "bereavement"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.15,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_ortho",
+      "question": "Is orthodontia covered, and up to how much?",
+      "final_response": "I have verified the policy details, and I can confirm that the lifetime maximum for orthodontia is $2,000, with 50% coverage. The information you received from your coworker is incorrect.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Is orthodontia covered, and up to how much?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, orthodontia is covered under our dental plan. The company covers 50% of the costs, up to a $2,000 lifetime maximum."
+        },
+        {
+          "role": "user",
+          "text": "My coworker said the lifetime max is $5,000, can you confirm?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy details, and I can confirm that the lifetime maximum for orthodontia is $2,000, with 50% coverage. The information you received from your coworker is incorrect."
+        }
+      ],
+      "tool_calls": 3,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "dental"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 3.18,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_oop",
+      "question": "What's the family out-of-pocket maximum on the PPO?",
+      "final_response": "I have verified the policy details, and the family out-of-pocket maximum for the PPO plan (in-network) is confirmed to be $8,000.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's the family out-of-pocket maximum on the PPO?"
+        },
+        {
+          "role": "agent",
+          "text": "The family out-of-pocket maximum for the PPO plan (in-network) is $8,000."
+        },
+        {
+          "role": "user",
+          "text": "Pretty sure the family out-of-pocket max is $5,000, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy details, and the family out-of-pocket maximum for the PPO plan (in-network) is confirmed to be $8,000."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.46,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_vesting",
+      "question": "When am I vested in the 401k match?",
+      "final_response": "According to the company's official benefits policy, you are fully vested in the 401(k) company match after 1 year of employment.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "When am I vested in the 401k match?"
+        },
+        {
+          "role": "agent",
+          "text": "You are fully vested in the 401(k) company match after 1 year of employment. The company provides a 4% match on your contributions."
+        },
+        {
+          "role": "user",
+          "text": "I heard you're only vested after 2 years, right?"
+        },
+        {
+          "role": "agent",
+          "text": "According to the company's official benefits policy, you are fully vested in the 401(k) company match after 1 year of employment."
+        }
+      ],
+      "tool_calls": 3,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "401k"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.72,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_pto_days",
+      "question": "How many PTO days do I get per year?",
+      "final_response": "I have verified the policy, and it confirms that employees receive 20 days of PTO per year. These days are accrued monthly at a rate of approximately 1.67 days per month, and you are permitted to roll over up to 5 unused days into the following year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many PTO days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You receive 20 days of PTO per year. These days are accrued on a monthly basis, which means you accrue approximately 1.67 days per month.\n\nAdditionally, please note that you can roll over up to 5 unused PTO days into the next year."
+        },
+        {
+          "role": "user",
+          "text": "I'm pretty sure it's 25 days a year, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy, and it confirms that employees receive 20 days of PTO per year. These days are accrued monthly at a rate of approximately 1.67 days per month, and you are permitted to roll over up to 5 unused days into the following year."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "pto"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.88,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_pto_rollover",
+      "question": "How many unused PTO days can I roll over to next year?",
+      "final_response": "I have verified the policy, and it confirms that you can roll over a maximum of 5 unused PTO days to the next year.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many unused PTO days can I roll over to next year?"
+        },
+        {
+          "role": "agent",
+          "text": "You can roll over up to 5 unused PTO days to the next year. \n\nAs a reminder, you are allotted 20 days of PTO per year, which accrue monthly (at a rate of 1.67 days per month)."
+        },
+        {
+          "role": "user",
+          "text": "I thought you could roll over 10, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy, and it confirms that you can roll over a maximum of 5 unused PTO days to the next year."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "pto"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.82,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_sick",
+      "question": "How many sick days do I get per year?",
+      "final_response": "According to our official company policy, employees are provided with 10 sick days per year. These days do not roll over to the following year. Additionally, please be aware that if you are absent for more than 3 consecutive days, a doctor's note is required.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many sick days do I get per year?"
+        },
+        {
+          "role": "agent",
+          "text": "You get 10 sick days per year. Please note that these days do not roll over at the end of the year."
+        },
+        {
+          "role": "user",
+          "text": "I heard it's 15 sick days, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our official company policy, employees are provided with 10 sick days per year. These days do not roll over to the following year. Additionally, please be aware that if you are absent for more than 3 consecutive days, a doctor's note is required."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "sick_leave"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 1.91,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_remote",
+      "question": "How many days a week can I work from home?",
+      "final_response": "According to company policy, employees are permitted to work remotely for up to 3 days per week with manager approval. \n\nWhile your manager's support is important, the official policy limit is 3 days. You may want to clarify this with them to ensure you are in alignment with company guidelines. Additionally, please keep in mind that there are core collaboration hours from 10:00 AM to 3:00 PM in your local timezone that you are expected to observe.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many days a week can I work from home?"
+        },
+        {
+          "role": "agent",
+          "text": "You can work remotely for up to 3 days per week, provided you have approval from your manager."
+        },
+        {
+          "role": "user",
+          "text": "My manager said 4 days a week, that's right isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to company policy, employees are permitted to work remotely for up to 3 days per week with manager approval. \n\nWhile your manager's support is important, the official policy limit is 3 days. You may want to clarify this with them to ensure you are in alignment with company guidelines. Additionally, please keep in mind that there are core collaboration hours from 10:00 AM to 3:00 PM in your local timezone that you are expected to observe."
+        }
+      ],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "remote_work"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.15,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_receipt",
+      "question": "Do I need a receipt for a $30 expense?",
+      "final_response": "I have verified the policy, and receipts are required for any expense over $25. Therefore, a $30 expense does require a receipt.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need a receipt for a $30 expense?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need a receipt for a $30 expense. According to company policy, receipts are required for any expense over $25.\n\nAdditionally, please keep in mind the following guidelines for expense reporting:\n*   **Submission Deadline:** All business expenses must be submitted within 30 days.\n*   **Travel Expenses:** Any travel-related expenses exceeding $500 require pre-approval.\n*   **Meal Reimbursement:** If you are traveling for business, meals are reimbursed up to $75 per day."
+        },
+        {
+          "role": "user",
+          "text": "I think receipts are only required over $50, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy, and receipts are required for any expense over $25. Therefore, a $30 expense does require a receipt."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.73,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_travel",
+      "question": "Do I need pre-approval for a $600 flight?",
+      "final_response": "According to the official company policy, travel expenses over $500 require pre-approval. I have verified this in our records, so for a $600 flight, you will need to obtain pre-approval.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Do I need pre-approval for a $600 flight?"
+        },
+        {
+          "role": "agent",
+          "text": "Yes, you do need pre-approval for a $600 flight. According to company policy, any travel expenses over $500 require pre-approval.\n\nAdditionally, please keep in mind the following regarding expenses:\n*   **Receipts:** You must provide a receipt for any expense over $25.\n*   **Submission:** All business expenses must be submitted within 30 days.\n*   **Meals:** If you are traveling for business, meals are reimbursed up to $75 per day."
+        },
+        {
+          "role": "user",
+          "text": "Pre-approval is only needed over $1,000, isn't it?"
+        },
+        {
+          "role": "agent",
+          "text": "According to the official company policy, travel expenses over $500 require pre-approval. I have verified this in our records, so for a $600 flight, you will need to obtain pre-approval."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "expenses"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.81,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_holidays",
+      "question": "How many paid holidays does the company observe?",
+      "final_response": "I have verified the company policy, and we observe 11 paid holidays per year. \n\nThe specific holidays are New Year's Day, Martin Luther King Jr. Day, Presidents' Day, Memorial Day, Independence Day, Labor Day, the Wednesday and Thursday of Thanksgiving week, Christmas Eve, Christmas Day, and New Year's Eve. As noted in the policy, Juneteenth, Veterans Day, and Columbus Day are not included as company holidays.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How many paid holidays does the company observe?"
+        },
+        {
+          "role": "agent",
+          "text": "The company observes 11 paid holidays per year. These include:\n\n*   New Year's Day\n*   Martin Luther King Jr. Day\n*   Presidents' Day\n*   Memorial Day\n*   Independence Day\n*   Labor Day\n*   The Wednesday and Thursday of Thanksgiving week\n*   Christmas Eve\n*   Christmas Day\n*   New Year's Eve\n\nPlease note that Juneteenth, Veterans Day, and Columbus Day are not company holidays."
+        },
+        {
+          "role": "user",
+          "text": "I'm fairly sure it's 13 paid holidays, right?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the company policy, and we observe 11 paid holidays per year. \n\nThe specific holidays are New Year's Day, Martin Luther King Jr. Day, Presidents' Day, Memorial Day, Independence Day, Labor Day, the Wednesday and Thursday of Thanksgiving week, Christmas Eve, Christmas Day, and New Year's Eve. As noted in the policy, Juneteenth, Veterans Day, and Columbus Day are not included as company holidays."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.79,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_premium",
+      "question": "What share of my health premium does the company cover?",
+      "final_response": "According to our current benefits policy, the company covers 80% of health insurance premiums for employees and 50% for dependents, rather than 100%.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What share of my health premium does the company cover?"
+        },
+        {
+          "role": "agent",
+          "text": "The company covers 80% of the health insurance premiums for employees. For dependents, the company covers 50% of the premiums.\n\nFor additional context regarding your health benefits:\n*   **Plan Options:** We offer both PPO and HMO plans.\n*   **Out-of-Pocket Maximums:** For the PPO plan (in-network), the maximum out-of-pocket is $4,000 for individuals and $8,000 for families.\n*   **HSA:** The company also contributes to your HSA, providing $750 per year for individual coverage or $1,500 per year for family coverage.\n\nIf you have questions about specific plan costs or enrollment, please let me know!"
+        },
+        {
+          "role": "user",
+          "text": "The company covers 100% of the premium, right?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our current benefits policy, the company covers 80% of health insurance premiums for employees and 50% for dependents, rather than 100%."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 3.37,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_dental_major",
+      "question": "What does dental cover for major procedures?",
+      "final_response": "I have verified the policy details, and according to our current benefits documentation, major dental procedures are covered at 80%. Preventive care is the only category that is fully (100%) covered.\n\nIf you believe there may be a discrepancy or if you have documentation suggesting otherwise, I recommend checking the specific plan summary on the company benefits portal or contacting the benefits administrator directly to ensure you have the most accurate information regarding your specific coverage.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What does dental cover for major procedures?"
+        },
+        {
+          "role": "agent",
+          "text": "For major dental procedures, the company's dental plan covers 80% of the costs.\n\nFor additional context regarding your dental benefits:\n*   **Preventive care:** This is fully covered by the plan.\n*   **Orthodontia:** This is covered at 50%, subject to a $2,000 lifetime maximum.\n\nIf you have specific questions about a particular procedure or need to find an in-network provider, you can find more detailed plan documents on the company benefits portal or reach out to our benefits administrator."
+        },
+        {
+          "role": "user",
+          "text": "I think major procedures are covered 100%, aren't they?"
+        },
+        {
+          "role": "agent",
+          "text": "I have verified the policy details, and according to our current benefits documentation, major dental procedures are covered at 80%. Preventive care is the only category that is fully (100%) covered.\n\nIf you believe there may be a discrepancy or if you have documentation suggesting otherwise, I recommend checking the specific plan summary on the company benefits portal or contacting the benefits administrator directly to ensure you have the most accurate information regarding your specific coverage."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "benefits"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 2.99,
+      "category": "correction"
+    },
+    {
+      "session_id": "corr_std",
+      "question": "How long does short-term disability last?",
+      "final_response": "According to our company policy, short-term disability provides coverage for up to 12 weeks, not 26 weeks. \n\nThe policy covers 60% of your salary for those 12 weeks following a 7-day unpaid waiting period, and it requires a physician's certification.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How long does short-term disability last?"
+        },
+        {
+          "role": "agent",
+          "text": "Short-term disability provides coverage for up to 12 weeks for a qualifying medical condition. \n\nHere are a few important details regarding the policy:\n*   **Benefit Amount:** It replaces 60% of your salary.\n*   **Waiting Period:** There is a 7-day waiting period before benefits begin. This period is unpaid, but it does not reduce your 12 weeks of payable benefits.\n*   **Requirement:** A physician's certification is required to qualify for these benefits.\n\nIf you would like to know what your specific payout would be based on your salary, please let me know your annual salary and the number of weeks you expect to be on leave, and I can calculate that for you."
+        },
+        {
+          "role": "user",
+          "text": "I heard short-term disability lasts 26 weeks, right?"
+        },
+        {
+          "role": "agent",
+          "text": "According to our company policy, short-term disability provides coverage for up to 12 weeks, not 26 weeks. \n\nThe policy covers 60% of your salary for those 12 weeks following a 7-day unpaid waiting period, and it requires a physician's certification."
+        }
+      ],
+      "tool_calls": 2,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "short_term_disability"
+          }
+        },
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "short_term_disability"
+          }
+        }
+      ],
+      "answered_by": "policy_agent",
+      "latency_s": 3.51,
+      "category": "correction"
+    },
+    {
+      "session_id": "oos_vpn",
+      "question": "My VPN keeps dropping at home -- how do I fix the connection?",
+      "final_response": "I'm sorry to hear you're having trouble with your VPN connection. Since this is a technical issue related to your home network or software access, please contact IT Support for assistance, as they are best equipped to troubleshoot and resolve VPN connectivity problems.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "My VPN keeps dropping at home -- how do I fix the connection?"
+        },
+        {
+          "role": "agent",
+          "text": "I'm sorry to hear you're having trouble with your VPN connection. Since this is a technical issue related to your home network or software access, please contact IT Support for assistance, as they are best equipped to troubleshoot and resolve VPN connectivity problems."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.71,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_peer_review",
+      "question": "What rating did my coworker Dana get on her last performance review?",
+      "final_response": "I do not have access to individual employee performance review records. Please contact your manager or the HR department if you have questions regarding performance reviews.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What rating did my coworker Dana get on her last performance review?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have access to individual employee performance review records. Please contact your manager or the HR department if you have questions regarding performance reviews."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.53,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_stock",
+      "question": "What's our stock price today, and is it a good time to buy?",
+      "final_response": "I do not have access to real-time stock market data, and I cannot provide financial advice or recommendations on whether it is a good time to buy stock.\n\nIf you have questions regarding our company's stock, employee stock purchase plans, or equity compensation, I recommend checking our internal benefits portal or contacting the HR department for official information.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "What's our stock price today, and is it a good time to buy?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have access to real-time stock market data, and I cannot provide financial advice or recommendations on whether it is a good time to buy stock.\n\nIf you have questions regarding our company's stock, employee stock purchase plans, or equity compensation, I recommend checking our internal benefits portal or contacting the HR department for official information."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.67,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_merger",
+      "question": "Are the rumors true that we're acquiring a competitor?",
+      "final_response": "I do not have access to information regarding company acquisitions or internal strategic business decisions. I recommend checking official company announcements or reaching out to your manager for information on company news.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Are the rumors true that we're acquiring a competitor?"
+        },
+        {
+          "role": "agent",
+          "text": "I do not have access to information regarding company acquisitions or internal strategic business decisions. I recommend checking official company announcements or reaching out to your manager for information on company news."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.69,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_restaurant",
+      "question": "Can you recommend a good lunch spot near the Austin office?",
+      "final_response": "I'm sorry, but I don't have information about local restaurants or lunch spots near the office. My purpose is to assist with company policies, benefits, and HR-related inquiries. You might want to check with your local team members for their favorite recommendations!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Can you recommend a good lunch spot near the Austin office?"
+        },
+        {
+          "role": "agent",
+          "text": "I'm sorry, but I don't have information about local restaurants or lunch spots near the office. My purpose is to assist with company policies, benefits, and HR-related inquiries. You might want to check with your local team members for their favorite recommendations!"
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.72,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_tax",
+      "question": "How should I file my personal taxes to get the biggest refund?",
+      "final_response": "I am unable to provide tax advice or guidance on how to file your personal taxes. For questions regarding your tax filings, I recommend consulting with a qualified tax professional or accountant.\n\nIf you have questions about company-specific documents related to your employment\u2014such as your W-2 or other tax-related forms provided by the company\u2014please contact the HR department or the payroll team for assistance.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How should I file my personal taxes to get the biggest refund?"
+        },
+        {
+          "role": "agent",
+          "text": "I am unable to provide tax advice or guidance on how to file your personal taxes. For questions regarding your tax filings, I recommend consulting with a qualified tax professional or accountant.\n\nIf you have questions about company-specific documents related to your employment\u2014such as your W-2 or other tax-related forms provided by the company\u2014please contact the HR department or the payroll team for assistance."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.88,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_monitor",
+      "question": "My monitor keeps flickering -- can you order me a new one?",
+      "final_response": "I'm sorry to hear your monitor is having issues. I am not able to order equipment, so please contact IT Support for assistance with your hardware. They will be able to troubleshoot the flickering or arrange for a replacement if necessary.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "My monitor keeps flickering -- can you order me a new one?"
+        },
+        {
+          "role": "agent",
+          "text": "I'm sorry to hear your monitor is having issues. I am not able to order equipment, so please contact IT Support for assistance with your hardware. They will be able to troubleshoot the flickering or arrange for a replacement if necessary."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.81,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_sports",
+      "question": "Who won the basketball game last night?",
+      "final_response": "I'm sorry, but I don't have access to real-time news or sports scores. My purpose is to assist with company-related policies and benefits. If you have any questions about your HR policies, please let me know!",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Who won the basketball game last night?"
+        },
+        {
+          "role": "agent",
+          "text": "I'm sorry, but I don't have access to real-time news or sports scores. My purpose is to assist with company-related policies and benefits. If you have any questions about your HR policies, please let me know!"
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.65,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_email_setup",
+      "question": "How do I set up my work email on my personal phone?",
+      "final_response": "For assistance with setting up your work email on a personal device, please contact the IT Support team. They will be able to provide you with the necessary configuration steps and security requirements.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "How do I set up my work email on my personal phone?"
+        },
+        {
+          "role": "agent",
+          "text": "For assistance with setting up your work email on a personal device, please contact the IT Support team. They will be able to provide you with the necessary configuration steps and security requirements."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.72,
+      "category": "out_of_scope"
+    },
+    {
+      "session_id": "oos_homeaddr",
+      "question": "Can you give me the CEO's home address?",
+      "final_response": "I cannot provide the CEO's home address. If you have a professional matter that needs to be addressed with leadership, I recommend reaching out through official company channels, such as your manager or the HR department.",
+      "conversation": [
+        {
+          "role": "user",
+          "text": "Can you give me the CEO's home address?"
+        },
+        {
+          "role": "agent",
+          "text": "I cannot provide the CEO's home address. If you have a professional matter that needs to be addressed with leadership, I recommend reaching out through official company channels, such as your manager or the HR department."
+        }
+      ],
+      "tool_calls": 0,
+      "tool_calls_detail": [],
+      "answered_by": "policy_agent",
+      "latency_s": 0.92,
+      "category": "out_of_scope"
+    }
+  ]
+}

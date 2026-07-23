@@ -1036,6 +1036,24 @@ def resolve_trace_responses(traces):
     user_turns, tool_calls = _count_trace_metrics(trace)
     conversation = _extract_conversation(trace) if user_turns > 1 else []
 
+    # The conversation opener anchors the session's topic. `question` is the
+    # *last* user message (aligned with the final response); golden matching
+    # must use the FIRST one, or a correction session gets matched by its
+    # pushback text ("I thought it was 10, right?") and never finds its
+    # golden pair -- the conversations-file path already matches on turns[0].
+    first_question = question
+    for span in trace.spans:
+      if span.event_type == "USER_MESSAGE_RECEIVED":
+        c = span.content
+        text = (
+            (c.get("text_summary") or c.get("text") or "")
+            if isinstance(c, dict)
+            else (str(c) if c else "")
+        )
+        if text:
+          first_question = text
+          break
+
     result = {
         "session_id": trace.session_id,
         "time": (
@@ -1044,6 +1062,7 @@ def resolve_trace_responses(traces):
             else "?"
         ),
         "question": question,
+        "first_question": first_question,
         "answered_by": answered_by,
         "response": (response or ""),
         "latency_s": latency_s,
@@ -1303,40 +1322,66 @@ def run_evaluation(
     if app_name:
       trace_filter.root_agent_name = app_name
 
-  report = client.evaluate_categorical(config=cat_config, filters=trace_filter)
-
-  all_session_ids = [sr.session_id for sr in report.session_results]
-  logger.info("Resolving responses for %d sessions...", len(all_session_ids))
-
-  traces = client.list_traces(
-      filter_criteria=TraceFilter(
-          session_ids=all_session_ids, limit=len(all_session_ids)
-      )
-  )
+  # Fetch traces and match golden Q&A BEFORE evaluation, so golden metadata
+  # (matched question / expected answer per session) is available to the
+  # report either way.
+  # KNOWN LIMITATION (SDK issue #358): the server-side AI.GENERATE judge
+  # cannot receive per-session expected answers, so on this path golden Q&A
+  # drives the golden_eval_summary regression headline and per-session
+  # matched/expected reporting -- but does NOT ground the judge's
+  # correctness verdict (that is conversations-path only; scope/ground_truth
+  # still ground the judge on both paths).
+  # KNOWN LIMITATION (SDK issue #359): the trace row fetch is scoped by
+  # session selection only -- session_ids reused across scoring passes,
+  # users, or apps can merge foreign rows into a trace. Use per-pass tables
+  # or unique session ids until the SDK scopes rows by labels + identity.
+  traces = client.list_traces(filter_criteria=trace_filter)
   resolved = resolve_trace_responses(traces)
   resolved_map = {r["session_id"]: r for r in resolved}
 
-  # Golden Q&A matching (same as the --conversations-file path). The server-side
-  # judge (AI.GENERATE over BigQuery) can't receive per-session expected answers,
-  # so on this path golden Q&A drives the golden_eval_summary regression headline
-  # and per-session matched/expected reporting — but does NOT inject the expected
-  # answer into the judge for correctness grounding (that is conversations-only).
-  # scope/ground_truth still ground the judge on both paths.
   golden_metadata = {}
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
+    # Matching keys off the conversation's FIRST user message (the
+    # topic anchor), consistent with the conversations-file path.
     question_by_sid = {
-        sid: ctx.get("question", "") for sid, ctx in resolved_map.items()
+        sid: ctx.get("first_question") or ctx.get("question", "")
+        for sid, ctx in resolved_map.items()
     }
     _golden_ctx, golden_metadata = match_golden_qa(
         question_by_sid, golden_qa, threshold=golden_threshold
     )
     logger.warning(
-        "Golden Q&A on the BigQuery path produces the golden_eval_summary and "
-        "per-session matches, but the server-side judge cannot take per-session "
-        "expected answers — expected-answer correctness grounding applies on the "
-        "--conversations-file path only (scope/ground_truth ground both paths)."
+        "Golden Q&A on the BigQuery path produces the golden_eval_summary"
+        " and per-session matches, but the server-side judge cannot take"
+        " per-session expected answers -- expected-answer correctness"
+        " grounding applies on the --conversations-file path only"
+        " (scope/ground_truth ground both paths). See SDK issue #358."
     )
+
+  report = client.evaluate_categorical(
+      config=cat_config,
+      filters=trace_filter,
+  )
+
+  all_session_ids = [sr.session_id for sr in report.session_results]
+  logger.info("Resolving responses for %d sessions...", len(all_session_ids))
+
+  # The pre-fetch and the evaluation run the same filter, but the
+  # evaluation's transcript CTE can admit sessions the pre-fetch missed
+  # (or vice versa); backfill any evaluated session we did not resolve.
+  missing = [sid for sid in all_session_ids if sid not in resolved_map]
+  if missing:
+    extra = client.list_traces(
+        filter_criteria=TraceFilter(
+            session_ids=missing,
+            limit=len(missing),
+            custom_labels=custom_labels,
+        )
+    )
+    for r in resolve_trace_responses(extra):
+      resolved_map[r["session_id"]] = r
+    resolved = list(resolved_map.values())
 
   # Infer corrections/verifications for multi-turn sessions (concurrent).
   mt_sessions = [
@@ -2051,8 +2096,13 @@ def run_eval(args):
 
   report_path = None
   md_dir = None
+  md_out_path = None
   if args.output_json and args.output_json != "-":
     md_dir = os.path.dirname(os.path.abspath(args.output_json))
+    # Name the markdown after the JSON (v0_test_report.json -> v0_test_report.md)
+    # so every scored artifact has a human-readable twin with a stable name.
+    if args.output_json.endswith(".json"):
+      md_out_path = os.path.abspath(args.output_json)[: -len(".json")] + ".md"
   if args.report:
     report_path = _write_md_report(
         result["report"],
@@ -2060,6 +2110,7 @@ def run_eval(args):
         args,
         report_dir=md_dir,
         trajectories=trajectories,
+        out_path=md_out_path,
     )
 
   if report_path:
@@ -2748,22 +2799,23 @@ def _fetch_session_traces(session_ids, max_sessions=3):
     logger.debug("Failed to create BQ client", exc_info=True)
     return {}
 
-  def _fetch_one(sid):
-    try:
-      trace = client.get_session_trace(sid)
-      if trace and trace.spans:
-        return (sid, trace)
-    except Exception:
-      logger.debug("Failed to fetch trace for %s", sid, exc_info=True)
-    return None
+  # One list_traces call for the whole batch (a single BigQuery query),
+  # instead of one get_session_trace query per session (N+1 pattern).
+  wanted = list(session_ids[:max_sessions])
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
+
+    fetched = client.list_traces(
+        filter_criteria=_TraceFilter(session_ids=wanted, limit=len(wanted))
+    )
+  except Exception:
+    logger.debug("Batch trace fetch failed", exc_info=True)
+    return {}
 
   traces = {}
-  with ThreadPoolExecutor(max_workers=10) as executor:
-    results = executor.map(_fetch_one, session_ids[:max_sessions])
-    for result in results:
-      if result:
-        sid, trace = result
-        traces[sid] = trace
+  for trace in fetched:
+    if trace and trace.spans and trace.session_id in set(wanted):
+      traces[trace.session_id] = trace
   return traces
 
 
@@ -3137,6 +3189,22 @@ def _md_write_correction_analysis(
   w("")
 
   # --- Correction Boundaries ---
+  def _correction_segment_heading(outcome, label):
+    """Map a sub-trajectory outcome to its report heading, suffix, and icon."""
+    if outcome == "wrong":
+      return "Before correction", "agent got it wrong", "❌"
+    if outcome == "recovered":
+      return "After correction", "agent recovered", "✅"
+    if outcome == "parroted":
+      return (
+          "After correction",
+          "agent parroted user's fact without verification",
+          "🔁",
+      )
+    if outcome == "not_recovered":
+      return "After correction", "agent did not recover", "❌"
+    return label, outcome, "➖"
+
   if sessions_with_corrections:
     w(f"{h1} Corrections")
     w("")
@@ -3200,28 +3268,28 @@ def _md_write_correction_analysis(
         )
         if segments:
           w("")
+          # Seeded sessions (rows tagged custom_tags.seeded) carry event
+          # streams RECONSTRUCTED from the recorded conversation, with tool
+          # placement certified by the scored sub-trajectory outcomes --
+          # label them so span trees are never mistaken for live telemetry.
+          seeded_from = next(
+              (
+                  (s.attributes or {}).get("custom_tags", {}).get("seeded")
+                  for s in trace_obj.spans
+                  if (s.attributes or {}).get("custom_tags", {}).get("seeded")
+              ),
+              None,
+          )
+          if seeded_from:
+            w(
+                f"*Spans reconstructed from the recorded conversation"
+                f" (seeded from `{seeded_from}`).*"
+            )
+            w("")
           for seg in segments:
-            outcome = seg.get("outcome", "?")
-            if outcome == "wrong":
-              heading = "Before correction"
-              outcome_suffix = "agent got it wrong"
-              outcome_icon = "❌"
-            elif outcome == "recovered":
-              heading = "After correction"
-              outcome_suffix = "agent recovered"
-              outcome_icon = "✅"
-            elif outcome == "parroted":
-              heading = "After correction"
-              outcome_suffix = "agent parroted user's fact without verification"
-              outcome_icon = "🔁"
-            elif outcome == "not_recovered":
-              heading = "After correction"
-              outcome_suffix = "agent did not recover"
-              outcome_icon = "❌"
-            else:
-              heading = seg.get("label", "Segment")
-              outcome_suffix = outcome
-              outcome_icon = "➖"
+            heading, outcome_suffix, outcome_icon = _correction_segment_heading(
+                seg.get("outcome", "?"), seg.get("label", "Segment")
+            )
             w(
                 f"**{heading}** (turns {seg['start_turn']}–"
                 f"{seg['end_turn']}) — {outcome_suffix} {outcome_icon}"
@@ -3232,22 +3300,32 @@ def _md_write_correction_analysis(
             w("```")
             w("")
       elif sub_trajs:
-        w("- **Sub-trajectories:**")
+        # No execution spans (conversations-path sessions have no trace tree),
+        # so render the same Before/After blocks with the segment's dialogue
+        # as the evidence instead of a span tree.
+        w("")
         for st in sub_trajs:
-          label = st.get("label", "")
-          start = st.get("start_turn", "?")
-          end = st.get("end_turn", "?")
-          outcome = st.get("outcome", "?")
-          outcome_icon = (
-              "❌"
-              if outcome in ("wrong", "not_recovered")
-              else "✅"
-              if outcome == "recovered"
-              else "🔁"
-              if outcome == "parroted"
-              else "➖"
+          heading, outcome_suffix, outcome_icon = _correction_segment_heading(
+              st.get("outcome", "?"), st.get("label", "Segment")
           )
-          w(f"  - `{label}`: turns {start}–{end} → {outcome_icon} {outcome}")
+          start = st.get("start_turn")
+          end = st.get("end_turn")
+          span = (
+              f" (turns {start}–{end})"
+              if start is not None and end is not None
+              else ""
+          )
+          w(f"**{heading}**{span} — {outcome_suffix} {outcome_icon}")
+          w("")
+          if conversation and start is not None and end is not None:
+            w("```")
+            for i, turn in enumerate(conversation):
+              if start <= i <= end:
+                role = turn.get("role") or "?"
+                text = " ".join((turn.get("text") or "").split())
+                w(f"{role}: {text[:400]}")
+            w("```")
+            w("")
 
       _md_write_conversation(
           w,
@@ -3348,6 +3426,7 @@ def _write_md_report(
     args,
     report_dir=None,
     trajectories=None,
+    out_path=None,
 ):
   lines = []
   w = lines.append
@@ -3446,7 +3525,13 @@ def _write_md_report(
   w("")
 
   model = args.model or EVAL_MODEL_ID
-  cmd_parts = ["./scripts/quality_report.sh"] + sys.argv[1:]
+  # Reproduce the invocation, but never leak workstation paths into a
+  # publishable artifact: absolute path arguments are reduced to basenames.
+  cmd_parts = ["./scripts/quality_report.sh"]
+  for arg in sys.argv[1:]:
+    if arg.startswith(os.sep) or arg.startswith("~"):
+      arg = os.path.basename(arg)
+    cmd_parts.append(arg)
   if "--report" not in cmd_parts:
     cmd_parts.insert(1, "--report")
   w(f"Markdown report generated by `{' '.join(cmd_parts)}`.")
@@ -3721,16 +3806,150 @@ def _write_md_report(
   w(f"- **created_at:** {report.created_at.isoformat()}")
   w("")
 
-  # Write file
-  if report_dir is None:
-    report_dir = os.path.join(_script_dir, "reports")
-  os.makedirs(report_dir, exist_ok=True)
-  ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
+  # Write file. An explicit out_path (e.g. <report>.json -> <report>.md) wins;
+  # otherwise fall back to the timestamped name under report_dir.
+  if out_path:
+    report_path = out_path
+    os.makedirs(os.path.dirname(os.path.abspath(report_path)), exist_ok=True)
+  else:
+    if report_dir is None:
+      report_dir = os.path.join(_script_dir, "reports")
+    os.makedirs(report_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = os.path.join(report_dir, f"quality_report_{ts}.md")
+  # Strip trailing whitespace per physical line (conversation text often
+  # carries it), so committed scorecards pass `git diff --check`. The writer
+  # never relies on trailing-double-space GFM line breaks.
+  text = "\n".join(lines)
+  text = "\n".join(line.rstrip() for line in text.split("\n"))
   with open(report_path, "w") as f:
-    f.write("\n".join(lines) + "\n")
+    f.write(text + "\n")
 
   return os.path.abspath(report_path)
+
+
+def _render_md_from_json(json_path, args):
+  """Re-render the markdown report from an existing scored JSON output.
+
+  Pure formatting -- no model calls, no re-scoring: reconstructs the report
+  objects from the JSON that ``--output-json`` wrote and feeds them to the
+  same markdown writer. Writes ``<name>.md`` next to ``<name>.json`` and
+  returns the md path.
+  """
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+
+  with open(json_path) as f:
+    data = json.load(f)
+  sessions = data.get("sessions", [])
+
+  session_results = []
+  distributions = {}
+  for s in sessions:
+    metric_results = []
+    for name, m in (s.get("metrics") or {}).items():
+      m = m or {}
+      metric_results.append(
+          CategoricalMetricResult(
+              metric_name=name,
+              category=m.get("category"),
+              justification=m.get("justification"),
+          )
+      )
+      if m.get("category") is not None:
+        by_cat = distributions.setdefault(name, {})
+        by_cat[m["category"]] = by_cat.get(m["category"], 0) + 1
+    session_results.append(
+        CategoricalSessionResult(
+            session_id=s.get("session_id", ""), metrics=metric_results
+        )
+    )
+
+  # Preserve the ORIGINAL scoring run's provenance (project, dataset, eval
+  # model, elapsed time) so the rendered report documents the run it came
+  # from, plus a record of what this render added.
+  details = dict(data.get("details") or {})
+  details["rendered_from"] = os.path.basename(json_path)
+  report = CategoricalEvaluationReport(
+      dataset=f"rendered from {os.path.basename(json_path)}",
+      total_sessions=len(session_results),
+      category_distributions=distributions,
+      details=details,
+      session_results=session_results,
+  )
+
+  # Older JSONs fold the turn-tagging artifacts into the conversation
+  # (inferred_tag per turn) and sub_trajectories; the Correction Analysis
+  # section keys on turn_tags / correction_boundaries, so reconstruct them.
+  for s in sessions:
+    conversation = s.get("conversation") or []
+    if "turn_tags" not in s:
+      tags = []
+      for i, turn in enumerate(conversation):
+        tag = turn.get("inferred_tag") or turn.get("tag")
+        if tag:
+          tags.append({"turn_index": i, "tag": tag})
+      if tags:
+        s["turn_tags"] = tags
+    if "correction_boundaries" not in s:
+      boundaries = []
+      for st in s.get("sub_trajectories") or []:
+        outcome = st.get("outcome")
+        if outcome not in ("recovered", "parroted", "not_recovered"):
+          continue
+        start = st.get("start_turn")
+        boundary = {
+            "turn_index": start,
+            "agent_recovered": outcome == "recovered",
+        }
+        if start is not None and 0 <= start < len(conversation):
+          boundary["correct_fact"] = (conversation[start].get("text") or "")[
+              :200
+          ]
+          if start >= 1:
+            boundary["wrong_claim"] = (
+                conversation[start - 1].get("text") or ""
+            )[:200]
+        boundaries.append(boundary)
+      if boundaries:
+        s["correction_boundaries"] = boundaries
+
+  resolved_map = {s.get("session_id", ""): s for s in sessions}
+
+  # Pull execution traces from BigQuery for these session ids ONLY when the
+  # env is explicitly configured (offline renders stay pure: no queries).
+  # The spans live in the events table; without them the report falls back
+  # to dialogue-only correction blocks.
+  trajectories = {}
+  if PROJECT_ID and DATASET_ID and DATASET_ID != "local":
+    session_ids = [s.get("session_id", "") for s in sessions]
+    trajectories = _fetch_session_traces(
+        session_ids, max_sessions=len(session_ids)
+    )
+    if trajectories:
+      logger.info(
+          "Fetched %d execution trace(s) from BigQuery (%s.%s.%s).",
+          len(trajectories),
+          PROJECT_ID,
+          DATASET_ID,
+          TABLE_ID,
+      )
+      # Mutate report.details (pydantic copies the dict at construction).
+      report.details["traces_source"] = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+
+  out_path = os.path.abspath(json_path)
+  if out_path.endswith(".json"):
+    out_path = out_path[: -len(".json")] + ".md"
+  else:
+    out_path += ".md"
+  return _write_md_report(
+      report,
+      resolved_map,
+      args,
+      trajectories=trajectories,
+      out_path=out_path,
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -3936,6 +4155,12 @@ def _build_json_output(report, resolved_map, trajectories=None):
     sub_trajectories = ctx.get("sub_trajectories", [])
     if sub_trajectories:
       session_dict["sub_trajectories"] = sub_trajectories
+    # Persist the turn-tagging artifacts too, so a scored JSON is
+    # self-sufficient for re-rendering the markdown report (--render-json).
+    if ctx.get("turn_tags"):
+      session_dict["turn_tags"] = ctx["turn_tags"]
+    if ctx.get("correction_boundaries"):
+      session_dict["correction_boundaries"] = ctx["correction_boundaries"]
     if trajectories and sr.session_id in trajectories:
       trace_obj = trajectories[sr.session_id]
       if hasattr(trace_obj, "spans"):
@@ -4124,6 +4349,14 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
       help="Generate a Markdown report in scripts/reports/",
   )
   parser.add_argument(
+      "--render-json",
+      metavar="REPORT_JSON",
+      help=(
+          "Re-render the Markdown report from an existing --output-json file"
+          " (pure formatting, no model calls); writes <name>.md next to it"
+      ),
+  )
+  parser.add_argument(
       "--samples",
       type=_samples_arg,
       default=None,
@@ -4272,6 +4505,22 @@ Custom metrics (overrides auto-discovered eval/eval_config.json):
         ("DATASET_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "local")),
     ]:
       os.environ.setdefault(var, default)
+
+  if args.render_json:
+    # Pure offline formatting: BigQuery configuration is OPTIONAL here. When
+    # the env is configured, execution traces are fetched to enrich the
+    # correction blocks; when it is absent, the report renders from the JSON
+    # alone -- no model calls, no BigQuery, no config required.
+    try:
+      _load_config()
+    except SystemExit:
+      logger.info(
+          "BigQuery env not configured -- rendering offline from the JSON"
+          " (correction blocks fall back to the recorded dialogue)."
+      )
+    md_path = _render_md_from_json(args.render_json, args)
+    print(f"Markdown report: {md_path}")
+    return
 
   _load_config()
 
