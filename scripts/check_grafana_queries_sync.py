@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import difflib
 import json
-import sys
 from pathlib import Path
+import sys
 from typing import Any
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_PATH = REPOSITORY_ROOT / "grafana" / "bqaa-dashboard.json"
