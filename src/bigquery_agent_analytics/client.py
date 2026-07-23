@@ -301,11 +301,14 @@ SELECT
   NULLIF(
       TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')), 'null'
   ) AS tag_payload,
+  COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
+      AS attributes_valid,
   COUNT(*) AS row_count
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
-GROUP BY 1, 2, 3, 4, 5
-ORDER BY session_id, user_id, root_agent_name, experiment_id, tag_payload
+GROUP BY 1, 2, 3, 4, 5, 6
+ORDER BY attributes_valid DESC, session_id, user_id, root_agent_name,
+  experiment_id, tag_payload
 LIMIT @candidate_limit
 """
 
@@ -333,18 +336,21 @@ SELECT * FROM (
     NULLIF(
         TO_JSON_STRING(JSON_QUERY(attributes, '$.custom_tags')), 'null'
     ) AS tag_payload,
+    COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
+        AS attributes_valid,
     COUNT(*) AS row_count
   FROM `{project}.{dataset}.{table}`
   WHERE session_id = @session_id{identity_pins}
     AND ({identity_disjunction})
-  GROUP BY 1, 2, 3, 4, 5
+  GROUP BY 1, 2, 3, 4, 5, 6
 )
 WHERE TRUE
 QUALIFY ROW_NUMBER() OVER (
   PARTITION BY user_id, root_agent_name
-  ORDER BY experiment_id, tag_payload
+  ORDER BY attributes_valid DESC, experiment_id, tag_payload
 ) <= @per_identity_capped
-ORDER BY session_id, user_id, root_agent_name, experiment_id, tag_payload
+ORDER BY session_id, user_id, root_agent_name, attributes_valid DESC,
+  experiment_id, tag_payload
 """
 
 # Bounded intrinsic-identity discovery for allow_mixed_scope reads:
@@ -357,10 +363,12 @@ SELECT DISTINCT
   user_id,
   NULLIF(
       TO_JSON_STRING(JSON_QUERY(attributes, '$.root_agent_name')), 'null'
-  ) AS root_agent_name
+  ) AS root_agent_name,
+  COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
+      AS attributes_valid
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
-ORDER BY session_id, user_id, root_agent_name
+ORDER BY attributes_valid DESC, session_id, user_id, root_agent_name
 LIMIT @identity_limit
 """
 
@@ -1051,6 +1059,7 @@ class Client:
     ]
     if not candidate_rows:
       raise _no_matching_events_error(selector, bool(pushdown))
+    candidate_rows = _validated_discovery_rows(candidate_rows)
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
     if truncated:
       # Sound boundary handling (PR #371 review rounds 7-9): the SQL
@@ -1100,6 +1109,23 @@ class Client:
       return self._fetch_identity_trace(
           matching[0].identity, resolved_scope=matching[0]
       )
+    if not truncated and allow_mixed_scope and len(matching) >= 2:
+      # A complete candidate page already proves the full
+      # selector-matched identity population. Reuse it instead of
+      # rediscovering the same identities: one identity proceeds
+      # directly to the conversation-complete fetch, while multiple
+      # identities are already a proven public ambiguity.
+      matched_identities = list(
+          dict.fromkeys(candidate.identity for candidate in matching)
+      )
+      if len(matched_identities) >= 2:
+        raise AmbiguousSessionError(
+            candidates=matching,
+            population_truncated=False,
+        )
+      return self._fetch_mixed_scope_trace(
+          selector, discovered=(matched_identities, False)
+      )
     if len(matching) == 1 and truncated and allow_mixed_scope:
       # Under truncation the singleton needs TWO proofs (rounds 7-10).
       # Identity uniqueness: a fully pinned intrinsic identity is
@@ -1134,7 +1160,7 @@ class Client:
       # Reuse the page just fetched — the mixed path would otherwise
       # rerun the identical discovery query (round 10, P3-1).
       return self._fetch_mixed_scope_trace(selector, discovered=discovered)
-    if allow_mixed_scope:
+    if allow_mixed_scope and truncated:
       return self._fetch_mixed_scope_trace(selector)
     if len(matching) >= 2:
       # The typed ambiguity surface: real, executable retries. The
@@ -1275,6 +1301,7 @@ class Client:
     ]
     if not identity_rows:
       raise _no_matching_events_error(selector, bool(pushdown))
+    identity_rows = _validated_discovery_rows(identity_rows)
     identity_page_truncated = len(identity_rows) > _MAX_IDENTITIES
     identity_rows = identity_rows[:_MAX_IDENTITIES]
     identities: list = []
@@ -1377,7 +1404,6 @@ class Client:
     fetched_entries = []
     for row in results:
       row_dict = dict(row)
-      span = Span.from_bigquery_row(row_dict)
       # Validated from the RAW cell (PR #371 review rounds 8 P2-2,
       # 9 P1-5, 10 P1-1): a persisted non-object — including a JSON
       # string scalar the BigQuery decoder hands over as str, even
@@ -1393,6 +1419,11 @@ class Client:
               else _NO_ATTESTATION
           ),
       )
+      # Hand the normalized object to Span so it cannot reparse the
+      # raw scalar after the authoritative attestation has accepted
+      # this row.
+      row_dict["attributes"] = attributes
+      span = Span.from_bigquery_row(row_dict)
       row_user = row_dict.get("user_id")
       row_root = attributes.get("root_agent_name")
       if (
@@ -1513,6 +1544,7 @@ class Client:
             resolve_query, job_config=job_config
         ).result()
     ]
+    rows = _validated_discovery_rows(rows)
     rows_by_identity: dict[tuple, list] = {}
     for row in rows:
       key = (
@@ -3523,6 +3555,28 @@ def _merge_criterion_reports(
 _NO_ATTESTATION = object()
 
 
+def _validated_discovery_rows(rows: list[dict]) -> list[dict]:
+  """Return only SQL-attested object/null rows from a discovery page.
+
+  Discovery SQL orders valid rows ahead of malformed rows before its
+  bound, so malformed persisted values neither become public retry
+  candidates nor consume sound enumeration capacity. Older/foreign
+  row sources without the projected attestation remain compatible.
+  A malformed-only page fails with the same redacted validation
+  surface used by fetched-row materialization.
+  """
+  valid = [
+      row
+      for row in rows
+      if "attributes_valid" not in row or row.get("attributes_valid") is True
+  ]
+  if rows and not valid:
+    raise ValueError(
+        "Persisted attributes must be a JSON object (contents redacted)."
+    )
+  return valid
+
+
 def _validated_attributes_object(
     raw: Any, sql_type: Any = _NO_ATTESTATION
 ) -> dict:
@@ -4092,9 +4146,10 @@ def _build_traces_from_rows(
   """
   identity_groups: dict[tuple, list] = {}
   # Quarantine keys, coarsest-first: a row whose user_id cannot be
-  # validated poisons its session; an unreadable attributes object or
-  # root agent poisons (session, user); a malformed experiment or tag
-  # payload poisons the fully-identified identity.
+  # validated poisons its session. An unreadable attributes object or
+  # root agent poisons its exact projected SQL anchor when available,
+  # otherwise (session, user). A malformed experiment or tag payload
+  # poisons the fully-identified identity.
   poisoned_sessions: set = set()
   poisoned_users: set = set()
   poisoned_identities: set = set()
@@ -4102,7 +4157,6 @@ def _build_traces_from_rows(
   for row in results:
     row_dict = dict(row)
     sid = row_dict.get("session_id", "unknown")
-    span = Span.from_bigquery_row(row_dict)
     try:
       user_id = _validated_identity_attr("user_id", row_dict.get("user_id"))
     except ValueError:
@@ -4131,7 +4185,25 @@ def _build_traces_from_rows(
     except ValueError:
       if on_malformed != "quarantine":
         raise
-      poisoned_users.add((sid, user_id))
+      anchor_identity = None
+      if "anchor_user_id" in row_dict and "anchor_root_agent_name" in row_dict:
+        try:
+          anchor_identity = (
+              sid,
+              _validated_identity_attr(
+                  "anchor_user_id", row_dict.get("anchor_user_id")
+              ),
+              _validated_identity_attr(
+                  "anchor_root_agent_name",
+                  row_dict.get("anchor_root_agent_name"),
+              ),
+          )
+        except ValueError:
+          anchor_identity = None
+      if anchor_identity is None:
+        poisoned_users.add((sid, user_id))
+      else:
+        poisoned_identities.add(anchor_identity)
       continue
     identity_key = (sid, user_id, root_agent_name)
     try:
@@ -4146,6 +4218,11 @@ def _build_traces_from_rows(
         raise
       poisoned_identities.add(identity_key)
       continue
+    # Parse the remaining span fields only after authoritative
+    # attributes validation, and pass the normalized object onward so
+    # Span never reparses the persisted scalar.
+    row_dict["attributes"] = attributes
+    span = Span.from_bigquery_row(row_dict)
     identity_groups.setdefault(identity_key, []).append(
         (experiment, payload, span)
     )

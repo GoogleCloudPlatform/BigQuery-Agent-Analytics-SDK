@@ -26,8 +26,9 @@ silently matched nothing.
 * ``BQAA_LIVE_BQ=1`` — explicit opt-in.
 * ``BQAA_LIVE_BQ_PROJECT`` — GCP project ID to bill the queries to.
 
-The probes query literal JSON built with ``JSON_OBJECT``; no datasets
-or tables are read or written.
+The JSONPath probes query literal JSON built with ``JSON_OBJECT``.
+The collision tests create a temporary dataset and table, then delete
+the dataset during fixture teardown.
 
 ## Run
 
@@ -163,6 +164,9 @@ def collision_dataset(bq_client):
       an enrichment row (v0 + subagent — its own exact scope), one
       untagged shared row, and one foreign-tagged row whose payload
       lacks the run key entirely.
+    * ``poison-scalar``: one valid named-root identity beside a
+      malformed NULL-root SQL anchor whose attributes are a JSON
+      string scalar.
   """
   import uuid
 
@@ -225,10 +229,16 @@ def collision_dataset(bq_client):
           ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
            'eve', 'tr-p', 'foreign', JSON '{{}}',
            JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK'),
-          -- poison-scalar: attributes is a JSON STRING scalar whose
+          -- poison-scalar: a valid named-root row beside attributes
+          -- stored as a JSON STRING scalar whose
           -- text is serialized object syntax; the Python decoder
           -- yields the inner str while every SQL path sees NULL
           -- (round 10, P1-1)
+          ('2026-07-01 13:59:59', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-good', 'good', JSON '{{}}',
+           JSON_OBJECT(
+               'root_agent_name', 'real-root',
+               'custom_tags', JSON_OBJECT('run', 'valid')), 'OK'),
           ('2026-07-01 14:00:00', 'LLM_RESPONSE', 'a', 'poison-scalar',
            'mallory', 'tr-x', 'x1', JSON '{{}}',
            TO_JSON(TO_JSON_STRING(JSON_OBJECT(
@@ -496,9 +506,9 @@ class TestLiveCollisionFixture:
   def test_string_scalar_attributes_quarantined_live(self, sdk_client):
     # PR #371 review round 10, P1-1: the REAL BigQuery decoder hands
     # the poison-scalar row's attributes over as the decoded inner
-    # str; the JSON_TYPE attestation must quarantine it in listings
-    # and fail the singular read closed — never fabricate the
-    # 'fabricated' identity or the run=v1 scope that SQL cannot see.
+    # str. Discovery and listing attestation must quarantine only its
+    # NULL-root anchor, preserve the valid named-root sibling, and
+    # never advertise the fabricated identity/scope.
     from bigquery_agent_analytics.trace import TraceFilter
 
     traces = [
@@ -506,6 +516,17 @@ class TestLiveCollisionFixture:
         for t in sdk_client.list_traces(TraceFilter(limit=50))
         if t.session_id == "poison-scalar"
     ]
-    assert traces == []
+    assert len(traces) == 1
+    assert traces[0].identity.root_agent_name == "real-root"
+    assert {span.span_id for span in traces[0].spans} == {"good"}
+
+    trace = sdk_client.get_session_trace("poison-scalar")
+    assert trace.identity.root_agent_name == "real-root"
+    assert {span.span_id for span in trace.spans} == {"good"}
+
     with pytest.raises(ValueError, match="JSON object"):
-      sdk_client.get_session_trace("poison-scalar")
+      sdk_client.get_session_trace(
+          "poison-scalar",
+          user_id="mallory",
+          root_agent_name=None,
+      )

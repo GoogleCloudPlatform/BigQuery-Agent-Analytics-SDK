@@ -32,7 +32,10 @@ from bigquery_agent_analytics.client import _candidates_matching_selector
 from bigquery_agent_analytics.client import _GET_SESSION_TRACE_QUERY
 from bigquery_agent_analytics.client import _LIST_TRACES_QUERY
 from bigquery_agent_analytics.client import _parse_tag_payload
+from bigquery_agent_analytics.client import _RESOLVE_CANDIDATES_BATCH_QUERY
 from bigquery_agent_analytics.client import _resolve_scope_candidates
+from bigquery_agent_analytics.client import _RESOLVE_SESSION_CANDIDATES_QUERY
+from bigquery_agent_analytics.client import _RESOLVE_SESSION_IDENTITIES_QUERY
 from bigquery_agent_analytics.client import Client
 from bigquery_agent_analytics.trace import AmbiguousSessionError
 from bigquery_agent_analytics.trace import TraceFilter
@@ -896,15 +899,6 @@ class TestAllowMixedScope:
         _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
         _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
     ]
-    identity_batch = [
-        _mock_row(
-            {
-                "session_id": "sess-1",
-                "user_id": "alice",
-                "root_agent_name": None,
-            }
-        )
-    ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
         _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
@@ -912,7 +906,7 @@ class TestAllowMixedScope:
     ]
     mock_bq = MagicMock()
     jobs = []
-    for batch in [candidate_batch, identity_batch, fetch_batch]:
+    for batch in [candidate_batch, fetch_batch]:
       job = MagicMock()
       job.result.return_value = batch
       jobs.append(job)
@@ -930,6 +924,7 @@ class TestAllowMixedScope:
     # KTD4 coverage metadata names the covered scope signatures.
     assert trace.scope_coverage is not None
     assert len(trace.scope_coverage) == 2
+    assert mock_bq.query.call_count == 2
 
   def test_mixed_scope_still_ambiguous_across_identities(self):
     from unittest.mock import MagicMock
@@ -982,23 +977,15 @@ class TestRound3Regressions:
         _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
         _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
     ]
-    identity_batch = [
-        _mock_row(
-            {
-                "session_id": "sess-1",
-                "user_id": "alice",
-                "root_agent_name": None,
-            }
-        )
-    ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="dup")),
         _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="dup")),
         _mock_row(_event_row(span_id="tail")),
     ]
-    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    client, mock_bq = self._client([candidate_batch, fetch_batch])
     trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
     assert [s.span_id for s in trace.spans] == ["dup", "dup", "tail"]
+    assert mock_bq.query.call_count == 2
 
   def test_exact_selector_wins_over_mixed_scope_flag(self):
     # P1-3: a signature-pinned selector returns its exact candidate
@@ -1193,12 +1180,8 @@ class TestRound4Regressions:
   def test_mixed_scope_nonexistent_selector_not_found(self):
     # P1-1: run=missing must not return the whole identity — the
     # scope-pinned identity query comes back empty.
-    candidate_batch = [
-        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
-        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
-    ]
-    identity_batch: list = []  # pushdown pins exclude everything
-    client, mock_bq = self._client([candidate_batch, identity_batch])
+    candidate_batch: list = []  # pushdown pins exclude everything
+    client, mock_bq = self._client([candidate_batch])
     # Round 8, P3-12: a pin-excluded page names the pins, not a
     # false session absence.
     with pytest.raises(ValueError, match="under the selector's pins"):
@@ -1207,9 +1190,10 @@ class TestRound4Regressions:
           custom_labels={"run": "missing"},
           allow_mixed_scope=True,
       )
-    identity_query = mock_bq.query.call_args[0][0]
-    # The identity query carries the scope pushdown.
-    assert "@pin_label_key_0" in identity_query
+    candidate_query = mock_bq.query.call_args[0][0]
+    # Candidate discovery carries the scope pushdown.
+    assert "@pin_label_key_0" in candidate_query
+    assert mock_bq.query.call_count == 1
 
   def test_mixed_scope_pins_prevent_false_identity_ambiguity(self):
     # P1-1: scope pins that select only Alice's scopes must not
@@ -1230,23 +1214,15 @@ class TestRound4Regressions:
         ),
         _mock_row(_candidate_row(user_id="bob")),
     ]
-    identity_batch = [
-        _mock_row(
-            {
-                "session_id": "sess-1",
-                "user_id": "alice",
-                "root_agent_name": None,
-            }
-        )
-    ]
     fetch_batch = [
         _mock_row(_event_row(user_id="alice", custom_tags={"team": "a"})),
     ]
-    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    client, mock_bq = self._client([candidate_batch, fetch_batch])
     trace = client.get_session_trace(
         "sess-1", custom_labels={"team": "a"}, allow_mixed_scope=True
     )
     assert trace.identity.user_id == "alice"
+    assert mock_bq.query.call_count == 2
 
   def test_mixed_coverage_reflects_fetched_scopes(self):
     # P1-3: coverage names every scope actually fetched, not just the
@@ -1255,20 +1231,11 @@ class TestRound4Regressions:
         _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
         _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
     ]
-    identity_batch = [
-        _mock_row(
-            {
-                "session_id": "sess-1",
-                "user_id": "alice",
-                "root_agent_name": None,
-            }
-        )
-    ]
     fetch_batch = [
         _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="p0")),
         _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="p1")),
     ]
-    client, _ = self._client([candidate_batch, identity_batch, fetch_batch])
+    client, _ = self._client([candidate_batch, fetch_batch])
     trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
     assert trace.scope_coverage is not None
     v0_sig = TraceScope(custom_labels={"run": "v0"}).scope_signature
@@ -1321,25 +1288,7 @@ class TestRound4Regressions:
         _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
         _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
     ]
-    identity_batch = [
-        _mock_row(
-            {
-                "session_id": "sess-1",
-                "user_id": "alice",
-                "root_agent_name": None,
-            }
-        ),
-        _mock_row(
-            {"session_id": "sess-1", "user_id": "bob", "root_agent_name": None}
-        ),
-    ]
-    # Batched per-identity discovery (round 7, P2): ONE query
-    # enumerates every ambiguous identity's scope page.
-    batch = [
-        _mock_row(_candidate_row(user_id="alice", tag_payload='{"run": "v0"}')),
-        _mock_row(_candidate_row(user_id="bob", tag_payload='{"run": "v1"}')),
-    ]
-    client, mock_bq = self._client([candidate_batch, identity_batch, batch])
+    client, mock_bq = self._client([candidate_batch])
     with pytest.raises(AmbiguousSessionError) as exc_info:
       client.get_session_trace("sess-1", allow_mixed_scope=True)
     payloads = [
@@ -1348,10 +1297,11 @@ class TestRound4Regressions:
     ]
     assert {"run": "v0"} in payloads
     assert {"run": "v1"} in payloads
-    # One batched query, not per-identity scans (round 7, P2).
-    batch_query = mock_bq.query.call_args[0][0]
-    assert "QUALIFY ROW_NUMBER() OVER" in batch_query
-    assert mock_bq.query.call_count == 3
+    # A complete candidate page proves the cross-identity ambiguity
+    # without any duplicate identity or scope rediscovery.
+    candidate_query = mock_bq.query.call_args[0][0]
+    assert "QUALIFY ROW_NUMBER() OVER" not in candidate_query
+    assert mock_bq.query.call_count == 1
 
   def test_mixed_fetch_revalidates_row_identity(self):
     # P2-8: a fetched row not matching the resolved identity fails
@@ -2138,10 +2088,14 @@ class TestRound8Regressions:
         _RESOLVE_SESSION_CANDIDATES_QUERY,
         _RESOLVE_CANDIDATES_BATCH_QUERY,
     ):
+      normalized_query = " ".join(query.split())
       for attr in ("root_agent_name", "experiment_id", "custom_tags"):
         assert f"JSON_QUERY(attributes, '$.{attr}')" in query
-      assert query.count("'null'") == 3, "each attribute folds 'null'"
-      assert "NULLIF(" in query
+        assert (
+            f"TO_JSON_STRING(JSON_QUERY(attributes, '$.{attr}'))"
+            in normalized_query
+        )
+      assert query.count("NULLIF(") == 3
     assert "NULLIF(" in _RESOLVE_SESSION_IDENTITIES_QUERY
     # The batch window runs over a plain subquery (never SELECT-list
     # aliases of the grouped query) and QUALIFY has its required
@@ -2814,3 +2768,263 @@ class TestRound10Regressions:
     traces = client.list_traces(TraceFilter(limit=1))
     assert [t.session_id for t in traces] == ["s-old"]
     assert mock_bq.query.call_count == 2
+
+
+class TestRound11Regressions:
+  """PR #371 review round 11 reproduced findings."""
+
+  def _client(self, batches):
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  @staticmethod
+  def _discovery_row(*, valid, **kwargs):
+    row = _candidate_row(**kwargs)
+    row["attributes_valid"] = valid
+    return _mock_row(row)
+
+  def test_discovery_attestation_precedes_every_enumeration_limit(self):
+    for query in (
+        _RESOLVE_SESSION_CANDIDATES_QUERY,
+        _RESOLVE_CANDIDATES_BATCH_QUERY,
+        _RESOLVE_SESSION_IDENTITIES_QUERY,
+    ):
+      assert "JSON_TYPE(attributes)" in query
+      assert "attributes_valid" in query
+      assert "attributes_valid DESC" in query
+
+  def test_malformed_discovery_row_cannot_create_public_candidate(self):
+    candidates = [
+        self._discovery_row(
+            valid=True, user_id="alice", tag_payload='{"run": "v1"}'
+        ),
+        self._discovery_row(valid=False, user_id="mallory"),
+    ]
+    fetched = [
+        _mock_row(
+            _event_row(user_id="alice", custom_tags={"run": "v1"}, span_id="ok")
+        )
+    ]
+    client, mock_bq = self._client([candidates, fetched])
+
+    trace = client.get_session_trace("sess-1")
+
+    assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
+    assert [span.span_id for span in trace.spans] == ["ok"]
+    assert mock_bq.query.call_count == 2
+
+  def test_malformed_only_discovery_fails_before_fetch(self):
+    candidates = [self._discovery_row(valid=False, user_id="mallory")]
+    raw = _event_row(user_id="mallory", span_id="bad")
+    raw["attributes"] = '{"root_agent_name": "fabricated"}'
+    raw["attributes_type"] = "string"
+    client, mock_bq = self._client([candidates, [_mock_row(raw)]])
+
+    with pytest.raises(ValueError, match="JSON object"):
+      client.get_session_trace("sess-1")
+
+    assert mock_bq.query.call_count == 1
+
+  def test_malformed_identity_does_not_join_mixed_read_population(self):
+    identity_rows = [
+        self._discovery_row(valid=True, user_id="alice"),
+        self._discovery_row(valid=False, user_id="mallory"),
+    ]
+    client, _ = self._client([identity_rows])
+
+    identities, truncated = client._discover_session_identities(
+        TraceSelector(session_id="sess-1")
+    )
+
+    assert identities == [TraceIdentity(session_id="sess-1", user_id="alice")]
+    assert not truncated
+
+  def test_malformed_batched_row_cannot_create_retry_candidate(self):
+    alice = TraceIdentity(session_id="sess-1", user_id="alice")
+    bob = TraceIdentity(session_id="sess-1", user_id="bob")
+    rows = [
+        self._discovery_row(
+            valid=True, user_id="alice", tag_payload='{"run": "v1"}'
+        ),
+        self._discovery_row(valid=False, user_id="bob"),
+    ]
+    client, _ = self._client([rows])
+
+    candidates, truncated = client._real_candidates_for_identities(
+        TraceSelector(session_id="sess-1"), [alice, bob]
+    )
+
+    assert [candidate.identity for candidate in candidates] == [alice]
+    assert not truncated
+
+  def test_attested_malformed_row_quarantines_only_its_sql_anchor(self):
+    malformed = _event_row(session_id="shared", user_id="alice", span_id="bad")
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    malformed["anchor_user_id"] = "alice"
+    malformed["anchor_root_agent_name"] = None
+    valid = _event_row(
+        session_id="shared",
+        user_id="alice",
+        root_agent_name="named-root",
+        span_id="good",
+    )
+    valid["attributes_type"] = "object"
+    valid["anchor_user_id"] = "alice"
+    valid["anchor_root_agent_name"] = "named-root"
+
+    traces = _build_traces_from_rows(
+        [_mock_row(malformed), _mock_row(valid)], on_malformed="quarantine"
+    )
+
+    assert [trace.identity for trace in traces] == [
+        TraceIdentity(
+            session_id="shared",
+            user_id="alice",
+            root_agent_name="named-root",
+        )
+    ]
+    assert [span.span_id for span in traces[0].spans] == ["good"]
+
+  def test_malformed_row_without_sql_anchor_uses_coarse_quarantine(self):
+    malformed = _event_row(session_id="shared", user_id="alice", span_id="bad")
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    valid = _event_row(
+        session_id="shared",
+        user_id="alice",
+        root_agent_name="named-root",
+        span_id="good",
+    )
+
+    traces = _build_traces_from_rows(
+        [_mock_row(malformed), _mock_row(valid)], on_malformed="quarantine"
+    )
+
+    assert traces == []
+
+  def test_quarantine_uses_projected_anchor_user_independently(self):
+    malformed = _event_row(session_id="shared", user_id="alice", span_id="bad")
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    malformed["anchor_user_id"] = "projected-owner"
+    malformed["anchor_root_agent_name"] = None
+    valid = _event_row(session_id="shared", user_id="alice", span_id="good")
+    valid["attributes_type"] = "object"
+    valid["anchor_user_id"] = "alice"
+    valid["anchor_root_agent_name"] = None
+
+    traces = _build_traces_from_rows(
+        [_mock_row(malformed), _mock_row(valid)], on_malformed="quarantine"
+    )
+
+    assert [trace.identity for trace in traces] == [
+        TraceIdentity(session_id="shared", user_id="alice")
+    ]
+    assert [span.span_id for span in traces[0].spans] == ["good"]
+
+  def test_invalid_projected_anchor_uses_coarse_quarantine(self):
+    malformed = _event_row(session_id="shared", user_id="alice", span_id="bad")
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    malformed["anchor_user_id"] = 7
+    malformed["anchor_root_agent_name"] = None
+    valid = _event_row(
+        session_id="shared",
+        user_id="alice",
+        root_agent_name="named-root",
+        span_id="good",
+    )
+
+    traces = _build_traces_from_rows(
+        [_mock_row(malformed), _mock_row(valid)], on_malformed="quarantine"
+    )
+
+    assert traces == []
+
+  def test_builder_validates_attestation_before_span_json_parsing(self):
+    deeply_nested = "[" * 10000 + "0" + "]" * 10000
+    malformed = _event_row(session_id="deep", span_id="bad")
+    malformed["attributes"] = deeply_nested
+    malformed["attributes_type"] = "string"
+    malformed["anchor_user_id"] = "alice"
+    malformed["anchor_root_agent_name"] = None
+
+    with pytest.raises(ValueError, match="JSON object"):
+      _build_traces_from_rows([_mock_row(malformed)])
+
+    assert (
+        _build_traces_from_rows(
+            [_mock_row(malformed)], on_malformed="quarantine"
+        )
+        == []
+    )
+
+  def test_mixed_read_validates_attestation_before_span_json_parsing(self):
+    identity_rows = [
+        self._discovery_row(valid=True, user_id="alice"),
+    ]
+    deeply_nested = "[" * 10000 + "0" + "]" * 10000
+    malformed = _event_row(session_id="deep", span_id="bad")
+    malformed["attributes"] = deeply_nested
+    malformed["attributes_type"] = "string"
+    client, _ = self._client([identity_rows, [_mock_row(malformed)]])
+
+    with pytest.raises(ValueError, match="JSON object"):
+      client._fetch_mixed_scope_trace(TraceSelector(session_id="sess-1"))
+
+  def test_complete_same_identity_page_reuses_candidates_for_mixed_read(self):
+    candidates = [
+        self._discovery_row(
+            valid=True, user_id="alice", tag_payload='{"run": "v0"}'
+        ),
+        self._discovery_row(
+            valid=True, user_id="alice", tag_payload='{"run": "v1"}'
+        ),
+    ]
+    fetched = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="v0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="v1")),
+    ]
+    client, mock_bq = self._client([candidates, fetched])
+
+    trace = client.get_session_trace("sess-1", allow_mixed_scope=True)
+
+    assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.scope is None
+    assert [span.span_id for span in trace.spans] == ["v0", "v1"]
+    assert mock_bq.query.call_count == 2
+
+  def test_complete_cross_identity_page_raises_without_rediscovery(self):
+    candidates = [
+        self._discovery_row(
+            valid=True, user_id="alice", tag_payload='{"run": "v0"}'
+        ),
+        self._discovery_row(
+            valid=True, user_id="bob", tag_payload='{"run": "v0"}'
+        ),
+    ]
+    client, mock_bq = self._client([candidates])
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1", allow_mixed_scope=True)
+
+    assert {
+        candidate.identity.user_id for candidate in exc_info.value.candidates
+    } == {"alice", "bob"}
+    assert not exc_info.value.population_truncated
+    assert mock_bq.query.call_count == 1
