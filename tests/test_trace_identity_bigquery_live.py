@@ -164,9 +164,11 @@ def collision_dataset(bq_client):
       an enrichment row (v0 + subagent — its own exact scope), one
       untagged shared row, and one foreign-tagged row whose payload
       lacks the run key entirely.
-    * ``poison-scalar``: one valid named-root identity beside a
-      malformed NULL-root SQL anchor whose attributes are a JSON
-      string scalar.
+    * ``poison-scalar``: valid NULL-root scopes beside a malformed
+      row on the same SQL anchor whose attributes are a JSON string
+      scalar.
+    * ``poison-only``: a malformed-only session proving discovery
+      still fails closed with a typed validation error.
   """
   import uuid
 
@@ -229,21 +231,31 @@ def collision_dataset(bq_client):
           ('2026-07-01 13:00:04', 'LLM_RESPONSE', 'a', 'passes',
            'eve', 'tr-p', 'foreign', JSON '{{}}',
            JSON '{{"custom_tags": {{"other": "x"}}}}', 'OK'),
-          -- poison-scalar: a valid named-root row beside attributes
-          -- stored as a JSON STRING scalar whose
-          -- text is serialized object syntax; the Python decoder
-          -- yields the inner str while every SQL path sees NULL
-          -- (round 10, P1-1)
+          -- poison-scalar: valid NULL-root rows beside attributes
+          -- stored as a JSON STRING scalar on the same SQL anchor.
+          -- The decoder yields the inner str while every SQL path
+          -- sees NULL (round 10, P1-1).
+          ('2026-07-01 13:59:57', 'USER_MESSAGE_RECEIVED', 'a',
+           'poison-scalar', 'mallory', 'tr-good', 'good', JSON '{{}}',
+           JSON '{{}}', 'OK'),
+          ('2026-07-01 13:59:58', 'LLM_RESPONSE', 'a', 'poison-scalar',
+           'mallory', 'tr-good', 'good-v0', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v0"}}}}', 'OK'),
           ('2026-07-01 13:59:59', 'LLM_RESPONSE', 'a', 'poison-scalar',
-           'mallory', 'tr-good', 'good', JSON '{{}}',
-           JSON_OBJECT(
-               'root_agent_name', 'real-root',
-               'custom_tags', JSON_OBJECT('run', 'valid')), 'OK'),
+           'mallory', 'tr-good', 'good-v1', JSON '{{}}',
+           JSON '{{"custom_tags": {{"run": "v1"}}}}', 'OK'),
           ('2026-07-01 14:00:00', 'LLM_RESPONSE', 'a', 'poison-scalar',
            'mallory', 'tr-x', 'x1', JSON '{{}}',
            TO_JSON(TO_JSON_STRING(JSON_OBJECT(
                'root_agent_name', 'fabricated',
                'custom_tags', JSON_OBJECT('run', 'v1')))),
+           'OK'),
+          -- poison-only: no valid discovery row can mask the typed
+          -- malformed-attributes failure.
+          ('2026-07-01 14:01:00', 'LLM_RESPONSE', 'a', 'poison-only',
+           'mallory', 'tr-x', 'only-bad', JSON '{{}}',
+           TO_JSON(TO_JSON_STRING(JSON_OBJECT(
+               'root_agent_name', 'fabricated'))),
            'OK')
     """
     ).result()
@@ -505,28 +517,34 @@ class TestLiveCollisionFixture:
 
   def test_string_scalar_attributes_quarantined_live(self, sdk_client):
     # PR #371 review round 10, P1-1: the REAL BigQuery decoder hands
-    # the poison-scalar row's attributes over as the decoded inner
-    # str. Discovery and listing attestation must quarantine only its
-    # NULL-root anchor, preserve the valid named-root sibling, and
-    # never advertise the fabricated identity/scope.
-    from bigquery_agent_analytics.trace import TraceFilter
+    # the poison-scalar row's attributes over as the decoded inner str.
+    # Discovery excludes it from public candidates and every advertised
+    # exact retry remains executable even though the malformed row shares
+    # the valid rows' NULL-root SQL anchor.
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceSelector
 
-    traces = [
-        t
-        for t in sdk_client.list_traces(TraceFilter(limit=50))
-        if t.session_id == "poison-scalar"
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      sdk_client.get_session_trace("poison-scalar")
+    selectors = [
+        TraceSelector(**candidate["selector"])
+        for candidate in exc_info.value.to_dict()["candidates"]
     ]
-    assert len(traces) == 1
-    assert traces[0].identity.root_agent_name == "real-root"
-    assert {span.span_id for span in traces[0].spans} == {"good"}
+    assert len(selectors) == 2
+    for selector in selectors:
+      trace = sdk_client.get_trace_by_selector(selector)
+      assert trace.identity.root_agent_name is None
+      assert "x1" not in {span.span_id for span in trace.spans}
 
-    trace = sdk_client.get_session_trace("poison-scalar")
-    assert trace.identity.root_agent_name == "real-root"
-    assert {span.span_id for span in trace.spans} == {"good"}
+    mixed = sdk_client.get_session_trace(
+        "poison-scalar", allow_mixed_scope=True
+    )
+    assert mixed.scope is None
+    assert {span.span_id for span in mixed.spans} == {
+        "good",
+        "good-v0",
+        "good-v1",
+    }
 
     with pytest.raises(ValueError, match="JSON object"):
-      sdk_client.get_session_trace(
-          "poison-scalar",
-          user_id="mallory",
-          root_agent_name=None,
-      )
+      sdk_client.get_session_trace("poison-only")

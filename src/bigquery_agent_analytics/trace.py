@@ -2449,6 +2449,9 @@ class AmbiguousSessionError(ValueError):
     :meth:`ResolvedTraceSelector.to_retry_payload`: a ``selector``
     dict of :class:`TraceSelector` keyword arguments that retries the
     lookup in one step, plus the candidate's ``scope_signature``.
+    When ``population_truncated`` is true, ``candidate_count`` and
+    ``candidates`` describe only the enumerated lower bound; more
+    matching candidates may exist beyond the discovery cap.
     Carries candidate identity dimensions and scope signatures only;
     event content and judge context never appear here.
     """

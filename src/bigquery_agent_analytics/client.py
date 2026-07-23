@@ -281,13 +281,13 @@ ORDER BY event_count DESC
 # difference between "rooty" and a persisted numeric/boolean. The
 # NULLIF folds the explicit-JSON-null encoding ('null') into the
 # raw-missing encoding (SQL NULL) AT THE SOURCE (PR #371 review
-# round 8, P1-1): one semantic value would otherwise occupy two
-# non-adjacent runs of the ordered page (NULL sorts first, 'null'
-# sorts after every '"..."' name), letting a truncated page split a
-# NON-boundary identity's classification context. With canonical
-# encodings every identity is one contiguous run, so only the
-# boundary identity can straddle the cut. The LIMIT bounds SQL and
-# Python work for pathological sessions.
+# round 8, P1-1). ``attributes_valid DESC`` first isolates the valid
+# subsequence from the malformed tail; WITHIN that valid subsequence,
+# canonical encodings make each identity one contiguous run. Python
+# removes the invalid tail before deciding truncation or classifying
+# scopes, so only the valid subsequence's boundary identity can
+# straddle a real cut. The LIMIT bounds SQL and Python work for
+# pathological sessions.
 _RESOLVE_SESSION_CANDIDATES_QUERY = """\
 SELECT
   session_id,
@@ -397,6 +397,7 @@ SELECT
 FROM `{project}.{dataset}.{table}` e
 WHERE e.session_id = @session_id
   AND e.user_id IS NOT DISTINCT FROM @anchor_user_id
+  AND COALESCE(JSON_TYPE(e.attributes), 'null') IN ('object', 'null')
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM @anchor_root_agent_name
   AND {row_where}
@@ -1062,14 +1063,14 @@ class Client:
     candidate_rows = _validated_discovery_rows(candidate_rows)
     truncated = len(candidate_rows) > _MAX_SCOPE_CANDIDATES
     if truncated:
-      # Sound boundary handling (PR #371 review rounds 7-9): the SQL
-      # page folds explicit-JSON-null encodings into raw-missing
-      # (round 8, P1-1), so every canonical identity is one
-      # contiguous run and only the boundary identity can straddle
-      # the cut. The boundary identity's rows go through the shared
-      # partial-page classifier (round 9, P1-2): tagged rows and
-      # every COMPLETE experiment group stay classifiable — proven
-      # ambiguity must surface as typed retries, not a generic
+      # Sound boundary handling (PR #371 review rounds 7-9): invalid
+      # rows have already been removed from the validity-ordered page.
+      # Within the remaining canonical valid subsequence every
+      # identity is one contiguous run, so only its boundary identity
+      # can straddle the cut. The boundary identity's rows go through
+      # the shared partial-page classifier (round 9, P1-2): tagged
+      # rows and every COMPLETE experiment group stay classifiable —
+      # proven ambiguity must surface as typed retries, not a generic
       # enumeration error — while only the final (possibly cut)
       # experiment group and unprovable empty-scope context are
       # dropped. The canonical-key comparison is kept as defense in
@@ -1126,40 +1127,42 @@ class Client:
       return self._fetch_mixed_scope_trace(
           selector, discovered=(matched_identities, False)
       )
-    if len(matching) == 1 and truncated and allow_mixed_scope:
+    if len(matching) == 1 and truncated:
       # Under truncation the singleton needs TWO proofs (rounds 7-10).
       # Identity uniqueness: a fully pinned intrinsic identity is
       # unique by construction; otherwise it is proven through the
-      # bounded identity page, and any other outcome goes to the
-      # mixed path, which enforces the cross-identity ambiguity
-      # surface (round 9, P1-1). Scope uniqueness: only an exact
+      # bounded identity page. Scope uniqueness: only an exact
       # scope_signature pin proves the one visible match IS the
-      # requested scope — a subset pin (labels, experiment) can match
-      # another scope beyond the cut, so without the signature the
-      # flag's promise is the conversation-complete mixed read, not
-      # the first visible match (round 10, P1-2).
+      # requested scope. These proofs make an ambiguity retry
+      # executable regardless of allow_mixed_scope; the flag controls
+      # only the fallback when exactness cannot be proven.
       if selector.scope_signature is None:
-        return self._fetch_mixed_scope_trace(selector)
+        if allow_mixed_scope:
+          return self._fetch_mixed_scope_trace(selector)
       if (
-          selector.user_id is not UNSET
+          selector.scope_signature is not None
+          and selector.user_id is not UNSET
           and selector.root_agent_name is not UNSET
       ):
         return self._fetch_identity_trace(
             matching[0].identity, resolved_scope=matching[0]
         )
-      discovered = self._discover_session_identities(selector)
-      identities, identity_page_truncated = discovered
-      if (
-          not identity_page_truncated
-          and len(identities) == 1
-          and identities[0] == matching[0].identity
-      ):
-        return self._fetch_identity_trace(
-            matching[0].identity, resolved_scope=matching[0]
-        )
-      # Reuse the page just fetched — the mixed path would otherwise
-      # rerun the identical discovery query (round 10, P3-1).
-      return self._fetch_mixed_scope_trace(selector, discovered=discovered)
+      discovered = None
+      if selector.scope_signature is not None:
+        discovered = self._discover_session_identities(selector)
+        identities, identity_page_truncated = discovered
+        if (
+            not identity_page_truncated
+            and len(identities) == 1
+            and identities[0] == matching[0].identity
+        ):
+          return self._fetch_identity_trace(
+              matching[0].identity, resolved_scope=matching[0]
+          )
+      if allow_mixed_scope:
+        # Reuse the page just fetched — the mixed path would otherwise
+        # rerun the identical discovery query (round 10, P3-1).
+        return self._fetch_mixed_scope_trace(selector, discovered=discovered)
     if allow_mixed_scope and truncated:
       return self._fetch_mixed_scope_trace(selector)
     if len(matching) >= 2:
@@ -1717,6 +1720,13 @@ class Client:
         would require an unpruned full-table aggregation per listing;
         callers needing a stable prefix should list once with the
         larger limit and slice.
+
+        Malformed persisted attributes quarantine only affected
+        identity groups. A warning reports the number of distinct
+        groups actually removed, at most once per group for this
+        ``list_traces`` call even when anchor escalation retries the
+        query; malformed rows that remove no otherwise-returnable
+        group do not produce a quarantine warning.
     """
     # One fully detached snapshot feeds the fragments, parameters,
     # AND the post-query limit, so concurrent filter mutation cannot
@@ -1787,6 +1797,7 @@ class Client:
     # trace_limit parameter untouched and cannot escalate — there is
     # no fill target to escalate toward.
     traces: list[Trace] = []
+    reported_quarantined_groups: set = set()
     while True:
       attempt_params = [
           (
@@ -1807,6 +1818,7 @@ class Client:
           scope_predicate=scope_predicate,
           population_complete=population_complete,
           on_malformed="quarantine",
+          _reported_quarantined_groups=reported_quarantined_groups,
       )
       anchors: set = set()
       for index, row in enumerate(results):
@@ -1873,7 +1885,13 @@ class Client:
             (float) — separate from ``aggregate_scores``.
 
     Returns:
-        EvaluationReport with per-session and aggregate scores.
+        EvaluationReport with per-session and aggregate scores. When
+        the API fallback expands one session into multiple identity/
+        scope evaluation units, each ``SessionScore.details`` carries
+        authoritative ``user_id``, ``root_agent_name``, and
+        ``scope_signature`` attribution. These keys are SDK-reserved
+        and strict mode preserves them while adding
+        ``parse_error=True``.
     """
     table = dataset or self.table_id
     # One detached snapshot for the whole evaluation: candidate
@@ -4117,6 +4135,7 @@ def _build_traces_from_rows(
     scope_predicate: Optional[Any] = None,
     population_complete: bool = True,
     on_malformed: str = "raise",
+    _reported_quarantined_groups: Optional[set[tuple]] = None,
 ) -> list[Trace]:
   """Groups BigQuery result rows into Trace objects.
 
@@ -4237,16 +4256,20 @@ def _build_traces_from_rows(
     ]
     for key in contaminated:
       del identity_groups[key]
-    quarantined_count = (
-        len(poisoned_sessions) + len(poisoned_users) + len(poisoned_identities)
-    )
-    logging.getLogger(__name__).warning(
-        "Quarantined %d identity group(s) carrying malformed persisted"
-        " attributes (identifiers and contents redacted); remaining"
-        " results are unaffected. Use a singular read on the affected"
-        " session for the typed validation error.",
-        quarantined_count,
-    )
+    newly_contaminated = contaminated
+    if _reported_quarantined_groups is not None:
+      newly_contaminated = [
+          key for key in contaminated if key not in _reported_quarantined_groups
+      ]
+      _reported_quarantined_groups.update(contaminated)
+    if newly_contaminated:
+      logging.getLogger(__name__).warning(
+          "Quarantined %d identity group(s) carrying malformed persisted"
+          " attributes (identifiers and contents redacted); remaining"
+          " results are unaffected. Use a singular read on the affected"
+          " session for the typed validation error.",
+          len(newly_contaminated),
+      )
 
   # Phase 1: define slots; shared rows stay factored — subgroup-local
   # untagged rows per subgroup, and untagged NULL-experiment rows in
@@ -4468,7 +4491,7 @@ def _apply_strict_mode(report: EvaluationReport) -> EvaluationReport:
               session_id=ss.session_id,
               scores=ss.scores,
               passed=False,
-              details={"parse_error": True},
+              details={**ss.details, "parse_error": True},
               llm_feedback=ss.llm_feedback,
           )
       )

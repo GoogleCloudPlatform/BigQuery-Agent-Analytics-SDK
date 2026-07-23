@@ -2280,9 +2280,12 @@ class TestRound8Regressions:
     import logging
 
     good = _event_row(session_id="s-good", trace_id="TG", span_id="g1")
+    bad_valid = _event_row(session_id="s-bad", span_id="b0")
     bad = _event_row(session_id="s-bad", span_id="b1")
     bad["attributes"] = '{"experiment_id": 7}'
-    client, _ = self._client([[_mock_row(good), _mock_row(bad)]])
+    client, _ = self._client(
+        [[_mock_row(good), _mock_row(bad_valid), _mock_row(bad)]]
+    )
     with caplog.at_level(logging.WARNING):
       traces = client.list_traces(TraceFilter(limit=10))
     assert [t.session_id for t in traces] == ["s-good"]
@@ -2798,14 +2801,26 @@ class TestRound11Regressions:
     return _mock_row(row)
 
   def test_discovery_attestation_precedes_every_enumeration_limit(self):
-    for query in (
-        _RESOLVE_SESSION_CANDIDATES_QUERY,
-        _RESOLVE_CANDIDATES_BATCH_QUERY,
-        _RESOLVE_SESSION_IDENTITIES_QUERY,
+    for query, limit_marker in (
+        (_RESOLVE_SESSION_CANDIDATES_QUERY, "LIMIT @candidate_limit"),
+        (_RESOLVE_SESSION_IDENTITIES_QUERY, "LIMIT @identity_limit"),
     ):
       assert "JSON_TYPE(attributes)" in query
       assert "attributes_valid" in query
-      assert "attributes_valid DESC" in query
+      assert query.index("ORDER BY attributes_valid DESC") < query.index(
+          limit_marker
+      )
+
+    batch_window_start = _RESOLVE_CANDIDATES_BATCH_QUERY.index(
+        "QUALIFY ROW_NUMBER() OVER"
+    )
+    batch_window_end = _RESOLVE_CANDIDATES_BATCH_QUERY.index(
+        ") <= @per_identity_capped", batch_window_start
+    )
+    assert (
+        "ORDER BY attributes_valid DESC"
+        in _RESOLVE_CANDIDATES_BATCH_QUERY[batch_window_start:batch_window_end]
+    )
 
   def test_malformed_discovery_row_cannot_create_public_candidate(self):
     candidates = [
@@ -3028,3 +3043,310 @@ class TestRound11Regressions:
     } == {"alice", "bob"}
     assert not exc_info.value.population_truncated
     assert mock_bq.query.call_count == 1
+
+
+class TestRound12Regressions:
+  """PR #371 review round 12 reproduced findings."""
+
+  def _client(self, batches):
+    mock_bq = MagicMock()
+    jobs = []
+    for batch in batches:
+      job = MagicMock()
+      job.result.return_value = batch
+      jobs.append(job)
+    mock_bq.query.side_effect = jobs
+    return (
+        Client(
+            project_id="proj",
+            dataset_id="ds",
+            verify_schema=False,
+            bq_client=mock_bq,
+        ),
+        mock_bq,
+    )
+
+  @staticmethod
+  def _attested_candidate(**kwargs):
+    row = _candidate_row(**kwargs)
+    row["attributes_valid"] = True
+    return _mock_row(row)
+
+  @staticmethod
+  def _anchored(row):
+    row["anchor_user_id"] = row.get("user_id")
+    row["anchor_root_agent_name"] = None
+    return row
+
+  def test_truncated_ambiguity_payload_retries_exact_scope_by_default(self):
+    import json
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    unaddressable_key = "k\\"
+    candidate_page = [
+        self._attested_candidate(
+            tag_payload=json.dumps({unaddressable_key: f"v{i}"})
+        )
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    client, _ = self._client([candidate_page])
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+
+    selector_payload = json.loads(
+        json.dumps(exc_info.value.to_dict()["candidates"][0]["selector"])
+    )
+    selected_value = selector_payload["custom_labels"][unaddressable_key]
+    fetched = [
+        _mock_row(
+            _event_row(
+                custom_tags={unaddressable_key: selected_value},
+                span_id="selected",
+            )
+        )
+    ]
+    retry_client, mock_bq = self._client([candidate_page, fetched])
+
+    trace = retry_client.get_trace_by_selector(
+        TraceSelector(**selector_payload)
+    )
+
+    assert trace.scope is not None
+    assert trace.scope.labels_dict == {unaddressable_key: selected_value}
+    assert [span.span_id for span in trace.spans] == ["selected"]
+    assert mock_bq.query.call_count == 2
+
+  def test_truncated_exact_scope_with_partial_identity_uses_bounded_proof(self):
+    import json
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    unaddressable_key = "k\\"
+    candidate_page = [
+        self._attested_candidate(
+            tag_payload=json.dumps({unaddressable_key: f"v{i}"})
+        )
+        for i in range(_MAX_SCOPE_CANDIDATES + 1)
+    ]
+    target_scope = TraceScope(
+        custom_labels={unaddressable_key: "v0"}
+    ).scope_signature
+    identity_page = [
+        self._attested_candidate(user_id="alice", tag_payload=None)
+    ]
+    fetched = [
+        _mock_row(
+            _event_row(
+                custom_tags={unaddressable_key: "v0"},
+                span_id="selected",
+            )
+        )
+    ]
+    client, mock_bq = self._client([candidate_page, identity_page, fetched])
+
+    trace = client.get_session_trace(
+        "sess-1",
+        user_id="alice",
+        custom_labels={unaddressable_key: "v0"},
+        scope_signature=target_scope,
+    )
+
+    assert trace.scope is not None
+    assert trace.scope.scope_signature == target_scope
+    assert [span.span_id for span in trace.spans] == ["selected"]
+    assert mock_bq.query.call_count == 3
+
+  def test_singular_fetch_excludes_attested_invalid_attributes(self):
+    normalized_query = " ".join(_GET_SESSION_TRACE_QUERY.split())
+
+    assert (
+        "COALESCE(JSON_TYPE(e.attributes), 'null') "
+        "IN ('object', 'null')" in normalized_query
+    )
+    assert normalized_query.index(
+        "COALESCE(JSON_TYPE(e.attributes), 'null')"
+    ) < normalized_query.index("JSON_VALUE(e.attributes, '$.root_agent_name')")
+
+  def test_quarantine_logs_only_identity_groups_actually_removed(self, caplog):
+    malformed = self._anchored(
+        _event_row(session_id="shared", user_id="alice", span_id="bad")
+    )
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    valid_same_group = self._anchored(
+        _event_row(session_id="shared", user_id="alice", span_id="valid")
+    )
+    orphan_malformed = self._anchored(
+        _event_row(session_id="orphan", user_id="mallory", span_id="orphan")
+    )
+    orphan_malformed["attributes"] = "opaque"
+    orphan_malformed["attributes_type"] = "string"
+
+    with caplog.at_level("WARNING"):
+      traces = _build_traces_from_rows(
+          [
+              _mock_row(malformed),
+              _mock_row(valid_same_group),
+              _mock_row(orphan_malformed),
+          ],
+          on_malformed="quarantine",
+      )
+
+    warnings = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
+    assert traces == []
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Quarantined 1 identity group")
+
+  def test_quarantine_does_not_log_when_no_group_was_removed(self, caplog):
+    orphan_malformed = self._anchored(
+        _event_row(session_id="orphan", user_id="mallory", span_id="orphan")
+    )
+    orphan_malformed["attributes"] = "opaque"
+    orphan_malformed["attributes_type"] = "string"
+
+    with caplog.at_level("WARNING"):
+      traces = _build_traces_from_rows(
+          [_mock_row(orphan_malformed)],
+          on_malformed="quarantine",
+      )
+
+    assert traces == []
+    assert not [
+        record
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
+
+  def test_listing_escalation_logs_each_quarantined_group_once(self, caplog):
+    bad_valid = self._anchored(
+        _event_row(session_id="newest", user_id="alice", span_id="valid")
+    )
+    bad_malformed = self._anchored(
+        _event_row(session_id="newest", user_id="alice", span_id="bad")
+    )
+    bad_malformed["attributes"] = "opaque"
+    bad_malformed["attributes_type"] = "string"
+    older = self._anchored(
+        _event_row(session_id="older", user_id="bob", span_id="older")
+    )
+    client, mock_bq = self._client(
+        [
+            [_mock_row(bad_valid), _mock_row(bad_malformed)],
+            [
+                _mock_row(bad_valid),
+                _mock_row(bad_malformed),
+                _mock_row(older),
+            ],
+        ]
+    )
+
+    with caplog.at_level("WARNING"):
+      traces = client.list_traces(TraceFilter(limit=1))
+
+    warnings = [
+        record.message
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
+    assert [trace.session_id for trace in traces] == ["older"]
+    assert mock_bq.query.call_count == 2
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Quarantined 1 identity group")
+
+  def test_direct_builder_reports_each_independent_quarantine_call(
+      self, caplog
+  ):
+    valid = self._anchored(
+        _event_row(session_id="shared", user_id="alice", span_id="valid")
+    )
+    malformed = self._anchored(
+        _event_row(session_id="shared", user_id="alice", span_id="bad")
+    )
+    malformed["attributes"] = "opaque"
+    malformed["attributes_type"] = "string"
+    with caplog.at_level("WARNING"):
+      _build_traces_from_rows(
+          [_mock_row(valid), _mock_row(malformed)],
+          on_malformed="quarantine",
+      )
+      _build_traces_from_rows(
+          [_mock_row(valid), _mock_row(malformed)],
+          on_malformed="quarantine",
+      )
+
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if record.message.startswith("Quarantined 1 identity group")
+            ]
+        )
+        == 2
+    )
+
+  def test_invalid_tail_does_not_truncate_candidate_population(self):
+    import json
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    valid = [
+        self._attested_candidate(tag_payload=json.dumps({"run": f"v{i}"}))
+        for i in range(_MAX_SCOPE_CANDIDATES)
+    ]
+    invalid_row = _candidate_row(user_id="mallory")
+    invalid_row["attributes_valid"] = False
+    client, _ = self._client([valid + [_mock_row(invalid_row)]])
+
+    with pytest.raises(AmbiguousSessionError) as exc_info:
+      client.get_session_trace("sess-1")
+
+    assert len(exc_info.value.candidates) == _MAX_SCOPE_CANDIDATES
+    assert not exc_info.value.population_truncated
+
+  def test_invalid_tail_does_not_truncate_identity_population(self):
+    from bigquery_agent_analytics.client import _MAX_IDENTITIES
+
+    valid = [
+        self._attested_candidate(user_id=f"user-{i}")
+        for i in range(_MAX_IDENTITIES)
+    ]
+    invalid_row = _candidate_row(user_id="mallory")
+    invalid_row["attributes_valid"] = False
+    client, _ = self._client([valid + [_mock_row(invalid_row)]])
+
+    identities, truncated = client._discover_session_identities(
+        TraceSelector(session_id="sess-1")
+    )
+
+    assert len(identities) == _MAX_IDENTITIES
+    assert not truncated
+
+  def test_invalid_tail_does_not_truncate_batched_identity_partition(self):
+    import json
+
+    from bigquery_agent_analytics.client import _MAX_SCOPE_CANDIDATES
+
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    valid = [
+        self._attested_candidate(
+            user_id="alice", tag_payload=json.dumps({"run": f"v{i}"})
+        )
+        for i in range(_MAX_SCOPE_CANDIDATES)
+    ]
+    invalid_row = _candidate_row(user_id="alice")
+    invalid_row["attributes_valid"] = False
+    client, _ = self._client([valid + [_mock_row(invalid_row)]])
+
+    candidates, truncated = client._real_candidates_for_identities(
+        TraceSelector(session_id="sess-1"), [identity]
+    )
+
+    assert len(candidates) == _MAX_SCOPE_CANDIDATES
+    assert not truncated
