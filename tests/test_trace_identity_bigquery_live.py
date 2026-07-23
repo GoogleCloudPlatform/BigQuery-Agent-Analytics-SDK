@@ -167,8 +167,9 @@ def collision_dataset(bq_client):
     * ``poison-scalar``: valid NULL-root scopes beside a malformed
       row on the same SQL anchor whose attributes are a JSON string
       scalar.
-    * ``poison-only``: a malformed-only session proving discovery
-      still fails closed with a typed validation error.
+    * ``poison-only``: the newest raw row is a malformed-only session,
+      proving discovery still fails closed while listing anchor limits
+      skip it in favor of older valid sessions.
   """
   import uuid
 
@@ -515,14 +516,37 @@ class TestLiveCollisionFixture:
       seen_users.add(trace.identity.user_id)
     assert seen_users == {"alice", "bob"}
 
-  def test_string_scalar_attributes_quarantined_live(self, sdk_client):
+  def test_string_scalar_attributes_excluded_live(self, sdk_client, caplog):
     # PR #371 review round 10, P1-1: the REAL BigQuery decoder hands
     # the poison-scalar row's attributes over as the decoded inner str.
     # Discovery excludes it from public candidates and every advertised
     # exact retry remains executable even though the malformed row shares
     # the valid rows' NULL-root SQL anchor.
     from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import TraceFilter
     from bigquery_agent_analytics.trace import TraceSelector
+
+    with caplog.at_level("WARNING"):
+      listed = sdk_client.list_traces(TraceFilter(limit=50))
+      newest = sdk_client.list_traces(TraceFilter(limit=1))
+    poison_traces = [
+        trace for trace in listed if trace.session_id == "poison-scalar"
+    ]
+    assert len(poison_traces) == 2
+    assert {trace.scope.labels_dict["run"] for trace in poison_traces} == {
+        "v0",
+        "v1",
+    }
+    assert all(
+        "x1" not in {span.span_id for span in trace.spans}
+        for trace in poison_traces
+    )
+    assert [trace.session_id for trace in newest] == ["poison-scalar"]
+    assert not [
+        record
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
 
     with pytest.raises(AmbiguousSessionError) as exc_info:
       sdk_client.get_session_trace("poison-scalar")

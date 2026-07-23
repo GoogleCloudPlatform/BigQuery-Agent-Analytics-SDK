@@ -3350,3 +3350,240 @@ class TestRound12Regressions:
 
     assert len(candidates) == _MAX_SCOPE_CANDIDATES
     assert not truncated
+
+
+class TestRound13Regressions:
+  """PR #371 review round 13 reproduced findings."""
+
+  @staticmethod
+  def _job(rows):
+    job = MagicMock()
+    job.result.return_value = rows
+    return job
+
+  @staticmethod
+  def _anchored(row):
+    row["anchor_user_id"] = row.get("user_id")
+    row["anchor_root_agent_name"] = None
+    return row
+
+  @staticmethod
+  def _has_outer_attestation(query):
+    normalized = " ".join(query.split())
+    return (
+        "COALESCE(JSON_TYPE(e.attributes), 'null') "
+        "IN ('object', 'null')" in normalized
+    )
+
+  @staticmethod
+  def _has_cte_attestation(query):
+    normalized = " ".join(query.split())
+    return (
+        "COALESCE(JSON_TYPE(attributes), 'null') "
+        "IN ('object', 'null')" in normalized
+    )
+
+  def test_public_singular_retry_and_listing_share_attestation_boundary(
+      self, caplog
+  ):
+    import json
+
+    unaddressable_key = "k\\"
+
+    def candidate_rows():
+      rows = []
+      for value in ("v0", "v1"):
+        row = _candidate_row(
+            user_id="alice",
+            tag_payload=json.dumps({unaddressable_key: value}),
+        )
+        row["attributes_valid"] = True
+        rows.append(_mock_row(row))
+      return rows
+
+    def valid_row(value, span_id):
+      row = _event_row(
+          user_id="alice",
+          custom_tags=(
+              {unaddressable_key: value} if value is not None else None
+          ),
+          span_id=span_id,
+      )
+      row["attributes_type"] = "object"
+      return row
+
+    def poison_row():
+      row = _event_row(user_id="alice", span_id="x1")
+      row["attributes"] = "opaque"
+      row["attributes_type"] = "string"
+      return row
+
+    valid_fetch = valid_row("v0", "selected")
+    valid_listing = [
+        self._anchored(valid_row(None, "shared")),
+        self._anchored(valid_row("v0", "v0")),
+        self._anchored(valid_row("v1", "v1")),
+    ]
+    poison = self._anchored(poison_row())
+    queries = []
+
+    def query_side_effect(query, **_kwargs):
+      queries.append(query)
+      if "COUNT(*) AS row_count" in query:
+        return self._job(candidate_rows())
+      if "WITH trace_sessions AS" in query:
+        # This fake models BigQuery's expanded-row WHERE: when the
+        # outer attestation is absent, the same-anchor scalar is
+        # re-admitted and Python must quarantine the whole identity.
+        rows = (
+            valid_listing
+            if self._has_outer_attestation(query)
+            else [*valid_listing, poison]
+        )
+        return self._job([_mock_row(dict(row)) for row in rows])
+      # Singular fetch parity: round 12 already added this predicate;
+      # keep the public retry behavioral instead of substring-only.
+      rows = (
+          [valid_fetch]
+          if self._has_outer_attestation(query)
+          else [valid_fetch, poison]
+      )
+      return self._job([_mock_row(dict(row)) for row in rows])
+
+    mock_bq = MagicMock()
+    mock_bq.query.side_effect = query_side_effect
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    target_scope = TraceScope(
+        custom_labels={unaddressable_key: "v0"}
+    ).scope_signature
+    selector = TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name=None,
+        custom_labels={unaddressable_key: "v0"},
+        scope_signature=target_scope,
+    )
+
+    with caplog.at_level("WARNING"):
+      retry = client.get_trace_by_selector(selector)
+      listed = client.list_traces(TraceFilter(limit=10))
+
+    assert [span.span_id for span in retry.spans] == ["selected"]
+    fetch_query = queries[1]
+    assert self._has_outer_attestation(fetch_query)
+    assert {trace.scope.labels_dict["k\\"] for trace in listed} == {
+        "v0",
+        "v1",
+    }
+    assert all(
+        "x1" not in {span.span_id for span in trace.spans} for trace in listed
+    )
+    assert not [
+        record
+        for record in caplog.records
+        if record.message.startswith("Quarantined")
+    ]
+
+  def test_listing_attestations_precede_both_enumeration_boundaries(self):
+    normalized = " ".join(_LIST_TRACES_QUERY.split())
+    cte_attestation = normalized.index(
+        "COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')"
+    )
+    cte_where = normalized.index("{where}")
+    group_by = normalized.index("GROUP BY session_id, user_id, root_agent_name")
+    anchor_limit = normalized.index("LIMIT @trace_limit")
+    outer_attestation = normalized.index(
+        "COALESCE(JSON_TYPE(e.attributes), 'null') IN ('object', 'null')"
+    )
+    row_where = normalized.index("{row_where}")
+
+    assert cte_attestation < cte_where < group_by < anchor_limit
+    assert outer_attestation < row_where
+
+  def test_poison_only_newest_anchor_does_not_starve_listing(self):
+    poison = self._anchored(
+        _event_row(session_id="newest-poison", user_id="mallory", span_id="x1")
+    )
+    poison["attributes"] = "opaque"
+    poison["attributes_type"] = "string"
+    older = self._anchored(
+        _event_row(session_id="older-valid", user_id="alice", span_id="good")
+    )
+    older["attributes_type"] = "object"
+
+    def query_side_effect(query, **_kwargs):
+      # This models the anchor CTE's WHERE-before-LIMIT behavior.
+      # Mocks cannot execute BigQuery SQL, so the selected page
+      # depends explicitly on whether the production query carries
+      # the CTE attestation.
+      selected = older if self._has_cte_attestation(query) else poison
+      return self._job([_mock_row(dict(selected))])
+
+    mock_bq = MagicMock()
+    mock_bq.query.side_effect = query_side_effect
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+    traces = client.list_traces(TraceFilter(limit=1))
+
+    assert [trace.session_id for trace in traces] == ["older-valid"]
+    assert mock_bq.query.call_count == 1
+
+  def test_poison_only_anchor_does_not_starve_api_evaluation(self):
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.evaluators import SessionScore
+
+    poison = self._anchored(
+        _event_row(session_id="newest-poison", user_id="mallory", span_id="x1")
+    )
+    poison["attributes"] = "opaque"
+    poison["attributes_type"] = "string"
+    older = self._anchored(
+        _event_row(session_id="older-valid", user_id="alice", span_id="good")
+    )
+    older["attributes_type"] = "object"
+
+    def query_side_effect(query, **_kwargs):
+      selected = older if self._has_cte_attestation(query) else poison
+      return self._job([_mock_row(dict(selected))])
+
+    class _Judge:
+      name = "judge"
+
+      async def evaluate_session(self, trace_text, final):
+        return SessionScore(
+            session_id="pending", scores={"quality": 1.0}, passed=True
+        )
+
+    mock_bq = MagicMock()
+    mock_bq.query.side_effect = query_side_effect
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+
+    report = client._api_judge(
+        _Judge(),
+        "tbl",
+        "TRUE",
+        [bq.ScalarQueryParameter("trace_limit", "INT64", 1)],
+        row_where="TRUE",
+        limit=1,
+        trace_filter=None,
+    )
+
+    assert report.total_sessions == 1
+    assert report.session_scores[0].session_id == "older-valid"
+    assert mock_bq.query.call_count == 1

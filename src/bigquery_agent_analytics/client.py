@@ -153,6 +153,8 @@ ORDER BY timestamp ASC
 # intrinsic identity, and the outer row fetch joins NULL-safely on
 # every anchor dimension, so a reused session_id cannot absorb rows
 # from another user or root agent even when the filter pins nothing.
+# Top-level non-object attributes are intentionally excluded before
+# both anchor LIMIT selection and expanded-row materialization.
 # {row_where} re-applies caller-selected label/experiment scope to
 # the fetched rows (see TraceFilter.row_scope_where).
 _LIST_TRACES_QUERY = """\
@@ -163,7 +165,8 @@ WITH trace_sessions AS (
     JSON_VALUE(attributes, '$.root_agent_name') AS root_agent_name,
     MAX(timestamp) AS last_event_ts
   FROM `{project}.{dataset}.{table}`
-  WHERE {where}
+  WHERE COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
+    AND ({where})
   GROUP BY session_id, user_id, root_agent_name
   ORDER BY last_event_ts DESC, session_id, user_id, root_agent_name
   LIMIT @trace_limit
@@ -194,7 +197,8 @@ JOIN trace_sessions ts
   AND e.user_id IS NOT DISTINCT FROM ts.user_id
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM ts.root_agent_name
-WHERE {row_where}
+WHERE COALESCE(JSON_TYPE(e.attributes), 'null') IN ('object', 'null')
+  AND ({row_where})
 ORDER BY e.session_id, e.timestamp ASC, e.span_id, e.invocation_id,
   e.event_type
 """
@@ -374,7 +378,9 @@ LIMIT @identity_limit
 
 # Anchored singular fetch: rows are pinned to the RESOLVED identity
 # NULL-safely, and {row_where} applies the resolved scope so foreign
-# passes sharing the session id stay excluded.
+# passes sharing the session id stay excluded. Like discovery and
+# bulk listing, it intentionally excludes top-level non-object
+# attributes; completeness covers only object-or-null-attested rows.
 _GET_SESSION_TRACE_QUERY = """\
 SELECT
   e.event_type,
@@ -969,7 +975,9 @@ class Client:
         allow_mixed_scope: KTD4 escape hatch. When ``True``, a
             selector that cannot be narrowed to a single scope
             returns a conversation-complete read of the single
-            matching intrinsic identity instead of raising:
+            matching intrinsic identity's object-or-null-attested
+            rows instead of raising; top-level non-object attributes
+            are intentionally excluded:
             ``scope`` is ``None`` and ``scope_coverage`` names the
             scope signatures merged into the trace. Ambiguity ACROSS
             identities still raises.
@@ -1020,11 +1028,12 @@ class Client:
         allow_mixed_scope: Opt-in escape hatch (plan KTD4): when the
             selector remains scope-ambiguous but its selector-aware
             population resolves to ONE intrinsic identity, return the
-            conversation-complete row set for that identity in
-            producer row order. The trace carries ``identity``,
-            ``scope=None``, and ``scope_coverage`` derived from the
-            scopes actually fetched (``None`` when that population
-            was too large to enumerate).
+            conversation-complete object-or-null-attested row set
+            for that identity in producer row order. Top-level
+            non-object attributes are intentionally excluded. The
+            trace carries ``identity``, ``scope=None``, and
+            ``scope_coverage`` derived from the scopes actually fetched
+            (``None`` when that population was too large to enumerate).
 
     Raises:
         ValueError: If no events match the selector, if the
@@ -1114,8 +1123,9 @@ class Client:
       # A complete candidate page already proves the full
       # selector-matched identity population. Reuse it instead of
       # rediscovering the same identities: one identity proceeds
-      # directly to the conversation-complete fetch, while multiple
-      # identities are already a proven public ambiguity.
+      # directly to the conversation-complete object-or-null fetch,
+      # while multiple identities are already a proven public
+      # ambiguity.
       matched_identities = list(
           dict.fromkeys(candidate.identity for candidate in matching)
       )
@@ -1181,7 +1191,7 @@ class Client:
           " absence can be proven from the enumerated page. Add"
           " identity, experiment, or label pins (they narrow the SQL"
           " page), or use allow_mixed_scope=True for a"
-          " conversation-complete read."
+          " conversation-complete object-or-null-attested read."
       )
     raise ValueError("No candidates match the requested session.")
 
@@ -1325,7 +1335,11 @@ class Client:
       selector: TraceSelector,
       discovered: Optional[tuple] = None,
   ) -> Trace:
-    """Conversation-complete read for one intrinsic identity.
+    """Conversation-complete object-or-null-attested read for one identity.
+
+    Top-level non-object attributes are intentionally excluded by the
+    same SQL attestation used by discovery and scoped singular fetches;
+    they are outside this completeness contract.
 
     Identity uniqueness is established by a bounded DISTINCT-identity
     query carrying the FULL selector pushdown — identity pins AND
@@ -1721,12 +1735,15 @@ class Client:
         callers needing a stable prefix should list once with the
         larger limit and slice.
 
-        Malformed persisted attributes quarantine only affected
-        identity groups. A warning reports the number of distinct
-        groups actually removed, at most once per group for this
-        ``list_traces`` call even when anchor escalation retries the
-        query; malformed rows that remove no otherwise-returnable
-        group do not produce a quarantine warning.
+        Top-level non-object attributes are excluded in SQL before
+        anchor selection and row materialization, so they consume no
+        limit slots, never appear in results, and produce no quarantine
+        warning. Object-typed rows with malformed identity/scope fields
+        are quarantined in Python; the warning reports distinct groups
+        actually removed, at most once per group for this
+        ``list_traces`` call across anchor escalation retries. A
+        matching singular selector still raises the typed validation
+        error for those object-typed malformed fields.
     """
     # One fully detached snapshot feeds the fragments, parameters,
     # AND the post-query limit, so concurrent filter mutation cannot
@@ -4264,10 +4281,13 @@ def _build_traces_from_rows(
       _reported_quarantined_groups.update(contaminated)
     if newly_contaminated:
       logging.getLogger(__name__).warning(
-          "Quarantined %d identity group(s) carrying malformed persisted"
-          " attributes (identifiers and contents redacted); remaining"
-          " results are unaffected. Use a singular read on the affected"
-          " session for the typed validation error.",
+          "Quarantined %d identity group(s) after Python validation of"
+          " materialized attributes (identifiers and contents redacted)."
+          " SDK listing SQL excludes attested top-level non-object rows"
+          " before this stage, so listing warnings cover object-typed"
+          " rows with malformed identity/scope fields. Remaining results"
+          " are unaffected; use a matching singular selector for the"
+          " typed validation error.",
           len(newly_contaminated),
       )
 
