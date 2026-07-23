@@ -32,6 +32,10 @@ PANEL_QUERIES = {
     18: "recent_sessions.sql",
     19: "trace_detail.sql",
 }
+TEMPLATE_VARIABLE_QUERIES = {
+    "agent": "var_agent.sql",
+    "session_id": "var_session_id.sql",
+}
 # Panels that consume another panel's result via Grafana's Dashboard data
 # source, mapped to the panel id they draw from. These add no BigQuery load, so
 # they carry no embedded query and are validated by reference instead.
@@ -56,10 +60,11 @@ def fail(message: str) -> None:
 def check_unmapped_queries() -> int:
   """Fail if the queries directory holds .sql files this check never sees.
 
-  PANEL_QUERIES is the only thing that decides which .sql files get compared
-  against the dashboard. A new .sql file that nobody adds to the dict is
-  therefore invisible to this check. Diff the on-disk files against the mapped
-  files directly so a mismatch is surfaced loudly rather than silently passing.
+  The explicit panel and template-variable maps decide which .sql files get
+  compared against the dashboard. A new .sql file that nobody adds to either
+  map is therefore invisible to this check. Diff the on-disk files against the
+  mapped files directly so a mismatch is surfaced loudly rather than silently
+  passing.
   Comparing counts alone is unsound: deleting one mapped file while adding one
   unmapped file keeps the counts equal but leaves an unmapped file uncaught.
 
@@ -72,7 +77,9 @@ def check_unmapped_queries() -> int:
     fail(f"cannot list canonical queries in {QUERIES_DIRECTORY}: {error}")
     return 1
 
-  mapped_files = set(PANEL_QUERIES.values())
+  mapped_files = set(PANEL_QUERIES.values()) | set(
+      TEMPLATE_VARIABLE_QUERIES.values()
+  )
   unmapped = sorted(sql_files - mapped_files)
   if not unmapped:
     return 0
@@ -81,13 +88,13 @@ def check_unmapped_queries() -> int:
       "  ****************************************************************\n"
       "  * ERROR: unmapped SQL files in grafana/queries/                *\n"
       "  ****************************************************************\n"
-      f"  Found {len(sql_files)} .sql file(s) on disk but PANEL_QUERIES maps\n"
+      f"  Found {len(sql_files)} .sql file(s) on disk but the query maps cover\n"
       f"  only {len(mapped_files)} unique file(s). This check compares ONLY\n"
-      "  the files listed in PANEL_QUERIES, so any file missing from that\n"
-      "  dict is never validated against the dashboard.\n"
+      "  the files listed in PANEL_QUERIES or TEMPLATE_VARIABLE_QUERIES, so\n"
+      "  files missing from both are never validated against the dashboard.\n"
       "\n"
       "  Do NOT rely on this script to catch every drift automatically\n"
-      "  until PANEL_QUERIES is updated to cover the files below:\n"
+      "  until a query map is updated to cover the files below:\n"
       + "".join(f"    - {name}\n" for name in unmapped)
       + "  ****************************************************************",
       file=sys.stderr,
@@ -116,11 +123,24 @@ def load_dashboard() -> dict[str, Any]:
   return dashboard
 
 
+def flatten_panels(panels: list[Any]) -> list[Any]:
+  """Return all panels, including panels nested inside collapsed rows."""
+
+  flattened: list[Any] = []
+  for panel in panels:
+    flattened.append(panel)
+    if isinstance(panel, dict):
+      nested_panels = panel.get("panels", [])
+      if isinstance(nested_panels, list):
+        flattened.extend(flatten_panels(nested_panels))
+  return flattened
+
+
 def main() -> int:
   """
   Validates the integrity and synchronization of the Grafana dashboard queries.
 
-  This CI script strictly enforces four key conditions:
+  This CI script strictly enforces six key conditions:
   1. Drift Prevention: The 'rawSql' inside the JSON dashboard exactly matches
      the canonical '.sql' files in the queries directory (printing unified diffs on failure).
   2. Unmapped File Detection: Every '.sql' file in the queries directory is
@@ -129,6 +149,10 @@ def main() -> int:
      is explicitly registered in the PANEL_QUERIES dictionary.
   4. Dashboard Datasource Validation: Every panel querying the '-- Dashboard --'
      datasource is explicitly registered in DASHBOARD_DATA_PANEL_SOURCES.
+  5. Template Variable Reverse Mapping: Every BigQuery query variable in the
+     dashboard is explicitly registered in TEMPLATE_VARIABLE_QUERIES.
+  6. Template Variable Synchronization: Query variables match their canonical
+     files and their definition and query.rawSql copies match each other.
   """
   errors = check_unmapped_queries()
 
@@ -139,7 +163,7 @@ def main() -> int:
     return 1
 
   panels: dict[int, dict[str, Any]] = {}
-  for panel in dashboard["panels"]:
+  for panel in flatten_panels(dashboard["panels"]):
     if not isinstance(panel, dict) or not isinstance(panel.get("id"), int):
       fail("each dashboard panel must be an object with an integer id")
       errors += 1
@@ -149,6 +173,111 @@ def main() -> int:
       fail(f"duplicate panel id {panel_id}")
       errors += 1
     panels[panel_id] = panel
+
+  templating = dashboard.get("templating", {})
+  variables = templating.get("list", []) if isinstance(templating, dict) else []
+  if not isinstance(variables, list):
+    fail("dashboard.templating.list must be an array")
+    errors += 1
+    variables = []
+  variables_by_name = {
+      variable.get("name"): variable
+      for variable in variables
+      if isinstance(variable, dict) and isinstance(variable.get("name"), str)
+  }
+
+  for variable in variables:
+    if not isinstance(variable, dict) or variable.get("type") != "query":
+      continue
+    datasource = variable.get("datasource")
+    if (
+        not isinstance(datasource, dict)
+        or datasource.get("type") != "grafana-bigquery-datasource"
+    ):
+      continue
+    variable_name = variable.get("name")
+    if not isinstance(variable_name, str):
+      fail("each BigQuery query variable must have a string name")
+      errors += 1
+    elif variable_name not in TEMPLATE_VARIABLE_QUERIES:
+      fail(
+          f"BigQuery query variable {variable_name} is missing from "
+          "TEMPLATE_VARIABLE_QUERIES"
+      )
+      errors += 1
+
+  for variable_name, filename in TEMPLATE_VARIABLE_QUERIES.items():
+    variable = variables_by_name.get(variable_name)
+    if variable is None:
+      fail(f"missing template variable {variable_name} for {filename}")
+      errors += 1
+      continue
+    definition = variable.get("definition")
+    query = variable.get("query")
+    raw_sql = query.get("rawSql") if isinstance(query, dict) else None
+    if not isinstance(definition, str) or not isinstance(raw_sql, str):
+      fail(
+          f"template variable {variable_name} must have string definition "
+          "and query.rawSql values"
+      )
+      errors += 1
+      continue
+    if normalize(definition) != normalize(raw_sql):
+      fail(
+          f"template variable {variable_name} definition has drifted from "
+          "query.rawSql"
+      )
+      errors += 1
+    try:
+      canonical_query = (QUERIES_DIRECTORY / filename).read_text(
+          encoding="utf-8"
+      )
+    except OSError as error:
+      fail(f"cannot read canonical query {filename}: {error}")
+      errors += 1
+      continue
+    if normalize(raw_sql) != normalize(canonical_query):
+      fail(
+          f"template variable {variable_name} query has drifted from "
+          f"grafana/queries/{filename}"
+      )
+      diff = difflib.unified_diff(
+          normalize(canonical_query).splitlines(),
+          normalize(raw_sql).splitlines(),
+          fromfile=f"grafana/queries/{filename}",
+          tofile=f"dashboard variable {variable_name} query.rawSql",
+          lineterm="",
+      )
+      print("\n".join(diff), file=sys.stderr)
+      errors += 1
+
+  for variable_name, variable in variables_by_name.items():
+    all_value = variable.get("allValue")
+    if all_value is None:
+      continue
+    if not isinstance(all_value, str) or not all_value:
+      fail(
+          f"template variable {variable_name} allValue must be a "
+          "non-empty string when set"
+      )
+      errors += 1
+      continue
+    interpolation = "${" + variable_name + ":sqlstring}"
+    sentinel = all_value
+    for filename in PANEL_QUERIES.values():
+      try:
+        canonical_query = (QUERIES_DIRECTORY / filename).read_text(
+            encoding="utf-8"
+        )
+      except OSError:
+        # The canonical panel-query loop below reports the read failure.
+        continue
+      if interpolation in canonical_query and sentinel not in canonical_query:
+        fail(
+            f"canonical query {filename} uses {interpolation} but does not "
+            f"contain the variable's allValue sentinel {all_value!r}"
+        )
+        errors += 1
 
   for panel_id, panel in panels.items():
     if panel.get("type") == "row":
@@ -240,7 +369,8 @@ def main() -> int:
     )
     return 1
   print(
-      f"Grafana dashboard JSON is valid and {len(PANEL_QUERIES)} queries "
+      "Grafana dashboard JSON is valid and "
+      f"{len(PANEL_QUERIES) + len(TEMPLATE_VARIABLE_QUERIES)} queries "
       "are in sync."
   )
   return 0

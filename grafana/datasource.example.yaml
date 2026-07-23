@@ -30,8 +30,8 @@ datasources:
       tokenUri: https://oauth2.googleapis.com/token
       processingLocation: US # match your dataset's location, e.g. US, EU
     secureJsonData:
-      # Paste ONLY the private_key field from the service-account JSON key
-      # (keep the \n escapes exactly as they appear in the JSON file).
+      # Paste ONLY the private_key field from the service-account JSON key as
+      # a multiline PEM with real line breaks, not literal \n sequences.
       # Do NOT commit a real key to version control.
       privateKey: |
         -----BEGIN PRIVATE KEY-----

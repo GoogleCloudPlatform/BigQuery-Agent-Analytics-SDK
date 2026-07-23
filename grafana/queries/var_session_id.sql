@@ -1,0 +1,1 @@
+SELECT session_id FROM `${project}.${dataset}.${table}` WHERE $__timeFilter(timestamp) AND session_id IS NOT NULL AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}])) GROUP BY session_id ORDER BY MAX(timestamp) DESC LIMIT 200

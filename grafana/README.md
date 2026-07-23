@@ -30,18 +30,21 @@ AI Agent app ──SDK──▶ BigQuery agent_events ──ViewManager──▶
 - A Grafana instance ([Grafana Cloud Free](https://grafana.com/products/cloud/)).
   > **Important for new users:** You must install the **Google BigQuery** data source plugin (`grafana-bigquery-datasource`) in Grafana before BigQuery will appear as an available connector.
 
-### 0. Service Account & Auth Setup
+## 0. Service Account & Auth Setup
 
 Grafana requires Google Cloud credentials to read your BigQuery data, using
 either a dedicated service account or Application Default Credentials.
 
 1. In the Google Cloud Console, go to **IAM & Admin → Service Accounts**.
 2. Click **Create Service Account** (e.g., name it `grafana-bqaa-viewer`).
-3. Grant it the following two roles on your project:
-   - `BigQuery Data Viewer` (to read the tables and views)
-   - `BigQuery Job User` (to execute the queries)
+3. Grant `BigQuery Job User` (`roles/bigquery.jobUser`) on the project so the
+   account can execute queries. Grant `BigQuery Data Viewer`
+   (`roles/bigquery.dataViewer`) only on the specific BQAA dataset that Grafana
+   needs to read, not on the entire project.
 4. After creating the account, click on it, navigate to the **Keys** tab, and click **Add Key → Create new key**. 
-5. Choose **JSON** and download the file. Keep this file secure; you will upload it to Grafana in Step 2.
+5. Choose **JSON** and download the file. Keep it outside the repository and
+   secure; you will upload it to Grafana in Step 2.
+   > **Note:** Because service account key filenames vary wildly depending on how they are generated (e.g., GCP Console vs. `gcloud` CLI), this repository's `.gitignore` globally ignores all new `*.json` files to protect against accidental credential leaks.
 
 ## 1. Prepare the data
 
@@ -79,6 +82,12 @@ with `adk_` by default; if you used a custom prefix, set the dashboard's
 **Self-managed Grafana (Docker or Bare-Metal):**
 You can provision the BigQuery data source automatically on startup using a YAML file. Create a copy of [`datasource.example.yaml`](datasource.example.yaml) (never commit your real service account key to version control) and inject your credentials. *(Note: Default login for a fresh local Grafana is `admin` / `admin`).*
 
+For `secureJsonData.privateKey`, use the PEM as an actual YAML multiline value
+with real line breaks, as shown in the example. Do not paste the JSON
+representation containing literal `\n` escape sequences. Prefer mounting the
+key or injecting it from a secret manager instead of storing it in the
+provisioning file.
+
 - **Docker:** Copy the example, inject your credentials, then pass the plugin
   environment variable and mount your YAML file:
   ```bash
@@ -100,12 +109,13 @@ You can provision the BigQuery data source automatically on startup using a YAML
 1. **Dashboards → New → Import**.
 2. Upload `bqaa-dashboard.json` (or paste its contents).
 3. If and when prompted, select your BigQuery data source.
-4. Set the dashboard variables at the top:
-   - **GCP project** / **BigQuery dataset** / **Events table** - where the SDK
-     writes (`agent_events` by default).
-   - **View prefix** - `adk_` unless you customized `ViewManager`.
-   - **Agent** - multi-select filter, populated from your data.
-   - **Session** - drives the *Trace detail* panel.
+4. Click **Dashboard Settings** (the gear icon at the top right), then go to
+   **Variables**.
+5. Select and update the hidden `project`, `dataset`, `table`, and
+   `view_prefix` constants to match your environment. The default table is
+   `agent_events`, and the default view prefix is `adk_`.
+6. Use the visible **Agent** multi-select filter and **Session** selector at the
+   top of the dashboard. **Session** drives the *Trace detail* panel.
 
 You should see four rows: 
    - **Overview** (sessions, events, error rate, latency, volumes)
@@ -117,11 +127,20 @@ You should see four rows:
 
 Because BigQuery is an enterprise data source that requires underlying authentication, Grafana Cloud Free does **not** allow you to share live, interactive BigQuery dashboards publicly. 
 
-If you want to share your dashboard with external stakeholders who do not have a Grafana account, you must use the **Snapshot** feature:
+If you want to share your dashboard with external stakeholders who do not have a Grafana account, you must use the **Snapshot** feature. 
+
+> **CRITICAL PRIVACY WARNING:** A snapshot is a public, point-in-time dashboard containing the visible data. While it strips the backend queries to prevent further interaction with the database, it **preserves all visible values AND the raw executed SQL strings** directly in the URL payload (including session IDs, error messages, and even your plain-text GCP Project ID and Dataset name embedded in the queries). While this method does allow you to easily share the dashboard, you must be aware that **any unauthenticated user on the internet can view this production data and infrastructure layout** if you publish it this way. Therefore, the data you snapshot must be strictly curated based on your intent. **DO NOT publish snapshots of real production telemetry.**
+
+Before sharing a snapshot, you **MUST**:
+1. Run `bqaa seed-events` into a dedicated, isolated demo dataset.
+2. Update your dashboard's `dataset` constant to point strictly to this redacted demo dataset.
+3. Verify every visible panel to ensure no sensitive prompts, responses, or identifiers exist.
+4. Set a short expiration time (e.g., 1 hour) when creating the snapshot.
+5. Open the generated snapshot link in an **Incognito window** and perform a final verification before sharing the link.
+
+To create the snapshot:
 1. In your loaded dashboard, click the **Share** button at the top right.
 2. Select the **Snapshot** tab.
-3. Set an expiration time (ranging from 1 hour to never expire) and a Snapshot name.
+3. Set a short expiration time and a Snapshot name.
 4. Click **Publish to snapshot.raintank.io** (or Local Snapshot).
-5. Copy the generated link. 
-
-This link creates a static, point-in-time image of your dashboard with all the current data hardcoded into it. Viewers will be able to see the charts without needing Grafana accounts or BigQuery credentials, but they will not be able to interact with the dropdown variables.
+5. Copy the generated link and verify it in Incognito.

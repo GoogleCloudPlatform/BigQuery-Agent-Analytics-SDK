@@ -19,7 +19,8 @@ SELECT
   CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,
   error_message
 FROM `${project}.${dataset}.${table}`
-WHERE session_id = ${session_id:sqlstring}
+WHERE session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}])
   AND $__timeFilter(timestamp)
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))
 ORDER BY timestamp
 LIMIT 500

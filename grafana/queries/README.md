@@ -1,8 +1,9 @@
 # Grafana Panel Queries — Source of Truth
 
 The `.sql` files in this directory are the **canonical source of truth** for
-every panel in `grafana/bqaa-dashboard.json`. The dashboard JSON embeds a
-copy of each query (Grafana has no "include SQL from file" mechanism), so:
+every panel and query template variable in `grafana/bqaa-dashboard.json`.
+The dashboard JSON embeds a copy of each query (Grafana has no "include SQL
+from file" mechanism), so:
 
 > **If you change a query, change it here first, then paste the updated SQL
 > into the matching panel in `bqaa-dashboard.json`.** A PR that touches one
@@ -10,36 +11,25 @@ copy of each query (Grafana has no "include SQL from file" mechanism), so:
 
 ## Conventions
 
-- **Templating placeholders.** The files use Grafana template-variable
-  syntax exactly as it appears in the dashboard JSON:
-  - `${project}`, `${dataset}`, `${table}` — BigQuery location of the raw
-    `agent_events` table.
-  - `${view_prefix}` — prefix applied by `ViewManager` (default `adk_`).
-  - `${agent:sqlstring}` — multi-value agent filter, SQL-string-escaped by
-    Grafana.
-  - `${session_id:sqlstring}` — single session id, SQL-string-escaped by
-    Grafana to prevent SQL injection.
-  - `$__timeFilter(timestamp)` / `$__timeGroup(timestamp, $__interval)` —
-    Grafana BigQuery datasource macros for the dashboard time range.
+- **Templating placeholders.** The files use Grafana template-variable syntax:
+  - `${project}`, `${dataset}`, `${table}` — BigQuery location.
+  - `${view_prefix}` — prefix applied by `ViewManager`.
+  - `${agent:sqlstring}`, `${session_id:sqlstring}` — variables safely escaped by Grafana to prevent SQL injection.
+  - `$__timeFilter(...)` — Grafana time range macros.
 
-  To run a file directly in the BigQuery console, replace the placeholders
-  by hand (e.g. `$__timeFilter(timestamp)` →
-  `timestamp BETWEEN TIMESTAMP('...') AND TIMESTAMP('...')`).
+- **The `All` agent sentinel.** The `agent` variable's "All" option uses the custom value `'___ALL___'`. Because of how Grafana handles multi-select interpolation, queries pair every agent filter with this sentinel using BigQuery array syntax to prevent injection and empty-array crashes:
+  `('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))`.
 
-- **Error predicate.** The SDK's canonical `ERROR_SQL_PREDICATE` and the
-  values actually emitted by `seed_events.py` disagree on casing (the seed
-  corpus emits lowercase `error`). All queries here therefore use the
-  casing-safe predicate `UPPER(status) = 'ERROR'`.
+- **Error predicate.** An event is classified as an error if it meets any of the following conditions (used across overview and session queries):
+  ```sql
+  ENDS_WITH(event_type, '_ERROR')
+    OR error_message IS NOT NULL
+    OR UPPER(status) = 'ERROR'
+  ```
 
-- **Typed views over raw JSON.** Wherever a typed column exists on a
-  `ViewManager` view (e.g. `usage_prompt_tokens` on
-  `${view_prefix}llm_responses`), the query uses the view rather than
-  re-extracting JSON from `agent_events`. Only session-level rollups and
-  the trace-detail query hit the raw table.
+- **Typed views.** Queries use typed views (e.g. `${view_prefix}llm_responses`) instead of parsing JSON from the raw `agent_events` table whenever possible.
 
-- **Missing-telemetry degradation.** Token sums degrade to `0`
-  (`IFNULL(..., 0)`); latency aggregates stay `NULL` so charts show gaps
-  rather than fake zeros.
+- **Missing telemetry.** Token sums degrade to `0` (`IFNULL(..., 0)`); latency aggregates stay `NULL` so charts show gaps instead of fake zeros.
 
 ## File → Panel map
 
@@ -57,6 +47,8 @@ copy of each query (Grafana has no "include SQL from file" mechanism), so:
 | `tool_errors.sql`             | Tool errors (Tools)                                               |
 | `recent_sessions.sql`         | Recent sessions (Sessions & Traces)                               |
 | `trace_detail.sql`            | Trace detail for `$session_id` (Sessions & Traces)                |
+| `var_agent.sql`               | Agent template variable                                           |
+| `var_session_id.sql`          | Session template variable                                         |
 
 ## Adding a New Panel (CI Synchronization)
 

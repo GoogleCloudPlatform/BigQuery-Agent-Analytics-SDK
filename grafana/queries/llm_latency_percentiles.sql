@@ -8,6 +8,6 @@ SELECT
   APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms
 FROM `${project}.${dataset}.${view_prefix}llm_responses`
 WHERE $__timeFilter(timestamp)
-  AND agent IN (${agent:sqlstring})
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))
 GROUP BY time
 ORDER BY time

@@ -5,11 +5,11 @@
 -- labeled "Estimated Cost" for this reason; token counts are the
 -- primary FinOps signal.
 SELECT
-  SUM(IFNULL(usage_prompt_tokens, 0)) / 1e6 * 1.25    -- $ / 1M prompt tokens
-    + SUM(IFNULL(usage_completion_tokens, 0)) / 1e6 * 5.00  -- $ / 1M completion tokens
+  IFNULL(SUM(usage_prompt_tokens), 0) / 1e6 * 1.25    -- $ / 1M prompt tokens
+    + IFNULL(SUM(usage_completion_tokens), 0) / 1e6 * 5.00  -- $ / 1M completion tokens
     AS estimated_cost_usd,
   -- NOTE: This column is consumed dynamically by the dependent 'Total tokens' panel
-  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens
+  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens
 FROM `${project}.${dataset}.${view_prefix}llm_responses`
 WHERE $__timeFilter(timestamp)
-  AND agent IN (${agent:sqlstring})
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))

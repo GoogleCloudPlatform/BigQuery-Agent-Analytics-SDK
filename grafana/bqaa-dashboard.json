@@ -51,10 +51,10 @@
         "skipUrlSync": false
       },
       {
-        "type": "textbox",
+        "type": "constant",
         "name": "project",
         "label": "GCP project",
-        "description": "Google Cloud project containing the BQAA dataset.",
+        "description": "Google Cloud project containing the BQAA dataset. Locked to a constant so viewers cannot repoint panels at arbitrary projects.",
         "query": "my-project",
         "current": {
           "selected": false,
@@ -68,14 +68,14 @@
             "value": "my-project"
           }
         ],
-        "hide": 0,
-        "skipUrlSync": false
+        "hide": 2,
+        "skipUrlSync": true
       },
       {
-        "type": "textbox",
+        "type": "constant",
         "name": "dataset",
         "label": "BigQuery dataset",
-        "description": "Dataset holding agent_events and the ViewManager views.",
+        "description": "Dataset holding agent_events and the ViewManager views. Locked to a constant so viewers cannot explore arbitrary datasets.",
         "query": "agent_analytics",
         "current": {
           "selected": false,
@@ -89,14 +89,14 @@
             "value": "agent_analytics"
           }
         ],
-        "hide": 0,
-        "skipUrlSync": false
+        "hide": 2,
+        "skipUrlSync": true
       },
       {
-        "type": "textbox",
+        "type": "constant",
         "name": "table",
         "label": "Events table",
-        "description": "Raw events table name (ViewManager table_id).",
+        "description": "Raw events table name (ViewManager table_id). Locked to a constant so viewers cannot repoint panels at arbitrary tables.",
         "query": "agent_events",
         "current": {
           "selected": false,
@@ -110,14 +110,14 @@
             "value": "agent_events"
           }
         ],
-        "hide": 0,
-        "skipUrlSync": false
+        "hide": 2,
+        "skipUrlSync": true
       },
       {
-        "type": "textbox",
+        "type": "constant",
         "name": "view_prefix",
         "label": "View prefix",
-        "description": "Prefix ViewManager applies to view names (default adk_).",
+        "description": "Prefix ViewManager applies to view names (default adk_). Locked to a constant so viewers cannot repoint panels at arbitrary views.",
         "query": "adk_",
         "current": {
           "selected": false,
@@ -131,14 +131,14 @@
             "value": "adk_"
           }
         ],
-        "hide": 0,
-        "skipUrlSync": false
+        "hide": 2,
+        "skipUrlSync": true
       },
       {
         "type": "query",
         "name": "agent",
         "label": "Agent",
-        "description": "Filter panels to one or more agents.",
+        "description": "Filter panels to one or more agents. \"All\" interpolates the custom allValue '___ALL___' — quoted here because Grafana injects a custom all value verbatim, without applying the :sqlstring formatter.",
         "datasource": {
           "type": "grafana-bigquery-datasource",
           "uid": "${datasource}"
@@ -155,6 +155,7 @@
         "refresh": 2,
         "multi": true,
         "includeAll": true,
+        "allValue": "'___ALL___'",
         "current": {},
         "options": [],
         "sort": 0,
@@ -175,11 +176,11 @@
           "refId": "tempvar",
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT session_id FROM `${project}.${dataset}.${table}` WHERE $__timeFilter(timestamp) AND agent IN (${agent:sqlstring}) GROUP BY session_id ORDER BY MAX(timestamp) DESC LIMIT 200",
+          "rawSql": "SELECT session_id FROM `${project}.${dataset}.${table}` WHERE $__timeFilter(timestamp) AND session_id IS NOT NULL AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}])) GROUP BY session_id ORDER BY MAX(timestamp) DESC LIMIT 200",
           "format": 1,
           "location": ""
         },
-        "definition": "SELECT session_id FROM `${project}.${dataset}.${table}` WHERE $__timeFilter(timestamp) AND agent IN (${agent:sqlstring}) GROUP BY session_id ORDER BY MAX(timestamp) DESC LIMIT 200",
+        "definition": "SELECT session_id FROM `${project}.${dataset}.${table}` WHERE $__timeFilter(timestamp) AND session_id IS NOT NULL AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}])) GROUP BY session_id ORDER BY MAX(timestamp) DESC LIMIT 200",
         "refresh": 2,
         "multi": false,
         "includeAll": false,
@@ -231,7 +232,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\n-- NOTE: The avg_llm_latency_ms subquery performs an extra full scan of llm_responses.\n-- This is an intentional UX decision to provide a top-level scalar metric alongside\n-- the dedicated time-series panel below.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
+          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: The avg_llm_latency_ms subquery performs an extra full scan of llm_responses.\n-- This is an intentional UX decision to provide a top-level scalar metric alongside\n-- the dedicated time-series panel below.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(ENDS_WITH(e.event_type, '_ERROR') OR e.error_message IS NOT NULL OR UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR r.agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR e.agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n",
           "format": 1,
           "location": ""
         }
@@ -337,7 +338,7 @@
         "x": 12,
         "y": 1
       },
-      "description": "Share of events with UPPER(status) = 'ERROR' (casing-safe predicate; see grafana/queries/README.md).",
+      "description": "Share of events counted as errors: event_type ending in _ERROR, or a non-NULL error_message, or UPPER(status) = 'ERROR'. See grafana/queries/README.md.",
       "datasource": {
         "type": "datasource",
         "uid": "-- Dashboard --"
@@ -477,7 +478,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Events over time, one series per event_type (Overview row).\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS events\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY time, event_type\nORDER BY time\n",
+          "rawSql": "-- Panel: Events over time, one series per event_type (Overview row).\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS events\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY time, event_type\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -525,7 +526,7 @@
         "x": 12,
         "y": 5
       },
-      "description": "Error events per event_type (UPPER(status) = 'ERROR').",
+      "description": "Error events per event_type. An event counts as an error when event_type ends in _ERROR, error_message is non-NULL, or UPPER(status) = 'ERROR'.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -539,7 +540,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Errors over time, one series per event_type (Overview row).\n-- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate; the SDK's\n-- ERROR_SQL_PREDICATE and seed_events.py disagree on status casing.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS errors\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n  AND UPPER(status) = 'ERROR'\nGROUP BY time, event_type\nORDER BY time\n",
+          "rawSql": "-- Panel: Errors over time, one series per event_type (Overview row).\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS errors\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND (ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nGROUP BY time, event_type\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -614,7 +615,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Token usage over time (LLM & FinOps row).\n-- Uses the typed ${view_prefix}llm_responses view. Missing usage telemetry\n-- degrades to 0 for sums (IFNULL) rather than dropping the bucket.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  SUM(IFNULL(usage_prompt_tokens, 0)) AS prompt_tokens,\n  SUM(IFNULL(usage_completion_tokens, 0)) AS completion_tokens,\n  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY time\nORDER BY time\n",
+          "rawSql": "-- Panel: Token usage over time (LLM & FinOps row).\n-- Uses the typed ${view_prefix}llm_responses view. Missing usage telemetry\n-- degrades to 0 for sums (IFNULL) rather than dropping the bucket.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY time\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -672,7 +673,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).\n-- Latency aggregates deliberately stay NULL when telemetry is missing so\n-- the chart shows gaps instead of fake zeros.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms,\n  APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY time\nORDER BY time\n",
+          "rawSql": "-- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).\n-- Latency aggregates deliberately stay NULL when telemetry is missing so\n-- the chart shows gaps instead of fake zeros.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms,\n  APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY time\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -730,7 +731,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tokens by model (LLM & FinOps row).\n-- model_version is the response-side attribute exposed by the\n-- ${view_prefix}llm_responses view; rows without it group under \"unknown\".\nSELECT\n  IFNULL(model_version, 'unknown') AS model,\n  SUM(IFNULL(usage_prompt_tokens, 0)) AS prompt_tokens,\n  SUM(IFNULL(usage_completion_tokens, 0)) AS completion_tokens,\n  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens,\n  COUNT(*) AS responses\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY model\nORDER BY total_tokens DESC\n",
+          "rawSql": "-- Panel: Tokens by model (LLM & FinOps row).\n-- model_version is the response-side attribute exposed by the\n-- ${view_prefix}llm_responses view; rows without it group under \"unknown\".\nSELECT\n  IFNULL(model_version, 'unknown') AS model,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens,\n  COUNT(*) AS responses\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY model\nORDER BY total_tokens DESC\n",
           "format": 1,
           "location": ""
         }
@@ -748,7 +749,40 @@
             "axisLabel": ""
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "tooltip": false,
+                  "viz": true,
+                  "legend": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "responses"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "tooltip": false,
+                  "viz": true,
+                  "legend": true
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "orientation": "horizontal",
@@ -791,7 +825,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Costs are DERIVED, not telemetry: the SDK records token counts only.\n-- The per-1M-token rates below are placeholders \u2014 adjust them to the\n-- pricing of the model(s) you actually run. The panel is intentionally\n-- labeled \"Estimated Cost\" for this reason; token counts are the\n-- primary FinOps signal.\nSELECT\n  SUM(IFNULL(usage_prompt_tokens, 0)) / 1e6 * 1.25    -- $ / 1M prompt tokens\n    + SUM(IFNULL(usage_completion_tokens, 0)) / 1e6 * 5.00  -- $ / 1M completion tokens\n    AS estimated_cost_usd,\n  -- NOTE: This column is consumed dynamically by the dependent 'Total tokens' panel\n  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n",
+          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Costs are DERIVED, not telemetry: the SDK records token counts only.\n-- The per-1M-token rates below are placeholders \u2014 adjust them to the\n-- pricing of the model(s) you actually run. The panel is intentionally\n-- labeled \"Estimated Cost\" for this reason; token counts are the\n-- primary FinOps signal.\nSELECT\n  IFNULL(SUM(usage_prompt_tokens), 0) / 1e6 * 1.25    -- $ / 1M prompt tokens\n    + IFNULL(SUM(usage_completion_tokens), 0) / 1e6 * 5.00  -- $ / 1M completion tokens\n    AS estimated_cost_usd,\n  -- NOTE: This column is consumed dynamically by the dependent 'Total tokens' panel\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n",
           "format": 1,
           "location": ""
         }
@@ -910,7 +944,7 @@
         "x": 0,
         "y": 31
       },
-      "description": "Completions per tool from ${view_prefix}tool_completions.",
+      "description": "Invocations per tool from ${view_prefix}tool_starts, so failed invocations are counted (${view_prefix}tool_completions would drop them).",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -924,7 +958,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool invocations by tool (Tools row).\n-- Uses the typed ${view_prefix}tool_completions view.\nSELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY tool_name\nORDER BY invocations DESC\n",
+          "rawSql": "-- Panel: Tool invocations by tool (Tools row).\n-- Uses the typed ${view_prefix}tool_starts view so failed invocations are\n-- included in the volume (${view_prefix}tool_completions would drop them).\nSELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM `${project}.${dataset}.${view_prefix}tool_starts`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY tool_name\nORDER BY invocations DESC\n",
           "format": 1,
           "location": ""
         }
@@ -985,7 +1019,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool latency by tool (Tools row).\n-- Latency stays NULL when missing (no IFNULL) so averages aren't skewed.\nSELECT\n  tool_name,\n  COUNT(*) AS invocations,\n  AVG(total_ms) AS avg_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY tool_name\nORDER BY p95_ms DESC\n",
+          "rawSql": "-- Panel: Tool latency by tool (Tools row).\n-- Latency stays NULL when missing (no IFNULL) so averages aren't skewed.\nSELECT\n  tool_name,\n  COUNT(*) AS completions,\n  AVG(total_ms) AS avg_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY tool_name\nORDER BY p95_ms DESC\n",
           "format": 1,
           "location": ""
         }
@@ -1055,7 +1089,7 @@
         "x": 16,
         "y": 31
       },
-      "description": "TOOL_ERROR events plus error-status completions (UPPER(status) = 'ERROR').",
+      "description": "TOOL_ERROR events plus completions that carry a non-NULL error_message or UPPER(status) = 'ERROR'. UNION ALL is intentional: one logical failure that emits both a TOOL_ERROR and an error-status TOOL_COMPLETED appears as two rows.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -1069,7 +1103,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Combines the dedicated TOOL_ERROR view with any error-status completions.\n-- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate (see\n-- queries/README.md).\n-- UNION ALL intentionally preserves both telemetry records when one logical\n-- failure emits a TOOL_ERROR and an error-status TOOL_COMPLETED event.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_errors`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n  AND UPPER(status) = 'ERROR'\nORDER BY timestamp DESC\nLIMIT 100\n",
+          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Combines the dedicated TOOL_ERROR view with any error-status completions.\n-- UNION ALL intentionally preserves both telemetry records when one logical\n-- failure emits a TOOL_ERROR and an error-status TOOL_COMPLETED event.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_errors`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nORDER BY timestamp DESC\nLIMIT 100\n",
           "format": 1,
           "location": ""
         }
@@ -1134,7 +1168,7 @@
         "x": 0,
         "y": 40
       },
-      "description": "Session rollups over the raw ${table} table. Pick a session_id in the dashboard variable above to inspect its trace below.",
+      "description": "Session rollups over the raw ${table} table. errors_in_window counts events whose event_type ends in _ERROR, or that carry a non-NULL error_message, or whose UPPER(status) = 'ERROR'. Pick a session_id in the dashboard variable above to inspect its trace below.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -1148,7 +1182,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Recent sessions (Sessions & Traces row).\n-- Session-level rollup over the raw agent_events table.\n-- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate (see\n-- queries/README.md).\nSELECT\n  session_id,\n  MIN(timestamp) AS started_at,\n  MAX(timestamp) AS last_event_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_s,\n  COUNT(DISTINCT agent) AS agents,\n  COUNT(*) AS events,\n  COUNTIF(UPPER(status) = 'ERROR') AS errors\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\nGROUP BY session_id\nORDER BY started_at DESC\nLIMIT 50\n",
+          "rawSql": "-- Panel: Recent sessions (Sessions & Traces row).\n-- Session-level rollup over the raw agent_events table.\nSELECT\n  session_id,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS agents_in_window,\n  COUNT(*) AS events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS errors_in_window\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nGROUP BY session_id\nORDER BY started_in_window_at DESC\nLIMIT 50\n",
           "format": 1,
           "location": ""
         }
@@ -1182,7 +1216,7 @@
         "cellHeight": "sm",
         "sortBy": [
           {
-            "displayName": "started_at",
+            "displayName": "started_in_window_at",
             "desc": true
           }
         ],
@@ -1205,7 +1239,7 @@
         "x": 0,
         "y": 48
       },
-      "description": "Full event timeline for the selected session. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
+      "description": "Event timeline within the active time window for the selected session. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${datasource}"
@@ -1219,7 +1253,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Trace detail for the selected $session_id (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - ${session_id:sqlstring} lets Grafana SQL-escape the value (injection-safe).\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes \u2014 one column covers both.\nSELECT\n  timestamp,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE session_id = ${session_id:sqlstring}\n  AND $__timeFilter(timestamp)\nORDER BY timestamp\nLIMIT 500\n",
+          "rawSql": "-- Panel: Trace detail for the selected $session_id (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - ${session_id:sqlstring} lets Grafana SQL-escape the value (injection-safe).\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes \u2014 one column covers both.\nSELECT\n  timestamp,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}])\n  AND $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\nORDER BY timestamp\nLIMIT 500\n",
           "format": 1,
           "location": ""
         }

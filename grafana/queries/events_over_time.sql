@@ -5,6 +5,6 @@ SELECT
   COUNT(*) AS events
 FROM `${project}.${dataset}.${table}`
 WHERE $__timeFilter(timestamp)
-  AND agent IN (${agent:sqlstring})
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))
 GROUP BY time, event_type
 ORDER BY time
