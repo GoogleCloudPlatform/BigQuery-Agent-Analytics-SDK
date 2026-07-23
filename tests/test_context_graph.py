@@ -671,6 +671,31 @@ class TestContextGraphManager:
     )
     assert set(span_ids_param.values) == {"parent", "child"}
 
+  def test_reconstruct_trace_gql_preserves_positional_graph_arguments(self):
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = []
+    mock_client.query.return_value = mock_job
+    mgr = self._make_manager(mock_client)
+
+    mgr.reconstruct_trace_gql(
+        "sess-1",
+        "custom_graph",
+        17,
+        span_ids={"s1", "s2"},
+    )
+
+    query = mock_client.query.call_args.args[0]
+    assert "GRAPH `test-project.test_dataset.custom_graph`" in query
+    limit_param = next(
+        param
+        for param in mock_client.query.call_args.kwargs[
+            "job_config"
+        ].query_parameters
+        if param.name == "result_limit"
+    )
+    assert limit_param.value == 17
+
   def test_reconstruct_trace_gql_session_only_resolves_safe_population(self):
     from bigquery_agent_analytics.client import Client
     from bigquery_agent_analytics.trace import Span
@@ -1931,6 +1956,7 @@ class TestClientContextGraph:
     """A unique session resolves once and returns the flat trace unchanged."""
     with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
+      from bigquery_agent_analytics.trace import Span
       from bigquery_agent_analytics.trace import Trace
       from bigquery_agent_analytics.trace import TraceSelector
 
@@ -1945,7 +1971,18 @@ class TestClientContextGraph:
             "reconstruct_trace_gql",
             return_value=[],
         ):
-          mock_trace = Trace(trace_id="t1", session_id="sess-1", spans=[])
+          mock_trace = Trace(
+              trace_id="t1",
+              session_id="sess-1",
+              spans=[
+                  Span(
+                      event_type="USER_MESSAGE_RECEIVED",
+                      agent="root",
+                      timestamp=datetime.now(timezone.utc),
+                      span_id="s1",
+                  )
+              ],
+          )
           with patch.object(
               Client,
               "get_trace_by_selector",
@@ -1955,6 +1992,10 @@ class TestClientContextGraph:
             mock_resolve.assert_called_once_with(
                 TraceSelector(session_id="sess-1"),
                 allow_mixed_scope=False,
+            )
+            ContextGraphManager.reconstruct_trace_gql.assert_called_once_with(
+                session_id="sess-1",
+                span_ids=("s1",),
             )
             assert result is mock_trace
 

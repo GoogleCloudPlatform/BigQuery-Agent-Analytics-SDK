@@ -1732,9 +1732,10 @@ class ContextGraphManager:
   def reconstruct_trace_gql(
       self,
       session_id: str,
-      span_ids: set[str] | tuple[str, ...] | list[str] | None = None,
       graph_name: Optional[str] = None,
       result_limit: int = 1000,
+      *,
+      span_ids: set[str] | tuple[str, ...] | list[str] | None = None,
   ) -> list[dict[str, Any]]:
     """Reconstructs a session trace using GQL graph traversal.
 
