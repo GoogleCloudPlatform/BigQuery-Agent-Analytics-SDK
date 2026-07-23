@@ -1,7 +1,7 @@
 {
   "title": "BigQuery Agent Analytics",
   "uid": "bqaa-dashboard",
-  "description": "Interactive dashboard for the BigQuery Agent Analytics SDK (issue #339). Panels query the raw agent_events table and the typed ViewManager views (adk_* by default). Panel SQL is maintained in grafana/queries/*.sql \u2014 treat those files as the source of truth.",
+  "description": "Interactive dashboard for the BigQuery Agent Analytics SDK. Panels query the raw agent_events table and the typed ViewManager views (adk_* by default). Panel SQL is maintained in grafana/queries/*.sql \u2014 treat those files as the source of truth.",
   "tags": [
     "bqaa",
     "bigquery",
@@ -147,11 +147,11 @@
           "refId": "tempvar",
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "SELECT DISTINCT agent FROM `${project}.${dataset}.${table}` WHERE agent IS NOT NULL ORDER BY agent",
+          "rawSql": "SELECT DISTINCT agent FROM `${project}.${dataset}.${table}` WHERE agent IS NOT NULL AND $__timeFilter(timestamp) ORDER BY agent",
           "format": 1,
           "location": ""
         },
-        "definition": "SELECT DISTINCT agent FROM `${project}.${dataset}.${table}` WHERE agent IS NOT NULL ORDER BY agent",
+        "definition": "SELECT DISTINCT agent FROM `${project}.${dataset}.${table}` WHERE agent IS NOT NULL AND $__timeFilter(timestamp) ORDER BY agent",
         "refresh": 2,
         "multi": true,
         "includeAll": true,
@@ -231,7 +231,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
+          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\n-- NOTE: The avg_llm_latency_ms subquery performs an extra full scan of llm_responses.\n-- This is an intentional UX decision to provide a top-level scalar metric alongside\n-- the dedicated time-series panel below.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
           "format": 1,
           "location": ""
         }
@@ -281,21 +281,17 @@
       },
       "description": "Total agent_events rows in the selected time range.",
       "datasource": {
-        "type": "grafana-bigquery-datasource",
-        "uid": "${datasource}"
+        "type": "datasource",
+        "uid": "-- Dashboard --"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-bigquery-datasource",
-            "uid": "${datasource}"
+            "type": "datasource",
+            "uid": "-- Dashboard --"
           },
-          "editorMode": "code",
-          "rawQuery": true,
-          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
-          "format": 1,
-          "location": ""
+          "panelId": 2
         }
       ],
       "fieldConfig": {
@@ -343,21 +339,17 @@
       },
       "description": "Share of events with UPPER(status) = 'ERROR' (casing-safe predicate; see grafana/queries/README.md).",
       "datasource": {
-        "type": "grafana-bigquery-datasource",
-        "uid": "${datasource}"
+        "type": "datasource",
+        "uid": "-- Dashboard --"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-bigquery-datasource",
-            "uid": "${datasource}"
+            "type": "datasource",
+            "uid": "-- Dashboard --"
           },
-          "editorMode": "code",
-          "rawQuery": true,
-          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
-          "format": 1,
-          "location": ""
+          "panelId": 2
         }
       ],
       "fieldConfig": {
@@ -414,21 +406,17 @@
       },
       "description": "Mean total_ms across LLM responses. Stays empty (not 0) when latency telemetry is missing.",
       "datasource": {
-        "type": "grafana-bigquery-datasource",
-        "uid": "${datasource}"
+        "type": "datasource",
+        "uid": "-- Dashboard --"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-bigquery-datasource",
-            "uid": "${datasource}"
+            "type": "datasource",
+            "uid": "-- Dashboard --"
           },
-          "editorMode": "code",
-          "rawQuery": true,
-          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's\n-- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND r.agent IN (${agent:sqlstring})\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND e.agent IN (${agent:sqlstring})\n",
-          "format": 1,
-          "location": ""
+          "panelId": 2
         }
       ],
       "fieldConfig": {
@@ -781,10 +769,10 @@
     },
     {
       "type": "stat",
-      "title": "Estimated cost",
+      "title": "Estimated cost (placeholder rates)",
       "id": 12,
       "gridPos": {
-        "h": 8,
+        "h": 4,
         "w": 8,
         "x": 16,
         "y": 22
@@ -803,7 +791,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Costs are DERIVED, not telemetry: the SDK records token counts only.\n-- The per-1M-token rates below are placeholders \u2014 adjust them to the\n-- pricing of the model(s) you actually run. The panel is intentionally\n-- labeled \"Estimated Cost\" for this reason; token counts are the\n-- primary FinOps signal.\nSELECT\n  SUM(IFNULL(usage_prompt_tokens, 0)) / 1e6 * 1.25    -- $ / 1M prompt tokens\n    + SUM(IFNULL(usage_completion_tokens, 0)) / 1e6 * 5.00  -- $ / 1M completion tokens\n    AS estimated_cost_usd,\n  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n",
+          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Costs are DERIVED, not telemetry: the SDK records token counts only.\n-- The per-1M-token rates below are placeholders \u2014 adjust them to the\n-- pricing of the model(s) you actually run. The panel is intentionally\n-- labeled \"Estimated Cost\" for this reason; token counts are the\n-- primary FinOps signal.\nSELECT\n  SUM(IFNULL(usage_prompt_tokens, 0)) / 1e6 * 1.25    -- $ / 1M prompt tokens\n    + SUM(IFNULL(usage_completion_tokens, 0)) / 1e6 * 5.00  -- $ / 1M completion tokens\n    AS estimated_cost_usd,\n  -- NOTE: This column is consumed dynamically by the dependent 'Total tokens' panel\n  SUM(IFNULL(usage_total_tokens, 0)) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n",
           "format": 1,
           "location": ""
         }
@@ -843,6 +831,63 @@
       }
     },
     {
+      "type": "stat",
+      "title": "Total tokens",
+      "id": 20,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 26
+      },
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 12
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^total_tokens$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
       "type": "row",
       "title": "Tools",
       "collapsed": false,
@@ -857,7 +902,7 @@
     },
     {
       "type": "barchart",
-      "title": "Tool invocations",
+      "title": "Tool invocations by tool",
       "id": 14,
       "gridPos": {
         "h": 8,
@@ -1024,7 +1069,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Combines the dedicated TOOL_ERROR view with any error-status completions.\n-- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate (see\n-- queries/README.md).\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_errors`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n  AND UPPER(status) = 'ERROR'\nORDER BY timestamp DESC\nLIMIT 100\n",
+          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Combines the dedicated TOOL_ERROR view with any error-status completions.\n-- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate (see\n-- queries/README.md).\n-- UNION ALL intentionally preserves both telemetry records when one logical\n-- failure emits a TOOL_ERROR and an error-status TOOL_COMPLETED event.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_errors`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND agent IN (${agent:sqlstring})\n  AND UPPER(status) = 'ERROR'\nORDER BY timestamp DESC\nLIMIT 100\n",
           "format": 1,
           "location": ""
         }
@@ -1174,7 +1219,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Trace detail for the selected $session_id (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - ${session_id:sqlstring} lets Grafana SQL-escape the value (injection-safe).\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes \u2014 one column covers both.\nSELECT\n  timestamp,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE session_id = ${session_id:sqlstring}\nORDER BY timestamp\nLIMIT 500\n",
+          "rawSql": "-- Panel: Trace detail for the selected $session_id (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - ${session_id:sqlstring} lets Grafana SQL-escape the value (injection-safe).\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes \u2014 one column covers both.\nSELECT\n  timestamp,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE session_id = ${session_id:sqlstring}\n  AND $__timeFilter(timestamp)\nORDER BY timestamp\nLIMIT 500\n",
           "format": 1,
           "location": ""
         }

@@ -1,7 +1,7 @@
 # Grafana Dashboard for BigQuery Agent Analytics
 
 A free, low-friction alternative to the bespoke [`dashboard_v2/`](../dashboard_v2)
-React app (issue #339): visualize BQAA telemetry natively from BigQuery with
+React app: visualize BQAA telemetry natively from BigQuery with
 Grafana — including the free tier of Grafana Cloud — with nothing to host.
 
 Grafana is a **parallel** visualization option, not a replacement. Both consume
@@ -31,7 +31,10 @@ AI Agent app ──SDK──▶ BigQuery agent_events ──ViewManager──▶
   > **Important for new users:** You must install the **Google BigQuery** data source plugin (`grafana-bigquery-datasource`) in Grafana before BigQuery will appear as an available connector.
 
 ### 0. Service Account & Auth Setup
-Grafana requires a Google Cloud Service Account to read your BigQuery data, with the options of leveraging a specialized account and the default.
+
+Grafana requires Google Cloud credentials to read your BigQuery data, using
+either a dedicated service account or Application Default Credentials.
+
 1. In the Google Cloud Console, go to **IAM & Admin → Service Accounts**.
 2. Click **Create Service Account** (e.g., name it `grafana-bqaa-viewer`).
 3. Grant it the following two roles on your project:
@@ -76,8 +79,10 @@ with `adk_` by default; if you used a custom prefix, set the dashboard's
 **Self-managed Grafana (Docker or Bare-Metal):**
 You can provision the BigQuery data source automatically on startup using a YAML file. Create a copy of [`datasource.example.yaml`](datasource.example.yaml) (never commit your real service account key to version control) and inject your credentials. *(Note: Default login for a fresh local Grafana is `admin` / `admin`).*
 
-- **Docker:** Pass the plugin environment variable and mount your YAML file:
+- **Docker:** Copy the example, inject your credentials, then pass the plugin
+  environment variable and mount your YAML file:
   ```bash
+  cp grafana/datasource.example.yaml grafana/datasource.yaml
   docker run -d -p 3000:3000 \
     -e "GF_INSTALL_PLUGINS=grafana-bigquery-datasource" \
     -v /path/to/your/datasource.yaml:/etc/grafana/provisioning/datasources/datasource.yaml \
@@ -120,4 +125,3 @@ If you want to share your dashboard with external stakeholders who do not have a
 5. Copy the generated link. 
 
 This link creates a static, point-in-time image of your dashboard with all the current data hardcoded into it. Viewers will be able to see the charts without needing Grafana accounts or BigQuery credentials, but they will not be able to interact with the dropdown variables.
-

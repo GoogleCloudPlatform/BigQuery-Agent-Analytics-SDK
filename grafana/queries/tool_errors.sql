@@ -2,6 +2,8 @@
 -- Combines the dedicated TOOL_ERROR view with any error-status completions.
 -- NOTE: UPPER(status) = 'ERROR' is the casing-safe predicate (see
 -- queries/README.md).
+-- UNION ALL intentionally preserves both telemetry records when one logical
+-- failure emits a TOOL_ERROR and an error-status TOOL_COMPLETED event.
 SELECT
   timestamp,
   agent,

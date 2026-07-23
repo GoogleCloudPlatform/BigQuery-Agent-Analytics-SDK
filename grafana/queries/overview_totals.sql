@@ -2,6 +2,9 @@
 -- One row, four columns; each Grafana stat panel picks one field.
 -- NOTE: UPPER(status) = 'ERROR' is used instead of the SDK's
 -- ERROR_SQL_PREDICATE because seed_events.py emits lowercase statuses.
+-- NOTE: The avg_llm_latency_ms subquery performs an extra full scan of llm_responses.
+-- This is an intentional UX decision to provide a top-level scalar metric alongside
+-- the dedicated time-series panel below.
 SELECT
   COUNT(DISTINCT e.session_id) AS sessions,
   COUNT(*) AS events,

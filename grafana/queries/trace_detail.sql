@@ -20,5 +20,6 @@ SELECT
   error_message
 FROM `${project}.${dataset}.${table}`
 WHERE session_id = ${session_id:sqlstring}
+  AND $__timeFilter(timestamp)
 ORDER BY timestamp
 LIMIT 500

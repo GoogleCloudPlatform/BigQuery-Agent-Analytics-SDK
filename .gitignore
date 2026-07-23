@@ -35,3 +35,4 @@ deploy/streaming_evaluation/.streaming_evaluation_state.json
 .DS_Store
 .DS_Store?
 ._*
+grafana/datasource.yaml
