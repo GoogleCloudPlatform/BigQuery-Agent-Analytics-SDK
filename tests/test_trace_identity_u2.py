@@ -101,6 +101,7 @@ def _candidate_row(
     root_agent_name=None,
     experiment_id=None,
     tag_payload=None,
+    scope_trace_id=None,
     row_count=1,
 ):
   import json as json_mod
@@ -119,6 +120,7 @@ def _candidate_row(
           json_mod.dumps(experiment_id) if experiment_id is not None else None
       ),
       "tag_payload": tag_payload,
+      "scope_trace_id": scope_trace_id,
       "row_count": row_count,
   }
 
@@ -177,6 +179,7 @@ class TestListTracesQueryShape:
         in _GET_SESSION_TRACE_QUERY
     )
     assert "{row_where}" in _GET_SESSION_TRACE_QUERY
+    assert "{event_where}" in _GET_SESSION_TRACE_QUERY
 
 
 class TestTagPayloadParsing:
@@ -509,6 +512,123 @@ class TestSingularReadResolution:
     }
     assert fetch_params["anchor_user_id"] == "alice"
     assert fetch_params["anchor_root_agent_name"] is None
+
+  def test_selector_event_types_push_down_after_exact_resolution(self):
+    scope = TraceScope(custom_labels={"run": "v1"})
+    candidate_batch = [_mock_row(_candidate_row(tag_payload='{"run": "v1"}'))]
+    selected = _event_row(
+        custom_tags=None,
+        span_id="selected-shared",
+    )
+    selected["event_type"] = "TOOL_COMPLETED"
+    client, mock_bq = self._client([candidate_batch, [_mock_row(selected)]])
+
+    trace = client.get_trace_by_selector(
+        TraceSelector(
+            session_id="sess-1",
+            scope_signature=scope.scope_signature,
+        ),
+        event_types=["TOOL_COMPLETED"],
+    )
+
+    fetch_query = mock_bq.query.call_args.args[0]
+    fetch_params = {
+        param.name: param
+        for param in mock_bq.query.call_args.kwargs[
+            "job_config"
+        ].query_parameters
+    }
+    assert "e.event_type IN UNNEST(@selected_event_types)" in fetch_query
+    assert fetch_params["selected_event_types"].values == ["TOOL_COMPLETED"]
+    assert trace.scope == scope
+    assert [span.span_id for span in trace.spans] == ["selected-shared"]
+
+  def test_selector_event_types_can_return_empty_attributed_trace(self):
+    scope = TraceScope(custom_labels={"run": "v1"})
+    candidate_batch = [_mock_row(_candidate_row(tag_payload='{"run": "v1"}'))]
+    client, _ = self._client([candidate_batch, []])
+
+    trace = client.get_trace_by_selector(
+        TraceSelector(
+            session_id="sess-1",
+            scope_signature=scope.scope_signature,
+        ),
+        event_types=["TOOL_COMPLETED"],
+    )
+
+    assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
+    assert trace.scope == scope
+    assert trace.spans == []
+
+  def test_selector_event_types_preserve_resolved_scope_trace_id(self):
+    scope = TraceScope(custom_labels={"run": "v1"})
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(
+                tag_payload='{"run": "v1"}',
+                scope_trace_id="scope-trace-1",
+            )
+        )
+    ]
+    selected_shared = _event_row(
+        custom_tags=None,
+        span_id="selected-shared",
+        trace_id="shared-trace",
+    )
+    selected_shared["event_type"] = "USER_MESSAGE_RECEIVED"
+    client, mock_bq = self._client(
+        [candidate_batch, [_mock_row(selected_shared)]]
+    )
+
+    trace = client.get_trace_by_selector(
+        TraceSelector(
+            session_id="sess-1",
+            scope_signature=scope.scope_signature,
+        ),
+        event_types=["USER_MESSAGE_RECEIVED"],
+    )
+
+    assert trace.trace_id == "scope-trace-1"
+    assert "AS scope_trace_id" in mock_bq.query.call_args_list[0].args[0]
+
+  def test_event_filtered_zero_span_semantics_are_documented(self):
+    for method in (Client.get_session_trace, Client.get_trace_by_selector):
+      doc = method.__doc__ or ""
+      assert "zero-span" in doc
+      assert "does not raise" in doc
+
+  def test_mixed_selector_event_types_separates_scope_metadata_from_spans(self):
+    scope_v0 = TraceScope(custom_labels={"run": "v0"})
+    scope_v1 = TraceScope(custom_labels={"run": "v1"})
+    candidate_batch = [
+        _mock_row(_candidate_row(tag_payload='{"run": "v0"}')),
+        _mock_row(_candidate_row(tag_payload='{"run": "v1"}')),
+    ]
+    metadata_batch = [
+        _mock_row(_event_row(custom_tags={"run": "v0"}, span_id="meta-v0")),
+        _mock_row(_event_row(custom_tags={"run": "v1"}, span_id="meta-v1")),
+    ]
+    selected = _event_row(custom_tags=None, span_id="selected")
+    selected["event_type"] = "TOOL_COMPLETED"
+    client, mock_bq = self._client(
+        [candidate_batch, metadata_batch, [_mock_row(selected)]]
+    )
+
+    trace = client.get_trace_by_selector(
+        TraceSelector(session_id="sess-1"),
+        allow_mixed_scope=True,
+        event_types=["TOOL_COMPLETED"],
+    )
+
+    metadata_query = mock_bq.query.call_args_list[1].args[0]
+    fetch_query = mock_bq.query.call_args_list[2].args[0]
+    assert "e.content" not in metadata_query
+    assert "e.event_type IN UNNEST(@selected_event_types)" in fetch_query
+    assert trace.scope is None
+    assert trace.scope_coverage == tuple(
+        sorted((scope_v0.scope_signature, scope_v1.scope_signature))
+    )
+    assert [span.span_id for span in trace.spans] == ["selected"]
 
   def test_null_identity_anchor_binds_null_parameters(self):
     candidate_batch = [_mock_row(_candidate_row(user_id=None))]

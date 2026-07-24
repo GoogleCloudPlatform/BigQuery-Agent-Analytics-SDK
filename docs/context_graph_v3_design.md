@@ -549,7 +549,9 @@ GRAPH `project.dataset.agent_context_graph`
 MATCH
   (parent:TechNode)-[c:Caused]->(child:TechNode)
 WHERE parent.session_id = @session_id
-   OR child.session_id = @session_id
+  AND child.session_id = @session_id
+  AND parent.span_id IN UNNEST(@span_ids)
+  AND child.span_id IN UNNEST(@span_ids)
 RETURN
   parent.span_id AS parent_span_id,
   parent.event_type AS parent_event_type,
@@ -907,13 +909,14 @@ The Context Graph is implemented as a standalone module (`~2500 lines`) in the B
 
 | Decision | Rationale |
 |----------|-----------|
-| Standalone module | No internal imports from other SDK modules; independently testable |
+| Mostly standalone module | Independently testable; the legacy manager-level session convenience lazily imports `Client` so it can resolve ambiguity before running GQL |
 | `output_schema` in AI.GENERATE | Eliminates JSON parsing failures from free-form LLM output |
 | Composite `biz_node_id` | `span_id:node_type:node_value` prevents collisions from same-span multi-entity extraction |
 | MERGE with 3-way logic | Single atomic statement handles insert, update, and stale cleanup |
 | Fail-closed world-change | Query errors and callback errors both produce `check_failed=True, is_safe_to_approve=False` |
 | Legacy endpoint rejection | `project.dataset.model` refs raise `ValueError` instead of silently producing bad Vertex AI URLs |
-| GQL + flat trace merge | GQL returns only edge pairs; SDK merges isolated events from flat SQL for completeness |
+| Flat resolution + confined GQL | Flat SQL resolves identity/scope and the complete span population first; GQL may add parent links only between those span IDs |
+| Duplicate span fallback | `TechNode KEY (span_id)` requires unique node IDs; a resolved flat population containing duplicates bypasses GQL rather than applying an edge to an arbitrary row |
 | Timezone-safe sorting | `datetime(1970,1,1,tzinfo=timezone.utc)` fallback instead of naive `datetime.min` |
 | Two-table edge model | BigQuery Property Graph DDL requires separate edge tables when source/destination types differ |
 | Idempotent delete-then-insert | Decision data uses delete-before-insert instead of MERGE for simplicity with multi-table consistency |
@@ -928,12 +931,12 @@ The `Client` class exposes GQL trace reconstruction:
 def get_session_trace_gql(self, session_id, config=None) -> Trace:
     """Reconstructs a session trace using GQL graph traversal.
 
-    1. Runs GQL query via ContextGraphManager.reconstruct_trace_gql()
-    2. Fetches flat trace via get_session_trace() for isolated events
-    3. Backfills parent_span_id when spans arrive out of order
-    4. Merges isolated spans not covered by GQL
-    5. Sorts by timezone-aware timestamps
-    6. Falls back to flat SQL when GQL returns no edges
+    1. Resolves the exact identity/scope via get_trace_by_selector()
+    2. Supplies only that trace's span IDs to reconstruct_trace_gql()
+    3. Accepts parent relationships only when both spans are in that set
+    4. Keeps flat SQL authoritative for payloads, metadata, and isolated spans
+    5. Sorts copied spans by timezone-aware timestamps
+    6. Returns the flat trace unchanged when GQL returns no edges
     """
 ```
 

@@ -51,6 +51,8 @@ def run_bq_agent_sdk(command: str, args: dict) -> dict:
     if isinstance(value, bool):
       if value:
         cmd.append(f"--{flag}")
+    elif isinstance(value, (dict, list)):
+      cmd.append(f"--{flag}={json.dumps(value, separators=(',', ':'))}")
     else:
       cmd.append(f"--{flag}={value}")
 
@@ -62,6 +64,14 @@ def run_bq_agent_sdk(command: str, args: dict) -> dict:
   )
   if result.returncode == 0:
     return json.loads(result.stdout)
+  for output in (result.stdout, result.stderr):
+    try:
+      payload = json.loads(output)
+    except (json.JSONDecodeError, TypeError):
+      continue
+    if isinstance(payload, dict):
+      payload["exit_code"] = result.returncode
+      return payload
   return {"error": result.stderr.strip(), "exit_code": result.returncode}
 
 
@@ -94,11 +104,24 @@ def get_insights(last: str = "24h") -> dict:
   return run_bq_agent_sdk("insights", {"last": last})
 
 
-def get_session_trace(session_id: str) -> dict:
-  """Retrieve the full trace for a specific session."""
+def get_session_trace(
+    session_id: str | None = None,
+    selector: dict | None = None,
+) -> dict:
+  """Retrieve a trace, optionally retrying an ambiguity candidate selector."""
+  if (session_id is None) == (selector is None):
+    return {
+        "error": "Provide exactly one of session_id or selector.",
+        "exit_code": 2,
+    }
+  args = (
+      {"selector_json": json.dumps(selector, separators=(",", ":"))}
+      if selector is not None
+      else {"session_id": session_id}
+  )
   return run_bq_agent_sdk(
       "get-trace",
-      {"session_id": session_id},
+      args,
   )
 
 

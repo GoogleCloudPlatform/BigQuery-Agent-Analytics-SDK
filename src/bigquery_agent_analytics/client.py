@@ -307,6 +307,11 @@ SELECT
   ) AS tag_payload,
   COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
       AS attributes_valid,
+  ARRAY_AGG(
+    IF(trace_id = '', NULL, trace_id) IGNORE NULLS
+    ORDER BY timestamp, span_id, invocation_id, event_type
+    LIMIT 1
+  )[SAFE_OFFSET(0)] AS scope_trace_id,
   COUNT(*) AS row_count
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
@@ -407,7 +412,25 @@ WHERE e.session_id = @session_id
   AND JSON_VALUE(e.attributes, '$.root_agent_name')
       IS NOT DISTINCT FROM @anchor_root_agent_name
   AND {row_where}
+  AND {event_where}
 ORDER BY e.timestamp ASC, e.span_id, e.invocation_id, e.event_type
+"""
+
+# Lightweight companion for event-filtered mixed-scope reads. Scope
+# completeness and Python-only selector verification still require every
+# row's attributes, but excluded event payloads must not be transferred or
+# materialized merely to establish that metadata.
+_GET_SESSION_SCOPE_METADATA_QUERY = """\
+SELECT
+  e.user_id,
+  e.attributes,
+  JSON_TYPE(e.attributes) AS attributes_type
+FROM `{project}.{dataset}.{table}` e
+WHERE e.session_id = @session_id
+  AND e.user_id IS NOT DISTINCT FROM @anchor_user_id
+  AND COALESCE(JSON_TYPE(e.attributes), 'null') IN ('object', 'null')
+  AND JSON_VALUE(e.attributes, '$.root_agent_name')
+      IS NOT DISTINCT FROM @anchor_root_agent_name
 """
 
 # NOTE (PR #371 review round 6, P2-11): the persisted schema carries
@@ -950,6 +973,7 @@ class Client:
       custom_labels: Optional[dict] = None,
       scope_signature: Optional[str] = None,
       allow_mixed_scope: bool = False,
+      event_types: Optional[list[str]] = None,
   ) -> Trace:
     """Fetches all spans for one resolved session identity.
 
@@ -981,6 +1005,12 @@ class Client:
             ``scope`` is ``None`` and ``scope_coverage`` names the
             scope signatures merged into the trace. Ambiguity ACROSS
             identities still raises.
+        event_types: Optional event types to materialize. Candidate
+            resolution stays scope-complete; the resolved span fetch
+            applies this restriction in SQL. When the restriction
+            matches no rows, the resolved identity/scope is returned
+            as a zero-span :class:`Trace`; this does not raise the
+            unfiltered not-found error.
 
     Returns:
         A Trace for the single resolved identity/scope, with
@@ -1001,7 +1031,9 @@ class Client:
         scope_signature=scope_signature,
     )
     return self.get_trace_by_selector(
-        selector, allow_mixed_scope=allow_mixed_scope
+        selector,
+        allow_mixed_scope=allow_mixed_scope,
+        event_types=event_types,
     )
 
   def get_trace_by_selector(
@@ -1009,6 +1041,7 @@ class Client:
       selector: TraceSelector,
       *,
       allow_mixed_scope: bool = False,
+      event_types: Optional[list[str]] = None,
   ) -> Trace:
     """Fetches the single trace pinned by a :class:`TraceSelector`.
 
@@ -1034,6 +1067,12 @@ class Client:
             trace carries ``identity``, ``scope=None``, and
             ``scope_coverage`` derived from the scopes actually fetched
             (``None`` when that population was too large to enumerate).
+        event_types: Optional event types to materialize. Candidate
+            discovery always sees the complete scope population; the
+            authoritative span fetch applies this restriction in SQL.
+            When the restriction matches no rows, the resolved
+            identity/scope is returned as a zero-span :class:`Trace`;
+            this does not raise the unfiltered not-found error.
 
     Raises:
         ValueError: If no events match the selector, if the
@@ -1043,6 +1082,8 @@ class Client:
         AmbiguousSessionError: If the selector still matches more
             than one resolved candidate.
     """
+    if event_types is not None:
+      event_types = list(TraceFilter(event_types=event_types).event_types or [])
     pushdown, pin_params = self._selector_pushdown_pins(selector)
     resolve_query = _RESOLVE_SESSION_CANDIDATES_QUERY.format(
         project=self.project_id,
@@ -1117,7 +1158,10 @@ class Client:
     # with the enumeration-bound error.
     if len(matching) == 1 and not truncated:
       return self._fetch_identity_trace(
-          matching[0].identity, resolved_scope=matching[0]
+          matching[0].identity,
+          resolved_scope=matching[0],
+          scope_trace_id=_resolved_scope_trace_id(candidate_rows, matching[0]),
+          event_types=event_types,
       )
     if not truncated and allow_mixed_scope and len(matching) >= 2:
       # A complete candidate page already proves the full
@@ -1135,7 +1179,9 @@ class Client:
             population_truncated=False,
         )
       return self._fetch_mixed_scope_trace(
-          selector, discovered=(matched_identities, False)
+          selector,
+          discovered=(matched_identities, False),
+          event_types=event_types,
       )
     if len(matching) == 1 and truncated:
       # Under truncation the singleton needs TWO proofs (rounds 7-10).
@@ -1148,14 +1194,21 @@ class Client:
       # only the fallback when exactness cannot be proven.
       if selector.scope_signature is None:
         if allow_mixed_scope:
-          return self._fetch_mixed_scope_trace(selector)
+          return self._fetch_mixed_scope_trace(
+              selector, event_types=event_types
+          )
       if (
           selector.scope_signature is not None
           and selector.user_id is not UNSET
           and selector.root_agent_name is not UNSET
       ):
         return self._fetch_identity_trace(
-            matching[0].identity, resolved_scope=matching[0]
+            matching[0].identity,
+            resolved_scope=matching[0],
+            scope_trace_id=_resolved_scope_trace_id(
+                candidate_rows, matching[0]
+            ),
+            event_types=event_types,
         )
       discovered = None
       if selector.scope_signature is not None:
@@ -1167,14 +1220,23 @@ class Client:
             and identities[0] == matching[0].identity
         ):
           return self._fetch_identity_trace(
-              matching[0].identity, resolved_scope=matching[0]
+              matching[0].identity,
+              resolved_scope=matching[0],
+              scope_trace_id=_resolved_scope_trace_id(
+                  candidate_rows, matching[0]
+              ),
+              event_types=event_types,
           )
       if allow_mixed_scope:
         # Reuse the page just fetched — the mixed path would otherwise
         # rerun the identical discovery query (round 10, P3-1).
-        return self._fetch_mixed_scope_trace(selector, discovered=discovered)
+        return self._fetch_mixed_scope_trace(
+            selector,
+            discovered=discovered,
+            event_types=event_types,
+        )
     if allow_mixed_scope and truncated:
-      return self._fetch_mixed_scope_trace(selector)
+      return self._fetch_mixed_scope_trace(selector, event_types=event_types)
     if len(matching) >= 2:
       # The typed ambiguity surface: real, executable retries. The
       # truncation marker tells callers the set is a lower bound.
@@ -1334,6 +1396,7 @@ class Client:
       self,
       selector: TraceSelector,
       discovered: Optional[tuple] = None,
+      event_types: Optional[list[str]] = None,
   ) -> Trace:
     """Conversation-complete object-or-null-attested read for one identity.
 
@@ -1398,18 +1461,49 @@ class Client:
             identity.root_agent_name,
         ),
     ]
+    scope_results = None
+    event_where = "TRUE"
+    if event_types is not None:
+      # Mixed reads need the complete attributes population for coverage and
+      # Python-only pin verification. Fetch that lightweight metadata
+      # separately so excluded event payloads never cross the wire.
+      metadata_query = _GET_SESSION_SCOPE_METADATA_QUERY.format(
+          project=self.project_id,
+          dataset=self.dataset_id,
+          table=self.table_id,
+      )
+      metadata_config = bigquery.QueryJobConfig(query_parameters=params)
+      metadata_config = with_sdk_labels(metadata_config, feature="trace-read")
+      scope_results = list(
+          self.bq_client.query(
+              metadata_query, job_config=metadata_config
+          ).result()
+      )
+      if not scope_results:
+        raise ValueError(
+            f"No events found for session_id={identity.session_id}"
+        )
+      event_where = "e.event_type IN UNNEST(@selected_event_types)"
+      params = [
+          *params,
+          bigquery.ArrayQueryParameter(
+              "selected_event_types", "STRING", event_types
+          ),
+      ]
+
     fetch_query = _GET_SESSION_TRACE_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
         row_where="TRUE",
+        event_where=event_where,
     )
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     job_config = with_sdk_labels(job_config, feature="trace-read")
     results = list(
         self.bq_client.query(fetch_query, job_config=job_config).result()
     )
-    if not results:
+    if not results and event_types is None:
       raise ValueError(f"No events found for session_id={identity.session_id}")
     # Producer row order, one span per row: no cross-scope merging,
     # no span_id-based dedup, no chronology loss. Every fetched row
@@ -1419,7 +1513,8 @@ class Client:
     # inserted between discovery and fetch must not slip through.
     spans = []
     fetched_entries = []
-    for row in results:
+
+    def _validated_components(row):
       row_dict = dict(row)
       # Validated from the RAW cell (PR #371 review rounds 8 P2-2,
       # 9 P1-5, 10 P1-1): a persisted non-object — including a JSON
@@ -1436,36 +1531,35 @@ class Client:
               else _NO_ATTESTATION
           ),
       )
-      # Hand the normalized object to Span so it cannot reparse the
-      # raw scalar after the authoritative attestation has accepted
-      # this row.
-      row_dict["attributes"] = attributes
-      span = Span.from_bigquery_row(row_dict)
-      row_user = row_dict.get("user_id")
-      row_root = attributes.get("root_agent_name")
-      if (
-          row_user != identity.user_id
-          or not (row_root is None or isinstance(row_root, str))
-          or row_root != identity.root_agent_name
-      ):
+      row_user = _validated_identity_attr("user_id", row_dict.get("user_id"))
+      row_root = _validated_identity_attr(
+          "root_agent_name", attributes.get("root_agent_name")
+      )
+      if row_user != identity.user_id or row_root != identity.root_agent_name:
         raise ValueError(
             "Resolution/fetch consistency failure: a fetched row does"
             " not match the resolved identity (identifiers redacted)."
             " The underlying data changed between resolution and"
             " fetch; retry the lookup."
         )
-      spans.append(span)
-      fetched_entries.append(
-          (
-              _validated_identity_attr(
-                  "experiment_id", attributes.get("experiment_id")
-              ),
-              _parse_tag_payload(
-                  attributes.get("custom_tags"), source="attributes"
-              ),
-              None,
-          )
+      experiment = _validated_identity_attr(
+          "experiment_id", attributes.get("experiment_id")
       )
+      payload = _parse_tag_payload(
+          attributes.get("custom_tags"), source="attributes"
+      )
+      row_dict["attributes"] = attributes
+      return row_dict, experiment, payload
+
+    for row in scope_results if scope_results is not None else results:
+      _, experiment, payload = _validated_components(row)
+      fetched_entries.append((experiment, payload, None))
+
+    for row in results:
+      row_dict, _, _ = _validated_components(row)
+      # Hand the normalized object to Span so it cannot reparse the raw
+      # scalar after the authoritative attestation has accepted this row.
+      spans.append(Span.from_bigquery_row(row_dict))
     # Coverage from the scopes ACTUALLY fetched, computed WITHOUT the
     # per-row cross-product expansion (PR #371 review round 5, P2-8):
     # only distinct (experiment, payload-signature) sets are tracked.
@@ -1627,6 +1721,8 @@ class Client:
       self,
       identity: TraceIdentity,
       resolved_scope: ResolvedTraceSelector,
+      scope_trace_id: Optional[str] = None,
+      event_types: Optional[list[str]] = None,
   ) -> Trace:
     """Anchored row fetch for one resolved identity and scope.
 
@@ -1660,18 +1756,34 @@ class Client:
     params.extend(
         param for param in filter_params if param.name in scope_param_names
     )
+    event_where = "TRUE"
+    if event_types is not None:
+      event_where = "e.event_type IN UNNEST(@selected_event_types)"
+      params.append(
+          bigquery.ArrayQueryParameter(
+              "selected_event_types", "STRING", event_types
+          )
+      )
 
     fetch_query = _GET_SESSION_TRACE_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
         table=self.table_id,
         row_where=row_where,
+        event_where=event_where,
     )
     job_config = bigquery.QueryJobConfig(query_parameters=params)
     job_config = with_sdk_labels(job_config, feature="trace-read")
     results = list(
         self.bq_client.query(fetch_query, job_config=job_config).result()
     )
+    if event_types is not None:
+      return _materialize_event_filtered_trace(
+          results,
+          identity=identity,
+          resolved_scope=resolved_scope,
+          scope_trace_id=scope_trace_id,
+      )
     if not results:
       raise ValueError(f"No events found for session_id={identity.session_id}")
     # Materialize ONLY the resolved scope (PR #371 review round 7,
@@ -3378,6 +3490,13 @@ class Client:
       self,
       session_id: str,
       config: Optional[Any] = None,
+      *,
+      user_id: Any = UNSET,
+      root_agent_name: Any = UNSET,
+      experiment_id: Any = UNSET,
+      custom_labels: Optional[dict] = None,
+      scope_signature: Optional[str] = None,
+      allow_mixed_scope: bool = False,
   ) -> Trace:
     """Reconstructs a session trace using GQL graph traversal.
 
@@ -3394,85 +3513,121 @@ class Client:
     Args:
         session_id: The session ID to reconstruct.
         config: Optional :class:`ContextGraphConfig`.
+        user_id: Optional identity pin, with the same three-state
+            semantics as :meth:`get_session_trace`.
+        root_agent_name: Optional root-agent identity pin.
+        experiment_id: Optional experiment scope pin.
+        custom_labels: Optional subset label pins.
+        scope_signature: Optional exact-scope signature pin.
+        allow_mixed_scope: Opt in to the same mixed-scope escape hatch
+            as :meth:`get_session_trace`.
 
     Returns:
-        A Trace object with all spans for the session.
+        A Trace object for the resolved identity/scope.
     """
-    mgr = self.context_graph(config=config)
-    rows = mgr.reconstruct_trace_gql(session_id=session_id)
+    selector = TraceSelector(
+        session_id=session_id,
+        user_id=user_id,
+        root_agent_name=root_agent_name,
+        experiment_id=experiment_id,
+        custom_labels=custom_labels,
+        scope_signature=scope_signature,
+    )
+    return self.get_trace_by_selector_gql(
+        selector,
+        config=config,
+        allow_mixed_scope=allow_mixed_scope,
+    )
 
-    # Always fetch the flat trace to capture isolated events
-    flat_trace = self.get_session_trace(session_id)
+  def get_trace_by_selector_gql(
+      self,
+      selector: TraceSelector,
+      config: Optional[Any] = None,
+      *,
+      allow_mixed_scope: bool = False,
+  ) -> Trace:
+    """Reconstructs one selector-resolved trace using GQL edges.
+
+    The shared flat resolver runs exactly once and defines the complete
+    allowed span population. Under the Property Graph's unique TechNode
+    ``span_id`` key contract, GQL receives those exact IDs so traversal cannot
+    broaden the read to another identity or scope that reuses the same
+    ``session_id``. Duplicate IDs bypass GQL. The graph result supplies only
+    parent relationships; span content and trace metadata remain sourced from
+    the authoritative flat trace.
+
+    Args:
+        selector: Identity and scope pins for the singular read.
+        config: Optional :class:`ContextGraphConfig`.
+        allow_mixed_scope: Pass through the U2 mixed-scope escape hatch.
+
+    Returns:
+        The resolved flat trace when no graph edges exist, otherwise an
+        equivalent trace whose copied spans carry GQL parent links and are
+        ordered chronologically.
+    """
+    flat_trace = self.get_trace_by_selector(
+        selector, allow_mixed_scope=allow_mixed_scope
+    )
+    populated_span_ids = [
+        span.span_id for span in flat_trace.spans if span.span_id
+    ]
+    span_ids = tuple(sorted(set(populated_span_ids)))
+    if not span_ids:
+      return flat_trace
+    if len(span_ids) != len(populated_span_ids):
+      # Property Graph TechNode keys require a unique span_id. A resolved
+      # mixed-scope trace can legitimately preserve repeated producer rows,
+      # but GQL cannot attribute an edge to one of those copies. Keep the
+      # authoritative flat relationships rather than applying one graph edge
+      # to an arbitrary duplicate.
+      logger.warning(
+          "Skipping GQL relationship reconstruction because the resolved"
+          " trace contains non-unique span IDs."
+      )
+      return flat_trace
+
+    mgr = self.context_graph(config=config)
+    rows = mgr.reconstruct_trace_gql(
+        session_id=selector.session_id,
+        span_ids=span_ids,
+    )
 
     if not rows:
       logger.info(
           "No GQL edges for session_id=%s (flat/sparse trace); "
           "using flat SQL query.",
-          session_id,
+          selector.session_id,
       )
       return flat_trace
 
-    # Build spans from GQL edge pairs.
-    # A span may appear as parent_ first (no parent link) then as
-    # child_ later — backfill parent_span_id when that happens.
-    seen: dict[str, dict[str, Any]] = {}
+    # Graph rows are permitted to contribute relationships only. The
+    # authoritative flat trace contributes every span and all payload data,
+    # so a stale or unexpectedly broad graph can never fabricate an event.
+    spans = [copy.deepcopy(span) for span in flat_trace.spans]
+    by_id = {span.span_id: span for span in spans if span.span_id}
     for row in rows:
-      for prefix in ("parent_", "child_"):
-        sid = row.get(f"{prefix}span_id")
-        if not sid:
-          continue
-        if sid not in seen:
-          seen[sid] = {
-              "span_id": sid,
-              "event_type": row.get(f"{prefix}event_type", "UNKNOWN"),
-              "agent": row.get(f"{prefix}agent"),
-              "timestamp": row.get(f"{prefix}timestamp"),
-              "session_id": row.get("session_id"),
-              "invocation_id": row.get(f"{prefix}invocation_id"),
-              "content": row.get(f"{prefix}content") or {},
-              "latency_ms": row.get(f"{prefix}latency_ms"),
-              "status": row.get(f"{prefix}status", "OK"),
-              "error_message": row.get(f"{prefix}error_message"),
-              "parent_span_id": (
-                  row.get("parent_span_id") if prefix == "child_" else None
-              ),
-          }
-        elif prefix == "child_" and not seen[sid].get("parent_span_id"):
-          # Backfill parent link from this child_ edge
-          seen[sid]["parent_span_id"] = row.get("parent_span_id")
-
-    gql_spans = [Span.from_bigquery_row(v) for v in seen.values()]
-
-    # Merge: add any flat-trace spans not already covered by GQL
-    gql_span_ids = {s.span_id for s in gql_spans if s.span_id}
-    for span in flat_trace.spans:
-      if span.span_id and span.span_id not in gql_span_ids:
-        gql_spans.append(span)
+      parent_id = row.get("parent_span_id")
+      child_id = row.get("child_span_id")
+      if parent_id in by_id and child_id in by_id:
+        by_id[child_id].parent_span_id = parent_id
 
     # Sort by timestamp for deterministic chronological order.
     # Use epoch as fallback (timezone-aware to avoid naive/aware conflicts).
     _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    gql_spans.sort(key=lambda s: (s.timestamp or _epoch, s.span_id or ""))
-
-    spans = gql_spans
-    user_id = flat_trace.user_id
-    trace_id = flat_trace.trace_id
-
-    timestamps = [s.timestamp for s in spans if s.timestamp]
-    start = min(timestamps) if timestamps else None
-    end = max(timestamps) if timestamps else None
-    total_ms = None
-    if start and end:
-      total_ms = (end - start).total_seconds() * 1000
+    spans.sort(key=lambda s: (s.timestamp or _epoch, s.span_id or ""))
 
     return Trace(
-        trace_id=trace_id or session_id,
-        session_id=session_id,
+        trace_id=flat_trace.trace_id,
+        session_id=flat_trace.session_id,
         spans=spans,
-        user_id=user_id,
-        start_time=start,
-        end_time=end,
-        total_latency_ms=total_ms,
+        user_id=flat_trace.user_id,
+        start_time=flat_trace.start_time,
+        end_time=flat_trace.end_time,
+        total_latency_ms=flat_trace.total_latency_ms,
+        identity=flat_trace.identity,
+        scope=flat_trace.scope,
+        scope_coverage=flat_trace.scope_coverage,
     )
 
 
@@ -3657,6 +3812,87 @@ def _validated_attributes_object(
       return parsed
   raise ValueError(
       "Persisted attributes must be a JSON object (contents redacted)."
+  )
+
+
+def _materialize_event_filtered_trace(
+    results: list,
+    *,
+    identity: TraceIdentity,
+    resolved_scope: ResolvedTraceSelector,
+    scope_trace_id: Optional[str] = None,
+) -> Trace:
+  """Build one already-resolved scope from a SQL-filtered event subset.
+
+  Candidate discovery has already proven ``resolved_scope``. The span query
+  may contain only shared rows after event-type pushdown, so reconstructing
+  candidates from that subset would incorrectly lose the proven scope.
+  Instead, each returned row is validated and assigned using the same
+  exact-payload/shared-row rules as :func:`_build_traces_from_rows`.
+  """
+  scope = resolved_scope.scope
+  expected_labels = scope.labels_dict
+  spans = []
+  own_trace_ids = []
+  for row in results:
+    row_dict = dict(row)
+    attributes = _validated_attributes_object(
+        row_dict.get("attributes"),
+        sql_type=(
+            row_dict.get("attributes_type")
+            if "attributes_type" in row_dict
+            else _NO_ATTESTATION
+        ),
+    )
+    row_user = _validated_identity_attr("user_id", row_dict.get("user_id"))
+    row_root = _validated_identity_attr(
+        "root_agent_name", attributes.get("root_agent_name")
+    )
+    if row_user != identity.user_id or row_root != identity.root_agent_name:
+      raise ValueError(
+          "Resolution/fetch consistency failure: a fetched row does not"
+          " match the resolved identity (identifiers redacted). The"
+          " underlying data changed between resolution and fetch; retry"
+          " the lookup."
+      )
+    experiment = _validated_identity_attr(
+        "experiment_id", attributes.get("experiment_id")
+    )
+    payload = _parse_tag_payload(
+        attributes.get("custom_tags"), source="attributes"
+    )
+
+    # Untagged NULL-experiment rows are identity-wide shared
+    # infrastructure. Otherwise the experiment must match; untagged
+    # subgroup-local rows are shared within that experiment, and tagged
+    # rows belong only to their exact payload.
+    identity_shared = experiment is None and payload is None
+    if not identity_shared:
+      if experiment != scope.experiment_id:
+        continue
+      if payload is not None and payload != expected_labels:
+        continue
+      if payload is not None and row_dict.get("trace_id"):
+        own_trace_ids.append(row_dict["trace_id"])
+
+    row_dict["attributes"] = attributes
+    spans.append(Span.from_bigquery_row(row_dict))
+
+  timestamps = [span.timestamp for span in spans if span.timestamp]
+  start = min(timestamps) if timestamps else None
+  end = max(timestamps) if timestamps else None
+  total_ms = (end - start).total_seconds() * 1000 if start and end else None
+  return Trace(
+      trace_id=scope_trace_id
+      or (own_trace_ids[0] if own_trace_ids else identity.session_id),
+      session_id=identity.session_id,
+      spans=spans,
+      user_id=identity.user_id,
+      start_time=start,
+      end_time=end,
+      total_latency_ms=total_ms,
+      identity=identity,
+      scope=scope,
   )
 
 
@@ -3971,6 +4207,51 @@ def _resolve_scope_candidates(rows: list[dict]) -> list[ResolvedTraceSelector]:
   candidates = list(dict.fromkeys(candidates))
   candidates.sort(key=_candidate_sort_key)
   return candidates
+
+
+def _resolved_scope_trace_id(
+    rows: list[dict], candidate: ResolvedTraceSelector
+) -> Optional[str]:
+  """Return the unfiltered candidate page's trace ID for one exact scope.
+
+  Event filtering can remove every tagged row from the payload fetch.
+  Candidate discovery is intentionally unfiltered, so its per-payload
+  aggregate remains the stable source for the scope's producer trace ID.
+  Untagged rows are shared infrastructure and never supply a scope-specific
+  ID.
+  """
+  expected_labels = candidate.scope.labels_dict
+  for row in rows:
+    identity = TraceIdentity(
+        session_id=row.get("session_id"),
+        user_id=_validated_identity_attr("user_id", row.get("user_id")),
+        root_agent_name=_parse_identity_attr_json(
+            "root_agent_name", row.get("root_agent_name")
+        ),
+    )
+    if identity != candidate.identity:
+      continue
+    experiment = _parse_identity_attr_json(
+        "experiment_id", row.get("experiment_id")
+    )
+    payload = _parse_tag_payload(row.get("tag_payload"))
+    if (
+        experiment != candidate.scope.experiment_id
+        or payload is None
+        or payload != expected_labels
+    ):
+      continue
+    trace_id = row.get("scope_trace_id")
+    if trace_id is None:
+      return None
+    if type(trace_id) is not str:
+      raise ValueError(
+          "Persisted trace_id must be a string (contents redacted)."
+      )
+    if trace_id == "":
+      return None
+    return trace_id
+  return None
 
 
 def _candidates_matching_selector(

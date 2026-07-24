@@ -265,7 +265,9 @@ GRAPH `project.dataset.agent_context_graph`
 MATCH
   (parent:TechNode)-[c:Caused]->(child:TechNode)
 WHERE parent.session_id = @session_id
-   OR child.session_id = @session_id
+  AND child.session_id = @session_id
+  AND parent.span_id IN UNNEST(@span_ids)
+  AND child.span_id IN UNNEST(@span_ids)
 RETURN
   parent.span_id AS parent_span_id,
   parent.event_type AS parent_event_type,
@@ -380,7 +382,7 @@ Uses `AI.GENERATE` with `output_schema` to extract typed business entities (Prod
 Quantified-path GQL query that traverses from a HITL decision event through up to 20 hops of causal lineage to the business entities that influenced the decision. Returns the full reasoning chain with confidence scores and artifact URIs.
 
 ### 5.4 GQL Trace Reconstruction (replaces recursive CTEs)
-Native GQL traversal of the Caused edge type to reconstruct session traces. Returns parent-child span pairs ordered by timestamp. The SDK merges GQL results with isolated events (spans without edges) for completeness.
+Native GQL traversal of the Caused edge type reconstructs parent-child relationships for an identity/scope-safe span population resolved by flat SQL first. Both ends of every edge must belong to the supplied `@span_ids`; flat SQL remains authoritative for event payloads, isolated events, and trace metadata.
 
 ### 5.5 World-Change Detection (Fail-Closed)
 Joins BizNodes with agent events to retrieve `evaluated_at` timestamps. The Python SDK layer applies the `current_state_fn` callback and enforces fail-closed semantics.
@@ -472,13 +474,14 @@ The Context Graph is implemented as a standalone module (`~1300 lines`) in the B
 
 | Decision | Rationale |
 |----------|-----------|
-| Standalone module | No internal imports from other SDK modules; independently testable |
+| Mostly standalone module | Independently testable; the legacy manager-level session convenience lazily imports `Client` so it can resolve ambiguity before running GQL |
 | `output_schema` in AI.GENERATE | Eliminates JSON parsing failures from free-form LLM output |
 | Composite `biz_node_id` | `span_id:node_type:node_value` prevents collisions from same-span multi-entity extraction |
 | MERGE with 3-way logic | Single atomic statement handles insert, update, and stale cleanup |
 | Fail-closed world-change | Query errors and callback errors both produce `check_failed=True, is_safe_to_approve=False` |
 | Legacy endpoint rejection | `project.dataset.model` refs raise `ValueError` instead of silently producing bad Vertex AI URLs |
-| GQL + flat trace merge | GQL returns only edge pairs; SDK merges isolated events from flat SQL for completeness |
+| Flat resolution + confined GQL | Flat SQL resolves identity/scope and the complete span population first; GQL may add parent links only between those span IDs |
+| Duplicate span fallback | `TechNode KEY (span_id)` requires unique node IDs; a resolved flat population containing duplicates bypasses GQL rather than applying an edge to an arbitrary row |
 | Timezone-safe sorting | `datetime(1970,1,1,tzinfo=timezone.utc)` fallback instead of naive `datetime.min` |
 
 ### 7.3 Client Integration
@@ -490,12 +493,12 @@ The `Client` class exposes GQL trace reconstruction:
 def get_session_trace_gql(self, session_id, config=None) -> Trace:
     """Reconstructs a session trace using GQL graph traversal.
 
-    1. Runs GQL query via ContextGraphManager.reconstruct_trace_gql()
-    2. Fetches flat trace via get_session_trace() for isolated events
-    3. Backfills parent_span_id when spans arrive out of order
-    4. Merges isolated spans not covered by GQL
-    5. Sorts by timezone-aware timestamps
-    6. Falls back to flat SQL when GQL returns no edges
+    1. Resolves the exact identity/scope via get_trace_by_selector()
+    2. Supplies only that trace's span IDs to reconstruct_trace_gql()
+    3. Accepts parent relationships only when both spans are in that set
+    4. Keeps flat SQL authoritative for payloads, metadata, and isolated spans
+    5. Sorts copied spans by timezone-aware timestamps
+    6. Returns the flat trace unchanged when GQL returns no edges
     """
 ```
 

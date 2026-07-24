@@ -96,6 +96,14 @@ trace = client.get_trace("trace-abc-123")
 trace.render()
 ```
 
+For session reads, `session_id` is a reusable conversation identifier rather
+than a unique trace key. `client.get_session_trace()` resolves user, root agent,
+experiment, and labels; if more than one candidate remains it raises
+`AmbiguousSessionError` carrying structured candidates for an exact
+`client.get_trace_by_selector()` retry. The same contract is used by GQL,
+trajectory evaluation, the CLI, the Remote Function, and reports. See
+[Identity-safe session resolution](SDK.md#resolve-a-session-safely).
+
 See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
 feature.
 

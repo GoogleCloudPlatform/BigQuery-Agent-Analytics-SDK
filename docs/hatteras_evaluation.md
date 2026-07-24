@@ -281,12 +281,25 @@ already used by `LLMAsJudge` and `insights`:
 
 1. Filter sessions with `TraceFilter`
 2. Build one ordered transcript per `session_id`
-3. Call `AI.GENERATE` once per session
+3. Call `AI.GENERATE` once per session transcript
 4. Read typed output columns or parse a constrained JSON/string envelope
 5. Convert rows into `CategoricalSessionResult`
 
 This keeps the execution model aligned with the existing SDK design instead of
 introducing a separate trace-by-trace Python-only path.
+
+> **Current identity boundary (#359):** `session_id` is a persistent
+> conversation identifier and may be reused by different users, root agents,
+> experiments, or labeled passes. Identity-safe trace consumers now use the
+> shared `TraceSelector` resolver and preserve an `AmbiguousSessionError`
+> candidate for a one-step retry. The categorical `AI.GENERATE` SQL below,
+> however, still aggregates by bare `session_id`; U3 does not claim
+> identity-bound judge context or persistence cardinality. Reports correlate a
+> score through reserved attribution when it is present and use the legacy
+> session-only association only when exactly one trace candidate exists;
+> otherwise they fail closed. The planned judge-context and schema/writer/view
+> migrations must change this aggregation before colliding categorical
+> sessions can be scored and persisted independently.
 
 ### Concrete SQL template
 
@@ -492,7 +505,9 @@ belong in `evaluators.py`, which is focused on numeric scoring contracts.
 This proposal should reuse and align with current SDK patterns:
 
 - `TraceFilter` for session selection
-- `Client.get_session_trace()` transcript semantics
+- `Client.get_session_trace()` / `get_trace_by_selector()` identity-safe
+  transcript semantics for trace-consuming secondary surfaces (not yet the
+  categorical server-side aggregate above)
 - BigQuery-native `AI.GENERATE` execution patterns already used in `insights`
   and other modules
 - Gemini API fallback patterns already used by `LLMAsJudge`
@@ -530,6 +545,9 @@ Those numeric contracts should remain numeric.
 - Add result table DDL/template
 - Add `persist_results=True` flow
 - Add export/query helpers if needed
+- Migrate schema, writer, and views in that order so identity/scope attribution
+  is part of the persistence key before colliding sessions are written. The U3
+  read/report plumbing intentionally does not claim this cardinality migration.
 
 ### Phase 4: CLI exposure
 
