@@ -29,9 +29,8 @@ def main() -> int:
       "sentinels": {
           "project": placeholders["PROJECT"],
           "dataset": placeholders["DATASET"],
-          "viewPrefix": placeholders["VIEW_PREFIX"],
+          "table": placeholders["TABLE"],
       },
-      "defaultViewPrefix": "v",
       "defaultTable": "agent_events",
   }
   rendered = (

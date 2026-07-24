@@ -1,88 +1,55 @@
--- preflight.sql.tmpl — structural compatibility check, run by the hydration
--- helper as the current user BEFORE emitting a Linking API URL.
+-- preflight.sql.tmpl — structural BQAA base-table compatibility check.
 --
--- Reports every missing required view and every missing required source
--- column BY NAME (one row per problem; zero rows = preflight passes).
--- Structural pass means "preflight-compatible" only — never parity-certified
--- (see the certification lifecycle in the governing contract, issue #365).
-WITH required_views AS (
-  SELECT view_suffix, required_column, column_type FROM UNNEST([
-    -- Common columns are checked on every one of the 15 v1 views.
-    STRUCT('_ALL_' AS view_suffix, 'timestamp' AS required_column, 'TIMESTAMP' AS column_type),
-    ('_ALL_', 'event_type', 'STRING'),
-    ('_ALL_', 'agent', 'STRING'),
-    ('_ALL_', 'session_id', 'STRING'),
-    ('_ALL_', 'invocation_id', 'STRING'),
-    ('_ALL_', 'user_id', 'STRING'),
-    ('_ALL_', 'trace_id', 'STRING'),
-    ('_ALL_', 'span_id', 'STRING'),
-    ('_ALL_', 'parent_span_id', 'STRING'),
-    ('_ALL_', 'status', 'STRING'),
-    ('_ALL_', 'error_message', 'STRING'),
-    ('_ALL_', 'is_truncated', 'BOOL'),
-    -- Required source columns for the token-precedence rule and metrics.
-    ('llm_response', 'usage_metadata', 'JSON'),
-    ('llm_response', 'usage_prompt_tokens', 'INT64'),
-    ('llm_response', 'usage_completion_tokens', 'INT64'),
-    ('llm_response', 'usage_total_tokens', 'INT64'),
-    ('llm_response', 'total_ms', 'INT64'),
-    ('llm_response', 'ttft_ms', 'INT64'),
-    ('llm_response', 'model_version', 'STRING'),
-    ('tool_completed', 'tool_name', 'STRING'),
-    ('tool_completed', 'tool_origin', 'STRING'),
-    ('tool_completed', 'total_ms', 'INT64'),
-    ('tool_error', 'tool_name', 'STRING'),
-    ('tool_error', 'tool_origin', 'STRING'),
-    ('tool_error', 'total_ms', 'INT64')
+-- Reports every missing required column and rejects an object that is not a
+-- physical base table or zero-copy table clone. Zero rows means the dashboard
+-- query can run without any generated views.
+WITH required AS (
+  SELECT column_name, data_type FROM UNNEST([
+    STRUCT('timestamp' AS column_name, 'TIMESTAMP' AS data_type),
+    ('event_type', 'STRING'),
+    ('agent', 'STRING'),
+    ('session_id', 'STRING'),
+    ('invocation_id', 'STRING'),
+    ('user_id', 'STRING'),
+    ('trace_id', 'STRING'),
+    ('span_id', 'STRING'),
+    ('parent_span_id', 'STRING'),
+    ('content', 'JSON'),
+    ('attributes', 'JSON'),
+    ('latency_ms', 'JSON'),
+    ('status', 'STRING'),
+    ('error_message', 'STRING'),
+    ('is_truncated', 'BOOL')
   ])
 ),
-v1_views AS (
-  SELECT suffix FROM UNNEST([
-    'user_message_received', 'llm_request', 'llm_response', 'llm_error',
-    'tool_starting', 'tool_completed', 'tool_error', 'agent_starting',
-    'agent_completed', 'invocation_starting', 'invocation_completed',
-    'state_delta', 'hitl_credential_request', 'hitl_confirmation_request',
-    'hitl_input_request'
-  ]) AS suffix
-),
-expected AS (
-  SELECT
-    CONCAT('{{VIEW_PREFIX}}_', v.suffix) AS view_name,
-    r.required_column,
-    r.column_type
-  FROM v1_views v
-  JOIN required_views r
-    ON r.view_suffix = '_ALL_' OR r.view_suffix = v.suffix
-),
 actual AS (
-  SELECT table_name, column_name, data_type
+  SELECT column_name, data_type
   FROM `{{PROJECT}}.{{DATASET}}`.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = '{{TABLE}}'
 ),
--- Object-type check: a base table shadowing a generated-view name must be
--- rejected (WRONG_OBJECT_TYPE), not silently accepted via COLUMNS alone.
-objects AS (
-  SELECT table_name, table_type
+object AS (
+  SELECT table_type
   FROM `{{PROJECT}}.{{DATASET}}`.INFORMATION_SCHEMA.TABLES
+  WHERE table_name = '{{TABLE}}'
 )
 SELECT
-  e.view_name,
-  e.required_column,
-  e.column_type AS expected_type,
+  '{{TABLE}}' AS table_name,
+  r.column_name,
+  r.data_type AS expected_type,
   a.data_type AS observed_type,
   o.table_type AS observed_object_type,
   CASE
-    WHEN o.table_name IS NULL THEN 'MISSING_VIEW'
-    WHEN o.table_type != 'VIEW' THEN 'WRONG_OBJECT_TYPE'
+    WHEN o.table_type IS NULL THEN 'MISSING_TABLE'
+    WHEN o.table_type NOT IN ('BASE TABLE', 'CLONE') THEN 'WRONG_OBJECT_TYPE'
     WHEN a.column_name IS NULL THEN 'MISSING_COLUMN'
     ELSE 'TYPE_MISMATCH'
   END AS problem
-FROM expected e
-LEFT JOIN objects o
-  ON o.table_name = e.view_name
-LEFT JOIN actual a
-  ON a.table_name = e.view_name AND a.column_name = e.required_column
-WHERE o.table_name IS NULL
-   OR o.table_type != 'VIEW'
+FROM required r
+CROSS JOIN (SELECT 1) anchor
+LEFT JOIN object o ON TRUE
+LEFT JOIN actual a USING (column_name)
+WHERE o.table_type IS NULL
+   OR o.table_type NOT IN ('BASE TABLE', 'CLONE')
    OR a.column_name IS NULL
-   OR a.data_type != e.column_type
-ORDER BY e.view_name, e.required_column
+   OR a.data_type != r.data_type
+ORDER BY r.column_name

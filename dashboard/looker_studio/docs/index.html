@@ -35,8 +35,8 @@
         <form class="card" id="configurator" novalidate>
           <h2>Connect your BQAA data</h2>
           <p class="card-intro">
-            The standard <code>v_*</code> generated views must exist beside
-            the BQAA event table.
+            Only the BQAA event table is required. Generated views are not
+            used.
           </p>
 
           <label for="project">Project ID</label>
@@ -66,25 +66,12 @@
             required
           >
           <span class="hint">
-            Used to identify and name this installation. Charts read the
-            BQAA-generated views, not the raw table.
+            Charts read this table directly and extract reporting fields from
+            its JSON columns.
           </span>
 
           <details>
             <summary>Advanced settings</summary>
-            <label for="prefix">Generated-view prefix</label>
-            <input
-              id="prefix"
-              name="prefix"
-              autocomplete="off"
-              value="v"
-              required
-            >
-            <span class="hint">
-              Keep <code>v</code> unless the plugin uses a custom
-              <code>view_prefix</code>.
-            </span>
-
             <label for="billing-project">Billing project ID</label>
             <input
               id="billing-project"
@@ -142,12 +129,11 @@
       </section>
 
       <aside class="notice">
-        <strong>BQAA views are required.</strong>
-        A raw event table by itself is not enough. The ADK plugin must run with
-        <code>create_views=True</code>. Standard installations use the
-        <code>v</code> prefix; custom prefixes and billing projects are under
-        Advanced settings. For a location override or verified preflight, use
-        the repository’s CLI helper.
+        <strong>No generated views required.</strong>
+        The dashboard reads the configured BQAA event table directly. A
+        separate billing project is available under Advanced settings. For a
+        location override or verified preflight, use the repository’s CLI
+        helper.
       </aside>
 
       <footer>

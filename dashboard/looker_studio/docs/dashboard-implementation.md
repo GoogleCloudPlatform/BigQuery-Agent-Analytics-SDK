@@ -13,26 +13,26 @@ extra report data sources.
 
 The public template embeds the executable synthetic sentinel query from
 `sql/events_v1.template.sql`. `tools/hydrate_dashboard.py` validates the
-caller's BQAA base table and generated views, then emits a Linking API URL
-whose `sqlReplace` replaces the sentinel project, dataset, and view prefix.
+caller's BQAA base table, then emits a Linking API URL whose `sqlReplace`
+replaces the sentinel project, dataset, and table ID.
 The new data source is created with the clicking user's credentials. The
 template never exposes or delegates the template owner's BigQuery access.
 
 `docs/index.html` provides the standard-installation path without requiring a
 local CLI. It accepts project, dataset, and table IDs, assumes the standard
-`v` generated-view prefix and uses the project as the billing project by
-default, with optional advanced overrides for both, then constructs the same
-Linking API URL entirely in the browser. URL query
+`agent_events` table and uses the project as the billing project by default,
+with an optional billing-project override, then constructs the same Linking
+API URL entirely in the browser. URL query
 parameters can prefill the three inputs, but the page never opens the report
 without a user click.
 
 Looker Studio report parameters are not the binding mechanism. They can pass
 scalar values to BigQuery custom SQL, but BigQuery query parameters cannot
 replace identifiers in `FROM` paths. Connector-level Linking API
-`sqlReplace` is therefore required to bind the project, dataset, and generated
-view prefix. The base table ID is retained for installation identity and
-report naming; charts read the 15 BQAA-generated views. The authenticated CLI
-is the only path that preflight-validates that table and view contract.
+`sqlReplace` is therefore required to bind the project, dataset, and table
+ID. Charts scan that base table once and directly extract the token,
+latency, and tool fields exposed by the optional BQAA views. The authenticated
+CLI is the only path that preflight-validates the table contract.
 
 The canonical report is shared as Public/Viewer, uses Viewer's Credentials,
 and has manual report publishing enabled. Its published title is
@@ -53,7 +53,7 @@ installations, in this order:
 1. pinned LookML keys: `prompt_token_count`, `candidates_token_count`,
    `total_token_count`;
 2. alternate BQAA keys: `prompt_tokens`, `completion_tokens`, `total_tokens`;
-3. the generated-view fallback columns.
+3. content-derived token counts (`content.usage`).
 
 Malformed metadata values use `SAFE_CAST` and fall through instead of
 aborting every report chart.
@@ -109,16 +109,19 @@ The stable source fields map to report measures as follows:
 
 Dimensions use the stable fields directly. Tool-only and error-only charts
 use the typed `tool_completed_*` and `tool_error_*` fields so null rows from
-other union branches do not contribute to the measure.
+other event types do not contribute to the measure.
 
 ## Real-data smoke validation
 
-On 2026-07-23, the read-only live validator:
+On 2026-07-24, the base-table-only implementation:
 
-- passed the 15-view/column preflight;
-- executed the exact production custom query for the report window;
-- executed all 37 independent oracle queries against a real BQAA dataset;
-- reported 37 successes and zero failures.
+- passed the table/column preflight against a physical table clone;
+- dry-ran the exact production custom query successfully;
+- returned all 100,004 fixture rows, including 263 event rows omitted by the
+  historical generated-view intersection;
+- matched the generated views exactly for LLM token, LLM-row, tool-row,
+  tool-latency, error-row, and error-latency aggregates; and
+- executed all 37 independent base-table oracle queries successfully.
 
 No live result rows or source identifiers are committed. This smoke result
 proves installation compatibility and query executability; it does not replace

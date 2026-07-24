@@ -1,36 +1,43 @@
 {
-  "comment": "Machine-readable static intersection and exclusion lists for the portable Looker Studio dashboard.",
-  "intersection_views": [
-    "v_agent_completed",
-    "v_agent_starting",
-    "v_hitl_confirmation_request",
-    "v_hitl_credential_request",
-    "v_hitl_input_request",
-    "v_invocation_completed",
-    "v_invocation_starting",
-    "v_llm_error",
-    "v_llm_request",
-    "v_llm_response",
-    "v_state_delta",
-    "v_tool_completed",
-    "v_tool_error",
-    "v_tool_starting",
-    "v_user_message_received"
-  ],
-  "profiles": {
-    "1.27.0": {"source_ref": "v1.27.0", "adds": []},
-    "1.36.1": {"source_ref": "v1.36.1",
-               "adds": ["v_a2a_interaction", "v_agent_response"]},
-    "2.4.0": {"source_ref": "v2.4.0",
-              "adds": ["v_a2a_interaction", "v_agent_response",
-                        "v_agent_state_checkpoint", "v_agent_transfer",
-                        "v_event_compaction", "v_tool_paused"]}
+  "comment": "Machine-readable source contract for the portable Looker Studio dashboard.",
+  "source_object": "agent_events",
+  "source_object_type": "BASE TABLE",
+  "generated_views_required": false,
+  "required_columns": {
+    "timestamp": "TIMESTAMP",
+    "event_type": "STRING",
+    "agent": "STRING",
+    "session_id": "STRING",
+    "invocation_id": "STRING",
+    "user_id": "STRING",
+    "trace_id": "STRING",
+    "span_id": "STRING",
+    "parent_span_id": "STRING",
+    "content": "JSON",
+    "attributes": "JSON",
+    "latency_ms": "JSON",
+    "status": "STRING",
+    "error_message": "STRING",
+    "is_truncated": "BOOL"
   },
-  "excluded_from_v1_union": [
-    "v_a2a_interaction", "v_agent_response", "v_agent_state_checkpoint",
-    "v_agent_transfer", "v_event_compaction", "v_tool_paused"
-  ],
-  "base_table_only_event_types": [
-    "HITL_CREDENTIAL_COMPLETED", "HITL_CONFIRMATION_COMPLETED"
+  "profiles": {
+    "1.27.0": {
+      "source_ref": "v1.27.0",
+      "status": "candidate"
+    },
+    "1.36.1": {
+      "source_ref": "v1.36.1",
+      "status": "candidate"
+    },
+    "2.4.0": {
+      "source_ref": "v2.4.0",
+      "status": "candidate"
+    }
+  },
+  "event_scope": "all base-table rows in the selected date range",
+  "specialized_extractions": [
+    "LLM_RESPONSE",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR"
   ]
 }

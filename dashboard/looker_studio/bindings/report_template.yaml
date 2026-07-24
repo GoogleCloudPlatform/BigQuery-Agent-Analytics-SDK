@@ -13,9 +13,24 @@ published_date: "2026-07-24"
 # This attestation covers the reviewed repository artifact. It does not prove
 # that the mutable external Looker Studio report still embeds these bytes.
 reviewed_template_sql:
-  sha256: 4b9af4390b6445f4af3856a395f17a85eaaf20cdc6b80d1f34a0645575b76881
+  sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
   reviewed_date: "2026-07-24"
   scope: repository_artifact_only
+live_template_verification:
+  verified_date: "2026-07-24"
+  repository_sql_sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
+  method:
+    - connector_custom_query_review
+    - sqlreplace_table_only_smoke_test
+  result: PASSED
+  limitation: mutable_external_report_requires_reverification_after_changes
+source_contract:
+  mode: BASE_TABLE
+  generated_views_required: false
+  replacement_identifiers:
+    - PROJECT
+    - DATASET
+    - TABLE
 governance:
   live_report_owner_class: CONTRIBUTOR_MANAGED
   sentinel_fixture_owner_class: CONTRIBUTOR_MANAGED
