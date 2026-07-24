@@ -43,7 +43,9 @@ from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
 from .evaluators import SystemEvaluator
 from .formatter import format_output
+from .trace import AmbiguousSessionError
 from .trace import TraceFilter
+from .trace import TraceSelector
 
 app = typer.Typer(
     name="bq-agent-sdk",
@@ -328,6 +330,30 @@ def get_trace(
         None, help="Retrieve by session ID."
     ),
     trace_id: Optional[str] = typer.Option(None, help="Retrieve by trace ID."),
+    user_id: Optional[str] = typer.Option(
+        None, help="Pin the session user ID."
+    ),
+    root_agent_name: Optional[str] = typer.Option(
+        None, help="Pin the session root agent."
+    ),
+    experiment_id: Optional[str] = typer.Option(
+        None, help="Pin the evaluation experiment."
+    ),
+    labels: Optional[list[str]] = typer.Option(
+        None,
+        "--label",
+        help="Pin a custom scope label as KEY=VALUE. Repeat as needed.",
+    ),
+    scope_signature: Optional[str] = typer.Option(
+        None, help="Pin the exact canonical scope signature."
+    ),
+    selector_json: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Exact TraceSelector JSON, including explicit null pins from an"
+            " ambiguity candidate payload."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -335,19 +361,79 @@ def get_trace(
     ),
 ) -> None:
   """Retrieve and display a session trace."""
-  if not session_id and not trace_id:
+  selector_option_used = any(
+      value is not None
+      for value in (
+          user_id,
+          root_agent_name,
+          experiment_id,
+          labels,
+          scope_signature,
+      )
+  )
+  if not session_id and not trace_id and not selector_json:
     typer.echo(
-        "Error: provide --session-id or --trace-id.",
+        "Error: provide --session-id, --trace-id, or --selector-json.",
         err=True,
     )
     raise typer.Exit(code=2)
+  if trace_id and (session_id or selector_json or selector_option_used):
+    typer.echo(
+        "Error: --trace-id cannot be combined with session selector options.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+  if selector_json and (session_id or selector_option_used):
+    typer.echo(
+        "Error: --selector-json cannot be combined with other selector"
+        " options.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
   try:
+    selector = None
+    if selector_json:
+      payload = json.loads(selector_json)
+      if type(payload) is not dict:
+        raise ValueError("--selector-json must decode to a JSON object.")
+      selector = TraceSelector(**payload)
+    elif session_id and selector_option_used:
+      label_pairs = []
+      for item in labels or []:
+        if "=" not in item:
+          raise ValueError("--label must use KEY=VALUE form.")
+        label_pairs.append(tuple(item.split("=", 1)))
+      selector_kwargs = {
+          name: value
+          for name, value in (
+              ("user_id", user_id),
+              ("root_agent_name", root_agent_name),
+              ("experiment_id", experiment_id),
+          )
+          if value is not None
+      }
+      selector = TraceSelector(
+          session_id=session_id,
+          **selector_kwargs,
+          custom_labels=label_pairs or None,
+          scope_signature=scope_signature,
+      )
+
     client = _build_client(project_id, dataset_id, table_id, location)
-    if session_id:
+    if selector is not None:
+      trace = client.get_trace_by_selector(selector)
+    elif session_id:
       trace = client.get_session_trace(session_id)
     else:
       trace = client.get_trace(trace_id)
     typer.echo(format_output(trace, fmt))
+  except AmbiguousSessionError as exc:
+    if fmt.lower() == "json":
+      typer.echo(format_output(exc.to_dict(), "json"))
+    else:
+      typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
   except Exception as exc:
     typer.echo(f"Error: {exc}", err=True)
     raise typer.Exit(code=2)

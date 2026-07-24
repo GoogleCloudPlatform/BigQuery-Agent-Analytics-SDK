@@ -25,10 +25,12 @@ import json
 from typing import Any
 
 from bigquery_agent_analytics import Client
+from bigquery_agent_analytics import AmbiguousSessionError
 from bigquery_agent_analytics import LLMAsJudge
 from bigquery_agent_analytics import serialize
 from bigquery_agent_analytics import SystemEvaluator
 from bigquery_agent_analytics import TraceFilter
+from bigquery_agent_analytics import TraceSelector
 from bigquery_agent_analytics._deploy_runtime import resolve_client_options
 
 
@@ -68,12 +70,15 @@ def process_calls(
       result["_version"] = "1.0"
       replies.append(result)
     except Exception as e:
+      error = {
+          "code": type(e).__name__,
+          "message": str(e),
+      }
+      if isinstance(e, AmbiguousSessionError):
+        error["details"] = e.to_dict()
       replies.append(
           {
-              "_error": {
-                  "code": type(e).__name__,
-                  "message": str(e),
-              },
+              "_error": error,
               "_version": "1.0",
           }
       )
@@ -83,7 +88,13 @@ def process_calls(
 def dispatch(client, operation, params):
   """Route operation to SDK method, return JSON-safe dict."""
   if operation == "analyze":
-    trace = client.get_session_trace(params["session_id"])
+    selector = _analyze_selector(params)
+    trace = client.get_trace_by_selector(
+        selector,
+        allow_mixed_scope=_bool_param(
+            params.get("allow_mixed_scope", False)
+        ),
+    )
     return serialize(trace)
 
   if operation == "evaluate":
@@ -115,6 +126,43 @@ def dispatch(client, operation, params):
     return serialize(report)
 
   raise ValueError(f"Unknown operation: {operation!r}")
+
+
+_ANALYZE_SELECTOR_FIELDS = (
+    "user_id",
+    "root_agent_name",
+    "experiment_id",
+    "custom_labels",
+    "scope_signature",
+)
+
+
+def _analyze_selector(params: dict[str, Any]) -> TraceSelector:
+  """Build a selector while preserving absent versus explicit null pins."""
+  if "selector" in params:
+    conflicts = [
+        field
+        for field in ("session_id", *_ANALYZE_SELECTOR_FIELDS)
+        if field in params
+    ]
+    if conflicts:
+      raise ValueError(
+          "analyze 'selector' cannot be combined with additive selector"
+          f" fields: {', '.join(conflicts)}"
+      )
+    payload = params["selector"]
+    if type(payload) is not dict:
+      raise TypeError("analyze 'selector' must be a JSON object.")
+    return TraceSelector(**payload)
+
+  if "session_id" not in params:
+    raise ValueError("analyze requires 'session_id' or 'selector'.")
+  selector_kwargs = {
+      field: params[field]
+      for field in _ANALYZE_SELECTOR_FIELDS
+      if field in params
+  }
+  return TraceSelector(session_id=params["session_id"], **selector_kwargs)
 
 
 def _bool_param(value: Any) -> bool:
