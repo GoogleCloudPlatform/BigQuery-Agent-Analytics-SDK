@@ -151,3 +151,22 @@ def test_browser_configurator_javascript_contract():
       cwd=DASHBOARD,
       check=True,
   )
+
+
+def test_googlecloudplatform_pages_configuration():
+  page = (DASHBOARD / "docs/index.html").read_text()
+  assert "github.com/caohy1988" not in page
+  assert (
+      "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
+      in page
+  )
+  assert (
+      "https://googlecloudplatform.github.io/"
+      "BigQuery-Agent-Analytics-SDK/" in page
+  )
+
+  workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
+  assert 'path: dashboard/looker_studio/docs' in workflow
+  assert "pages: write" in workflow
+  assert "id-token: write" in workflow
+  assert "actions/deploy-pages@v4" in workflow

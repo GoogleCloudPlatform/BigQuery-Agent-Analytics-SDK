@@ -1,10 +1,25 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   buildDashboardUrl,
   buildSetupUrl,
   validateConfiguration,
 } from "../docs/configurator.mjs";
 import { REPORT_CONFIG } from "../docs/report-config.mjs";
+
+const pageSource = readFileSync(
+  new URL("../docs/index.html", import.meta.url),
+  "utf8",
+);
+assert.doesNotMatch(pageSource, /github\.com\/caohy1988/);
+assert.match(
+  pageSource,
+  /https:\/\/github\.com\/GoogleCloudPlatform\/BigQuery-Agent-Analytics-SDK/,
+);
+assert.match(
+  pageSource,
+  /https:\/\/googlecloudplatform\.github\.io\/BigQuery-Agent-Analytics-SDK\//,
+);
 
 const values = {
   project: "customer-project-123",

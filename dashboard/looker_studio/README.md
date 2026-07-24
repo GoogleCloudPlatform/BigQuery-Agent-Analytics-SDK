@@ -96,7 +96,7 @@ All seven dashboard pages default to a rolling 365-day window ending
 yesterday. The Trace Inspector intentionally has no default date control.
 
 For the standard BQAA layout, open the
-[three-field dashboard configurator](https://caohy1988.github.io/bigquery-agent-analytics-dashboard/)
+[three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
 and enter only:
 
 1. GCP project ID;
@@ -108,7 +108,7 @@ Studio Linking API URL. Project, dataset, and table identifiers can also be
 prefilled in a shareable setup link:
 
 ```text
-https://caohy1988.github.io/bigquery-agent-analytics-dashboard/?project=PROJECT_ID&dataset=DATASET_ID&table=agent_events
+https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/?project=PROJECT_ID&dataset=DATASET_ID&table=agent_events
 ```
 
 The standard path assumes the plugin's default `v` generated-view prefix and
