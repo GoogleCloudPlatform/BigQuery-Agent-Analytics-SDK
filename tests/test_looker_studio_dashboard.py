@@ -166,7 +166,10 @@ def test_googlecloudplatform_pages_configuration():
   )
 
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
-  assert 'path: dashboard/looker_studio/docs' in workflow
+  assert "path: dashboard/looker_studio/docs" in workflow
   assert "pages: write" in workflow
   assert "id-token: write" in workflow
-  assert "actions/deploy-pages@v4" in workflow
+  assert (
+      "actions/deploy-pages@"
+      "d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e" in workflow
+  )
