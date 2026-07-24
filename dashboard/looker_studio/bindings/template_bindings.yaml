@@ -1,0 +1,23 @@
+# Executable sentinel bindings for the canonical Looker Studio template.
+#
+# These are REAL identifiers (a deployed synthetic fixture project/dataset and
+# a deliberately unique view prefix) — never logical placeholders. The SQL
+# embedded in the canonical report must execute against them so Data Studio
+# can discover fields and build the 37 charts at template-construction time.
+#
+# tools/render_template.py maps the .tmpl logical placeholders to these
+# values; the hydration helper later replaces these exact sentinel strings
+# with the user's values via the Linking API sqlReplace parameter.
+#
+# The sentinel strings must each be globally unique within the rendered SQL
+# (asserted by the renderer) so string replacement can never corrupt other
+# identifiers.
+#
+# These are the REAL provisioned M0 fixture identifiers. The sentinel view
+# prefix exists as 15 alias views (vsentinelbqaa_* -> v_*) in the fixture
+# dataset, so the rendered template SQL executes as-is at
+# template-construction time.
+placeholders:
+  PROJECT: test-project-0728-467323
+  DATASET: bqaa_fixture_adk_1_27_0
+  VIEW_PREFIX: vsentinelbqaa

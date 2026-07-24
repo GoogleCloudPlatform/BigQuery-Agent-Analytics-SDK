@@ -1,0 +1,36 @@
+{
+  "comment": "Machine-readable static intersection and exclusion lists for the portable Looker Studio dashboard.",
+  "intersection_views": [
+    "v_agent_completed",
+    "v_agent_starting",
+    "v_hitl_confirmation_request",
+    "v_hitl_credential_request",
+    "v_hitl_input_request",
+    "v_invocation_completed",
+    "v_invocation_starting",
+    "v_llm_error",
+    "v_llm_request",
+    "v_llm_response",
+    "v_state_delta",
+    "v_tool_completed",
+    "v_tool_error",
+    "v_tool_starting",
+    "v_user_message_received"
+  ],
+  "profiles": {
+    "1.27.0": {"source_ref": "v1.27.0", "adds": []},
+    "1.36.1": {"source_ref": "v1.36.1",
+               "adds": ["v_a2a_interaction", "v_agent_response"]},
+    "2.4.0": {"source_ref": "v2.4.0",
+              "adds": ["v_a2a_interaction", "v_agent_response",
+                        "v_agent_state_checkpoint", "v_agent_transfer",
+                        "v_event_compaction", "v_tool_paused"]}
+  },
+  "excluded_from_v1_union": [
+    "v_a2a_interaction", "v_agent_response", "v_agent_state_checkpoint",
+    "v_agent_transfer", "v_event_compaction", "v_tool_paused"
+  ],
+  "base_table_only_event_types": [
+    "HITL_CREDENTIAL_COMPLETED", "HITL_CONFIRMATION_COMPLETED"
+  ]
+}

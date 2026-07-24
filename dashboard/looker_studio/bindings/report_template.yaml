@@ -1,0 +1,29 @@
+# Public Looker Studio template metadata used by tools/hydrate_dashboard.py.
+#
+# The report contains one embedded BigQuery CUSTOM_QUERY data source. The
+# Linking API updates that source by alias and applies sqlReplace to the
+# executable sentinel values in bindings/template_bindings.yaml.
+report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
+data_source_alias: ds230
+default_report_name: BigQuery Agent Analytics
+credential_mode: VIEWERS
+link_access: PUBLIC
+publishing_mode: MANUAL
+published_date: "2026-07-24"
+# This attestation covers the reviewed repository artifact. It does not prove
+# that the mutable external Looker Studio report still embeds these bytes.
+reviewed_template_sql:
+  sha256: 4b9af4390b6445f4af3856a395f17a85eaaf20cdc6b80d1f34a0645575b76881
+  reviewed_date: "2026-07-24"
+  scope: repository_artifact_only
+governance:
+  live_report_owner_class: CONTRIBUTOR_MANAGED
+  sentinel_fixture_owner_class: CONTRIBUTOR_MANAGED
+  target_owner_class: GOOGLE_MANAGED
+  transfer_status: PENDING_MAINTAINER
+default_date_range:
+  mode: rolling
+  start_offset_days: 365
+  end_offset_days: 1
+  include_today: false
+  page_scope: all_dashboard_pages

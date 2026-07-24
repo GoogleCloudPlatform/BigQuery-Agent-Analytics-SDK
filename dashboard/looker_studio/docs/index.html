@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Create a private Looker Studio dashboard from your BigQuery Agent Analytics installation."
+    >
+    <title>Configure BigQuery Agent Analytics</title>
+    <link
+      rel="canonical"
+      href="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">BigQuery Agent Analytics</div>
+          <h1>Your telemetry. Your dashboard.</h1>
+          <p class="lede">
+            Enter three BigQuery identifiers. We’ll prepare a private copy of
+            the published Looker Studio dashboard, connected with your Google
+            credentials.
+          </p>
+          <ul class="facts" aria-label="Dashboard facts">
+            <li>37 parity charts</li>
+            <li>8 report pages</li>
+            <li>No data leaves Google</li>
+          </ul>
+        </div>
+
+        <form class="card" id="configurator" novalidate>
+          <h2>Connect your BQAA data</h2>
+          <p class="card-intro">
+            The standard <code>v_*</code> generated views must exist beside
+            the BQAA event table.
+          </p>
+
+          <label for="project">Project ID</label>
+          <input
+            id="project"
+            name="project"
+            autocomplete="off"
+            placeholder="my-gcp-project"
+            required
+          >
+
+          <label for="dataset">Dataset ID</label>
+          <input
+            id="dataset"
+            name="dataset"
+            autocomplete="off"
+            placeholder="agent_analytics"
+            required
+          >
+
+          <label for="table">BQAA table ID</label>
+          <input
+            id="table"
+            name="table"
+            autocomplete="off"
+            value="agent_events"
+            required
+          >
+          <span class="hint">
+            Used to identify and name this installation. Charts read the
+            BQAA-generated views, not the raw table.
+          </span>
+
+          <details>
+            <summary>Advanced settings</summary>
+            <label for="prefix">Generated-view prefix</label>
+            <input
+              id="prefix"
+              name="prefix"
+              autocomplete="off"
+              value="v"
+              required
+            >
+            <span class="hint">
+              Keep <code>v</code> unless the plugin uses a custom
+              <code>view_prefix</code>.
+            </span>
+
+            <label for="billing-project">Billing project ID</label>
+            <input
+              id="billing-project"
+              name="billingProject"
+              autocomplete="off"
+              placeholder="Defaults to the source project"
+            >
+          </details>
+
+          <p id="form-status" role="status" aria-live="polite"></p>
+          <div class="actions">
+            <a
+              class="button button-primary"
+              id="create-dashboard"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-disabled="true"
+            >Create my dashboard</a>
+            <button class="button button-secondary" id="copy-link" type="button">
+              Copy setup link
+            </button>
+          </div>
+          <p class="privacy">
+            This page has no backend. It sends no identifiers or credentials
+            to the template owner; it only creates a Google Looker Studio URL.
+          </p>
+        </form>
+      </section>
+
+      <section class="how" aria-label="How setup works">
+        <article class="step">
+          <span class="step-number">01</span>
+          <h3>Enter identifiers</h3>
+          <p>
+            Use the project, dataset, and base table configured for the ADK
+            BigQuery Agent Analytics plugin.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">02</span>
+          <h3>Review in Google</h3>
+          <p>
+            Looker Studio shows the substituted custom query and billing
+            project before creating anything.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">03</span>
+          <h3>Own the report</h3>
+          <p>
+            Authorize BigQuery, choose “Edit and share,” and the configured
+            report is saved in your account.
+          </p>
+        </article>
+      </section>
+
+      <aside class="notice">
+        <strong>BQAA views are required.</strong>
+        A raw event table by itself is not enough. The ADK plugin must run with
+        <code>create_views=True</code>. Standard installations use the
+        <code>v</code> prefix; custom prefixes and billing projects are under
+        Advanced settings. For a location override or verified preflight, use
+        the repository’s CLI helper.
+      </aside>
+
+      <footer>
+        <span>Open-source dashboard · Apache 2.0</span>
+        <span>
+          <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK">
+            GoogleCloudPlatform source and verified CLI
+          </a>
+          ·
+          <a href="https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40">
+            View template
+          </a>
+        </span>
+      </footer>
+    </main>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

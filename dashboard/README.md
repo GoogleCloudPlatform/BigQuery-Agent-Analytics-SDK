@@ -2,6 +2,10 @@
 
 An interactive Streamlit dashboard for monitoring and diagnosing agent execution logs stored in **Google BigQuery**. This tool provides deep visibility into LLM performance, token consumption, and orchestration reliability, following the **ADK (Agent Development Kit)** standard.
 
+For the published, no-hosting-required Looker Studio template over
+BQAA-generated views, see
+[`dashboard/looker_studio`](looker_studio/README.md).
+
 ---
 
 ## 🚀 Getting Started

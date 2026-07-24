@@ -22,7 +22,7 @@ regressions — all through BigQuery SQL or Python.
 **Observability**
 - Trace reconstruction and DAG visualization
 - Per-event-type BigQuery views
-- Observability dashboards (SQL and BigFrames)
+- Observability dashboards (Looker Studio, SQL, and BigFrames)
 
 **Evaluation**
 - Code-based metrics (latency, turn count, error rate, token efficiency, cost)
@@ -152,6 +152,7 @@ with a runnable ADK agent.
 | Resource | Description |
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
+| [Looker Studio Dashboard](dashboard/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
 | [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
 | [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |
