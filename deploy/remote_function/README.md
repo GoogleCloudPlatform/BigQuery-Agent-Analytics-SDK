@@ -56,10 +56,47 @@ SELECT `my-project.agent_analytics.agent_analytics`(
   'analyze', JSON '{"session_id": "s1"}'
 );
 
+-- Add identity/scope pins when they are already known.
+SELECT `my-project.agent_analytics.agent_analytics`(
+  'analyze', JSON '{
+    "session_id": "s1",
+    "user_id": "user-42",
+    "root_agent_name": "support_agent",
+    "experiment_id": "exp-7",
+    "custom_labels": {"run": "v1"}
+  }'
+);
+
+-- Exact retry: carry candidates[0].selector through as JSON.
+WITH initial AS (
+  SELECT `my-project.agent_analytics.agent_analytics`(
+    'analyze', JSON '{"session_id": "s1"}'
+  ) AS result
+)
+SELECT `my-project.agent_analytics.agent_analytics`(
+  'analyze',
+  JSON_OBJECT(
+    'selector',
+    JSON_QUERY(result, '$._error.details.candidates[0].selector')
+  )
+)
+FROM initial;
+
 SELECT `my-project.agent_analytics.agent_analytics`(
   'evaluate', JSON '{"metric": "latency"}'
 );
 ```
+
+`session_id` is a conversation identifier, so an unpinned `analyze` request can
+match multiple identities or scopes. That row returns
+`_error.code = "AmbiguousSessionError"` and the retry-ready payload under
+`_error.details`; it does not choose one candidate implicitly. Preserve JSON
+`null` values in the selected selector because they pin SQL `NULL`, while an
+absent field is unpinned.
+
+The printable error message is redacted, but the structured selector includes
+user, root-agent, experiment, label, and scope-signature metadata. Treat it as
+sensitive. Event content and judge context are not included.
 
 ## Files
 

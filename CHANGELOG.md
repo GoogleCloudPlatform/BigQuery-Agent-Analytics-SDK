@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Identity-safe singular trace resolution (#359)** — `TraceIdentity`,
+  `TraceScope`, `TraceSelector`, `ResolvedTraceSelector`, and
+  `AmbiguousSessionError` distinguish a reusable conversation `session_id`
+  across users, root agents, experiments, and exact custom-label payloads.
+  `Client.get_session_trace()` now resolves candidates without a newest-wins
+  fallback; `Client.get_trace_by_selector()` accepts a retry-ready candidate
+  selector. Scalar pins distinguish unpinned, SQL `NULL`, and string values,
+  and canonical `scope_signature` values make subset/superset label scopes
+  distinct. `allow_mixed_scope=True` is an explicit single-identity escape
+  hatch and reports its included scopes through `Trace.scope_coverage`.
+- **Identity-safe secondary surfaces** — GQL reconstruction, flat fallback,
+  `BigQueryTraceEvaluator`, CLI `get-trace`, Remote Function `analyze`, the
+  self-monitoring agent example, and quality/latency reports now use the shared
+  selector contract. CLI JSON and Remote Function errors expose structured,
+  exact retry selectors; human-readable ambiguity messages remain redacted.
+  Reports retain colliding rows and render resolved identity plus exact scope
+  (or mixed-scope coverage) in text, Markdown, and JSON.
+
+### Changed
+
+- **Migration guidance for session readers** — code that assumed
+  `session_id` uniquely identified one trace must now catch
+  `AmbiguousSessionError`, choose a candidate according to application policy,
+  and pass the complete `candidate["selector"]` to `TraceSelector` and
+  `get_trace_by_selector()`. Preserve explicit JSON `null` pins and
+  `scope_signature`; dropping either can broaden a retry. Callers whose
+  `session_id` resolves uniquely continue unchanged; callers that need every
+  candidate can use `list_traces()` instead of a singular read. Legacy
+  session-only report correlation remains supported only when exactly one
+  candidate exists and otherwise fails closed.
+- Rows with the same intrinsic identity and exact scope are indistinguishable
+  to the selector contract and resolve as one candidate. Producers that need a
+  finer boundary should record a distinct experiment/label scope or use their
+  producer `trace_id`.
+- Structured ambiguity payloads contain user/root-agent/experiment/label
+  metadata and should be handled as sensitive data. They never include event
+  content or judge context.
+- This release aligns read, trajectory-evaluation, CLI/Remote Function,
+  example, and report surfaces at one boundary. Judge-context binding and
+  persistence/view cardinality migrations remain separate follow-up work; no
+  result-table schema is changed here.
+
 ## [0.4.0] - 2026-06-18
 
 ### Release highlights

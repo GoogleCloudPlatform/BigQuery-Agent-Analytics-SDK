@@ -41,12 +41,15 @@ client = Client(
 
 ## 2. Trace Reconstruction & Visualization
 
-### Retrieve a Single Trace
+### Retrieve a Producer Trace
 
-Fetch the full conversation DAG for a specific session and render it as a hierarchical tree.
+Fetch the span DAG for one producer `trace_id` and render it as a hierarchical
+tree. A multi-turn conversation can contain more than one producer trace; use
+the identity-safe session resolver below when the conversation is the desired
+boundary.
 
 ```python
-# Retrieve and visualize a session trace
+# Retrieve and visualize one producer execution trace.
 trace = client.get_trace("trace-abc-123")
 trace.render()
 ```
@@ -72,6 +75,53 @@ print(trace.tool_calls)       # List of tool invocations
 print(trace.final_response)   # The agent's final answer
 print(trace.error_spans)      # Any errors that occurred
 ```
+
+### Resolve a Session Safely
+
+`session_id` identifies a persistent conversation thread; it is not a globally
+unique trace key. Different users, root agents, experiments, or labeled passes
+can legitimately reuse it. Singular session reads therefore resolve
+`TraceIdentity` plus `TraceScope` and never choose a newest row implicitly:
+
+```python
+from bigquery_agent_analytics import AmbiguousSessionError
+from bigquery_agent_analytics import TraceSelector
+
+try:
+    trace = client.get_session_trace("sess-001")
+except AmbiguousSessionError as exc:
+    payload = exc.to_dict()
+    # Choose a candidate according to application policy, then retry exactly.
+    selector = TraceSelector(**payload["candidates"][0]["selector"])
+    trace = client.get_trace_by_selector(selector)
+
+print(trace.identity)               # session + user + root agent
+print(trace.scope.scope_signature)  # exact experiment/label payload
+```
+
+Scalar selector fields are three-state: omitted means unpinned, explicit
+`None` pins SQL `NULL`, and a string (including `""`) pins equality. Preserve
+the complete candidate `selector` object when retrying; its
+`scope_signature` distinguishes an exact label payload from subset matches.
+
+If one intrinsic identity intentionally spans multiple recorded scopes,
+`allow_mixed_scope=True` returns its conversation-complete, attested row set
+with `trace.scope is None` and `trace.scope_coverage` describing the included
+scopes. It never merges multiple identities.
+
+Persisted rows with the same intrinsic identity and the same exact scope have
+no remaining selector dimension and are intentionally one resolved candidate.
+If an application needs to distinguish those executions, record a different
+experiment/label scope or query by a producer `trace_id`.
+
+`str(exc)` is redacted to counts and differing dimension names. Structured
+payloads from `exc.to_dict()`, JSON CLI output, and the Remote Function include
+candidate identity dimensions and scope signatures so a caller can retry; do
+not publish those payloads where user or experiment identifiers are sensitive.
+
+Quality and latency reports use the same attribution dimensions. Colliding
+session rows remain separate in text, Markdown, and JSON; an old session-only
+score is correlated only when exactly one candidate exists.
 
 ### List & Filter Traces
 
@@ -374,7 +424,7 @@ The `details` dict on `EvaluationReport` holds operational metadata that is sepa
 ### Evaluate Against a Golden Trajectory
 
 ```python
-from bigquery_agent_analytics import BigQueryTraceEvaluator
+from bigquery_agent_analytics import BigQueryTraceEvaluator, TraceSelector
 from bigquery_agent_analytics.trace_evaluator import MatchType
 
 evaluator = BigQueryTraceEvaluator(
@@ -388,6 +438,14 @@ evaluator = BigQueryTraceEvaluator(
 
 result = await evaluator.evaluate_session(
     session_id="sess-001",
+    # Optional, but required when the session ID resolves ambiguously.
+    selector=TraceSelector(
+        session_id="sess-001",
+        user_id="user-42",
+        root_agent_name="support_agent",
+        custom_labels={"run": "v1"},
+        scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+    ),
     golden_trajectory=[
         {"tool_name": "search_docs", "args": {"query": "password reset"}},
         {"tool_name": "format_response", "args": {}},
@@ -408,7 +466,18 @@ print(f"Step efficiency: {result.scores.get('step_efficiency')}")
 ```python
 eval_dataset = [
     {
-        "session_id": "sess-001",
+        # A TraceSelector instance or its mapping form is accepted.
+        "selector": {
+            "session_id": "sess-001",
+            "user_id": "user-42",
+            "root_agent_name": "support_agent",
+            "experiment_id": None,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": (
+                'v1:{"custom_labels":[["run","v1"]],'
+                '"experiment_id":null}'
+            ),
+        },
         "expected_trajectory": [
             {"tool_name": "search_docs", "args": {}},
         ],
@@ -1643,11 +1712,23 @@ print(cgm.get_property_graph_ddl())
 
 ### GQL Trace Reconstruction
 
-Reconstruct traces using native Graph Query Language instead of recursive CTEs:
+Reconstruct traces using native Graph Query Language instead of recursive CTEs.
+The shared flat resolver first selects the exact identity/scope; GQL receives
+only that trace's span IDs, so graph traversal and its flat fallback cannot
+broaden a colliding `session_id`:
 
 ```python
-# GQL-based trace reconstruction (quantified-path traversal)
-trace = client.get_session_trace_gql(session_id="sess-001")
+# GQL-based reconstruction with the same retry selector as flat reads.
+from bigquery_agent_analytics import TraceSelector
+
+selector = TraceSelector(
+    session_id="sess-001",
+    user_id="user-42",
+    root_agent_name="support_agent",
+    custom_labels={"run": "v1"},
+    scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+)
+trace = client.get_trace_by_selector_gql(selector)
 trace.render()
 ```
 
@@ -1780,7 +1861,24 @@ bq-agent-sdk doctor --project-id=P --dataset-id=D
 ```bash
 bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S
 bq-agent-sdk get-trace --project-id=P --dataset-id=D --trace-id=T
+
+# Additive identity/scope pins.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S \
+  --user-id=user-42 --root-agent-name=support_agent \
+  --experiment-id=exp-7 --label=run=v1
+
+# Save the structured ambiguity, choose a candidate, and retry it exactly.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D \
+  --session-id=S --format=json > ambiguity.json || test $? -eq 2
+SELECTOR="$(jq -c '.candidates[0].selector' ambiguity.json)"
+bq-agent-sdk get-trace --project-id=P --dataset-id=D \
+  --selector-json="$SELECTOR"
 ```
+
+On ambiguity, `--format=json` writes the structured
+`AmbiguousSessionError.to_dict()` payload and exits nonzero. Text/table output
+uses the redacted message. Use `--selector-json` when explicit JSON `null` pins
+must survive the retry; a scalar CLI option left absent means unpinned.
 
 #### `evaluate` — Run Evaluations
 
@@ -1932,6 +2030,21 @@ The script:
 -- Analyze a session trace
 SELECT `PROJECT.DATASET.agent_analytics`('analyze', JSON'{"session_id": "s1"}');
 
+-- Exact retry: carry candidates[0].selector through as JSON.
+WITH initial AS (
+  SELECT `PROJECT.DATASET.agent_analytics`(
+    'analyze', JSON'{"session_id": "s1"}'
+  ) AS result
+)
+SELECT `PROJECT.DATASET.agent_analytics`(
+  'analyze',
+  JSON_OBJECT(
+    'selector',
+    JSON_QUERY(result, '$._error.details.candidates[0].selector')
+  )
+)
+FROM initial;
+
 -- Run a code evaluator
 SELECT `PROJECT.DATASET.agent_analytics`('evaluate', JSON'{
   "metric": "latency",
@@ -1963,6 +2076,41 @@ returns a per-row `_error` object; other rows succeed normally:
 ```json
 {"_error": {"code": "ValueError", "message": "..."}, "_version": "1.0"}
 ```
+
+For `AmbiguousSessionError`, `_error.details` is the structured retry payload:
+
+```json
+{
+  "_error": {
+    "code": "AmbiguousSessionError",
+    "message": "Ambiguous singular session lookup: Exactly 2 candidates match. Retry with an explicit selector for: user_id, scope_signature.",
+    "details": {
+      "error": "ambiguous_session",
+      "candidate_count": 2,
+      "population_truncated": false,
+      "retry_dimensions": ["user_id", "scope_signature"],
+      "candidates": [
+        {
+          "selector": {
+            "session_id": "s1",
+            "user_id": null,
+            "root_agent_name": "support_agent",
+            "experiment_id": null,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": "v1:{...}"
+          },
+          "scope_signature": "v1:{...}"
+        }
+      ]
+    }
+  },
+  "_version": "1.0"
+}
+```
+
+Candidate selectors contain identity and experiment metadata; treat the
+structured response as sensitive. Event content and judge context are never
+included.
 
 ### Configuration
 
