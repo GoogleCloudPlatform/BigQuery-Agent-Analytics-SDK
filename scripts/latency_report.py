@@ -245,6 +245,21 @@ def render_timing_tree(trace, verbose=False):
   total = format_ms(trace.total_latency_ms)
   time_str = trace.start_time.strftime("%H:%M:%S") if trace.start_time else "?"
   lines.append(f"Session: {trace.session_id}")
+  identity = getattr(trace, "identity", None)
+  scope = getattr(trace, "scope", None)
+  user_id = (
+      identity.user_id
+      if identity is not None
+      else getattr(trace, "user_id", None)
+  )
+  if user_id is not None:
+    lines.append(f"User: {user_id}")
+  if identity is not None and identity.root_agent_name is not None:
+    lines.append(f"Root agent: {identity.root_agent_name}")
+  if scope is not None:
+    lines.append(f"Scope: {scope.scope_signature}")
+  elif getattr(trace, "scope_coverage", None) is not None:
+    lines.append("Scope coverage: " + ", ".join(trace.scope_coverage))
   lines.append(f"Time: {time_str}  Total: {total}")
   lines.append("─" * 70)
 
@@ -465,9 +480,27 @@ def _build_json_output(traces):
 
   sessions = []
   for trace in traces:
+    identity = getattr(trace, "identity", None)
+    scope = getattr(trace, "scope", None)
     sessions.append(
         {
             "session_id": trace.session_id,
+            "user_id": (
+                identity.user_id
+                if identity is not None
+                else getattr(trace, "user_id", None)
+            ),
+            "root_agent_name": (
+                identity.root_agent_name if identity is not None else None
+            ),
+            "experiment_id": (
+                scope.experiment_id if scope is not None else None
+            ),
+            "custom_labels": (scope.labels_dict if scope is not None else None),
+            "scope_signature": (
+                scope.scope_signature if scope is not None else None
+            ),
+            "scope_coverage": getattr(trace, "scope_coverage", None),
             "total_latency_ms": trace.total_latency_ms,
             "start_time": trace.start_time.isoformat()
             if trace.start_time

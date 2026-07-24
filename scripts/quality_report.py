@@ -1056,6 +1056,32 @@ def resolve_trace_responses(traces):
 
     result = {
         "session_id": trace.session_id,
+        "user_id": (
+            trace.identity.user_id
+            if getattr(trace, "identity", None) is not None
+            else getattr(trace, "user_id", None)
+        ),
+        "root_agent_name": (
+            trace.identity.root_agent_name
+            if getattr(trace, "identity", None) is not None
+            else None
+        ),
+        "experiment_id": (
+            trace.scope.experiment_id
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "custom_labels": (
+            trace.scope.labels_dict
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "scope_signature": (
+            trace.scope.scope_signature
+            if getattr(trace, "scope", None) is not None
+            else None
+        ),
+        "scope_coverage": getattr(trace, "scope_coverage", None),
         "time": (
             trace.start_time.strftime("%Y-%m-%d %H:%M:%S")
             if trace.start_time
@@ -1091,6 +1117,127 @@ def resolve_trace_responses(traces):
     logger.info("Resolved %d A2A responses", remote_lookups)
 
   return results
+
+
+_REPORT_ATTRIBUTION_FIELDS = (
+    "user_id",
+    "root_agent_name",
+    "scope_signature",
+)
+
+
+def _resolved_entry_key(entry):
+  """Stable identity/scope key for a resolved report context."""
+  return (
+      entry.get("session_id"),
+      entry.get("user_id"),
+      entry.get("root_agent_name"),
+      entry.get("scope_signature"),
+  )
+
+
+def _index_resolved_entries(entries):
+  """Index resolved contexts without overwriting reused session IDs.
+
+  Unique sessions retain their legacy string key. Colliding sessions use
+  their full resolved identity/scope tuple. A duplicate full tuple is kept
+  under an ordinal suffix rather than silently replacing earlier data.
+  """
+  grouped = {}
+  for entry in entries:
+    grouped.setdefault(entry.get("session_id"), []).append(entry)
+
+  indexed = {}
+  for session_id, candidates in grouped.items():
+    if len(candidates) == 1:
+      indexed[session_id] = candidates[0]
+      continue
+    for ordinal, entry in enumerate(candidates):
+      key = _resolved_entry_key(entry)
+      if key in indexed:
+        logger.warning(
+            "Duplicate resolved report candidate for session %s and the"
+            " same identity/scope; retaining both with an ordinal key.",
+            session_id,
+        )
+        key = (*key, ordinal)
+      indexed[key] = entry
+  return indexed
+
+
+def _resolved_context_for_score(resolved_map, score):
+  """Correlate a score to one context, failing closed on ambiguity."""
+  session_id = score.session_id
+  candidates = [
+      context
+      for key, context in resolved_map.items()
+      if context.get("session_id", key if isinstance(key, str) else None)
+      == session_id
+  ]
+  if not candidates:
+    return {}
+
+  details = getattr(score, "details", None) or {}
+  pinned_fields = [
+      field for field in _REPORT_ATTRIBUTION_FIELDS if field in details
+  ]
+  if pinned_fields:
+    candidates = [
+        context
+        for context in candidates
+        if all(context.get(field) == details[field] for field in pinned_fields)
+    ]
+
+  if len(candidates) == 1:
+    return candidates[0]
+  if candidates:
+    logger.warning(
+        "Ambiguous report correlation for session %s: %d trace candidates"
+        " remain and the score has insufficient identity/scope attribution;"
+        " omitting the association.",
+        session_id,
+        len(candidates),
+    )
+  else:
+    logger.warning(
+        "No report trace candidate matches the identity/scope attribution"
+        " on score for session %s; omitting the association.",
+        session_id,
+    )
+  return {}
+
+
+def _resolved_context_for_session(resolved_map, session_id):
+  """Return a legacy session context only when it is unique."""
+
+  class _SessionOnlyScore:
+    details = {}
+
+    def __init__(self, value):
+      self.session_id = value
+
+  return _resolved_context_for_score(
+      resolved_map, _SessionOnlyScore(session_id)
+  )
+
+
+def _report_identity_suffix(context):
+  """Printable identity/scope attribution for a resolved report row."""
+  dimensions = []
+  for label, field in (
+      ("user", "user_id"),
+      ("root", "root_agent_name"),
+      ("experiment", "experiment_id"),
+      ("scope", "scope_signature"),
+  ):
+    value = context.get(field)
+    if value is not None:
+      dimensions.append(f"{label}={value}")
+  if context.get("scope_signature") is None:
+    coverage = context.get("scope_coverage")
+    if coverage is not None:
+      dimensions.append(f"scope_coverage={','.join(coverage)}")
+  return f" [{', '.join(dimensions)}]" if dimensions else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1219,7 +1366,7 @@ async def _build_resolved_map_from_conversations(
         entries[idx]["corrections"] = corr
         entries[idx]["verifications"] = verif
 
-  resolved = {}
+  resolved = []
   for entry in entries:
     conv = entry["conv"]
     resolved_entry = {
@@ -1245,8 +1392,8 @@ async def _build_resolved_map_from_conversations(
           "correction_boundaries", []
       )
       resolved_entry["sub_trajectories"] = entry.get("sub_trajectories", [])
-    resolved[entry["sid"]] = resolved_entry
-  return resolved
+    resolved.append(resolved_entry)
+  return _index_resolved_entries(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -1331,23 +1478,22 @@ def run_evaluation(
   # matched/expected reporting -- but does NOT ground the judge's
   # correctness verdict (that is conversations-path only; scope/ground_truth
   # still ground the judge on both paths).
-  # KNOWN LIMITATION (SDK issue #359): the trace row fetch is scoped by
-  # session selection only -- session_ids reused across scoring passes,
-  # users, or apps can merge foreign rows into a trace. Use per-pass tables
-  # or unique session ids until the SDK scopes rows by labels + identity.
   traces = client.list_traces(filter_criteria=trace_filter)
   resolved = resolve_trace_responses(traces)
-  resolved_map = {r["session_id"]: r for r in resolved}
+  resolved_map = _index_resolved_entries(resolved)
 
   golden_metadata = {}
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
     # Matching keys off the conversation's FIRST user message (the
     # topic anchor), consistent with the conversations-file path.
-    question_by_sid = {
-        sid: ctx.get("first_question") or ctx.get("question", "")
-        for sid, ctx in resolved_map.items()
-    }
+    question_by_sid = {}
+    for sid in {ctx.get("session_id") for ctx in resolved_map.values()}:
+      ctx = _resolved_context_for_session(resolved_map, sid)
+      if ctx:
+        question_by_sid[sid] = ctx.get("first_question") or ctx.get(
+            "question", ""
+        )
     _golden_ctx, golden_metadata = match_golden_qa(
         question_by_sid, golden_qa, threshold=golden_threshold
     )
@@ -1370,7 +1516,10 @@ def run_evaluation(
   # The pre-fetch and the evaluation run the same filter, but the
   # evaluation's transcript CTE can admit sessions the pre-fetch missed
   # (or vice versa); backfill any evaluated session we did not resolve.
-  missing = [sid for sid in all_session_ids if sid not in resolved_map]
+  resolved_session_ids = {
+      context.get("session_id") for context in resolved_map.values()
+  }
+  missing = [sid for sid in all_session_ids if sid not in resolved_session_ids]
   if missing:
     extra = client.list_traces(
         filter_criteria=TraceFilter(
@@ -1379,8 +1528,9 @@ def run_evaluation(
             custom_labels=custom_labels,
         )
     )
-    for r in resolve_trace_responses(extra):
-      resolved_map[r["session_id"]] = r
+    resolved_map = _index_resolved_entries(
+        [*resolved_map.values(), *resolve_trace_responses(extra)]
+    )
     resolved = list(resolved_map.values())
 
   # Infer corrections/verifications for multi-turn sessions (concurrent).
@@ -1832,7 +1982,10 @@ def run_browse(args):
 
   for r in results:
     a2a_tag = "  [A2A]" if r.get("is_a2a") else ""
-    print(f"\n  [{r['time']}] {r['session_id']}{a2a_tag}")
+    print(
+        f"\n  [{r['time']}] {r['session_id']}"
+        f"{_report_identity_suffix(r)}{a2a_tag}"
+    )
     print(f"    Question:  {r['question']}")
     print(f"    Agent:     {r['answered_by']}")
     if r["response"]:
@@ -2032,8 +2185,8 @@ def run_eval(args):
     # Also fetch trajectories for all correction sessions (for inline display)
     if tag_turns:
       correction_sids = [
-          sid
-          for sid, ctx in result["resolved_map"].items()
+          ctx.get("session_id")
+          for ctx in result["resolved_map"].values()
           if ctx.get("correction_boundaries")
       ]
       for sid in correction_sids:
@@ -2045,8 +2198,8 @@ def run_eval(args):
     trajectories = _fetch_session_traces(traj_sids, len(traj_sids))
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
-      for sid, trace_obj in trajectories.items():
-        ctx = result["resolved_map"].get(sid)
+      for trace_obj in trajectories.values():
+        ctx = _resolved_context_for_trace(result["resolved_map"], trace_obj)
         if ctx and ctx.get("answered_by") == "unknown":
           ctx["answered_by"] = get_responding_agent(trace_obj)
     else:
@@ -2056,21 +2209,21 @@ def run_eval(args):
   if args.session and not trajectories and not conversations_file:
     trajectories = _fetch_session_traces([args.session], max_sessions=1)
     if trajectories:
-      for sid, trace_obj in trajectories.items():
-        ctx = result["resolved_map"].get(sid)
+      for trace_obj in trajectories.values():
+        ctx = _resolved_context_for_trace(result["resolved_map"], trace_obj)
         if ctx and ctx.get("answered_by") == "unknown":
           ctx["answered_by"] = get_responding_agent(trace_obj)
 
   # Print execution trace to console for single-session mode
   if args.session and trajectories:
-    trace_obj = trajectories.get(args.session)
+    trace_obj = _trace_for_session(trajectories, args.session)
     if trace_obj:
       hr = "─" * 70
       print(f"\n{'=' * 70}")
       print("EXECUTION TRACE")
       print(f"{'=' * 70}")
       print(_render_trace(trace_obj))
-      ctx = result["resolved_map"].get(args.session, {})
+      ctx = _resolved_context_for_session(result["resolved_map"], args.session)
       sub_trajs = ctx.get("sub_trajectories", [])
       conversation = ctx.get("conversation", [])
       if sub_trajs and conversation:
@@ -2154,7 +2307,7 @@ def _group_by_category(report):
 def _build_agent_stats(report, resolved_map):
   agent_stats = {}
   for sr in report.session_results:
-    ctx = resolved_map.get(sr.session_id, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     agent = ctx.get("answered_by") or "unknown"
     if agent not in agent_stats:
       agent_stats[agent] = {
@@ -2334,9 +2487,7 @@ def _print_eval_results(
   hr = "\u2500" * 70
 
   by_category = _group_by_category(report)
-  a2a_session_ids = {
-      sid for sid, ctx in resolved_map.items() if ctx.get("is_a2a")
-  }
+  a2a_count = sum(bool(ctx.get("is_a2a")) for ctx in resolved_map.values())
 
   # --- Per-session details ---
   samples_dict = _parse_samples(samples)
@@ -2362,14 +2513,17 @@ def _print_eval_results(
 
     for sr in sessions[:limit]:
       sid = sr.session_id
-      ctx = resolved_map.get(sid, {})
+      ctx = _resolved_context_for_score(resolved_map, sr)
       question = ctx.get("question", "")
       response = ctx.get("response", "")
       answered_by = ctx.get("answered_by", "")
 
-      a2a_tag = "  [A2A]" if sid in a2a_session_ids else ""
+      a2a_tag = "  [A2A]" if ctx.get("is_a2a") else ""
       agent_tag = f"  \u2192 {answered_by}" if answered_by else ""
-      print(f"\n  Session:     {sid}{a2a_tag}{agent_tag}")
+      print(
+          f"\n  Session:     {sid}{_report_identity_suffix(ctx)}"
+          f"{a2a_tag}{agent_tag}"
+      )
       q = " ".join(question.split()) if question else "(none)"
       r = " ".join(response.split()) if response else "(none)"
       print(f"  Question:    {q}")
@@ -2530,8 +2684,8 @@ def _print_eval_results(
         f"  Parse errors             : "
         f"{unknown_count} session(s) ({parse_error_metrics} metric evals)"
     )
-  if a2a_session_ids:
-    print(f"  A2A sessions detected    : {len(a2a_session_ids)}")
+  if a2a_count:
+    print(f"  A2A sessions detected    : {a2a_count}")
 
   # --- Failure breakdown: skill gap vs knowledge gap vs tool gap ---
   counts, _ = _failure_breakdown_from_report(report)
@@ -2763,10 +2917,100 @@ def _segment_trace_by_turns(trace, conversation, sub_trajectories):
   return segments
 
 
+def _trace_attribution(trace):
+  identity = getattr(trace, "identity", None)
+  scope = getattr(trace, "scope", None)
+  return {
+      "session_id": trace.session_id,
+      "user_id": (
+          identity.user_id
+          if identity is not None
+          else getattr(trace, "user_id", None)
+      ),
+      "root_agent_name": (
+          identity.root_agent_name if identity is not None else None
+      ),
+      "scope_signature": (scope.scope_signature if scope is not None else None),
+  }
+
+
+def _index_traces(traces):
+  """Index traces without collapsing reused session IDs."""
+  entries = [{**_trace_attribution(trace), "_trace": trace} for trace in traces]
+  return {
+      key: entry["_trace"]
+      for key, entry in _index_resolved_entries(entries).items()
+  }
+
+
+def _trace_for_score(trajectories, score):
+  """Correlate one score to one trace using reserved attribution details."""
+  contexts = {
+      key: {**_trace_attribution(trace), "_trace": trace}
+      for key, trace in trajectories.items()
+  }
+  context = _resolved_context_for_score(contexts, score)
+  return context.get("_trace") if context else None
+
+
+def _resolved_context_for_trace(resolved_map, trace):
+  """Correlate one resolved trace to its report context."""
+  attribution = _trace_attribution(trace)
+  session_candidates = [
+      context
+      for key, context in resolved_map.items()
+      if context.get("session_id", key if isinstance(key, str) else None)
+      == attribution["session_id"]
+  ]
+  if len(session_candidates) == 1 and not any(
+      field in session_candidates[0] for field in _REPORT_ATTRIBUTION_FIELDS
+  ):
+    # Legacy/local report rows predate identity attribution. Preserve their
+    # historical unique-session association without broadening collisions.
+    return session_candidates[0]
+
+  class _TraceAttribution:
+    pass
+
+  record = _TraceAttribution()
+  record.session_id = attribution["session_id"]
+  record.details = {
+      field: attribution[field] for field in _REPORT_ATTRIBUTION_FIELDS
+  }
+  return _resolved_context_for_score(resolved_map, record)
+
+
+def _trace_for_context(trajectories, context):
+  """Correlate one resolved context to its exact trace."""
+
+  class _ContextAttribution:
+    pass
+
+  record = _ContextAttribution()
+  record.session_id = context.get("session_id")
+  record.details = {
+      field: context[field]
+      for field in _REPORT_ATTRIBUTION_FIELDS
+      if field in context
+  }
+  return _trace_for_score(trajectories, record)
+
+
+def _trace_for_session(trajectories, session_id):
+  """Return a session trace only when the report population is unique."""
+  contexts = {
+      key: {**_trace_attribution(trace), "_trace": trace}
+      for key, trace in trajectories.items()
+  }
+  context = _resolved_context_for_session(contexts, session_id)
+  return context.get("_trace") if context else None
+
+
 def _fetch_session_traces(session_ids, max_sessions=3):
   """Fetch execution traces from BigQuery for the given session IDs.
 
-  Returns a dict mapping session_id -> Trace object.
+  Returns a collision-safe mapping. Unique sessions keep their legacy
+  ``session_id`` key; reused sessions are keyed by identity/scope tuples.
   Silently returns empty dict if BQ is not configured or unavailable.
   """
   if not session_ids:
@@ -2812,11 +3056,12 @@ def _fetch_session_traces(session_ids, max_sessions=3):
     logger.debug("Batch trace fetch failed", exc_info=True)
     return {}
 
-  traces = {}
-  for trace in fetched:
-    if trace and trace.spans and trace.session_id in set(wanted):
-      traces[trace.session_id] = trace
-  return traces
+  retained = [
+      trace
+      for trace in fetched
+      if trace and trace.spans and trace.session_id in set(wanted)
+  ]
+  return _index_traces(retained)
 
 
 def _select_trajectory_sessions(report, resolved_map, n):
@@ -2830,8 +3075,8 @@ def _select_trajectory_sessions(report, resolved_map, n):
   unhelpful_sids = {sr.session_id for sr in by_category.get("unhelpful", [])}
   partial_sids = {sr.session_id for sr in by_category.get("partial", [])}
   correction_sids = {
-      sid
-      for sid, ctx in resolved_map.items()
+      ctx.get("session_id")
+      for ctx in resolved_map.values()
       if ctx.get("correction_boundaries")
   }
 
@@ -2869,8 +3114,9 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
   )
   w("")
 
-  for sid, trace_obj in trajectories.items():
-    ctx = resolved_map.get(sid, {})
+  for trace_obj in trajectories.values():
+    sid = trace_obj.session_id
+    ctx = _resolved_context_for_trace(resolved_map, trace_obj)
     # Skip correction sessions — their traces are shown in Correction Analysis
     if ctx.get("correction_boundaries"):
       continue
@@ -2878,7 +3124,7 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
     answered_by = ctx.get("answered_by", "")
     q = " ".join(question.split()) if question else "(none)"
 
-    w(f"### `{sid}` → {answered_by}")
+    w(f"### `{sid}`{_report_identity_suffix(ctx)}" f" → {answered_by}")
     w("")
     w(f"**Question:** {q}")
     w("")
@@ -2963,7 +3209,6 @@ def _md_write_session_section(
     sessions,
     md_samples,
     resolved_map,
-    a2a_session_ids,
     heading_level=2,
 ):
   """Write a section of per-session details to the markdown report."""
@@ -2976,16 +3221,19 @@ def _md_write_session_section(
   w("")
   for sr in shown:
     sid = sr.session_id
-    ctx = resolved_map.get(sid, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     question = ctx.get("question", "")
     response = ctx.get("response", "")
     answered_by = ctx.get("answered_by", "")
-    a2a_tag = " [A2A]" if sid in a2a_session_ids else ""
+    a2a_tag = " [A2A]" if ctx.get("is_a2a") else ""
 
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"{sh} `{sid}`{a2a_tag} \u2192 {answered_by}")
+    w(
+        f"{sh} `{sid}`{_report_identity_suffix(ctx)}"
+        f"{a2a_tag} \u2192 {answered_by}"
+    )
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "\u2026") if len(r) > 500 else r
@@ -3049,7 +3297,7 @@ def _md_write_low_dimension_section(
     w("")
   for sr, mr in shown:
     sid = sr.session_id
-    ctx = resolved_map.get(sid, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     question = ctx.get("question", "")
     response = ctx.get("response", "")
     answered_by = ctx.get("answered_by", "")
@@ -3057,7 +3305,7 @@ def _md_write_low_dimension_section(
     q = " ".join(question.split()) if question else "(none)"
     r = " ".join(response.split()) if response else "(none)"
 
-    w(f"{sh} `{sid}` → {answered_by}")
+    w(f"{sh} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
     w("")
     w(f"- **Question:** {q}")
     r_display = (r[:500] + "…") if len(r) > 500 else r
@@ -3136,7 +3384,8 @@ def _md_write_correction_analysis(
   sessions_with_corrections = []
   tag_counts = {}
 
-  for sid, ctx in resolved_map.items():
+  for ctx in resolved_map.values():
+    sid = ctx.get("session_id")
     tags = ctx.get("turn_tags", [])
     boundaries = ctx.get("correction_boundaries", [])
     if tags:
@@ -3229,11 +3478,12 @@ def _md_write_correction_analysis(
 
     routing_failures = []
 
-    for sid, ctx in shown:
+    for _key, ctx in shown:
+      sid = ctx.get("session_id")
       question = ctx.get("question", "")
       answered_by = ctx.get("answered_by", "")
       q = " ".join(question.split()) if question else "(none)"
-      w(f"{h2} `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
 
@@ -3248,16 +3498,16 @@ def _md_write_correction_analysis(
         w(f'  - User corrected: *"{correct[:200]}"*')
         w(f"  - Agent recovered: {recovered_icon}")
 
-      trace_obj = trajectories.get(sid)
+      trace_obj = _trace_for_context(trajectories, ctx)
       diagnosis, failure_type = _diagnose_correction_trace(trace_obj)
       if diagnosis:
         w(f"- **Diagnosis:** {diagnosis}")
         if failure_type == "routing_failure":
-          routing_failures.append((sid, answered_by, q))
+          routing_failures.append((sid, answered_by, q, ctx))
 
       # Render sub-trajectories with inline execution traces
       sub_trajs = ctx.get("sub_trajectories", [])
-      trace_obj = trajectories.get(sid)
+      trace_obj = _trace_for_context(trajectories, ctx)
       conversation = ctx.get("conversation", [])
 
       if sub_trajs and trace_obj and hasattr(trace_obj, "spans"):
@@ -3351,8 +3601,8 @@ def _md_write_correction_analysis(
           f"had no tool or agent routing:"
       )
       w("")
-      for sid, agent, question in routing_failures:
-        w(f"- `{sid}` → {agent}: {question}")
+      for sid, agent, question, ctx in routing_failures:
+        w(f"- `{sid}`{_report_identity_suffix(ctx)} → {agent}: {question}")
       w("")
 
   # --- Tagged Conversations (no corrections) ---
@@ -3399,7 +3649,7 @@ def _md_write_correction_analysis(
           t for t in tags if t.get("tag") in ("VERIFY", "SPECIFICS", "SCOPE")
       ]
 
-      w(f"{h2} `{sid}` → {answered_by}")
+      w(f"{h2} `{sid}`{_report_identity_suffix(ctx)} → {answered_by}")
       w("")
       w(f"- **Question:** {q}")
       for ft in flag_tags:
@@ -3435,9 +3685,7 @@ def _write_md_report(
     trajectories = {}
 
   by_category = _group_by_category(report)
-  a2a_session_ids = {
-      sid for sid, ctx in resolved_map.items() if ctx.get("is_a2a")
-  }
+  a2a_count = sum(bool(ctx.get("is_a2a")) for ctx in resolved_map.values())
 
   fp_count = len(by_category.get("unhelpful", []))
   partial_count = len(by_category.get("partial", []))
@@ -3498,16 +3746,18 @@ def _write_md_report(
       toc.append("    * [Correction Analysis](#correction-analysis)")
       toc.append("      * [Turn Tag Distribution](#turn-tag-distribution)")
       correction_sessions = [
-          sid
-          for sid, ctx in resolved_map.items()
+          ctx
+          for ctx in resolved_map.values()
           if ctx.get("correction_boundaries")
       ]
       if correction_sessions:
         toc.append("      * [Corrections](#corrections)")
         has_routing_failures = any(
-            _diagnose_correction_trace(trajectories.get(sid))[1]
+            _diagnose_correction_trace(
+                _trace_for_context(trajectories, context)
+            )[1]
             == "routing_failure"
-            for sid in correction_sessions
+            for context in correction_sessions
         )
         if has_routing_failures:
           toc.append("      * [Routing Failures](#routing-failures)")
@@ -3556,7 +3806,7 @@ def _write_md_report(
   w(f"| Partial | {partial_count} |")
   w(f"| Unhelpful | {fp_count} |")
   w(f"| Unhelpful rate | {fp_rate:.1f}% |")
-  counts, gap_sids = _failure_breakdown_from_report(report)
+  counts, gap_scores = _failure_breakdown_from_report(report)
   unaddressable = counts["knowledge_gap"] + counts["tool_gap"]
   addressable = total - unaddressable
   good = meaningful_count + declined_count
@@ -3578,19 +3828,17 @@ def _write_md_report(
         f"| Parse errors | {unknown_count} session(s) "
         f"({parse_error_metrics} metric evals) |"
     )
-  if a2a_session_ids:
-    w(f"| A2A sessions | {len(a2a_session_ids)} |")
+  if a2a_count:
+    w(f"| A2A sessions | {a2a_count} |")
   w("")
 
   # --- Failure breakdown: which gaps evolution can vs cannot fix ---
-  def _gap_questions(sids):
+  def _gap_questions(scores):
     out = []
-    sid_set = set(sids)
-    for sr in report.session_results:
-      if sr.session_id in sid_set:
-        q = resolved_map.get(sr.session_id, {}).get("question", "")
-        if q:
-          out.append(" ".join(q.split()))
+    for sr in scores:
+      q = _resolved_context_for_score(resolved_map, sr).get("question", "")
+      if q:
+        out.append(" ".join(q.split()))
     return out
 
   for gap_key, title, blurb in [
@@ -3608,7 +3856,7 @@ def _write_md_report(
           " tool:",
       ),
   ]:
-    questions = _gap_questions(gap_sids[gap_key])
+    questions = _gap_questions(gap_scores[gap_key])
     if not questions:
       continue
     w(f"### {title}")
@@ -3737,7 +3985,6 @@ def _write_md_report(
         unhelpful_sessions,
         _get_sample_limit(_samples_dict, "unhelpful"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3749,7 +3996,6 @@ def _write_md_report(
         declined_sessions,
         _get_sample_limit(_samples_dict, "declined"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3777,7 +4023,6 @@ def _write_md_report(
         partial_sessions,
         _get_sample_limit(_samples_dict, "partial"),
         resolved_map,
-        a2a_session_ids,
         heading_level=3,
     )
 
@@ -3862,7 +4107,13 @@ def _render_md_from_json(json_path, args):
         by_cat[m["category"]] = by_cat.get(m["category"], 0) + 1
     session_results.append(
         CategoricalSessionResult(
-            session_id=s.get("session_id", ""), metrics=metric_results
+            session_id=s.get("session_id", ""),
+            metrics=metric_results,
+            details={
+                field: s.get(field)
+                for field in _REPORT_ATTRIBUTION_FIELDS
+                if field in s
+            },
         )
     )
 
@@ -3915,7 +4166,7 @@ def _render_md_from_json(json_path, args):
       if boundaries:
         s["correction_boundaries"] = boundaries
 
-  resolved_map = {s.get("session_id", ""): s for s in sessions}
+  resolved_map = _index_resolved_entries(sessions)
 
   # Pull execution traces from BigQuery for these session ids ONLY when the
   # env is explicitly configured (offline renders stay pure: no queries).
@@ -4023,9 +4274,9 @@ def _has_failure_attribution_data(report):
 
 
 def _failure_breakdown_from_report(report):
-  """Return (counts_by_class, gap_session_ids_by_class) from a raw report."""
+  """Return (counts_by_class, attributed score rows by class)."""
   counts = {c: 0 for c in _FAILURE_CLASSES}
-  gap_sids = {c: [] for c in _FAILURE_CLASSES}
+  gap_scores = {c: [] for c in _FAILURE_CLASSES}
   for sr in report.session_results:
     cats = {mr.metric_name: mr.category for mr in sr.metrics}
     fc = _failure_class(
@@ -4036,8 +4287,8 @@ def _failure_breakdown_from_report(report):
     )
     if fc in counts:
       counts[fc] += 1
-      gap_sids[fc].append(sr.session_id)
-  return counts, gap_sids
+      gap_scores[fc].append(sr)
+  return counts, gap_scores
 
 
 def _classify_failures(report):
@@ -4099,7 +4350,7 @@ def _build_json_output(report, resolved_map, trajectories=None):
 
   sessions = []
   for sr in report.session_results:
-    ctx = resolved_map.get(sr.session_id, {})
+    ctx = _resolved_context_for_score(resolved_map, sr)
     metrics = {}
     quality_scores = {}
     for mr in sr.metrics:
@@ -4115,6 +4366,18 @@ def _build_json_output(report, resolved_map, trajectories=None):
         }
     session_dict = {
         "session_id": sr.session_id,
+        "user_id": (getattr(sr, "details", None) or {}).get(
+            "user_id", ctx.get("user_id")
+        ),
+        "root_agent_name": (getattr(sr, "details", None) or {}).get(
+            "root_agent_name", ctx.get("root_agent_name")
+        ),
+        "experiment_id": ctx.get("experiment_id"),
+        "custom_labels": ctx.get("custom_labels"),
+        "scope_signature": (getattr(sr, "details", None) or {}).get(
+            "scope_signature", ctx.get("scope_signature")
+        ),
+        "scope_coverage": ctx.get("scope_coverage"),
         "question": ctx.get("question", ""),
         "response": ctx.get("response", ""),
         "answered_by": ctx.get("answered_by", ""),
@@ -4161,8 +4424,8 @@ def _build_json_output(report, resolved_map, trajectories=None):
       session_dict["turn_tags"] = ctx["turn_tags"]
     if ctx.get("correction_boundaries"):
       session_dict["correction_boundaries"] = ctx["correction_boundaries"]
-    if trajectories and sr.session_id in trajectories:
-      trace_obj = trajectories[sr.session_id]
+    trace_obj = _trace_for_score(trajectories, sr) if trajectories else None
+    if trace_obj is not None:
       if hasattr(trace_obj, "spans"):
         session_dict["execution_trace"] = _render_trace(trace_obj)
         if sub_trajectories and conversation:

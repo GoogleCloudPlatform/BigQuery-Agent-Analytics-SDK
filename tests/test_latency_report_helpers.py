@@ -27,6 +27,9 @@ import sys
 
 import pytest
 
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+
 # Make scripts/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
@@ -36,6 +39,7 @@ try:
   from latency_report import _span_label
   from latency_report import format_ms
   from latency_report import render_summary_table
+  from latency_report import render_timing_tree
 
   _SKIP = False
 except ImportError:
@@ -83,12 +87,22 @@ class _FakeSpan:
 class _FakeTrace:
 
   def __init__(
-      self, spans, total_latency_ms=None, session_id="sess-1", start_time=None
+      self,
+      spans,
+      total_latency_ms=None,
+      session_id="sess-1",
+      start_time=None,
+      identity=None,
+      scope=None,
+      scope_coverage=None,
   ):
     self.spans = spans
     self.total_latency_ms = total_latency_ms
     self.session_id = session_id
     self.start_time = start_time or datetime.now(tz=timezone.utc)
+    self.identity = identity
+    self.scope = scope
+    self.scope_coverage = scope_coverage
 
 
 # ================================================================== #
@@ -276,6 +290,62 @@ class TestBuildJsonOutput:
     result = _build_json_output([trace])
     assert "agent_a" in result["per_agent"]
     assert "agent_b" in result["per_agent"]
+
+  def test_colliding_session_ids_retain_identity_and_scope(self):
+    identity_a = TraceIdentity(
+        session_id="shared", user_id="alice", root_agent_name="root"
+    )
+    identity_b = TraceIdentity(
+        session_id="shared", user_id="bob", root_agent_name="root"
+    )
+    scope_a = TraceScope(custom_labels={"run": "v0"})
+    scope_b = TraceScope(custom_labels={"run": "v1"})
+    traces = [
+        _FakeTrace(
+            [],
+            total_latency_ms=100,
+            session_id="shared",
+            identity=identity_a,
+            scope=scope_a,
+        ),
+        _FakeTrace(
+            [],
+            total_latency_ms=200,
+            session_id="shared",
+            identity=identity_b,
+            scope=scope_b,
+        ),
+    ]
+
+    result = _build_json_output(traces)
+
+    assert len(result["sessions"]) == 2
+    assert [row["user_id"] for row in result["sessions"]] == [
+        "alice",
+        "bob",
+    ]
+    assert [row["scope_signature"] for row in result["sessions"]] == [
+        scope_a.scope_signature,
+        scope_b.scope_signature,
+    ]
+    rendered = render_timing_tree(traces[0])
+    assert "User: alice" in rendered
+    assert scope_a.scope_signature in rendered
+
+  def test_mixed_scope_text_retains_coverage(self):
+    scope_a = TraceScope(custom_labels={"run": "v0"})
+    scope_b = TraceScope(custom_labels={"run": "v1"})
+    trace = _FakeTrace(
+        [],
+        session_id="shared",
+        scope_coverage=(scope_a.scope_signature, scope_b.scope_signature),
+    )
+
+    rendered = render_timing_tree(trace)
+
+    assert "Scope coverage:" in rendered
+    assert scope_a.scope_signature in rendered
+    assert scope_b.scope_signature in rendered
 
 
 # ================================================================== #

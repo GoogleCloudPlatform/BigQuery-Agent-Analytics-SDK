@@ -19,9 +19,20 @@ effects (logging.basicConfig, dotenv) have been moved into _configure_logging()
 and _load_dotenv() so the module is safe to import without triggering them.
 """
 
+from datetime import datetime
+from datetime import timezone
+import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+
+from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 # Make scripts/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -45,6 +56,7 @@ from quality_report import generate_quality_report
 from quality_report import get_a2a_response
 from quality_report import get_user_input
 from quality_report import print_quality_report
+import quality_report as quality_report_module
 
 # ---------------------------------------------------------------------------
 # Lightweight stubs for report objects
@@ -75,15 +87,237 @@ class _FakeMetric:
 
 class _FakeSession:
 
-  def __init__(self, session_id, metrics):
+  def __init__(self, session_id, metrics, details=None):
     self.session_id = session_id
     self.metrics = metrics
+    self.details = details or {}
 
 
 class _FakeReport:
 
   def __init__(self, session_results):
     self.session_results = session_results
+
+
+class TestIdentityAwareReportMaps:
+
+  @staticmethod
+  def _trace(user_id, run):
+    now = datetime.now(tz=timezone.utc)
+    identity = TraceIdentity(
+        session_id="shared", user_id=user_id, root_agent_name="root"
+    )
+    scope = TraceScope(custom_labels={"run": run})
+    return Trace(
+        trace_id=f"trace-{run}",
+        session_id="shared",
+        user_id=user_id,
+        identity=identity,
+        scope=scope,
+        spans=[
+            Span(
+                event_type="USER_MESSAGE_RECEIVED",
+                agent="root",
+                timestamp=now,
+                content={"text": f"question-{run}"},
+                span_id=f"user-{run}",
+            ),
+            Span(
+                event_type="LLM_RESPONSE",
+                agent="root",
+                timestamp=now,
+                content={"response": f"answer-{run}"},
+                span_id=f"answer-{run}",
+            ),
+        ],
+        start_time=now,
+        end_time=now,
+    )
+
+  def test_colliding_resolved_traces_survive_and_match_score_details(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module.resolve_trace_responses(traces)
+    indexed = quality_report_module._index_resolved_entries(resolved)
+
+    assert len(indexed) == 2
+    assert {entry["user_id"] for entry in indexed.values()} == {
+        "alice",
+        "bob",
+    }
+
+    for trace in traces:
+      score = _FakeSession(
+          "shared",
+          [],
+          details={
+              "user_id": trace.identity.user_id,
+              "root_agent_name": trace.identity.root_agent_name,
+              "scope_signature": trace.scope.scope_signature,
+          },
+      )
+      context = quality_report_module._resolved_context_for_score(
+          indexed, score
+      )
+      assert context["user_id"] == trace.identity.user_id
+      assert context["scope_signature"] == trace.scope.scope_signature
+
+  def test_session_only_score_does_not_pick_one_collision(self, caplog):
+    resolved = quality_report_module.resolve_trace_responses(
+        [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    )
+    indexed = quality_report_module._index_resolved_entries(resolved)
+
+    context = quality_report_module._resolved_context_for_score(
+        indexed, _FakeSession("shared", [])
+    )
+
+    assert context == {}
+    assert "ambiguous" in caplog.text.lower()
+
+  def test_collision_safe_trace_index_retains_both_candidates(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+
+    indexed = quality_report_module._index_traces(traces)
+
+    assert len(indexed) == 2
+    assert {trace.identity.user_id for trace in indexed.values()} == {
+        "alice",
+        "bob",
+    }
+
+  def test_unique_legacy_context_matches_scoped_trace_both_directions(self):
+    trace = self._trace("alice", "v0")
+    legacy_context = {
+        "session_id": "shared",
+        "question": "legacy question",
+    }
+    resolved = {"shared": legacy_context}
+    trajectories = quality_report_module._index_traces([trace])
+
+    assert (
+        quality_report_module._trace_for_context(trajectories, legacy_context)
+        is trace
+    )
+    assert (
+        quality_report_module._resolved_context_for_trace(resolved, trace)
+        is legacy_context
+    )
+
+  def test_json_output_correlates_colliding_scores_by_attribution(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    scores = [
+        CategoricalSessionResult(
+            session_id="shared",
+            details={
+                "user_id": trace.identity.user_id,
+                "root_agent_name": trace.identity.root_agent_name,
+                "scope_signature": trace.scope.scope_signature,
+            },
+        )
+        for trace in traces
+    ]
+    report = CategoricalEvaluationReport(
+        dataset="test",
+        total_sessions=2,
+        session_results=scores,
+    )
+
+    output = quality_report_module._build_json_output(report, resolved)
+
+    assert [row["user_id"] for row in output["sessions"]] == [
+        "alice",
+        "bob",
+    ]
+    assert [row["question"] for row in output["sessions"]] == [
+        "question-v0",
+        "question-v1",
+    ]
+    suffix = quality_report_module._report_identity_suffix(
+        resolved[next(iter(resolved))]
+    )
+    assert "user=" in suffix
+    assert "scope=" in suffix
+    coverage_suffix = quality_report_module._report_identity_suffix(
+        {
+            "scope_signature": None,
+            "scope_coverage": tuple(
+                trace.scope.scope_signature for trace in traces
+            ),
+        }
+    )
+    assert "scope_coverage=" in coverage_suffix
+    assert traces[0].scope.scope_signature in coverage_suffix
+    assert traces[1].scope.scope_signature in coverage_suffix
+
+  def test_json_to_markdown_retains_colliding_identity_attribution(
+      self, tmp_path, monkeypatch
+  ):
+    scopes = [
+        TraceScope(custom_labels={"run": "v0"}),
+        TraceScope(custom_labels={"run": "v1"}),
+    ]
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": user_id,
+            "root_agent_name": "root",
+            "scope_signature": scope.scope_signature,
+            "question": f"question-{run}",
+            "response": f"answer-{run}",
+            "is_a2a": is_a2a,
+            "metrics": {
+                "response_usefulness": {
+                    "category": "unhelpful",
+                    "justification": f"reason-{run}",
+                },
+                "failure_attribution": {
+                    "category": failure_class,
+                    "justification": f"failure-{run}",
+                },
+            },
+        }
+        for user_id, run, scope, is_a2a, failure_class in zip(
+            ("alice", "bob"),
+            ("v0", "v1"),
+            scopes,
+            (True, False),
+            ("knowledge_gap", "tool_gap"),
+        )
+    ]
+    json_path = tmp_path / "collision.json"
+    json_path.write_text(
+        json.dumps({"sessions": sessions, "details": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "local")
+
+    quality_report_module._render_md_from_json(
+        str(json_path), SimpleNamespace(model=None, samples=None)
+    )
+    markdown = json_path.with_suffix(".md").read_text(encoding="utf-8")
+
+    assert "user=alice" in markdown
+    assert "user=bob" in markdown
+    assert scopes[0].scope_signature in markdown
+    assert scopes[1].scope_signature in markdown
+    assert "question-v0" in markdown
+    assert "question-v1" in markdown
+    assert markdown.count("[A2A]") == 1
+
+    knowledge_gap = markdown.split(
+        "### Knowledge Gaps (add a fact to existing data)", 1
+    )[1].split("### Tool Gaps (build a new tool / data source)", 1)[0]
+    tool_gap = markdown.split(
+        "### Tool Gaps (build a new tool / data source)", 1
+    )[1].split("## Category Distributions", 1)[0]
+    assert "question-v0" in knowledge_gap
+    assert "question-v1" not in knowledge_gap
+    assert "question-v1" in tool_gap
+    assert "question-v0" not in tool_gap
 
 
 # ================================================================== #
