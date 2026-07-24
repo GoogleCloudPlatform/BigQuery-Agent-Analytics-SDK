@@ -2151,6 +2151,47 @@ class TestClientContextGraph:
     assert by_id["s2"].trace_id == "trace-authoritative"
     assert by_id["s2"].time_to_first_token_ms == 4
 
+  def test_get_trace_by_selector_gql_skips_non_unique_span_ids(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import Span
+    from bigquery_agent_analytics.trace import Trace
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    client = Client(
+        project_id="p",
+        dataset_id="d",
+        verify_schema=False,
+        bq_client=MagicMock(),
+    )
+    flat_trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        spans=[
+            Span(
+                event_type="TOOL_STARTING",
+                agent="root",
+                timestamp=None,
+                span_id="dup",
+            ),
+            Span(
+                event_type="TOOL_COMPLETED",
+                agent="root",
+                timestamp=None,
+                span_id="dup",
+            ),
+        ],
+    )
+    selector = TraceSelector(session_id="sess-1")
+
+    with patch.object(Client, "get_trace_by_selector", return_value=flat_trace):
+      with patch.object(
+          ContextGraphManager, "reconstruct_trace_gql"
+      ) as reconstruct:
+        result = client.get_trace_by_selector_gql(selector)
+
+    assert result is flat_trace
+    reconstruct.assert_not_called()
+
   def test_get_trace_by_selector_gql_propagates_resolver_ambiguity(self):
     from bigquery_agent_analytics.client import Client
     from bigquery_agent_analytics.trace import AmbiguousSessionError

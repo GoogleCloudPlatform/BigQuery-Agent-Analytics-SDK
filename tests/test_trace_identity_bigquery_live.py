@@ -307,6 +307,7 @@ class TestIdentityQueriesDryRun:
   def test_singular_queries_dry_run(self, collision_dataset, bq_client):
     from google.cloud import bigquery as bq
 
+    from bigquery_agent_analytics.client import _GET_SESSION_SCOPE_METADATA_QUERY
     from bigquery_agent_analytics.client import _GET_SESSION_TRACE_QUERY
     from bigquery_agent_analytics.client import _RESOLVE_SESSION_CANDIDATES_QUERY
     from bigquery_agent_analytics.trace import TraceFilter
@@ -335,6 +336,7 @@ class TestIdentityQueriesDryRun:
         dataset=dataset_id,
         table="agent_events",
         row_where=row_filter.row_scope_where(),
+        event_where="e.event_type IN UNNEST(@selected_event_types)",
     )
     bq_client.query(
         fetch,
@@ -347,6 +349,27 @@ class TestIdentityQueriesDryRun:
                 ),
                 bq.ScalarQueryParameter("label_key_0", "STRING", '"run"'),
                 bq.ScalarQueryParameter("label_val_0", "STRING", "v0"),
+                bq.ArrayQueryParameter(
+                    "selected_event_types", "STRING", ["TOOL_COMPLETED"]
+                ),
+            ],
+            dry_run=True,
+        ),
+    )
+    metadata = _GET_SESSION_SCOPE_METADATA_QUERY.format(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+    )
+    bq_client.query(
+        metadata,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                bq.ScalarQueryParameter("session_id", "STRING", "passes"),
+                bq.ScalarQueryParameter("anchor_user_id", "STRING", None),
+                bq.ScalarQueryParameter(
+                    "anchor_root_agent_name", "STRING", None
+                ),
             ],
             dry_run=True,
         ),

@@ -638,8 +638,8 @@ Three matching algorithms:
 
 Deterministic replay for debugging and comparison:
 
-- **`replay_session(session_id, replay_mode, step_callback)`**: Fetches trace, replays events in order. Modes: `"full"` (all events), `"step"` (with callback per event), `"tool_only"` (only tool events)
-- **`compare_replays(session_a, session_b)`**: Replays both sessions, diffs tool sequences and response similarity
+- **`replay_session(session_id, replay_mode, step_callback, *, selector=None)`**: Fetches an unambiguous or exactly selected trace and replays events in order. Modes: `"full"` (all events), `"step"` (with callback per event), `"tool_only"` (only tool events)
+- **`compare_replays(session_a, session_b, *, selector_1=None, selector_2=None)`**: Replays both sessions, with optional exact retry selectors for reused IDs, then diffs tool sequences and response similarity
 
 #### 4.4.4 Secondary-surface identity contract
 
@@ -647,7 +647,9 @@ Every secondary trace consumer delegates singular resolution to the same
 `TraceSelector` contract:
 
 - GQL reconstruction resolves the authoritative flat trace once and restricts
-  traversal to its span IDs.
+  traversal to its span IDs under the Property Graph's unique TechNode-key
+  contract. A flat population with duplicate span IDs skips GQL rather than
+  attributing a relationship to an arbitrary copy.
 - `BigQueryTraceEvaluator` accepts a selector on single evaluations and either
   a selector object or mapping in batch datasets.
 - CLI JSON failures and Remote Function `_error.details` expose the structured

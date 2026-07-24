@@ -41,6 +41,7 @@ Example usage:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import copy
 from dataclasses import dataclass
 from dataclasses import field
@@ -175,18 +176,23 @@ class SessionTrace:
   scope_coverage: Optional[tuple[str, ...]] = None
 
   def extract_tool_trajectory(self) -> list[ToolCall]:
-    """Extracts the tool call trajectory from events."""
+    """Extracts tool calls even when stable SQL ties put terminals first."""
     tool_calls = []
-    tool_starts: dict[str, TraceEvent] = {}
-
+    tool_starts: dict[tuple[str, str], deque[TraceEvent]] = {}
     for event in self.events:
       if event.event_type == "TOOL_STARTING":
         tool_name = event.content.get("tool", "unknown")
-        tool_starts[event.span_id or tool_name] = event
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        tool_starts.setdefault(key, deque()).append(event)
 
-      elif event.event_type == "TOOL_COMPLETED":
+    for event in self.events:
+      if event.event_type == "TOOL_COMPLETED":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -204,7 +210,11 @@ class SessionTrace:
 
       elif event.event_type == "TOOL_ERROR":
         tool_name = event.content.get("tool", "unknown")
-        start_event = tool_starts.pop(event.span_id or tool_name, None)
+        key = ("span", event.span_id) if event.span_id else ("tool", tool_name)
+        starts = tool_starts.get(key)
+        start_event = None
+        if starts and starts[0].timestamp <= event.timestamp:
+          start_event = starts.popleft()
 
         args = {}
         if start_event:
@@ -630,6 +640,7 @@ Required JSON format:
         lambda: self.trace_client.get_trace_by_selector(
             selector,
             allow_mixed_scope=allow_mixed_scope,
+            event_types=self.include_event_types,
         ),
     )
     return self._to_session_trace(trace, self.include_event_types)
@@ -1040,6 +1051,20 @@ class TraceReplayRunner:
     """
     self.evaluator = evaluator
 
+  async def _get_trace(
+      self,
+      session_id: str,
+      selector: Optional[TraceSelector],
+  ) -> SessionTrace:
+    """Resolve one replay input through the shared selector surface."""
+    if selector is None:
+      return await self.evaluator.get_session_trace(session_id)
+    if type(selector) is not TraceSelector:
+      raise TypeError("selector must be a TraceSelector.")
+    if selector.session_id != session_id:
+      raise ValueError("selector.session_id must match session_id.")
+    return await self.evaluator.get_trace_by_selector(selector)
+
   async def replay_session(
       self,
       session_id: str,
@@ -1047,6 +1072,8 @@ class TraceReplayRunner:
       step_callback: Optional[
           Callable[[TraceEvent, ReplayContext], None]
       ] = None,
+      *,
+      selector: Optional[TraceSelector] = None,
   ) -> ReplayContext:
     """Replays a recorded session step by step.
 
@@ -1055,11 +1082,12 @@ class TraceReplayRunner:
         replay_mode: "full" for all events, "step" for pause at each step,
                      "tool_only" for only tool calls.
         step_callback: Optional callback invoked at each step.
+        selector: Optional exact identity/scope selector for a reused session.
 
     Returns:
         ReplayContext with all injected responses.
     """
-    trace = await self.evaluator.get_session_trace(session_id)
+    trace = await self._get_trace(session_id, selector)
 
     replay_context = ReplayContext()
 
@@ -1097,18 +1125,23 @@ class TraceReplayRunner:
       self,
       session_id_1: str,
       session_id_2: str,
+      *,
+      selector_1: Optional[TraceSelector] = None,
+      selector_2: Optional[TraceSelector] = None,
   ) -> dict[str, Any]:
     """Compares two session replays to identify differences.
 
     Args:
         session_id_1: First session ID.
         session_id_2: Second session ID.
+        selector_1: Optional exact selector for the first reused session.
+        selector_2: Optional exact selector for the second reused session.
 
     Returns:
         Dict with comparison results.
     """
-    trace1 = await self.evaluator.get_session_trace(session_id_1)
-    trace2 = await self.evaluator.get_session_trace(session_id_2)
+    trace1 = await self._get_trace(session_id_1, selector_1)
+    trace2 = await self._get_trace(session_id_2, selector_2)
 
     differences = {
         "event_count_diff": len(trace1.events) - len(trace2.events),

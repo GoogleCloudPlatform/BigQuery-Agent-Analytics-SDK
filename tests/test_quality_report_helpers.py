@@ -27,6 +27,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
+import bigquery_agent_analytics
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
 from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
 from bigquery_agent_analytics.trace import Span
@@ -174,6 +175,95 @@ class TestIdentityAwareReportMaps:
     assert context == {}
     assert "ambiguous" in caplog.text.lower()
 
+  def test_trajectory_selection_skips_unattributed_collision(self, caplog):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    report = _FakeReport(
+        [
+            _FakeSession(
+                "shared",
+                [_FakeMetric("response_usefulness", "unhelpful")],
+            )
+        ]
+    )
+
+    session_ids, selected = quality_report_module._select_trajectory_population(
+        report,
+        resolved,
+        1,
+    )
+
+    assert session_ids == []
+    assert selected == {}
+    assert "ambiguous" in caplog.text.lower()
+
+  def test_trajectory_selection_keeps_only_the_attributed_score_context(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    selected_trace = traces[1]
+    report = _FakeReport(
+        [
+            _FakeSession(
+                "shared",
+                [_FakeMetric("response_usefulness", "unhelpful")],
+                details={
+                    "user_id": selected_trace.identity.user_id,
+                    "root_agent_name": selected_trace.identity.root_agent_name,
+                    "scope_signature": selected_trace.scope.scope_signature,
+                },
+            )
+        ]
+    )
+
+    session_ids, selected = quality_report_module._select_trajectory_population(
+        report,
+        resolved,
+        1,
+    )
+
+    assert session_ids == ["shared"]
+    assert list(selected.values()) == [
+        resolved[
+            (
+                "shared",
+                "bob",
+                "root",
+                selected_trace.scope.scope_signature,
+            )
+        ]
+    ]
+
+  def test_built_report_index_reuses_attribution_lookup(self):
+    trace = self._trace("alice", "v0")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([trace])
+    )
+    score = _FakeSession(
+        "shared",
+        [],
+        details={
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "scope_signature": trace.scope.scope_signature,
+        },
+    )
+
+    def _unexpected_full_scan():
+      raise AssertionError("correlation rescanned the full report index")
+
+    resolved.items = _unexpected_full_scan
+
+    assert (
+        quality_report_module._resolved_context_for_score(resolved, score)[
+            "user_id"
+        ]
+        == "alice"
+    )
+
   def test_collision_safe_trace_index_retains_both_candidates(self):
     traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
 
@@ -184,6 +274,232 @@ class TestIdentityAwareReportMaps:
         "alice",
         "bob",
     }
+
+  def test_trace_fetch_limit_counts_resolved_identity_scope_candidates(self):
+    resolved = quality_report_module._index_resolved_entries(
+        [
+            {
+                "session_id": "shared",
+                "user_id": "alice",
+                "root_agent_name": "root",
+                "scope_signature": "scope-a",
+            },
+            {
+                "session_id": "shared",
+                "user_id": "bob",
+                "root_agent_name": "root",
+                "scope_signature": "scope-b",
+            },
+            {
+                "session_id": "other",
+                "user_id": "carol",
+                "root_agent_name": "root",
+                "scope_signature": "scope-c",
+            },
+        ]
+    )
+
+    assert quality_report_module._trace_fetch_limit(resolved, ["shared"]) == 2
+    assert (
+        quality_report_module._trace_fetch_limit(resolved, ["shared", "other"])
+        == 3
+    )
+
+  def test_explicit_report_limit_reserves_u2_candidates_per_session(self):
+    assert quality_report_module._explicit_report_trace_limit(["shared"]) == 64
+    assert (
+        quality_report_module._explicit_report_trace_limit(
+            ["shared", "other", "shared"]
+        )
+        == 128
+    )
+
+  def test_fetch_session_traces_uses_resolved_trace_limit(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    requested_limits = []
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        requested_limits.append(filter_criteria.limit)
+        return traces
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"], max_sessions=1, max_traces=2
+    )
+
+    assert requested_limits == [2, 4]
+    assert len(fetched) == 2
+
+  def test_fetch_session_traces_retains_only_report_attribution(
+      self, monkeypatch
+  ):
+    alice = self._trace("alice", "v0")
+    bob = self._trace("bob", "v1")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([alice])
+    )
+    captured = {}
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        captured["filter"] = filter_criteria
+        # The foreign trace is deliberately first, matching the failure mode
+        # where a newer same-session scope would otherwise fill the limit.
+        return [bob, alice]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert captured["filter"].limit == 64
+    assert list(fetched.values()) == [alice]
+
+  def test_fetch_session_traces_expands_past_64_scope_candidates(
+      self, monkeypatch
+  ):
+    traces = [self._trace("alice", f"v{i:02d}") for i in range(65)]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    requested_limits = []
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        requested_limits.append(filter_criteria.limit)
+        return traces[: filter_criteria.limit]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert requested_limits == [64, 128]
+    assert len(fetched) == 65
+
+  def test_complete_report_listing_fails_instead_of_returning_capped_page(
+      self, monkeypatch
+  ):
+    import pytest
+
+    traces = [self._trace("alice", f"v{i:02d}") for i in range(64)]
+
+    class _FakeClient:
+
+      def list_traces(self, filter_criteria):
+        return traces[: filter_criteria.limit]
+
+    monkeypatch.setattr(
+        quality_report_module, "_REPORT_TRACE_LIMIT_CEILING", 64
+    )
+
+    with pytest.raises(
+        quality_report_module._ReportTracePopulationTruncatedError,
+        match="no partial report",
+    ):
+      quality_report_module._list_complete_report_traces(
+          _FakeClient(),
+          bigquery_agent_analytics.TraceFilter(
+              session_ids=["shared"],
+              limit=64,
+          ),
+      )
+
+  def test_fetch_session_traces_fails_closed_for_legacy_collision(
+      self, monkeypatch, caplog
+  ):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        [{"session_id": "shared", "question": "legacy"}]
+    )
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        del filter_criteria
+        return traces
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert fetched == {}
+    assert "legacy report context" in caplog.text
+
+  def test_markdown_trajectory_skips_trace_outside_report_attribution(
+      self, monkeypatch, caplog
+  ):
+    alice = self._trace("alice", "v0")
+    bob = self._trace("bob", "v1")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([alice])
+    )
+    written = []
+    monkeypatch.setattr(
+        quality_report_module,
+        "_render_trace",
+        lambda _trace: "FOREIGN TRACE",
+    )
+
+    quality_report_module._md_write_trajectory_section(
+        written.append,
+        quality_report_module._index_traces([bob]),
+        resolved,
+    )
+
+    rendered = "\n".join(written)
+    assert "FOREIGN TRACE" not in rendered
+    assert "trace outside the resolved report population" in caplog.text
 
   def test_unique_legacy_context_matches_scoped_trace_both_directions(self):
     trace = self._trace("alice", "v0")

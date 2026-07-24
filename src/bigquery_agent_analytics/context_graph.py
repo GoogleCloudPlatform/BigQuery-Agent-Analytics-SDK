@@ -1748,9 +1748,10 @@ class ContextGraphManager:
         span_ids: Exact span population from an already-resolved trace.
             Both ends of every returned edge must be members, preventing
             graph traversal from widening an identity/scope-safe flat read
-            back to the session-only population. When omitted for backward
-            compatibility, the shared SDK client resolves ``session_id``
-            first; ambiguity therefore raises instead of broadening GQL.
+            back to the session-only population under the graph's unique
+            TechNode ``span_id`` key contract. When omitted for backward
+            compatibility, the shared SDK client resolves ``session_id`` first;
+            ambiguity therefore raises instead of broadening GQL.
         graph_name: Override graph name.
         result_limit: Maximum result rows.
 

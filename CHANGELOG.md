@@ -24,8 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-monitoring agent example, and quality/latency reports now use the shared
   selector contract. CLI JSON and Remote Function errors expose structured,
   exact retry selectors; human-readable ambiguity messages remain redacted.
-  Reports retain colliding rows and render resolved identity plus exact scope
-  (or mixed-scope coverage) in text, Markdown, and JSON.
+  Reports retain colliding rows when score attribution is available, fail
+  closed rather than attaching a legacy session-only score to one candidate,
+  and render resolved identity plus exact scope (or mixed-scope coverage) in
+  text, Markdown, and JSON.
 
 ### Changed
 

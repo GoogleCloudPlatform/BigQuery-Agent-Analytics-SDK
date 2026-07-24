@@ -532,19 +532,32 @@ efficiency = TrajectoryMetrics.compute_step_efficiency(2, 2)         # 1.0
 Replay a recorded session step-by-step for debugging:
 
 ```python
-from bigquery_agent_analytics import TraceReplayRunner
+from bigquery_agent_analytics import TraceReplayRunner, TraceSelector
 
 replay_runner = TraceReplayRunner(evaluator)
+selector = TraceSelector(
+    session_id="sess-001",
+    user_id="user-42",
+    root_agent_name="support_agent",
+    experiment_id=None,
+    custom_labels={"run": "v1"},
+    scope_signature='v1:{"custom_labels":[["run","v1"]],"experiment_id":null}',
+)
 
 # Full replay with step-by-step callback
 context = await replay_runner.replay_session(
     session_id="sess-001",
+    selector=selector,  # optional exact retry selector for a reused session
     replay_mode="step",  # "full", "step", or "tool_only"
     step_callback=lambda event, ctx: print(f"  {event.event_type}: {event.content}"),
 )
 
 # Compare two replays to find differences
-diff = await replay_runner.compare_replays("sess-001", "sess-002")
+diff = await replay_runner.compare_replays(
+    "sess-001",
+    "sess-002",
+    selector_1=selector,  # either selector is optional
+)
 print(f"Tool differences: {diff['tool_differences']}")
 print(f"Response match: {diff['response_match']}")
 ```
@@ -1714,8 +1727,10 @@ print(cgm.get_property_graph_ddl())
 
 Reconstruct traces using native Graph Query Language instead of recursive CTEs.
 The shared flat resolver first selects the exact identity/scope; GQL receives
-only that trace's span IDs, so graph traversal and its flat fallback cannot
-broaden a colliding `session_id`:
+only that trace's span IDs. This confinement relies on the Property Graph's
+`TechNode KEY (span_id)` uniqueness contract; if the resolved flat population
+contains duplicate span IDs, the SDK skips GQL and returns the authoritative
+flat trace instead of applying an edge to an arbitrary duplicate:
 
 ```python
 # GQL-based reconstruction with the same retry selector as flat reads.

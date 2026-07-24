@@ -1124,6 +1124,15 @@ _REPORT_ATTRIBUTION_FIELDS = (
     "root_agent_name",
     "scope_signature",
 )
+# U2 bounds one singular candidate-enumeration page at 64 exact
+# identity/scope candidates. Explicit report session lists start with the same
+# reservation, then grow until the returned population is provably complete.
+_REPORT_INITIAL_CANDIDATES_PER_SESSION = 64
+_REPORT_TRACE_LIMIT_CEILING = 1_048_576
+
+
+class _ReportTracePopulationTruncatedError(RuntimeError):
+  """A report listing saturated its last permitted completeness probe."""
 
 
 def _resolved_entry_key(entry):
@@ -1134,6 +1143,25 @@ def _resolved_entry_key(entry):
       entry.get("root_agent_name"),
       entry.get("scope_signature"),
   )
+
+
+class _ResolvedEntriesIndex(dict):
+  """Dict-compatible report index with a reusable session lookup."""
+
+  def __init__(self, indexed):
+    super().__init__(indexed)
+    by_session = {}
+    by_attribution = {}
+    for key, context in self.items():
+      session_id = context.get(
+          "session_id", key if isinstance(key, str) else None
+      )
+      by_session.setdefault(session_id, []).append(context)
+      by_attribution.setdefault(_resolved_entry_key(context), []).append(
+          context
+      )
+    self.by_session = by_session
+    self.by_attribution = by_attribution
 
 
 def _index_resolved_entries(entries):
@@ -1162,26 +1190,49 @@ def _index_resolved_entries(entries):
         )
         key = (*key, ordinal)
       indexed[key] = entry
-  return indexed
+  return _ResolvedEntriesIndex(indexed)
 
 
-def _resolved_context_for_score(resolved_map, score):
-  """Correlate a score to one context, failing closed on ambiguity."""
-  session_id = score.session_id
-  candidates = [
+def _resolved_candidates(resolved_map, session_id):
+  """Return one session's candidates without rescanning a built index."""
+  if isinstance(resolved_map, _ResolvedEntriesIndex):
+    return list(resolved_map.by_session.get(session_id, ()))
+  return [
       context
       for key, context in resolved_map.items()
       if context.get("session_id", key if isinstance(key, str) else None)
       == session_id
   ]
-  if not candidates:
-    return {}
 
+
+def _resolved_context_for_score(resolved_map, score):
+  """Correlate a score to one context, failing closed on ambiguity."""
+  session_id = score.session_id
   details = getattr(score, "details", None) or {}
   pinned_fields = [
       field for field in _REPORT_ATTRIBUTION_FIELDS if field in details
   ]
-  if pinned_fields:
+  exact_indexed_lookup = (
+      isinstance(resolved_map, _ResolvedEntriesIndex)
+      and type(session_id) is str
+      and len(pinned_fields) == len(_REPORT_ATTRIBUTION_FIELDS)
+      and all(
+          type(details[field]) in (str, type(None))
+          for field in _REPORT_ATTRIBUTION_FIELDS
+      )
+  )
+  if exact_indexed_lookup:
+    attribution = (
+        session_id,
+        *(details[field] for field in _REPORT_ATTRIBUTION_FIELDS),
+    )
+    candidates = list(resolved_map.by_attribution.get(attribution, ()))
+  else:
+    candidates = _resolved_candidates(resolved_map, session_id)
+  if not candidates:
+    return {}
+
+  if pinned_fields and not exact_indexed_lookup:
     candidates = [
         context
         for context in candidates
@@ -1444,12 +1495,14 @@ def run_evaluation(
 
   if session_id:
     trace_filter = TraceFilter(
-        session_ids=[session_id], custom_labels=custom_labels
+        session_ids=[session_id],
+        limit=_explicit_report_trace_limit([session_id]),
+        custom_labels=custom_labels,
     )
   elif session_ids:
     trace_filter = TraceFilter(
         session_ids=session_ids,
-        limit=len(session_ids),
+        limit=_explicit_report_trace_limit(session_ids),
         custom_labels=custom_labels,
     )
     if app_name:
@@ -1478,7 +1531,11 @@ def run_evaluation(
   # matched/expected reporting -- but does NOT ground the judge's
   # correctness verdict (that is conversations-path only; scope/ground_truth
   # still ground the judge on both paths).
-  traces = client.list_traces(filter_criteria=trace_filter)
+  explicit_sessions = bool(session_id or session_ids)
+  if explicit_sessions:
+    traces, trace_filter = _list_complete_report_traces(client, trace_filter)
+  else:
+    traces = client.list_traces(filter_criteria=trace_filter)
   resolved = resolve_trace_responses(traces)
   resolved_map = _index_resolved_entries(resolved)
 
@@ -1521,12 +1578,13 @@ def run_evaluation(
   }
   missing = [sid for sid in all_session_ids if sid not in resolved_session_ids]
   if missing:
-    extra = client.list_traces(
-        filter_criteria=TraceFilter(
+    extra, _ = _list_complete_report_traces(
+        client,
+        TraceFilter(
             session_ids=missing,
-            limit=len(missing),
+            limit=_explicit_report_trace_limit(missing),
             custom_labels=custom_labels,
-        )
+        ),
     )
     resolved_map = _index_resolved_entries(
         [*resolved_map.values(), *resolve_trace_responses(extra)]
@@ -1808,12 +1866,17 @@ def generate_quality_report_from_conversations(
 
   trajectories = {}
   if trajectory_samples and trajectory_samples > 0:
-    traj_sids = _select_trajectory_sessions(
+    traj_sids, trajectory_map = _select_trajectory_population(
         result["report"],
         result["resolved_map"],
         trajectory_samples,
     )
-    trajectories = _fetch_session_traces(traj_sids, trajectory_samples)
+    trajectories = _fetch_session_traces(
+        traj_sids,
+        trajectory_samples,
+        max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
+        resolved_map=trajectory_map,
+    )
 
   output = _build_json_output(
       result["report"],
@@ -2177,25 +2240,42 @@ def run_eval(args):
   trajectory_samples = getattr(args, "trajectory_samples", 0)
   tag_turns = getattr(args, "tag_turns", False)
   if trajectory_samples and trajectory_samples > 0:
-    traj_sids = _select_trajectory_sessions(
+    traj_sids, trajectory_map = _select_trajectory_population(
         result["report"],
         result["resolved_map"],
         trajectory_samples,
     )
     # Also fetch trajectories for all correction sessions (for inline display)
     if tag_turns:
-      correction_sids = [
-          ctx.get("session_id")
-          for ctx in result["resolved_map"].values()
-          if ctx.get("correction_boundaries")
-      ]
-      for sid in correction_sids:
-        if sid not in traj_sids:
-          traj_sids.append(sid)
+      selected_contexts = list(trajectory_map.values())
+      selected_keys = {
+          _resolved_entry_key(context) for context in selected_contexts
+      }
+      for context in result["resolved_map"].values():
+        if not context.get("correction_boundaries"):
+          continue
+        key = _resolved_entry_key(context)
+        if key in selected_keys:
+          continue
+        selected_keys.add(key)
+        selected_contexts.append(context)
+      trajectory_map = _index_resolved_entries(selected_contexts)
+      traj_sids = list(
+          dict.fromkeys(
+              ctx.get("session_id")
+              for ctx in trajectory_map.values()
+              if ctx.get("session_id")
+          )
+      )
     logger.info(
         "Fetching %d execution trajectories from BigQuery...", len(traj_sids)
     )
-    trajectories = _fetch_session_traces(traj_sids, len(traj_sids))
+    trajectories = _fetch_session_traces(
+        traj_sids,
+        len(traj_sids),
+        max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
+        resolved_map=trajectory_map,
+    )
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
       for trace_obj in trajectories.values():
@@ -2207,7 +2287,12 @@ def run_eval(args):
 
   # Single-session mode: always fetch trajectory from BQ
   if args.session and not trajectories and not conversations_file:
-    trajectories = _fetch_session_traces([args.session], max_sessions=1)
+    trajectories = _fetch_session_traces(
+        [args.session],
+        max_sessions=1,
+        max_traces=_trace_fetch_limit(result["resolved_map"], [args.session]),
+        resolved_map=result["resolved_map"],
+    )
     if trajectories:
       for trace_obj in trajectories.values():
         ctx = _resolved_context_for_trace(result["resolved_map"], trace_obj)
@@ -2934,21 +3019,38 @@ def _trace_attribution(trace):
   }
 
 
+class _TraceIndex(dict):
+  """Dict-compatible trace index carrying its correlation contexts."""
+
+  def __init__(self, indexed, contexts):
+    super().__init__(indexed)
+    self.contexts = contexts
+
+
 def _index_traces(traces):
   """Index traces without collapsing reused session IDs."""
   entries = [{**_trace_attribution(trace), "_trace": trace} for trace in traces]
-  return {
-      key: entry["_trace"]
-      for key, entry in _index_resolved_entries(entries).items()
-  }
+  contexts = _index_resolved_entries(entries)
+  indexed = {key: entry["_trace"] for key, entry in contexts.items()}
+  return _TraceIndex(indexed, contexts)
+
+
+def _trace_contexts(trajectories):
+  """Return a reusable collision-safe context index for traces."""
+  contexts = getattr(trajectories, "contexts", None)
+  if isinstance(contexts, _ResolvedEntriesIndex):
+    return contexts
+  return _index_resolved_entries(
+      [
+          {**_trace_attribution(trace), "_trace": trace}
+          for trace in trajectories.values()
+      ]
+  )
 
 
 def _trace_for_score(trajectories, score):
   """Correlate one score to one trace using reserved attribution details."""
-  contexts = {
-      key: {**_trace_attribution(trace), "_trace": trace}
-      for key, trace in trajectories.items()
-  }
+  contexts = _trace_contexts(trajectories)
   context = _resolved_context_for_score(contexts, score)
   return context.get("_trace") if context else None
 
@@ -2956,12 +3058,9 @@ def _trace_for_score(trajectories, score):
 def _resolved_context_for_trace(resolved_map, trace):
   """Correlate one resolved trace to its report context."""
   attribution = _trace_attribution(trace)
-  session_candidates = [
-      context
-      for key, context in resolved_map.items()
-      if context.get("session_id", key if isinstance(key, str) else None)
-      == attribution["session_id"]
-  ]
+  session_candidates = _resolved_candidates(
+      resolved_map, attribution["session_id"]
+  )
   if len(session_candidates) == 1 and not any(
       field in session_candidates[0] for field in _REPORT_ATTRIBUTION_FIELDS
   ):
@@ -2998,19 +3097,131 @@ def _trace_for_context(trajectories, context):
 
 def _trace_for_session(trajectories, session_id):
   """Return a session trace only when the report population is unique."""
-  contexts = {
-      key: {**_trace_attribution(trace), "_trace": trace}
-      for key, trace in trajectories.items()
-  }
+  contexts = _trace_contexts(trajectories)
   context = _resolved_context_for_session(contexts, session_id)
   return context.get("_trace") if context else None
 
 
-def _fetch_session_traces(session_ids, max_sessions=3):
+def _trace_fetch_limit(resolved_map, session_ids):
+  """Return the resolved trace count needed for selected sessions.
+
+  A legacy session id can resolve to multiple identity/scope candidates.
+  ``TraceFilter.limit`` bounds resolved traces, not distinct session ids, so
+  sizing it from the latter would silently discard collision candidates.
+  """
+  wanted = set(session_ids)
+  resolved_count = sum(
+      1
+      for context in resolved_map.values()
+      if context.get("session_id") in wanted
+  )
+  return max(len(wanted), resolved_count)
+
+
+def _explicit_report_trace_limit(session_ids):
+  """Initial size for a completeness-probed explicit-session listing."""
+  return max(
+      1,
+      len(set(session_ids)) * _REPORT_INITIAL_CANDIDATES_PER_SESSION,
+  )
+
+
+def _list_complete_report_traces(client, filter_criteria):
+  """List an explicit report population without a silent trace cap.
+
+  ``list_traces`` returns at most ``TraceFilter.limit`` resolved traces. An
+  exactly full page therefore proves neither completeness nor truncation.
+  Double the limit until the result is shorter than the request. If the
+  defensive ceiling is itself saturated, fail explicitly instead of dropping
+  identity/scope candidates from a report.
+
+  Returns:
+      ``(traces, effective_filter)`` where ``effective_filter.limit`` is the
+      completeness-proving request size and can be reused by the evaluator.
+  """
+  request = filter_criteria.snapshot()
+  limit = max(1, request.limit)
+  if limit > _REPORT_TRACE_LIMIT_CEILING:
+    raise _ReportTracePopulationTruncatedError(
+        "The requested report trace population exceeds the completeness"
+        f" ceiling ({_REPORT_TRACE_LIMIT_CEILING}); narrow the explicit"
+        " session set."
+    )
+
+  while True:
+    request.limit = limit
+    traces = client.list_traces(filter_criteria=request)
+    if len(traces) < limit:
+      return traces, request
+    if limit >= _REPORT_TRACE_LIMIT_CEILING:
+      raise _ReportTracePopulationTruncatedError(
+          "The report trace population saturated the completeness ceiling"
+          f" ({_REPORT_TRACE_LIMIT_CEILING}); no partial report was produced."
+      )
+    limit = min(limit * 2, _REPORT_TRACE_LIMIT_CEILING)
+
+
+def _retain_report_traces(fetched, resolved_map):
+  """Keep only traces provably attributable to the resolved report rows."""
+  by_session = {}
+  for trace in fetched:
+    by_session.setdefault(trace.session_id, []).append(trace)
+
+  retained = []
+  unmatched_count = 0
+  legacy_collision_count = 0
+  for session_id, traces in by_session.items():
+    contexts = _resolved_candidates(resolved_map, session_id)
+    has_attributed_context = any(
+        any(field in context for field in _REPORT_ATTRIBUTION_FIELDS)
+        for context in contexts
+    )
+    if has_attributed_context:
+      for trace in traces:
+        if _resolved_context_for_trace(resolved_map, trace):
+          retained.append(trace)
+        else:
+          unmatched_count += 1
+      continue
+
+    # A legacy report row has only a session id. It remains compatible when
+    # the fetched population is singular, but cannot safely choose among a
+    # reused session's identity/scope candidates.
+    if len(contexts) == 1 and len(traces) == 1:
+      retained.append(traces[0])
+    elif contexts:
+      legacy_collision_count += len(traces)
+    else:
+      unmatched_count += len(traces)
+
+  if unmatched_count:
+    logger.warning(
+        "Omitting %d execution trace(s) outside the resolved report"
+        " population.",
+        unmatched_count,
+    )
+  if legacy_collision_count:
+    logger.warning(
+        "Omitting %d execution trace(s): a legacy report context cannot"
+        " distinguish reused-session identity/scope candidates.",
+        legacy_collision_count,
+    )
+  return retained
+
+
+def _fetch_session_traces(
+    session_ids,
+    max_sessions=3,
+    *,
+    max_traces=None,
+    resolved_map=None,
+):
   """Fetch execution traces from BigQuery for the given session IDs.
 
   Returns a collision-safe mapping. Unique sessions keep their legacy
   ``session_id`` key; reused sessions are keyed by identity/scope tuples.
+  When ``resolved_map`` is supplied, only traces matching that report
+  population are retained; legacy session-only rows fail closed on collision.
   Silently returns empty dict if BQ is not configured or unavailable.
   """
   if not session_ids:
@@ -3043,15 +3254,26 @@ def _fetch_session_traces(session_ids, max_sessions=3):
     logger.debug("Failed to create BQ client", exc_info=True)
     return {}
 
-  # One list_traces call for the whole batch (a single BigQuery query),
-  # instead of one get_session_trace query per session (N+1 pattern).
-  wanted = list(session_ids[:max_sessions])
+  # One batched listing operation (with completeness probes only when a page
+  # saturates), instead of one get_session_trace query per session.
+  wanted = list(dict.fromkeys(session_ids))[:max_sessions]
+  trace_limit = max_traces if max_traces is not None else len(wanted)
+  if resolved_map is not None:
+    # The listing is necessarily session-wide because one report can contain
+    # multiple identity/scope candidates. Reserve U2's full candidate bound so
+    # a newer foreign candidate cannot consume the caller's smaller display
+    # limit before attribution is checked below.
+    trace_limit = max(trace_limit, _explicit_report_trace_limit(wanted))
   try:
     from bigquery_agent_analytics import TraceFilter as _TraceFilter
 
-    fetched = client.list_traces(
-        filter_criteria=_TraceFilter(session_ids=wanted, limit=len(wanted))
+    fetched, _ = _list_complete_report_traces(
+        client,
+        _TraceFilter(session_ids=wanted, limit=trace_limit),
     )
+  except _ReportTracePopulationTruncatedError as exc:
+    logger.warning("Skipping execution trajectories: %s", exc)
+    return {}
   except Exception:
     logger.debug("Batch trace fetch failed", exc_info=True)
     return {}
@@ -3061,48 +3283,81 @@ def _fetch_session_traces(session_ids, max_sessions=3):
       for trace in fetched
       if trace and trace.spans and trace.session_id in set(wanted)
   ]
+  if resolved_map is not None:
+    retained = _retain_report_traces(retained, resolved_map)
   return _index_traces(retained)
 
 
-def _select_trajectory_sessions(report, resolved_map, n):
-  """Pick the N most interesting sessions for trajectory display.
+def _select_trajectory_population(report, resolved_map, n):
+  """Pick N score-attributed contexts for trajectory display.
 
   Priority: unhelpful with corrections > unhelpful > partial > corrections > any.
+  A session-only score that maps to multiple identity/scope contexts is
+  deliberately omitted: fetching by its bare session ID could render every
+  candidate as the explanation for one score.
   """
   by_category = _group_by_category(report)
+  unhelpful = {id(sr) for sr in by_category.get("unhelpful", [])}
+  partial = {id(sr) for sr in by_category.get("partial", [])}
   candidates = []
+  for ordinal, score in enumerate(report.session_results):
+    context = _resolved_context_for_score(resolved_map, score)
+    if not context:
+      continue
+    correction = bool(context.get("correction_boundaries"))
+    if id(score) in unhelpful:
+      priority = 0 if correction else 1
+    elif id(score) in partial:
+      priority = 2
+    elif correction:
+      priority = 3
+    else:
+      priority = 4
+    candidates.append((priority, ordinal, context))
 
-  unhelpful_sids = {sr.session_id for sr in by_category.get("unhelpful", [])}
-  partial_sids = {sr.session_id for sr in by_category.get("partial", [])}
-  correction_sids = {
-      ctx.get("session_id")
-      for ctx in resolved_map.values()
-      if ctx.get("correction_boundaries")
-  }
+  selected = []
+  selected_keys = set()
+  for _, _, context in sorted(candidates):
+    key = _resolved_entry_key(context)
+    if key in selected_keys:
+      continue
+    selected_keys.add(key)
+    selected.append(context)
+    if len(selected) >= n:
+      break
 
-  for sid in unhelpful_sids & correction_sids:
-    candidates.append(sid)
-  for sid in unhelpful_sids - correction_sids:
-    candidates.append(sid)
-  for sid in partial_sids:
-    if sid not in candidates:
-      candidates.append(sid)
-  for sid in correction_sids - unhelpful_sids - partial_sids:
-    candidates.append(sid)
+  selected_map = _index_resolved_entries(selected)
+  session_ids = list(
+      dict.fromkeys(
+          context.get("session_id")
+          for context in selected
+          if context.get("session_id")
+      )
+  )
+  return session_ids, selected_map
 
-  if len(candidates) < n:
-    for sr in report.session_results:
-      if sr.session_id not in candidates:
-        candidates.append(sr.session_id)
-      if len(candidates) >= n:
-        break
 
-  return candidates[:n]
+def _select_trajectory_sessions(report, resolved_map, n):
+  """Backward-compatible session-id view of safe trajectory selection."""
+  session_ids, _ = _select_trajectory_population(report, resolved_map, n)
+  return session_ids
 
 
 def _md_write_trajectory_section(w, trajectories, resolved_map):
   """Write the Sample Trajectories section to the markdown report."""
   if not trajectories:
+    return
+
+  matched = []
+  for trace_obj in trajectories.values():
+    ctx = _resolved_context_for_trace(resolved_map, trace_obj)
+    if not ctx:
+      logger.warning(
+          "Omitting an execution trace outside the resolved report population."
+      )
+      continue
+    matched.append((trace_obj, ctx))
+  if not matched:
     return
 
   w("## Sample Execution Trajectories")
@@ -3114,9 +3369,8 @@ def _md_write_trajectory_section(w, trajectories, resolved_map):
   )
   w("")
 
-  for trace_obj in trajectories.values():
+  for trace_obj, ctx in matched:
     sid = trace_obj.session_id
-    ctx = _resolved_context_for_trace(resolved_map, trace_obj)
     # Skip correction sessions — their traces are shown in Correction Analysis
     if ctx.get("correction_boundaries"):
       continue
@@ -4176,7 +4430,10 @@ def _render_md_from_json(json_path, args):
   if PROJECT_ID and DATASET_ID and DATASET_ID != "local":
     session_ids = [s.get("session_id", "") for s in sessions]
     trajectories = _fetch_session_traces(
-        session_ids, max_sessions=len(session_ids)
+        session_ids,
+        max_sessions=len(session_ids),
+        max_traces=_trace_fetch_limit(resolved_map, session_ids),
+        resolved_map=resolved_map,
     )
     if trajectories:
       logger.info(

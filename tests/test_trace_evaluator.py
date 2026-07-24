@@ -18,6 +18,7 @@ from datetime import datetime
 from datetime import timezone
 import threading
 from unittest.mock import AsyncMock
+from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -157,6 +158,45 @@ class TestSessionTrace:
     assert tool_calls[0].status == "OK"
     assert tool_calls[1].tool_name == "format"
     assert tool_calls[1].status == "ERROR"
+
+  @pytest.mark.parametrize("terminal_type", ["TOOL_COMPLETED", "TOOL_ERROR"])
+  def test_extract_tool_trajectory_pairs_tied_terminal_before_start(
+      self, terminal_type
+  ):
+    """Shared resolver tie-breaks must not erase the tool arguments."""
+    timestamp = datetime.now(timezone.utc)
+    events = [
+        TraceEvent(
+            event_type=terminal_type,
+            agent="agent",
+            timestamp=timestamp,
+            content={"tool": "search", "result": {"data": "sunny"}},
+            attributes={},
+            span_id="span-1",
+            error_message=(
+                "search failed" if terminal_type == "TOOL_ERROR" else None
+            ),
+        ),
+        TraceEvent(
+            event_type="TOOL_STARTING",
+            agent="agent",
+            timestamp=timestamp,
+            content={"tool": "search", "args": {"query": "weather"}},
+            attributes={},
+            span_id="span-1",
+        ),
+    ]
+
+    trace = SessionTrace(
+        session_id="sess-1",
+        user_id="user-1",
+        events=events,
+    )
+
+    tool_calls = trace.extract_tool_trajectory()
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].args == {"query": "weather"}
 
   def test_extract_final_response_from_agent_completed(self):
     """Test extracting final response from AGENT_COMPLETED event."""
@@ -429,7 +469,13 @@ class TestBigQueryTraceEvaluator:
     main_thread = threading.get_ident()
     fetch_threads = []
 
-    def fetch(_client, selector, *, allow_mixed_scope=False):
+    def fetch(
+        _client,
+        selector,
+        *,
+        allow_mixed_scope=False,
+        event_types=None,
+    ):
       fetch_threads.append(threading.get_ident())
       assert selector == TraceSelector(
           session_id="sess-123",
@@ -440,6 +486,7 @@ class TestBigQueryTraceEvaluator:
           scope_signature=scope.scope_signature,
       )
       assert allow_mixed_scope is True
+      assert event_types == evaluator.include_event_types
       return sdk_trace
 
     with patch.object(Client, "get_trace_by_selector", autospec=True) as get:
@@ -792,6 +839,32 @@ class TestTraceReplayRunner:
     assert callback_events == ["TOOL_COMPLETED"]
 
   @pytest.mark.asyncio
+  async def test_replay_session_accepts_exact_selector(
+      self, replay_runner, mock_evaluator
+  ):
+    selector = TraceSelector(session_id="sess-123", user_id="alice")
+    mock_evaluator.get_trace_by_selector = AsyncMock(
+        return_value=SessionTrace(
+            session_id="sess-123", user_id="alice", events=[]
+        )
+    )
+    mock_evaluator.get_session_trace = AsyncMock()
+
+    await replay_runner.replay_session("sess-123", selector=selector)
+
+    mock_evaluator.get_trace_by_selector.assert_awaited_once_with(selector)
+    mock_evaluator.get_session_trace.assert_not_awaited()
+
+  @pytest.mark.asyncio
+  async def test_replay_session_rejects_mismatched_selector(
+      self, replay_runner
+  ):
+    with pytest.raises(ValueError, match="session_id"):
+      await replay_runner.replay_session(
+          "sess-a", selector=TraceSelector(session_id="sess-b")
+      )
+
+  @pytest.mark.asyncio
   async def test_compare_replays(self, replay_runner, mock_evaluator):
     """Test comparing two session replays."""
     trace1 = SessionTrace(
@@ -824,3 +897,30 @@ class TestTraceReplayRunner:
     assert diff["tool_count_diff"] == 0
     assert len(diff["tool_differences"]) == 2  # Both tools differ
     assert diff["response_match"] is False
+
+  @pytest.mark.asyncio
+  async def test_compare_replays_accepts_exact_selectors(
+      self, replay_runner, mock_evaluator
+  ):
+    selector_1 = TraceSelector(session_id="sess-1", user_id="alice")
+    selector_2 = TraceSelector(session_id="sess-2", user_id="bob")
+    mock_evaluator.get_trace_by_selector = AsyncMock(
+        side_effect=[
+            SessionTrace(session_id="sess-1", user_id="alice", events=[]),
+            SessionTrace(session_id="sess-2", user_id="bob", events=[]),
+        ]
+    )
+    mock_evaluator.get_session_trace = AsyncMock()
+
+    await replay_runner.compare_replays(
+        "sess-1",
+        "sess-2",
+        selector_1=selector_1,
+        selector_2=selector_2,
+    )
+
+    assert mock_evaluator.get_trace_by_selector.await_args_list == [
+        call(selector_1),
+        call(selector_2),
+    ]
+    mock_evaluator.get_session_trace.assert_not_awaited()
