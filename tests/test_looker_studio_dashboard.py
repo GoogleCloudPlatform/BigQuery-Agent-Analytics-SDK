@@ -113,6 +113,13 @@ def test_report_and_web_bindings_cannot_drift():
 
   assert web["reportId"] == report["report_id"]
   assert web["dataSourceAlias"] == report["data_source_alias"]
+  assert report["default_date_range"] == {
+      "mode": "rolling",
+      "start_offset_days": 365,
+      "end_offset_days": 1,
+      "include_today": False,
+      "page_scope": "all_dashboard_pages",
+  }
   assert web["sentinels"] == {
       "project": bindings["PROJECT"],
       "dataset": bindings["DATASET"],

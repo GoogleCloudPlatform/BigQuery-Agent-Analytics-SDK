@@ -9,4 +9,10 @@ default_report_name: BigQuery Agent Analytics
 credential_mode: VIEWERS
 link_access: PUBLIC
 publishing_mode: MANUAL
-published_date: "2026-07-23"
+published_date: "2026-07-24"
+default_date_range:
+  mode: rolling
+  start_offset_days: 365
+  end_offset_days: 1
+  include_today: false
+  page_scope: all_dashboard_pages

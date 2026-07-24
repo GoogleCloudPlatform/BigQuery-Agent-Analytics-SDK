@@ -72,10 +72,13 @@ The Inspector exposes timestamp, event type, agent, user, trace, span, and
 status from the same production data source. It is a drill-through aid, not a
 38th parity tile.
 
-Usage pages use an inclusive 14-day window ending yesterday. Performance
-pages use an inclusive 7-day window ending yesterday. Looker Studio sends
-those bounds through `@DS_START_DATE` and `@DS_END_DATE`; the production query
-applies the frozen half-open UTC predicate.
+All seven dashboard pages use a rolling 365-day window ending yesterday.
+Looker Studio sends those bounds through `@DS_START_DATE` and
+`@DS_END_DATE`; the production query applies the frozen half-open UTC
+predicate. The generated manifest retains the pinned LookML's original
+14-day Usage and 7-day Performance defaults as source-provenance metadata;
+the published template intentionally overrides them for the product default.
+The Trace Inspector has no default date control.
 
 ## Looker Studio measure mappings
 

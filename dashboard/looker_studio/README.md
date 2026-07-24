@@ -92,6 +92,9 @@ fixture parity certification or M4 visual sign-off.
 Canonical published template:
 [BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40).
 
+All seven dashboard pages default to a rolling 365-day window ending
+yesterday. The Trace Inspector intentionally has no default date control.
+
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://caohy1988.github.io/bigquery-agent-analytics-dashboard/)
 and enter only:
