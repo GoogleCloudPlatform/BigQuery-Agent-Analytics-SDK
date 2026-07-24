@@ -17,6 +17,11 @@ caller's BQAA base table, then emits a Linking API URL whose `sqlReplace`
 replaces the sentinel project, dataset, and table ID.
 The new data source is created with the clicking user's credentials. The
 template never exposes or delegates the template owner's BigQuery access.
+The Linking API creation review can label that new source as Owner's
+Credentials. The generated report must remain private until its owner opens
+**Resource → Manage added data sources → Edit** and verifies **Data
+credentials: Viewer**. This manual share gate cannot be encoded in a Linking
+API parameter.
 
 `docs/index.html` provides the standard-installation path without requiring a
 local CLI. It accepts project, dataset, and table IDs, assumes the standard
@@ -38,7 +43,9 @@ The canonical report is shared as Public/Viewer, uses Viewer's Credentials,
 and has manual report publishing enabled. Its published title is
 `BigQuery Agent Analytics — Template`. A signed-out visitor is sent to Google
 sign-in; after sign-in, the Linking API review dialog shows the substituted
-custom SQL and the caller's billing project before the caller acknowledges it.
+custom SQL, the caller's billing project, and the new data source's credential
+mode before the caller acknowledges it. The canonical template's Viewer mode
+and the generated copy's credential mode are separate settings.
 
 The live report and sentinel fixture are contributor-managed pending transfer
 to Google-managed ownership. `bindings/report_template.yaml` records a

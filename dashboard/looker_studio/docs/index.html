@@ -120,13 +120,25 @@
         </article>
         <article class="step">
           <span class="step-number">03</span>
-          <h3>Own the report</h3>
+          <h3>Save, then secure sharing</h3>
           <p>
-            Authorize BigQuery, choose “Edit and share,” and the configured
-            report is saved in your account.
+            Choose “Edit and share” to save it. Before sharing, set the new
+            data source’s credentials to <strong>Viewer’s Credentials</strong>
+            so every viewer must have their own BigQuery access.
           </p>
         </article>
       </section>
+
+      <aside class="notice">
+        <strong>Keep the new report private until the credential check.</strong>
+        The Linking API creates a data source owned by the person opening the
+        link and its review dialog can show Owner’s Credentials. In the saved
+        report, open <em>Resource → Manage added data sources → Edit</em> and
+        verify <em>Data credentials: Viewer</em> before sharing.
+        <a href="https://docs.cloud.google.com/data-studio/data-credentials">
+          Learn about Looker Studio data credentials.
+        </a>
+      </aside>
 
       <aside class="notice">
         <strong>No generated views required.</strong>

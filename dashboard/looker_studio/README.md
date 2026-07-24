@@ -137,13 +137,27 @@ python3 tools/hydrate_dashboard.py \
 
 The command rejects non-BQAA tables, checks the required base-table columns,
 and prints a Looker Studio creation URL. Open that URL, authorize BigQuery,
-then select **Edit and share** to save the configured report to your account.
-The new report uses your credentials and your billing project; it does not
-grant the template owner access to your data.
+then:
+
+1. select **Edit and share** to save the configured report to your account;
+2. keep the new report private;
+3. open **Resource → Manage added data sources → Edit**; and
+4. verify **Data credentials: Viewer** before sharing the report.
+
+The Linking API creates a new data source with the clicking user's
+credentials, and its creation dialog can label that source **Owner's
+Credentials**. Changing the saved report to **Viewer's Credentials** ensures
+that every viewer must have their own access to the underlying BigQuery data.
+See the official
+[data credentials documentation](https://docs.cloud.google.com/data-studio/data-credentials).
+The new report uses your billing project and does not grant the template owner
+access to your data.
 
 A Google sign-in is required because the template deliberately uses Viewer's
-Credentials. The template itself is public, manually published, and backed
-only by the committed synthetic sentinel fixture.
+Credentials. This is the canonical template's mode; it does not remove the
+credential gate for the new data source created by the Linking API. The
+template itself is public, manually published, and backed only by the
+committed synthetic sentinel fixture.
 
 The report and sentinel fixture are currently contributor-managed pending a
 maintainer-approved transfer to Google-managed ownership. The reviewed

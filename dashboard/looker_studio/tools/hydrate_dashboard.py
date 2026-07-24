@@ -214,6 +214,11 @@ def main() -> int:
       "BQAA preflight OK: base event table is compatible; no views required",
       file=sys.stderr,
   )
+  print(
+      "SECURITY: keep the new report private until Resource > Manage added "
+      "data sources > Edit shows Data credentials: Viewer",
+      file=sys.stderr,
+  )
   print(link)
   return 0
 

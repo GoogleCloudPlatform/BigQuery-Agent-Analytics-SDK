@@ -251,6 +251,7 @@ def test_report_and_web_bindings_cannot_drift():
       "method": [
           "connector_custom_query_review",
           "sqlreplace_table_only_smoke_test",
+          "canonical_viewer_credentials_review",
       ],
       "result": "PASSED",
       "limitation": "mutable_external_report_requires_reverification_after_changes",
@@ -259,6 +260,12 @@ def test_report_and_web_bindings_cannot_drift():
       "mode": "BASE_TABLE",
       "generated_views_required": False,
       "replacement_identifiers": ["PROJECT", "DATASET", "TABLE"],
+  }
+  assert report["credential_mode"] == "VIEWERS"
+  assert report["generated_report_credential_gate"] == {
+      "observed_initial_mode": "OWNERS",
+      "required_before_sharing": "VIEWERS",
+      "verification_path": "Resource > Manage added data sources > Edit",
   }
 
 
