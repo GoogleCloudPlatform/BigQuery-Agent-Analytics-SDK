@@ -1888,12 +1888,19 @@ bq-agent-sdk get-trace --project-id=P --dataset-id=D \
 SELECTOR="$(jq -c '.candidates[0].selector' ambiguity.json)"
 bq-agent-sdk get-trace --project-id=P --dataset-id=D \
   --selector-json="$SELECTOR"
+
+# Merge multiple scopes only when they belong to one intrinsic identity.
+# Cross-identity ambiguity still raises.
+bq-agent-sdk get-trace --project-id=P --dataset-id=D --session-id=S \
+  --allow-mixed-scope
 ```
 
 On ambiguity, `--format=json` writes the structured
 `AmbiguousSessionError.to_dict()` payload and exits nonzero. Text/table output
 uses the redacted message. Use `--selector-json` when explicit JSON `null` pins
 must survive the retry; a scalar CLI option left absent means unpinned.
+`--allow-mixed-scope` is the conversation-complete escape hatch for one
+identity spanning multiple scopes; it never merges identities.
 
 #### `evaluate` — Run Evaluations
 

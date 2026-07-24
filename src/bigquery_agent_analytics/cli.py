@@ -354,6 +354,13 @@ def get_trace(
             " ambiguity candidate payload."
         ),
     ),
+    allow_mixed_scope: bool = typer.Option(
+        False,
+        help=(
+            "Return a conversation-complete trace when one intrinsic identity"
+            " spans multiple scopes. Cross-identity ambiguity still raises."
+        ),
+    ),
     fmt: str = typer.Option(
         "json",
         "--format",
@@ -377,7 +384,9 @@ def get_trace(
         err=True,
     )
     raise typer.Exit(code=2)
-  if trace_id and (session_id or selector_json or selector_option_used):
+  if trace_id and (
+      session_id or selector_json or selector_option_used or allow_mixed_scope
+  ):
     typer.echo(
         "Error: --trace-id cannot be combined with session selector options.",
         err=True,
@@ -422,9 +431,15 @@ def get_trace(
 
     client = _build_client(project_id, dataset_id, table_id, location)
     if selector is not None:
-      trace = client.get_trace_by_selector(selector)
+      if allow_mixed_scope:
+        trace = client.get_trace_by_selector(selector, allow_mixed_scope=True)
+      else:
+        trace = client.get_trace_by_selector(selector)
     elif session_id:
-      trace = client.get_session_trace(session_id)
+      if allow_mixed_scope:
+        trace = client.get_session_trace(session_id, allow_mixed_scope=True)
+      else:
+        trace = client.get_session_trace(session_id)
     else:
       trace = client.get_trace(trace_id)
     typer.echo(format_output(trace, fmt))

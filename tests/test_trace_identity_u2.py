@@ -101,6 +101,7 @@ def _candidate_row(
     root_agent_name=None,
     experiment_id=None,
     tag_payload=None,
+    scope_trace_id=None,
     row_count=1,
 ):
   import json as json_mod
@@ -119,6 +120,7 @@ def _candidate_row(
           json_mod.dumps(experiment_id) if experiment_id is not None else None
       ),
       "tag_payload": tag_payload,
+      "scope_trace_id": scope_trace_id,
       "row_count": row_count,
   }
 
@@ -557,6 +559,43 @@ class TestSingularReadResolution:
     assert trace.identity == TraceIdentity(session_id="sess-1", user_id="alice")
     assert trace.scope == scope
     assert trace.spans == []
+
+  def test_selector_event_types_preserve_resolved_scope_trace_id(self):
+    scope = TraceScope(custom_labels={"run": "v1"})
+    candidate_batch = [
+        _mock_row(
+            _candidate_row(
+                tag_payload='{"run": "v1"}',
+                scope_trace_id="scope-trace-1",
+            )
+        )
+    ]
+    selected_shared = _event_row(
+        custom_tags=None,
+        span_id="selected-shared",
+        trace_id="shared-trace",
+    )
+    selected_shared["event_type"] = "USER_MESSAGE_RECEIVED"
+    client, mock_bq = self._client(
+        [candidate_batch, [_mock_row(selected_shared)]]
+    )
+
+    trace = client.get_trace_by_selector(
+        TraceSelector(
+            session_id="sess-1",
+            scope_signature=scope.scope_signature,
+        ),
+        event_types=["USER_MESSAGE_RECEIVED"],
+    )
+
+    assert trace.trace_id == "scope-trace-1"
+    assert "AS scope_trace_id" in mock_bq.query.call_args_list[0].args[0]
+
+  def test_event_filtered_zero_span_semantics_are_documented(self):
+    for method in (Client.get_session_trace, Client.get_trace_by_selector):
+      doc = method.__doc__ or ""
+      assert "zero-span" in doc
+      assert "does not raise" in doc
 
   def test_mixed_selector_event_types_separates_scope_metadata_from_spans(self):
     scope_v0 = TraceScope(custom_labels={"run": "v0"})

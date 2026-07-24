@@ -307,6 +307,11 @@ SELECT
   ) AS tag_payload,
   COALESCE(JSON_TYPE(attributes), 'null') IN ('object', 'null')
       AS attributes_valid,
+  ARRAY_AGG(
+    IF(trace_id = '', NULL, trace_id) IGNORE NULLS
+    ORDER BY timestamp, span_id, invocation_id, event_type
+    LIMIT 1
+  )[SAFE_OFFSET(0)] AS scope_trace_id,
   COUNT(*) AS row_count
 FROM `{project}.{dataset}.{table}`
 WHERE session_id = @session_id{identity_pins}
@@ -1002,7 +1007,10 @@ class Client:
             identities still raises.
         event_types: Optional event types to materialize. Candidate
             resolution stays scope-complete; the resolved span fetch
-            applies this restriction in SQL.
+            applies this restriction in SQL. When the restriction
+            matches no rows, the resolved identity/scope is returned
+            as a zero-span :class:`Trace`; this does not raise the
+            unfiltered not-found error.
 
     Returns:
         A Trace for the single resolved identity/scope, with
@@ -1062,6 +1070,9 @@ class Client:
         event_types: Optional event types to materialize. Candidate
             discovery always sees the complete scope population; the
             authoritative span fetch applies this restriction in SQL.
+            When the restriction matches no rows, the resolved
+            identity/scope is returned as a zero-span :class:`Trace`;
+            this does not raise the unfiltered not-found error.
 
     Raises:
         ValueError: If no events match the selector, if the
@@ -1149,6 +1160,7 @@ class Client:
       return self._fetch_identity_trace(
           matching[0].identity,
           resolved_scope=matching[0],
+          scope_trace_id=_resolved_scope_trace_id(candidate_rows, matching[0]),
           event_types=event_types,
       )
     if not truncated and allow_mixed_scope and len(matching) >= 2:
@@ -1193,6 +1205,9 @@ class Client:
         return self._fetch_identity_trace(
             matching[0].identity,
             resolved_scope=matching[0],
+            scope_trace_id=_resolved_scope_trace_id(
+                candidate_rows, matching[0]
+            ),
             event_types=event_types,
         )
       discovered = None
@@ -1207,6 +1222,9 @@ class Client:
           return self._fetch_identity_trace(
               matching[0].identity,
               resolved_scope=matching[0],
+              scope_trace_id=_resolved_scope_trace_id(
+                  candidate_rows, matching[0]
+              ),
               event_types=event_types,
           )
       if allow_mixed_scope:
@@ -1703,6 +1721,7 @@ class Client:
       self,
       identity: TraceIdentity,
       resolved_scope: ResolvedTraceSelector,
+      scope_trace_id: Optional[str] = None,
       event_types: Optional[list[str]] = None,
   ) -> Trace:
     """Anchored row fetch for one resolved identity and scope.
@@ -1763,6 +1782,7 @@ class Client:
           results,
           identity=identity,
           resolved_scope=resolved_scope,
+          scope_trace_id=scope_trace_id,
       )
     if not results:
       raise ValueError(f"No events found for session_id={identity.session_id}")
@@ -3800,6 +3820,7 @@ def _materialize_event_filtered_trace(
     *,
     identity: TraceIdentity,
     resolved_scope: ResolvedTraceSelector,
+    scope_trace_id: Optional[str] = None,
 ) -> Trace:
   """Build one already-resolved scope from a SQL-filtered event subset.
 
@@ -3862,7 +3883,8 @@ def _materialize_event_filtered_trace(
   end = max(timestamps) if timestamps else None
   total_ms = (end - start).total_seconds() * 1000 if start and end else None
   return Trace(
-      trace_id=own_trace_ids[0] if own_trace_ids else identity.session_id,
+      trace_id=scope_trace_id
+      or (own_trace_ids[0] if own_trace_ids else identity.session_id),
       session_id=identity.session_id,
       spans=spans,
       user_id=identity.user_id,
@@ -4185,6 +4207,51 @@ def _resolve_scope_candidates(rows: list[dict]) -> list[ResolvedTraceSelector]:
   candidates = list(dict.fromkeys(candidates))
   candidates.sort(key=_candidate_sort_key)
   return candidates
+
+
+def _resolved_scope_trace_id(
+    rows: list[dict], candidate: ResolvedTraceSelector
+) -> Optional[str]:
+  """Return the unfiltered candidate page's trace ID for one exact scope.
+
+  Event filtering can remove every tagged row from the payload fetch.
+  Candidate discovery is intentionally unfiltered, so its per-payload
+  aggregate remains the stable source for the scope's producer trace ID.
+  Untagged rows are shared infrastructure and never supply a scope-specific
+  ID.
+  """
+  expected_labels = candidate.scope.labels_dict
+  for row in rows:
+    identity = TraceIdentity(
+        session_id=row.get("session_id"),
+        user_id=_validated_identity_attr("user_id", row.get("user_id")),
+        root_agent_name=_parse_identity_attr_json(
+            "root_agent_name", row.get("root_agent_name")
+        ),
+    )
+    if identity != candidate.identity:
+      continue
+    experiment = _parse_identity_attr_json(
+        "experiment_id", row.get("experiment_id")
+    )
+    payload = _parse_tag_payload(row.get("tag_payload"))
+    if (
+        experiment != candidate.scope.experiment_id
+        or payload is None
+        or payload != expected_labels
+    ):
+      continue
+    trace_id = row.get("scope_trace_id")
+    if trace_id is None:
+      return None
+    if type(trace_id) is not str:
+      raise ValueError(
+          "Persisted trace_id must be a string (contents redacted)."
+      )
+    if trace_id == "":
+      return None
+    return trace_id
+  return None
 
 
 def _candidates_matching_selector(

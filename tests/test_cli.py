@@ -291,6 +291,28 @@ class TestGetTrace:
     )
 
   @patch("bigquery_agent_analytics.cli._build_client")
+  def test_get_trace_allows_conversation_complete_mixed_scope(self, mock_build):
+    client = MagicMock()
+    client.get_session_trace.return_value = _mock_trace()
+    mock_build.return_value = client
+
+    result = runner.invoke(
+        app,
+        [
+            "get-trace",
+            "--project-id=proj",
+            "--dataset-id=ds",
+            "--session-id=s1",
+            "--allow-mixed-scope",
+        ],
+    )
+
+    assert result.exit_code == 0
+    client.get_session_trace.assert_called_once_with(
+        "s1", allow_mixed_scope=True
+    )
+
+  @patch("bigquery_agent_analytics.cli._build_client")
   def test_get_trace_json_ambiguity_is_actionable(self, mock_build):
     client = MagicMock()
     client.get_session_trace.side_effect = _mock_ambiguity()
