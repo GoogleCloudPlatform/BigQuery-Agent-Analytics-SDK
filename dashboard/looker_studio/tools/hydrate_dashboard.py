@@ -54,6 +54,20 @@ def load_yaml(path: pathlib.Path) -> dict:
   return value
 
 
+def reject_sentinel_collisions(
+    values: dict[str, str], sentinels: dict[str, str]
+) -> None:
+  """Reject inputs that sequential sqlReplace could mutate a second time."""
+  reserved = tuple(sentinels.values())
+  if not reserved or not all(
+      isinstance(value, str) and value for value in reserved
+  ):
+    raise ValueError("template bindings contain invalid sentinel values")
+  for label, value in values.items():
+    if any(sentinel in value for sentinel in reserved):
+      raise ValueError(f"{label} contains a reserved template sentinel")
+
+
 def bq_query(project: str, location: str, sql: str) -> list[dict]:
   proc = subprocess.run(
       [
@@ -142,6 +156,16 @@ def build_link(
   report = load_yaml(ROOT / "bindings/report_template.yaml")
   bindings = load_yaml(ROOT / "bindings/template_bindings.yaml")
   sentinels = bindings["placeholders"]
+  reject_sentinel_collisions(
+      {
+          "project ID": project,
+          "dataset ID": dataset,
+          "view prefix": prefix,
+          "billing project ID": billing_project,
+          "report name": report_name,
+      },
+      sentinels,
+  )
   alias = report["data_source_alias"]
   sql_replace = ",".join(
       [
@@ -208,6 +232,17 @@ def main() -> int:
         PROJECT_RE,
     )
     location = require_identifier("location", args.location, LOCATION_RE)
+    bindings = load_yaml(ROOT / "bindings/template_bindings.yaml")
+    reject_sentinel_collisions(
+        {
+            "project ID": project,
+            "dataset ID": dataset,
+            "table ID": table,
+            "view prefix": prefix,
+            "billing project ID": billing,
+        },
+        bindings["placeholders"],
+    )
   except ValueError as exc:
     print(f"ERROR: {exc}", file=sys.stderr)
     return 2

@@ -102,6 +102,19 @@ for (const invalid of [
   assert.throws(() => buildDashboardUrl(invalid));
 }
 
+for (const collision of [
+  { ...values, project: "vsentinelbqaaproj" },
+  { ...values, dataset: "customer_vsentinelbqaa_data" },
+  { ...values, table: "agent_vsentinelbqaa_events" },
+  { ...values, prefix: "bqaa_fixture_adk_1_27_0_custom" },
+  { ...values, billingProject: "vsentinelbqaabilling" },
+]) {
+  assert.throws(
+    () => buildDashboardUrl(collision),
+    /reserved dashboard template value/,
+  );
+}
+
 console.log(
-  "web configurator OK: three identifiers validated; Linking API URL deterministic",
+  "web configurator OK: identifiers and sentinels validated; Linking API URL deterministic",
 );

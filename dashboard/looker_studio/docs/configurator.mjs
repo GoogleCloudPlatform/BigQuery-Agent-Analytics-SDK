@@ -12,9 +12,26 @@ function requireValue(label, value, pattern) {
   return normalized;
 }
 
+function rejectSentinelCollisions(values, config) {
+  const sentinels = Object.values(config.sentinels ?? {});
+  if (
+    sentinels.length === 0 ||
+    sentinels.some((sentinel) => typeof sentinel !== "string" || !sentinel)
+  ) {
+    throw new Error("The dashboard template has invalid sentinel bindings.");
+  }
+  for (const value of Object.values(values)) {
+    if (sentinels.some((sentinel) => value.includes(sentinel))) {
+      throw new Error(
+        "An identifier contains a reserved dashboard template value.",
+      );
+    }
+  }
+}
+
 export function validateConfiguration(input, config = REPORT_CONFIG) {
   const project = requireValue("project ID", input.project, PROJECT_RE);
-  return Object.freeze({
+  const values = {
     project,
     dataset: requireValue("dataset ID", input.dataset, BIGQUERY_ID_RE),
     table: requireValue("table ID", input.table, BIGQUERY_ID_RE),
@@ -28,7 +45,9 @@ export function validateConfiguration(input, config = REPORT_CONFIG) {
       input.billingProject || project,
       PROJECT_RE,
     ),
-  });
+  };
+  rejectSentinelCollisions(values, config);
+  return Object.freeze(values);
 }
 
 export function buildDashboardUrl(input, config = REPORT_CONFIG) {

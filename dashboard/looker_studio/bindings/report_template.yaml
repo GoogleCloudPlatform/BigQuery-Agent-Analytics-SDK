@@ -10,6 +10,17 @@ credential_mode: VIEWERS
 link_access: PUBLIC
 publishing_mode: MANUAL
 published_date: "2026-07-24"
+# This attestation covers the reviewed repository artifact. It does not prove
+# that the mutable external Looker Studio report still embeds these bytes.
+reviewed_template_sql:
+  sha256: 4b9af4390b6445f4af3856a395f17a85eaaf20cdc6b80d1f34a0645575b76881
+  reviewed_date: "2026-07-24"
+  scope: repository_artifact_only
+governance:
+  live_report_owner_class: CONTRIBUTOR_MANAGED
+  sentinel_fixture_owner_class: CONTRIBUTOR_MANAGED
+  target_owner_class: GOOGLE_MANAGED
+  transfer_status: PENDING_MAINTAINER
 default_date_range:
   mode: rolling
   start_offset_days: 365

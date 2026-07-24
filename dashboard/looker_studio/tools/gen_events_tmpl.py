@@ -8,6 +8,11 @@ which is the static v1 intersection: 1.36.1 and 2.4.0 are supersets.
 Regenerating must be byte-identical (CI asserts no drift).
 """
 
+import argparse
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
 VIEWS = [
     "user_message_received",
     "llm_request",
@@ -123,7 +128,8 @@ def branch(view: str) -> str:
   return "\n".join(lines)
 
 
-def main() -> None:
+def generate() -> str:
+  """Return the deterministic logical all-events query."""
   header = """\
 -- events_v1.sql.tmpl — logical all-events union over the BQAA-generated
 -- views (static v1 intersection = the ADK 1.27.0 inventory, 15 views).
@@ -157,9 +163,19 @@ WHERE e.timestamp >= TIMESTAMP(PARSE_DATE('%Y%m%d', @DS_START_DATE), 'UTC')
   AND e.timestamp < TIMESTAMP(
         DATE_ADD(PARSE_DATE('%Y%m%d', @DS_END_DATE), INTERVAL 1 DAY), 'UTC')
 """
-  with open("sql/events_v1.sql.tmpl", "w") as fh:
-    fh.write(header + body + footer)
-  print(f"wrote sql/events_v1.sql.tmpl ({len(VIEWS)} branches)")
+  return header + body + footer
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      "--output",
+      type=pathlib.Path,
+      default=ROOT / "sql/events_v1.sql.tmpl",
+  )
+  args = parser.parse_args()
+  args.output.write_text(generate())
+  print(f"wrote {args.output} ({len(VIEWS)} branches)")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,13 @@ and has manual report publishing enabled. Its published title is
 sign-in; after sign-in, the Linking API review dialog shows the substituted
 custom SQL and the caller's billing project before the caller acknowledges it.
 
+The live report and sentinel fixture are contributor-managed pending transfer
+to Google-managed ownership. `bindings/report_template.yaml` records a
+SHA-256 and review date for the repository's rendered query. Its deliberately
+narrow `repository_artifact_only` scope must not be represented as an
+attestation of the mutable live report. Until transfer, a release reviewer
+must manually compare the live embedded query with the reviewed artifact.
+
 Token fields accept both BQAA `usage_metadata` shapes observed in supported
 installations, in this order:
 

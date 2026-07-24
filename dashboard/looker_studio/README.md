@@ -152,6 +152,14 @@ A Google sign-in is required because the template deliberately uses Viewer's
 Credentials. The template itself is public, manually published, and backed
 only by the committed synthetic sentinel fixture.
 
+The report and sentinel fixture are currently contributor-managed pending a
+maintainer-approved transfer to Google-managed ownership. The reviewed
+repository query's SHA-256 and review date are recorded in
+`bindings/report_template.yaml`. That attestation detects repository drift;
+it cannot prove that a mutable external Looker Studio report still embeds the
+same query. Until ownership is transferred, publication review must manually
+confirm the live template against the reviewed SQL.
+
 `--table` identifies the BQAA base table for validation only. Dashboard charts
 read the plugin-generated views selected by `--prefix`; a raw table alone is
 not sufficient for this parity dashboard.

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -26,15 +27,19 @@ ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "dashboard/looker_studio"
 
 
-def _load_hydration_module():
-  module_path = DASHBOARD / "tools/hydrate_dashboard.py"
+def _load_dashboard_module(name):
+  module_path = DASHBOARD / f"tools/{name}.py"
   spec = importlib.util.spec_from_file_location(
-      "looker_studio_hydration", module_path
+      f"looker_studio_{name}", module_path
   )
   assert spec is not None and spec.loader is not None
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
   return module
+
+
+def _load_hydration_module():
+  return _load_dashboard_module("hydrate_dashboard")
 
 
 def test_portable_linking_api_configuration():
@@ -78,6 +83,79 @@ def test_hydration_identifiers_fail_closed(label, value, pattern):
   hydration = _load_hydration_module()
   with pytest.raises(ValueError):
     hydration.require_identifier(label, value, getattr(hydration, pattern))
+
+
+@pytest.mark.parametrize(
+    ("project", "dataset", "prefix", "billing_project", "report_name"),
+    [
+        (
+            "vsentinelbqaaproj",
+            "agent_analytics",
+            "v",
+            "billing-project-123",
+            "Customer BQAA",
+        ),
+        (
+            "customer-project-123",
+            "customer_vsentinelbqaa_data",
+            "v",
+            "billing-project-123",
+            "Customer BQAA",
+        ),
+        (
+            "customer-project-123",
+            "agent_analytics",
+            "bqaa_fixture_adk_1_27_0_custom",
+            "billing-project-123",
+            "Customer BQAA",
+        ),
+    ],
+)
+def test_hydration_rejects_sequential_replacement_collisions(
+    project, dataset, prefix, billing_project, report_name
+):
+  hydration = _load_hydration_module()
+  with pytest.raises(ValueError, match="reserved template sentinel"):
+    hydration.build_link(
+        project,
+        dataset,
+        prefix,
+        billing_project,
+        report_name,
+    )
+
+
+def test_generated_sql_artifacts_cannot_drift(tmp_path):
+  generator = _load_dashboard_module("gen_events_tmpl")
+  renderer = _load_dashboard_module("render_template")
+  bindings = yaml.safe_load(
+      (DASHBOARD / "bindings/template_bindings.yaml").read_text()
+  )["placeholders"]
+
+  logical_events = generator.generate()
+  generated_logical = tmp_path / "events_v1.sql.tmpl"
+  generated_logical.write_text(logical_events)
+  assert (
+      generated_logical.read_bytes()
+      == (DASHBOARD / "sql/events_v1.sql.tmpl").read_bytes()
+  )
+
+  expected = {
+      "sql/events_v1.template.sql": renderer.render_text(
+          logical_events,
+          bindings,
+          "sql/events_v1.sql.tmpl",
+      ),
+      "sql/preflight.template.sql": renderer.render_text(
+          (DASHBOARD / "sql/preflight.sql.tmpl").read_text(),
+          bindings,
+          "sql/preflight.sql.tmpl",
+      ),
+  }
+  for path, rendered in expected.items():
+    generated = tmp_path / Path(path).name
+    generated.write_text(rendered)
+    assert generated.read_bytes() == (DASHBOARD / path).read_bytes()
 
 
 def test_chart_manifest_and_independent_queries_are_complete():
@@ -124,6 +202,13 @@ def test_report_and_web_bindings_cannot_drift():
       "project": bindings["PROJECT"],
       "dataset": bindings["DATASET"],
       "viewPrefix": bindings["VIEW_PREFIX"],
+  }
+  attestation = report["reviewed_template_sql"]
+  template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
+  assert attestation == {
+      "sha256": hashlib.sha256(template).hexdigest(),
+      "reviewed_date": "2026-07-24",
+      "scope": "repository_artifact_only",
   }
 
 
