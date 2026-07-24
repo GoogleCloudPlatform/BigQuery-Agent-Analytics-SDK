@@ -1,0 +1,3646 @@
+# Consumer snapshot of the reviewed dashboard contract.
+meta:
+  source_repo: looker-open-source/agent-analytics-block
+  pinned_commit: fe6423cc9775b6dc61f7f7047dd4424603ddb3a1
+  source_files:
+  - dashboards/agent_analytics_usage.dashboard.lookml
+  - dashboards/agent_analytics_performance.dashboard.lookml
+  generator: bigquery-agent-analytics-dashboard@0e0e7a4:tools/lookml_to_spec.py
+  contract_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#365
+controls:
+- id: usage-control-date
+  source_dashboard: usage
+  name: Date
+  field: agent_events.timestamp_date
+  default_value: 14 day
+  allow_multiple_values: true
+  ui_config:
+    type: relative_timeframes
+    display: inline
+- id: usage-control-trace-id
+  source_dashboard: usage
+  name: Trace ID
+  field: agent_events.trace_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: usage-control-agent
+  source_dashboard: usage
+  name: Agent
+  field: agent_events.agent
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: usage-control-user-id
+  source_dashboard: usage
+  name: User ID
+  field: agent_events.user_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: usage-control-span-id
+  source_dashboard: usage
+  name: Span ID
+  field: agent_events.span_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: performance-control-date
+  source_dashboard: performance
+  name: Date
+  field: agent_events.timestamp_date
+  default_value: 7 day
+  allow_multiple_values: true
+  ui_config:
+    type: relative_timeframes
+    display: inline
+- id: performance-control-trace-id
+  source_dashboard: performance
+  name: Trace ID
+  field: agent_events.trace_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: performance-control-agent
+  source_dashboard: performance
+  name: Agent
+  field: agent_events.agent
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: performance-control-user-id
+  source_dashboard: performance
+  name: User ID
+  field: agent_events.user_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: performance-control-span-id
+  source_dashboard: performance
+  name: Span ID
+  field: agent_events.span_id
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+- id: performance-control-tool-name
+  source_dashboard: performance
+  name: Tool Name
+  field: v_tool_completed.tool_name
+  default_value: ''
+  allow_multiple_values: true
+  ui_config:
+    type: tag_list
+    display: popover
+charts:
+- id: usage-token-usage-split-by-agent
+  source_dashboard: usage
+  source_tile: Token Usage split by Agent
+  page: Token Consumption
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.agent
+  - v_llm_response.total_tokens_consumed
+  dimensions:
+  - agent_events.agent
+  measures:
+  - v_llm_response.total_tokens_consumed
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    v_llm_response.total_tokens_consumed: NOT NULL
+  sorts:
+  - v_llm_response.total_tokens_consumed desc
+  limit: 5
+  column_limit: 50
+  listen:
+    Trace ID: agent_events.trace_id
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 5
+    col: 12
+    width: 12
+    height: 8
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    hidden_series:
+    - TechSupport - v_llm_response.total_tokens_consumed
+    - SupportBot - v_llm_response.total_tokens_consumed
+    series_colors:
+      TechSupport - v_llm_response.total_tokens_consumed: '#9334e6'
+      v_llm_response.total_tokens_consumed: '#f9ab00'
+    hidden_pivots: {}
+    show_null_points: true
+    interpolation: linear
+    defaults_version: 1
+    note_state: collapsed
+    note_display: hover
+    note_text: A breakdown of total token consumption distributed across your different agents, highlighting
+      which bots are the most resource-intensive.
+  oracle_query: oracle/queries/usage-token-usage-split-by-agent.sql
+- id: usage-top-5-users-with-most-tokens-consumption
+  source_dashboard: usage
+  source_tile: Top 5 users with most Tokens consumption
+  page: Token Consumption
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.user_id
+  - v_llm_response.total_tokens_consumed
+  dimensions:
+  - agent_events.user_id
+  measures:
+  - v_llm_response.total_tokens_consumed
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 5
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 5
+    col: 0
+    width: 12
+    height: 8
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    show_null_points: true
+    interpolation: linear
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A leaderboard of the top 5 individual end-users who have driven the highest token costs.
+  oracle_query: oracle/queries/usage-top-5-users-with-most-tokens-consumption.sql
+- id: usage-total-tokens-consumption-over-the-time
+  source_dashboard: usage
+  source_tile: Total Tokens Consumption Over the Time
+  page: Token Consumption
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - v_llm_response.total_tokens_consumed
+  - agent_events.timestamp_date
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - v_llm_response.total_tokens_consumed
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters: {}
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 0
+    col: 9
+    width: 15
+    height: 5
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_llm_response.total_tokens_consumed: '#e8710a'
+    defaults_version: 1
+    show_row_numbers: true
+    transpose: false
+    truncate_text: true
+    hide_totals: false
+    hide_row_totals: false
+    size_to_fit: true
+    table_theme: white
+    enable_conditional_formatting: false
+    header_text_alignment: left
+    header_font_size: 12
+    rows_font_size: 12
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    ordering: none
+    show_null_labels: false
+    note_state: collapsed
+    note_display: hover
+    note_text: A daily time-series area chart tracking the aggregate volume of tokens burned
+  oracle_query: oracle/queries/usage-total-tokens-consumption-over-the-time.sql
+- id: usage-total-tokens
+  source_dashboard: usage
+  source_tile: Total Tokens
+  page: Token Consumption
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.pop_total_tokens_current
+  - v_llm_response.pop_total_tokens_change
+  dimensions: []
+  measures:
+  - v_llm_response.pop_total_tokens_current
+  - v_llm_response.pop_total_tokens_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 14 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.pop_date_filter
+  geometry:
+    row: 0
+    col: 0
+    width: 9
+    height: 5
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    comparison_label: VS Previous Period
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_llm_response.total_tokens_consumed: '#e8710a'
+    defaults_version: 1
+    show_row_numbers: true
+    transpose: false
+    truncate_text: true
+    hide_totals: false
+    hide_row_totals: false
+    size_to_fit: true
+    table_theme: white
+    header_text_alignment: left
+    header_font_size: 12
+    rows_font_size: 12
+    ordering: none
+    show_null_labels: false
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: The total aggregate number of prompt and completion tokens consumed by all LLM requests
+      within the selected timeframe
+  oracle_query: oracle/queries/usage-total-tokens.sql
+- id: usage-top-5-users-with-most-traces
+  source_dashboard: usage
+  source_tile: Top 5 users with most Traces
+  page: Agent & Sessions
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.user_id
+  - agent_events.total_traces
+  dimensions:
+  - agent_events.user_id
+  measures:
+  - agent_events.total_traces
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - agent_events.total_traces desc 0
+  limit: 5
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 7
+    col: 0
+    width: 12
+    height: 8
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    show_null_points: true
+    interpolation: linear
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A leaderboard of your most active power-users, ranked by the total number of distinct interactions
+      they have initiated.
+  oracle_query: oracle/queries/usage-top-5-users-with-most-traces.sql
+- id: usage-total-traces
+  source_dashboard: usage
+  source_tile: Total Traces
+  page: Agent & Sessions
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - agent_events.pop_total_traces_current
+  - agent_events.pop_total_traces_change
+  dimensions: []
+  measures:
+  - agent_events.pop_total_traces_current
+  - agent_events.pop_total_traces_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 14 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.pop_date_filter
+  geometry:
+    row: 2
+    col: 0
+    width: 9
+    height: 5
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    comparison_label: VS Previous Period
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_llm_response.total_tokens_consumed: '#e8710a'
+    defaults_version: 1
+    show_row_numbers: true
+    transpose: false
+    truncate_text: true
+    hide_totals: false
+    hide_row_totals: false
+    size_to_fit: true
+    table_theme: white
+    header_text_alignment: left
+    header_font_size: 12
+    rows_font_size: 12
+    ordering: none
+    show_null_labels: false
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: The total number of unique, end-to-end user interactions (journeys) processed by the agents
+  oracle_query: oracle/queries/usage-total-traces.sql
+- id: usage-traces-split-by-agent
+  source_dashboard: usage
+  source_tile: Traces split by Agent
+  page: Agent & Sessions
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.agent
+  - agent_events.total_traces
+  dimensions:
+  - agent_events.agent
+  measures:
+  - agent_events.total_traces
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    v_llm_response.total_tokens_consumed: NOT NULL
+  sorts:
+  - agent_events.total_traces desc 0
+  limit: 5
+  column_limit: 50
+  listen:
+    Trace ID: agent_events.trace_id
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 7
+    col: 12
+    width: 12
+    height: 8
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    hidden_series:
+    - TechSupport - v_llm_response.total_tokens_consumed
+    - SupportBot - v_llm_response.total_tokens_consumed
+    series_colors:
+      TechSupport - v_llm_response.total_tokens_consumed: '#9334e6'
+      v_llm_response.total_tokens_consumed: '#f9ab00'
+      agent_events.total_traces: '#f9ab00'
+    hidden_pivots: {}
+    show_null_points: true
+    interpolation: linear
+    defaults_version: 1
+    note_state: collapsed
+    note_display: hover
+    note_text: A distribution of total traffic across your agents, showing which bots are handling the
+      highest volume of user requests.
+  oracle_query: oracle/queries/usage-traces-split-by-agent.sql
+- id: usage-total-traces-generation-over-the-time
+  source_dashboard: usage
+  source_tile: Total Traces Generation Over the Time
+  page: Agent & Sessions
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - agent_events.timestamp_date
+  - agent_events.total_traces
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - agent_events.total_traces
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters: {}
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 2
+    col: 9
+    width: 15
+    height: 5
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_llm_response.total_tokens_consumed: '#1e8e3e'
+    defaults_version: 1
+    show_row_numbers: true
+    transpose: false
+    truncate_text: true
+    hide_totals: false
+    hide_row_totals: false
+    size_to_fit: true
+    table_theme: white
+    enable_conditional_formatting: false
+    header_text_alignment: left
+    header_font_size: 12
+    rows_font_size: 12
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    ordering: none
+    show_null_labels: false
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A daily time-series area chart showing the volume of unique agent interactions
+  oracle_query: oracle/queries/usage-total-traces-generation-over-the-time.sql
+- id: usage-total-sessions
+  source_dashboard: usage
+  source_tile: Total Sessions
+  page: Agent & Sessions
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - agent_events.pop_total_sessions_current
+  - agent_events.pop_total_sessions_change
+  dimensions: []
+  measures:
+  - agent_events.pop_total_sessions_current
+  - agent_events.pop_total_sessions_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 7 days
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Date: agent_events.timestamp_date
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+  geometry:
+    row: 17
+    col: 0
+    width: 8
+    height: 7
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    comparison_label: vs Last Period
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    defaults_version: 1
+  oracle_query: oracle/queries/usage-total-sessions.sql
+- id: usage-number-of-sessions-trend
+  source_dashboard: usage
+  source_tile: Number of Sessions Trend
+  page: Agent & Sessions
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - agent_events.total_sessions
+  - agent_events.timestamp_date
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - agent_events.total_sessions
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Date: agent_events.timestamp_date
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+  geometry:
+    row: 17
+    col: 8
+    width: 16
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_sessions: '#e52592'
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: vs Last Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+  oracle_query: oracle/queries/usage-number-of-sessions-trend.sql
+- id: usage-top-5-agents-split-by-session-count
+  source_dashboard: usage
+  source_tile: Top 5 Agents Split by Session Count
+  page: Agent & Sessions
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.total_sessions
+  - agent_events.agent
+  dimensions:
+  - agent_events.agent
+  measures:
+  - agent_events.total_sessions
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - agent_events.total_sessions desc 0
+  limit: 5
+  column_limit: 50
+  listen:
+    Date: agent_events.timestamp_date
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+  geometry:
+    row: 24
+    col: 1
+    width: 22
+    height: 9
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_sessions: '#e8710a'
+    show_null_points: true
+    interpolation: linear
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: vs Last Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+  oracle_query: oracle/queries/usage-top-5-agents-split-by-session-count.sql
+- id: usage-tool-invocations
+  source_dashboard: usage
+  source_tile: Tool Invocations
+  page: Tool Usage
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.total_invocations
+  - v_tool_completed.tool_name
+  dimensions:
+  - v_tool_completed.tool_name
+  measures:
+  - agent_events.total_invocations
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    v_tool_completed.tool_name: -NULL
+  sorts:
+  - agent_events.total_invocations desc
+  limit: 10
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 6
+    col: 0
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+    defaults_version: 1
+    note_state: collapsed
+    note_display: hover
+    note_text: A ranked list showing which specific backend tools and functions are being executed the
+      most frequently by the LLMs.
+  oracle_query: oracle/queries/usage-tool-invocations.sql
+- id: usage-events-by-agent
+  source_dashboard: usage
+  source_tile: Events By Agent
+  page: Tool Usage
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.total_events
+  - agent_events.agent
+  dimensions:
+  - agent_events.agent
+  measures:
+  - agent_events.total_events
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.event_type: '"TOOL_COMPLETED"'
+  sorts:
+  - agent_events.total_events desc 0
+  limit: 10
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 6
+    col: 12
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A breakdown of total raw lifecycle events (including tool calls, errors, and LLM requests)
+      distributed across your agents.
+  oracle_query: oracle/queries/usage-events-by-agent.sql
+- id: usage-tool-calls-over-time
+  source_dashboard: usage
+  source_tile: Tool Calls Over Time
+  page: Tool Usage
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - agent_events.total_events
+  - v_tool_completed.tool_name
+  - agent_events.timestamp_date
+  dimensions:
+  - v_tool_completed.tool_name
+  - agent_events.timestamp_date
+  measures:
+  - agent_events.total_events
+  pivots:
+  - v_tool_completed.tool_name
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters:
+    agent_events.event_type: '"TOOL_COMPLETED"'
+    agent_events.timestamp_date: 14 days
+  sorts:
+  - v_tool_completed.tool_name
+  - agent_events.timestamp_date desc
+  limit: 5000
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 0
+    col: 0
+    width: 24
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: monotone
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A stacked area chart tracking the daily execution volume of specific backend tools and
+      functions
+  oracle_query: oracle/queries/usage-tool-calls-over-time.sql
+- id: usage-total-calls
+  source_dashboard: usage
+  source_tile: Total Calls
+  page: LLM Interactions
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.pop_llm_calls_current
+  - v_llm_response.pop_llm_calls_change
+  dimensions: []
+  measures:
+  - v_llm_response.pop_llm_calls_current
+  - v_llm_response.pop_llm_calls_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 7 days
+  sorts: []
+  limit: 5000
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.pop_date_filter
+  geometry:
+    row: 0
+    col: 0
+    width: 8
+    height: 6
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    comparison_label: V Previous Period
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: monotone
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: The absolute number of individual requests sent to the underlying LLM models.
+  oracle_query: oracle/queries/usage-total-calls.sql
+- id: usage-llm-call-trends
+  source_dashboard: usage
+  source_tile: LLM Call Trends
+  page: LLM Interactions
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - v_llm_response.total_llm_calls
+  - agent_events.timestamp_minute
+  dimensions:
+  - agent_events.timestamp_minute
+  measures:
+  - v_llm_response.total_llm_calls
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_minute
+  tile_filters:
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - agent_events.timestamp_minute desc
+  limit: 5000
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 0
+    col: 8
+    width: 16
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: monotone
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#8ab4f8'
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: V Previous Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A highly granular scatter plot showing the frequency and clustering of LLM requests over
+      time.
+  oracle_query: oracle/queries/usage-llm-call-trends.sql
+- id: usage-top-5-agents-by-llm-calls
+  source_dashboard: usage
+  source_tile: Top 5 Agents by LLM Calls
+  page: LLM Interactions
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - v_llm_response.total_llm_calls
+  - agent_events.agent
+  dimensions:
+  - agent_events.agent
+  measures:
+  - v_llm_response.total_llm_calls
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - v_llm_response.total_llm_calls desc 0
+  limit: 500
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 6
+    col: 1
+    width: 21
+    height: 8
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#f28b82'
+    show_null_points: true
+    interpolation: monotone
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: V Previous Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A ranking of which agents are triggering the most calls to the LLM backend.
+  oracle_query: oracle/queries/usage-top-5-agents-by-llm-calls.sql
+- id: usage-total-users
+  source_dashboard: usage
+  source_tile: Total Users
+  page: User Analytics
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - agent_events.pop_total_users_current
+  - agent_events.pop_total_users_change
+  dimensions: []
+  measures:
+  - agent_events.pop_total_users_current
+  - agent_events.pop_total_users_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.pop_date_filter
+  geometry:
+    row: 2
+    col: 0
+    width: 8
+    height: 7
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#f28b82'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    show_null_points: true
+    interpolation: monotone
+    smart_single_value_size: false
+    comparison_label: V Previous Period
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: The count of unique, distinct end-users who have interacted with any agent during the selected
+      timeframe.
+  oracle_query: oracle/queries/usage-total-users.sql
+- id: usage-user-growth-over-time
+  source_dashboard: usage
+  source_tile: User Growth Over Time
+  page: User Analytics
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - agent_events.total_users
+  - agent_events.timestamp_date
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - agent_events.total_users
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters:
+    agent_events.timestamp_date: 7 days
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 5
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 2
+    col: 8
+    width: 16
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: monotone
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#f28b82'
+      agent_events.total_users: '#1e8e3e'
+    ordering: none
+    show_null_labels: false
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: V Previous Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A smoothed area chart tracking the daily count of active unique users to measure platform
+      adoption and retention.
+  oracle_query: oracle/queries/usage-user-growth-over-time.sql
+- id: usage-top-5-users-by-session
+  source_dashboard: usage
+  source_tile: Top 5 Users by Session
+  page: User Analytics
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.user_id
+  - agent_events.total_sessions
+  dimensions:
+  - agent_events.user_id
+  measures:
+  - agent_events.total_sessions
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts:
+  - agent_events.total_sessions desc 0
+  limit: 5
+  column_limit: 5
+  listen:
+    Date: agent_events.timestamp_date
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+  geometry:
+    row: 9
+    col: 0
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    show_null_points: false
+    interpolation: monotone
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#e8710a'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#f28b82'
+      agent_events.total_users: '#1e8e3e'
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: V Previous Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A leaderboard ranking your top power-users by the total number of distinct conversation
+      sessions they have maintained.
+  oracle_query: oracle/queries/usage-top-5-users-by-session.sql
+- id: usage-top-5-users-by-events
+  source_dashboard: usage
+  source_tile: Top 5 Users by Events
+  page: User Analytics
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - agent_events.user_id
+  - agent_events.total_events
+  dimensions:
+  - agent_events.user_id
+  measures:
+  - agent_events.total_events
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts:
+  - agent_events.total_events desc 0
+  limit: 5
+  column_limit: 5
+  listen:
+    Date: agent_events.timestamp_date
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+  geometry:
+    row: 9
+    col: 12
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      agent_events.total_invocations: '#1e8e3e'
+      agent_events.total_events: '#f9ab00'
+      execute_sql - agent_events.total_events: '#e8710a'
+      v_llm_response.total_llm_calls: '#f28b82'
+      agent_events.total_users: '#1e8e3e'
+    show_null_points: false
+    interpolation: monotone
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    comparison_label: V Previous Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A ranking of users based on the raw volume of lifecycle events they generate, indicating
+      deep, complex usage of the system.
+  oracle_query: oracle/queries/usage-top-5-users-by-events.sql
+- id: performance-average-tool-latency-ms
+  source_dashboard: performance
+  source_tile: Average Tool Latency (ms)
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_completed.average_tool_latency
+  dimensions: []
+  measures:
+  - v_tool_completed.average_tool_latency
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Trace ID: agent_events.trace_id
+    Agent: agent_events.agent
+    User ID: agent_events.user_id
+    Span ID: agent_events.span_id
+    Tool Name: v_tool_completed.tool_name
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 2
+    col: 0
+    width: 7
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    defaults_version: 1
+    note_state: collapsed
+    note_display: hover
+    note_text: The average time (in milliseconds) it takes for backend tools and functions to execute
+      and return a result.
+  oracle_query: oracle/queries/performance-average-tool-latency-ms.sql
+- id: performance-tool-latency-trend
+  source_dashboard: performance
+  source_tile: Tool Latency Trend
+  page: Latency
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - v_tool_completed.timestamp_date
+  - v_tool_completed.average_tool_latency
+  dimensions:
+  - v_tool_completed.timestamp_date
+  measures:
+  - v_tool_completed.average_tool_latency
+  pivots: []
+  fill_fields:
+  - v_tool_completed.timestamp_date
+  tile_filters: {}
+  sorts:
+  - v_tool_completed.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 2
+    col: 7
+    width: 17
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+      v_tool_completed.average_tool_latency: '#f9ab00'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: An area chart tracking the historical trend of average tool execution times, helping identify
+      backend performance degradation.
+  oracle_query: oracle/queries/performance-tool-latency-trend.sql
+- id: performance-average-llm-latency-in-ms
+  source_dashboard: performance
+  source_tile: Average LLM Latency (in ms)
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.average_llm_latency
+  dimensions: []
+  measures:
+  - v_llm_response.average_llm_latency
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 15
+    col: 0
+    width: 8
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    hidden_fields: []
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    note_state: collapsed
+    note_display: hover
+    note_text: The average round-trip time (in milliseconds) it takes for the LLM to process a prompt
+      and return a response.
+    title_hidden: true
+  oracle_query: oracle/queries/performance-average-llm-latency-in-ms.sql
+- id: performance-llm-latency-trend
+  source_dashboard: performance
+  source_tile: LLM Latency Trend
+  page: Latency
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - v_llm_response.average_llm_latency
+  - agent_events.timestamp_date
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - v_llm_response.average_llm_latency
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters: {}
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 15
+    col: 8
+    width: 16
+    height: 6
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+      v_llm_response.average_llm_latency: '#e8710a'
+    series_labels: {}
+    font_size_main: '14'
+    orientation: auto
+    hidden_fields: []
+    hidden_points_if_no: []
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    style_v_llm_response.average_llm_latency: '#3A4245'
+    show_title_v_llm_response.average_llm_latency: true
+    title_placement_v_llm_response.average_llm_latency: above
+    value_format_v_llm_response.average_llm_latency: ''
+    note_state: collapsed
+    note_display: hover
+    note_text: An area chart tracking historical LLM response times to identify API throttling or model
+      performance issues.
+  oracle_query: oracle/queries/performance-llm-latency-trend.sql
+- id: performance-p50-tool-latency
+  source_dashboard: performance
+  source_tile: P50 Tool Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  dimensions: []
+  measures:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 10
+    col: 0
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    global_tooltip_options:
+      custom_tooltips_enabled: false
+      template: "\n<div class=\"section\">\n  <div class=\"header\">P50 Tool Latency</div>\n  <div class=\"\
+        value\">{{ v_tool_completed.p50_tool_latency }}</div>\n</div>\n<div class=\"section\">\n  <div\
+        \ class=\"header\">P75 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p75_tool_latency\
+        \ }}</div>\n</div>\n<div class=\"section\">\n  <div class=\"header\">P90 Tool Latency</div>\n\
+        \  <div class=\"value\">{{ v_tool_completed.p90_tool_latency }}</div>\n</div>\n<div class=\"section\"\
+        >\n  <div class=\"header\">P99 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p99_tool_latency\
+        \ }}</div>\n</div>"
+      style:
+        font_size: 12
+        font_family: Roboto, 'Noto Sans', 'Noto Sans JP', 'Noto Sans CJK KR', 'Noto Sans Arabic UI', 'Noto
+          Sans Devanagari UI', 'Noto Sans Hebrew', 'Noto Sans Thai UI', Helvetica, Arial, sans-serif
+        font_color: '#FFFFFF'
+        background_color: '#262D33'
+        border_radius: 4
+        border_color: transparent
+        box_shadow: none
+        align: left
+    single_value_title: P50 Tool Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_tool_completed.p75_tool_latency
+    - v_tool_completed.p90_tool_latency
+    - v_tool_completed.p99_tool_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p90_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p90_tool_latency: true
+    title_placement_v_tool_completed.p90_tool_latency: above
+    value_format_v_tool_completed.p90_tool_latency: ''
+    show_comparison_v_tool_completed.p90_tool_latency: false
+    style_v_tool_completed.p99_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p99_tool_latency: true
+    title_placement_v_tool_completed.p99_tool_latency: above
+    value_format_v_tool_completed.p99_tool_latency: ''
+    show_comparison_v_tool_completed.p99_tool_latency: false
+  oracle_query: oracle/queries/performance-p50-tool-latency.sql
+- id: performance-p75-tool-latency
+  source_dashboard: performance
+  source_tile: P75 Tool Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  dimensions: []
+  measures:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 10
+    col: 6
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    global_tooltip_options:
+      custom_tooltips_enabled: false
+      template: "\n<div class=\"section\">\n  <div class=\"header\">P50 Tool Latency</div>\n  <div class=\"\
+        value\">{{ v_tool_completed.p50_tool_latency }}</div>\n</div>\n<div class=\"section\">\n  <div\
+        \ class=\"header\">P75 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p75_tool_latency\
+        \ }}</div>\n</div>\n<div class=\"section\">\n  <div class=\"header\">P90 Tool Latency</div>\n\
+        \  <div class=\"value\">{{ v_tool_completed.p90_tool_latency }}</div>\n</div>\n<div class=\"section\"\
+        >\n  <div class=\"header\">P99 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p99_tool_latency\
+        \ }}</div>\n</div>"
+      style:
+        font_size: 12
+        font_family: Roboto, 'Noto Sans', 'Noto Sans JP', 'Noto Sans CJK KR', 'Noto Sans Arabic UI', 'Noto
+          Sans Devanagari UI', 'Noto Sans Hebrew', 'Noto Sans Thai UI', Helvetica, Arial, sans-serif
+        font_color: '#FFFFFF'
+        background_color: '#262D33'
+        border_radius: 4
+        border_color: transparent
+        box_shadow: none
+        align: left
+    single_value_title: P75 Tool Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_tool_completed.p90_tool_latency
+    - v_tool_completed.p99_tool_latency
+    - v_tool_completed.p50_tool_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p90_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p90_tool_latency: true
+    title_placement_v_tool_completed.p90_tool_latency: above
+    value_format_v_tool_completed.p90_tool_latency: ''
+    show_comparison_v_tool_completed.p90_tool_latency: false
+    style_v_tool_completed.p99_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p99_tool_latency: true
+    title_placement_v_tool_completed.p99_tool_latency: above
+    value_format_v_tool_completed.p99_tool_latency: ''
+    show_comparison_v_tool_completed.p99_tool_latency: false
+  oracle_query: oracle/queries/performance-p75-tool-latency.sql
+- id: performance-p90-tool-latency
+  source_dashboard: performance
+  source_tile: P90 Tool Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  dimensions: []
+  measures:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 10
+    col: 12
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    global_tooltip_options:
+      custom_tooltips_enabled: false
+      template: "\n<div class=\"section\">\n  <div class=\"header\">P50 Tool Latency</div>\n  <div class=\"\
+        value\">{{ v_tool_completed.p50_tool_latency }}</div>\n</div>\n<div class=\"section\">\n  <div\
+        \ class=\"header\">P75 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p75_tool_latency\
+        \ }}</div>\n</div>\n<div class=\"section\">\n  <div class=\"header\">P90 Tool Latency</div>\n\
+        \  <div class=\"value\">{{ v_tool_completed.p90_tool_latency }}</div>\n</div>\n<div class=\"section\"\
+        >\n  <div class=\"header\">P99 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p99_tool_latency\
+        \ }}</div>\n</div>"
+      style:
+        font_size: 12
+        font_family: Roboto, 'Noto Sans', 'Noto Sans JP', 'Noto Sans CJK KR', 'Noto Sans Arabic UI', 'Noto
+          Sans Devanagari UI', 'Noto Sans Hebrew', 'Noto Sans Thai UI', Helvetica, Arial, sans-serif
+        font_color: '#FFFFFF'
+        background_color: '#262D33'
+        border_radius: 4
+        border_color: transparent
+        box_shadow: none
+        align: left
+    single_value_title: P90 Tool Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_tool_completed.p99_tool_latency
+    - v_tool_completed.p50_tool_latency
+    - v_tool_completed.p75_tool_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p90_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p90_tool_latency: true
+    title_placement_v_tool_completed.p90_tool_latency: above
+    value_format_v_tool_completed.p90_tool_latency: ''
+    show_comparison_v_tool_completed.p90_tool_latency: false
+    style_v_tool_completed.p99_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p99_tool_latency: true
+    title_placement_v_tool_completed.p99_tool_latency: above
+    value_format_v_tool_completed.p99_tool_latency: ''
+    show_comparison_v_tool_completed.p99_tool_latency: false
+  oracle_query: oracle/queries/performance-p90-tool-latency.sql
+- id: performance-p99-tool-latency
+  source_dashboard: performance
+  source_tile: P99 Tool Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  dimensions: []
+  measures:
+  - v_tool_completed.p50_tool_latency
+  - v_tool_completed.p75_tool_latency
+  - v_tool_completed.p90_tool_latency
+  - v_tool_completed.p99_tool_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 10
+    col: 18
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    global_tooltip_options:
+      custom_tooltips_enabled: false
+      template: "\n<div class=\"section\">\n  <div class=\"header\">P50 Tool Latency</div>\n  <div class=\"\
+        value\">{{ v_tool_completed.p50_tool_latency }}</div>\n</div>\n<div class=\"section\">\n  <div\
+        \ class=\"header\">P75 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p75_tool_latency\
+        \ }}</div>\n</div>\n<div class=\"section\">\n  <div class=\"header\">P90 Tool Latency</div>\n\
+        \  <div class=\"value\">{{ v_tool_completed.p90_tool_latency }}</div>\n</div>\n<div class=\"section\"\
+        >\n  <div class=\"header\">P99 Tool Latency</div>\n  <div class=\"value\">{{ v_tool_completed.p99_tool_latency\
+        \ }}</div>\n</div>"
+      style:
+        font_size: 12
+        font_family: Roboto, 'Noto Sans', 'Noto Sans JP', 'Noto Sans CJK KR', 'Noto Sans Arabic UI', 'Noto
+          Sans Devanagari UI', 'Noto Sans Hebrew', 'Noto Sans Thai UI', Helvetica, Arial, sans-serif
+        font_color: '#FFFFFF'
+        background_color: '#262D33'
+        border_radius: 4
+        border_color: transparent
+        box_shadow: none
+        align: left
+    single_value_title: P99 Tool Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_tool_completed.p50_tool_latency
+    - v_tool_completed.p75_tool_latency
+    - v_tool_completed.p90_tool_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p90_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p90_tool_latency: true
+    title_placement_v_tool_completed.p90_tool_latency: above
+    value_format_v_tool_completed.p90_tool_latency: ''
+    show_comparison_v_tool_completed.p90_tool_latency: false
+    style_v_tool_completed.p99_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p99_tool_latency: true
+    title_placement_v_tool_completed.p99_tool_latency: above
+    value_format_v_tool_completed.p99_tool_latency: ''
+    show_comparison_v_tool_completed.p99_tool_latency: false
+  oracle_query: oracle/queries/performance-p99-tool-latency.sql
+- id: performance-p50-llm-latency
+  source_dashboard: performance
+  source_tile: P50 Llm Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  dimensions: []
+  measures:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 23
+    col: 0
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    single_value_title: P50 Llm Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_llm_response.p75_llm_latency
+    - v_llm_response.p90_llm_latency
+    - v_llm_response.p99_llm_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+  oracle_query: oracle/queries/performance-p50-llm-latency.sql
+- id: performance-p75-llm-latency
+  source_dashboard: performance
+  source_tile: P75 Llm Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  dimensions: []
+  measures:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 23
+    col: 12
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    single_value_title: P75 Llm Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_llm_response.p90_llm_latency
+    - v_llm_response.p99_llm_latency
+    - v_llm_response.p50_llm_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+  oracle_query: oracle/queries/performance-p75-llm-latency.sql
+- id: performance-p90-llm-latency
+  source_dashboard: performance
+  source_tile: P90 Llm Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  dimensions: []
+  measures:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 23
+    col: 18
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    single_value_title: P90 Llm Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_llm_response.p99_llm_latency
+    - v_llm_response.p50_llm_latency
+    - v_llm_response.p75_llm_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+  oracle_query: oracle/queries/performance-p90-llm-latency.sql
+- id: performance-p99-llm-latency
+  source_dashboard: performance
+  source_tile: P99 Llm Latency
+  page: Latency
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  dimensions: []
+  measures:
+  - v_llm_response.p50_llm_latency
+  - v_llm_response.p75_llm_latency
+  - v_llm_response.p90_llm_latency
+  - v_llm_response.p99_llm_latency
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.agent: ''
+    agent_events.span_id: ''
+    agent_events.trace_id: ''
+    agent_events.user_id: ''
+    agent_events.timestamp_date: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 23
+    col: 6
+    width: 6
+    height: 3
+  comparison_previous_period: false
+  percentile: true
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: false
+    comparison_type: value
+    comparison_reverse_colors: false
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    single_value_title: P99 Llm Latency
+    smart_single_value_size: false
+    hidden_fields:
+    - v_llm_response.p50_llm_latency
+    - v_llm_response.p75_llm_latency
+    - v_llm_response.p90_llm_latency
+    hidden_points_if_no: []
+    series_labels: {}
+    show_view_names: false
+    font_size_main: '14'
+    orientation: auto
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    x_axis_zoom: true
+    y_axis_zoom: true
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    series_colors:
+      v_tool_completed.p50_tool_latency: '#f9ab00'
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    ordering: none
+    show_null_labels: false
+    defaults_version: 1
+    hidden_pivots: {}
+    style_v_tool_completed.p50_tool_latency: '#3A4245'
+    show_title_v_tool_completed.p50_tool_latency: true
+    title_placement_v_tool_completed.p50_tool_latency: above
+    value_format_v_tool_completed.p50_tool_latency: ''
+  oracle_query: oracle/queries/performance-p99-llm-latency.sql
+- id: performance-total-errors
+  source_dashboard: performance
+  source_tile: Total Errors
+  page: Errors
+  looker_type: single_value
+  ls_chart: SCORECARD
+  fields:
+  - v_tool_error.pop_tool_errors_current
+  - v_tool_error.pop_tool_errors_change
+  dimensions: []
+  measures:
+  - v_tool_error.pop_tool_errors_current
+  - v_tool_error.pop_tool_errors_change
+  pivots: []
+  fill_fields: []
+  tile_filters:
+    agent_events.pop_date_filter: 7 days
+  sorts: []
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.pop_date_filter
+  geometry:
+    row: 0
+    col: 0
+    width: 8
+    height: 7
+  comparison_previous_period: true
+  percentile: false
+  style:
+    custom_color_enabled: true
+    show_single_value_title: true
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    smart_single_value_size: false
+    comparison_label: vs Last Period
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: none
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: true
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    defaults_version: 1
+    note_state: collapsed
+    note_display: hover
+    note_text: The total number of backend tool executions that resulted in an error status, including
+      the Period-over-Period trend.
+  oracle_query: oracle/queries/performance-total-errors.sql
+- id: performance-tool-errors-trend
+  source_dashboard: performance
+  source_tile: Tool Errors Trend
+  page: Errors
+  looker_type: looker_area
+  ls_chart: AREA
+  fields:
+  - agent_events.timestamp_date
+  - v_tool_error.total_tool_errors
+  dimensions:
+  - agent_events.timestamp_date
+  measures:
+  - v_tool_error.total_tool_errors
+  pivots: []
+  fill_fields:
+  - agent_events.timestamp_date
+  tile_filters: {}
+  sorts:
+  - agent_events.timestamp_date desc
+  limit: 500
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 0
+    col: 8
+    width: 16
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    show_null_points: false
+    interpolation: linear
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_tool_error.total_tool_errors: '#a50e0e'
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    comparison_label: vs Last Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A daily time-series tracking the volume of tool failures. Click a spike to drill down into
+      the raw error logs.
+  oracle_query: oracle/queries/performance-tool-errors-trend.sql
+- id: performance-top-5-agents-by-errors
+  source_dashboard: performance
+  source_tile: Top 5 Agents By Errors
+  page: Errors
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - v_tool_error.total_tool_errors
+  - agent_events.agent
+  dimensions:
+  - agent_events.agent
+  measures:
+  - v_tool_error.total_tool_errors
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts:
+  - v_tool_error.total_tool_errors desc 0
+  limit: 5
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 7
+    col: 0
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_tool_error.total_tool_errors: '#e8710a'
+    show_null_points: false
+    interpolation: linear
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    comparison_label: vs Last Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A ranking showing which specific agents are experiencing the highest volume of failures.
+  oracle_query: oracle/queries/performance-top-5-agents-by-errors.sql
+- id: performance-top-5-tools-by-errors
+  source_dashboard: performance
+  source_tile: Top 5 Tools by Errors
+  page: Errors
+  looker_type: looker_bar
+  ls_chart: BAR
+  fields:
+  - v_tool_error.total_tool_errors
+  - v_tool_error.tool_name
+  dimensions:
+  - v_tool_error.tool_name
+  measures:
+  - v_tool_error.total_tool_errors
+  pivots: []
+  fill_fields: []
+  tile_filters: {}
+  sorts:
+  - v_tool_error.total_tool_errors desc 0
+  limit: 5
+  column_limit: 50
+  listen:
+    Agent: agent_events.agent
+    Span ID: agent_events.span_id
+    Trace ID: agent_events.trace_id
+    User ID: agent_events.user_id
+    Date: agent_events.timestamp_date
+  geometry:
+    row: 7
+    col: 12
+    width: 12
+    height: 7
+  comparison_previous_period: false
+  percentile: false
+  style:
+    x_axis_gridlines: false
+    y_axis_gridlines: true
+    show_view_names: false
+    show_y_axis_labels: true
+    show_y_axis_ticks: true
+    y_axis_tick_density: default
+    y_axis_tick_density_custom: 5
+    show_x_axis_label: true
+    show_x_axis_ticks: true
+    y_axis_scale_mode: linear
+    x_axis_reversed: false
+    y_axis_reversed: false
+    plot_size_by_field: false
+    trellis: ''
+    stacking: ''
+    limit_displayed_rows: false
+    legend_position: center
+    point_style: circle
+    show_value_labels: false
+    label_density: 25
+    x_axis_scale: auto
+    y_axis_combined: true
+    ordering: none
+    show_null_labels: false
+    show_totals_labels: false
+    show_silhouette: false
+    totals_color: '#808080'
+    x_axis_zoom: true
+    y_axis_zoom: true
+    series_colors:
+      v_tool_error.total_tool_errors: '#f9ab00'
+    show_null_points: false
+    interpolation: linear
+    custom_color_enabled: true
+    show_single_value_title: true
+    smart_single_value_size: false
+    show_comparison: true
+    comparison_type: change
+    comparison_reverse_colors: true
+    show_comparison_label: true
+    comparison_label: vs Last Period
+    enable_conditional_formatting: false
+    conditional_formatting_include_totals: false
+    conditional_formatting_include_nulls: false
+    defaults_version: 1
+    hidden_pivots: {}
+    note_state: collapsed
+    note_display: hover
+    note_text: A critical leaderboard of the most unstable backend tools. Focus debugging efforts on the
+      tools at the top of this list
+  oracle_query: oracle/queries/performance-top-5-tools-by-errors.sql
+non_data_elements:
+- id: usage-nondata-1
+  source_dashboard: usage
+  page: Agent & Sessions
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 0
+    col: 0
+    width: 24
+    height: 2
+  payload:
+    name: ''
+    type: text
+    title_text: ''
+    subtitle_text: ''
+    body_text: '[{"type":"h1","children":[{"text":"Agent"}],"align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+- id: usage-nondata-2
+  source_dashboard: usage
+  page: Agent & Sessions
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 15
+    col: 0
+    width: 24
+    height: 2
+  payload:
+    name: ' (Copy)'
+    type: text
+    title_text: ' (Copy)'
+    subtitle_text: ''
+    body_text: '[{"type":"h1","children":[{"text":"Sessions"}],"align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+- id: usage-nondata-3
+  source_dashboard: usage
+  page: User Analytics
+  looker_type: button
+  ls_chart: BUTTON
+  geometry:
+    row: 0
+    col: 19
+    width: 5
+    height: 1
+  payload:
+    type: button
+    name: button_854
+    rich_content_json: '{"text":"Performance Report","description":"","newTab":false,"alignment":"center","size":"small","style":"FILLED","color":"#E52592","href":"/dashboards/agent-analytics::agent_analytics_performance"}'
+- id: usage-nondata-4
+  source_dashboard: usage
+  page: User Analytics
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 1
+    col: 0
+    width: 21
+    height: 1
+  payload:
+    name: ' (2)'
+    type: text
+    title_text: ''
+    subtitle_text: ''
+    body_text: ''
+- id: performance-nondata-1
+  source_dashboard: performance
+  page: Latency
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 0
+    col: 6
+    width: 13
+    height: 2
+  payload:
+    name: ''
+    type: text
+    title_text: ''
+    subtitle_text: ''
+    body_text: '[{"type":"h1","children":[{"text":"Tool Latency"}],"align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+- id: performance-nondata-2
+  source_dashboard: performance
+  page: Latency
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 13
+    col: 0
+    width: 24
+    height: 2
+  payload:
+    name: ' (Copy)'
+    type: text
+    title_text: ' (Copy)'
+    subtitle_text: ''
+    body_text: '[{"type":"h1","children":[{"text":"LLM Latency"}],"align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+- id: performance-nondata-3
+  source_dashboard: performance
+  page: Latency
+  looker_type: button
+  ls_chart: BUTTON
+  geometry:
+    row: 0
+    col: 19
+    width: 5
+    height: 2
+  payload:
+    type: button
+    name: button_871
+    rich_content_json: '{"text":"Usage Report","description":"","newTab":false,"alignment":"center","size":"medium","style":"FILLED","color":"#E52592","href":"/dashboards/agent-analytics::agent_analytics_usage"}'
+- id: performance-nondata-4
+  source_dashboard: performance
+  page: Latency
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 8
+    col: 0
+    width: 24
+    height: 2
+  payload:
+    name: ' (2)'
+    type: text
+    title_text: ''
+    subtitle_text: ''
+    body_text: '[{"type":"h2","children":[{"text":"Tool Latency (in ms)"}],"align":"center"},{"type":"p","children":[{"text":"The
+      P50, P75, P90, and P99 latency distributions for tool executions. Focus on P99 to identify the worst-case
+      timeouts."}],"id":"nj8zb","align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+- id: performance-nondata-5
+  source_dashboard: performance
+  page: Latency
+  looker_type: text
+  ls_chart: TEXT
+  geometry:
+    row: 21
+    col: 0
+    width: 24
+    height: 2
+  payload:
+    name: ' (Copy 2)'
+    type: text
+    title_text: ' (Copy 2)'
+    subtitle_text: ''
+    body_text: '[{"type":"h2","children":[{"text":"LLM Latency (in ms)"}],"align":"center"},{"type":"p","children":[{"text":"The
+      P50, P75, P90, and P99 latency distributions for LLM calls. Crucial for understanding the true user
+      experience delay."}],"id":"nj8zb","align":"center"}]'
+    rich_content_json: '{"format":"slate"}'
+tabs:
+- source_dashboard: usage
+  name: Token Consumption
+  title: Token Consumption
+- source_dashboard: usage
+  name: Agent & Sessions
+  title: Agent & Sessions
+- source_dashboard: usage
+  name: Tool Usage
+  title: Tool Usage
+- source_dashboard: usage
+  name: LLM Interactions
+  title: LLM Interactions
+- source_dashboard: usage
+  name: User Analytics
+  title: User Analytics
+- source_dashboard: performance
+  name: Latency
+  title: Latency
+- source_dashboard: performance
+  name: Errors
+  title: Errors
+decisions:
+  call_row_policy: raw_row

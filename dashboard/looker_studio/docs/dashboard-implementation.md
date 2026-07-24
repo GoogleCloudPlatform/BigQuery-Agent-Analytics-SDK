@@ -1,0 +1,115 @@
+# Looker Studio implementation contract
+
+This document connects the generated parity manifest to the canonical report
+implementation. It contains no report ID, production project/dataset name, or
+result values.
+
+## Data-source boundary
+
+The report has exactly one embedded BigQuery data source. Its custom query is
+the rendered form of `sql/events_v1.sql.tmpl`; the 37 files under
+`oracle/queries/` are independent validation queries and are never added as
+extra report data sources.
+
+The public template embeds the executable synthetic sentinel query from
+`sql/events_v1.template.sql`. `tools/hydrate_dashboard.py` validates the
+caller's BQAA base table and generated views, then emits a Linking API URL
+whose `sqlReplace` replaces the sentinel project, dataset, and view prefix.
+The new data source is created with the clicking user's credentials. The
+template never exposes or delegates the template owner's BigQuery access.
+
+`docs/index.html` provides the standard-installation path without requiring a
+local CLI. It accepts project, dataset, and table IDs, assumes the standard
+`v` generated-view prefix and uses the project as the billing project by
+default, with optional advanced overrides for both, then constructs the same
+Linking API URL entirely in the browser. URL query
+parameters can prefill the three inputs, but the page never opens the report
+without a user click.
+
+Looker Studio report parameters are not the binding mechanism. They can pass
+scalar values to BigQuery custom SQL, but BigQuery query parameters cannot
+replace identifiers in `FROM` paths. Connector-level Linking API
+`sqlReplace` is therefore required to bind the project, dataset, and generated
+view prefix. The base table ID is retained for installation identity and
+report naming; charts read the 15 BQAA-generated views. The authenticated CLI
+is the only path that preflight-validates that table and view contract.
+
+The canonical report is shared as Public/Viewer, uses Viewer's Credentials,
+and has manual report publishing enabled. Its published title is
+`BigQuery Agent Analytics — Template`. A signed-out visitor is sent to Google
+sign-in; after sign-in, the Linking API review dialog shows the substituted
+custom SQL and the caller's billing project before the caller acknowledges it.
+
+Token fields accept both BQAA `usage_metadata` shapes observed in supported
+installations, in this order:
+
+1. pinned LookML keys: `prompt_token_count`, `candidates_token_count`,
+   `total_token_count`;
+2. alternate BQAA keys: `prompt_tokens`, `completion_tokens`, `total_tokens`;
+3. the generated-view fallback columns.
+
+Malformed metadata values use `SAFE_CAST` and fall through instead of
+aborting every report chart.
+
+## Pages and chart inventory
+
+The report implements all 37 manifest charts plus one non-parity Trace
+Inspector table:
+
+| Page | Manifest charts |
+|---|---:|
+| Token Consumption | 4 |
+| Agent & Sessions | 7 |
+| Tool Usage | 3 |
+| LLM Interactions | 3 |
+| User Analytics | 4 |
+| Latency | 12 |
+| Errors | 4 |
+| **Total parity charts** | **37** |
+| Trace Inspector | 1 additional table |
+
+The Inspector exposes timestamp, event type, agent, user, trace, span, and
+status from the same production data source. It is a drill-through aid, not a
+38th parity tile.
+
+Usage pages use an inclusive 14-day window ending yesterday. Performance
+pages use an inclusive 7-day window ending yesterday. Looker Studio sends
+those bounds through `@DS_START_DATE` and `@DS_END_DATE`; the production query
+applies the frozen half-open UTC predicate.
+
+## Looker Studio measure mappings
+
+The stable source fields map to report measures as follows:
+
+| Manifest measure | Looker Studio implementation |
+|---|---|
+| total events | `Record Count` |
+| total invocations | `COUNT_DISTINCT(invocation_id)` |
+| total traces | `COUNT_DISTINCT(trace_id)` |
+| total sessions | `COUNT_DISTINCT(session_id)` |
+| total users | `COUNT_DISTINCT(user_id)` |
+| total tokens | `SUM(usage_total_tokens)` |
+| LLM calls | `COUNT_DISTINCT(llm_response_pk)` |
+| tool calls | `COUNT_DISTINCT(tool_completed_pk)` |
+| tool errors | `COUNT_DISTINCT(tool_error_pk)` |
+| average LLM latency | `AVG(llm_total_ms)` |
+| average tool latency | `AVG(tool_completed_total_ms)` |
+| LLM percentile Pn | `PERCENTILE(llm_total_ms, n)` |
+| tool percentile Pn | `PERCENTILE(tool_completed_total_ms, n)` |
+
+Dimensions use the stable fields directly. Tool-only and error-only charts
+use the typed `tool_completed_*` and `tool_error_*` fields so null rows from
+other union branches do not contribute to the measure.
+
+## Real-data smoke validation
+
+On 2026-07-23, the read-only live validator:
+
+- passed the 15-view/column preflight;
+- executed the exact production custom query for the report window;
+- executed all 37 independent oracle queries against a real BQAA dataset;
+- reported 37 successes and zero failures.
+
+No live result rows or source identifiers are committed. This smoke result
+proves installation compatibility and query executability; it does not replace
+seeded parity certification or M4 visual sign-off.
