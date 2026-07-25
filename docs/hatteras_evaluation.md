@@ -290,16 +290,15 @@ introducing a separate trace-by-trace Python-only path.
 
 > **Current identity boundary (#359):** `session_id` is a persistent
 > conversation identifier and may be reused by different users, root agents,
-> experiments, or labeled passes. Identity-safe trace consumers now use the
-> shared `TraceSelector` resolver and preserve an `AmbiguousSessionError`
-> candidate for a one-step retry. The categorical `AI.GENERATE` SQL below,
-> however, still aggregates by bare `session_id`; U3 does not claim
-> identity-bound judge context or persistence cardinality. Reports correlate a
-> score through reserved attribution when it is present and use the legacy
-> session-only association only when exactly one trace candidate exists;
-> otherwise they fail closed. The planned judge-context and schema/writer/view
-> migrations must change this aggregation before colliding categorical
-> sessions can be scored and persisted independently.
+> experiments, or labeled passes. With U4, non-empty
+> `per_session_context` evaluation resolves the filtered population through the
+> shared U2 selector contract and supplies one parameterized transcript/context
+> struct per exact `ResolvedTraceSelector`; AI.GENERATE, retry, and API fallback
+> keep that selector key unchanged. Legacy string context keys are accepted only
+> for an unambiguous evaluated session. The bare-session SQL below remains the
+> compatibility path when no context mapping is supplied. Persistence
+> cardinality is still U5: U4 context calls reject `persist_results=True` until
+> the results schema, writer, and views carry the same identity provenance.
 
 ### Concrete SQL template
 
@@ -506,8 +505,8 @@ This proposal should reuse and align with current SDK patterns:
 
 - `TraceFilter` for session selection
 - `Client.get_session_trace()` / `get_trace_by_selector()` identity-safe
-  transcript semantics for trace-consuming secondary surfaces (not yet the
-  categorical server-side aggregate above)
+  transcript semantics for trace-consuming secondary surfaces and U4
+  selector-keyed judge-context inputs
 - BigQuery-native `AI.GENERATE` execution patterns already used in `insights`
   and other modules
 - Gemini API fallback patterns already used by `LLMAsJudge`

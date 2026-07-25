@@ -45,6 +45,7 @@ Example usage::
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 import concurrent.futures
 import copy
 from datetime import datetime
@@ -59,6 +60,11 @@ from google.cloud import bigquery
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .categorical_evaluator import _build_evaluation_inputs_parameter
+from .categorical_evaluator import _CategoricalEvaluationInput
+from .categorical_evaluator import _normalize_categorical_evaluation_inputs
+from .categorical_evaluator import _spans_to_categorical_transcript
+from .categorical_evaluator import _validated_context_mapping
 from .categorical_evaluator import build_ai_classify_query
 from .categorical_evaluator import build_ai_generate_query
 from .categorical_evaluator import build_categorical_prompt
@@ -1885,6 +1891,7 @@ class Client:
       limit: Optional[int],
       scope_predicate: Optional[Any],
       feature: str,
+      span_predicate: Optional[Any] = None,
   ) -> list[Trace]:
     """Anchor-escalating listing fetch shared by every bulk read path.
 
@@ -1945,6 +1952,7 @@ class Client:
           results,
           max_traces=limit,
           scope_predicate=scope_predicate,
+          span_predicate=span_predicate,
           population_complete=population_complete,
           on_malformed="quarantine",
           _reported_quarantined_groups=reported_quarantined_groups,
@@ -2454,6 +2462,9 @@ class Client:
       config: CategoricalEvaluationConfig,
       filters: Optional[TraceFilter] = None,
       dataset: Optional[str] = None,
+      per_session_context: Optional[
+          Mapping[ResolvedTraceSelector | str, str]
+      ] = None,
   ) -> CategoricalEvaluationReport:
     """Runs categorical evaluation over traces.
 
@@ -2463,12 +2474,27 @@ class Client:
       AI.CLASSIFY → AI.GENERATE → Gemini API
     * When ``include_justification=True`` (default):
       AI.GENERATE → Gemini API
+    * With any non-empty ``per_session_context``:
+      identity-safe resolution → AI.GENERATE → Gemini API
 
     Args:
         config: Categorical evaluation configuration with metric
             definitions and allowed categories.
         filters: Optional trace filters.
         dataset: Optional table name override.
+        per_session_context: Optional trusted judge context keyed by an exact
+            :class:`ResolvedTraceSelector` or, for an unambiguous evaluated
+            population, by legacy session-id string. A non-empty mapping
+            bypasses AI.CLASSIFY and binds context to the exact U2
+            identity/scope selector through every generative path. Legacy
+            string keys are accepted only for one matching resolved trace;
+            keys outside the filtered population are ignored. Treat values as
+            trusted evaluator material subject to the same data-governance
+            policy as evaluation prompts. Context is sent only as a query
+            parameter/model prompt; it is not interpolated into SQL, logged,
+            persisted, or placed in job labels. Context calls reject
+            ``config.persist_results=True`` until the U5 identity-safe
+            persistence migration lands.
 
     Returns:
         CategoricalEvaluationReport with per-session results and
@@ -2477,6 +2503,47 @@ class Client:
     table = dataset or self.table_id
     filt = filters or TraceFilter()
     where, params = filt.to_sql_conditions()
+
+    identity_bound_inputs: Optional[list[_CategoricalEvaluationInput]] = None
+    classify_skip_reason = None
+    context_snapshot = (
+        _validated_context_mapping(per_session_context)
+        if per_session_context is not None
+        else {}
+    )
+    if context_snapshot:
+      if config.persist_results:
+        raise ValueError(
+            "Identity-bound judge context requires identity-safe persistence"
+            " from issue #358 U5; disable persist_results until that schema,"
+            " writer, and view migration is installed."
+        )
+      # Resolve the same exact identity/scope population used by U2 before
+      # any model call. One detached filter snapshot feeds SQL fragments,
+      # scope matching, and the returned limit.
+      filt = filt.snapshot()
+      where, row_where, params = filt.to_query_fragments()
+      traces = self._fetch_filtered_traces(
+          table=table,
+          where=where,
+          row_where=row_where,
+          params=params,
+          limit=filt.limit,
+          scope_predicate=_filter_scope_predicate(filt),
+          feature="eval-categorical",
+          span_predicate=lambda spans: len(
+              _spans_to_categorical_transcript(spans)
+          )
+          > 10,
+      )
+      identity_bound_inputs = _normalize_categorical_evaluation_inputs(
+          traces,
+          context_snapshot,
+      )
+      classify_skip_reason = (
+          "AI.CLASSIFY skipped: identity-bound judge context requires"
+          " per-trace prompt input, which AI.CLASSIFY cannot accept."
+      )
 
     # Endpoint precedence: config.endpoint wins when explicitly set.
     # When config uses the default, fall back to client.endpoint —
@@ -2497,8 +2564,20 @@ class Client:
     classify_fallback_reason = None
     fallback_reason = None
 
+    if identity_bound_inputs == []:
+      report = build_categorical_report(
+          dataset=f"{table_ref} WHERE {where}",
+          session_results=[],
+          config=config,
+      )
+      report.details["execution_mode"] = "ai_generate"
+      report.details["empty_population"] = True
+      report.details["classify_skip_reason"] = classify_skip_reason
+      self._persist_categorical_if_configured(report, config, endpoint)
+      return report
+
     # When justification is not needed, try AI.CLASSIFY first.
-    if not config.include_justification:
+    if not config.include_justification and identity_bound_inputs is None:
       try:
         session_results, classify_null_count = self._categorical_ai_classify(
             config,
@@ -2534,6 +2613,7 @@ class Client:
           params,
           endpoint,
           connection_id,
+          evaluation_inputs=identity_bound_inputs,
       )
       report = build_categorical_report(
           dataset=f"{table_ref} WHERE {where}",
@@ -2545,14 +2625,28 @@ class Client:
         report.details["retry"] = retry_meta
       if classify_fallback_reason:
         report.details["classify_fallback_reason"] = classify_fallback_reason
+      if classify_skip_reason:
+        report.details["classify_skip_reason"] = classify_skip_reason
       self._persist_categorical_if_configured(report, config, endpoint)
       return report
     except Exception as e:
-      logger.debug(
-          "AI.GENERATE categorical failed, falling back to API: %s",
-          e,
-      )
-      fallback_reason = str(e)
+      if identity_bound_inputs is not None:
+        logger.debug(
+            "AI.GENERATE categorical failed, falling back to API"
+            " (details redacted because trusted judge context was"
+            " present; type=%s)",
+            type(e).__name__,
+        )
+        fallback_reason = (
+            f"{type(e).__name__}: details redacted because trusted"
+            " judge context was present"
+        )
+      else:
+        logger.debug(
+            "AI.GENERATE categorical failed, falling back to API: %s",
+            e,
+        )
+        fallback_reason = str(e)
 
     # Fallback: Gemini API.
     try:
@@ -2562,6 +2656,7 @@ class Client:
           where,
           params,
           endpoint,
+          evaluation_inputs=identity_bound_inputs,
       )
       report = build_categorical_report(
           dataset=f"{table_ref} WHERE {where}",
@@ -2572,6 +2667,8 @@ class Client:
       report.details["fallback_reason"] = fallback_reason
       if classify_fallback_reason:
         report.details["classify_fallback_reason"] = classify_fallback_reason
+      if classify_skip_reason:
+        report.details["classify_skip_reason"] = classify_skip_reason
       self._persist_categorical_if_configured(report, config, endpoint)
       return report
     except ImportError:
@@ -2584,6 +2681,8 @@ class Client:
       report.details["execution_mode"] = "api_unavailable"
       report.details["fallback_reason"] = fallback_reason
       report.details["api_error"] = "google-genai not installed"
+      if classify_skip_reason:
+        report.details["classify_skip_reason"] = classify_skip_reason
       return report
 
   def _categorical_ai_classify(
@@ -2639,6 +2738,7 @@ class Client:
       params: list,
       endpoint: str,
       connection_id: Optional[str] = None,
+      evaluation_inputs: Optional[list[_CategoricalEvaluationInput]] = None,
   ) -> tuple[list, dict]:
     """Classifies sessions using BigQuery AI.GENERATE.
 
@@ -2657,9 +2757,15 @@ class Client:
         temperature=config.temperature,
         connection_id=connection_id,
         max_output_tokens=config.max_output_tokens,
+        identity_bound=evaluation_inputs is not None,
     )
 
-    query_params = list(params) + [
+    source_params = (
+        [_build_evaluation_inputs_parameter(evaluation_inputs)]
+        if evaluation_inputs is not None
+        else list(params)
+    )
+    query_params = source_params + [
         bigquery.ScalarQueryParameter(
             "categorical_prompt",
             "STRING",
@@ -2679,37 +2785,106 @@ class Client:
 
     session_results = []
     failed_sessions = {}
+    inputs_by_key = (
+        {item.evaluation_key: item for item in evaluation_inputs}
+        if evaluation_inputs is not None
+        else {}
+    )
+    result_keys = []
     for row in results:
       r = dict(row)
       sid = r.get("session_id", "unknown")
+      input_key = (
+          r.get("evaluation_key") if evaluation_inputs is not None else sid
+      )
+      if evaluation_inputs is not None and input_key not in inputs_by_key:
+        raise ValueError(
+            "Identity-bound categorical result carried an unknown"
+            " evaluation key."
+        )
+      if evaluation_inputs is not None and input_key in result_keys:
+        raise ValueError(
+            "Identity-bound categorical result duplicated an evaluation key."
+        )
+      result_keys.append(input_key)
       parsed = parse_categorical_row(sid, r, config)
+      input_item = inputs_by_key.get(input_key)
+      if input_item is not None:
+        parsed.details.update(
+            {
+                "user_id": input_item.selector.identity.user_id,
+                "root_agent_name": (
+                    input_item.selector.identity.root_agent_name
+                ),
+                "scope_signature": input_item.selector.scope_signature,
+            }
+        )
       has_parse_error = any(m.parse_error for m in parsed.metrics)
       if has_parse_error and r.get("transcript"):
-        failed_sessions[sid] = r.get("transcript", "")
+        failed_sessions[input_key] = r.get("transcript", "")
       session_results.append(parsed)
+
+    if evaluation_inputs is not None and set(result_keys) != set(inputs_by_key):
+      raise ValueError(
+          "Identity-bound categorical result did not return exactly one"
+          " row per resolved evaluation input."
+      )
 
     retry_meta = {}
     if failed_sessions:
       logger.warning(
-          "AI.GENERATE returned NULL/unparseable for %d session(s), "
-          "retrying via Gemini API: %s",
+          "AI.GENERATE returned NULL/unparseable for %d session(s); "
+          "retrying via Gemini API.",
           len(failed_sessions),
-          ", ".join(failed_sessions.keys()),
       )
+      retry_kwargs = {}
+      if evaluation_inputs is not None:
+        retry_kwargs["per_session_context"] = {
+            key: inputs_by_key[key].judge_context
+            for key in failed_sessions
+            if inputs_by_key[key].judge_context is not None
+        }
+        retry_kwargs["resolved_selectors"] = {
+            key: inputs_by_key[key].selector for key in failed_sessions
+        }
       retried = self._retry_failed_sessions(
           failed_sessions,
           config,
           endpoint,
           max_retries=3,
+          **retry_kwargs,
       )
       resolved = 0
       if retried:
-        retried_map = {r.session_id: r for r in retried}
+        if evaluation_inputs is None:
+          retried_map = {r.session_id: r for r in retried}
+        else:
+          retried_map = {}
+          unmatched = list(retried)
+          for key in failed_sessions:
+            selector = inputs_by_key[key].selector
+            for index, retried_result in enumerate(unmatched):
+              details = retried_result.details
+              if (
+                  retried_result.session_id == selector.identity.session_id
+                  and details.get("user_id") == selector.identity.user_id
+                  and details.get("root_agent_name")
+                  == selector.identity.root_agent_name
+                  and details.get("scope_signature") == selector.scope_signature
+              ):
+                retried_map[key] = unmatched.pop(index)
+                break
         session_results = [
-            retried_map.get(sr.session_id, sr) for sr in session_results
+            retried_map.get(key, sr)
+            for key, sr in zip(result_keys, session_results)
         ]
+        counted_results = (
+            retried_map.values() if evaluation_inputs is not None else retried
+        )
         resolved = sum(
-            1 for r in retried if not any(m.parse_error for m in r.metrics)
+            1
+            for r in counted_results
+            if not any(m.parse_error for m in r.metrics)
         )
         logger.info(
             "Gemini API retry resolved %d/%d failed sessions",
@@ -2723,6 +2898,12 @@ class Client:
           "retry_unresolved": len(failed_sessions) - resolved,
       }
 
+    if evaluation_inputs is not None:
+      by_key = dict(zip(result_keys, session_results))
+      session_results = [
+          by_key[item.evaluation_key] for item in evaluation_inputs
+      ]
+
     return session_results, retry_meta
 
   def _retry_failed_sessions(
@@ -2731,6 +2912,8 @@ class Client:
       config: CategoricalEvaluationConfig,
       endpoint: str,
       max_retries: int = 3,
+      per_session_context: Optional[dict[str, str]] = None,
+      resolved_selectors: Optional[dict[str, ResolvedTraceSelector]] = None,
   ) -> list:
     """Retries classification for failed sessions via Gemini API.
 
@@ -2742,11 +2925,15 @@ class Client:
         config: Evaluation config.
         endpoint: Model endpoint.
         max_retries: Maximum number of retry attempts.
+        per_session_context: Context keyed like ``transcripts``.
+        resolved_selectors: Exact selector metadata keyed like
+            ``transcripts``.
 
     Returns:
         List of CategoricalSessionResult for successfully retried
         sessions.
     """
+    original_order = list(transcripts)
     remaining = dict(transcripts)
     all_results = {}
 
@@ -2760,17 +2947,48 @@ class Client:
         )
         time.sleep(backoff)
       try:
+        api_kwargs = {}
+        if per_session_context is not None:
+          api_kwargs["per_session_context"] = {
+              key: per_session_context[key]
+              for key in remaining
+              if key in per_session_context
+          }
+        if resolved_selectors is not None:
+          api_kwargs["resolved_selectors"] = {
+              key: resolved_selectors[key]
+              for key in remaining
+              if key in resolved_selectors
+          }
+        remaining_keys = list(remaining)
         results = _run_sync(
-            classify_sessions_via_api(remaining, config, endpoint)
+            classify_sessions_via_api(
+                remaining,
+                config,
+                endpoint,
+                **api_kwargs,
+            )
         )
         still_failed = {}
-        for r in results:
+        for input_key, r in zip(remaining_keys, results):
           has_error = any(m.parse_error for m in r.metrics)
           if has_error:
-            if r.session_id in remaining:
-              still_failed[r.session_id] = remaining[r.session_id]
-              for m in r.metrics:
-                if m.parse_error:
+            still_failed[input_key] = remaining[input_key]
+            for m in r.metrics:
+              if m.parse_error:
+                if (
+                    per_session_context is not None
+                    and input_key in per_session_context
+                ):
+                  logger.warning(
+                      "Retry attempt %d, session %s, metric %s:"
+                      " parse_error=True (raw response redacted because"
+                      " trusted judge context was present)",
+                      attempt,
+                      r.session_id,
+                      m.metric_name,
+                  )
+                else:
                   logger.warning(
                       "Retry attempt %d, session %s, metric %s: "
                       "parse_error=True, raw_response=%s",
@@ -2779,9 +2997,12 @@ class Client:
                       m.metric_name,
                       repr(m.raw_response[:500] if m.raw_response else None),
                   )
-                  break
+                break
           else:
-            all_results[r.session_id] = r
+            all_results[input_key] = r
+        # A short API result is unresolved work, never implicit success.
+        for input_key in remaining_keys[len(results) :]:
+          still_failed[input_key] = remaining[input_key]
         remaining = still_failed
         if remaining:
           logger.warning(
@@ -2790,12 +3011,20 @@ class Client:
               len(remaining),
           )
       except Exception as e:  # Broad catch: retry loop logs + continues
-        logger.warning(
-            "Gemini API retry attempt %d failed: %s (type=%s)",
-            attempt,
-            e,
-            type(e).__name__,
-        )
+        if per_session_context:
+          logger.warning(
+              "Gemini API retry attempt %d failed (details redacted"
+              " because trusted judge context was present; type=%s)",
+              attempt,
+              type(e).__name__,
+          )
+        else:
+          logger.warning(
+              "Gemini API retry attempt %d failed: %s (type=%s)",
+              attempt,
+              e,
+              type(e).__name__,
+          )
 
     if remaining:
       logger.warning(
@@ -2804,7 +3033,11 @@ class Client:
           max_retries,
       )
 
-    return list(all_results.values())
+    return [
+        all_results[input_key]
+        for input_key in original_order
+        if input_key in all_results
+    ]
 
   def _categorical_api_fallback(
       self,
@@ -2813,6 +3046,7 @@ class Client:
       where: str,
       params: list,
       endpoint: str,
+      evaluation_inputs: Optional[list[_CategoricalEvaluationInput]] = None,
   ) -> list:
     """Classifies sessions using the Gemini API (fallback).
 
@@ -2820,6 +3054,28 @@ class Client:
     transcript-building CTE as the ``AI.GENERATE`` path,
     then classifies each session via the Gemini API.
     """
+    if evaluation_inputs is not None:
+      transcripts = {
+          item.evaluation_key: item.transcript for item in evaluation_inputs
+      }
+      contexts = {
+          item.evaluation_key: item.judge_context
+          for item in evaluation_inputs
+          if item.judge_context is not None
+      }
+      selectors = {
+          item.evaluation_key: item.selector for item in evaluation_inputs
+      }
+      return _run_sync(
+          classify_sessions_via_api(
+              transcripts,
+              config,
+              endpoint,
+              per_session_context=contexts,
+              resolved_selectors=selectors,
+          )
+      )
+
     query = CATEGORICAL_TRANSCRIPT_QUERY.format(
         project=self.project_id,
         dataset=self.dataset_id,
@@ -4431,6 +4687,7 @@ def _build_traces_from_rows(
     results: list,
     max_traces: Optional[int] = None,
     scope_predicate: Optional[Any] = None,
+    span_predicate: Optional[Any] = None,
     population_complete: bool = True,
     on_malformed: str = "raise",
     _reported_quarantined_groups: Optional[set[tuple]] = None,
@@ -4688,6 +4945,23 @@ def _build_traces_from_rows(
   if scope_predicate is not None:
     slots = [slot for slot in slots if scope_predicate(slot["scope"])]
   slots.sort(key=_slot_sort_key)
+  if span_predicate is not None:
+    # Apply content eligibility before the public limit while spans are
+    # still factored references. This lets the anchor fetch refill after
+    # a rejected newest trace without materializing/deep-copying every
+    # scope in the page (U4 categorical transcript HAVING parity).
+    eligible_slots = []
+    for slot in slots:
+      ordered_spans = [
+          span
+          for _, span in sorted(
+              slot["own"] + slot["local_shared"] + slot["identity_shared"],
+              key=lambda pair: pair[0],
+          )
+      ]
+      if span_predicate(ordered_spans):
+        eligible_slots.append(slot)
+    slots = eligible_slots
   if max_traces is not None:
     slots = slots[:max_traces]
 

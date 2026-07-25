@@ -1491,6 +1491,51 @@ print(report.category_distributions)
 # {'tone': {'positive': 42, 'negative': 12, 'neutral': 46}}
 ```
 
+#### Bind trusted context to an exact trace
+
+Golden expected answers and other judge-only context must be keyed to the
+resolved identity and exact scope, not to a reusable `session_id`:
+
+```python
+from bigquery_agent_analytics import ResolvedTraceSelector
+
+filters = TraceFilter.from_cli_args(last="24h")
+traces = client.list_traces(filters)
+per_trace_context = {
+    ResolvedTraceSelector(trace.identity, trace.scope): (
+        f"Expected answer:\n{goldens[trace.identity.user_id]}"
+    )
+    for trace in traces
+}
+
+context_report = client.evaluate_categorical(
+    config=config.model_copy(update={"persist_results": False}),
+    filters=filters,
+    per_session_context=per_trace_context,
+)
+```
+
+Every non-empty `per_session_context` mapping starts at AI.GENERATE (even when
+`include_justification=False`) because AI.CLASSIFY has no per-row context
+input. `report.details["classify_skip_reason"]` records that cost/latency
+decision. The same selector-keyed context is reused unchanged for
+AI.GENERATE parse/NULL retries and full Gemini API fallback; unmapped traces
+still run without extra context.
+
+A legacy string key is allowed when it names exactly one trace in the filtered
+population. Reused/ambiguous session IDs raise `AmbiguousSessionError` before a
+model call; use its exact candidates or `list_traces()` to construct
+`ResolvedTraceSelector` keys. Mapping entries outside the filtered population
+are ignored.
+
+Treat context as trusted evaluator material subject to the same governance as
+your evaluation prompts. It is carried as query-parameter/model input and is
+redacted from context-aware error logs; it is never SQL text or a job label.
+The U4 API deliberately rejects `persist_results=True` with context until the
+U5 identity columns, writer, views, and cardinality migration land, preventing
+two identities that reuse a session ID from being persisted as indistinguishable
+rows.
+
 ### Step 3: Create Dashboard Views
 
 The results table is append-only (uses streaming inserts). Retries and overlapping runs will produce duplicate rows. The dashboard views deduplicate at read time.

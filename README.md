@@ -104,6 +104,32 @@ experiment, and labels; if more than one candidate remains it raises
 trajectory evaluation, the CLI, the Remote Function, and reports. See
 [Identity-safe session resolution](SDK.md#resolve-a-session-safely).
 
+Categorical evaluation can bind trusted per-trace judge context (for example,
+a golden expected answer) to the same exact selector:
+
+```python
+from bigquery_agent_analytics import ResolvedTraceSelector, TraceFilter
+
+filters = TraceFilter(limit=100)
+traces = client.list_traces(filters)
+context = {
+    ResolvedTraceSelector(trace.identity, trace.scope): expected_answer(trace)
+    for trace in traces
+}
+report = client.evaluate_categorical(
+    config,
+    filters=filters,
+    per_session_context=context,
+)
+```
+
+Legacy string keys are accepted only when the evaluated `session_id` is
+unambiguous; otherwise `AmbiguousSessionError` fails before any model call.
+Context is trusted evaluator material, sent as a query parameter/model prompt
+through AI.GENERATE, retry, and API fallback. It is never interpolated into
+SQL, logged, persisted, or placed in job labels. Apply the same data-governance
+policy you use for evaluation prompts.
+
 See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
 feature.
 

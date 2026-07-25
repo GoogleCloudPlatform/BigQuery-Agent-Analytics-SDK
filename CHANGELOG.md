@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closed rather than attaching a legacy session-only score to one candidate,
   and render resolved identity plus exact scope (or mixed-scope coverage) in
   text, Markdown, and JSON.
+- **Identity-bound categorical judge context (#358 U4)** —
+  `Client.evaluate_categorical(..., per_session_context=...)` accepts exact
+  `ResolvedTraceSelector` keys, plus legacy session-id keys only when the
+  filtered population is unambiguous. A non-empty mapping resolves and
+  deduplicates the U2 identity/scope population before any model call, bypasses
+  AI.CLASSIFY with a recorded reason, and carries the same parameterized
+  transcript/context binding through BigQuery AI.GENERATE, parse/NULL retry,
+  and full Gemini API fallback. Unmapped traces still run without context;
+  empty resolved work makes no model call. Context-aware logs redact model
+  text/raw retry responses so a model echo cannot disclose trusted context.
 
 ### Changed
 
@@ -49,9 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata and should be handled as sensitive data. They never include event
   content or judge context.
 - This release aligns read, trajectory-evaluation, CLI/Remote Function,
-  example, and report surfaces at one boundary. Judge-context binding and
-  persistence/view cardinality migrations remain separate follow-up work; no
-  result-table schema is changed here.
+  example, report, and categorical judge-context surfaces at one boundary.
+  Context is trusted prompt material: it is a query parameter/model input,
+  never SQL text, a job label, or persisted input. The identity-safe
+  persistence/view cardinality migration remains U5; until it lands, context
+  calls reject `persist_results=True` rather than writing colliding identities
+  into the legacy session-only results schema.
 
 ## [0.4.0] - 2026-06-18
 

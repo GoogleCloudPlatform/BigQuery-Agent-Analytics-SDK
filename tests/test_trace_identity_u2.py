@@ -1185,6 +1185,30 @@ class TestRound3Regressions:
     unbounded = _build_traces_from_rows(rows)
     assert len(unbounded) == 6
 
+  def test_span_predicate_runs_before_limit_without_materializing_rejects(self):
+    """U4 transcript eligibility cannot let a short newest trace starve."""
+    from datetime import timedelta
+    import json as json_mod
+
+    newest = _event_row(session_id="new", user_id="new-user")
+    newest["timestamp"] = _TS + timedelta(seconds=1)
+    newest["content"] = json_mod.dumps({"text_summary": ""})
+    older = _event_row(session_id="old", user_id="old-user")
+    older["content"] = json_mod.dumps(
+        {"text_summary": "long enough to evaluate"}
+    )
+
+    traces = _build_traces_from_rows(
+        [_mock_row(newest), _mock_row(older)],
+        max_traces=1,
+        span_predicate=lambda spans: len(
+            spans[0].content.get("text_summary", "")
+        )
+        > 10,
+    )
+
+    assert [trace.session_id for trace in traces] == ["old"]
+
   def test_trace_id_ignores_earlier_shared_row(self):
     # P2-10: an early untagged row's trace id must not shadow the
     # scoped producer ids.

@@ -434,6 +434,98 @@ class TestIdentityQueriesDryRun:
         ),
     )
 
+  @pytest.mark.parametrize("empty", [False, True])
+  def test_identity_bound_categorical_input_dry_runs(
+      self, collision_dataset, bq_client, empty
+  ):
+    """The exact ARRAY<STRUCT> + AI.GENERATE grammar binds in BigQuery."""
+    from google.cloud import bigquery as bq
+
+    from bigquery_agent_analytics.categorical_evaluator import _build_evaluation_inputs_parameter
+    from bigquery_agent_analytics.categorical_evaluator import _CategoricalEvaluationInput
+    from bigquery_agent_analytics.categorical_evaluator import build_ai_generate_query
+    from bigquery_agent_analytics.trace import ResolvedTraceSelector
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+
+    project, dataset_id = collision_dataset
+    selector = ResolvedTraceSelector(
+        TraceIdentity("collide", "alice", None),
+        TraceScope(),
+    )
+    inputs = (
+        []
+        if empty
+        else [
+            _CategoricalEvaluationInput(
+                selector=selector,
+                transcript="USER_MESSAGE_RECEIVED: hello",
+                judge_context="Expected answer: hello",
+            )
+        ]
+    )
+    query = build_ai_generate_query(
+        project=project,
+        dataset=dataset_id,
+        table="agent_events",
+        where="TRUE",
+        endpoint="gemini-2.5-flash",
+        temperature=0.0,
+        identity_bound=True,
+    )
+    job = bq_client.query(
+        query,
+        job_config=bq.QueryJobConfig(
+            query_parameters=[
+                _build_evaluation_inputs_parameter(inputs),
+                bq.ScalarQueryParameter(
+                    "categorical_prompt",
+                    "STRING",
+                    "Return one allowed category.",
+                ),
+            ],
+            dry_run=True,
+        ),
+    )
+    assert job.total_bytes_processed is not None
+
+
+class TestCategoricalContextCollisionLive:
+  """U4 context binds to the exact U2 selector on live collision data."""
+
+  def test_reused_session_gets_two_separate_context_inputs(self, sdk_client):
+    from bigquery_agent_analytics.categorical_evaluator import _normalize_categorical_evaluation_inputs
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import ResolvedTraceSelector
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    traces = sdk_client.list_traces(
+        TraceFilter(session_ids=["collide"], limit=10)
+    )
+    selectors = [
+        ResolvedTraceSelector(trace.identity, trace.scope) for trace in traces
+    ]
+    by_user = {selector.identity.user_id: selector for selector in selectors}
+    inputs = _normalize_categorical_evaluation_inputs(
+        traces,
+        {
+            by_user["alice"]: "Alice expected",
+            by_user["bob"]: "Bob expected",
+        },
+    )
+
+    assert {
+        item.selector.identity.user_id: item.judge_context for item in inputs
+    } == {
+        "alice": "Alice expected",
+        "bob": "Bob expected",
+    }
+    with pytest.raises(AmbiguousSessionError):
+      _normalize_categorical_evaluation_inputs(
+          traces,
+          {"collide": "unsafe shared context"},
+      )
+
 
 class TestLiveCollisionFixture:
   """Reused session ids must not cross-contaminate (issue #359)."""

@@ -15,6 +15,8 @@
 """Tests for the categorical evaluator module."""
 
 import asyncio
+from datetime import datetime
+from datetime import timezone
 import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -22,6 +24,11 @@ from unittest.mock import patch
 
 import pytest
 
+from bigquery_agent_analytics.categorical_evaluator import _build_evaluation_inputs_parameter
+from bigquery_agent_analytics.categorical_evaluator import _CategoricalEvaluationInput
+from bigquery_agent_analytics.categorical_evaluator import _normalize_categorical_evaluation_inputs
+from bigquery_agent_analytics.categorical_evaluator import _resolved_selector_key
+from bigquery_agent_analytics.categorical_evaluator import _trace_to_categorical_transcript
 from bigquery_agent_analytics.categorical_evaluator import build_ai_classify_query
 from bigquery_agent_analytics.categorical_evaluator import build_ai_generate_query
 from bigquery_agent_analytics.categorical_evaluator import build_categorical_prompt
@@ -41,6 +48,12 @@ from bigquery_agent_analytics.categorical_evaluator import flatten_results_to_ro
 from bigquery_agent_analytics.categorical_evaluator import parse_categorical_row
 from bigquery_agent_analytics.categorical_evaluator import parse_classifications
 from bigquery_agent_analytics.categorical_evaluator import parse_classify_row
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
@@ -804,6 +817,93 @@ class TestClassifySessionsViaApi:
     assert results[0].metrics[0].category == "positive"
     assert results[0].metrics[1].category == "safe"
 
+  def test_identity_metadata_keeps_colliding_session_contexts_separate(self):
+    """Internal selector keys, not session_id, bind context and attribution."""
+    config = _make_config()
+    alice = TestIdentityBoundEvaluationInputs._selector(user_id="alice")
+    bob = TestIdentityBoundEvaluationInputs._selector(user_id="bob")
+    transcripts = {"alice-key": "alice transcript", "bob-key": "bob transcript"}
+    contexts = {"alice-key": "Alice expected", "bob-key": "Bob expected"}
+    selectors = {"alice-key": alice, "bob-key": bob}
+    raw_response = json.dumps(
+        [
+            {"metric_name": "tone", "category": "positive"},
+            {"metric_name": "safety", "category": "safe"},
+        ]
+    )
+    response = MagicMock(text=raw_response)
+    response.candidates = []
+    mock_client, mock_models = _make_genai_client([response, response])
+
+    with _mock_genai_modules(mock_client):
+      results = _run(
+          classify_sessions_via_api(
+              transcripts,
+              config,
+              per_session_context=contexts,
+              resolved_selectors=selectors,
+          )
+      )
+
+    prompts = [
+        call.kwargs["contents"]
+        for call in mock_models.generate_content.call_args_list
+    ]
+    assert "Alice expected" in prompts[0]
+    assert "Bob expected" not in prompts[0]
+    assert "Bob expected" in prompts[1]
+    assert "Alice expected" not in prompts[1]
+    assert [result.session_id for result in results] == [
+        "shared",
+        "shared",
+    ]
+    assert [result.details["user_id"] for result in results] == [
+        "alice",
+        "bob",
+    ]
+    assert [result.details["scope_signature"] for result in results] == [
+        alice.scope_signature,
+        bob.scope_signature,
+    ]
+
+  @pytest.mark.parametrize(
+      "shape",
+      ["missing", "extra"],
+  )
+  def test_resolved_selector_keys_must_exactly_match_transcripts(self, shape):
+    alice = ResolvedTraceSelector(
+        TraceIdentity("shared", "alice", "root"),
+        TraceScope("e1", {"run": "v1"}),
+    )
+    bob = ResolvedTraceSelector(
+        TraceIdentity("shared", "bob", "root"),
+        TraceScope("e1", {"run": "v1"}),
+    )
+    selectors = {} if shape == "missing" else {"k1": alice, "extra": bob}
+    with pytest.raises(ValueError, match="exactly match transcript keys"):
+      _run(
+          classify_sessions_via_api(
+              {"k1": "transcript"},
+              _make_config(),
+              resolved_selectors=selectors,
+          )
+      )
+
+  def test_resolved_selectors_must_be_unique(self):
+    selector = ResolvedTraceSelector(
+        TraceIdentity("shared", "alice", "root"),
+        TraceScope("e1", {"run": "v1"}),
+    )
+
+    with pytest.raises(ValueError, match="duplicate resolved selectors"):
+      _run(
+          classify_sessions_via_api(
+              {"k1": "one", "k2": "two"},
+              _make_config(),
+              resolved_selectors={"k1": selector, "k2": selector},
+          )
+      )
+
   def test_api_exception_per_session(self):
     """API failure for one session should produce parse errors for that
     session but not crash the whole run."""
@@ -1329,6 +1429,234 @@ class TestBuildAiGenerateQuery:
     assert "it''s-a-model" in sql
 
 
+class TestIdentityBoundEvaluationInputs:
+  """U4 identity-bound transcript and query-parameter primitives."""
+
+  @staticmethod
+  def _selector(
+      *,
+      session_id="shared",
+      user_id="alice",
+      root_agent_name="root",
+      experiment_id="e1",
+      labels=None,
+  ):
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(
+            session_id=session_id,
+            user_id=user_id,
+            root_agent_name=root_agent_name,
+        ),
+        scope=TraceScope(
+            experiment_id=experiment_id,
+            custom_labels=labels or {"run": "v1"},
+        ),
+    )
+
+  def test_trace_transcript_matches_sql_content_priority(self):
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    trace = Trace(
+        trace_id="t",
+        session_id="s",
+        spans=[
+            Span(
+                event_type="USER_MESSAGE",
+                agent="user",
+                timestamp=ts,
+                content={"text_summary": "summary", "response": "ignored"},
+            ),
+            Span(
+                event_type="AGENT_MESSAGE",
+                agent=None,
+                timestamp=ts,
+                content={"response": "response"},
+            ),
+            Span(
+                event_type="ARTIFACT",
+                agent="writer",
+                timestamp=ts,
+                content={"artifacts": [{"parts": [{"text": "artifact"}]}]},
+            ),
+            Span(
+                event_type="TOOL_COMPLETED",
+                agent="tool-agent",
+                timestamp=ts,
+                content={"tool": "search"},
+            ),
+            Span(
+                event_type="EMPTY",
+                agent=None,
+                timestamp=ts,
+                content={},
+            ),
+        ],
+    )
+
+    assert _trace_to_categorical_transcript(trace) == (
+        "USER_MESSAGE [user]: summary\n"
+        "AGENT_MESSAGE: response\n"
+        "ARTIFACT [writer]: artifact\n"
+        "TOOL_COMPLETED [tool-agent]: search\n"
+        "EMPTY: "
+    )
+
+  def test_trace_transcript_treats_non_object_content_like_json_value(self):
+    ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    trace = Trace(
+        trace_id="t",
+        session_id="s",
+        spans=[
+            Span(
+                event_type="SCALAR_CONTENT",
+                agent=None,
+                timestamp=ts,
+                content=["not", "an", "object"],
+            )
+        ],
+    )
+
+    assert _trace_to_categorical_transcript(trace) == "SCALAR_CONTENT: "
+
+  def test_selector_key_distinguishes_reused_session(self):
+    alice = self._selector(user_id="alice")
+    bob = self._selector(user_id="bob")
+
+    assert _resolved_selector_key(alice) != _resolved_selector_key(bob)
+    assert _resolved_selector_key(alice) == _resolved_selector_key(alice)
+
+  def test_struct_parameter_has_explicit_type_for_empty_and_values(self):
+    selector = self._selector()
+    item = _CategoricalEvaluationInput(
+        selector=selector,
+        transcript="USER_MESSAGE: hello",
+        judge_context="Expected answer: hello",
+    )
+
+    empty_repr = _build_evaluation_inputs_parameter([]).to_api_repr()
+    populated_repr = _build_evaluation_inputs_parameter([item]).to_api_repr()
+
+    empty_structs = empty_repr["parameterType"]["arrayType"]["structTypes"]
+    populated_structs = populated_repr["parameterType"]["arrayType"][
+        "structTypes"
+    ]
+    assert empty_structs == populated_structs
+    assert [field["name"] for field in empty_structs] == [
+        "evaluation_key",
+        "session_id",
+        "transcript",
+        "judge_context",
+    ]
+    values = populated_repr["parameterValue"]["arrayValues"][0]["structValues"]
+    assert values["evaluation_key"]["value"] == _resolved_selector_key(selector)
+    assert values["session_id"]["value"] == "shared"
+    assert values["transcript"]["value"] == "USER_MESSAGE: hello"
+    assert values["judge_context"]["value"] == "Expected answer: hello"
+
+  def test_identity_bound_query_reads_parameter_and_context(self):
+    sql = build_ai_generate_query(
+        "p",
+        "d",
+        "t",
+        "1=1",
+        "gemini-2.5-flash",
+        0.0,
+        identity_bound=True,
+    )
+
+    assert "UNNEST(@evaluation_inputs)" in sql
+    assert "judge_context" in sql
+    assert "evaluation_key" in sql
+    assert "`p.d.t`" not in sql
+    assert "GROUP BY session_id" not in sql
+
+  @staticmethod
+  def _trace(selector, text="This transcript is long enough to judge."):
+    return Trace(
+        trace_id=selector.identity.session_id,
+        session_id=selector.identity.session_id,
+        user_id=selector.identity.user_id,
+        identity=selector.identity,
+        scope=selector.scope,
+        spans=[
+            Span(
+                event_type="USER_MESSAGE",
+                agent="user",
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                content={"text_summary": text},
+            )
+        ],
+    )
+
+  def test_exact_selectors_bind_separate_contexts_for_reused_session(self):
+    alice = self._selector(user_id="alice")
+    bob = self._selector(user_id="bob")
+
+    inputs = _normalize_categorical_evaluation_inputs(
+        [self._trace(alice), self._trace(bob)],
+        {alice: "Alice expected", bob: "Bob expected"},
+    )
+
+    assert [(item.selector, item.judge_context) for item in inputs] == [
+        (alice, "Alice expected"),
+        (bob, "Bob expected"),
+    ]
+
+  def test_legacy_session_key_requires_unique_resolved_trace(self):
+    alice = self._selector(user_id="alice")
+    bob = self._selector(user_id="bob")
+
+    with pytest.raises(AmbiguousSessionError) as exc:
+      _normalize_categorical_evaluation_inputs(
+          [self._trace(alice), self._trace(bob)],
+          {"shared": "one unsafe context"},
+      )
+
+    assert exc.value.candidates == (alice, bob)
+
+  def test_legacy_and_exact_alias_dedupe_or_conflict(self):
+    alice = self._selector(user_id="alice")
+    trace = self._trace(alice)
+
+    inputs = _normalize_categorical_evaluation_inputs(
+        [trace, trace],
+        {"shared": "expected", alice: "expected"},
+    )
+    assert len(inputs) == 1
+    assert inputs[0].judge_context == "expected"
+
+    with pytest.raises(ValueError, match="conflicting judge context"):
+      _normalize_categorical_evaluation_inputs(
+          [trace],
+          {"shared": "legacy", alice: "exact"},
+      )
+
+  def test_unmapped_traces_remain_and_out_of_population_keys_are_ignored(self):
+    alice = self._selector(user_id="alice")
+    absent = self._selector(session_id="absent", user_id="nobody")
+
+    inputs = _normalize_categorical_evaluation_inputs(
+        [self._trace(alice)],
+        {absent: "unused", "also-absent": "unused"},
+    )
+
+    assert len(inputs) == 1
+    assert inputs[0].selector == alice
+    assert inputs[0].judge_context is None
+
+  @pytest.mark.parametrize(
+      "context",
+      [
+          {1: "invalid key"},
+          {"shared": 1},
+      ],
+  )
+  def test_invalid_context_types_fail_before_input_construction(self, context):
+    alice = self._selector(user_id="alice")
+
+    with pytest.raises(TypeError):
+      _normalize_categorical_evaluation_inputs([self._trace(alice)], context)
+
+
 # ------------------------------------------------------------------ #
 # parse_classify_row Tests                                             #
 # ------------------------------------------------------------------ #
@@ -1603,6 +1931,30 @@ class TestFinishReasonLogging:
     assert len(results) == 1
     assert all(m.parse_error for m in results[0].metrics)
 
+  def test_context_path_redacts_model_text_from_parse_warning(self):
+    """A model echo of trusted judge context must not enter logs."""
+    config = _make_config()
+    transcripts = {"s1": "USER: Hello"}
+    secret = "golden-answer-secret-7f31"
+    mock_response = MagicMock()
+    mock_response.text = secret
+    mock_response.candidates = []
+    mock_client, _ = _make_genai_client(mock_response)
+
+    with _mock_genai_modules(mock_client):
+      with patch(
+          "bigquery_agent_analytics.categorical_evaluator.logger"
+      ) as mock_logger:
+        _run(
+            classify_sessions_via_api(
+                transcripts,
+                config,
+                per_session_context={"s1": secret},
+            )
+        )
+
+    assert secret not in repr(mock_logger.warning.call_args_list)
+
 
 # ------------------------------------------------------------------ #
 # NULL retry logic Tests                                               #
@@ -1649,8 +2001,8 @@ class TestRetryFailedSessions:
     )
 
     with patch(
-        "bigquery_agent_analytics.client._run_sync",
-        return_value=[good_result],
+        "bigquery_agent_analytics.client.classify_sessions_via_api",
+        new=AsyncMock(return_value=[good_result]),
     ):
       results = client._retry_failed_sessions(
           transcripts,
@@ -1662,6 +2014,71 @@ class TestRetryFailedSessions:
     assert len(results) == 1
     assert results[0].session_id == "s1"
     assert results[0].metrics[0].category == "positive"
+
+  def test_identity_bound_retry_forwards_context_by_internal_key(self):
+    """Two reused session ids cannot overwrite each other during retry."""
+    client = self._make_client()
+    config = _make_config()
+    alice = TestIdentityBoundEvaluationInputs._selector(user_id="alice")
+    bob = TestIdentityBoundEvaluationInputs._selector(user_id="bob")
+    transcripts = {"alice-key": "alice text", "bob-key": "bob text"}
+    contexts = {"alice-key": "Alice expected", "bob-key": "Bob expected"}
+    selectors = {"alice-key": alice, "bob-key": bob}
+    captured = {}
+
+    async def fake_api(
+        actual_transcripts,
+        actual_config,
+        endpoint,
+        per_session_context=None,
+        resolved_selectors=None,
+    ):
+      captured["transcripts"] = actual_transcripts
+      captured["contexts"] = per_session_context
+      captured["selectors"] = resolved_selectors
+      return [
+          CategoricalSessionResult(
+              session_id="shared",
+              metrics=[
+                  CategoricalMetricResult(
+                      metric_name="tone", category="positive"
+                  )
+              ],
+              details={"user_id": "alice"},
+          ),
+          CategoricalSessionResult(
+              session_id="shared",
+              metrics=[
+                  CategoricalMetricResult(
+                      metric_name="tone", category="negative"
+                  )
+              ],
+              details={"user_id": "bob"},
+          ),
+      ]
+
+    with patch(
+        "bigquery_agent_analytics.client.classify_sessions_via_api",
+        side_effect=fake_api,
+    ):
+      results = client._retry_failed_sessions(
+          transcripts,
+          config,
+          "gemini-2.5-flash",
+          max_retries=1,
+          per_session_context=contexts,
+          resolved_selectors=selectors,
+      )
+
+    assert captured == {
+        "transcripts": transcripts,
+        "contexts": contexts,
+        "selectors": selectors,
+    }
+    assert [result.details["user_id"] for result in results] == [
+        "alice",
+        "bob",
+    ]
 
   def test_retry_exhausts_attempts(self):
     """Sessions that keep failing should exhaust all retry attempts."""
@@ -1687,9 +2104,9 @@ class TestRetryFailedSessions:
     )
 
     with patch(
-        "bigquery_agent_analytics.client._run_sync",
-        return_value=[bad_result],
-    ) as mock_run:
+        "bigquery_agent_analytics.client.classify_sessions_via_api",
+        new=AsyncMock(return_value=[bad_result]),
+    ) as mock_api:
       results = client._retry_failed_sessions(
           transcripts,
           config,
@@ -1698,7 +2115,7 @@ class TestRetryFailedSessions:
       )
 
     assert len(results) == 0
-    assert mock_run.call_count == 3
+    assert mock_api.await_count == 3
 
   def test_retry_handles_api_exception(self):
     """API exceptions during retry should not crash."""
@@ -1707,8 +2124,8 @@ class TestRetryFailedSessions:
     transcripts = {"s1": "USER: Hello"}
 
     with patch(
-        "bigquery_agent_analytics.client._run_sync",
-        side_effect=RuntimeError("API down"),
+        "bigquery_agent_analytics.client.classify_sessions_via_api",
+        new=AsyncMock(side_effect=RuntimeError("API down")),
     ):
       results = client._retry_failed_sessions(
           transcripts,
@@ -1718,6 +2135,66 @@ class TestRetryFailedSessions:
       )
 
     assert len(results) == 0
+
+  def test_context_retry_redacts_raw_response_from_logs(self):
+    client = self._make_client()
+    config = _make_config()
+    secret = "golden-answer-secret-a019"
+    bad_result = CategoricalSessionResult(
+        session_id="s1",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                parse_error=True,
+                passed_validation=False,
+                raw_response=secret,
+            )
+        ],
+    )
+
+    async def fake_api(*args, **kwargs):
+      return [bad_result]
+
+    with (
+        patch(
+            "bigquery_agent_analytics.client.classify_sessions_via_api",
+            side_effect=fake_api,
+        ),
+        patch("bigquery_agent_analytics.client.logger") as mock_logger,
+    ):
+      client._retry_failed_sessions(
+          {"s1": "transcript"},
+          config,
+          "gemini-2.5-flash",
+          max_retries=1,
+          per_session_context={"s1": secret},
+      )
+
+    assert secret not in repr(mock_logger.warning.call_args_list)
+
+  def test_context_retry_redacts_outer_api_exception(self):
+    client = self._make_client()
+    secret = "golden-answer-secret-outer-31f0"
+
+    async def fake_api(*args, **kwargs):
+      raise RuntimeError(secret)
+
+    with (
+        patch(
+            "bigquery_agent_analytics.client.classify_sessions_via_api",
+            side_effect=fake_api,
+        ),
+        patch("bigquery_agent_analytics.client.logger") as mock_logger,
+    ):
+      client._retry_failed_sessions(
+          {"s1": "transcript"},
+          _make_config(),
+          "gemini-2.5-flash",
+          max_retries=1,
+          per_session_context={"s1": "trusted context"},
+      )
+
+    assert secret not in repr(mock_logger.warning.call_args_list)
 
   def test_retry_partial_success(self):
     """When some sessions succeed and some fail, only the successful
@@ -1759,8 +2236,8 @@ class TestRetryFailedSessions:
     )
 
     with patch(
-        "bigquery_agent_analytics.client._run_sync",
-        return_value=[good_result, bad_result],
+        "bigquery_agent_analytics.client.classify_sessions_via_api",
+        new=AsyncMock(return_value=[good_result, bad_result]),
     ):
       results = client._retry_failed_sessions(
           transcripts,
@@ -1838,6 +2315,151 @@ class TestRetryFailedSessions:
     assert len(results) == 2
     assert retry_meta["failed_count"] == 1
     assert retry_meta["retry_attempted"] is True
+
+  def test_ai_generate_retry_uses_selector_keys_for_reused_session(self):
+    client = self._make_client()
+    config = _make_config()
+    alice = TestIdentityBoundEvaluationInputs._selector(user_id="alice")
+    bob = TestIdentityBoundEvaluationInputs._selector(user_id="bob")
+    inputs = [
+        _CategoricalEvaluationInput(
+            selector=alice,
+            transcript="alice transcript",
+            judge_context="Alice expected",
+        ),
+        _CategoricalEvaluationInput(
+            selector=bob,
+            transcript="bob transcript",
+            judge_context=None,
+        ),
+    ]
+    client.bq_client.query.return_value.result.return_value = [
+        {
+            "evaluation_key": inputs[0].evaluation_key,
+            "session_id": "shared",
+            "transcript": "alice transcript",
+            "classifications": None,
+        },
+        {
+            "evaluation_key": inputs[1].evaluation_key,
+            "session_id": "shared",
+            "transcript": "bob transcript",
+            "classifications": None,
+        },
+    ]
+    retried = [
+        CategoricalSessionResult(
+            session_id="shared",
+            metrics=[
+                CategoricalMetricResult(metric_name="tone", category="positive")
+            ],
+            details={
+                "user_id": "alice",
+                "root_agent_name": "root",
+                "scope_signature": alice.scope_signature,
+            },
+        ),
+        CategoricalSessionResult(
+            session_id="shared",
+            metrics=[
+                CategoricalMetricResult(metric_name="tone", category="negative")
+            ],
+            details={
+                "user_id": "bob",
+                "root_agent_name": "root",
+                "scope_signature": bob.scope_signature,
+            },
+        ),
+    ]
+
+    with patch.object(
+        client,
+        "_retry_failed_sessions",
+        return_value=retried,
+    ) as mock_retry:
+      results, retry_meta = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+          evaluation_inputs=inputs,
+      )
+
+    retry_transcripts = mock_retry.call_args.args[0]
+    retry_kwargs = mock_retry.call_args.kwargs
+    assert list(retry_transcripts) == [
+        inputs[0].evaluation_key,
+        inputs[1].evaluation_key,
+    ]
+    assert retry_kwargs["per_session_context"] == {
+        inputs[0].evaluation_key: "Alice expected"
+    }
+    assert retry_kwargs["resolved_selectors"] == {
+        inputs[0].evaluation_key: alice,
+        inputs[1].evaluation_key: bob,
+    }
+    assert [result.details["user_id"] for result in results] == [
+        "alice",
+        "bob",
+    ]
+    assert [result.metrics[0].category for result in results] == [
+        "positive",
+        "negative",
+    ]
+    assert retry_meta["retry_resolved"] == 2
+
+  def test_identity_bound_results_follow_resolved_input_order(self):
+    client = self._make_client()
+    config = _make_config()
+    alice = TestIdentityBoundEvaluationInputs._selector(user_id="alice")
+    bob = TestIdentityBoundEvaluationInputs._selector(user_id="bob")
+    inputs = [
+        _CategoricalEvaluationInput(alice, "alice transcript"),
+        _CategoricalEvaluationInput(bob, "bob transcript"),
+    ]
+
+    def payload(tone):
+      return json.dumps(
+          [
+              {"metric_name": "tone", "category": tone},
+              {"metric_name": "safety", "category": "safe"},
+          ]
+      )
+
+    # BigQuery does not promise row order without ORDER BY.
+    client.bq_client.query.return_value.result.return_value = [
+        {
+            "evaluation_key": inputs[1].evaluation_key,
+            "session_id": "shared",
+            "transcript": "bob transcript",
+            "classifications": payload("negative"),
+        },
+        {
+            "evaluation_key": inputs[0].evaluation_key,
+            "session_id": "shared",
+            "transcript": "alice transcript",
+            "classifications": payload("positive"),
+        },
+    ]
+
+    results, _ = client._categorical_ai_generate(
+        config,
+        "t",
+        "1=1",
+        [],
+        "gemini-2.5-flash",
+        evaluation_inputs=inputs,
+    )
+
+    assert [result.details["user_id"] for result in results] == [
+        "alice",
+        "bob",
+    ]
+    assert [result.metrics[0].category for result in results] == [
+        "positive",
+        "negative",
+    ]
 
   def test_ai_generate_no_retry_when_all_succeed(self):
     """When all rows have classifications, no retry should happen."""

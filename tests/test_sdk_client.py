@@ -21,13 +21,20 @@ from unittest.mock import patch
 
 import pytest
 
+from bigquery_agent_analytics.categorical_evaluator import _resolved_selector_key
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
 from bigquery_agent_analytics.client import Client
 from bigquery_agent_analytics.evaluators import EvaluationReport
 from bigquery_agent_analytics.evaluators import SystemEvaluator
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceFilter
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 
 def _mock_bq_client():
@@ -1596,6 +1603,329 @@ class TestEvaluateCategoricalFallback:
     assert report.details["api_error"] == "google-genai not installed"
     assert "AI.GENERATE not available" in report.details["fallback_reason"]
     assert report.total_sessions == 0
+
+
+class TestEvaluateCategoricalIdentityBoundContext:
+  """U4 selector-safe per-trace judge context integration."""
+
+  @staticmethod
+  def _selector(user_id="alice"):
+    return ResolvedTraceSelector(
+        identity=TraceIdentity(
+            session_id="shared-session",
+            user_id=user_id,
+            root_agent_name="root",
+        ),
+        scope=TraceScope(
+            experiment_id="exp",
+            custom_labels={"run": user_id},
+        ),
+    )
+
+  @staticmethod
+  def _trace(selector):
+    return Trace(
+        trace_id=f"trace-{selector.identity.user_id}",
+        session_id=selector.identity.session_id,
+        user_id=selector.identity.user_id,
+        identity=selector.identity,
+        scope=selector.scope,
+        spans=[
+            Span(
+                event_type="USER_MESSAGE",
+                agent="user",
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                content={"text_summary": "A transcript long enough to judge."},
+            )
+        ],
+    )
+
+  def _client(self):
+    mock_bq = _mock_bq_client()
+    client = Client(
+        project_id="proj",
+        dataset_id="ds",
+        verify_schema=False,
+        bq_client=mock_bq,
+    )
+    return client, mock_bq
+
+  def test_context_path_uses_typed_selector_inputs_and_skips_classify(self):
+    client, mock_bq = self._client()
+    alice = self._selector()
+    valid = (
+        '[{"metric_name":"tone","category":"positive",'
+        '"justification":"matched"}]'
+    )
+    mock_bq.query.return_value.result.return_value = [
+        {
+            "evaluation_key": _resolved_selector_key(alice),
+            "session_id": "shared-session",
+            "transcript": "A transcript long enough to judge.",
+            "classifications": valid,
+        }
+    ]
+
+    with patch.object(
+        client, "_fetch_filtered_traces", return_value=[self._trace(alice)]
+    ):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(include_justification=False),
+          per_session_context={alice: "Expected answer: Alice"},
+      )
+
+    sql = mock_bq.query.call_args.args[0]
+    job_config = mock_bq.query.call_args.kwargs["job_config"]
+    inputs_param = next(
+        p for p in job_config.query_parameters if p.name == "evaluation_inputs"
+    )
+    encoded = inputs_param.to_api_repr()
+    context = encoded["parameterValue"]["arrayValues"][0]["structValues"][
+        "judge_context"
+    ]["value"]
+    assert "AI.GENERATE" in sql
+    assert "AI.CLASSIFY" not in sql
+    assert "Expected answer: Alice" not in sql
+    assert context == "Expected answer: Alice"
+    assert "Expected answer: Alice" not in repr(job_config.labels)
+    assert report.details["execution_mode"] == "ai_generate"
+    assert (
+        "identity-bound judge context" in report.details["classify_skip_reason"]
+    )
+
+  def test_legacy_context_ambiguity_raises_before_model_call(self):
+    client, mock_bq = self._client()
+    alice = self._selector("alice")
+    bob = self._selector("bob")
+
+    with (
+        patch.object(
+            client,
+            "_fetch_filtered_traces",
+            return_value=[self._trace(alice), self._trace(bob)],
+        ),
+        pytest.raises(AmbiguousSessionError),
+    ):
+      client.evaluate_categorical(
+          config=_make_categorical_config(),
+          per_session_context={"shared-session": "unsafe shared context"},
+      )
+
+    mock_bq.query.assert_not_called()
+
+  def test_invalid_context_mapping_fails_before_population_fetch(self):
+    client, mock_bq = self._client()
+
+    with (
+        patch.object(client, "_fetch_filtered_traces") as mock_fetch,
+        pytest.raises(TypeError, match="Judge context keys"),
+    ):
+      client.evaluate_categorical(
+          config=_make_categorical_config(),
+          per_session_context={1: "invalid"},
+      )
+
+    mock_fetch.assert_not_called()
+    mock_bq.query.assert_not_called()
+
+  def test_context_persistence_fails_closed_until_identity_schema_u5(self):
+    client, mock_bq = self._client()
+    selector = self._selector()
+
+    with (
+        patch.object(client, "_fetch_filtered_traces") as mock_fetch,
+        pytest.raises(ValueError, match="identity-safe persistence"),
+    ):
+      client.evaluate_categorical(
+          config=_make_categorical_config(persist_results=True),
+          per_session_context={selector: "Expected answer"},
+      )
+
+    mock_fetch.assert_not_called()
+    mock_bq.query.assert_not_called()
+
+  def test_empty_resolved_population_makes_no_model_call(self):
+    client, mock_bq = self._client()
+    selector = self._selector()
+
+    with patch.object(client, "_fetch_filtered_traces", return_value=[]):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(include_justification=False),
+          per_session_context={selector: "Expected answer"},
+      )
+
+    mock_bq.query.assert_not_called()
+    assert report.total_sessions == 0
+    assert report.details["execution_mode"] == "ai_generate"
+    assert report.details["empty_population"] is True
+    assert (
+        "identity-bound judge context" in report.details["classify_skip_reason"]
+    )
+
+  def test_short_newest_trace_does_not_starve_older_judgeable_trace(self):
+    """The context path refills after transcript-length rejection."""
+    client, mock_bq = self._client()
+    selector = self._selector()
+    short = self._trace(selector)
+    short.spans[0].content = {"text_summary": ""}
+    long = self._trace(selector)
+    rows = [
+        [
+            {
+                "session_id": "new",
+                "anchor_user_id": "u",
+                "anchor_root_agent_name": "r",
+            }
+        ],
+        [
+            {
+                "session_id": "new",
+                "anchor_user_id": "u",
+                "anchor_root_agent_name": "r",
+            },
+            {
+                "session_id": "old",
+                "anchor_user_id": "u",
+                "anchor_root_agent_name": "r",
+            },
+        ],
+    ]
+    mock_bq.query.side_effect = [
+        MagicMock(result=MagicMock(return_value=page)) for page in rows
+    ]
+    filt = TraceFilter(limit=1)
+    where, row_where, params = filt.to_query_fragments()
+    page_traces = iter([[short], [short, long]])
+
+    def fake_build(_rows, *, max_traces, span_predicate, **kwargs):
+      eligible = [
+          trace for trace in next(page_traces) if span_predicate(trace.spans)
+      ]
+      return eligible[:max_traces]
+
+    with patch(
+        "bigquery_agent_analytics.client._build_traces_from_rows",
+        side_effect=fake_build,
+    ):
+      traces = client._fetch_filtered_traces(
+          table="agent_events",
+          where=where,
+          row_where=row_where,
+          params=params,
+          limit=1,
+          scope_predicate=None,
+          span_predicate=lambda spans: len(
+              spans[0].content.get("text_summary", "")
+          )
+          > 10,
+          feature="eval-categorical",
+      )
+
+    assert traces == [long]
+    assert mock_bq.query.call_count == 2
+
+  def test_full_api_fallback_reuses_resolved_transcripts_and_contexts(self):
+    client, mock_bq = self._client()
+    alice = self._selector("alice")
+    bob = self._selector("bob")
+    traces = [self._trace(alice), self._trace(bob)]
+    mock_bq.query.return_value.result.side_effect = RuntimeError(
+        "AI.GENERATE unavailable"
+    )
+    captured = {}
+
+    async def fake_api(
+        transcripts,
+        config,
+        endpoint,
+        per_session_context=None,
+        resolved_selectors=None,
+    ):
+      captured["transcripts"] = transcripts
+      captured["contexts"] = per_session_context
+      captured["selectors"] = resolved_selectors
+      from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+      from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+
+      return [
+          CategoricalSessionResult(
+              session_id=selector.identity.session_id,
+              metrics=[
+                  CategoricalMetricResult(
+                      metric_name="tone", category="positive"
+                  )
+              ],
+              details={
+                  "user_id": selector.identity.user_id,
+                  "root_agent_name": selector.identity.root_agent_name,
+                  "scope_signature": selector.scope_signature,
+              },
+          )
+          for selector in resolved_selectors.values()
+      ]
+
+    with (
+        patch.object(
+            client,
+            "_fetch_filtered_traces",
+            return_value=traces,
+        ),
+        patch(
+            "bigquery_agent_analytics.client.classify_sessions_via_api",
+            side_effect=fake_api,
+        ),
+    ):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(),
+          per_session_context={
+              alice: "Alice expected",
+              bob: "Bob expected",
+          },
+      )
+
+    # Exactly one BigQuery model query: fallback reuses the already
+    # resolved transcripts instead of running the legacy session query.
+    assert mock_bq.query.call_count == 1
+    assert report.details["execution_mode"] == "api_fallback"
+    assert list(captured["contexts"].values()) == [
+        "Alice expected",
+        "Bob expected",
+    ]
+    assert list(captured["selectors"].values()) == [alice, bob]
+    assert [result.details["user_id"] for result in report.session_results] == [
+        "alice",
+        "bob",
+    ]
+
+  def test_context_path_redacts_bigquery_failure_from_logs_and_report(self):
+    client, mock_bq = self._client()
+    selector = self._selector()
+    secret = "golden-answer-secret-bq-7721"
+    mock_bq.query.return_value.result.side_effect = RuntimeError(secret)
+
+    with (
+        patch.object(
+            client,
+            "_fetch_filtered_traces",
+            return_value=[self._trace(selector)],
+        ),
+        patch(
+            "bigquery_agent_analytics.client.classify_sessions_via_api",
+            side_effect=ImportError("genai unavailable"),
+        ),
+        patch("bigquery_agent_analytics.client.logger") as mock_logger,
+    ):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(),
+          per_session_context={selector: "trusted context"},
+      )
+
+    assert report.details["execution_mode"] == "api_unavailable"
+    assert secret not in repr(report.details)
+    assert secret not in repr(mock_logger.debug.call_args_list)
+    assert (
+        "identity-bound judge context" in report.details["classify_skip_reason"]
+    )
 
 
 class TestEvaluateCategoricalPersistence:
