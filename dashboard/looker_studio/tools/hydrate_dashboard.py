@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Validate a BQAA installation and emit its Looker Studio creation URL.
 
-The dashboard reads the BQAA-generated views, not the raw event table. The
-table ID is accepted as a structural BQAA installation anchor; the view prefix
-selects the generated reporting views used by the report.
+The dashboard reads one BQAA agent-events table and does not require the
+optional generated analytics views.
 """
 
 import argparse
@@ -19,26 +18,7 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
-PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-
-BQAA_TABLE_COLUMNS = {
-    "timestamp": "TIMESTAMP",
-    "event_type": "STRING",
-    "agent": "STRING",
-    "session_id": "STRING",
-    "invocation_id": "STRING",
-    "user_id": "STRING",
-    "trace_id": "STRING",
-    "span_id": "STRING",
-    "parent_span_id": "STRING",
-    "content": "JSON",
-    "attributes": "JSON",
-    "latency_ms": "JSON",
-    "status": "STRING",
-    "error_message": "STRING",
-    "is_truncated": "BOOL",
-}
 
 
 def require_identifier(label: str, value: str, pattern: re.Pattern) -> str:
@@ -55,17 +35,29 @@ def load_yaml(path: pathlib.Path) -> dict:
 
 
 def reject_sentinel_collisions(
-    values: dict[str, str], sentinels: dict[str, str]
+    replacements: dict[str, str], sentinels: dict[str, str]
 ) -> None:
-  """Reject inputs that sequential sqlReplace could mutate a second time."""
-  reserved = tuple(sentinels.values())
-  if not reserved or not all(
-      isinstance(value, str) and value for value in reserved
-  ):
+  """Reject only values that a later sqlReplace pair would mutate.
+
+  A replacement may safely equal or contain its own sentinel because that
+  pair has already consumed the input when the replacement text is inserted.
+  It may also contain an earlier sentinel. A later sentinel is unsafe because
+  the subsequent pair would rewrite part of the inserted identifier.
+  """
+  order = ("PROJECT", "DATASET", "TABLE")
+  if set(replacements) != set(order):
+    raise ValueError("replacement values do not match template bindings")
+  reserved = tuple(sentinels.get(name) for name in order)
+  if not all(isinstance(value, str) and value for value in reserved):
     raise ValueError("template bindings contain invalid sentinel values")
-  for label, value in values.items():
-    if any(sentinel in value for sentinel in reserved):
-      raise ValueError(f"{label} contains a reserved template sentinel")
+  if len(set(reserved)) != len(reserved):
+    raise ValueError("template bindings contain duplicate sentinel values")
+  for index, name in enumerate(order):
+    value = replacements[name]
+    if any(sentinel in value for sentinel in reserved[index + 1 :]):
+      raise ValueError(
+          f"{name.lower()} contains a later reserved template sentinel"
+      )
 
 
 def bq_query(project: str, location: str, sql: str) -> list[dict]:
@@ -93,63 +85,18 @@ def bq_query(project: str, location: str, sql: str) -> list[dict]:
 
 
 def table_preflight_sql(project: str, dataset: str, table: str) -> str:
-  required = ",\n    ".join(
-      f"STRUCT('{name}' AS column_name, '{kind}' AS data_type)"
-      for name, kind in BQAA_TABLE_COLUMNS.items()
-  )
-  return f"""\
-WITH required AS (
-  SELECT * FROM UNNEST([
-    {required}
-  ])
-),
-actual AS (
-  SELECT column_name, data_type
-  FROM `{project}.{dataset}`.INFORMATION_SCHEMA.COLUMNS
-  WHERE table_name = '{table}'
-),
-object AS (
-  SELECT table_type
-  FROM `{project}.{dataset}`.INFORMATION_SCHEMA.TABLES
-  WHERE table_name = '{table}'
-)
-SELECT
-  '{table}' AS table_name,
-  r.column_name,
-  r.data_type AS expected_type,
-  a.data_type AS observed_type,
-  o.table_type AS observed_object_type,
-  CASE
-    WHEN o.table_type IS NULL THEN 'MISSING_TABLE'
-    WHEN o.table_type != 'BASE TABLE' THEN 'WRONG_OBJECT_TYPE'
-    WHEN a.column_name IS NULL THEN 'MISSING_COLUMN'
-    ELSE 'TYPE_MISMATCH'
-  END AS problem
-FROM required r
-CROSS JOIN (SELECT 1) anchor
-LEFT JOIN object o ON TRUE
-LEFT JOIN actual a USING (column_name)
-WHERE o.table_type IS NULL
-   OR o.table_type != 'BASE TABLE'
-   OR a.column_name IS NULL
-   OR a.data_type != r.data_type
-ORDER BY r.column_name
-"""
-
-
-def view_preflight_sql(project: str, dataset: str, prefix: str) -> str:
   template = (ROOT / "sql/preflight.sql.tmpl").read_text()
   return (
       template.replace("{{PROJECT}}", project)
       .replace("{{DATASET}}", dataset)
-      .replace("{{VIEW_PREFIX}}", prefix)
+      .replace("{{TABLE}}", table)
   )
 
 
 def build_link(
     project: str,
     dataset: str,
-    prefix: str,
+    table: str,
     billing_project: str,
     report_name: str,
 ) -> str:
@@ -158,11 +105,9 @@ def build_link(
   sentinels = bindings["placeholders"]
   reject_sentinel_collisions(
       {
-          "project ID": project,
-          "dataset ID": dataset,
-          "view prefix": prefix,
-          "billing project ID": billing_project,
-          "report name": report_name,
+          "PROJECT": project,
+          "DATASET": dataset,
+          "TABLE": table,
       },
       sentinels,
   )
@@ -173,8 +118,8 @@ def build_link(
           project,
           sentinels["DATASET"],
           dataset,
-          sentinels["VIEW_PREFIX"],
-          prefix,
+          sentinels["TABLE"],
+          table,
       ]
   )
   params = {
@@ -197,8 +142,8 @@ def build_link(
 def main() -> int:
   parser = argparse.ArgumentParser(
       description=(
-          "Validate a BQAA table and its generated views, then create a "
-          "configured Looker Studio dashboard link."
+          "Validate a BQAA event table, then create a configured Looker "
+          "Studio dashboard link."
       )
   )
   parser.add_argument("--project", required=True)
@@ -206,12 +151,7 @@ def main() -> int:
   parser.add_argument(
       "--table",
       default="agent_events",
-      help="BQAA base table used for structural validation (default: agent_events)",
-  )
-  parser.add_argument(
-      "--prefix",
-      default="v",
-      help="BQAA generated-view prefix (default: v)",
+      help="BQAA event table queried by the dashboard (default: agent_events)",
   )
   parser.add_argument(
       "--billing-project",
@@ -225,7 +165,6 @@ def main() -> int:
     project = require_identifier("project ID", args.project, PROJECT_RE)
     dataset = require_identifier("dataset ID", args.dataset, ID_RE)
     table = require_identifier("table ID", args.table, ID_RE)
-    prefix = require_identifier("view prefix", args.prefix, PREFIX_RE)
     billing = require_identifier(
         "billing project ID",
         args.billing_project or project,
@@ -235,11 +174,9 @@ def main() -> int:
     bindings = load_yaml(ROOT / "bindings/template_bindings.yaml")
     reject_sentinel_collisions(
         {
-            "project ID": project,
-            "dataset ID": dataset,
-            "table ID": table,
-            "view prefix": prefix,
-            "billing project ID": billing,
+            "PROJECT": project,
+            "DATASET": dataset,
+            "TABLE": table,
         },
         bindings["placeholders"],
     )
@@ -271,33 +208,15 @@ def main() -> int:
       )
     return 1
 
-  try:
-    view_problems = bq_query(
-        billing, location, view_preflight_sql(project, dataset, prefix)
-    )
-  except (OSError, RuntimeError, json.JSONDecodeError) as exc:
-    print(f"ERROR: {exc}", file=sys.stderr)
-    return 1
-  if view_problems:
-    print(
-        f"ERROR: {len(view_problems)} generated-view compatibility "
-        "problem(s); run the BQAA plugin with create_views=True",
-        file=sys.stderr,
-    )
-    for problem in view_problems[:20]:
-      print(
-          "  - "
-          f"{problem.get('problem')}: "
-          f"{problem.get('view_name')}."
-          f"{problem.get('required_column')}",
-          file=sys.stderr,
-      )
-    return 1
-
   report_name = args.report_name or f"BigQuery Agent Analytics — {dataset}"
-  link = build_link(project, dataset, prefix, billing, report_name)
+  link = build_link(project, dataset, table, billing, report_name)
   print(
-      "BQAA preflight OK: base table and 15 generated views are compatible",
+      "BQAA preflight OK: base event table is compatible; no views required",
+      file=sys.stderr,
+  )
+  print(
+      "SECURITY: keep the new report private until Resource > Manage added "
+      "data sources > Edit shows Data credentials: Viewer",
       file=sys.stderr,
   )
   print(link)

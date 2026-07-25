@@ -9,8 +9,8 @@ They serve two purposes:
 
 1. make every chart's metric, filter, sort, and limit contract reviewable;
 2. let `../tools/validate_live_bqaa.py` compile and execute all chart
-   contracts against a caller's BQAA-generated views without collecting
-   result values.
+   contracts against a caller's BQAA event table without collecting result
+   values or requiring generated views.
 
 The dashboard itself has one embedded custom-query data source. These files
 are validation artifacts, not 37 additional Looker Studio data sources.

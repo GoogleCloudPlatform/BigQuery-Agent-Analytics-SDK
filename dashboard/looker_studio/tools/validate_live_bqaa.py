@@ -21,7 +21,6 @@ import yaml
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
-PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,127}$")
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 FILTER_PARAMS = (
     "filter_agent",
@@ -30,25 +29,6 @@ FILTER_PARAMS = (
     "filter_span_id",
     "filter_tool_name",
 )
-REQUIRED_VIEWS = {
-    "user_message_received",
-    "llm_request",
-    "llm_response",
-    "llm_error",
-    "tool_starting",
-    "tool_completed",
-    "tool_error",
-    "agent_starting",
-    "agent_completed",
-    "invocation_starting",
-    "invocation_completed",
-    "state_delta",
-    "hitl_credential_request",
-    "hitl_confirmation_request",
-    "hitl_input_request",
-}
-
-
 def require_identifier(label: str, value: str, pattern: re.Pattern) -> str:
   if not pattern.fullmatch(value):
     raise ValueError(f"invalid {label}: {value!r}")
@@ -71,7 +51,7 @@ def run_query(
     source_project: str,
     billing_project: str,
     dataset: str,
-    prefix: str,
+    table: str,
     location: str,
     start: str,
     end: str,
@@ -80,7 +60,7 @@ def run_query(
       sql_path.read_text()
       .replace("{{PROJECT}}", source_project)
       .replace("{{DATASET}}", dataset)
-      .replace("{{VIEW_PREFIX}}", prefix)
+      .replace("{{TABLE}}", table)
   )
   job_id = f"looker_studio_smoke_{uuid.uuid4().hex}"
   command = [
@@ -120,7 +100,7 @@ def main() -> int:
       help="BigQuery billing project (default: --project)",
   )
   parser.add_argument("--dataset", required=True)
-  parser.add_argument("--prefix", default="v")
+  parser.add_argument("--table", default="agent_events")
   parser.add_argument("--location", default="US")
   parser.add_argument(
       "--end-date",
@@ -139,7 +119,7 @@ def main() -> int:
     require_identifier("project ID", args.project, PROJECT_RE)
     require_identifier("billing project ID", billing_project, PROJECT_RE)
     require_identifier("dataset ID", args.dataset, ID_RE)
-    require_identifier("view prefix", args.prefix, PREFIX_RE)
+    require_identifier("table ID", args.table, ID_RE)
     require_identifier("location", args.location, LOCATION_RE)
   except ValueError as exc:
     raise SystemExit(str(exc)) from exc
@@ -155,7 +135,7 @@ def main() -> int:
       .read_text()
       .replace("{{PROJECT}}", args.project)
       .replace("{{DATASET}}", args.dataset)
-      .replace("{{VIEW_PREFIX}}", args.prefix)
+      .replace("{{TABLE}}", args.table)
   )
   preflight_process = subprocess.run(
       [
@@ -193,7 +173,7 @@ def main() -> int:
           args.project,
           billing_project,
           args.dataset,
-          args.prefix,
+          args.table,
           args.location,
           start,
           end,
@@ -224,8 +204,8 @@ def main() -> int:
           datetime.timezone.utc
       ).isoformat(),
       "report_end_date": args.end_date,
-      "view_prefix": args.prefix,
-      "required_view_count": len(REQUIRED_VIEWS),
+      "source_object_type": "BASE TABLE",
+      "generated_views_required": False,
       "spec_sha256": sha256_file(args.spec),
       "charts_expected": 37,
       "charts_succeeded": len(executed),

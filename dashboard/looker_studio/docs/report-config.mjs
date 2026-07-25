@@ -5,8 +5,7 @@ export const REPORT_CONFIG = Object.freeze({
   "sentinels": {
     "project": "test-project-0728-467323",
     "dataset": "bqaa_fixture_adk_1_27_0",
-    "viewPrefix": "vsentinelbqaa"
+    "table": "sentinelbqaaevents"
   },
-  "defaultViewPrefix": "v",
   "defaultTable": "agent_events"
 });

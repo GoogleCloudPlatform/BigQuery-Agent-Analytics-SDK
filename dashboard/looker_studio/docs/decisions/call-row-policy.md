@@ -24,10 +24,10 @@ identical (6,323).
 
 ## Decision
 
-**`raw_row` over the direct view**: SUM/AVG/percentile aggregate every
-view row (partials included); call counts use `COUNT(DISTINCT
-trace_id|span_id)`. The dashboard's union and the oracle share these
-semantics by independent construction.
+**`raw_row` over the base table**: SUM/AVG/percentile aggregate every event
+row (partials included); call counts use `COUNT(DISTINCT trace_id|span_id)`.
+The dashboard and the oracle preserve these semantics by independent
+construction.
 
 This is **not** exact block reproduction on the repeated-key population.
 The earlier claim ("reproduces block behavior by construction") was wrong

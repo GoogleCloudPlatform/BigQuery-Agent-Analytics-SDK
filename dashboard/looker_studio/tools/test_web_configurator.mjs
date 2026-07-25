@@ -25,7 +25,6 @@ const values = {
   project: "customer-project-123",
   dataset: "agent_analytics",
   table: "agent_events",
-  prefix: "v",
   billingProject: "customer-project-123",
 };
 assert.deepEqual(validateConfiguration(values), values);
@@ -42,8 +41,8 @@ assert.equal(
     "customer-project-123",
     "bqaa_fixture_adk_1_27_0",
     "agent_analytics",
-    "vsentinelbqaa",
-    "v",
+    "sentinelbqaaevents",
+    "agent_events",
   ].join(","),
 );
 assert.equal(
@@ -71,23 +70,12 @@ assert.equal(setup.hash, "");
 
 const advanced = {
   ...values,
-  prefix: "analytics-v2",
   billingProject: "billing-project-123",
 };
 const advancedDashboard = new URL(buildDashboardUrl(advanced));
 assert.equal(
-  advancedDashboard.searchParams.get("ds.ds230.sqlReplace").split(",").at(-1),
-  "analytics-v2",
-);
-assert.equal(
   advancedDashboard.searchParams.get("ds.ds230.billingProjectId"),
   "billing-project-123",
-);
-assert.equal(
-  new URL(
-    buildSetupUrl(advanced, "https://example.test/configure"),
-  ).searchParams.get("prefix"),
-  "analytics-v2",
 );
 
 for (const invalid of [
@@ -96,23 +84,28 @@ for (const invalid of [
   { ...values, dataset: "bad-dataset" },
   { ...values, dataset: "data`set" },
   { ...values, table: "table,other" },
-  { ...values, prefix: "v,other" },
   { ...values, billingProject: "UPPERCASE" },
 ]) {
   assert.throws(() => buildDashboardUrl(invalid));
 }
 
 for (const collision of [
-  { ...values, project: "vsentinelbqaaproj" },
-  { ...values, dataset: "customer_vsentinelbqaa_data" },
-  { ...values, table: "agent_vsentinelbqaa_events" },
-  { ...values, prefix: "bqaa_fixture_adk_1_27_0_custom" },
-  { ...values, billingProject: "vsentinelbqaabilling" },
+  { ...values, project: "xsentinelbqaaevents" },
+  { ...values, dataset: "customer_sentinelbqaaevents_data" },
 ]) {
   assert.throws(
     () => buildDashboardUrl(collision),
     /reserved dashboard template value/,
   );
+}
+
+for (const safeCollision of [
+  { ...values, project: "test-project-0728-467323" },
+  { ...values, dataset: "bqaa_fixture_adk_1_27_0" },
+  { ...values, table: "custom_sentinelbqaaevents_table" },
+  { ...values, billingProject: "test-project-0728-467323" },
+]) {
+  assert.doesNotThrow(() => buildDashboardUrl(safeCollision));
 }
 
 console.log(

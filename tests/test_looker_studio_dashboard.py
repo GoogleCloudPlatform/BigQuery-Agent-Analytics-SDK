@@ -47,7 +47,7 @@ def test_portable_linking_api_configuration():
   link = hydration.build_link(
       "customer-project-123",
       "agent_analytics",
-      "custom-views",
+      "agent_events",
       "billing-project-123",
       "Customer BQAA",
   )
@@ -64,8 +64,8 @@ def test_portable_linking_api_configuration():
       "customer-project-123",
       "bqaa_fixture_adk_1_27_0",
       "agent_analytics",
-      "vsentinelbqaa",
-      "custom-views",
+      "sentinelbqaaevents",
+      "agent_events",
   ]
 
 
@@ -76,7 +76,7 @@ def test_portable_linking_api_configuration():
         ("project ID", "project;drop", "PROJECT_RE"),
         ("dataset ID", "bad-dataset", "ID_RE"),
         ("dataset ID", "data`set", "ID_RE"),
-        ("view prefix", "v,other", "PREFIX_RE"),
+        ("table ID", "table,other", "ID_RE"),
     ],
 )
 def test_hydration_identifiers_fail_closed(label, value, pattern):
@@ -86,43 +86,78 @@ def test_hydration_identifiers_fail_closed(label, value, pattern):
 
 
 @pytest.mark.parametrize(
-    ("project", "dataset", "prefix", "billing_project", "report_name"),
+    ("project", "dataset", "table", "billing_project", "report_name"),
     [
         (
-            "vsentinelbqaaproj",
+            "xsentinelbqaaevents",
             "agent_analytics",
-            "v",
+            "agent_events",
             "billing-project-123",
             "Customer BQAA",
         ),
         (
             "customer-project-123",
-            "customer_vsentinelbqaa_data",
-            "v",
-            "billing-project-123",
-            "Customer BQAA",
-        ),
-        (
-            "customer-project-123",
-            "agent_analytics",
-            "bqaa_fixture_adk_1_27_0_custom",
+            "customer_sentinelbqaaevents_data",
+            "agent_events",
             "billing-project-123",
             "Customer BQAA",
         ),
     ],
 )
 def test_hydration_rejects_sequential_replacement_collisions(
-    project, dataset, prefix, billing_project, report_name
+    project, dataset, table, billing_project, report_name
 ):
   hydration = _load_hydration_module()
   with pytest.raises(ValueError, match="reserved template sentinel"):
     hydration.build_link(
         project,
         dataset,
-        prefix,
+        table,
         billing_project,
         report_name,
     )
+
+
+@pytest.mark.parametrize(
+    ("project", "dataset", "table", "billing_project"),
+    [
+        (
+            "test-project-0728-467323",
+            "agent_analytics",
+            "agent_events",
+            "billing-project-123",
+        ),
+        (
+            "customer-project-123",
+            "bqaa_fixture_adk_1_27_0",
+            "agent_events",
+            "billing-project-123",
+        ),
+        (
+            "customer-project-123",
+            "agent_analytics",
+            "custom_sentinelbqaaevents_table",
+            "billing-project-123",
+        ),
+        (
+            "customer-project-123",
+            "agent_analytics",
+            "agent_events",
+            "test-project-0728-467323",
+        ),
+    ],
+)
+def test_hydration_allows_nonsequential_sentinel_text(
+    project, dataset, table, billing_project
+):
+  hydration = _load_hydration_module()
+  hydration.build_link(
+      project,
+      dataset,
+      table,
+      billing_project,
+      "Customer BQAA",
+  )
 
 
 def test_generated_sql_artifacts_cannot_drift(tmp_path):
@@ -201,7 +236,7 @@ def test_report_and_web_bindings_cannot_drift():
   assert web["sentinels"] == {
       "project": bindings["PROJECT"],
       "dataset": bindings["DATASET"],
-      "viewPrefix": bindings["VIEW_PREFIX"],
+      "table": bindings["TABLE"],
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
@@ -210,21 +245,49 @@ def test_report_and_web_bindings_cannot_drift():
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
+  assert report["live_template_verification"] == {
+      "verified_date": "2026-07-24",
+      "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
+      "method": [
+          "connector_custom_query_review",
+          "sqlreplace_table_only_smoke_test",
+          "canonical_viewer_credentials_review",
+      ],
+      "result": "PASSED",
+      "limitation": "mutable_external_report_requires_reverification_after_changes",
+  }
+  assert report["source_contract"] == {
+      "mode": "BASE_TABLE",
+      "generated_views_required": False,
+      "replacement_identifiers": ["PROJECT", "DATASET", "TABLE"],
+  }
+  assert report["credential_mode"] == "VIEWERS"
+  assert report["generated_report_credential_gate"] == {
+      "observed_initial_mode": "OWNERS",
+      "required_before_sharing": "VIEWERS",
+      "verification_path": "Resource > Manage added data sources > Edit",
+  }
 
 
-def test_union_and_preflight_cover_the_portable_bqaa_contract():
-  union = (DASHBOARD / "sql/events_v1.sql.tmpl").read_text()
+def test_base_table_query_and_preflight_cover_the_bqaa_contract():
+  query = (DASHBOARD / "sql/events_v1.sql.tmpl").read_text()
   preflight = (DASHBOARD / "sql/preflight.sql.tmpl").read_text()
   profile = json.loads(
       (DASHBOARD / "spec/compatibility_profile.json").read_text()
   )
 
-  assert union.count("FROM `{{PROJECT}}.{{DATASET}}.{{VIEW_PREFIX}}_") == 15
-  assert len(profile["intersection_views"]) == 15
-  assert "usage_metadata" in preflight
+  assert query.count("FROM `{{PROJECT}}.{{DATASET}}.{{TABLE}}`") == 1
+  assert "VIEW_PREFIX" not in query
+  assert profile["generated_views_required"] is False
+  assert profile["source_object"] == "agent_events"
+  assert "JSON_VALUE(content, '$.usage.total')" in query
+  assert "$.usage_metadata.total_token_count" in query
+  assert "JSON_VALUE(content, '$.tool')" in query
+  assert "{{TABLE}}" in preflight
+  assert "VIEW_PREFIX" not in preflight
   assert "WRONG_OBJECT_TYPE" in preflight
-  assert "@DS_START_DATE" in union
-  assert "@DS_END_DATE" in union
+  assert "@DS_START_DATE" in query
+  assert "@DS_END_DATE" in query
 
 
 @pytest.mark.skipif(

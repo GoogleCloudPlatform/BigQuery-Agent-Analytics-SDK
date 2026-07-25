@@ -35,8 +35,8 @@
         <form class="card" id="configurator" novalidate>
           <h2>Connect your BQAA data</h2>
           <p class="card-intro">
-            The standard <code>v_*</code> generated views must exist beside
-            the BQAA event table.
+            Only the BQAA event table is required. Generated views are not
+            used.
           </p>
 
           <label for="project">Project ID</label>
@@ -66,25 +66,12 @@
             required
           >
           <span class="hint">
-            Used to identify and name this installation. Charts read the
-            BQAA-generated views, not the raw table.
+            Charts read this table directly and extract reporting fields from
+            its JSON columns.
           </span>
 
           <details>
             <summary>Advanced settings</summary>
-            <label for="prefix">Generated-view prefix</label>
-            <input
-              id="prefix"
-              name="prefix"
-              autocomplete="off"
-              value="v"
-              required
-            >
-            <span class="hint">
-              Keep <code>v</code> unless the plugin uses a custom
-              <code>view_prefix</code>.
-            </span>
-
             <label for="billing-project">Billing project ID</label>
             <input
               id="billing-project"
@@ -133,21 +120,32 @@
         </article>
         <article class="step">
           <span class="step-number">03</span>
-          <h3>Own the report</h3>
+          <h3>Save, then secure sharing</h3>
           <p>
-            Authorize BigQuery, choose “Edit and share,” and the configured
-            report is saved in your account.
+            Choose “Edit and share” to save it. Before sharing, set the new
+            data source’s credentials to <strong>Viewer’s Credentials</strong>
+            so every viewer must have their own BigQuery access.
           </p>
         </article>
       </section>
 
       <aside class="notice">
-        <strong>BQAA views are required.</strong>
-        A raw event table by itself is not enough. The ADK plugin must run with
-        <code>create_views=True</code>. Standard installations use the
-        <code>v</code> prefix; custom prefixes and billing projects are under
-        Advanced settings. For a location override or verified preflight, use
-        the repository’s CLI helper.
+        <strong>Keep the new report private until the credential check.</strong>
+        The Linking API creates a data source owned by the person opening the
+        link and its review dialog can show Owner’s Credentials. In the saved
+        report, open <em>Resource → Manage added data sources → Edit</em> and
+        verify <em>Data credentials: Viewer</em> before sharing.
+        <a href="https://docs.cloud.google.com/data-studio/data-credentials">
+          Learn about Looker Studio data credentials.
+        </a>
+      </aside>
+
+      <aside class="notice">
+        <strong>No generated views required.</strong>
+        The dashboard reads the configured BQAA event table directly. A
+        separate billing project is available under Advanced settings. For a
+        location override or verified preflight, use the repository’s CLI
+        helper.
       </aside>
 
       <footer>
