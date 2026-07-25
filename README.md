@@ -123,8 +123,10 @@ report = client.evaluate_categorical(
 )
 ```
 
-Legacy string keys are accepted only when the evaluated `session_id` is
-unambiguous; otherwise `AmbiguousSessionError` fails before any model call.
+Legacy string keys are accepted only when the transcript-eligible evaluated
+`session_id` is unambiguous; eligibility is applied before that ambiguity
+check, so exact selector keys are recommended whenever session IDs may be
+reused. Otherwise `AmbiguousSessionError` fails before any model call.
 Context is trusted evaluator material, sent as a query parameter/model prompt
 through AI.GENERATE, retry, and API fallback. It is never interpolated into
 SQL, logged, persisted, or placed in job labels. Apply the same data-governance

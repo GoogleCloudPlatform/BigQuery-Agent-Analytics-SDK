@@ -1517,6 +1517,65 @@ class TestIdentityBoundEvaluationInputs:
 
     assert _trace_to_categorical_transcript(trace) == "SCALAR_CONTENT: "
 
+  @pytest.mark.parametrize(
+      ("slot", "structural_fallback"),
+      [
+          ("text_summary", "response fallback"),
+          ("response", "artifact fallback"),
+          ("artifact", "tool fallback"),
+          ("tool", ""),
+      ],
+  )
+  @pytest.mark.parametrize(
+      ("value", "scalar_text"),
+      [
+          ({"nested": "object"}, None),
+          (["array", "value"], None),
+          (True, "true"),
+          (False, "false"),
+          (17, "17"),
+      ],
+  )
+  def test_trace_transcript_matches_json_value_for_each_priority_slot(
+      self, slot, structural_fallback, value, scalar_text
+  ):
+    """Python transcript values follow BigQuery JSON_VALUE semantics."""
+    if slot == "text_summary":
+      content = {
+          "text_summary": value,
+          "response": structural_fallback,
+      }
+    elif slot == "response":
+      content = {
+          "response": value,
+          "artifacts": [
+              {"parts": [{"text": structural_fallback}]},
+          ],
+      }
+    elif slot == "artifact":
+      content = {
+          "artifacts": [{"parts": [{"text": value}]}],
+          "tool": structural_fallback,
+      }
+    else:
+      content = {"tool": value}
+
+    trace = Trace(
+        trace_id="t",
+        session_id="s",
+        spans=[
+            Span(
+                event_type="EVENT",
+                agent=None,
+                timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                content=content,
+            )
+        ],
+    )
+    expected = structural_fallback if scalar_text is None else scalar_text
+
+    assert _trace_to_categorical_transcript(trace) == f"EVENT: {expected}"
+
   def test_selector_key_distinguishes_reused_session(self):
     alice = self._selector(user_id="alice")
     bob = self._selector(user_id="bob")
@@ -2652,3 +2711,26 @@ class TestQueryOrderByBeforeLimit:
       assert (
           "ORDER BY MAX(timestamp) DESC, session_id" in sql
       ), f"{name} missing session_id tiebreaker in ORDER BY"
+
+  def test_all_transcript_queries_use_trace_producer_tiebreakers(self):
+    """Legacy SQL transcript order matches identity-bound trace order."""
+    config = _make_config()
+    queries = [
+        ("CATEGORICAL_TRANSCRIPT_QUERY", CATEGORICAL_TRANSCRIPT_QUERY),
+        ("CATEGORICAL_AI_GENERATE_QUERY", CATEGORICAL_AI_GENERATE_QUERY),
+        (
+            "build_ai_classify_query",
+            build_ai_classify_query(config, "p", "d", "t", "1=1"),
+        ),
+        (
+            "build_ai_generate_query",
+            build_ai_generate_query(
+                "p", "d", "t", "1=1", "gemini-2.5-flash", 0.0
+            ),
+        ),
+    ]
+    producer_order = "ORDER BY timestamp, span_id, invocation_id, event_type"
+    for name, sql in queries:
+      assert (
+          producer_order in sql
+      ), f"{name} does not match the resolved trace producer order"

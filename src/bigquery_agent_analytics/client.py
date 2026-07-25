@@ -2487,13 +2487,16 @@ class Client:
             population, by legacy session-id string. A non-empty mapping
             bypasses AI.CLASSIFY and binds context to the exact U2
             identity/scope selector through every generative path. Legacy
-            string keys are accepted only for one matching resolved trace;
-            keys outside the filtered population are ignored. Treat values as
-            trusted evaluator material subject to the same data-governance
-            policy as evaluation prompts. Context is sent only as a query
-            parameter/model prompt; it is not interpolated into SQL, logged,
-            persisted, or placed in job labels. Context calls reject
-            ``config.persist_results=True`` until the U5 identity-safe
+            string keys are accepted only for one matching transcript-eligible
+            resolved trace. Transcript eligibility (length greater than 10)
+            is applied before that ambiguity check, so an ineligible colliding
+            trace does not make the survivor ambiguous; exact selector keys
+            avoid that inference. Keys outside the filtered population are
+            ignored. Treat values as trusted evaluator material subject to the
+            same data-governance policy as evaluation prompts. Context is sent
+            only as a query parameter/model prompt; it is not interpolated into
+            SQL, logged, persisted, or placed in job labels. Context calls
+            reject ``config.persist_results=True`` until the U5 identity-safe
             persistence migration lands.
 
     Returns:

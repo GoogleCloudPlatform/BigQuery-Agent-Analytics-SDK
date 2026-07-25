@@ -133,8 +133,14 @@ def _trace_content_text(content: Any) -> str:
         candidates.append(parts[0].get("text"))
   candidates.append(content.get("tool"))
   for value in candidates:
-    if value is not None:
-      return value if isinstance(value, str) else str(value)
+    if value is None or isinstance(value, (dict, list)):
+      # JSON_VALUE returns NULL for objects and arrays, so COALESCE
+      # continues to the next candidate in the SQL transcript.
+      continue
+    if isinstance(value, bool):
+      # BigQuery renders JSON booleans with JSON's lowercase spelling.
+      return "true" if value else "false"
+    return value if isinstance(value, str) else str(value)
   return ""
 
 
@@ -161,9 +167,13 @@ def _normalize_categorical_evaluation_inputs(
   """Binds trusted context to a deduplicated exact-selector population.
 
   Legacy session-id keys are accepted only when that id names one
-  resolved trace in this evaluated population. Keys outside the
-  population are ignored so a caller can pass a context superset
-  alongside a narrower :class:`TraceFilter`.
+  transcript-eligible resolved trace in this evaluated population. The
+  ``LENGTH(transcript) > 10`` eligibility gate runs before this legacy
+  ambiguity check, so an ineligible colliding trace does not make the
+  surviving trace ambiguous. Exact selector keys avoid relying on that
+  population inference. Keys outside the population are ignored so a
+  caller can pass a context superset alongside a narrower
+  :class:`TraceFilter`.
   """
   context_snapshot = _validated_context_mapping(per_session_context)
 
@@ -475,7 +485,7 @@ SELECT
         ''
       )
     ),
-    '\\n' ORDER BY timestamp
+    '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
   ) AS transcript
 FROM `{project}.{dataset}.{table}`
 WHERE {where}
@@ -502,7 +512,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
@@ -624,7 +634,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
@@ -723,7 +733,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}

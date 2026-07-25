@@ -1522,11 +1522,13 @@ decision. The same selector-keyed context is reused unchanged for
 AI.GENERATE parse/NULL retries and full Gemini API fallback; unmapped traces
 still run without extra context.
 
-A legacy string key is allowed when it names exactly one trace in the filtered
-population. Reused/ambiguous session IDs raise `AmbiguousSessionError` before a
-model call; use its exact candidates or `list_traces()` to construct
-`ResolvedTraceSelector` keys. Mapping entries outside the filtered population
-are ignored.
+A legacy string key is allowed when it names exactly one transcript-eligible
+trace in the filtered population. The transcript-length gate runs before this
+ambiguity check, so a short ineligible colliding trace does not make the
+survivor ambiguous. Prefer exact `ResolvedTraceSelector` keys whenever session
+IDs may be reused. Reused/ambiguous eligible session IDs raise
+`AmbiguousSessionError` before a model call; mapping entries outside the
+filtered population are ignored.
 
 Treat context as trusted evaluator material subject to the same governance as
 your evaluation prompts. It is carried as query-parameter/model input and is
