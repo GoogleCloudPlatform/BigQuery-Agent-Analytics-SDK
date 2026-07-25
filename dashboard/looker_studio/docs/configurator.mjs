@@ -3,10 +3,29 @@ import { REPORT_CONFIG } from "./report-config.mjs";
 export const PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 export const BIGQUERY_ID_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
 
-function requireValue(label, value, pattern) {
+const VALIDATION_MESSAGES = Object.freeze({
+  project:
+    "Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.",
+  dataset:
+    "Start with a letter or underscore, then use only letters, digits, or underscores.",
+  table:
+    "Start with a letter or underscore, then use only letters, digits, or underscores.",
+  billingProject:
+    "Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.",
+});
+
+export class ConfigurationError extends Error {
+  constructor(field, message) {
+    super(message);
+    this.name = "ConfigurationError";
+    this.field = field;
+  }
+}
+
+function requireValue(field, value, pattern) {
   const normalized = String(value ?? "").trim();
   if (!pattern.test(normalized)) {
-    throw new Error(`Enter a valid BigQuery ${label}.`);
+    throw new ConfigurationError(field, VALIDATION_MESSAGES[field]);
   }
   return normalized;
 }
@@ -31,13 +50,13 @@ function rejectSentinelCollisions(values, config) {
 }
 
 export function validateConfiguration(input, config = REPORT_CONFIG) {
-  const project = requireValue("project ID", input.project, PROJECT_RE);
+  const project = requireValue("project", input.project, PROJECT_RE);
   const values = {
     project,
-    dataset: requireValue("dataset ID", input.dataset, BIGQUERY_ID_RE),
-    table: requireValue("table ID", input.table, BIGQUERY_ID_RE),
+    dataset: requireValue("dataset", input.dataset, BIGQUERY_ID_RE),
+    table: requireValue("table", input.table, BIGQUERY_ID_RE),
     billingProject: requireValue(
-      "billing project ID",
+      "billingProject",
       input.billingProject || project,
       PROJECT_RE,
     ),

@@ -212,6 +212,63 @@ def test_chart_manifest_and_independent_queries_are_complete():
   assert mapped == observed
 
 
+def test_product_contract_covers_every_parity_chart_and_live_fix():
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/chart_manifest.yaml").read_text()
+  )
+  product = yaml.safe_load(
+      (DASHBOARD / "spec/product_contract.yaml").read_text()
+  )
+
+  source_ids = {chart["id"] for chart in manifest["charts"]}
+  product_charts = product["charts"]
+  assert {chart["id"] for chart in product_charts} == source_ids
+  assert len(product_charts) == 37
+  assert len({chart["title"] for chart in product_charts}) == 37
+
+  titles = {chart["id"]: chart["title"] for chart in product_charts}
+  assert titles["usage-events-by-agent"] == "Tool Completions by Agent"
+  assert titles["usage-total-calls"] == "Total LLM Calls"
+  assert titles["usage-top-5-users-by-session"] == "Top 5 Users by Sessions"
+  assert titles["performance-average-llm-latency-in-ms"].endswith("(ms)")
+  assert all("Llm" not in title for title in titles.values())
+  assert all("Over the Time" not in title for title in titles.values())
+
+  assert [page["name"] for page in product["pages"]] == [
+      "Token Consumption",
+      "Agent & Sessions",
+      "Tool Usage",
+      "LLM Interactions",
+      "User Analytics",
+      "Latency",
+      "Errors",
+      "Trace Inspector",
+  ]
+  assert product["defaults"]["date_range"] == {
+      "mode": "rolling",
+      "start_offset_days": 365,
+      "end_offset_days": 1,
+      "include_today": False,
+      "page_scope": "all_dashboard_pages",
+  }
+  assert product["layout"]["percentile_order"] == {
+      "llm": ["P50", "P75", "P90", "P99"],
+      "tool": ["P50", "P75", "P90", "P99"],
+  }
+  assert (
+      product["behavioral_fixes"]["usage-llm-call-trends"]["dimension"]
+      == "event_date"
+  )
+  assert {
+      "session_id",
+      "model_version",
+  }.issubset(product["filtering"]["filter_bar"]["available_fields"])
+  assert (
+      product["filtering"]["predefined_tool_name_control"]["status"]
+      == "intentionally_not_published"
+  )
+
+
 def test_report_and_web_bindings_cannot_drift():
   report = yaml.safe_load(
       (DASHBOARD / "bindings/report_template.yaml").read_text()
@@ -246,15 +303,29 @@ def test_report_and_web_bindings_cannot_drift():
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-24",
+      "verified_date": "2026-07-25",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
           "sqlreplace_table_only_smoke_test",
           "canonical_viewer_credentials_review",
+          "published_eight_page_ux_smoke_test",
       ],
       "result": "PASSED",
       "limitation": "mutable_external_report_requires_reverification_after_changes",
+  }
+  assert report["product_contract"] == "spec/product_contract.yaml"
+  assert report["product_verification"] == {
+      "verified_date": "2026-07-25",
+      "pages": 8,
+      "checks": [
+          "expected_page_and_chart_titles_present",
+          "no_too_many_rows_errors",
+          "no_date_control_chart_overlaps",
+          "llm_call_volume_dimension_is_event_date",
+          "llm_and_tool_percentile_order_is_p50_p75_p90_p99",
+      ],
+      "result": "PASSED",
   }
   assert report["source_contract"] == {
       "mode": "BASE_TABLE",
@@ -303,6 +374,7 @@ def test_browser_configurator_javascript_contract():
 
 def test_googlecloudplatform_pages_configuration():
   page = (DASHBOARD / "docs/index.html").read_text()
+  styles = (DASHBOARD / "docs/styles.css").read_text()
   assert "github.com/caohy1988" not in page
   assert (
       "https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK"
@@ -312,6 +384,13 @@ def test_googlecloudplatform_pages_configuration():
       "https://googlecloudplatform.github.io/"
       "BigQuery-Agent-Analytics-SDK/" in page
   )
+  assert 'rel="icon" href="./favicon.svg"' in page
+  assert 'property="og:title"' in page
+  assert 'name="twitter:card"' in page
+  assert "Copy security checklist" in page
+  assert "billing-project-hint" in page
+  assert "@media (prefers-color-scheme: dark)" in styles
+  assert (DASHBOARD / "docs/favicon.svg").is_file()
 
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
   assert "path: dashboard/looker_studio/docs" in workflow

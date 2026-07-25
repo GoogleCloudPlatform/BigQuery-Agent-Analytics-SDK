@@ -4,6 +4,11 @@ This document connects the generated parity manifest to the canonical report
 implementation. It contains no report ID, production project/dataset name, or
 result values.
 
+The manifest is an immutable snapshot of the pinned community block. Current
+product behavior and intentional divergences are recorded separately in
+`../spec/product_contract.yaml`; see `issue-377-review.md` for the live
+validation that established the boundary.
+
 ## Data-source boundary
 
 The report has exactly one embedded BigQuery data source. Its custom query is
@@ -86,6 +91,12 @@ The Inspector exposes timestamp, event type, agent, user, trace, span, and
 status from the same production data source. It is a drill-through aid, not a
 38th parity tile.
 
+Every page has a visible page heading, and every non-scorecard chart has an
+explicit chart title. Product titles use title case, “Over Time,” uppercase
+“LLM,” plural “Sessions,” and `(ms)` for latency units. The Tool Usage chart
+formerly inherited as “Events By Agent” is labeled **Tool Completions by
+Agent** because its metric intentionally counts only `TOOL_COMPLETED` rows.
+
 All seven dashboard pages use a rolling 365-day window ending yesterday.
 Looker Studio sends those bounds through `@DS_START_DATE` and
 `@DS_END_DATE`; the production query applies the frozen half-open UTC
@@ -93,6 +104,10 @@ predicate. The generated manifest retains the pinned LookML's original
 14-day Usage and 7-day Performance defaults as source-provenance metadata;
 the published template intentionally overrides them for the product default.
 The Trace Inspector has no default date control.
+
+The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
+timestamp dimension exceeded Looker Studio's chart row limit on the canonical
+fixture and rendered “Too Many Rows.”
 
 ## Looker Studio measure mappings
 

@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --ink: #17212b;
   --muted: #5b6672;
   --line: #dce3e8;
@@ -134,12 +134,27 @@ input:focus {
   box-shadow: 0 0 0 3px rgba(9, 107, 90, 0.12);
 }
 
-.hint {
+.field-hint,
+.field-error {
   display: block;
   margin-top: 6px;
-  color: var(--muted);
   font-size: 0.75rem;
   line-height: 1.4;
+}
+
+.field-hint {
+  color: var(--muted);
+}
+
+.field-error {
+  min-height: 1.05rem;
+  color: #a33b26;
+  font-weight: 650;
+}
+
+input[aria-invalid="true"] {
+  border-color: #a33b26;
+  box-shadow: 0 0 0 3px rgba(163, 59, 38, 0.1);
 }
 
 details {
@@ -256,6 +271,49 @@ summary {
   color: var(--ink);
 }
 
+.post-create {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(340px, 1.2fr);
+  gap: 32px;
+  align-items: start;
+  margin-top: 46px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper);
+  box-shadow: 0 14px 44px rgba(24, 45, 39, 0.08);
+}
+
+.post-create h2 {
+  margin: 8px 0 10px;
+  font-size: 1.45rem;
+}
+
+.post-create p,
+.post-create ol {
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.6;
+}
+
+.post-create p {
+  margin: 0;
+}
+
+.post-create ol {
+  margin: 0;
+  padding-left: 1.35rem;
+}
+
+.post-create li + li {
+  margin-top: 6px;
+}
+
+.checklist-copy {
+  grid-column: 2;
+  justify-self: start;
+}
+
 footer {
   display: flex;
   justify-content: space-between;
@@ -269,6 +327,51 @@ footer a {
   color: var(--green-dark);
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #edf5f2;
+    --muted: #b8c7c2;
+    --line: #3c4a46;
+    --paper: #17221f;
+    --canvas: #0f1715;
+    --green: #7dd3c7;
+    --green-dark: #a6e4dc;
+    --green-soft: #243b36;
+    --orange: #f6a06d;
+    --shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 12% 4%, rgba(125, 211, 199, 0.12), transparent 27rem),
+      linear-gradient(145deg, #111b18 0%, var(--canvas) 60%, #0c1311 100%);
+  }
+
+  .facts li,
+  .notice {
+    background: rgba(23, 34, 31, 0.78);
+  }
+
+  input {
+    border-color: #53645f;
+    background: #111a18;
+  }
+
+  #form-status[data-kind="error"],
+  .field-error {
+    color: #ffb19d;
+  }
+
+  .button-primary {
+    color: #0b1714;
+    background: #7dd3c7;
+  }
+
+  .button-primary:hover {
+    background: #a6e4dc;
+  }
+}
+
 @media (max-width: 820px) {
   main {
     width: min(100% - 28px, 620px);
@@ -276,7 +379,8 @@ footer a {
   }
 
   .hero,
-  .how {
+  .how,
+  .post-create {
     grid-template-columns: 1fr;
   }
 
@@ -291,6 +395,10 @@ footer a {
 
   .actions {
     grid-template-columns: 1fr;
+  }
+
+  .checklist-copy {
+    grid-column: 1;
   }
 
   footer {

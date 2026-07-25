@@ -7,11 +7,29 @@
       name="description"
       content="Create a private Looker Studio dashboard from your BigQuery Agent Analytics installation."
     >
+    <meta name="theme-color" content="#096b5a">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      property="og:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
+    <meta
+      property="og:url"
+      content="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      name="twitter:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
     <title>Configure BigQuery Agent Analytics</title>
     <link
       rel="canonical"
       href="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
     >
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
@@ -45,8 +63,14 @@
             name="project"
             autocomplete="off"
             placeholder="my-gcp-project"
+            aria-describedby="project-hint project-error"
             required
           >
+          <span class="field-hint" id="project-hint">
+            6–30 characters: lowercase letters, digits, and hyphens. Start
+            with a letter and end with a letter or digit.
+          </span>
+          <span class="field-error" id="project-error" aria-live="polite"></span>
 
           <label for="dataset">Dataset ID</label>
           <input
@@ -54,8 +78,14 @@
             name="dataset"
             autocomplete="off"
             placeholder="agent_analytics"
+            aria-describedby="dataset-hint dataset-error"
             required
           >
+          <span class="field-hint" id="dataset-hint">
+            Start with a letter or underscore; then use letters, digits, or
+            underscores.
+          </span>
+          <span class="field-error" id="dataset-error" aria-live="polite"></span>
 
           <label for="table">BQAA table ID</label>
           <input
@@ -63,12 +93,15 @@
             name="table"
             autocomplete="off"
             value="agent_events"
+            aria-describedby="table-hint table-error"
             required
           >
-          <span class="hint">
+          <span class="field-hint" id="table-hint">
             Charts read this table directly and extract reporting fields from
-            its JSON columns.
+            its JSON columns. The standard BQAA table is
+            <code>agent_events</code>.
           </span>
+          <span class="field-error" id="table-error" aria-live="polite"></span>
 
           <details>
             <summary>Advanced settings</summary>
@@ -78,7 +111,16 @@
               name="billingProject"
               autocomplete="off"
               placeholder="Defaults to the source project"
+              aria-describedby="billing-project-hint billing-project-error"
             >
+            <span class="field-hint" id="billing-project-hint">
+              Optional. Leave blank to run queries in the source project.
+            </span>
+            <span
+              class="field-error"
+              id="billing-project-error"
+              aria-live="polite"
+            ></span>
           </details>
 
           <p id="form-status" role="status" aria-live="polite"></p>
@@ -139,6 +181,36 @@
           Learn about Looker Studio data credentials.
         </a>
       </aside>
+
+      <section class="post-create" aria-labelledby="post-create-title">
+        <div>
+          <div class="eyebrow">Required security check</div>
+          <h2 id="post-create-title">Before you share the new report</h2>
+          <p>
+            The Linking API creates a new data source owned by the person who
+            opens the link. Keep the report private until these checks pass.
+          </p>
+        </div>
+        <ol id="security-checklist">
+          <li>Select <strong>Edit and share</strong> to save your copy.</li>
+          <li>Keep the report private while configuring its data source.</li>
+          <li>
+            Open <strong>Resource → Manage added data sources → Edit</strong>.
+          </li>
+          <li>
+            Set <strong>Data credentials</strong> to
+            <strong>Viewer’s Credentials</strong>.
+          </li>
+          <li>Test the report with an account that has only viewer access.</li>
+        </ol>
+        <button
+          class="button button-secondary checklist-copy"
+          id="copy-checklist"
+          type="button"
+        >
+          Copy security checklist
+        </button>
+      </section>
 
       <aside class="notice">
         <strong>No generated views required.</strong>

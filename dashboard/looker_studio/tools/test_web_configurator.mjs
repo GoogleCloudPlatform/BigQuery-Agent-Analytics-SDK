@@ -86,8 +86,24 @@ for (const invalid of [
   { ...values, table: "table,other" },
   { ...values, billingProject: "UPPERCASE" },
 ]) {
-  assert.throws(() => buildDashboardUrl(invalid));
+  assert.throws(
+    () => buildDashboardUrl(invalid),
+    (error) => typeof error.field === "string" && error.message.length > 20,
+  );
 }
+
+assert.throws(
+  () => buildDashboardUrl({ ...values, project: "short" }),
+  (error) =>
+    error.field === "project" &&
+    /6–30 lowercase letters, digits, or hyphens/.test(error.message),
+);
+assert.throws(
+  () => buildDashboardUrl({ ...values, dataset: "bad-dataset" }),
+  (error) =>
+    error.field === "dataset" &&
+    /letter or underscore/.test(error.message),
+);
 
 for (const collision of [
   { ...values, project: "xsentinelbqaaevents" },

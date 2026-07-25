@@ -38,6 +38,7 @@ billing project is supported as an optional advanced setting.
 | Path | What it is |
 |---|---|
 | `spec/chart_manifest.yaml` | Reviewed consumer snapshot: 37 chart records, 9 non-data elements, controls, listener matrix, layout, and oracle mappings |
+| `spec/product_contract.yaml` | Current product-layer titles, layout, filters, live fixes, and intentional divergences from the pinned block |
 | `sql/events_v1.sql.tmpl` | Reviewed base-table query (**generated** by `tools/gen_events_tmpl.py`) |
 | `sql/events_v1.template.sql` | Sentinel-rendered SQL embedded in the canonical report (**generated** by `tools/render_template.py`) |
 | `sql/preflight.sql.tmpl` / `.template.sql` | Structural compatibility check, run by the hydration helper before emitting a link |
@@ -49,6 +50,7 @@ billing project is supported as an optional advanced setting.
 | `docs/index.html` | Three-field, client-only configurator for the public dashboard template |
 | `tools/hydrate_dashboard.py` | Validates a BQAA table and emits a user-owned Looker Studio report URL |
 | `docs/dashboard-implementation.md` | Looker Studio page, field, formula, and live-validation implementation contract |
+| `docs/issue-377-review.md` | Live validation matrix for the UX/design backlog |
 | `oracle/queries/` | 37 independent per-chart SQL contracts used by the live validator |
 
 ## Pinned contracts
@@ -169,6 +171,33 @@ publication review must repeat the live check after every template change.
 
 `--table` is both the object validated by the CLI and the only BigQuery object
 queried by the dashboard.
+
+## Large-table operating guidance
+
+Every chart reads the same date-pruned custom query over the configured
+`agent_events` table. Cost therefore scales primarily with the selected date
+window, event volume, and number of chart interactions.
+
+- Keep the BQAA table partitioned on its event timestamp and retain the
+  dashboard's `@DS_START_DATE` / `@DS_END_DATE` predicate. Do not wrap the
+  partition column in a transformation that prevents pruning.
+- Use the shortest date range that answers the operational question. The
+  365-day default is an onboarding view, not a recommendation for every
+  high-volume installation.
+- Set BigQuery partition expiration to the retention period your incident and
+  compliance policies actually require.
+- Monitor bytes processed in BigQuery job history before and after changing
+  the dashboard or retention window.
+- For repeatedly queried, high-volume installations, evaluate BI Engine or a
+  scheduled, date-partitioned rollup table. Keep the raw table for Inspector
+  workflows and validate rollup semantics against the independent oracle
+  queries before switching dashboard charts.
+- Use a separate billing project when teams need dashboard-specific quotas,
+  reservations, or cost attribution.
+
+The report footer's “Data Last Updated” value is a Looker Studio connector
+refresh time. It is not the latest BQAA event timestamp and must not be treated
+as a data-freshness guarantee.
 
 To run the browser configurator from this checkout:
 

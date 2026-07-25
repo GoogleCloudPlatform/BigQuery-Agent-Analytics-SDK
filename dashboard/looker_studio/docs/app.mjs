@@ -8,12 +8,20 @@ import { REPORT_CONFIG } from "./report-config.mjs";
 const form = document.querySelector("#configurator");
 const createLink = document.querySelector("#create-dashboard");
 const copyButton = document.querySelector("#copy-link");
+const checklistButton = document.querySelector("#copy-checklist");
+const checklist = document.querySelector("#security-checklist");
 const status = document.querySelector("#form-status");
 const inputs = {
   project: document.querySelector("#project"),
   dataset: document.querySelector("#dataset"),
   table: document.querySelector("#table"),
   billingProject: document.querySelector("#billing-project"),
+};
+const errors = {
+  project: document.querySelector("#project-error"),
+  dataset: document.querySelector("#dataset-error"),
+  table: document.querySelector("#table-error"),
+  billingProject: document.querySelector("#billing-project-error"),
 };
 
 function currentValues() {
@@ -27,7 +35,15 @@ function setStatus(message, kind = "") {
   status.dataset.kind = kind;
 }
 
+function clearFieldErrors() {
+  for (const [name, input] of Object.entries(inputs)) {
+    input.removeAttribute("aria-invalid");
+    errors[name].textContent = "";
+  }
+}
+
 function refresh() {
+  clearFieldErrors();
   try {
     const values = validateConfiguration(currentValues());
     createLink.href = buildDashboardUrl(values);
@@ -41,6 +57,10 @@ function refresh() {
     createLink.removeAttribute("href");
     createLink.setAttribute("aria-disabled", "true");
     copyButton.disabled = true;
+    if (error.field && inputs[error.field]) {
+      inputs[error.field].setAttribute("aria-invalid", "true");
+      errors[error.field].textContent = error.message;
+    }
     setStatus(error.message, "error");
   }
 }
@@ -80,6 +100,18 @@ copyButton.addEventListener("click", async () => {
     setStatus("Setup link copied. It contains identifiers, never credentials.", "ready");
   } catch (error) {
     setStatus(error.message || "Could not copy the setup link.", "error");
+  }
+});
+
+checklistButton.addEventListener("click", async () => {
+  const text = [...checklist.querySelectorAll("li")]
+    .map((item, index) => `${index + 1}. ${item.textContent.trim()}`)
+    .join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("Security checklist copied.", "ready");
+  } catch {
+    setStatus("Could not copy the security checklist.", "error");
   }
 });
 
