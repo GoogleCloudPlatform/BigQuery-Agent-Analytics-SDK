@@ -51,6 +51,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import json
@@ -383,16 +384,20 @@ def match_golden_qa(
   """Match session questions to golden Q&A by embedding cosine similarity.
 
   Args:
-    question_by_sid: dict mapping session_id -> user question text.
+    question_by_sid: dict mapping an opaque evaluation key (normally an exact
+        ``ResolvedTraceSelector`` on the BigQuery path, or a session id on the
+        local-conversation path) to user question text.
     golden_qa: list of dicts with ``question`` and optional
         ``expected_answer``, ``topic``, ``expected_behavior``.
     threshold: minimum cosine similarity (0-1) for a match.
 
   Returns:
     (per_session_context, golden_metadata):
-      - per_session_context maps session_id -> a judge-context string
+      - per_session_context preserves each input key and maps it to a
+        judge-context string
         (expected answer and/or a "should decline" note).
-      - golden_metadata maps session_id -> match details (matched flag,
+      - golden_metadata preserves each input key and maps it to match details
+        (matched flag,
         matched question, expected answer, topic, out_of_scope, similarity).
   """
   if not golden_qa or not question_by_sid:
@@ -485,10 +490,20 @@ def _inject_golden_summary(report, golden_metadata):
       "unmatched_partial": 0,
   }
   mismatches = []
+  session_id_counts = Counter(
+      session.get("session_id", "") for session in report.get("sessions", [])
+  )
 
   for session in report.get("sessions", []):
     sid = session.get("session_id", "")
-    meta = golden_metadata.get(sid)
+    selector = _resolved_selector_from_context(session)
+    meta = (
+        golden_metadata.get(selector)
+        if selector is not None and selector in golden_metadata
+        else None
+    )
+    if meta is None and selector is None and session_id_counts[sid] == 1:
+      meta = golden_metadata.get(sid)
     if meta is None:
       session["golden_eval"] = None
       continue
@@ -553,6 +568,40 @@ def _inject_golden_summary(report, golden_metadata):
       ),
       "mismatches": mismatches,
   }
+
+
+def _resolved_selector_from_context(context):
+  """Rebuild an exact selector from report-safe identity/scope fields."""
+  from bigquery_agent_analytics.trace import ResolvedTraceSelector
+  from bigquery_agent_analytics.trace import TraceIdentity
+  from bigquery_agent_analytics.trace import TraceScope
+
+  identity_fields = (
+      "session_id",
+      "user_id",
+      "root_agent_name",
+      "scope_signature",
+  )
+  if any(field not in context for field in identity_fields):
+    return None
+  if context["session_id"] is None or context["scope_signature"] is None:
+    return None
+  try:
+    identity = TraceIdentity(
+        session_id=context.get("session_id"),
+        user_id=context.get("user_id"),
+        root_agent_name=context.get("root_agent_name"),
+    )
+    scope = TraceScope(
+        experiment_id=context.get("experiment_id"),
+        custom_labels=context.get("custom_labels"),
+    )
+  except (TypeError, ValueError):
+    return None
+  signature = context.get("scope_signature")
+  if signature is not None and signature != scope.scope_signature:
+    return None
+  return ResolvedTraceSelector(identity=identity, scope=scope)
 
 
 # ---------------------------------------------------------------------------
@@ -1468,6 +1517,7 @@ def run_evaluation(
 ) -> dict:
   from bigquery_agent_analytics import CategoricalEvaluationConfig
   from bigquery_agent_analytics import TraceFilter
+  from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
 
   model = model or EVAL_MODEL_ID
   client = get_client()
@@ -1522,15 +1572,8 @@ def run_evaluation(
     if app_name:
       trace_filter.root_agent_name = app_name
 
-  # Fetch traces and match golden Q&A BEFORE evaluation, so golden metadata
-  # (matched question / expected answer per session) is available to the
-  # report either way.
-  # KNOWN LIMITATION (SDK issue #358): the server-side AI.GENERATE judge
-  # cannot receive per-session expected answers, so on this path golden Q&A
-  # drives the golden_eval_summary regression headline and per-session
-  # matched/expected reporting -- but does NOT ground the judge's
-  # correctness verdict (that is conversations-path only; scope/ground_truth
-  # still ground the judge on both paths).
+  # Fetch traces and match golden Q&A BEFORE evaluation so the server-side
+  # judge and report enrichment use the same exact resolved selector keys.
   explicit_sessions = bool(session_id or session_ids)
   if explicit_sessions:
     traces, trace_filter = _list_complete_report_traces(client, trace_filter)
@@ -1540,32 +1583,32 @@ def run_evaluation(
   resolved_map = _index_resolved_entries(resolved)
 
   golden_metadata = {}
+  golden_ctx = {}
   golden_qa = (eval_spec or {}).get("golden_qa")
   if golden_qa:
     # Matching keys off the conversation's FIRST user message (the
     # topic anchor), consistent with the conversations-file path.
-    question_by_sid = {}
-    for sid in {ctx.get("session_id") for ctx in resolved_map.values()}:
-      ctx = _resolved_context_for_session(resolved_map, sid)
-      if ctx:
-        question_by_sid[sid] = ctx.get("first_question") or ctx.get(
+    question_by_selector = {}
+    for ctx in resolved_map.values():
+      selector = _resolved_selector_from_context(ctx)
+      if selector is not None:
+        question_by_selector[selector] = ctx.get("first_question") or ctx.get(
             "question", ""
         )
-    _golden_ctx, golden_metadata = match_golden_qa(
-        question_by_sid, golden_qa, threshold=golden_threshold
-    )
-    logger.warning(
-        "Golden Q&A on the BigQuery path produces the golden_eval_summary"
-        " and per-session matches, but the server-side judge cannot take"
-        " per-session expected answers -- expected-answer correctness"
-        " grounding applies on the --conversations-file path only"
-        " (scope/ground_truth ground both paths). See SDK issue #358."
+    golden_ctx, golden_metadata = match_golden_qa(
+        question_by_selector, golden_qa, threshold=golden_threshold
     )
 
-  report = client.evaluate_categorical(
+  evaluation_kwargs = dict(
       config=cat_config,
       filters=trace_filter,
   )
+  if golden_ctx:
+    evaluation_kwargs.update(
+        per_session_context=golden_ctx,
+        context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+    )
+  report = client.evaluate_categorical(**evaluation_kwargs)
 
   all_session_ids = [sr.session_id for sr in report.session_results]
   logger.info("Resolving responses for %d sessions...", len(all_session_ids))
@@ -4608,6 +4651,11 @@ def _build_json_output(report, resolved_map, trajectories=None):
   sessions = []
   for sr in report.session_results:
     ctx = _resolved_context_for_score(resolved_map, sr)
+    identity = getattr(sr, "identity", None)
+    scope = getattr(sr, "scope", None)
+    context_source = getattr(sr, "context_source", None)
+    if hasattr(context_source, "value"):
+      context_source = context_source.value
     metrics = {}
     quality_scores = {}
     for mr in sr.metrics:
@@ -4623,18 +4671,39 @@ def _build_json_output(report, resolved_map, trajectories=None):
         }
     session_dict = {
         "session_id": sr.session_id,
-        "user_id": (getattr(sr, "details", None) or {}).get(
-            "user_id", ctx.get("user_id")
+        "user_id": (
+            identity.user_id
+            if identity is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "user_id", ctx.get("user_id")
+            )
         ),
-        "root_agent_name": (getattr(sr, "details", None) or {}).get(
-            "root_agent_name", ctx.get("root_agent_name")
+        "root_agent_name": (
+            identity.root_agent_name
+            if identity is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "root_agent_name", ctx.get("root_agent_name")
+            )
         ),
-        "experiment_id": ctx.get("experiment_id"),
-        "custom_labels": ctx.get("custom_labels"),
-        "scope_signature": (getattr(sr, "details", None) or {}).get(
-            "scope_signature", ctx.get("scope_signature")
+        "experiment_id": (
+            scope.experiment_id
+            if scope is not None
+            else ctx.get("experiment_id")
+        ),
+        "custom_labels": (
+            scope.labels_dict if scope is not None else ctx.get("custom_labels")
+        ),
+        "scope_signature": (
+            scope.scope_signature
+            if scope is not None
+            else (getattr(sr, "details", None) or {}).get(
+                "scope_signature", ctx.get("scope_signature")
+            )
         ),
         "scope_coverage": ctx.get("scope_coverage"),
+        "context_applied": getattr(sr, "context_applied", False),
+        "context_source": context_source,
+        "execution_mode": getattr(sr, "execution_mode", None),
         "question": ctx.get("question", ""),
         "response": ctx.get("response", ""),
         "answered_by": ctx.get("answered_by", ""),

@@ -527,6 +527,119 @@ class TestCategoricalContextCollisionLive:
       )
 
 
+class TestCategoricalPersistenceCollisionLive:
+  """U5 persistence and latest views preserve colliding identities."""
+
+  def test_persisted_and_latest_cardinality_match_identity_results(
+      self, sdk_client, bq_client, collision_dataset
+  ):
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+    from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+
+    project, dataset_id = collision_dataset
+    results_table = "categorical_results_u5"
+    view_prefix = "u5_"
+    secret = "golden-answer-live-secret"
+    session_results = [
+        CategoricalSessionResult(
+            session_id="collide",
+            identity=TraceIdentity("collide", user_id, None),
+            scope=TraceScope(),
+            context_applied=True,
+            context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+            execution_mode="ai_generate",
+            metrics=[
+                CategoricalMetricResult(
+                    metric_name="tone",
+                    category=category,
+                    justification=secret,
+                    raw_response=secret,
+                )
+            ],
+        )
+        for user_id, category in (
+            ("alice", "positive"),
+            ("bob", "negative"),
+        )
+    ]
+    config = CategoricalEvaluationConfig(
+        metrics=[
+            CategoricalMetricDefinition(
+                name="tone",
+                definition="Overall tone.",
+                categories=[
+                    CategoricalMetricCategory(
+                        name="positive",
+                        definition="Positive tone.",
+                    ),
+                    CategoricalMetricCategory(
+                        name="negative",
+                        definition="Negative tone.",
+                    ),
+                ],
+            )
+        ],
+        persist_results=True,
+        results_table=results_table,
+        prompt_version="u5-live",
+    )
+    report = CategoricalEvaluationReport(
+        dataset=dataset_id,
+        total_sessions=len(session_results),
+        session_results=session_results,
+    )
+
+    sdk_client._persist_categorical_if_configured(
+        report,
+        config,
+        endpoint="gemini-2.5-flash",
+    )
+    created = sdk_client.create_categorical_views(
+        results_table=results_table,
+        view_prefix=view_prefix,
+    )
+
+    assert report.details["persisted"] is True
+    assert len(report.session_results) == 2
+    assert "categorical_results_latest" in created
+
+    raw = list(
+        bq_client.query(
+            f"""
+            SELECT
+              COUNT(*) AS row_count,
+              COUNT(DISTINCT identity_key) AS identity_count,
+              COUNTIF(justification IS NOT NULL OR raw_response IS NOT NULL)
+                AS contextual_payload_count
+            FROM `{project}.{dataset_id}.{results_table}`
+            """
+        ).result()
+    )[0]
+    latest = list(
+        bq_client.query(
+            f"""
+            SELECT
+              COUNT(*) AS row_count,
+              COUNT(DISTINCT identity_key) AS identity_count
+            FROM `{project}.{dataset_id}.{view_prefix}categorical_results_latest`
+            """
+        ).result()
+    )[0]
+
+    assert raw.row_count == len(report.session_results)
+    assert raw.identity_count == len(report.session_results)
+    assert raw.contextual_payload_count == 0
+    assert latest.row_count == len(report.session_results)
+    assert latest.identity_count == len(report.session_results)
+
+
 class TestLiveCollisionFixture:
   """Reused session ids must not cross-contaminate (issue #359)."""
 

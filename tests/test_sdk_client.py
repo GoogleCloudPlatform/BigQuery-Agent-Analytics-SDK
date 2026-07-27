@@ -22,6 +22,8 @@ from unittest.mock import patch
 import pytest
 
 from bigquery_agent_analytics.categorical_evaluator import _resolved_selector_key
+from bigquery_agent_analytics.categorical_evaluator import CATEGORICAL_RESULTS_MIGRATIONS
+from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricDefinition
@@ -1689,6 +1691,14 @@ class TestEvaluateCategoricalIdentityBoundContext:
     assert context == "Expected answer: Alice"
     assert "Expected answer: Alice" not in repr(job_config.labels)
     assert report.details["execution_mode"] == "ai_generate"
+    result = report.session_results[0]
+    assert result.identity == alice.identity
+    assert result.scope == alice.scope
+    assert result.context_applied is True
+    assert (
+        result.context_source is CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+    )
+    assert result.execution_mode == "ai_generate"
     assert (
         "identity-bound judge context" in report.details["classify_skip_reason"]
     )
@@ -1728,21 +1738,110 @@ class TestEvaluateCategoricalIdentityBoundContext:
     mock_fetch.assert_not_called()
     mock_bq.query.assert_not_called()
 
-  def test_context_persistence_fails_closed_until_identity_schema_u5(self):
+  def test_context_persistence_migrates_then_writes_identity_provenance(self):
     client, mock_bq = self._client()
     selector = self._selector()
+    secret = "Expected answer secret 991"
+    valid = '[{"metric_name":"tone","category":"positive"}]'
+    timeline = []
 
-    with (
-        patch.object(client, "_fetch_filtered_traces") as mock_fetch,
-        pytest.raises(ValueError, match="identity-safe persistence"),
+    def query_side_effect(sql, **kwargs):
+      timeline.append(("query", sql))
+      result = MagicMock()
+      if "AI.GENERATE" in sql:
+        result.result.return_value = [
+            {
+                "evaluation_key": _resolved_selector_key(selector),
+                "session_id": "shared-session",
+                "transcript": "A transcript long enough to judge.",
+                "classifications": valid,
+            }
+        ]
+      else:
+        result.result.return_value = None
+      return result
+
+    def insert_side_effect(table, rows):
+      timeline.append(("insert", table))
+      return []
+
+    mock_bq.query.side_effect = query_side_effect
+    mock_bq.insert_rows_json.side_effect = insert_side_effect
+
+    with patch.object(
+        client, "_fetch_filtered_traces", return_value=[self._trace(selector)]
     ):
-      client.evaluate_categorical(
+      report = client.evaluate_categorical(
           config=_make_categorical_config(persist_results=True),
-          per_session_context={selector: "Expected answer"},
+          per_session_context={selector: secret},
       )
 
-    mock_fetch.assert_not_called()
-    mock_bq.query.assert_not_called()
+    schema_steps = [
+        sql
+        for kind, sql in timeline
+        if kind == "query" and "AI.GENERATE" not in sql
+    ]
+    assert len(schema_steps) == 1 + len(CATEGORICAL_RESULTS_MIGRATIONS)
+    assert "CREATE TABLE IF NOT EXISTS" in schema_steps[0]
+    assert all("ADD COLUMN IF NOT EXISTS" in sql for sql in schema_steps[1:])
+    assert timeline[-1][0] == "insert"
+    row = mock_bq.insert_rows_json.call_args.args[1][0]
+    assert row["user_id"] == "alice"
+    assert row["root_agent_name"] == "root"
+    assert row["experiment_id"] == "exp"
+    assert row["scope_key"] == selector.scope_signature
+    assert row["identity_key"].startswith("v1:")
+    assert row["context_applied"] is True
+    assert row["context_source"] == "trusted_judge_context"
+    assert secret not in repr(row)
+    assert report.details["persisted"] is True
+
+  def test_context_persistence_migration_failure_skips_insert_and_redacts_error(
+      self,
+  ):
+    client, mock_bq = self._client()
+    selector = self._selector()
+    secret = "golden-answer-secret-migration-882"
+    valid = '[{"metric_name":"tone","category":"positive"}]'
+
+    def query_side_effect(sql, **kwargs):
+      result = MagicMock()
+      if "AI.GENERATE" in sql:
+        result.result.return_value = [
+            {
+                "evaluation_key": _resolved_selector_key(selector),
+                "session_id": "shared-session",
+                "transcript": "A transcript long enough to judge.",
+                "classifications": valid,
+            }
+        ]
+      elif "ADD COLUMN IF NOT EXISTS" in sql:
+        result.result.side_effect = RuntimeError(
+            f"migration failed while processing {secret}"
+        )
+      else:
+        result.result.return_value = None
+      return result
+
+    mock_bq.query.side_effect = query_side_effect
+
+    with (
+        patch.object(
+            client,
+            "_fetch_filtered_traces",
+            return_value=[self._trace(selector)],
+        ),
+        patch("bigquery_agent_analytics.client.logger") as mock_logger,
+    ):
+      report = client.evaluate_categorical(
+          config=_make_categorical_config(persist_results=True),
+          per_session_context={selector: secret},
+      )
+
+    mock_bq.insert_rows_json.assert_not_called()
+    assert report.details["persisted"] is False
+    assert secret not in repr(report.details)
+    assert secret not in repr(mock_logger.warning.call_args_list)
 
   def test_empty_resolved_population_makes_no_model_call(self):
     client, mock_bq = self._client()
@@ -2011,11 +2110,15 @@ class TestEvaluateCategoricalPersistence:
     )
     report = client.evaluate_categorical(config=config)
 
-    # Two queries: AI.GENERATE + DDL.
-    assert mock_bq.query.call_count == 2
+    # AI.GENERATE, CREATE TABLE, then every idempotent additive migration.
+    assert mock_bq.query.call_count == 2 + len(CATEGORICAL_RESULTS_MIGRATIONS)
     ddl_sql = mock_bq.query.call_args_list[1][0][0]
     assert "CREATE TABLE IF NOT EXISTS" in ddl_sql
     assert "my_results" in ddl_sql
+    assert all(
+        "ADD COLUMN IF NOT EXISTS" in call.args[0]
+        for call in mock_bq.query.call_args_list[2:]
+    )
 
     # insert_rows_json called with flattened rows.
     mock_bq.insert_rows_json.assert_called_once()
