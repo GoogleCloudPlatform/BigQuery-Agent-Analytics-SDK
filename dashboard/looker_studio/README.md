@@ -51,6 +51,7 @@ billing project is supported as an optional advanced setting.
 | `tools/hydrate_dashboard.py` | Validates a BQAA table and emits a user-owned Looker Studio report URL |
 | `docs/dashboard-implementation.md` | Looker Studio page, field, formula, and live-validation implementation contract |
 | `docs/issue-377-review.md` | Live validation matrix for the UX/design backlog |
+| `docs/rendering-and-viewport-support.md` | Native-chart completion protocol and supported desktop viewport contract |
 | `oracle/queries/` | 37 independent per-chart SQL contracts used by the live validator |
 
 ## Pinned contracts
@@ -92,6 +93,13 @@ Canonical published template:
 
 All seven dashboard pages default to a rolling 365-day window ending
 yesterday. The Trace Inspector intentionally has no default date control.
+
+The v1 report is a freeform desktop dashboard. Use a viewport at least 1280
+CSS pixels wide (1440 recommended). A cold load or page navigation can paint
+native charts after the surrounding report controls; allow up to 90 seconds
+for non-degenerate chart output. Phone and narrow-tablet layouts require a
+separate responsive template and are not supported by v1. See
+[`docs/rendering-and-viewport-support.md`](docs/rendering-and-viewport-support.md).
 
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)

@@ -37,6 +37,10 @@ live_template_verification:
   result: PASSED
   limitation: mutable_external_report_requires_reverification_after_changes
 product_contract: spec/product_contract.yaml
+viewer_qa_contract:
+  issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381
+  protocol: docs/rendering-and-viewport-support.md
+  status: INVESTIGATION_OPEN
 product_verification:
   verified_date: "2026-07-27"
   pages: 8

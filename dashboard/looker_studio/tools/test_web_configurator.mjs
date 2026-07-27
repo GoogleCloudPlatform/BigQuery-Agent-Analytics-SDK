@@ -20,6 +20,11 @@ assert.match(
   pageSource,
   /https:\/\/googlecloudplatform\.github\.io\/BigQuery-Agent-Analytics-SDK\//,
 );
+assert.match(
+  pageSource,
+  /Designed for desktop screens at least 1280 px wide/,
+);
+assert.match(pageSource, /allow up to 90 seconds/);
 
 const values = {
   project: "customer-project-123",

@@ -134,6 +134,35 @@ visual_system:
     title_case: true
     unit_style: "(ms)"
 
+viewer_qa:
+  # Bar, time-series, scorecard, and table components use Data Studio's native
+  # chart implementation. usercontent.goog render frames are not evidence of
+  # a third-party or Vega community visualization.
+  chart_implementation: native_data_studio
+  community_visualizations: not_used
+  completion_signal: non_degenerate_rendered_output
+  cold_load_timeout_seconds: 90
+  fresh_load_runs: 3
+  navigation_loops: 3
+  required_evidence:
+    - browser_and_version
+    - signed_in_state
+    - viewport_css_pixels
+    - load_type
+    - page_navigation_sequence
+    - time_to_non_degenerate_render
+    - timestamped_page_capture
+    - failed_network_requests
+    - bigquery_job_activity
+
+viewport_support:
+  layout_mode: freeform
+  target: desktop
+  minimum_supported_width_css_px: 1280
+  recommended_width_css_px: 1440
+  narrow_screen_support: not_supported_in_v1
+  responsive_template: separate_report_required
+
 charts:
   - id: usage-token-usage-split-by-agent
     title: Token Usage by Agent
@@ -237,3 +266,11 @@ deferred_enhancements:
     dependency: Add MAX(timestamp) without conflating it with connector refresh.
   - id: google-managed-template-ownership
     dependency: Maintainer-controlled Google account and transfer approval.
+  - id: native-chart-rendering-investigation
+    dependency: >-
+      Reproduce issue #381 under the viewer_qa protocol before changing chart
+      bindings, chart types, or the published report.
+  - id: responsive-mobile-template
+    dependency: >-
+      Maintainer approval for a separately owned responsive report, followed
+      by parity, hydration, credential, and mobile-viewport validation.

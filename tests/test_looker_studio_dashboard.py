@@ -298,10 +298,38 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "legend": "visible",
       "dimension_values_are_series_labels": True,
   }
-  assert "live_series_mode" not in product["visual_system"]
-  assert "llm-error-visibility" in {
-      item["id"] for item in product["deferred_enhancements"]
+  assert product["viewer_qa"] == {
+      "chart_implementation": "native_data_studio",
+      "community_visualizations": "not_used",
+      "completion_signal": "non_degenerate_rendered_output",
+      "cold_load_timeout_seconds": 90,
+      "fresh_load_runs": 3,
+      "navigation_loops": 3,
+      "required_evidence": [
+          "browser_and_version",
+          "signed_in_state",
+          "viewport_css_pixels",
+          "load_type",
+          "page_navigation_sequence",
+          "time_to_non_degenerate_render",
+          "timestamped_page_capture",
+          "failed_network_requests",
+          "bigquery_job_activity",
+      ],
   }
+  assert product["viewport_support"] == {
+      "layout_mode": "freeform",
+      "target": "desktop",
+      "minimum_supported_width_css_px": 1280,
+      "recommended_width_css_px": 1440,
+      "narrow_screen_support": "not_supported_in_v1",
+      "responsive_template": "separate_report_required",
+  }
+  assert "live_series_mode" not in product["visual_system"]
+  deferred = {item["id"] for item in product["deferred_enhancements"]}
+  assert "llm-error-visibility" in deferred
+  assert "responsive-mobile-template" in deferred
+  assert "native-chart-rendering-investigation" in deferred
   assert {
       "session_id",
       "model_version",
@@ -361,6 +389,11 @@ def test_report_and_web_bindings_cannot_drift():
       "limitation": "mutable_external_report_requires_reverification_after_changes",
   }
   assert report["product_contract"] == "spec/product_contract.yaml"
+  assert report["viewer_qa_contract"] == {
+      "issue": ("GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381"),
+      "protocol": "docs/rendering-and-viewport-support.md",
+      "status": "INVESTIGATION_OPEN",
+  }
   assert report["product_verification"] == {
       "verified_date": "2026-07-27",
       "pages": 8,
@@ -442,6 +475,8 @@ def test_googlecloudplatform_pages_configuration():
   assert 'name="twitter:card"' in page
   assert "Copy security checklist" in page
   assert "billing-project-hint" in page
+  assert "Designed for desktop screens at least 1280 px wide" in page
+  assert "allow up to 90 seconds" in page
   assert "@media (prefers-color-scheme: dark)" in styles
   assert (DASHBOARD / "docs/favicon.svg").is_file()
 
