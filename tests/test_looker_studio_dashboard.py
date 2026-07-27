@@ -259,6 +259,49 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       product["behavioral_fixes"]["usage-llm-call-trends"]["dimension"]
       == "event_date"
   )
+  assert (
+      product["behavioral_fixes"]["usage-llm-call-trends"]["oracle_grain"]
+      == "minute"
+  )
+  assert (
+      product["behavioral_fixes"]["usage-llm-call-trends"]["compare_at"]
+      == "event_date"
+  )
+  assert product["layout"]["latency_sections"] == {
+      "llm_percentile_top": 377,
+      "tool_percentile_top": 494,
+      "trend_title_top": 611,
+      "trend_chart_top": 670,
+      "overlap_free": True,
+  }
+  assert product["filtering"]["top_user_rankings"] == {
+      "group_remaining_as_others": False,
+      "charts": [
+          "usage-top-5-users-with-most-tokens-consumption",
+          "usage-top-5-users-with-most-traces",
+          "usage-top-5-users-by-session",
+          "usage-top-5-users-by-events",
+      ],
+  }
+  assert product["behavioral_fixes"]["tool-completed-charts"]["charts"] == [
+      "usage-tool-invocations",
+      "usage-tool-calls-over-time",
+      "performance-tool-latency-trend",
+  ]
+  assert product["visual_system"]["single_series"] == {
+      "mode": "google_blue",
+      "color": "#4285f4",
+      "legend": "hidden_when_title_defines_metric",
+  }
+  assert product["visual_system"]["multi_series"] == {
+      "mode": "categorical_google_palette",
+      "legend": "visible",
+      "dimension_values_are_series_labels": True,
+  }
+  assert "live_series_mode" not in product["visual_system"]
+  assert "llm-error-visibility" in {
+      item["id"] for item in product["deferred_enhancements"]
+  }
   assert {
       "session_id",
       "model_version",
@@ -303,20 +346,23 @@ def test_report_and_web_bindings_cannot_drift():
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-25",
+      "verified_date": "2026-07-27",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
           "sqlreplace_table_only_smoke_test",
           "canonical_viewer_credentials_review",
           "published_eight_page_ux_smoke_test",
+          "published_non_degenerate_chart_data_capture",
+          "editor_configuration_assertions",
+          "published_tool_page_refresh",
       ],
       "result": "PASSED",
       "limitation": "mutable_external_report_requires_reverification_after_changes",
   }
   assert report["product_contract"] == "spec/product_contract.yaml"
   assert report["product_verification"] == {
-      "verified_date": "2026-07-25",
+      "verified_date": "2026-07-27",
       "pages": 8,
       "checks": [
           "expected_page_and_chart_titles_present",
@@ -324,6 +370,13 @@ def test_report_and_web_bindings_cannot_drift():
           "no_date_control_chart_overlaps",
           "llm_call_volume_dimension_is_event_date",
           "llm_and_tool_percentile_order_is_p50_p75_p90_p99",
+          "llm_and_token_p1_bindings_render_non_degenerate_data",
+          "latency_sections_are_aligned_and_non_overlapping",
+          "single_series_legends_do_not_expose_internal_field_names",
+          "top_user_rankings_do_not_group_remaining_users_as_others",
+          "tool_charts_exclude_non_completed_rows",
+          "multi_series_charts_use_categorical_legends",
+          "no_partial_update_footer_after_refresh",
       ],
       "result": "PASSED",
   }

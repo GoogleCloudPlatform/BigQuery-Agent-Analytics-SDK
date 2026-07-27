@@ -16,7 +16,7 @@ generated_report_credential_gate:
   verification_path: Resource > Manage added data sources > Edit
 link_access: PUBLIC
 publishing_mode: MANUAL
-published_date: "2026-07-25"
+published_date: "2026-07-27"
 # This attestation covers the reviewed repository artifact. It does not prove
 # that the mutable external Looker Studio report still embeds these bytes.
 reviewed_template_sql:
@@ -24,18 +24,21 @@ reviewed_template_sql:
   reviewed_date: "2026-07-24"
   scope: repository_artifact_only
 live_template_verification:
-  verified_date: "2026-07-25"
+  verified_date: "2026-07-27"
   repository_sql_sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
   method:
     - connector_custom_query_review
     - sqlreplace_table_only_smoke_test
     - canonical_viewer_credentials_review
     - published_eight_page_ux_smoke_test
+    - published_non_degenerate_chart_data_capture
+    - editor_configuration_assertions
+    - published_tool_page_refresh
   result: PASSED
   limitation: mutable_external_report_requires_reverification_after_changes
 product_contract: spec/product_contract.yaml
 product_verification:
-  verified_date: "2026-07-25"
+  verified_date: "2026-07-27"
   pages: 8
   checks:
     - expected_page_and_chart_titles_present
@@ -43,6 +46,13 @@ product_verification:
     - no_date_control_chart_overlaps
     - llm_call_volume_dimension_is_event_date
     - llm_and_tool_percentile_order_is_p50_p75_p90_p99
+    - llm_and_token_p1_bindings_render_non_degenerate_data
+    - latency_sections_are_aligned_and_non_overlapping
+    - single_series_legends_do_not_expose_internal_field_names
+    - top_user_rankings_do_not_group_remaining_users_as_others
+    - tool_charts_exclude_non_completed_rows
+    - multi_series_charts_use_categorical_legends
+    - no_partial_update_footer_after_refresh
   result: PASSED
 source_contract:
   mode: BASE_TABLE

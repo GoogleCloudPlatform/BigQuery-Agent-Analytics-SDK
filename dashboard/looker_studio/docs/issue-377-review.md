@@ -5,6 +5,8 @@ Issue #377 was initially derived from the pinned Looker block snapshot in
 serialization of the current Looker Studio report. On 2026-07-25, the
 canonical report was reviewed directly in an authenticated Chrome session,
 page by page, at report ID `5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40`.
+The published report was reviewed again on 2026-07-27 after PR feedback found
+that the first title-only smoke test could miss incomplete chart renders.
 
 The review keeps the source snapshot unchanged and records current product
 behavior in `spec/product_contract.yaml`.
@@ -19,7 +21,16 @@ behavior in `spec/product_contract.yaml`.
   to `TOOL_COMPLETED`.
 - Date controls are aligned in the upper-right. Scorecards on LLM
   Interactions, User Analytics, Latency, and Errors no longer overlap them.
-- The final Tool P99 card is aligned with the P50/P75/P90 row.
+- Both percentile rows are aligned four-card grids. The trend titles and
+  charts sit below them without overlapping either row.
+- Single-series chart legends are hidden when the nearby title already names
+  the metric, so source field IDs such as `llm_response_pk`, `invocation_id`,
+  and `tool_error_pk` no longer leak into the presentation.
+- The four Top-5 user charts no longer group all remaining users into an
+  **Others** bucket that overwhelms the named users.
+- Tool Invocations, Tool Calls Over Time, and Tool Latency Over Time explicitly
+  use the existing **Tool completed rows** filter. This removes blank and
+  `null` tool-name series and preserves the pinned `TOOL_COMPLETED` semantics.
 - User-facing copy uses “Over Time,” “LLM,” plural “Sessions,” and one `(ms)`
   unit style.
 - The web configurator now has a favicon, OpenGraph/Twitter metadata,
@@ -35,9 +46,10 @@ behavior in `spec/product_contract.yaml`.
   single “Agent” section header described from the LookML snapshot.
 - All seven dashboard pages already used the product default of rolling 365
   days ending yesterday.
-- The live report used one blue series color, not the orange/pink/red
-  inconsistencies quoted from the manifest. A semantic multi-color palette is
-  therefore an enhancement, not a repair.
+- Single-series charts use Google blue. Breakdown charts correctly use a
+  categorical multi-color palette. The earlier `single_google_blue` contract
+  wording was inaccurate and has been replaced with separate single-series
+  and multi-series rules.
 - Live legends were not centered on all 37 charts. The more important live
   problem was missing chart titles, which this change fixes.
 - The live component geometry does not use the manifest's 24-column
@@ -56,6 +68,27 @@ Using either one as a report-wide control would silently exclude the other
 event family. The accepted follow-up is a unified `tool_name` field plus a
 page-scoped control verified across Tool Usage, Latency, and Errors.
 
+## Follow-up published-report verification
+
+The second visual pass initially observed empty or degenerate rendering for
+**LLM Call Volume Over Time**, **Top 5 Agents by LLM Calls**, and **Token Usage
+by Agent**. A clean published reload showed their persisted bindings and data
+were intact:
+
+- LLM Call Volume uses `event_date` with distinct `llm_response_pk`;
+- Top 5 Agents uses `agent` with distinct `llm_response_pk`; and
+- Token Usage by Agent uses `agent` with summed `usage_total_tokens`.
+
+This was an incomplete-render/stale-update state, not persisted field loss.
+The 2026-07-27 verification therefore checks the editor bindings and requires
+non-degenerate rendered data before passing; title presence alone is no longer
+sufficient.
+
+Tool Usage also retained a partial-update footer after publication even though
+all three charts rendered. Running the standard viewer **Refresh data** action
+cleared the footer, and a separate 30-second viewer load confirmed it did not
+return.
+
 ## Valid enhancements that require separate acceptance work
 
 The remaining ideas are useful but are not safe one-line UX fixes:
@@ -64,6 +97,8 @@ The remaining ideas are useful but are not safe one-line UX fixes:
   color-blind, truncation, and precision QA;
 - percentile trends and hourly grain add query-cost and layout decisions;
 - error rates require frozen denominator semantics;
+- LLM error visibility requires explicit `LLM_ERROR` measures before a rate
+  can be defined;
 - estimated spend requires a maintained, user-configurable pricing source;
 - Inspector drill-through requires copied-report filter propagation testing;
 - true data freshness must use `MAX(timestamp)`, not Looker Studio's connector

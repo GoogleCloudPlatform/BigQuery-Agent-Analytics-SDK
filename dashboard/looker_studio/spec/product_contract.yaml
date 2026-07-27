@@ -7,7 +7,7 @@ meta:
   contract_version: 1
   review_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#377
   source_parity_contract: spec/chart_manifest.yaml
-  live_review_date: "2026-07-25"
+  live_review_date: "2026-07-27"
   report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
 
 source:
@@ -57,14 +57,32 @@ layout:
   percentile_order:
     llm: [P50, P75, P90, P99]
     tool: [P50, P75, P90, P99]
+  latency_sections:
+    llm_percentile_top: 377
+    tool_percentile_top: 494
+    trend_title_top: 611
+    trend_chart_top: 670
+    overlap_free: true
 
 behavioral_fixes:
   usage-llm-call-trends:
     dimension: event_date
+    oracle_grain: minute
+    compare_at: event_date
     reason: Raw timestamp exceeded the Looker Studio chart row limit.
   usage-events-by-agent:
     event_scope: TOOL_COMPLETED
     display_title: Tool Completions by Agent
+  tool-completed-charts:
+    filter_name: Tool completed rows
+    event_scope: TOOL_COMPLETED
+    charts:
+      - usage-tool-invocations
+      - usage-tool-calls-over-time
+      - performance-tool-latency-trend
+    reason: >-
+      Excluding non-completed event rows removes blank and null tool-name
+      categories while preserving the pinned query semantics.
 
 filtering:
   filter_bar:
@@ -88,16 +106,29 @@ filtering:
   user_id:
     status: available_in_filter_bar
     applies_to_all_compatible_charts: true
+  top_user_rankings:
+    group_remaining_as_others: false
+    charts:
+      - usage-top-5-users-with-most-tokens-consumption
+      - usage-top-5-users-with-most-traces
+      - usage-top-5-users-by-session
+      - usage-top-5-users-by-events
 
 visual_system:
-  live_series_mode: single_google_blue
-  live_series_color: "#4285f4"
+  single_series:
+    mode: google_blue
+    color: "#4285f4"
+    legend: hidden_when_title_defines_metric
+  multi_series:
+    mode: categorical_google_palette
+    legend: visible
+    dimension_values_are_series_labels: true
   semantic_palette:
     status: deferred
     reason: >-
-      The live report does not contain the orange/pink/red inconsistencies
-      asserted from the pinned manifest. A multi-color semantic palette should
-      be introduced only with contrast and color-blind testing.
+      The live report uses a categorical palette only to distinguish
+      breakdown values. A cross-chart semantic palette should be introduced
+      only with contrast and color-blind testing.
   chart_titles:
     present_for_all_non_scorecard_charts: true
     title_case: true
@@ -192,6 +223,10 @@ deferred_enhancements:
     dependency: Product design and query-cost measurement.
   - id: error-rates
     dependency: Freeze denominator semantics for tool and LLM failures.
+  - id: llm-error-visibility
+    dependency: >-
+      Add LLM_ERROR measures and charts, then freeze their relationship to
+      request and response events before defining rates.
   - id: estimated-cost
     dependency: Versioned, user-configurable model pricing source.
   - id: hourly-grain
