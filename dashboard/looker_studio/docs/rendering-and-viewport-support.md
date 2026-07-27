@@ -1,14 +1,14 @@
 # Viewer rendering and viewport support
 
 This document defines how to validate the published BigQuery Agent Analytics
-Data Studio dashboard as a rendered product. It governs issue
+Looker Studio dashboard as a rendered product. It governs issue
 [#381](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/381)
 and complements the query, parity, and live-template contracts.
 
 ## Chart implementation boundary
 
-The canonical report uses Data Studio's native bar, time-series, scorecard, and
-table components. It does not use Vega or third-party community
+The canonical report uses Looker Studio's native bar, time-series, scorecard,
+and table components. It does not use Vega or third-party community
 visualizations.
 
 Native charts can still render inside Google-owned `usercontent.goog` frames.
@@ -54,6 +54,21 @@ A rendering defect is reproducible when the same chart remains blank after the
 navigation sequence produces the same failure in at least two loops. A single
 mid-render screenshot is not sufficient.
 
+### Observed baseline
+
+The 2026-07-27 live pass at a 1568 CSS-pixel viewport did not reproduce the
+blank-chart defect:
+
+- the cold load was still blank at 40 seconds and fully rendered by 70 seconds;
+- navigating away and returning rendered within 10 seconds;
+- SPA navigation to a second page rendered within 18 seconds; and
+- two complete render cycles made zero requests to `usercontent.goog` or a
+  community-visualization resource.
+
+The cold-load analytics beacon reported a cache view miss. These values are an
+environment-specific comparison baseline, not an SLA and not a substitute for
+the repeated-load acceptance protocol.
+
 ## Viewport support
 
 Version 1 is a freeform, desktop report:
@@ -63,15 +78,19 @@ Version 1 is a freeform, desktop report:
 - phone and narrow-tablet layouts are not supported.
 
 The configuration website remains responsive, but that does not make the
-external Data Studio report responsive. Freeform pages intentionally preserve
-the reviewed component geometry.
+external Looker Studio report responsive. Freeform pages intentionally
+preserve the reviewed component geometry.
 
-Data Studio only supports direct freeform-to-responsive conversion when a page
-has at most one component. Every dashboard page has multiple components, so
-mobile support requires a separately owned responsive report. That report
+Looker Studio only supports direct freeform-to-responsive conversion when a
+page has at most one component. Every dashboard page has multiple components,
+so mobile support requires a separately owned responsive report. That report
 must independently pass chart parity, Linking API hydration, Viewer
 Credentials, query-cost, and phone/tablet visual validation before it can
 replace or accompany the v1 template.
+
+The 1280-pixel minimum is a documented product-support boundary. The latest
+live pass ran at 1568 pixels, so targeted visual validation at 1280 pixels
+remains pending.
 
 ## Issue triage
 

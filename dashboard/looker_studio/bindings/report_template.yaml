@@ -40,7 +40,9 @@ product_contract: spec/product_contract.yaml
 viewer_qa_contract:
   issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381
   protocol: docs/rendering-and-viewport-support.md
-  status: INVESTIGATION_OPEN
+  status: NOT_REPRODUCED_UNDER_PROTOCOL
+  observed_baseline_comment: >-
+    https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/383#issuecomment-5098030747
 product_verification:
   verified_date: "2026-07-27"
   pages: 8

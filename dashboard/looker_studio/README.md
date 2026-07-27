@@ -100,6 +100,8 @@ native charts after the surrounding report controls; allow up to 90 seconds
 for non-degenerate chart output. Phone and narrow-tablet layouts require a
 separate responsive template and are not supported by v1. See
 [`docs/rendering-and-viewport-support.md`](docs/rendering-and-viewport-support.md).
+The latest live pass used a 1568-pixel viewport, so targeted validation at the
+documented 1280-pixel minimum is still pending.
 
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)

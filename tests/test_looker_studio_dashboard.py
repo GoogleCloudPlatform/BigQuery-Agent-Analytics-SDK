@@ -305,6 +305,23 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "cold_load_timeout_seconds": 90,
       "fresh_load_runs": 3,
       "navigation_loops": 3,
+      "observed_baseline": {
+          "verified_date": "2026-07-27",
+          "viewport_width_css_px": 1568,
+          "cold_load": {
+              "blank_observed_at_seconds": 40,
+              "fully_rendered_by_seconds": 70,
+              "cache_state": "view_miss",
+          },
+          "warm_navigation": {
+              "return_rendered_within_seconds": 10,
+              "second_page_rendered_within_seconds": 18,
+          },
+          "network": {
+              "usercontent_goog_requests": 0,
+              "community_visualization_requests": 0,
+          },
+      },
       "required_evidence": [
           "browser_and_version",
           "signed_in_state",
@@ -324,6 +341,8 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "recommended_width_css_px": 1440,
       "narrow_screen_support": "not_supported_in_v1",
       "responsive_template": "separate_report_required",
+      "minimum_width_validation": "pending",
+      "last_validated_width_css_px": 1568,
   }
   assert "live_series_mode" not in product["visual_system"]
   deferred = {item["id"] for item in product["deferred_enhancements"]}
@@ -392,7 +411,11 @@ def test_report_and_web_bindings_cannot_drift():
   assert report["viewer_qa_contract"] == {
       "issue": ("GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381"),
       "protocol": "docs/rendering-and-viewport-support.md",
-      "status": "INVESTIGATION_OPEN",
+      "status": "NOT_REPRODUCED_UNDER_PROTOCOL",
+      "observed_baseline_comment": (
+          "https://github.com/GoogleCloudPlatform/"
+          "BigQuery-Agent-Analytics-SDK/pull/383#issuecomment-5098030747"
+      ),
   }
   assert report["product_verification"] == {
       "verified_date": "2026-07-27",
