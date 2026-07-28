@@ -350,8 +350,13 @@ def _build_scope_context(spec=None):
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
 
 
-def _embed_texts(texts, model=None, batch_size=50):
-  """Embed *texts* for semantic similarity; returns L2-normalised vectors."""
+def _embed_texts(texts, model=None, batch_size=50, max_attempts=5):
+  """Embed *texts* for semantic similarity; returns L2-normalised vectors.
+
+  Transient quota/availability errors (429/503) are retried per batch with
+  exponential backoff — golden matching sits on the critical scoring path,
+  and a single unretried burst error would otherwise abort a whole run.
+  """
   from google import genai
   from google.genai import types
 
@@ -360,11 +365,27 @@ def _embed_texts(texts, model=None, batch_size=50):
   vectors = []
   for i in range(0, len(texts), batch_size):
     batch = texts[i : i + batch_size]
-    resp = client.models.embed_content(
-        model=model,
-        contents=batch,
-        config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
-    )
+    for attempt in range(1, max_attempts + 1):
+      try:
+        resp = client.models.embed_content(
+            model=model,
+            contents=batch,
+            config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
+        )
+        break
+      except Exception as exc:  # pylint: disable=broad-except
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        if code not in (429, 503) or attempt == max_attempts:
+          raise
+        delay = 2**attempt
+        logger.warning(
+            "Embedding batch hit transient %s; retrying in %ds (%d/%d)",
+            code,
+            delay,
+            attempt,
+            max_attempts - 1,
+        )
+        time.sleep(delay)
     for e in resp.embeddings:
       v = list(e.values)
       norm = math.sqrt(sum(x * x for x in v)) or 1.0

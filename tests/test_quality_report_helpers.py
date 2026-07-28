@@ -2177,3 +2177,61 @@ class TestHasFailureAttributionData:
     # tool_usage without correctness is not enough for the 2-way fallback.
     report = self._report(["response_usefulness", "tool_usage"])
     assert _has_failure_attribution_data(report) is False
+
+
+class TestEmbedTextsRetry:
+  """Golden-matching embeddings retry transient 429/503 per batch (#360 U6)."""
+
+  class _Transient(Exception):
+
+    def __init__(self, code):
+      super().__init__(f"transient {code}")
+      self.code = code
+
+  def _fake_genai(self, monkeypatch, failures):
+    import google.genai
+
+    calls = {"n": 0}
+
+    class _Embedding:
+      values = [3.0, 4.0]
+
+    class _Models:
+
+      def embed_content(self, **_kwargs):
+        calls["n"] += 1
+        if failures:
+          raise failures.pop(0)
+        resp = type("R", (), {})()
+        resp.embeddings = [_Embedding()]
+        return resp
+
+    class _Client:
+
+      def __init__(self, **_kwargs):
+        self.models = _Models()
+
+    monkeypatch.setattr(google.genai, "Client", _Client)
+    monkeypatch.setattr(quality_report_module.time, "sleep", lambda _s: None)
+    return calls
+
+  def test_transient_429_retried_then_succeeds(self, monkeypatch):
+    calls = self._fake_genai(
+        monkeypatch, [self._Transient(429), self._Transient(503)]
+    )
+    vectors = quality_report_module._embed_texts(["q"])
+    assert calls["n"] == 3
+    assert vectors == [[0.6, 0.8]]  # L2-normalised [3, 4]
+
+  def test_non_transient_error_raises_immediately(self, monkeypatch):
+    calls = self._fake_genai(monkeypatch, [self._Transient(400)])
+    with pytest.raises(self._Transient):
+      quality_report_module._embed_texts(["q"])
+    assert calls["n"] == 1
+
+  def test_exhausted_attempts_reraise(self, monkeypatch):
+    failures = [self._Transient(429) for _ in range(5)]
+    calls = self._fake_genai(monkeypatch, failures)
+    with pytest.raises(self._Transient):
+      quality_report_module._embed_texts(["q"], max_attempts=5)
+    assert calls["n"] == 5
