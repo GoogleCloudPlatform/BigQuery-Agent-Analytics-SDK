@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and full Gemini API fallback. Unmapped traces still run without context;
   empty resolved work makes no model call. Context-aware logs redact model
   text/raw retry responses so a model echo cannot disclose trusted context.
+- **Identity-safe categorical persistence and latest views (#358 U5)** —
+  categorical result tables gain nullable identity and context-provenance
+  columns through idempotent additive migrations; historical rows are not
+  backfilled. Deploy and roll back in schema → writer → view order. Latest
+  views preserve separate rows for identities that share a `session_id`; while
+  data straddles the migration, a sole typed identity supersedes matching
+  legacy metric/prompt rows, while zero or multiple identities retain the
+  `legacy:<session_id>` lane. Trusted judge/golden-answer input and model
+  echoes are never persisted — only SDK-owned provenance is. U5 closes the
+  remaining #358 persistence/report gate and unlocks U6/#360.
 
 ### Changed
 
@@ -61,10 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - This release aligns read, trajectory-evaluation, CLI/Remote Function,
   example, report, and categorical judge-context surfaces at one boundary.
   Context is trusted prompt material: it is a query parameter/model input,
-  never SQL text, a job label, or persisted input. The identity-safe
-  persistence/view cardinality migration remains U5; until it lands, context
-  calls reject `persist_results=True` rather than writing colliding identities
-  into the legacy session-only results schema.
+  never SQL text, a job label, or persisted input. U5 now provides the
+  identity-safe persistence/view-cardinality path for contextual results.
 
 ## [0.4.0] - 2026-06-18
 

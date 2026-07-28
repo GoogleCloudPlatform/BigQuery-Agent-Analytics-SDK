@@ -60,6 +60,7 @@ from google.cloud import bigquery
 from ._telemetry import LabeledBigQueryClient
 from ._telemetry import make_bq_client
 from ._telemetry import with_sdk_labels
+from .categorical_evaluator import _apply_categorical_result_provenance
 from .categorical_evaluator import _build_evaluation_inputs_parameter
 from .categorical_evaluator import _CategoricalEvaluationInput
 from .categorical_evaluator import _normalize_categorical_evaluation_inputs
@@ -71,7 +72,9 @@ from .categorical_evaluator import build_categorical_prompt
 from .categorical_evaluator import build_categorical_report
 from .categorical_evaluator import CATEGORICAL_AI_GENERATE_QUERY
 from .categorical_evaluator import CATEGORICAL_RESULTS_DDL
+from .categorical_evaluator import CATEGORICAL_RESULTS_MIGRATIONS
 from .categorical_evaluator import CATEGORICAL_TRANSCRIPT_QUERY
+from .categorical_evaluator import CategoricalContextSource
 from .categorical_evaluator import CategoricalEvaluationConfig
 from .categorical_evaluator import CategoricalEvaluationReport
 from .categorical_evaluator import classify_sessions_via_api
@@ -2465,6 +2468,7 @@ class Client:
       per_session_context: Optional[
           Mapping[ResolvedTraceSelector | str, str]
       ] = None,
+      context_source: Optional[CategoricalContextSource] = None,
   ) -> CategoricalEvaluationReport:
     """Runs categorical evaluation over traces.
 
@@ -2476,6 +2480,11 @@ class Client:
       AI.GENERATE → Gemini API
     * With any non-empty ``per_session_context``:
       identity-safe resolution → AI.GENERATE → Gemini API
+
+    With ``persist_results=True``, deploy the additive schema before this
+    writer and create/update latest-result views last. Historical legacy rows
+    are not backfilled; views preserve colliding identities and retain
+    ambiguous legacy rows in a separate namespace.
 
     Args:
         config: Categorical evaluation configuration with metric
@@ -2495,9 +2504,13 @@ class Client:
             ignored. Treat values as trusted evaluator material subject to the
             same data-governance policy as evaluation prompts. Context is sent
             only as a query parameter/model prompt; it is not interpolated into
-            SQL, logged, persisted, or placed in job labels. Context calls
-            reject ``config.persist_results=True`` until the U5 identity-safe
-            persistence migration lands.
+            SQL, logged, or placed in job labels. When persistence is enabled,
+            only identity and SDK-owned provenance are written; contextual raw
+            model responses are omitted to prevent an echoed golden answer
+            from reaching the results table.
+        context_source: Optional SDK-defined provenance for a non-empty context
+            mapping. Defaults to ``trusted_judge_context``. Arbitrary strings
+            are rejected rather than persisted as caller-controlled labels.
 
     Returns:
         CategoricalEvaluationReport with per-session results and
@@ -2515,11 +2528,11 @@ class Client:
         else {}
     )
     if context_snapshot:
-      if config.persist_results:
-        raise ValueError(
-            "Identity-bound judge context requires identity-safe persistence"
-            " from issue #358 U5; disable persist_results until that schema,"
-            " writer, and view migration is installed."
+      if context_source is None:
+        context_source = CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+      elif type(context_source) is not CategoricalContextSource:
+        raise TypeError(
+            "context_source must be a CategoricalContextSource value."
         )
       # Resolve the same exact identity/scope population used by U2 before
       # any model call. One detached filter snapshot feeds SQL fragments,
@@ -2542,6 +2555,7 @@ class Client:
       identity_bound_inputs = _normalize_categorical_evaluation_inputs(
           traces,
           context_snapshot,
+          context_source=context_source,
       )
       classify_skip_reason = (
           "AI.CLASSIFY skipped: identity-bound judge context requires"
@@ -2590,6 +2604,8 @@ class Client:
             endpoint,
             connection_id,
         )
+        for result in session_results:
+          result.execution_mode = "ai_classify"
         report = build_categorical_report(
             dataset=f"{table_ref} WHERE {where}",
             session_results=session_results,
@@ -2661,6 +2677,8 @@ class Client:
           endpoint,
           evaluation_inputs=identity_bound_inputs,
       )
+      for result in session_results:
+        result.execution_mode = "api_fallback"
       report = build_categorical_report(
           dataset=f"{table_ref} WHERE {where}",
           session_results=session_results,
@@ -2813,15 +2831,15 @@ class Client:
       parsed = parse_categorical_row(sid, r, config)
       input_item = inputs_by_key.get(input_key)
       if input_item is not None:
-        parsed.details.update(
-            {
-                "user_id": input_item.selector.identity.user_id,
-                "root_agent_name": (
-                    input_item.selector.identity.root_agent_name
-                ),
-                "scope_signature": input_item.selector.scope_signature,
-            }
+        _apply_categorical_result_provenance(
+            parsed,
+            selector=input_item.selector,
+            context_applied=input_item.judge_context is not None,
+            context_source=input_item.context_source,
+            execution_mode="ai_generate",
         )
+      else:
+        parsed.execution_mode = "ai_generate"
       has_parse_error = any(m.parse_error for m in parsed.metrics)
       if has_parse_error and r.get("transcript"):
         failed_sessions[input_key] = r.get("transcript", "")
@@ -2850,6 +2868,11 @@ class Client:
         retry_kwargs["resolved_selectors"] = {
             key: inputs_by_key[key].selector for key in failed_sessions
         }
+        retry_kwargs["context_sources"] = {
+            key: inputs_by_key[key].context_source
+            for key in failed_sessions
+            if inputs_by_key[key].context_source is not None
+        }
       retried = self._retry_failed_sessions(
           failed_sessions,
           config,
@@ -2867,13 +2890,9 @@ class Client:
           for key in failed_sessions:
             selector = inputs_by_key[key].selector
             for index, retried_result in enumerate(unmatched):
-              details = retried_result.details
               if (
-                  retried_result.session_id == selector.identity.session_id
-                  and details.get("user_id") == selector.identity.user_id
-                  and details.get("root_agent_name")
-                  == selector.identity.root_agent_name
-                  and details.get("scope_signature") == selector.scope_signature
+                  retried_result.identity == selector.identity
+                  and retried_result.scope == selector.scope
               ):
                 retried_map[key] = unmatched.pop(index)
                 break
@@ -2917,6 +2936,7 @@ class Client:
       max_retries: int = 3,
       per_session_context: Optional[dict[str, str]] = None,
       resolved_selectors: Optional[dict[str, ResolvedTraceSelector]] = None,
+      context_sources: Optional[dict[str, CategoricalContextSource]] = None,
   ) -> list:
     """Retries classification for failed sessions via Gemini API.
 
@@ -2930,6 +2950,8 @@ class Client:
         max_retries: Maximum number of retry attempts.
         per_session_context: Context keyed like ``transcripts``.
         resolved_selectors: Exact selector metadata keyed like
+            ``transcripts``.
+        context_sources: SDK-defined context provenance keyed like
             ``transcripts``.
 
     Returns:
@@ -2974,6 +2996,30 @@ class Client:
         )
         still_failed = {}
         for input_key, r in zip(remaining_keys, results):
+          selector = (
+              resolved_selectors.get(input_key)
+              if resolved_selectors is not None
+              else None
+          )
+          has_context = (
+              per_session_context is not None
+              and input_key in per_session_context
+          )
+          source = (
+              context_sources.get(
+                  input_key,
+                  CategoricalContextSource.TRUSTED_JUDGE_CONTEXT,
+              )
+              if context_sources is not None
+              else CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+          )
+          _apply_categorical_result_provenance(
+              r,
+              selector=selector,
+              context_applied=has_context,
+              context_source=source if has_context else None,
+              execution_mode="api_retry",
+          )
           has_error = any(m.parse_error for m in r.metrics)
           if has_error:
             still_failed[input_key] = remaining[input_key]
@@ -3069,7 +3115,7 @@ class Client:
       selectors = {
           item.evaluation_key: item.selector for item in evaluation_inputs
       }
-      return _run_sync(
+      results = _run_sync(
           classify_sessions_via_api(
               transcripts,
               config,
@@ -3078,6 +3124,15 @@ class Client:
               resolved_selectors=selectors,
           )
       )
+      for item, result in zip(evaluation_inputs, results):
+        _apply_categorical_result_provenance(
+            result,
+            selector=item.selector,
+            context_applied=item.judge_context is not None,
+            context_source=item.context_source,
+            execution_mode="api_fallback",
+        )
+      return results
 
     query = CATEGORICAL_TRANSCRIPT_QUERY.format(
         project=self.project_id,
@@ -3107,9 +3162,12 @@ class Client:
   ) -> None:
     """Persists categorical results to BigQuery when configured.
 
-    Creates the results table if it does not exist, flattens
-    session results to one row per ``(session_id, metric_name)``,
-    and writes via streaming insert.
+    Creates the results table if it does not exist, completes every additive
+    nullable schema migration, then flattens session results and writes via
+    streaming insert. Migrations run before the writer so deployment/rollback
+    order is schema → writer → view; historical rows are not backfilled.
+    Contextual rows persist identity plus SDK-owned provenance only, never
+    trusted context or a raw model response that could echo it.
     """
     if not config.persist_results:
       return
@@ -3130,6 +3188,13 @@ class Client:
           bigquery.QueryJobConfig(), feature="eval-categorical"
       )
       self.bq_client.query(ddl, job_config=ddl_config).result()
+      for migration_template in CATEGORICAL_RESULTS_MIGRATIONS:
+        migration = migration_template.format(
+            project=self.project_id,
+            dataset=self.dataset_id,
+            results_table=results_table,
+        )
+        self.bq_client.query(migration, job_config=ddl_config).result()
 
       rows = flatten_results_to_rows(report, config, endpoint)
       table_ref = f"{self.project_id}.{self.dataset_id}.{results_table}"
@@ -3151,12 +3216,25 @@ class Client:
         report.details["persisted_rows"] = len(rows)
         report.details["results_table"] = table_ref
     except Exception as e:
-      logger.warning(
-          "Failed to persist categorical results: %s",
-          e,
+      has_contextual_results = any(
+          result.context_applied for result in report.session_results
       )
+      if has_contextual_results:
+        persistence_error = (
+            f"categorical persistence failed ({type(e).__name__})"
+        )
+        logger.warning(
+            "Failed to persist contextual categorical results (%s).",
+            type(e).__name__,
+        )
+      else:
+        persistence_error = str(e)
+        logger.warning(
+            "Failed to persist categorical results: %s",
+            e,
+        )
       report.details["persisted"] = False
-      report.details["persist_error"] = str(e)
+      report.details["persist_error"] = persistence_error
 
   # -------------------------------------------------------------- #
   # Categorical Views                                                #

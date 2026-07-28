@@ -365,6 +365,7 @@ except ImportError as e:
 
 # Categorical Evaluator
 try:
+  from .categorical_evaluator import CategoricalContextSource
   from .categorical_evaluator import CategoricalEvaluationConfig
   from .categorical_evaluator import CategoricalEvaluationReport
   from .categorical_evaluator import CategoricalMetricCategory
@@ -374,6 +375,7 @@ try:
 
   __all__.extend(
       [
+          "CategoricalContextSource",
           "CategoricalEvaluationConfig",
           "CategoricalEvaluationReport",
           "CategoricalMetricCategory",

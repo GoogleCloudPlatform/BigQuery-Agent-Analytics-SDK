@@ -62,6 +62,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
+import hashlib
 import json
 import logging
 from typing import Any, Optional
@@ -69,6 +71,7 @@ from typing import Any, Optional
 from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import model_validator
 
 from bigquery_agent_analytics.evaluators import strip_markdown_fences
 from bigquery_agent_analytics.trace import AmbiguousSessionError
@@ -83,6 +86,13 @@ logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 DEFAULT_ENDPOINT = "gemini-2.5-flash"
 
 
+class CategoricalContextSource(str, Enum):
+  """SDK-defined provenance for trusted categorical judge context."""
+
+  TRUSTED_JUDGE_CONTEXT = "trusted_judge_context"
+  GOLDEN_EXPECTED_ANSWER = "golden_expected_answer"
+
+
 @dataclass(frozen=True, slots=True)
 class _CategoricalEvaluationInput:
   """One exact resolved trace and its trusted judge input."""
@@ -90,6 +100,7 @@ class _CategoricalEvaluationInput:
   selector: ResolvedTraceSelector
   transcript: str
   judge_context: Optional[str] = None
+  context_source: Optional[CategoricalContextSource] = None
 
   @property
   def evaluation_key(self) -> str:
@@ -163,6 +174,9 @@ def _trace_to_categorical_transcript(trace: Trace) -> str:
 def _normalize_categorical_evaluation_inputs(
     traces: list[Trace],
     per_session_context: Mapping[ResolvedTraceSelector | str, str],
+    context_source: CategoricalContextSource = (
+        CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+    ),
 ) -> list[_CategoricalEvaluationInput]:
   """Binds trusted context to a deduplicated exact-selector population.
 
@@ -237,6 +251,9 @@ def _normalize_categorical_evaluation_inputs(
           selector=selector,
           transcript=transcript,
           judge_context=bound_context.get(selector),
+          context_source=(
+              context_source if selector in bound_context else None
+          ),
       )
       for selector, transcript in population.items()
   ]
@@ -403,8 +420,28 @@ class CategoricalSessionResult(BaseModel):
   """Classification results for all metrics on a single session."""
 
   session_id: str
+  identity: Optional[TraceIdentity] = None
+  scope: Optional[TraceScope] = None
+  context_applied: bool = False
+  context_source: Optional[CategoricalContextSource] = None
+  execution_mode: Optional[str] = None
   metrics: list[CategoricalMetricResult] = Field(default_factory=list)
   details: dict[str, Any] = Field(default_factory=dict)
+
+  @model_validator(mode="after")
+  def _validate_provenance(self):
+    if (
+        self.identity is not None
+        and self.identity.session_id != self.session_id
+    ):
+      raise ValueError("identity.session_id must match session_id.")
+    if (self.identity is None) != (self.scope is None):
+      raise ValueError("identity and scope must be attached together.")
+    if self.context_applied != (self.context_source is not None):
+      raise ValueError(
+          "context_source must be set exactly when context_applied is true."
+      )
+    return self
 
 
 class CategoricalEvaluationReport(BaseModel):
@@ -456,6 +493,13 @@ DEFAULT_RESULTS_TABLE = "categorical_results"
 CATEGORICAL_RESULTS_DDL = """\
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{results_table}` (
   session_id STRING,
+  user_id STRING,
+  root_agent_name STRING,
+  experiment_id STRING,
+  scope_key STRING,
+  identity_key STRING,
+  context_applied BOOL,
+  context_source STRING,
   metric_name STRING,
   category STRING,
   justification STRING,
@@ -468,6 +512,21 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{results_table}` (
   created_at TIMESTAMP
 )
 """
+
+CATEGORICAL_RESULTS_MIGRATIONS = tuple(
+    f"""ALTER TABLE `{{project}}.{{dataset}}.{{results_table}}`
+ADD COLUMN IF NOT EXISTS {column}"""
+    for column in (
+        "user_id STRING",
+        "root_agent_name STRING",
+        "experiment_id STRING",
+        "scope_key STRING",
+        "identity_key STRING",
+        "context_applied BOOL",
+        "context_source STRING",
+        "execution_mode STRING",
+    )
+)
 
 CATEGORICAL_TRANSCRIPT_QUERY = """\
 SELECT
@@ -1104,6 +1163,10 @@ async def classify_sessions_via_api(
     endpoint: str = DEFAULT_ENDPOINT,
     per_session_context: dict[str, str] | None = None,
     resolved_selectors: dict[str, ResolvedTraceSelector] | None = None,
+    context_source: CategoricalContextSource = (
+        CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+    ),
+    execution_mode: str = "api_fallback",
 ) -> list[CategoricalSessionResult]:
   """Classifies sessions using the Gemini API (fallback).
 
@@ -1134,6 +1197,9 @@ async def classify_sessions_via_api(
           When present, transcript/context keys remain internal correlation
           keys while returned results carry the selector's public session id
           plus reserved identity/scope attribution.
+      context_source: SDK-defined provenance assigned to results that received
+          trusted context.
+      execution_mode: Per-result execution provenance.
 
   Returns:
       One ``CategoricalSessionResult`` per session, in input order.
@@ -1233,11 +1299,19 @@ async def classify_sessions_via_api(
                 len(raw_text),
                 repr(raw_text[:500]),
             )
-        return CategoricalSessionResult(
+        result = CategoricalSessionResult(
             session_id=sid,
             metrics=metrics,
             details=details,
         )
+        _apply_categorical_result_provenance(
+            result,
+            selector=selector,
+            context_applied=has_judge_context,
+            context_source=context_source if has_judge_context else None,
+            execution_mode=execution_mode,
+        )
+        return result
       except Exception as e:
         if has_judge_context:
           logger.warning(
@@ -1255,7 +1329,7 @@ async def classify_sessions_via_api(
               e,
               type(e).__name__,
           )
-        return CategoricalSessionResult(
+        result = CategoricalSessionResult(
             session_id=sid,
             metrics=[
                 CategoricalMetricResult(
@@ -1268,10 +1342,42 @@ async def classify_sessions_via_api(
             ],
             details=details,
         )
+        _apply_categorical_result_provenance(
+            result,
+            selector=selector,
+            context_applied=has_judge_context,
+            context_source=context_source if has_judge_context else None,
+            execution_mode=execution_mode,
+        )
+        return result
 
   tasks = [_classify_one(key, text) for key, text in transcripts.items()]
   results = await asyncio.gather(*tasks)
   return list(results)
+
+
+def _apply_categorical_result_provenance(
+    result: CategoricalSessionResult,
+    *,
+    selector: Optional[ResolvedTraceSelector],
+    context_applied: bool,
+    context_source: Optional[CategoricalContextSource],
+    execution_mode: str,
+) -> None:
+  """Assigns SDK-owned identity and execution provenance to one result."""
+  result.identity = selector.identity if selector is not None else None
+  result.scope = selector.scope if selector is not None else None
+  result.context_applied = context_applied
+  result.context_source = context_source if context_applied else None
+  result.execution_mode = execution_mode
+  if selector is not None:
+    result.details.update(
+        {
+            "user_id": selector.identity.user_id,
+            "root_agent_name": selector.identity.root_agent_name,
+            "scope_signature": selector.scope_signature,
+        }
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -1284,7 +1390,12 @@ def flatten_results_to_rows(
     config: CategoricalEvaluationConfig,
     endpoint: str,
 ) -> list[dict]:
-  """Flattens session results to one row per (session_id, metric_name).
+  """Flattens session results to persistence rows with identity provenance.
+
+  Identity/scope fields are nullable for historical-compatible rows. Contextual
+  rows retain only SDK-owned provenance; their justification and raw response
+  are omitted so trusted judge/golden-answer context, including model echoes,
+  cannot be persisted.
 
   Args:
       report: The evaluation report to flatten.
@@ -1298,20 +1409,70 @@ def flatten_results_to_rows(
   created_at = report.created_at.isoformat()
   rows = []
   for sr in report.session_results:
+    sr._validate_provenance()
+    identity = sr.identity
+    scope = sr.scope
+    identity_key = (
+        _categorical_identity_key(identity, scope)
+        if identity is not None
+        else None
+    )
+    result_execution_mode = sr.execution_mode or execution_mode
     for mr in sr.metrics:
       rows.append(
           {
               "session_id": sr.session_id,
+              "user_id": identity.user_id if identity is not None else None,
+              "root_agent_name": (
+                  identity.root_agent_name if identity is not None else None
+              ),
+              "experiment_id": (
+                  scope.experiment_id if scope is not None else None
+              ),
+              "scope_key": (
+                  scope.scope_signature if scope is not None else None
+              ),
+              "identity_key": identity_key,
+              "context_applied": sr.context_applied,
+              "context_source": (
+                  sr.context_source.value
+                  if sr.context_source is not None
+                  else None
+              ),
               "metric_name": mr.metric_name,
               "category": mr.category,
-              "justification": mr.justification,
+              "justification": (
+                  None if sr.context_applied else mr.justification
+              ),
               "passed_validation": mr.passed_validation,
               "parse_error": mr.parse_error,
-              "raw_response": mr.raw_response,
+              # A model may echo its trusted judge input. Persisting the raw
+              # envelope for a contextual evaluation could therefore copy a
+              # golden answer even though the SDK never writes the input
+              # directly.
+              "raw_response": (None if sr.context_applied else mr.raw_response),
               "endpoint": endpoint,
-              "execution_mode": execution_mode,
+              "execution_mode": result_execution_mode,
               "prompt_version": config.prompt_version,
               "created_at": created_at,
           }
       )
   return rows
+
+
+def _categorical_identity_key(
+    identity: TraceIdentity,
+    scope: Optional[TraceScope],
+) -> str:
+  """Returns a versioned stable key for one resolved trace identity/scope."""
+  canonical = json.dumps(
+      [
+          identity.session_id,
+          identity.user_id,
+          identity.root_agent_name,
+          scope.scope_signature if scope is not None else None,
+      ],
+      ensure_ascii=False,
+      separators=(",", ":"),
+  ).encode("utf-8")
+  return "v1:" + hashlib.sha256(canonical).hexdigest()

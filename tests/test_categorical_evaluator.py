@@ -36,7 +36,9 @@ from bigquery_agent_analytics.categorical_evaluator import build_categorical_rep
 from bigquery_agent_analytics.categorical_evaluator import build_classify_categories_literal
 from bigquery_agent_analytics.categorical_evaluator import CATEGORICAL_AI_GENERATE_QUERY
 from bigquery_agent_analytics.categorical_evaluator import CATEGORICAL_RESULTS_DDL
+from bigquery_agent_analytics.categorical_evaluator import CATEGORICAL_RESULTS_MIGRATIONS
 from bigquery_agent_analytics.categorical_evaluator import CATEGORICAL_TRANSCRIPT_QUERY
+from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationConfig
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
 from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricCategory
@@ -857,6 +859,11 @@ class TestClassifySessionsViaApi:
         "shared",
         "shared",
     ]
+    assert [result.identity for result in results] == [
+        alice.identity,
+        bob.identity,
+    ]
+    assert [result.scope for result in results] == [alice.scope, bob.scope]
     assert [result.details["user_id"] for result in results] == [
         "alice",
         "bob",
@@ -1079,6 +1086,13 @@ class TestCategoricalResultsDDL:
   def test_contains_all_schema_columns(self):
     for col in [
         "session_id STRING",
+        "user_id STRING",
+        "root_agent_name STRING",
+        "experiment_id STRING",
+        "scope_key STRING",
+        "identity_key STRING",
+        "context_applied BOOL",
+        "context_source STRING",
         "metric_name STRING",
         "category STRING",
         "justification STRING",
@@ -1091,6 +1105,26 @@ class TestCategoricalResultsDDL:
         "created_at TIMESTAMP",
     ]:
       assert col in CATEGORICAL_RESULTS_DDL
+
+  def test_additive_migrations_cover_identity_and_provenance(self):
+    migration_sql = "\n".join(CATEGORICAL_RESULTS_MIGRATIONS)
+    for column in [
+        "user_id STRING",
+        "root_agent_name STRING",
+        "experiment_id STRING",
+        "scope_key STRING",
+        "identity_key STRING",
+        "context_applied BOOL",
+        "context_source STRING",
+        "execution_mode STRING",
+    ]:
+      assert f"ADD COLUMN IF NOT EXISTS {column}" in migration_sql
+    assert all(
+        statement.startswith(
+            "ALTER TABLE `{project}.{dataset}.{results_table}`"
+        )
+        for statement in CATEGORICAL_RESULTS_MIGRATIONS
+    )
 
   def test_format_succeeds(self):
     formatted = CATEGORICAL_RESULTS_DDL.format(
@@ -1230,6 +1264,117 @@ class TestFlattenResultsToRows:
     assert len(rows) == 4
     session_ids = [r["session_id"] for r in rows]
     assert session_ids == ["s1", "s1", "s2", "s2"]
+
+  def test_identity_and_context_provenance_are_persisted_without_raw_context(
+      self,
+  ):
+    config = _make_config()
+    identity = TraceIdentity(
+        session_id="shared",
+        user_id="alice",
+        root_agent_name="root",
+    )
+    scope = TraceScope(
+        experiment_id="exp-a",
+        custom_labels={"run": "v1"},
+    )
+    secret = "golden-answer-secret-581"
+    result = CategoricalSessionResult(
+        session_id="shared",
+        identity=identity,
+        scope=scope,
+        context_applied=True,
+        context_source=CategoricalContextSource.GOLDEN_EXPECTED_ANSWER,
+        execution_mode="ai_generate",
+        metrics=[
+            CategoricalMetricResult(
+                metric_name="tone",
+                category="positive",
+                justification=secret,
+                raw_response=secret,
+            )
+        ],
+        details={"judge_context": secret},
+    )
+    report = build_categorical_report("test_ds", [result], config)
+    report.details["execution_mode"] = "ai_generate"
+
+    row = flatten_results_to_rows(report, config, "gemini-2.5-flash")[0]
+
+    assert row["user_id"] == "alice"
+    assert row["root_agent_name"] == "root"
+    assert row["experiment_id"] == "exp-a"
+    assert row["scope_key"] == scope.scope_signature
+    assert row["identity_key"].startswith("v1:")
+    assert row["context_applied"] is True
+    assert row["context_source"] == "golden_expected_answer"
+    assert row["execution_mode"] == "ai_generate"
+    assert row["justification"] is None
+    assert row["raw_response"] is None
+    assert secret not in json.dumps(row)
+
+  def test_identity_key_separates_reused_session_and_legacy_rows_stay_nullable(
+      self,
+  ):
+    config = _make_config()
+    alice = CategoricalSessionResult(
+        session_id="shared",
+        identity=TraceIdentity("shared", "alice", "root"),
+        scope=TraceScope(custom_labels={"run": "v1"}),
+        metrics=[CategoricalMetricResult(metric_name="tone")],
+    )
+    bob = CategoricalSessionResult(
+        session_id="shared",
+        identity=TraceIdentity("shared", "bob", "root"),
+        scope=TraceScope(custom_labels={"run": "v1"}),
+        metrics=[CategoricalMetricResult(metric_name="tone")],
+    )
+    legacy = CategoricalSessionResult(
+        session_id="legacy",
+        metrics=[CategoricalMetricResult(metric_name="tone")],
+    )
+    report = build_categorical_report("test_ds", [alice, bob, legacy], config)
+
+    rows = flatten_results_to_rows(report, config, "endpoint")
+
+    assert rows[0]["identity_key"] != rows[1]["identity_key"]
+    assert rows[2]["identity_key"] is None
+    assert rows[2]["scope_key"] is None
+    assert rows[2]["context_applied"] is False
+    assert rows[2]["context_source"] is None
+
+  @pytest.mark.parametrize(
+      "kwargs",
+      [
+          {
+              "session_id": "one",
+              "identity": TraceIdentity("one", "u", "root"),
+          },
+          {
+              "session_id": "one",
+              "identity": TraceIdentity("two", "u", "root"),
+          },
+          {
+              "session_id": "one",
+              "scope": TraceScope(custom_labels={"run": "v1"}),
+          },
+          {
+              "session_id": "one",
+              "context_applied": True,
+          },
+          {
+              "session_id": "one",
+              "context_source": (
+                  CategoricalContextSource.GOLDEN_EXPECTED_ANSWER
+              ),
+          },
+      ],
+  )
+  def test_result_rejects_incoherent_identity_or_context_provenance(
+      self, kwargs
+  ):
+    with pytest.raises(ValueError):
+      CategoricalSessionResult(**kwargs)
 
 
 # ------------------------------------------------------------------ #
@@ -2409,6 +2554,8 @@ class TestRetryFailedSessions:
     retried = [
         CategoricalSessionResult(
             session_id="shared",
+            identity=alice.identity,
+            scope=alice.scope,
             metrics=[
                 CategoricalMetricResult(metric_name="tone", category="positive")
             ],
@@ -2420,6 +2567,8 @@ class TestRetryFailedSessions:
         ),
         CategoricalSessionResult(
             session_id="shared",
+            identity=bob.identity,
+            scope=bob.scope,
             metrics=[
                 CategoricalMetricResult(metric_name="tone", category="negative")
             ],
@@ -2462,11 +2611,84 @@ class TestRetryFailedSessions:
         "alice",
         "bob",
     ]
+    assert [result.identity for result in results] == [
+        alice.identity,
+        bob.identity,
+    ]
+    assert [result.scope for result in results] == [alice.scope, bob.scope]
     assert [result.metrics[0].category for result in results] == [
         "positive",
         "negative",
     ]
     assert retry_meta["retry_resolved"] == 2
+
+  def test_ai_generate_retry_matches_typed_selector_not_result_details(self):
+    """Retry replacement ignores mutable details for reused session ids."""
+    client = self._make_client()
+    config = _make_config()
+    alice = TestIdentityBoundEvaluationInputs._selector(user_id="alice")
+    bob = TestIdentityBoundEvaluationInputs._selector(user_id="bob")
+    inputs = [
+        _CategoricalEvaluationInput(alice, "alice transcript"),
+        _CategoricalEvaluationInput(bob, "bob transcript"),
+    ]
+    client.bq_client.query.return_value.result.return_value = [
+        {
+            "evaluation_key": item.evaluation_key,
+            "session_id": "shared",
+            "transcript": item.transcript,
+            "classifications": None,
+        }
+        for item in inputs
+    ]
+    retried = [
+        CategoricalSessionResult(
+            session_id="shared",
+            identity=bob.identity,
+            scope=bob.scope,
+            metrics=[
+                CategoricalMetricResult(metric_name="tone", category="negative")
+            ],
+            details={
+                "user_id": "alice",
+                "root_agent_name": "root",
+                "scope_signature": alice.scope_signature,
+            },
+        ),
+        CategoricalSessionResult(
+            session_id="shared",
+            identity=alice.identity,
+            scope=alice.scope,
+            metrics=[
+                CategoricalMetricResult(metric_name="tone", category="positive")
+            ],
+            details={
+                "user_id": "bob",
+                "root_agent_name": "root",
+                "scope_signature": bob.scope_signature,
+            },
+        ),
+    ]
+
+    with patch.object(client, "_retry_failed_sessions", return_value=retried):
+      results, _ = client._categorical_ai_generate(
+          config,
+          "t",
+          "1=1",
+          [],
+          "gemini-2.5-flash",
+          evaluation_inputs=inputs,
+      )
+
+    assert [result.identity for result in results] == [
+        alice.identity,
+        bob.identity,
+    ]
+    assert [result.scope for result in results] == [alice.scope, bob.scope]
+    assert [result.metrics[0].category for result in results] == [
+        "positive",
+        "negative",
+    ]
 
   def test_identity_bound_results_follow_resolved_input_order(self):
     client = self._make_client()

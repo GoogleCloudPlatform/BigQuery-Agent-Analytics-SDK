@@ -27,9 +27,14 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
+import pytest
+
 import bigquery_agent_analytics
+from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
 from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
 from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
 from bigquery_agent_analytics.trace import TraceIdentity
@@ -274,6 +279,109 @@ class TestIdentityAwareReportMaps:
         "alice",
         "bob",
     }
+
+  def test_golden_matching_preserves_exact_selector_keys(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    selectors = [
+        ResolvedTraceSelector(
+            identity=trace.identity,
+            scope=trace.scope,
+        )
+        for trace in traces
+    ]
+    questions = {
+        selectors[0]: "alice question",
+        selectors[1]: "bob question",
+    }
+    golden = [
+        {"question": "alice golden", "expected_answer": "alice answer"},
+        {"question": "bob golden", "expected_answer": "bob answer"},
+    ]
+
+    def fake_embeddings(texts, **kwargs):
+      return [[1.0, 0.0] if "alice" in text else [0.0, 1.0] for text in texts]
+
+    monkeypatch.setattr(quality_report_module, "_embed_texts", fake_embeddings)
+
+    contexts, metadata = quality_report_module.match_golden_qa(
+        questions, golden
+    )
+
+    assert set(contexts) == set(selectors)
+    assert set(metadata) == set(selectors)
+    assert "alice answer" in contexts[selectors[0]]
+    assert "bob answer" in contexts[selectors[1]]
+
+  def test_bigquery_run_passes_selector_keyed_golden_context(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    captured = {}
+
+    class FakeClient:
+
+      def list_traces(self, filter_criteria):
+        return traces
+
+      def evaluate_categorical(self, **kwargs):
+        captured.update(kwargs)
+        results = []
+        for trace in traces:
+          results.append(
+              CategoricalSessionResult(
+                  session_id=trace.session_id,
+                  identity=trace.identity,
+                  scope=trace.scope,
+                  metrics=[
+                      CategoricalMetricResult(
+                          metric_name="response_usefulness",
+                          category="meaningful",
+                      )
+                  ],
+                  details={
+                      "user_id": trace.identity.user_id,
+                      "root_agent_name": trace.identity.root_agent_name,
+                      "scope_signature": trace.scope.scope_signature,
+                  },
+              )
+          )
+        return CategoricalEvaluationReport(
+            dataset="test",
+            total_sessions=2,
+            session_results=results,
+        )
+
+    def fake_match(questions, golden_qa, threshold):
+      captured["question_keys"] = set(questions)
+      return (
+          {
+              selector: f"context:{selector.identity.user_id}"
+              for selector in questions
+          },
+          {selector: {"matched": True} for selector in questions},
+      )
+
+    monkeypatch.setattr(quality_report_module, "get_client", FakeClient)
+    monkeypatch.setattr(quality_report_module, "match_golden_qa", fake_match)
+
+    quality_report_module.run_evaluation(
+        model="gemini-test",
+        limit=2,
+        eval_spec={
+            "golden_qa": [
+                {"question": "q", "expected_answer": "a"},
+            ]
+        },
+    )
+
+    expected = {
+        ResolvedTraceSelector(identity=trace.identity, scope=trace.scope)
+        for trace in traces
+    }
+    assert captured["question_keys"] == expected
+    assert set(captured["per_session_context"]) == expected
+    assert (
+        captured["context_source"]
+        is CategoricalContextSource.GOLDEN_EXPECTED_ANSWER
+    )
 
   def test_trace_fetch_limit_counts_resolved_identity_scope_candidates(self):
     resolved = quality_report_module._index_resolved_entries(
@@ -527,6 +635,11 @@ class TestIdentityAwareReportMaps:
     scores = [
         CategoricalSessionResult(
             session_id="shared",
+            identity=trace.identity,
+            scope=trace.scope,
+            context_applied=True,
+            context_source=(CategoricalContextSource.GOLDEN_EXPECTED_ANSWER),
+            execution_mode="ai_generate",
             details={
                 "user_id": trace.identity.user_id,
                 "root_agent_name": trace.identity.root_agent_name,
@@ -551,6 +664,13 @@ class TestIdentityAwareReportMaps:
         "question-v0",
         "question-v1",
     ]
+    assert all(row["context_applied"] is True for row in output["sessions"])
+    assert {row["context_source"] for row in output["sessions"]} == {
+        "golden_expected_answer"
+    }
+    assert {row["execution_mode"] for row in output["sessions"]} == {
+        "ai_generate"
+    }
     suffix = quality_report_module._report_identity_suffix(
         resolved[next(iter(resolved))]
     )
@@ -1159,6 +1279,206 @@ class TestInjectGoldenSummary:
     gs = report["summary"]["golden_eval_summary"]
     assert gs["matched_meaningful"] == 1
     assert gs["matched_unhelpful"] == 0
+
+  def test_unattributed_collision_does_not_use_legacy_golden_metadata(self):
+    sessions = [
+        {
+            "session_id": "shared",
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "metrics": {"response_usefulness": {"category": "unhelpful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            "shared": {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert [session["golden_eval"] for session in sessions] == [None, None]
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
+
+  def test_attributed_row_does_not_use_legacy_golden_metadata(self):
+    scope = TraceScope(custom_labels={"run": "v0"})
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v0"},
+            "scope_signature": scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        }
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            "shared": {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert sessions[0]["golden_eval"] is None
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
+
+  def test_colliding_session_ids_receive_their_exact_golden_match(self):
+    alice_scope = TraceScope(custom_labels={"run": "v0"})
+    bob_scope = TraceScope(custom_labels={"run": "v1"})
+    alice = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "alice", "root"),
+        scope=alice_scope,
+    )
+    bob = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "bob", "root"),
+        scope=bob_scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v0"},
+            "scope_signature": alice_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "user_id": "bob",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": bob_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "unhelpful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            alice: {
+                "matched": True,
+                "expected_answer": "alice answer",
+                "topic": "alice",
+                "similarity": 1.0,
+            },
+            bob: {
+                "matched": True,
+                "expected_answer": "bob answer",
+                "topic": "bob",
+                "similarity": 1.0,
+            },
+        },
+    )
+
+    assert sessions[0]["golden_eval"]["expected_answer"] == "alice answer"
+    assert sessions[1]["golden_eval"]["expected_answer"] == "bob answer"
+    assert report["summary"]["golden_eval_summary"]["matched"] == 2
+
+  def test_nullable_identity_dimensions_receive_exact_golden_match(self):
+    anonymous_scope = TraceScope(custom_labels={"run": "anonymous"})
+    named_scope = TraceScope(custom_labels={"run": "named"})
+    anonymous = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", None, None),
+        scope=anonymous_scope,
+    )
+    named = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "alice", "root"),
+        scope=named_scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": None,
+            "root_agent_name": None,
+            "experiment_id": None,
+            "custom_labels": {"run": "anonymous"},
+            "scope_signature": anonymous_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "named"},
+            "scope_signature": named_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            anonymous: {
+                "matched": True,
+                "expected_answer": "anonymous answer",
+                "similarity": 1.0,
+            },
+            named: {
+                "matched": True,
+                "expected_answer": "named answer",
+                "similarity": 1.0,
+            },
+        },
+    )
+
+    assert sessions[0]["golden_eval"]["expected_answer"] == "anonymous answer"
+    assert sessions[1]["golden_eval"]["expected_answer"] == "named answer"
+    assert report["summary"]["golden_eval_summary"]["matched"] == 2
+
+  @pytest.mark.parametrize("invalid_labels", [False, 0])
+  def test_invalid_falsy_labels_do_not_rebuild_exact_selector(
+      self, invalid_labels
+  ):
+    scope = TraceScope()
+    selector = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", None, None),
+        scope=scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": None,
+            "root_agent_name": None,
+            "experiment_id": None,
+            "custom_labels": invalid_labels,
+            "scope_signature": scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        }
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            selector: {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert sessions[0]["golden_eval"] is None
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
 
 
 # ================================================================== #

@@ -132,6 +132,17 @@ through AI.GENERATE, retry, and API fallback. It is never interpolated into
 SQL, logged, persisted, or placed in job labels. Apply the same data-governance
 policy you use for evaluation prompts.
 
+When `persist_results=True`, categorical results use an additive, nullable
+identity/provenance schema; existing historical rows are not backfilled.
+Deploy or roll back safely in this order: **schema, then writer, then views**.
+The latest-results view keeps identities distinct even when they share a
+`session_id`. During a legacy/schema straddle, a sole typed identity supersedes
+matching legacy metric/prompt rows; zero or multiple typed identities leave
+legacy rows in their separate `legacy:<session_id>` lane. Trusted judge or
+golden-answer context — including any model echo — is never persisted; only
+SDK-owned context provenance is. This U5 migration completes #358's remaining
+persistence/report gate and unlocks U6/#360.
+
 See [SDK.md](SDK.md) for the full API walkthrough with code examples for every
 feature.
 
