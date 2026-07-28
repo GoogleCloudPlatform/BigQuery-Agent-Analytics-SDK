@@ -19,9 +19,9 @@ source:
 defaults:
   date_range:
     mode: rolling
-    start_offset_days: 365
-    end_offset_days: 1
-    include_today: false
+    start_offset_days: 364
+    end_offset_days: 0
+    include_today: true
     page_scope: all_dashboard_pages
 
 pages:

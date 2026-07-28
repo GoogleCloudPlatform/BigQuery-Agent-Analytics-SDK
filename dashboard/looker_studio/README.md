@@ -91,8 +91,8 @@ fixture parity certification or M4 visual sign-off.
 Canonical published template:
 [BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40).
 
-All seven dashboard pages default to a rolling 365-day window ending
-yesterday. The Trace Inspector intentionally has no default date control.
+All seven dashboard pages default to a rolling 365-day window including
+today. The Trace Inspector intentionally has no default date control.
 
 The v1 report is a freeform desktop dashboard. Use a viewport at least 1280
 CSS pixels wide (1440 recommended). A cold load or page navigation can paint

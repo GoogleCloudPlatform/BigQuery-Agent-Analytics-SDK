@@ -97,7 +97,7 @@ explicit chart title. Product titles use title case, “Over Time,” uppercase
 formerly inherited as “Events By Agent” is labeled **Tool Completions by
 Agent** because its metric intentionally counts only `TOOL_COMPLETED` rows.
 
-All seven dashboard pages use a rolling 365-day window ending yesterday.
+All seven dashboard pages use a rolling 365-day window including today.
 Looker Studio sends those bounds through `@DS_START_DATE` and
 `@DS_END_DATE`; the production query applies the frozen half-open UTC
 predicate. The generated manifest retains the pinned LookML's original

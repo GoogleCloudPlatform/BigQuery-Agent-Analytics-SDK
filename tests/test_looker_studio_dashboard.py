@@ -246,9 +246,9 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
   ]
   assert product["defaults"]["date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 365,
-      "end_offset_days": 1,
-      "include_today": False,
+      "start_offset_days": 364,
+      "end_offset_days": 0,
+      "include_today": True,
       "page_scope": "all_dashboard_pages",
   }
   assert product["layout"]["percentile_order"] == {
@@ -375,9 +375,9 @@ def test_report_and_web_bindings_cannot_drift():
   assert web["dataSourceAlias"] == report["data_source_alias"]
   assert report["default_date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 365,
-      "end_offset_days": 1,
-      "include_today": False,
+      "start_offset_days": 364,
+      "end_offset_days": 0,
+      "include_today": True,
       "page_scope": "all_dashboard_pages",
   }
   assert web["sentinels"] == {
@@ -447,6 +447,23 @@ def test_report_and_web_bindings_cannot_drift():
       "required_before_sharing": "VIEWERS",
       "verification_path": "Resource > Manage added data sources > Edit",
   }
+
+
+def test_default_date_range_includes_today_for_exactly_365_calendar_days():
+  product = yaml.safe_load(
+      (DASHBOARD / "spec/product_contract.yaml").read_text()
+  )
+  report = yaml.safe_load(
+      (DASHBOARD / "bindings/report_template.yaml").read_text()
+  )
+
+  date_range = product["defaults"]["date_range"]
+  assert report["default_date_range"] == date_range
+  assert date_range["include_today"] is True
+  assert date_range["end_offset_days"] == 0
+  assert (
+      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 365
+  )
 
 
 def test_base_table_query_and_preflight_cover_the_bqaa_contract():
