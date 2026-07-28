@@ -1,6 +1,8 @@
 -- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).
 -- Latency aggregates deliberately stay NULL when telemetry is missing so
 -- the chart shows gaps instead of fake zeros.
+-- No event_type filter: the view is already scoped to a single event type,
+-- so filtering it would blank the panel for every non-LLM selection.
 SELECT
   $__timeGroup(timestamp, $__interval) AS time,
   APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,
@@ -9,5 +11,7 @@ SELECT
 FROM `${project}.${dataset}.${view_prefix}llm_responses`
 WHERE $__timeFilter(timestamp)
   AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))
+  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))
 GROUP BY time
 ORDER BY time

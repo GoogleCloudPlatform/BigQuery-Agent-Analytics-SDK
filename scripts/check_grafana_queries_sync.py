@@ -35,6 +35,8 @@ PANEL_QUERIES = {
 TEMPLATE_VARIABLE_QUERIES = {
     "agent": "var_agent.sql",
     "session_id": "var_session_id.sql",
+    "user_id": "var_user_id.sql",
+    "event_type": "var_event_type.sql",
 }
 # Panels that consume another panel's result via Grafana's Dashboard data
 # source, mapped to the panel id they draw from. These add no BigQuery load, so
