@@ -387,13 +387,14 @@ def test_report_and_web_bindings_cannot_drift():
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
+  assert report["published_date"] == "2026-07-28"
   assert attestation == {
       "sha256": hashlib.sha256(template).hexdigest(),
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-27",
+      "verified_date": "2026-07-28",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
@@ -403,6 +404,7 @@ def test_report_and_web_bindings_cannot_drift():
           "published_non_degenerate_chart_data_capture",
           "editor_configuration_assertions",
           "published_tool_page_refresh",
+          "published_include_today_default_validation",
       ],
       "result": "PASSED",
       "limitation": "mutable_external_report_requires_reverification_after_changes",
@@ -418,7 +420,7 @@ def test_report_and_web_bindings_cannot_drift():
       ),
   }
   assert report["product_verification"] == {
-      "verified_date": "2026-07-27",
+      "verified_date": "2026-07-28",
       "pages": 8,
       "checks": [
           "expected_page_and_chart_titles_present",
@@ -433,6 +435,7 @@ def test_report_and_web_bindings_cannot_drift():
           "tool_charts_exclude_non_completed_rows",
           "multi_series_charts_use_categorical_legends",
           "no_partial_update_footer_after_refresh",
+          "default_date_range_includes_today_on_seven_dashboard_pages",
       ],
       "result": "PASSED",
   }
