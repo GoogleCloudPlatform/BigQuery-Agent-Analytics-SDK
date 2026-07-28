@@ -1865,6 +1865,7 @@ def generate_quality_report_from_conversations(
     per_session_context=None,
     golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
     eval_config=None,
+    trace_filter=None,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1886,6 +1887,8 @@ def generate_quality_report_from_conversations(
       golden_threshold: Cosine-similarity threshold for golden matching.
       eval_config: Optional metric-definition override (same as the CLI
           ``--eval-config``); when None the built-in metrics are used.
+      trace_filter: Optional ``TraceFilter`` carrying app/label/time bounds
+          for the trajectory fetch; only its session_ids/limit are replaced.
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys. When the eval spec carries
@@ -1919,6 +1922,7 @@ def generate_quality_report_from_conversations(
         trajectory_samples,
         max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
         resolved_map=trajectory_map,
+        base_filter=trace_filter,
     )
 
   output = _build_json_output(
@@ -2149,6 +2153,14 @@ def run_eval(args):
       k, v = item.split("=", 1)
       custom_labels[k] = v
 
+  # CLI-derived bounds for every trajectory fetch in this invocation: the
+  # trace reads stay scoped to the same app/labels/time the scoring ran with.
+  base_trace_filter = _cli_base_trace_filter(
+      app_name=getattr(args, "app_name", None),
+      custom_labels=custom_labels,
+      time_period=getattr(args, "time_period", None),
+  )
+
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
     logger.info("Source: local conversations file %s", conversations_file)
@@ -2318,6 +2330,7 @@ def run_eval(args):
         len(traj_sids),
         max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
         resolved_map=trajectory_map,
+        base_filter=base_trace_filter,
     )
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
@@ -2335,6 +2348,7 @@ def run_eval(args):
         max_sessions=1,
         max_traces=_trace_fetch_limit(result["resolved_map"], [args.session]),
         resolved_map=result["resolved_map"],
+        base_filter=base_trace_filter,
     )
     if trajectories:
       for trace_obj in trajectories.values():
@@ -3252,12 +3266,34 @@ def _retain_report_traces(fetched, resolved_map):
   return retained
 
 
+def _cli_base_trace_filter(app_name=None, custom_labels=None, time_period=None):
+  """Build the CLI-derived base TraceFilter for trajectory fetches.
+
+  Preserves the app/label/time bounds the evaluation ran with so the trace
+  fetch cannot select rows outside the scored population's scope (e.g. a
+  shared events table holding several passes that reuse session ids).
+  Returns None when no bound is set (legacy unbounded fetch).
+  """
+  if not app_name and not custom_labels and time_period in (None, "", "all"):
+    return None
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
+  except ImportError:
+    return None
+  last = None if time_period in (None, "", "all") else time_period
+  base = _TraceFilter.from_cli_args(last=last, custom_labels=custom_labels)
+  if app_name:
+    base.root_agent_name = app_name
+  return base
+
+
 def _fetch_session_traces(
     session_ids,
     max_sessions=3,
     *,
     max_traces=None,
     resolved_map=None,
+    base_filter=None,
 ):
   """Fetch execution traces from BigQuery for the given session IDs.
 
@@ -3265,6 +3301,10 @@ def _fetch_session_traces(
   ``session_id`` key; reused sessions are keyed by identity/scope tuples.
   When ``resolved_map`` is supplied, only traces matching that report
   population are retained; legacy session-only rows fail closed on collision.
+  When ``base_filter`` is supplied (a ``TraceFilter``), the fetch delegates
+  to a snapshot of it and replaces ONLY the requested ``session_ids`` and
+  display ``limit`` — the caller's app/label/time bounds are preserved and
+  the caller's filter object is never mutated.
   Silently returns empty dict if BQ is not configured or unavailable.
   """
   if not session_ids:
@@ -3310,10 +3350,13 @@ def _fetch_session_traces(
   try:
     from bigquery_agent_analytics import TraceFilter as _TraceFilter
 
-    fetched, _ = _list_complete_report_traces(
-        client,
-        _TraceFilter(session_ids=wanted, limit=trace_limit),
-    )
+    if base_filter is not None:
+      fetch_filter = base_filter.snapshot()
+    else:
+      fetch_filter = _TraceFilter()
+    fetch_filter.session_ids = wanted
+    fetch_filter.limit = trace_limit
+    fetched, _ = _list_complete_report_traces(client, fetch_filter)
   except _ReportTracePopulationTruncatedError as exc:
     logger.warning("Skipping execution trajectories: %s", exc)
     return {}

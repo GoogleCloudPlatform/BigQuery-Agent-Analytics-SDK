@@ -449,6 +449,66 @@ class TestIdentityAwareReportMaps:
     assert requested_limits == [2, 4]
     assert len(fetched) == 2
 
+  def test_fetch_session_traces_preserves_base_filter_bounds(self, monkeypatch):
+    alice = self._trace("alice", "v0")
+    captured = {}
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        captured.setdefault("filters", []).append(filter_criteria)
+        return [alice]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    base = quality_report_module._cli_base_trace_filter(
+        app_name="skill-evolution-lab",
+        custom_labels={"run": "lab_1", "slice": "v0_test"},
+        time_period="24h",
+    )
+    base.limit = 500
+
+    quality_report_module._fetch_session_traces(
+        ["shared"], max_sessions=1, max_traces=2, base_filter=base
+    )
+
+    fetch_filter = captured["filters"][0]
+    # App/label/time bounds survive the delegation to the fetch filter...
+    assert fetch_filter.root_agent_name == "skill-evolution-lab"
+    assert fetch_filter.custom_labels == {"run": "lab_1", "slice": "v0_test"}
+    assert fetch_filter.start_time is not None
+    # ...while ONLY the session ids and display limit are replaced...
+    assert fetch_filter.session_ids == ["shared"]
+    assert fetch_filter.limit == 2
+    # ...and the caller's base filter is never mutated.
+    assert base.session_ids is None
+    assert base.limit == 500
+
+  def test_cli_base_trace_filter_bounds_and_unbounded_none(self):
+    base = quality_report_module._cli_base_trace_filter(
+        app_name="skill-evolution-lab",
+        custom_labels={"run": "lab_1"},
+        time_period="24h",
+    )
+    assert base.root_agent_name == "skill-evolution-lab"
+    assert base.custom_labels == {"run": "lab_1"}
+    assert base.start_time is not None
+
+    assert (
+        quality_report_module._cli_base_trace_filter(
+            app_name=None, custom_labels=None, time_period="all"
+        )
+        is None
+    )
+
   def test_fetch_session_traces_retains_only_report_attribution(
       self, monkeypatch
   ):
