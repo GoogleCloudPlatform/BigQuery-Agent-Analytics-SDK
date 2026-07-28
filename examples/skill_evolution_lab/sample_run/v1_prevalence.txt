@@ -1,6 +1,6 @@
-Prevalence across 48 independent analyst patches:
-  TOOL_USAGE: 43/48 (90%) -- VERY STRONG
-  PARROTING: 3/48 (6%) -- STRONG
-  MISSING_RULE: 1/48 (2%) -- weak
-  RESPONSE_PATTERN: 1/48 (2%) -- weak
+Prevalence across 55 independent analyst patches:
+  TOOL_USAGE: 51/55 (93%) -- VERY STRONG
+  MISSING_RULE: 2/55 (4%) -- moderate
+  SCOPE_GAP: 1/55 (2%) -- weak
+  PARROTING: 1/55 (2%) -- weak
 Strength is a consensus flag: weak = 1 analyst, moderate = 2, STRONG = >=3 independently converged, VERY STRONG = >=3 and a strict majority (more than half) of all patches.

@@ -1,13 +1,13 @@
 {
   "v0": {
     "overall": {
-      "rate": 36.2,
-      "correct": 29,
+      "rate": 35.0,
+      "correct": 28,
       "total": 80
     },
     "single_turn": {
-      "rate": 34.5,
-      "correct": 19,
+      "rate": 38.2,
+      "correct": 21,
       "total": 55
     },
     "corrections": {
@@ -16,22 +16,22 @@
       "total": 15
     },
     "out_of_scope": {
-      "rate": 100.0,
-      "correct": 10,
+      "rate": 70.0,
+      "correct": 7,
       "total": 10
     },
-    "parroted": 11,
+    "parroted": 12,
     "missing": 0
   },
   "v1": {
     "overall": {
-      "rate": 97.5,
-      "correct": 78,
+      "rate": 98.8,
+      "correct": 79,
       "total": 80
     },
     "single_turn": {
-      "rate": 100.0,
-      "correct": 55,
+      "rate": 98.2,
+      "correct": 54,
       "total": 55
     },
     "corrections": {
@@ -40,39 +40,39 @@
       "total": 15
     },
     "out_of_scope": {
-      "rate": 80.0,
-      "correct": 8,
+      "rate": 100.0,
+      "correct": 10,
       "total": 10
     },
     "parroted": 0,
     "missing": 0
   },
   "v0_dimensions": {
-    "correctness": 0.73,
+    "correctness": 0.72,
     "tool_usage": 0.75,
-    "specificity": 0.94,
-    "scope_compliance": 0.84,
-    "first_time_right": 0.84
+    "specificity": 0.85,
+    "scope_compliance": 0.82,
+    "first_time_right": 0.7
   },
   "v1_dimensions": {
-    "correctness": 1.99,
-    "tool_usage": 2.0,
-    "specificity": 2.0,
-    "scope_compliance": 2.0,
-    "first_time_right": 1.96
+    "correctness": 1.98,
+    "tool_usage": 1.99,
+    "specificity": 1.98,
+    "scope_compliance": 1.98,
+    "first_time_right": 1.95
   },
   "v0_tool_selection": {
-    "any_tool": 14,
+    "any_tool": 15,
     "by_tool": {
-      "lookup_company_policy": 9,
+      "lookup_company_policy": 10,
       "calculate_disability_pay": 5
     },
     "total": 80
   },
   "v1_tool_selection": {
-    "any_tool": 62,
+    "any_tool": 61,
     "by_tool": {
-      "lookup_company_policy": 57,
+      "lookup_company_policy": 56,
       "calculate_disability_pay": 5
     },
     "total": 80

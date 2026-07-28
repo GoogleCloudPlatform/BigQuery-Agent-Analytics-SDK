@@ -17,7 +17,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.64,
+      "latency_s": 1.87,
       "category": "pto"
     },
     {
@@ -37,7 +37,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.84,
+      "latency_s": 1.77,
       "category": "pto"
     },
     {
@@ -57,7 +57,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.58,
+      "latency_s": 1.7,
       "category": "pto"
     },
     {
@@ -77,7 +77,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.67,
+      "latency_s": 0.55,
       "category": "pto"
     },
     {
@@ -97,7 +97,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.45,
+      "latency_s": 0.78,
       "category": "sick_leave"
     },
     {
@@ -117,7 +117,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.55,
+      "latency_s": 0.58,
       "category": "sick_leave"
     },
     {
@@ -144,7 +144,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 2.97,
+      "latency_s": 1.26,
       "category": "sick_leave"
     },
     {
@@ -171,7 +171,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.31,
+      "latency_s": 1.58,
       "category": "remote_work"
     },
     {
@@ -191,7 +191,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.58,
+      "latency_s": 0.73,
       "category": "remote_work"
     },
     {
@@ -211,7 +211,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.5,
+      "latency_s": 0.51,
       "category": "remote_work"
     },
     {
@@ -231,7 +231,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.68,
+      "latency_s": 0.55,
       "category": "remote_work"
     },
     {
@@ -251,7 +251,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.55,
+      "latency_s": 0.73,
       "category": "expenses"
     },
     {
@@ -271,7 +271,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.78,
+      "latency_s": 0.6,
       "category": "expenses"
     },
     {
@@ -291,13 +291,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.69,
+      "latency_s": 0.73,
       "category": "expenses"
     },
     {
       "session_id": "t15_expenses",
       "question": "How long do I have to submit a business expense?",
-      "final_response": "I do not have information regarding business expense submission timelines. Please contact HR for assistance with this policy.",
+      "final_response": "I do not have information regarding business expense policies. Please contact HR for assistance with this question.",
       "conversation": [
         {
           "role": "user",
@@ -305,13 +305,13 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding business expense submission timelines. Please contact HR for assistance with this policy."
+          "text": "I do not have information regarding business expense policies. Please contact HR for assistance with this question."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.61,
+      "latency_s": 0.88,
       "category": "expenses"
     },
     {
@@ -331,7 +331,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.64,
+      "latency_s": 1.29,
       "category": "benefits"
     },
     {
@@ -351,7 +351,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.81,
       "category": "benefits"
     },
     {
@@ -371,7 +371,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.76,
+      "latency_s": 0.78,
       "category": "benefits"
     },
     {
@@ -391,7 +391,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.52,
+      "latency_s": 0.63,
       "category": "benefits"
     },
     {
@@ -411,13 +411,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.52,
+      "latency_s": 0.5,
       "category": "benefits"
     },
     {
       "session_id": "t21_benefits",
       "question": "How much does the company put into an HSA for individual coverage?",
-      "final_response": "I do not have information regarding HSA contributions. Please contact HR for details about your benefits.",
+      "final_response": "I do not have information regarding HSA contributions. Please contact HR for details on this benefit.",
       "conversation": [
         {
           "role": "user",
@@ -425,13 +425,13 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding HSA contributions. Please contact HR for details about your benefits."
+          "text": "I do not have information regarding HSA contributions. Please contact HR for details on this benefit."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.67,
+      "latency_s": 0.7,
       "category": "benefits"
     },
     {
@@ -471,7 +471,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.85,
+      "latency_s": 0.68,
       "category": "benefits"
     },
     {
@@ -511,7 +511,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.7,
+      "latency_s": 0.61,
       "category": "benefits"
     },
     {
@@ -531,7 +531,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.61,
+      "latency_s": 0.59,
       "category": "benefits"
     },
     {
@@ -551,7 +551,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.41,
+      "latency_s": 0.65,
       "category": "benefits"
     },
     {
@@ -571,7 +571,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.59,
+      "latency_s": 0.68,
       "category": "benefits"
     },
     {
@@ -591,7 +591,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.52,
+      "latency_s": 0.57,
       "category": "benefits"
     },
     {
@@ -611,7 +611,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.59,
+      "latency_s": 0.62,
       "category": "benefits"
     },
     {
@@ -631,7 +631,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.67,
+      "latency_s": 0.59,
       "category": "benefits"
     },
     {
@@ -651,7 +651,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.6,
+      "latency_s": 0.57,
       "category": "holidays"
     },
     {
@@ -671,13 +671,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.56,
+      "latency_s": 0.62,
       "category": "holidays"
     },
     {
       "session_id": "t34_holidays",
       "question": "Which days around Thanksgiving are paid holidays?",
-      "final_response": "I do not have information regarding specific holiday schedules. Please contact HR for details about paid holidays.",
+      "final_response": "The company observes the Wednesday and Thursday of Thanksgiving week as paid holidays.",
       "conversation": [
         {
           "role": "user",
@@ -685,13 +685,20 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding specific holiday schedules. Please contact HR for details about paid holidays."
+          "text": "The company observes the Wednesday and Thursday of Thanksgiving week as paid holidays."
         }
       ],
-      "tool_calls": 0,
-      "tool_calls_detail": [],
+      "tool_calls": 1,
+      "tool_calls_detail": [
+        {
+          "name": "lookup_company_policy",
+          "args": {
+            "topic": "holidays"
+          }
+        }
+      ],
       "answered_by": "policy_agent",
-      "latency_s": 0.73,
+      "latency_s": 1.54,
       "category": "holidays"
     },
     {
@@ -711,7 +718,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.62,
+      "latency_s": 0.81,
       "category": "bereavement"
     },
     {
@@ -731,7 +738,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.45,
+      "latency_s": 0.66,
       "category": "bereavement"
     },
     {
@@ -751,7 +758,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.47,
+      "latency_s": 0.55,
       "category": "bereavement"
     },
     {
@@ -771,13 +778,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.71,
+      "latency_s": 0.76,
       "category": "jury_duty"
     },
     {
       "session_id": "t39_eap",
       "question": "How many EAP counseling sessions do I get?",
-      "final_response": "The Employee Assistance Program (EAP) offers free, confidential counseling with up to 8 sessions per issue per year, plus a 24/7 hotline covering mental health, stress, legal, and financial matters.",
+      "final_response": "You are eligible for up to 8 counseling sessions per issue per year through the Employee Assistance Program (EAP). This program also includes a 24/7 hotline for mental health, stress, legal, and financial matters.",
       "conversation": [
         {
           "role": "user",
@@ -785,7 +792,7 @@
         },
         {
           "role": "agent",
-          "text": "The Employee Assistance Program (EAP) offers free, confidential counseling with up to 8 sessions per issue per year, plus a 24/7 hotline covering mental health, stress, legal, and financial matters."
+          "text": "You are eligible for up to 8 counseling sessions per issue per year through the Employee Assistance Program (EAP). This program also includes a 24/7 hotline for mental health, stress, legal, and financial matters."
         }
       ],
       "tool_calls": 1,
@@ -798,7 +805,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.34,
+      "latency_s": 1.53,
       "category": "eap"
     },
     {
@@ -825,7 +832,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.35,
+      "latency_s": 1.59,
       "category": "eap"
     },
     {
@@ -845,7 +852,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.71,
+      "latency_s": 0.67,
       "category": "flex_time"
     },
     {
@@ -865,7 +872,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.42,
+      "latency_s": 0.73,
       "category": "flex_time"
     },
     {
@@ -885,7 +892,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.5,
+      "latency_s": 0.55,
       "category": "tuition_reimbursement"
     },
     {
@@ -905,7 +912,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.73,
+      "latency_s": 0.61,
       "category": "tuition_reimbursement"
     },
     {
@@ -932,7 +939,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.51,
+      "latency_s": 1.4,
       "category": "short_term_disability"
     },
     {
@@ -959,7 +966,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.33,
+      "latency_s": 1.64,
       "category": "short_term_disability"
     },
     {
@@ -986,13 +993,13 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 0.99,
+      "latency_s": 1.11,
       "category": "short_term_disability"
     },
     {
       "session_id": "t48_benefits",
       "question": "How much of dependents' premiums does the company cover?",
-      "final_response": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this question.",
+      "final_response": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this topic.",
       "conversation": [
         {
           "role": "user",
@@ -1000,13 +1007,13 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this question."
+          "text": "I do not have information regarding the coverage of dependents' premiums. Please contact HR for assistance with this topic."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.81,
       "category": "benefits"
     },
     {
@@ -1026,7 +1033,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.44,
+      "latency_s": 2.05,
       "category": "tuition_reimbursement"
     },
     {
@@ -1046,7 +1053,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.68,
+      "latency_s": 0.61,
       "category": "sick_leave"
     },
     {
@@ -1068,13 +1075,13 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "annual_salary": 52000,
-            "weeks_out": 4
+            "weeks_out": 4,
+            "annual_salary": 52000
           }
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.67,
+      "latency_s": 1.3,
       "category": "calc"
     },
     {
@@ -1096,13 +1103,13 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "weeks_out": 1,
-            "annual_salary": 91000
+            "annual_salary": 91000,
+            "weeks_out": 1
           }
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.34,
+      "latency_s": 1.71,
       "category": "calc"
     },
     {
@@ -1124,13 +1131,13 @@
         {
           "name": "calculate_disability_pay",
           "args": {
-            "weeks_out": 14,
-            "annual_salary": 65000
+            "annual_salary": 65000,
+            "weeks_out": 14
           }
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.25,
+      "latency_s": 1.32,
       "category": "calc"
     },
     {
@@ -1158,7 +1165,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.34,
+      "latency_s": 1.36,
       "category": "calc"
     },
     {
@@ -1186,13 +1193,13 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.41,
+      "latency_s": 1.37,
       "category": "calc"
     },
     {
       "session_id": "corr_parental",
       "question": "How much parental leave does a secondary caregiver get?",
-      "final_response": "Thank you for that information. I apologize that I don't have that in my records, but I appreciate you sharing that figure. If you have any other questions about the policies I do have information on\u2014like PTO, sick leave, remote work, or general benefits\u2014please let me know!",
+      "final_response": "Thank you for that information. I have noted that you believe the policy is 12 weeks for a secondary caregiver. Since I do not have that specific policy in my records, please contact HR to confirm the details.",
       "conversation": [
         {
           "role": "user",
@@ -1208,13 +1215,13 @@
         },
         {
           "role": "agent",
-          "text": "Thank you for that information. I apologize that I don't have that in my records, but I appreciate you sharing that figure. If you have any other questions about the policies I do have information on\u2014like PTO, sick leave, remote work, or general benefits\u2014please let me know!"
+          "text": "Thank you for that information. I have noted that you believe the policy is 12 weeks for a secondary caregiver. Since I do not have that specific policy in my records, please contact HR to confirm the details."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.38,
+      "latency_s": 1.65,
       "category": "correction"
     },
     {
@@ -1242,7 +1249,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.29,
+      "latency_s": 1.31,
       "category": "correction"
     },
     {
@@ -1270,7 +1277,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.32,
+      "latency_s": 1.34,
       "category": "correction"
     },
     {
@@ -1298,7 +1305,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.24,
+      "latency_s": 1.88,
       "category": "correction"
     },
     {
@@ -1326,7 +1333,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.36,
+      "latency_s": 1.4,
       "category": "correction"
     },
     {
@@ -1354,7 +1361,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.13,
+      "latency_s": 1.52,
       "category": "correction"
     },
     {
@@ -1382,7 +1389,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.4,
+      "latency_s": 1.29,
       "category": "correction"
     },
     {
@@ -1410,7 +1417,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.1,
+      "latency_s": 1.13,
       "category": "correction"
     },
     {
@@ -1445,7 +1452,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.91,
+      "latency_s": 1.95,
       "category": "correction"
     },
     {
@@ -1473,7 +1480,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.42,
+      "latency_s": 1.32,
       "category": "correction"
     },
     {
@@ -1501,7 +1508,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.23,
+      "latency_s": 1.28,
       "category": "correction"
     },
     {
@@ -1529,7 +1536,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.31,
+      "latency_s": 1.47,
       "category": "correction"
     },
     {
@@ -1557,13 +1564,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.48,
+      "latency_s": 1.31,
       "category": "correction"
     },
     {
       "session_id": "corr_dental_major",
       "question": "What does dental cover for major procedures?",
-      "final_response": "You may be right! I apologize for the confusion. Since I don't have specific details on dental coverage in my records, please feel free to rely on your information, or you can contact HR if you would like to confirm the specifics.",
+      "final_response": "I apologize for the confusion. Thank you for that information; I will keep that in mind. If you have any other questions about our policies, please let me know!",
       "conversation": [
         {
           "role": "user",
@@ -1571,7 +1578,7 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding dental coverage for major procedures. Please contact HR for assistance with this topic."
+          "text": "I do not have information regarding specific dental coverage for major procedures. Please contact HR for assistance with this question."
         },
         {
           "role": "user",
@@ -1579,13 +1586,13 @@
         },
         {
           "role": "agent",
-          "text": "You may be right! I apologize for the confusion. Since I don't have specific details on dental coverage in my records, please feel free to rely on your information, or you can contact HR if you would like to confirm the specifics."
+          "text": "I apologize for the confusion. Thank you for that information; I will keep that in mind. If you have any other questions about our policies, please let me know!"
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.42,
+      "latency_s": 2.08,
       "category": "correction"
     },
     {
@@ -1620,7 +1627,7 @@
         }
       ],
       "answered_by": "policy_agent",
-      "latency_s": 1.95,
+      "latency_s": 1.81,
       "category": "correction"
     },
     {
@@ -1640,7 +1647,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 2.04,
+      "latency_s": 0.52,
       "category": "out_of_scope"
     },
     {
@@ -1660,7 +1667,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.7,
+      "latency_s": 0.64,
       "category": "out_of_scope"
     },
     {
@@ -1680,13 +1687,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.69,
+      "latency_s": 0.74,
       "category": "out_of_scope"
     },
     {
       "session_id": "oos_merger",
       "question": "Are the rumors true that we're acquiring a competitor?",
-      "final_response": "I do not have information regarding company acquisitions. I suggest you contact HR for further information.",
+      "final_response": "I do not have information regarding company acquisitions. Please contact HR for further assistance.",
       "conversation": [
         {
           "role": "user",
@@ -1694,13 +1701,13 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding company acquisitions. I suggest you contact HR for further information."
+          "text": "I do not have information regarding company acquisitions. Please contact HR for further assistance."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 1.04,
+      "latency_s": 0.67,
       "category": "out_of_scope"
     },
     {
@@ -1720,7 +1727,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.69,
+      "latency_s": 0.6,
       "category": "out_of_scope"
     },
     {
@@ -1740,13 +1747,13 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.82,
+      "latency_s": 0.71,
       "category": "out_of_scope"
     },
     {
       "session_id": "oos_monitor",
       "question": "My monitor keeps flickering -- can you order me a new one?",
-      "final_response": "I do not have information regarding equipment requests or office supplies. I suggest you contact HR for assistance with this matter.",
+      "final_response": "I do not have information regarding equipment requests. Please contact HR for assistance with this matter.",
       "conversation": [
         {
           "role": "user",
@@ -1754,19 +1761,19 @@
         },
         {
           "role": "agent",
-          "text": "I do not have information regarding equipment requests or office supplies. I suggest you contact HR for assistance with this matter."
+          "text": "I do not have information regarding equipment requests. Please contact HR for assistance with this matter."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.79,
+      "latency_s": 0.73,
       "category": "out_of_scope"
     },
     {
       "session_id": "oos_sports",
       "question": "Who won the basketball game last night?",
-      "final_response": "I do not have that information. Please contact HR for assistance with questions outside of company policies.",
+      "final_response": "I do not have that information. Please contact HR if you have questions regarding company policies or benefits.",
       "conversation": [
         {
           "role": "user",
@@ -1774,13 +1781,13 @@
         },
         {
           "role": "agent",
-          "text": "I do not have that information. Please contact HR for assistance with questions outside of company policies."
+          "text": "I do not have that information. Please contact HR if you have questions regarding company policies or benefits."
         }
       ],
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.63,
+      "latency_s": 0.82,
       "category": "out_of_scope"
     },
     {
@@ -1800,7 +1807,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.75,
+      "latency_s": 0.49,
       "category": "out_of_scope"
     },
     {
@@ -1820,7 +1827,7 @@
       "tool_calls": 0,
       "tool_calls_detail": [],
       "answered_by": "policy_agent",
-      "latency_s": 0.66,
+      "latency_s": 0.6,
       "category": "out_of_scope"
     }
   ]

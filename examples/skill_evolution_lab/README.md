@@ -22,10 +22,10 @@ improvement substrate — the conversation, the **tool calls (name + args)**, th
 user corrections, and the outcome labels — in one analyzable place. The evolution
 engine turns those traces into behavioral skill rules and validates them on
 held-out traffic before creating a new skill revision. This lab runs that wiring
-end to end: every session is logged to real BigQuery event tables, and the
-scorecards' execution-span trees are read back through the SDK's trace path
-(judging temporarily runs on the conversations file so it stays
-golden-answer-grounded -- see the workarounds section below).
+end to end: every session is logged to one shared BigQuery events table, the
+judge evaluates the traces read back from it with each session's golden
+expected answer as identity-bound context, and the scorecards' execution-span
+trees come from the same table -- see the data-path section below.
 
 This is the runnable companion to the blog post
 [*"Your Agent Can Learn From Its Own Conversations"*](https://medium.com/@evekhm/your-agent-can-learn-from-its-own-conversations-26f7d46ac325)
@@ -135,14 +135,14 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   27.1% (19/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   30.0% (21/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
-     V1 test:   100.0% (70/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V1 test:   98.6% (69/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
-| Overall                   | 36.2% (29/80) | 97.5% (78/80)  | +61.3pp  |
+| Overall                   | 35.0% (28/80) | 98.8% (79/80)  | +63.8pp  |
 | Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
 ```
 
@@ -164,28 +164,29 @@ V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
 a gain proves the loop compounds; a kept incumbent proves the guard holds. The
 committed [`sample_run/`](sample_run/) is a `--rounds 2` recording — its V2
-*tied* V1 and the gate kept the incumbent (`sample_run/RESULT_ROUND2.md`).
+came back *worse* overall and the gate kept the incumbent
+(`sample_run/RESULT_ROUND2.md`).
 
-### BigQuery is the write path; two disclosed workarounds pending SDK fixes
+### BigQuery end to end: one shared table, server-side golden-grounded judging
 
-Every session is logged to real BigQuery event tables in the plugin's row
-shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` / `TOOL_COMPLETED` /
+Every session is logged to one shared `agent_events` table in the plugin's
+row shape — `USER_MESSAGE_RECEIVED` / `TOOL_STARTING` / `TOOL_COMPLETED` /
 `LLM_RESPONSE` spans in true chronological order, with per-turn invocation
-ids, parent spans, measured latencies, `root_agent_name`, and per-run
-`custom_tags` — and the execution-span trees in the markdown scorecards are
-read back from those tables. Two deliberate workarounds apply until their SDK
-issues land (cleanup checklist: issue #360):
+ids, parent spans, measured latencies, `root_agent_name=skill-evolution-lab`,
+`user_id=lab-user`, and per-run `custom_tags {run, slice}`. The table is
+append-only across passes: the demo deliberately reuses the same held-out
+session ids for V0 and V1, and the SDK's identity-safe selectors (#359) keep
+each pass separate by resolved identity plus exact label scope.
 
-- **Judging** runs on the conversations file via the SDK's API judge, because
-  that is the only path whose judge receives each session's matched **golden
-  expected answer** — correctness, and the promotion gate built on it, is
-  answer-key-graded rather than judge-estimated. Server-side BigQuery judging
-  returns when issue #358 lands.
-- **Per-slice tables** (`agent_events_<run>_<slice>`): the demo reuses the
-  same session ids across slices, and the SDK's trace fetch selects rows by
-  session id alone — separate tables make V0/V1 span mixing physically
-  impossible. Collapses back to one shared `agent_events` table when issue
-  #359 lands.
+Scoring reads those rows back, bounded by app + exact run/slice labels + a
+24h window + a 500-row cap. The judge runs server-side (BigQuery
+`AI.GENERATE`, with the SDK's API fallback), and each session's matched
+**golden expected answer** reaches it as identity-bound per-session context
+(#358) — correctness, and the promotion gate built on it, is answer-key
+graded rather than judge-estimated. The execution-span trees in the markdown
+scorecards come from the same table through the same bounded selectors. The
+per-run traffic JSON remains a committed, diffable artifact and the
+expected-set source for `compare_runs.py --questions`; it is not judge input.
 
 Requires the BigQuery API enabled and table read/write + job permissions on
 the project (`setup.sh` takes care of the APIs).
@@ -363,7 +364,7 @@ Full accumulative `P_merge` across rounds and online skill retrieval are future 
   tokens on every call and buries the rules that matter under ones that don't.
 
 The anti-bloat rules are enforced by the consolidator prompt in `scripts/skill_evolution.py`,
-before compaction ever runs -- which is why an evolved skill stays behavioral (~2.4KB) rather
+before compaction ever runs -- which is why an evolved skill stays behavioral (~3KB) rather
 than a pile of baked facts:
 
 ```text
