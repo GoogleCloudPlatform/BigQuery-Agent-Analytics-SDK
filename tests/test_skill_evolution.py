@@ -417,3 +417,36 @@ def test_prevalence_exact_tie_stays_strong():
   assert "B: 3/6 (50%) -- STRONG" in out
   out = compute_prevalence_summary([patch_a] * 4 + [patch_b] * 2)
   assert "A: 4/6 (67%) -- VERY STRONG" in out
+
+
+class TestDemoShellContract:
+  """run_e2e_demo.sh honors the final (post-#360) data-path contract."""
+
+  _DEMO = os.path.join(
+      os.path.dirname(__file__),
+      "..",
+      "examples",
+      "skill_evolution_lab",
+      "run_e2e_demo.sh",
+  )
+
+  def _text(self):
+    with open(self._DEMO) as f:
+      return f.read()
+
+  def test_no_workaround_remnants(self):
+    text = self._text()
+    assert "--conversations-file" not in text
+    assert "TODO(#360)" not in text
+    assert "agent_events_${RUN_LABEL}_" not in text
+    assert "pending SDK" not in text
+
+  def test_scoring_is_bounded_and_labeled(self):
+    text = self._text()
+    for required in (
+        "--app-name skill-evolution-lab",
+        '--label "run=$RUN_LABEL"',
+        "--time-period 24h",
+        "--limit 500",
+    ):
+      assert required in text, required

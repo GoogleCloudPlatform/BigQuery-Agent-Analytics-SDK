@@ -271,13 +271,17 @@ run_agent() {
     --model "$AGENT_MODEL" --concurrency "$CONCURRENCY" -o "$out" "${bqargs[@]}"
 }
 
-# score <traffic> <report>  -- golden-grounded LLM judge. Full dimensions: the two
-# primary metrics (verdict + grounding) plus the five 0-2 quality dimensions.
-# The judge runs on the conversations file (each session's matched GOLDEN
-# EXPECTED ANSWER reaches the judge, so correctness -- and the promotion gate
-# built on it -- is answer-key-graded). Trace enrichment reads the shared
-# agent_events table bounded by app + run/slice labels + a 24h window + a
-# 500-row cap, resolved through the SDK's identity-safe selectors (#359).
+# score <traffic> <report>  -- golden-grounded LLM judge, server-side. The
+# judge evaluates the traces read back from the shared agent_events table
+# (BigQuery AI.GENERATE, with the SDK's API fallback), and each session's
+# matched GOLDEN EXPECTED ANSWER reaches it as identity-bound per-session
+# context (#358) -- correctness, and the promotion gate built on it, is
+# answer-key-graded. Selection is bounded by app + exact run/slice labels +
+# a 24h window + a 500-row cap, resolved through the SDK's identity-safe
+# selectors (#359). The traffic JSON ($1) stays a committed, diffable
+# artifact and the expected-set source for compare_runs -- it is not judge
+# input. Full dimensions: the two primary metrics (verdict + grounding)
+# plus the five 0-2 quality dimensions.
 # Every score writes BOTH artifacts: <name>.json (machine input for the
 # engine/compare) and its human-readable twin <name>.md (--report renders the
 # markdown scorecard next to the JSON, same basename).
@@ -288,13 +292,12 @@ score() {
   TABLE_ID="${TABLE_ID:-agent_events}" \
   DATASET_LOCATION="${DATASET_LOCATION:-${REGION:-us-central1}}" \
     $PY "$REPO_ROOT/scripts/quality_report.py" \
-      --conversations-file "$1" \
       --app-name skill-evolution-lab \
       --label "run=$RUN_LABEL" --label "slice=$(slice_of "$1")" \
       --time-period 24h --limit 500 \
       --trajectory-samples 500 \
       --eval-spec "$SPEC" --dimensions full \
-      --tag-turns --report --concurrency "$CONCURRENCY" --output-json "$2"
+      --tag-turns --report --output-json "$2"
 }
 
 # rate <report>  -> "X% (n/N golden-matched)"
@@ -321,7 +324,7 @@ echo "  Judge:      $JUDGE_MODEL  (@ $JUDGE_LOCATION)"
 echo "  Concurrency:$CONCURRENCY"
 echo "  Rounds:     $ROUNDS"
 echo "  Events:     BigQuery ${DATASET_ID:-agent_analytics}.${TABLE_ID:-agent_events} (shared table; rows labeled run=$RUN_LABEL, slice=<slice>)"
-echo "  Judge:      API judge, golden-answer-grounded"
+echo "  Judge:      server-side (BigQuery), golden-answer-grounded per session"
 if [[ "$WITH_REGISTRY" == "1" ]]; then
   echo "  Registry:   on  (skill-id=$SKILL_ID, @ $REGISTRY_LOCATION)"
 else
