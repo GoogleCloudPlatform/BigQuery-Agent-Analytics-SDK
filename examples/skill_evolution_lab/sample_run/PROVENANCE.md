@@ -15,7 +15,7 @@ referenced the standing `bqaa_hero_demo_20260708` dataset.
 | Table / run label | `agent_events` (only table) / `lab_20260728_180402_39256516193` |
 | Command | `DATASET_ID=u6_ae7_… ./run_e2e_demo.sh --agent-model gemini-3.1-flash-lite` (one round) |
 | Models | agent `gemini-3.1-flash-lite` (Vertex `global`); analyst `gemini-3.1-pro-preview` (`global`); judge `gemini-2.5-flash` @ `us-central1` (API judge — AE7 state) |
-| Result | exit 0; V0 test 28.6% (20/70), V1 test 100.0% (70/70) |
+| Result | exit 0; V0 test 28.6% (20/70), V1 test 100.0% (70/70) — in-scope rates (70 = 55 single-turn + 15 corrections; overall rates use 80 incl. the 10 out-of-scope) |
 | Persisted checks | slices v0_evolve 168r/68s, v0_test 216r/80s, v1_test 382r/80s — one run label, `app=skill-evolution-lab` everywhere, zero foreign rows; all 80 held-out ids reused across V0/V1 in ONE table with no span mixing (201 live span-tree lines, no `custom_tags.seeded`) |
 | Teardown | deleted after evidence capture (see below) |
 
@@ -43,7 +43,7 @@ the design.
 | Command | `DATASET_ID=u6_ae8_… ./run_e2e_demo.sh --agent-model gemini-3.1-flash-lite --rounds 2` |
 | Models | agent `gemini-3.1-flash-lite` (Vertex `global` — unchanged from the previous sample; the material migration is hybrid→server-side judging and per-slice→shared storage); analyst `gemini-3.1-pro-preview`; judge `gemini-2.5-flash` @ `us-central1`, server-side (`execution_mode: ai_generate` on all 5 scoring passes) |
 | Score bounds | `--app-name skill-evolution-lab --label run=… --label slice=… --time-period 24h --limit 500` (cap attested by the logged command + report metadata; population stayed far below it) |
-| Result | exit 0; V0 test 30.0% (21/70) → V1 98.6% (69/70); V2 95.7% — gate refused V2 (overall 93.8% ≤ 98.8%), V1 kept |
+| Result | exit 0; V0 test 30.0% (21/70) → V1 98.6% (69/70) — in-scope rates (70 = 55 single-turn + 15 corrections); V2 95.7% in-scope — gate refused V2 on the overall rate (93.8% ≤ 98.8%, denominator 80 incl. the 10 out-of-scope), V1 kept |
 | Persisted checks | 5 slices under exactly one run label (v0_evolve 166r/68s, v0_test 220r/80s, v1_evolve 256r/68s, v1_test 338r/80s, v2_test 332r/80s); `app=skill-evolution-lab` uniform; zero foreign rows; all 80 held-out ids reused across v0/v1/v2 test passes in ONE shared table with no event/transcript/context mixing; judge-context text absent from logs (U5 redaction) |
 | Teardown | deleted after evidence capture (see below) |
 
