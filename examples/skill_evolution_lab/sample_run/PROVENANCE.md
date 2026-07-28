@@ -78,8 +78,12 @@ enforcement proven without judging 500 synthetic sessions.
   formatter + whitespace checks; exact-80 held-out population per pass
   (missing sessions fail, strays excluded, ties keep the incumbent —
   enforced by `compare_runs.py --questions --gate` during the run).
-- `gist_update`: PENDING — recorded here once the canonical Gist revision is
-  published (or prepared-but-blocked) after the gates pass.
-- Scratch teardown: `u6_ae7_20260728_180346` DELETED, `u6_ae8_20260728_181934`
-  (failed attempt) DELETED, `u6_ae8_20260728_183340` DELETED — all after the
-  evidence above was captured; recorded at teardown time.
+- `gist_update: published` — canonical Gist
+  `evekhm/01c4673dddd68c1fd13383948eb7de35`, revision
+  `ac58c73475652769f0cbda8e86f0f30055f625b6`, prepared from the AE9 artifact
+  commit `c143f83` with sample_run links pinned to that SHA; SHA-256 of the
+  published markdown:
+  `3c9b3ba5fd04951d30c40ee24ac4266f3f3a707e9e5845c2929a63b6daacfb1a`.
+- Scratch teardown: `u6_ae7_20260728_180346`, `u6_ae8_20260728_181934`
+  (failed attempt), and `u6_ae8_20260728_183340` all DELETED after the
+  evidence above was captured and the Gist revision verified.
