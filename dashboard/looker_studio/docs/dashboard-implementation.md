@@ -109,6 +109,31 @@ The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
 timestamp dimension exceeded Looker Studio's chart row limit on the canonical
 fixture and rendered “Too Many Rows.”
 
+## Viewer rendering and viewport boundary
+
+The report uses native Looker Studio bar, time-series, scorecard, and table
+components. It does not use Vega or third-party community visualizations.
+Google-owned `usercontent.goog` render frames do not change that architecture
+and must not be used alone to diagnose a community-visualization failure.
+
+Viewer QA waits for non-degenerate chart output rather than treating page
+chrome, a loading indicator, or an empty chart container as completion.
+Release-candidate validation uses three fresh loads, three complete navigation
+loops, and a per-page timeout of 90 seconds. The complete evidence and failure
+rules are defined in
+[`rendering-and-viewport-support.md`](rendering-and-viewport-support.md).
+The dated baseline in that document records a 70-second cold render and
+warm-navigation renders within 18 seconds as observations, not performance
+guarantees.
+
+Version 1 is a freeform desktop report with a minimum supported viewport width
+of 1280 CSS pixels and a recommended width of 1440 CSS pixels. A responsive
+mobile report is a separate template: the current multi-component pages cannot
+be converted in place without rebuilding their section layout and repeating
+parity, hydration, credential, and visual acceptance.
+The most recent live pass used a 1568-pixel viewport; targeted validation at
+the documented 1280-pixel minimum remains pending.
+
 ## Looker Studio measure mappings
 
 The stable source fields map to report measures as follows:
