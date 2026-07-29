@@ -872,14 +872,34 @@ class TestU6BoundsProbeLive:
     client = Client(
         project_id=project, dataset_id=dataset_id, verify_schema=False
     )
+    recent = {f"{probe}-r1", f"{probe}-r2", f"{probe}-r3"}
 
+    # 1) Time-only, uncapped: proves the 24h predicate on its own. Exactly
+    #    the three recent labeled traces come back; the 48h-old same-label
+    #    sentinel is excluded by TIME (no limit can hide it at limit=50).
+    flt_time = TraceFilter.from_cli_args(
+        last="24h", custom_labels={"u6probe": probe}, limit=50
+    )
+    time_traces = client.list_traces(filter_criteria=flt_time)
+    assert {t.session_id for t in time_traces} == recent
+
+    # 2) Label-only, no time bound: the stale sentinel MUST appear, proving
+    #    the time predicate above is load-bearing (a regression that drops
+    #    start_time flips assertion 1, and this one detects a fixture where
+    #    the sentinel never matched the label at all).
+    flt_label = TraceFilter(custom_labels={"u6probe": probe}, limit=50)
+    label_traces = client.list_traces(filter_criteria=flt_label)
+    assert {t.session_id for t in label_traces} == recent | {f"{probe}-old"}
+
+    # 3) The capped read from the design: label + 24h + limit=2 returns
+    #    exactly two recent, correctly labeled resolved traces and neither
+    #    sentinel — the limit is enforced on the already time/label-bounded
+    #    population.
     flt = TraceFilter.from_cli_args(
         last="24h", custom_labels={"u6probe": probe}, limit=2
     )
     traces = client.list_traces(filter_criteria=flt)
-
     assert len(traces) == 2
-    recent = {f"{probe}-r1", f"{probe}-r2", f"{probe}-r3"}
     for trace in traces:
       assert trace.session_id in recent
       assert trace.scope is not None

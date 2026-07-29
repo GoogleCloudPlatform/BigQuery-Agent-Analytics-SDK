@@ -37,7 +37,7 @@ the design.
 | Field | Value |
 | --- | --- |
 | Commit (clean tree) | `6d9c65d` |
-| UTC window | 2026-07-28 18:33:57 → 18:45:43 (14m03s wall) |
+| UTC times | run start 2026-07-28 18:33:56, wall 14m03s (end ≈ 18:47:59, incl. post-persist compare/gate/restore); first → last persisted row 18:33:57 → 18:45:43 |
 | Project / dataset | `agent-skill-lab-01` / `u6_ae8_20260728_183340` (label `u6:ae8`) |
 | Table / run label | `agent_events` (only table) / `lab_20260728_183356_39969610161` |
 | Command | `DATASET_ID=u6_ae8_… ./run_e2e_demo.sh --agent-model gemini-3.1-flash-lite --rounds 2` |
@@ -61,8 +61,12 @@ enforcement proven without judging 500 synthetic sessions.
 ## AE9 — this recording
 
 - Source: the AE8 attempt-2 gate run above (`runs/20260728_183356_gemini_3_1_flash_lite`),
-  copied wholesale; `run.log` path-sanitized only. Artifact commit SHA: see the
-  commit that introduced this file.
+  copied wholesale, with two mechanical sanitations: `run.log` path prefixes
+  removed, and trailing console-padding whitespace stripped from `run.log` and
+  three consolidation candidate files (cosmetic; every hashed artifact except
+  `run.log` is byte-identical to the run output, and `run.log`'s hash below is
+  post-sanitation). Artifact commit SHA: see the commit that introduced this
+  file.
 - Headline (RESULT.md): V0 35.0% (28/80) → V1 98.8% (79/80) overall;
   corrections 0/15 → 15/15 with parroted sub-trajectories 12 → 0;
   out-of-scope 7/10 → 10/10. Round 2: V2 95.7% — strict-win gate kept V1.
@@ -71,7 +75,7 @@ enforcement proven without judging 500 synthetic sessions.
   - `v2_skill.md` `5b50d15c52e4a49cb3bc8801fed7f226d4bbadd5e659414e88135c3101d65114`
   - `RESULT.md` `6562e95ba73a4917ebea515ab31102dccb9908005ebdf8a8040aec198607fdc7`
   - `RESULT_ROUND2.md` `491db36d8ddbe4f584dbb12799443335829b383bd170c0db5ee0d4994894db30`
-  - `run.log` `8cd46b9205c48c38869483e530e24f8c09efaedfa058940b897c9f2e3440834e`
+  - `run.log` `c29d955fb5b637dfa3d942851ab43e3a0dd59c7c9a35565fa6db57bbd61e28fc`
   - `v1_test_report.json` `f95fcef046bc3ba43e42e09b2f5a01ead55038d4d45e79481542c6eda4e8065b`
 - Gates at the artifact commit: `bash -n run_e2e_demo.sh`; focused
   quality-report / compare-runs / skill-evolution suites; full offline suite;
@@ -87,3 +91,82 @@ enforcement proven without judging 500 synthetic sessions.
 - Scratch teardown: `u6_ae7_20260728_180346`, `u6_ae8_20260728_181934`
   (failed attempt), and `u6_ae8_20260728_183340` all DELETED after the
   evidence above was captured and the Gist revision verified.
+  **Retention gap, disclosed (review P1):** the raw SQL outputs behind the
+  gate-day aggregate rows were captured in the operator session but not all
+  committed before teardown. The retained gate-day outputs and a full
+  re-verification on a seeded replica of this exact recording are in the
+  appendix below.
+
+## Appendix — retained and re-verified query evidence (2026-07-29)
+
+**Retained from the gate day (2026-07-28, original scratch datasets).**
+AE7 (`u6_ae7_…0346`, run label `lab_…180402_39256516193`):
+
+```text
+run_label,slice,app,rows_n,sessions_n
+lab_20260728_180402_39256516193,v0_evolve,skill-evolution-lab,168,68
+lab_20260728_180402_39256516193,v0_test,skill-evolution-lab,216,80
+lab_20260728_180402_39256516193,v1_test,skill-evolution-lab,382,80
+
+v0_test_ids,v1_test_ids,reused_ids,first_row,last_row
+80,80,80,2026-07-28 18:04:04,2026-07-28 18:12:39
+```
+
+AE8 (`u6_ae8_…3340`, run label `lab_…183356_39969610161`):
+
+```text
+run_label,slice,app,rows_n,sessions_n
+lab_20260728_183356_39969610161,v0_evolve,skill-evolution-lab,166,68
+lab_20260728_183356_39969610161,v0_test,skill-evolution-lab,220,80
+lab_20260728_183356_39969610161,v1_evolve,skill-evolution-lab,256,68
+lab_20260728_183356_39969610161,v1_test,skill-evolution-lab,338,80
+lab_20260728_183356_39969610161,v2_test,skill-evolution-lab,332,80
+
+reused_all3,first_row,last_row
+80,2026-07-28 18:33:57,2026-07-28 18:45:43
+```
+
+**Re-verified on a seeded replica (2026-07-29).** The five committed
+traffic/report pairs were seeded into fresh expiring scratch
+`agent-skill-lab-01.u6_evid_20260729_022933` (7-day expiration, label
+`u6:evidence`) via `run_agent.py --seed-bigquery <traffic> --seed-report
+<report>` under the original run/slice labels — the replica reproduced the
+gate-day row counts exactly (166/220/256/338/332). Captured outputs:
+
+```text
+== per-slice cardinalities
+slice,rows_n,sessions,users,root_agents,scope_payloads
+v0_evolve,166,68,1,1,1
+v0_test,220,80,1,1,1
+v1_evolve,256,68,1,1,1
+v1_test,338,80,1,1,1
+v2_test,332,80,1,1,1
+
+== foreign-row exclusion (rows outside app or run label)
+foreign_rows,total_rows
+0,1312
+
+== reused held-out ids across v0/v1/v2 test slices
+reused_in_all_3
+80
+
+== SDK isolation probe (reused id t28_benefits, present in all 3 test passes)
+bare get_session_trace('t28_benefits') -> AmbiguousSessionError,
+  candidates=3, retry_dimensions=['custom_labels', 'scope_signature']
+scoped (v0_test): 1 trace, spans=2, scope_labels=v0_test
+scoped (v1_test): 1 trace, spans=6, scope_labels=v1_test
+scoped (v2_test): 1 trace, spans=4, scope_labels=v2_test
+
+== combined U2/U3 live suite + strengthened U6 bounds probe
+tests/test_trace_identity_bigquery_live.py: 39 passed in 74.31s
+  (BQAA_U6_PROBE_DATASET=u6_evid_20260729_022933; the probe now asserts
+   the 24h predicate uncapped, the label-only read that must include the
+   48h sentinel, and the capped limit=2 read)
+
+== redaction (committed run.log)
+occurrences of the golden-context prefix "EXPECTED ANSWER FOR THIS
+QUESTION": 0  (the demo does not persist evaluator rows; the U5 redaction
+contract is covered by the offline suite's categorical persistence tests)
+```
+
+The replica dataset was deleted after this capture.

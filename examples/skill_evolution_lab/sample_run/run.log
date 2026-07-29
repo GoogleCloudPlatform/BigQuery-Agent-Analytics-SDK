@@ -673,12 +673,12 @@ QUALITY SUMMARY
   [response_usefulness]
     ✅ HELPFUL         :   69  ( 86.2%) ###########################################
     ✅ DECLINED (OK)   :   10  ( 12.5%) ######
-    ❌ NOT HELPFUL     :    1  (  1.2%) 
+    ❌ NOT HELPFUL     :    1  (  1.2%)
 
   [task_grounding]
     ✅ GROUNDED        :   69  ( 86.2%) ###########################################
     ➖ NO TOOL NEEDED  :   10  ( 12.5%) ######
-    ❌ NOT GROUNDED    :    1  (  1.2%) 
+    ❌ NOT GROUNDED    :    1  (  1.2%)
 
   Execution Details:
     execution_mode: ai_generate
@@ -916,7 +916,7 @@ QUALITY SUMMARY
   [task_grounding]
     ✅ GROUNDED        :   59  ( 86.8%) ###########################################
     ➖ NO TOOL NEEDED  :    8  ( 11.8%) #####
-    ❌ NOT GROUNDED    :    1  (  1.5%) 
+    ❌ NOT GROUNDED    :    1  (  1.5%)
 
   Execution Details:
     execution_mode: ai_generate

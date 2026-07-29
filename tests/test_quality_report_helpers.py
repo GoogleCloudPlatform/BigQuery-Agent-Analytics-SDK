@@ -2235,3 +2235,39 @@ class TestEmbedTextsRetry:
     with pytest.raises(self._Transient):
       quality_report_module._embed_texts(["q"], max_attempts=5)
     assert calls["n"] == 5
+
+
+class TestEnrichmentBaseFilter:
+  """Enrichment bounds mirror the evaluator's effective selector (#385 P2)."""
+
+  def _args(self, **kw):
+    import argparse
+
+    defaults = dict(
+        app_name="skill-evolution-lab",
+        time_period="24h",
+        session=None,
+        session_ids_file=None,
+    )
+    defaults.update(kw)
+    return argparse.Namespace(**defaults)
+
+  def test_window_mode_keeps_time_bound(self):
+    base = quality_report_module._enrichment_base_filter(
+        self._args(), {"run": "lab_1"}
+    )
+    assert base.start_time is not None
+    assert base.root_agent_name == "skill-evolution-lab"
+    assert base.custom_labels == {"run": "lab_1"}
+
+  def test_explicit_sessions_drop_time_bound_keep_scope(self):
+    for kw in (
+        {"session": "sess-1"},
+        {"session_ids_file": "ids.json"},
+    ):
+      base = quality_report_module._enrichment_base_filter(
+          self._args(**kw), {"run": "lab_1"}
+      )
+      assert base.start_time is None
+      assert base.root_agent_name == "skill-evolution-lab"
+      assert base.custom_labels == {"run": "lab_1"}

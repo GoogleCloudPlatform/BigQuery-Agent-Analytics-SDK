@@ -2176,11 +2176,7 @@ def run_eval(args):
 
   # CLI-derived bounds for every trajectory fetch in this invocation: the
   # trace reads stay scoped to the same app/labels/time the scoring ran with.
-  base_trace_filter = _cli_base_trace_filter(
-      app_name=getattr(args, "app_name", None),
-      custom_labels=custom_labels,
-      time_period=getattr(args, "time_period", None),
-  )
+  base_trace_filter = _enrichment_base_filter(args, custom_labels)
 
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
@@ -3306,6 +3302,28 @@ def _cli_base_trace_filter(app_name=None, custom_labels=None, time_period=None):
   if app_name:
     base.root_agent_name = app_name
   return base
+
+
+def _enrichment_base_filter(args, custom_labels):
+  """Derive the trajectory-fetch bounds from the evaluator's own selector.
+
+  Mirrors run_evaluation(): app + labels always apply; the time bound
+  applies ONLY when sessions are selected by window. Explicit session
+  selection (``--session`` / ``--session-ids-file``) documents
+  ``--time-period`` as ignored and the evaluator builds its selector
+  without a time bound — enrichment must drop it too, otherwise an older
+  explicitly selected session scores but silently loses its trace.
+  """
+  explicit_session_mode = bool(
+      getattr(args, "session", None) or getattr(args, "session_ids_file", None)
+  )
+  return _cli_base_trace_filter(
+      app_name=getattr(args, "app_name", None),
+      custom_labels=custom_labels,
+      time_period=(
+          None if explicit_session_mode else getattr(args, "time_period", None)
+      ),
+  )
 
 
 def _fetch_session_traces(

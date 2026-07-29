@@ -77,8 +77,16 @@ skill.
    and Before/After **execution-span trees** for the correction cases).
    The demo writes both on every scoring pass; regenerate one any time with
    `quality_report.py --render-json <report.json>` (pure formatting, no model
-   calls). This recording logged its sessions live during the run, and the
-   committed scorecards carry that telemetry.
+   calls). One caveat: the summary and per-session sections re-render
+   offline, but the execution-span trees need the events rows, and this
+   recording's scratch dataset is gone — a bare re-render therefore carries
+   fresh provenance metadata and omits the span sections. To reproduce the
+   committed scorecards in full, first re-seed the committed traffic into a
+   configured table (`run_agent.py --seed-bigquery <traffic.json>
+   --seed-report <report.json>`, rows tagged `custom_tags.seeded`) and set
+   `PROJECT_ID`/`DATASET_ID`/`TABLE_ID` when re-rendering. This recording
+   logged its sessions live during the run, and the committed scorecards
+   carry that telemetry.
 
 3. **V0 baseline (held-out).** Same two steps on the *disjoint* held-out test set.
    → `v0_test_traffic.json`, `v0_test_report.json` — the honest baseline, on
