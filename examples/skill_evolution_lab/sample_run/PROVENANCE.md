@@ -59,25 +59,51 @@ foreign-label trace; a read-only selector with that label + a `24h` window +
 neither sentinel. **PASSED** (1 passed, 17.45s) — label, time, and limit
 enforcement proven without judging 500 synthetic sessions.
 
-## AE9 — this recording
+## This recording — the round-3 replacement (2026-07-29)
 
-- Source: the AE8 attempt-2 gate run above (`runs/20260728_183356_gemini_3_1_flash_lite`),
-  copied wholesale, with two mechanical sanitations: `run.log` path prefixes
-  removed, and trailing console-padding whitespace stripped from `run.log` and
-  three consolidation candidate files (cosmetic; every hashed artifact except
-  `run.log` is byte-identical to the run output, and `run.log`'s hash below is
-  post-sanitation). Artifact commit SHA: see the commit that introduced this
-  file.
-- Headline (RESULT.md): V0 35.0% (28/80) → V1 98.8% (79/80) overall;
-  corrections 0/15 → 15/15 with parroted sub-trajectories 12 → 0;
-  out-of-scope 7/10 → 10/10. Round 2: V2 95.7% — strict-win gate kept V1.
+The first committed recording (from the AE8 attempt-2 gate run,
+`runs/20260728_183356…`, artifact commit `c143f83`) was **superseded**: review
+found the demo writer gave `TOOL_STARTING`/`TOOL_COMPLETED` distinct span ids,
+and because the SDK pairs those events by span id, every recorded tool
+argument (225 calls) was dropped from `Trace.tool_calls` and therefore from
+the analysts' engine input. The writer fix (shared span id per tool call) and
+a whole-pass server-side gate (`print_rate.py --require-execution-mode
+ai_generate` after every score) landed in `a5ff27c`; this recording is a
+fresh `--rounds 2` gate run at that SHA.
+
+| Field | Value |
+| --- | --- |
+| Commit (clean tree) | `a5ff27c` |
+| UTC times | run start 2026-07-29 07:49:51, wall 13m26s (end ≈ 08:03:17, incl. post-persist compare/gate/restore); first → last persisted row 07:49:53 → 08:01:20 |
+| Project / dataset | `agent-skill-lab-01` / `u6_ae8b_20260729_074933` (7-day table expiration, label `u6:ae8b`) |
+| Table / run label | `agent_events` (only table) / `lab_20260729_074951_467892704` |
+| Command | `DATASET_ID=u6_ae8b_… ./run_e2e_demo.sh --agent-model gemini-3.1-flash-lite --rounds 2` |
+| Models | unchanged: agent `gemini-3.1-flash-lite` (Vertex `global`); analyst `gemini-3.1-pro-preview`; judge `gemini-2.5-flash` @ `us-central1`, server-side |
+| Execution mode | `ai_generate` on all 5 passes (now gated fatally by `score()`); 11 of 376 session scores used the per-session API retry — per pass v0_evolve 4, v0_test 1, v1_evolve 2, v1_test 3, v2_test 1, all resolved (`details.retry`) |
+| Tool-argument parity | **243/243** — every non-empty tool `args` in the traffic files appears in the reports (the defect this replacement fixes; previously 225 traffic / 0 report) |
+| Result | exit 0; V0 test 28.6% (20/70) → V1 91.4% (64/70) in-scope (70 = 55 single-turn + 15 corrections; overall rates use 80 incl. the 10 out-of-scope); round 2: **V2 100.0% (70/70) in-scope — V2 beat V1 and is the kept version** |
+| Persisted checks | 5 slices under one run label with 0 foreign rows (v0_evolve 170r/68s, v0_test 218r/80s, v1_evolve 262r/68s, v1_test 336r/80s, v2_test 362r/80s); all 80 held-out ids reused across the three test passes in ONE shared table |
+
+- Headline (RESULT.md / RESULT_ROUND2.md, overall denominators): V0 32.5%
+  (26/80) → V1 91.2% (73/80) → **V2 97.5% (78/80), kept by the strict-win
+  gate** (+6.3pp round-2 gain: V2 fixed all five remaining single-turn misses
+  and the last correction miss, giving up one out-of-scope decline).
+  Corrections 0/15 → 14/15 → 15/15; parroted sub-trajectories 11 → 0 → 0;
+  out-of-scope 6/10 → 9/10 → 8/10. Evolution internals: 24 successes / 44
+  failures, 54 patches (prevalence `TOOL_USAGE` 49, `MISSING_RULE` 2,
+  `PARROTING` 2, `SCOPE_GAP` 1); V1 2671B, V2 4051B. This recording shows the
+  other half of the guard: round 2 *promoting* a strictly better version
+  (the superseded recording showed it refusing a worse one).
+- Sanitations: `run.log` path prefixes removed; trailing console-padding
+  whitespace stripped from `run.log` and the generated markdown artifacts
+  (cosmetic; hashes below are post-sanitation).
 - Key artifact hashes (SHA-256):
-  - `v1_skill.md` `e321f05f4e1e32b59d061a46c203a3f31c6fad0d6cb09934ad08e0d0aa247db4`
-  - `v2_skill.md` `5b50d15c52e4a49cb3bc8801fed7f226d4bbadd5e659414e88135c3101d65114`
-  - `RESULT.md` `6562e95ba73a4917ebea515ab31102dccb9908005ebdf8a8040aec198607fdc7`
-  - `RESULT_ROUND2.md` `491db36d8ddbe4f584dbb12799443335829b383bd170c0db5ee0d4994894db30`
-  - `run.log` `c29d955fb5b637dfa3d942851ab43e3a0dd59c7c9a35565fa6db57bbd61e28fc`
-  - `v1_test_report.json` `f95fcef046bc3ba43e42e09b2f5a01ead55038d4d45e79481542c6eda4e8065b`
+  - `v1_skill.md` `494fcce26175cb0000b82043821b1d420b04d07c22f63908156e8bc9e10fe2a4`
+  - `v2_skill.md` `1b244f2ee3ba2cec94d4452b780b4c80d98e728a4f74e1b0c92750017a4d8fa5`
+  - `RESULT.md` `d0342bc25abfdb928b07253e70d6e39e0c726ddfed7b52c4f8798bc6c2ac1fd6`
+  - `RESULT_ROUND2.md` `02ade30c2103c4f26e1df85aaf6a65fed46b8a18d2d44c5a86a15c4d9775143e`
+  - `run.log` `6851a2d69b8cc93df46ef239dcb7aba1bac49b3558a8085757c8477a3f7ac5ba`
+  - `v1_test_report.json` `2f4ca2ae84c5a0313ebc138cbb6dd806d82c46c7e1969e7afaf366a41c8af76b`
 - Gates at the artifact commit: `bash -n run_e2e_demo.sh`; focused
   quality-report / compare-runs / skill-evolution suites; full offline suite;
   formatter + whitespace checks; exact-80 held-out population per pass

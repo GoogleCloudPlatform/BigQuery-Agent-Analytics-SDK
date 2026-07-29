@@ -4,28 +4,28 @@ Correctness on the held-out set: in-scope answers matched & meaningful, out-of-s
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 35.0% (28/80) | 98.8% (79/80) | +63.8pp |
-| Single-turn | 38.2% (21/55) | 98.2% (54/55) | +60.0pp |
-| Corrections (anti-parrot) | 0.0% (0/15) | 100.0% (15/15) | +100.0pp |
-| Out-of-scope (declined) | 70.0% (7/10) | 100.0% (10/10) | +30.0pp |
+| Overall | 32.5% (26/80) | 91.2% (73/80) | +58.7pp |
+| Single-turn | 36.4% (20/55) | 90.9% (50/55) | +54.5pp |
+| Corrections (anti-parrot) | 0.0% (0/15) | 93.3% (14/15) | +93.3pp |
+| Out-of-scope (declined) | 60.0% (6/10) | 90.0% (9/10) | +30.0pp |
 
-Parroted sub-trajectories: V0=12  V1=0 (lower is better -- the agent re-verified instead of caving).
+Parroted sub-trajectories: V0=11  V1=0 (lower is better -- the agent re-verified instead of caving).
 
 ## Tool selection (sessions that called each tool, held-out set)
 
 | Behavior | V0 | V1 |
 | --- | --- | --- |
-| Called any tool | 15/80 | 61/80 |
+| Called any tool | 14/80 | 61/80 |
 | `calculate_disability_pay` | 5/80 | 5/80 |
-| `lookup_company_policy` | 10/80 | 56/80 |
+| `lookup_company_policy` | 9/80 | 56/80 |
 
 ## Quality dimensions (average 0-2, held-out set)
 
 | Dimension | V0 | V1 | Delta |
 | --- | --- | --- | --- |
-| Correctness | 0.72 | 1.98 | +1.26 |
-| Tool use | 0.75 | 1.99 | +1.24 |
-| Specificity | 0.85 | 1.98 | +1.13 |
-| Scope compliance | 0.82 | 1.98 | +1.16 |
-| First-time-right | 0.70 | 1.95 | +1.25 |
+| Correctness | 0.68 | 1.85 | +1.17 |
+| Tool use | 0.70 | 1.90 | +1.2 |
+| Specificity | 0.80 | 1.80 | +1.0 |
+| Scope compliance | 0.78 | 1.82 | +1.04 |
+| First-time-right | 0.65 | 1.80 | +1.15 |
 
