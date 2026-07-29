@@ -301,7 +301,7 @@
   "panels": [
     {
       "type": "row",
-      "title": "Overview (Filters: Agent, User, Session | Event Type: Events over time only)",
+      "title": "Overview (Filters: Agent, User, Session | Event Type: Events over time and Events by agent only)",
       "collapsed": false,
       "id": 1,
       "gridPos": {
@@ -688,6 +688,140 @@
       }
     },
     {
+      "type": "barchart",
+      "title": "Events by agent",
+      "id": 21,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "description": "Event volume per agent over the raw ${table}. Honors the Event Type filter — with a selection active the bars read \"events of the selected type(s) per agent\". Events written without an agent group under \"unknown\" rather than being dropped, so with Event Type on All the bars add up to the Events stat above.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Events by agent (Overview row).\n-- Event volume per agent over the raw ${table}, so every event type counts, not\n-- just the ones a typed view exposes.\n-- This query DOES honor the Event Type filter: neither exemption in\n-- queries/README.md applies (it reads the raw table, and it does not count\n-- errors), so with a selection active the bars read \"events of the selected\n-- type(s) per agent\". It is the second panel in the Overview row to do so.\n-- agent is nullable on the raw table; IFNULL groups those rows under \"unknown\"\n-- rather than dropping them, so the bars still add up to the Events stat above\n-- whenever the Event Type filter is on All.\n-- The output column is agent_name, not agent, so the GROUP BY names the IFNULL\n-- alias instead of resolving back to the raw nullable column.\n-- HAVING COUNT(*) > 0 is a written-down contract rather than a live filter: the\n-- GROUP BY already emits no rows when nothing matches, which is what lets the\n-- panel fall back to its \"No matching data\" text. Stating it next to the\n-- aggregate keeps a later edit that widens the input set (an outer join, or a\n-- COUNTIF replacing the count) from silently drawing zero-height bars.\nSELECT\n  IFNULL(agent, 'unknown') AS agent_name,\n  COUNT(*) AS events\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY agent_name\nHAVING COUNT(*) > 0\nORDER BY events DESC\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisLabel": ""
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "barWidth": 0.85,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Top error messages",
+      "id": 22,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "description": "Distinct error_message strings in range, most frequent first, capped at 50. Only events carrying a non-NULL error_message appear: an error that recorded no message (event_type ending in _ERROR, or UPPER(status) = 'ERROR', with a NULL error_message) has no string to group under, so these counts are a subset of what Errors over time charts. Ignores the Event Type filter for the same reason Errors over time does — errors carry their own *_ERROR event types. sessions and agents count the distinct sessions and agents that hit each message; last_seen is the most recent occurrence in range.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Top error messages (Overview row).\n-- Ranks the distinct error_message strings in the window by how often they\n-- occur, so the loudest failure mode is the first row.\n-- Scope: only events carrying a non-NULL error_message. An error event that\n-- recorded no message (event_type ending in _ERROR, or UPPER(status) = 'ERROR',\n-- with error_message NULL) has no string to group under and is intentionally\n-- absent, so these counts are a subset of what Errors over time charts.\n-- No event_type filter: errors arrive as their own event types (LLM_ERROR,\n-- TOOL_ERROR, ...), so honoring a selection like LLM_RESPONSE would report zero\n-- errors when errors did occur — the same exemption errors_over_time.sql makes.\n-- HAVING COUNT(*) > 0 is a written-down contract rather than a live filter: the\n-- GROUP BY already emits no rows when nothing matches, which is what lets the\n-- panel fall back to its \"No errors in range\" text. Stating it next to the\n-- aggregate keeps a later edit that widens the input set (an outer join, or the\n-- error predicate moved out of the WHERE into a COUNTIF) from silently listing\n-- zero-count rows.\nSELECT\n  error_message,\n  COUNT(*) AS errors,\n  COUNT(DISTINCT session_id) AS sessions,\n  COUNT(DISTINCT agent) AS agents,\n  MAX(timestamp) AS last_seen\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND error_message IS NOT NULL\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY error_message\nHAVING COUNT(*) > 0\nORDER BY errors DESC\nLIMIT 50\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No errors in range",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "errors",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "LLM & FinOps (Filters: Agent, User, Session | Ignores: Event Type)",
       "collapsed": false,
@@ -696,7 +830,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 21
       },
       "panels": []
     },
@@ -708,7 +842,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 22
       },
       "description": "Prompt / completion / total tokens from ${view_prefix}llm_responses. Missing usage telemetry degrades to 0.",
       "datasource": {
@@ -766,7 +900,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 22
       },
       "description": "Latency percentiles from ${view_prefix}llm_responses. Gaps mean missing latency telemetry.",
       "datasource": {
@@ -821,10 +955,10 @@
       "title": "Tokens by model",
       "id": 11,
       "gridPos": {
-        "h": 8,
+        "h": 12,
         "w": 16,
         "x": 0,
-        "y": 22
+        "y": 30
       },
       "description": "Token totals grouped by model_version (response-side attribute).",
       "datasource": {
@@ -918,7 +1052,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 22
+        "y": 30
       },
       "description": "DERIVED estimate, not telemetry: token counts x the per-1M-token rates held in the price_per_1m_input_tokens and price_per_1m_output_tokens dashboard variables. The defaults are placeholders — edit those two variables (Dashboard settings → Variables) to match your model pricing. Token counts are the primary FinOps signal.",
       "datasource": {
@@ -982,7 +1116,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 26
+        "y": 34
       },
       "description": "Sum of the provider-reported usage.total token count (usage_total_tokens in ${view_prefix}llm_responses) over the selected time range and filters. This is the provider's own total rather than prompt + completion added up here, so it can differ from that sum when a provider bills cached, reasoning or other tokens it does not report in those two fields.",
       "datasource": {
@@ -1034,6 +1168,69 @@
       }
     },
     {
+      "type": "stat",
+      "title": "LLM calls",
+      "id": 23,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 38
+      },
+      "description": "Count of LLM_RESPONSE events in range — the number of completed model calls the rest of this row aggregates over. Read from ${view_prefix}llm_responses, which holds exactly that one event type, so the Event Type filter is ignored (honoring it would blank the stat for every non-LLM selection). Divide the token and cost panels by this to get a per-call average.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: LLM calls (LLM & FinOps row).\n-- Total number of LLM_RESPONSE events in the window: the call volume the token,\n-- latency and cost panels in this row are averaging and summing over.\n-- No event_type filter: the llm_responses view is already scoped to a single\n-- event type, so COUNT(*) is the LLM_RESPONSE count by construction and adding\n-- the filter would blank the stat for every non-LLM selection.\n-- HAVING COUNT(*) > 0 keeps the no-data contract: an unaggregated SELECT over an\n-- aggregate always emits one row, so an empty filter intersection would\n-- otherwise report a confident \"0 calls\" instead of letting the stat panel fall\n-- back to its \"No matching data\" text.\nSELECT\n  COUNT(*) AS llm_calls\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nHAVING COUNT(*) > 0\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^llm_calls$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
       "type": "row",
       "title": "Tools & Execution (Filters: Agent, User, Session | Ignores: Event Type)",
       "collapsed": false,
@@ -1042,7 +1239,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 42
       },
       "panels": []
     },
@@ -1054,7 +1251,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 31
+        "y": 43
       },
       "description": "Invocations per tool from ${view_prefix}tool_starts, so failed invocations are counted (${view_prefix}tool_completions would drop them).",
       "datasource": {
@@ -1115,7 +1312,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 31
+        "y": 43
       },
       "description": "Per-tool latency; NULLs mean missing latency telemetry.",
       "datasource": {
@@ -1199,7 +1396,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 31
+        "y": 43
       },
       "description": "TOOL_ERROR events plus completions that carry a non-NULL error_message or UPPER(status) = 'ERROR'. UNION ALL is intentional: one logical failure that emits both a TOOL_ERROR and an error-status TOOL_COMPLETED appears as two rows.",
       "datasource": {
@@ -1266,7 +1463,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 51
       },
       "panels": []
     },
@@ -1278,7 +1475,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 52
       },
       "description": "Session rollups over the raw ${table} table, capped at the 250 most recently active sessions in the time range — narrow the time range to reach older ones. All four filters are honored, but Agent, User and Event Type only select WHICH sessions are listed: each listed session's counts then cover that whole session, including the events those filters excluded, so they will not match the Overview stats. Filter to one agent and session_agents_in_window can still read 2, and session_errors_in_window can still include another agent's errors. session_errors_in_window counts events whose event_type ends in _ERROR, or that carry a non-NULL error_message, or whose UPPER(status) = 'ERROR'. session_users_in_window lists every distinct user_id in the session, so it can name more than one. session_input_tokens_in_window / session_output_tokens_in_window sum $.usage.prompt / $.usage.completion over the session's LLM_RESPONSE events — the same values the LLM & FinOps panels report as prompt/completion tokens. Click a session_id to pin it into the Session variable (the time range and the other three filters are carried over) and drive the Trace detail panel below; the Session dropdown above still accepts a typed or pasted value.",
       "datasource": {
@@ -1294,7 +1491,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Recent sessions (Sessions & Traces row).\n-- Session-level rollup over the raw agent_events table.\n-- All four filters apply, but agent, user_id and event_type only decide *which\n-- sessions are listed*: each gets its own LOGICAL_OR(...) in the HAVING over\n-- the GROUP BY, and the three are ANDed. A session is kept when it contains a\n-- match for each filter somewhere in the window — the matches need not be the\n-- same event. Applying them in the outer WHERE would drop events before the\n-- GROUP BY, so every rollup below would describe a filtered slice of the\n-- session while still being labelled as the session itself.\n-- HAVING rather than a `session_id IN (SELECT ...)` subquery: the subquery\n-- expresses the same predicate but reads the table a second time, and BigQuery\n-- bills bytes scanned per reference rather than collapsing the two reads.\n-- Consequently the per-session rollup columns below cover every event the\n-- session has in the window, including events the Agent / User / Event Type\n-- filters excluded, so they will not sum to the Overview stats.\n-- session_id IS NOT NULL matches var_session_id.sql: events written without a\n-- session would otherwise collapse into one NULL row that names no session and\n-- that the Session dropdown cannot select for the trace panel below.\n-- The LIMIT caps the table at the 250 most recently active sessions in the\n-- window. Truncated older sessions are reachable by narrowing the dashboard's\n-- time range, the same escape hatch var_session_id.sql documents.\n-- session_users_in_window is a STRING_AGG rather than ANY_VALUE: nothing in the\n-- schema stops two user_ids from sharing a session, and ANY_VALUE would silently\n-- name one of them. It reads like COUNT(DISTINCT agent) below — the column is\n-- there to show when a session is not the single-user thing it was assumed to\n-- be, so it lists every user rather than picking one.\n-- The token columns read $.usage.prompt / $.usage.completion straight off the\n-- raw content payload: this panel groups the raw table, so it cannot use the\n-- typed ${view_prefix}llm_responses view that exposes the same two extractions\n-- to the LLM & FinOps panels as usage_prompt_tokens / usage_completion_tokens.\n-- They are named input/output to match the price_per_1m_input_tokens /\n-- price_per_1m_output_tokens variables that price them. Only LLM_RESPONSE\n-- carries a usage block, and the IF() says so explicitly rather than leaning on\n-- the path being absent from every other event type's content — the view these\n-- numbers mirror is scoped to LLM_RESPONSE, and this sum has to scope itself.\n-- Like the counts, they cover the whole session in the window and so will not\n-- tie out against Token usage over time whenever a filter is active.\nSELECT\n  session_id,\n  STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id) AS session_users_in_window,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS session_agents_in_window,\n  COUNT(*) AS session_events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)\n    AS session_input_tokens_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)\n    AS session_output_tokens_in_window\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND session_id IS NOT NULL\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY session_id\nHAVING LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\nORDER BY last_event_in_window_at DESC\nLIMIT 250\n",
+          "rawSql": "-- Panel: Recent sessions (Sessions & Traces row).\n-- Session-level rollup over the raw agent_events table.\n-- All four filters apply, but agent, user_id and event_type only decide *which\n-- sessions are listed*: each gets its own LOGICAL_OR(...) in the HAVING over\n-- the GROUP BY, and the three are ANDed. A session is kept when it contains a\n-- match for each filter somewhere in the window — the matches need not be the\n-- same event. Applying them in the outer WHERE would drop events before the\n-- GROUP BY, so every rollup below would describe a filtered slice of the\n-- session while still being labelled as the session itself.\n-- HAVING rather than a `session_id IN (SELECT ...)` subquery: the subquery\n-- expresses the same predicate but reads the table a second time, and BigQuery\n-- bills bytes scanned per reference rather than collapsing the two reads.\n-- Consequently the per-session rollup columns below cover every event the\n-- session has in the window, including events the Agent / User / Event Type\n-- filters excluded, so they will not sum to the Overview stats.\n-- session_id IS NOT NULL matches var_session_id.sql: events written without a\n-- session would otherwise collapse into one NULL row that names no session and\n-- that the Session dropdown cannot select for the trace panel below.\n-- The LIMIT caps the table at the 250 most recently active sessions in the\n-- window. Truncated older sessions are reachable by narrowing the dashboard's\n-- time range, the same escape hatch var_session_id.sql documents.\n-- session_users_in_window is a STRING_AGG rather than ANY_VALUE: nothing in the\n-- schema stops two user_ids from sharing a session, and ANY_VALUE would silently\n-- name one of them. It reads like COUNT(DISTINCT agent) below — the column is\n-- there to show when a session is not the single-user thing it was assumed to\n-- be, so it lists every user rather than picking one.\n-- The token columns read $.usage.prompt / $.usage.completion straight off the\n-- raw content payload: this panel groups the raw table, so it cannot use the\n-- typed ${view_prefix}llm_responses view that exposes the same two extractions\n-- to the LLM & FinOps panels as usage_prompt_tokens / usage_completion_tokens.\n-- They are named input/output to match the price_per_1m_input_tokens /\n-- price_per_1m_output_tokens variables that price them. Only LLM_RESPONSE\n-- carries a usage block, and the IF() says so explicitly rather than leaning on\n-- the path being absent from every other event type's content — the view these\n-- numbers mirror is scoped to LLM_RESPONSE, and this sum has to scope itself.\n-- Like the counts, they cover the whole session in the window and so will not\n-- tie out against Token usage over time whenever a filter is active.\nSELECT\n  session_id,\n  STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id) AS session_users_in_window,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS session_agents_in_window,\n  COUNT(*) AS session_events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)\n    AS session_input_tokens_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)\n    AS session_output_tokens_in_window\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND session_id IS NOT NULL\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY session_id\nHAVING LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\nORDER BY last_event_in_window_at DESC\nLIMIT 250\n",
           "format": 1,
           "location": ""
         }
@@ -1333,7 +1530,7 @@
                 "value": [
                   {
                     "title": "Pin this session",
-                    "url": "?${__url_time_range}&${agent:queryparam}&${user_id:queryparam}&${event_type:queryparam}&var-session_id=${__data.fields.session_id}",
+                    "url": "${__url.path}?${__url_time_range}&${agent:queryparam}&${user_id:queryparam}&${event_type:queryparam}&var-session_id=${__data.fields.session_id}",
                     "targetBlank": false
                   }
                 ]
@@ -1368,7 +1565,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 60
       },
       "description": "Event timeline within the active time window for the selected session. Capped at the 500 most recent events, so with Session on All you see the newest activity rather than the oldest; click the timestamp header to re-sort a pinned session into chronological order. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
       "datasource": {

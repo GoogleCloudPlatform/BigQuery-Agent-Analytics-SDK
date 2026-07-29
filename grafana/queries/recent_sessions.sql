@@ -45,10 +45,10 @@ SELECT
   COUNT(*) AS session_events_in_window,
   COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,
   IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',
-    CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)
+    SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)
     AS session_input_tokens_in_window,
   IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',
-    CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)
+    SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)
     AS session_output_tokens_in_window
 FROM `${project}.${dataset}.${table}`
 WHERE $__timeFilter(timestamp)

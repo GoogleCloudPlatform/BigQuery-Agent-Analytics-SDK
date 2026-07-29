@@ -46,6 +46,10 @@ diffs SQL text, so keep the restatements few.
     OR error_message IS NOT NULL
     OR UPPER(status) = 'ERROR'
   ```
+  `top_errors.sql` is the one deliberate narrowing: it groups by the message
+  text, so it keeps only the `error_message IS NOT NULL` arm — an error that
+  recorded no message has no string to group under. Its counts are therefore a
+  subset of `errors_over_time.sql`'s, and its header says so.
 
 - **Typed views.** Queries use typed views (e.g. `${view_prefix}llm_responses`)
   instead of parsing JSON from the raw `agent_events` table whenever possible.
@@ -56,7 +60,9 @@ diffs SQL text, so keep the restatements few.
   reason in its header comment.
   1. A view-backed query is already scoped (each typed view holds exactly one
      event type), so adding the filter would blank the panel for every selection
-     that did not name that view's own event type.
+     that did not name that view's own event type. `llm_calls_total.sql` is the
+     limiting case: its `COUNT(*)` over `${view_prefix}llm_responses` *is* the
+     LLM_RESPONSE count, so the filter would only ever subtract from it.
   2. A query that counts *errors* is exempt even when it reads the raw
      `${table}`, because errors carry their own `*_ERROR` event types: honoring
      the filter would report zero errors (or a 0% error rate) whenever the
@@ -82,10 +88,13 @@ diffs SQL text, so keep the restatements few.
 | `overview_totals.sql`         | Sessions / Events / Error rate / Avg LLM latency stats (Overview) |
 | `events_over_time.sql`        | Events over time (Overview)                                       |
 | `errors_over_time.sql`        | Errors over time (Overview)                                       |
+| `events_by_agent.sql`         | Events by agent (Overview)                                        |
+| `top_errors.sql`              | Top error messages (Overview)                                     |
 | `llm_tokens_over_time.sql`    | Token usage over time (LLM & FinOps)                              |
 | `llm_latency_percentiles.sql` | LLM latency (p50 / p95 / TTFT) (LLM & FinOps)                      |
 | `tokens_by_model.sql`         | Tokens by model (LLM & FinOps)                                    |
 | `estimated_cost.sql`          | Estimated cost (placeholder rates) + Total tokens (LLM & FinOps)  |
+| `llm_calls_total.sql`         | LLM calls (LLM & FinOps)                                          |
 | `tool_usage.sql`              | Tool invocations by tool (Tools & Execution)                      |
 | `tool_latency.sql`            | Tool latency (Tools & Execution)                                  |
 | `tool_errors.sql`             | Tool errors (Tools & Execution)                                   |

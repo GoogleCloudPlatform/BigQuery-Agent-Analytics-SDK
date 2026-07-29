@@ -31,6 +31,9 @@ PANEL_QUERIES = {
     16: "tool_errors.sql",
     18: "recent_sessions.sql",
     19: "trace_detail.sql",
+    21: "events_by_agent.sql",
+    22: "top_errors.sql",
+    23: "llm_calls_total.sql",
 }
 TEMPLATE_VARIABLE_QUERIES = {
     "agent": "var_agent.sql",
