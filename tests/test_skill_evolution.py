@@ -516,12 +516,30 @@ class TestToolSpanPairing:
     path = os.path.join(lab_dir, "run_agent.py")
     spec = importlib.util.spec_from_file_location("skill_lab_run_agent", path)
     run_agent = importlib.util.module_from_spec(spec)
-    # run_agent imports the lab-local `_quiet` helper module.
+    # run_agent imports the lab-local `_quiet` helper, and `agent.agent`
+    # pulls the live Gemini/ADK stack (google.cloud.storage etc.) that CI
+    # does not install -- stub it: this test exercises only the BigQuery
+    # row writer, which needs neither build_config nor make_client.
+    import types
+
+    fake_pkg = types.ModuleType("agent")
+    fake_mod = types.ModuleType("agent.agent")
+    fake_mod.build_config = lambda *a, **k: None
+    fake_mod.make_client = lambda *a, **k: None
+    fake_pkg.agent = fake_mod
+    saved = {k: sys.modules.get(k) for k in ("agent", "agent.agent")}
+    sys.modules["agent"] = fake_pkg
+    sys.modules["agent.agent"] = fake_mod
     sys.path.insert(0, lab_dir)
     try:
       spec.loader.exec_module(run_agent)
     finally:
       sys.path.remove(lab_dir)
+      for k, v in saved.items():
+        if v is None:
+          sys.modules.pop(k, None)
+        else:
+          sys.modules[k] = v
 
     captured = {}
 
