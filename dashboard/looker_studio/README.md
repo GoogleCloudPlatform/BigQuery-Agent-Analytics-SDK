@@ -104,11 +104,13 @@ The latest live pass used a 1568-pixel viewport, so targeted validation at the
 documented 1280-pixel minimum is still pending.
 Issue
 [#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
-also found that lower charts on Token Consumption and Latency can cross the
-freeform page boundary. The repository now requires every component's bottom
-edge to remain at least 24 pixels inside the page; the canonical report still
-requires an editor update and republication before that check can be marked
-verified.
+also found that lower charts on Token Consumption and Latency crossed the
+freeform page boundary. The pages were resized in the editor (1030 px and
+1100 px) and the report was republished on 2026-07-29; a published-version
+probe verified 31 px and 30 px of bottom padding, above the required 24 px
+minimum. Reports copied through the Linking API before that date keep their
+own snapshot of the old geometry — create a fresh copy from the configurator
+to pick up the fix.
 
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)

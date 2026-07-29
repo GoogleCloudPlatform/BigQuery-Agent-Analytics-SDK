@@ -102,9 +102,12 @@ component top + component height <= page height - 24 px
 
 Issue
 [#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
-identified an open containment defect on Token Consumption and Latency. Until
-those pages are edited, republished, and reverified, their lower charts can be
-clipped even at supported desktop widths.
+identified a containment defect on Token Consumption and Latency. Both pages
+were resized and republished on 2026-07-29, and a published-version probe
+verified the rule holds (31 px and 30 px of bottom padding). Linking API
+copies created before that date retain the old geometry; a fresh copy is
+required to pick up the fix. Because the report is mutable, later geometry
+edits require reverification under this protocol.
 
 ## Issue triage
 

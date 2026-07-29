@@ -142,11 +142,14 @@ the documented 1280-pixel minimum remains pending.
 
 Freeform layout acceptance includes vertical containment as well as
 non-overlap. For every page, each component must satisfy
-`top + height <= page height - 24 px`. Issue #388 found that the lower charts on
-Token Consumption and Latency violate this rule in the mutable published
-report. `spec/product_contract.yaml` records the pending editor republication;
-repository metadata must not claim the live issue is closed before a new
-published visual pass verifies the component bounds.
+`top + height <= page height - 24 px`. Issue #388 found that the lower charts
+on Token Consumption and Latency violated this rule; those pages were resized
+(1030 px and 1100 px) and the report was republished on 2026-07-29, with a
+published-version probe verifying 31 px and 30 px of bottom padding.
+`spec/product_contract.yaml#layout.page_bounds` records the verified
+page-local measurements. The report remains mutable, so any later geometry
+edit requires a fresh published-version probe before the contract may keep
+claiming containment.
 
 ## Looker Studio measure mappings
 

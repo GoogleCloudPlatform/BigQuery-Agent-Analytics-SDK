@@ -324,13 +324,13 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "Latency",
   ]
   for page in page_bounds["pages"]:
-      assert (
-          page["max_component_bottom"]
-          <= page["page_height"] - page_bounds["minimum_bottom_padding_px"]
-      )
-      assert page["bottom_padding"] == (
-          page["page_height"] - page["max_component_bottom"]
-      )
+    assert (
+        page["max_component_bottom"]
+        <= page["page_height"] - page_bounds["minimum_bottom_padding_px"]
+    )
+    assert page["bottom_padding"] == (
+        page["page_height"] - page["max_component_bottom"]
+    )
   assert product["filtering"]["top_user_rankings"] == {
       "group_remaining_as_others": False,
       "charts": [
