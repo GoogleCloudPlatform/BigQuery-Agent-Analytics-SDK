@@ -298,6 +298,7 @@ score() {
       --trajectory-samples 500 \
       --eval-spec "$SPEC" --dimensions full \
       --tag-turns --report --output-json "$2"
+  $PY print_rate.py --require-execution-mode ai_generate "$2" >/dev/null
 }
 
 # rate <report>  -> "X% (n/N golden-matched)"

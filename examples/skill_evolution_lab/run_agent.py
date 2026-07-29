@@ -336,6 +336,11 @@ def _write_bigquery(results, app_name, labels):
     n_turns = max((t for _, _, t in events), default=0) + 1
     invocation_ids = [uuid.uuid4().hex for _ in range(n_turns)]
     root_span_ids: dict[int, str] = {}
+    # TOOL_STARTING and its TOOL_COMPLETED must share ONE span id: the SDK
+    # pairs the two events by span_id, and the args live on the start event
+    # -- distinct ids silently drop every tool argument from Trace.tool_calls
+    # (and therefore from the analysts' engine input). FIFO per tool name.
+    pending_tool_spans: dict[str, list[str]] = {}
     # Real timestamps: each event lands inside its turn's measured
     # (start, end) window -- USER at the start, LLM_RESPONSE at the end,
     # tool events interpolated between. Sessions without measured windows
@@ -357,6 +362,14 @@ def _write_bigquery(results, app_name, labels):
       for i, (event_type, content) in enumerate(turn_events):
         ts = start + timedelta(milliseconds=round(i * step, 3))
         span_id = uuid.uuid4().hex[:16]
+        if event_type == "TOOL_STARTING":
+          pending_tool_spans.setdefault(content.get("tool", ""), []).append(
+              span_id
+          )
+        elif event_type == "TOOL_COMPLETED":
+          started = pending_tool_spans.get(content.get("tool", ""))
+          if started:
+            span_id = started.pop(0)
         parent_span_id = root_span_ids.get(turn)
         if event_type == "USER_MESSAGE_RECEIVED" and turn not in root_span_ids:
           root_span_ids[turn] = span_id

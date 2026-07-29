@@ -26,7 +26,8 @@ Pre-flight smoke (against AE7 data): `--limit 2` server-side scoring returned
 judging works in-project.
 
 **Attempt 1 — failed, evidence retained.** Commit `9c0272b`, dataset
-`u6_ae8_20260728_181934` (retained until diagnosis, then expired). Exit 1 in
+`u6_ae8_20260728_181934` (retained until diagnosis, then explicitly deleted —
+the 7-day policy is a default *table* expiration and never had to fire). Exit 1 in
 STEP 3: an unretried `429 RESOURCE_EXHAUSTED` from the embedding model inside
 `match_golden_qa → _embed_texts`. Fix: commit `6d9c65d` (bounded per-batch
 retry on 429/503, unit-tested). A subsequent attempt used a new dataset, per
@@ -88,6 +89,9 @@ enforcement proven without judging 500 synthetic sessions.
   commit `c143f83` with sample_run links pinned to that SHA; SHA-256 of the
   published markdown:
   `3c9b3ba5fd04951d30c40ee24ac4266f3f3a707e9e5845c2929a63b6daacfb1a`.
+  Post-publication addendum: revision `c72af8eb` (2026-07-28T23:43Z) changed
+  three plugin-doc links (`adk.dev/integrations/…` → `adk.dev/observability/…`);
+  the gist HEAD therefore drifts from the hash above by exactly those lines.
 - Scratch teardown: `u6_ae7_20260728_180346`, `u6_ae8_20260728_181934`
   (failed attempt), and `u6_ae8_20260728_183340` all DELETED after the
   evidence above was captured and the Gist revision verified.

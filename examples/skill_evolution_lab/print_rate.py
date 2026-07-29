@@ -23,13 +23,38 @@ Out-of-scope is counted by the ``oos_`` session-id prefix (the same convention
 ``compare_runs.py`` uses), NOT by assuming every unmatched session is
 out-of-scope: an in-scope question that fails the golden match is printed as
 "unmatched" so a matching failure is visible instead of silently dropped.
+
+``--require-execution-mode MODE`` additionally exits 1 unless the report's
+top-level ``details.execution_mode`` equals MODE. The demo passes
+``ai_generate`` right after every score: a whole-pass fall-back to the Gemini
+API judge would otherwise exit 0 and let the run present itself as
+server-side through the promotion gate (per-session ``api_retry`` inside an
+``ai_generate`` pass is still allowed and disclosed in the session records).
 """
 
+import argparse
 import json
 import sys
 
-with open(sys.argv[1]) as f:
+_parser = argparse.ArgumentParser()
+_parser.add_argument("report")
+_parser.add_argument("--require-execution-mode", default=None)
+_args = _parser.parse_args()
+
+with open(_args.report) as f:
   report = json.load(f)
+
+if _args.require_execution_mode:
+  observed = (report.get("details") or {}).get("execution_mode")
+  if observed != _args.require_execution_mode:
+    print(
+        f"FATAL: execution_mode={observed!r} (required:"
+        f" {_args.require_execution_mode!r}) -- the pass was not judged"
+        " server-side; refusing to let it through the gate.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 g = report["summary"].get("golden_eval_summary", {})
 
 rate = g.get("matched_meaningful_rate")

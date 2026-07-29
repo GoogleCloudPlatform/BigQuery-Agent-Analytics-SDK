@@ -450,3 +450,145 @@ class TestDemoShellContract:
         "--limit 500",
     ):
       assert required in text, required
+
+
+class TestServerSideGate:
+  """score() aborts when a pass was not judged server-side (#385 P1)."""
+
+  _LAB = os.path.join(
+      os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+  )
+
+  def test_score_enforces_execution_mode(self):
+    with open(os.path.join(self._LAB, "run_e2e_demo.sh")) as f:
+      text = f.read()
+    assert "--require-execution-mode ai_generate" in text
+
+  def _run_print_rate(self, tmp_path, mode):
+    import subprocess
+
+    report = {
+        "summary": {
+            "golden_eval_summary": {
+                "matched_meaningful_rate": 100.0,
+                "matched_meaningful": 1,
+                "matched": 1,
+                "total_sessions": 1,
+            }
+        },
+        "sessions": [{"session_id": "t1", "golden_eval": {"matched": True}}],
+        "details": {"execution_mode": mode},
+    }
+    p = tmp_path / f"report_{mode}.json"
+    p.write_text(json.dumps(report))
+    return subprocess.run(
+        [
+            sys.executable,
+            os.path.join(self._LAB, "print_rate.py"),
+            "--require-execution-mode",
+            "ai_generate",
+            str(p),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+  def test_complete_fallback_pass_is_fatal(self, tmp_path):
+    result = self._run_print_rate(tmp_path, "api_fallback")
+    assert result.returncode == 1
+    assert "not judged server-side" in result.stderr
+
+  def test_server_side_pass_is_accepted(self, tmp_path):
+    result = self._run_print_rate(tmp_path, "ai_generate")
+    assert result.returncode == 0
+
+
+class TestToolSpanPairing:
+  """TOOL_STARTING/TOOL_COMPLETED share one span id so args survive (#385 P1)."""
+
+  def _rows_for(self, record):
+    import importlib.util
+    import unittest.mock as mock
+
+    lab_dir = os.path.join(
+        os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+    )
+    path = os.path.join(lab_dir, "run_agent.py")
+    spec = importlib.util.spec_from_file_location("skill_lab_run_agent", path)
+    run_agent = importlib.util.module_from_spec(spec)
+    # run_agent imports the lab-local `_quiet` helper module.
+    sys.path.insert(0, lab_dir)
+    try:
+      spec.loader.exec_module(run_agent)
+    finally:
+      sys.path.remove(lab_dir)
+
+    captured = {}
+
+    class _FakeBQ:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def create_dataset(self, *_a, **_k):
+        return object()
+
+      def create_table(self, *_a, **_k):
+        return object()
+
+      def insert_rows_json(self, _table, rows):
+        captured["rows"] = rows
+        return []
+
+    with mock.patch.dict(
+        os.environ,
+        {"PROJECT_ID": "p", "DATASET_ID": "d", "TABLE_ID": "agent_events"},
+    ):
+      with mock.patch.object(
+          run_agent, "_events_from_record", wraps=run_agent._events_from_record
+      ):
+        import google.cloud.bigquery as bq_mod
+
+        with mock.patch.object(bq_mod, "Client", _FakeBQ):
+          run_agent._write_bigquery([record], "skill-evolution-lab", {})
+    return captured["rows"]
+
+  def test_tool_args_pair_by_shared_span_id(self):
+    record = {
+        "session_id": "s1",
+        "error": None,
+        "conversation": [
+            {"role": "user", "text": "q"},
+            {"role": "agent", "text": "a"},
+        ],
+        "tool_calls_detail": [
+            {"name": "lookup_company_policy", "args": {"topic": "pto"}}
+        ],
+        "_events": [
+            ("USER_MESSAGE_RECEIVED", {"text": "q"}, 0),
+            (
+                "TOOL_STARTING",
+                {"tool": "lookup_company_policy", "args": {"topic": "pto"}},
+                0,
+            ),
+            (
+                "TOOL_COMPLETED",
+                {"tool": "lookup_company_policy", "result": "20 days"},
+                0,
+            ),
+            ("LLM_RESPONSE", {"response": "a"}, 0),
+        ],
+    }
+    rows = self._rows_for(record)
+    starts = [r for r in rows if r["event_type"] == "TOOL_STARTING"]
+    dones = [r for r in rows if r["event_type"] == "TOOL_COMPLETED"]
+    assert len(starts) == 1 and len(dones) == 1
+    assert starts[0]["span_id"] == dones[0]["span_id"]
+    assert json.loads(starts[0]["content"])["args"] == {"topic": "pto"}
+    # USER/LLM spans stay distinct.
+    others = {
+        r["span_id"]
+        for r in rows
+        if r["event_type"] in ("USER_MESSAGE_RECEIVED", "LLM_RESPONSE")
+    }
+    assert starts[0]["span_id"] not in others
