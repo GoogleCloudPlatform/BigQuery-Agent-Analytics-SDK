@@ -308,17 +308,29 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "trend_chart_top": 670,
       "overlap_free": True,
   }
-  assert product["layout"]["page_bounds"] == {
-      "affected_pages": ["Token Consumption", "Latency"],
-      "minimum_bottom_padding_px": 24,
-      "acceptance_rule": (
-          "component_top_plus_height_lte_page_height_minus_bottom_padding"
-      ),
-      "verification_status": "pending_editor_republication",
-      "tracking_issue": (
-          "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388"
-      ),
-  }
+  page_bounds = product["layout"]["page_bounds"]
+  assert page_bounds["minimum_bottom_padding_px"] == 24
+  assert page_bounds["acceptance_rule"] == (
+      "component_top_plus_height_lte_page_height_minus_bottom_padding"
+  )
+  assert page_bounds["coordinate_space"] == "page_local_css_px"
+  assert page_bounds["verification_status"] == "verified"
+  assert page_bounds["verified_date"] == "2026-07-29"
+  assert page_bounds["tracking_issue"] == (
+      "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388"
+  )
+  assert [page["name"] for page in page_bounds["pages"]] == [
+      "Token Consumption",
+      "Latency",
+  ]
+  for page in page_bounds["pages"]:
+      assert (
+          page["max_component_bottom"]
+          <= page["page_height"] - page_bounds["minimum_bottom_padding_px"]
+      )
+      assert page["bottom_padding"] == (
+          page["page_height"] - page["max_component_bottom"]
+      )
   assert product["filtering"]["top_user_rankings"] == {
       "group_remaining_as_others": False,
       "charts": [
@@ -432,17 +444,18 @@ def test_report_and_web_bindings_cannot_drift():
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
-  assert report["published_date"] == "2026-07-28"
+  assert report["published_date"] == "2026-07-29"
   assert attestation == {
       "sha256": hashlib.sha256(template).hexdigest(),
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-28",
+      "verified_date": "2026-07-29",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
+          "page_bounds_containment_probe",
           "sqlreplace_table_only_smoke_test",
           "canonical_viewer_credentials_review",
           "published_eight_page_ux_smoke_test",
@@ -484,13 +497,7 @@ def test_report_and_web_bindings_cannot_drift():
       ],
       "result": "PASSED",
   }
-  assert report["known_live_issues"] == [
-      {
-          "issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388",
-          "scope": "Token Consumption and Latency page containment",
-          "status": "REQUIRES_EDITOR_REPUBLICATION",
-      }
-  ]
+  assert report["known_live_issues"] == []
   assert report["source_contract"] == {
       "mode": "BASE_TABLE",
       "generated_views_required": False,
