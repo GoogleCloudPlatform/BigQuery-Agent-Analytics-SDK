@@ -16,7 +16,8 @@ import urllib.parse
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+TABLE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$")
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -163,8 +164,8 @@ def main() -> int:
 
   try:
     project = require_identifier("project ID", args.project, PROJECT_RE)
-    dataset = require_identifier("dataset ID", args.dataset, ID_RE)
-    table = require_identifier("table ID", args.table, ID_RE)
+    dataset = require_identifier("dataset ID", args.dataset, DATASET_RE)
+    table = require_identifier("table ID", args.table, TABLE_RE)
     billing = require_identifier(
         "billing project ID",
         args.billing_project or project,

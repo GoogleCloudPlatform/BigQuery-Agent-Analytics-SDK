@@ -92,6 +92,20 @@ The 1280-pixel minimum is a documented product-support boundary. The latest
 live pass ran at 1568 pixels, so targeted visual validation at 1280 pixels
 remains pending.
 
+Viewport width does not prove that freeform components remain inside the page
+canvas. Release-candidate validation must also capture the editor's page height
+and every component's top and height, then verify:
+
+```text
+component top + component height <= page height - 24 px
+```
+
+Issue
+[#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
+identified an open containment defect on Token Consumption and Latency. Until
+those pages are edited, republished, and reverified, their lower charts can be
+clipped even at supported desktop widths.
+
 ## Issue triage
 
 Keep rendering reliability and responsive-layout work separate:

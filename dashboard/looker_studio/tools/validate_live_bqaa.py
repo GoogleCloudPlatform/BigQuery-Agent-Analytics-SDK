@@ -20,7 +20,8 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
-ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
+TABLE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$")
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 FILTER_PARAMS = (
     "filter_agent",
@@ -118,8 +119,8 @@ def main() -> int:
   try:
     require_identifier("project ID", args.project, PROJECT_RE)
     require_identifier("billing project ID", billing_project, PROJECT_RE)
-    require_identifier("dataset ID", args.dataset, ID_RE)
-    require_identifier("table ID", args.table, ID_RE)
+    require_identifier("dataset ID", args.dataset, DATASET_RE)
+    require_identifier("table ID", args.table, TABLE_RE)
     require_identifier("location", args.location, LOCATION_RE)
   except ValueError as exc:
     raise SystemExit(str(exc)) from exc

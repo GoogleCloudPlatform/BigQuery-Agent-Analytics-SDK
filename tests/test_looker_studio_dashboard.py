@@ -69,14 +69,48 @@ def test_portable_linking_api_configuration():
   ]
 
 
+def test_hyphenated_bigquery_table_ids_are_supported_by_python_tools():
+  table = "events_agent_cur-phenix"
+  hydration = _load_hydration_module()
+  live_validation = _load_dashboard_module("validate_live_bqaa")
+
+  assert hasattr(hydration, "DATASET_RE")
+  assert hasattr(hydration, "TABLE_RE")
+  assert hasattr(live_validation, "DATASET_RE")
+  assert hasattr(live_validation, "TABLE_RE")
+  assert (
+      hydration.require_identifier("table ID", table, hydration.TABLE_RE)
+      == table
+  )
+  assert (
+      live_validation.require_identifier(
+          "table ID", table, live_validation.TABLE_RE
+      )
+      == table
+  )
+
+  link = hydration.build_link(
+      "customer-project-123",
+      "agent_analytics",
+      table,
+      "billing-project-123",
+      "Customer BQAA",
+  )
+  sql_replace = urllib.parse.parse_qs(
+      urllib.parse.urlparse(link).query
+  )["ds.ds230.sqlReplace"][0].split(",")
+  assert sql_replace[-2:] == ["sentinelbqaaevents", table]
+
+
 @pytest.mark.parametrize(
     ("label", "value", "pattern"),
     [
         ("project ID", "UPPERCASE", "PROJECT_RE"),
         ("project ID", "project;drop", "PROJECT_RE"),
-        ("dataset ID", "bad-dataset", "ID_RE"),
-        ("dataset ID", "data`set", "ID_RE"),
-        ("table ID", "table,other", "ID_RE"),
+        ("dataset ID", "bad-dataset", "DATASET_RE"),
+        ("dataset ID", "data`set", "DATASET_RE"),
+        ("table ID", "table,other", "TABLE_RE"),
+        ("table ID", "data`set", "TABLE_RE"),
     ],
 )
 def test_hydration_identifiers_fail_closed(label, value, pattern):
@@ -274,6 +308,17 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "trend_chart_top": 670,
       "overlap_free": True,
   }
+  assert product["layout"]["page_bounds"] == {
+      "affected_pages": ["Token Consumption", "Latency"],
+      "minimum_bottom_padding_px": 24,
+      "acceptance_rule": (
+          "component_top_plus_height_lte_page_height_minus_bottom_padding"
+      ),
+      "verification_status": "pending_editor_republication",
+      "tracking_issue": (
+          "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388"
+      ),
+  }
   assert product["filtering"]["top_user_rankings"] == {
       "group_remaining_as_others": False,
       "charts": [
@@ -439,6 +484,13 @@ def test_report_and_web_bindings_cannot_drift():
       ],
       "result": "PASSED",
   }
+  assert report["known_live_issues"] == [
+      {
+          "issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388",
+          "scope": "Token Consumption and Latency page containment",
+          "status": "REQUIRES_EDITOR_REPUBLICATION",
+      }
+  ]
   assert report["source_contract"] == {
       "mode": "BASE_TABLE",
       "generated_views_required": False,

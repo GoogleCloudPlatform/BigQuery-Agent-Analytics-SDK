@@ -57,11 +57,14 @@ function refresh() {
     createLink.removeAttribute("href");
     createLink.setAttribute("aria-disabled", "true");
     copyButton.disabled = true;
-    if (error.field && inputs[error.field]) {
+    const hasFieldError = Boolean(error.field && inputs[error.field]);
+    if (hasFieldError) {
       inputs[error.field].setAttribute("aria-invalid", "true");
       errors[error.field].textContent = error.message;
+      setStatus("");
+    } else {
+      setStatus(error.message, "error");
     }
-    setStatus(error.message, "error");
   }
 }
 

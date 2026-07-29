@@ -102,6 +102,13 @@ separate responsive template and are not supported by v1. See
 [`docs/rendering-and-viewport-support.md`](docs/rendering-and-viewport-support.md).
 The latest live pass used a 1568-pixel viewport, so targeted validation at the
 documented 1280-pixel minimum is still pending.
+Issue
+[#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
+also found that lower charts on Token Consumption and Latency can cross the
+freeform page boundary. The repository now requires every component's bottom
+edge to remain at least 24 pixels inside the page; the canonical report still
+requires an editor update and republication before that check can be marked
+verified.
 
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
@@ -110,6 +117,11 @@ and enter only:
 1. GCP project ID;
 2. BigQuery dataset ID;
 3. BQAA table ID (normally `agent_events`).
+
+For portable Linking API substitution, table IDs may use ASCII letters, digits,
+underscores, and hyphens, such as `events_agent_cur-phenix`. Dataset IDs retain
+BigQuery's no-hyphen restriction. Commas and backticks remain rejected because
+they would alter the `sqlReplace` binding list or the quoted SQL identifier.
 
 The configurator runs entirely in the browser and creates an official Looker
 Studio Linking API URL. Project, dataset, and table identifiers can also be

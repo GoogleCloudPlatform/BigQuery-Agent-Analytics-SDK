@@ -36,6 +36,12 @@ API URL entirely in the browser. URL query
 parameters can prefill the three inputs, but the page never opens the report
 without a user click.
 
+Dataset and table IDs use separate validators. Dataset IDs allow the established
+ASCII letter/digit/underscore subset. Table IDs additionally allow hyphens,
+which BigQuery supports and which remain safe inside the report's backticked
+table path. Commas and backticks stay invalid because they would change the
+Linking API replacement list or SQL identifier boundary.
+
 Looker Studio report parameters are not the binding mechanism. They can pass
 scalar values to BigQuery custom SQL, but BigQuery query parameters cannot
 replace identifiers in `FROM` paths. Connector-level Linking API
@@ -133,6 +139,14 @@ be converted in place without rebuilding their section layout and repeating
 parity, hydration, credential, and visual acceptance.
 The most recent live pass used a 1568-pixel viewport; targeted validation at
 the documented 1280-pixel minimum remains pending.
+
+Freeform layout acceptance includes vertical containment as well as
+non-overlap. For every page, each component must satisfy
+`top + height <= page height - 24 px`. Issue #388 found that the lower charts on
+Token Consumption and Latency violate this rule in the mutable published
+report. `spec/product_contract.yaml` records the pending editor republication;
+repository metadata must not claim the live issue is closed before a new
+published visual pass verifies the component bounds.
 
 ## Looker Studio measure mappings
 

@@ -1,7 +1,8 @@
 import { REPORT_CONFIG } from "./report-config.mjs";
 
 export const PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
-export const BIGQUERY_ID_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
+export const DATASET_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
+export const TABLE_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$/;
 
 const VALIDATION_MESSAGES = Object.freeze({
   project:
@@ -9,7 +10,7 @@ const VALIDATION_MESSAGES = Object.freeze({
   dataset:
     "Start with a letter or underscore, then use only letters, digits, or underscores.",
   table:
-    "Start with a letter or underscore, then use only letters, digits, or underscores.",
+    "Start with a letter, digit, or underscore, then use only letters, digits, underscores, or hyphens.",
   billingProject:
     "Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.",
 });
@@ -53,8 +54,8 @@ export function validateConfiguration(input, config = REPORT_CONFIG) {
   const project = requireValue("project", input.project, PROJECT_RE);
   const values = {
     project,
-    dataset: requireValue("dataset", input.dataset, BIGQUERY_ID_RE),
-    table: requireValue("table", input.table, BIGQUERY_ID_RE),
+    dataset: requireValue("dataset", input.dataset, DATASET_RE),
+    table: requireValue("table", input.table, TABLE_RE),
     billingProject: requireValue(
       "billingProject",
       input.billingProject || project,
