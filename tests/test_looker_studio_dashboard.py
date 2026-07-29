@@ -96,9 +96,9 @@ def test_hyphenated_bigquery_table_ids_are_supported_by_python_tools():
       "billing-project-123",
       "Customer BQAA",
   )
-  sql_replace = urllib.parse.parse_qs(
-      urllib.parse.urlparse(link).query
-  )["ds.ds230.sqlReplace"][0].split(",")
+  sql_replace = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)[
+      "ds.ds230.sqlReplace"
+  ][0].split(",")
   assert sql_replace[-2:] == ["sentinelbqaaevents", table]
 
 
