@@ -212,10 +212,16 @@ version number and metadata.
 
 
 def _has_parroted_recovery(session: dict) -> bool:
-  """True if the session has a parroted sub-trajectory outcome."""
-  for st in session.get("sub_trajectories", []) or []:
-    if st.get("outcome") == "parroted":
-      return True
+  """True if the session has a parroted sub-trajectory outcome.
+
+  Checks both ``sub_trajectories`` (turn-tagger output) and
+  ``execution_sub_trajectories`` (hosts that segment execution traces per
+  correction). Either marking a segment ``parroted`` reclassifies the session.
+  """
+  for key in ("sub_trajectories", "execution_sub_trajectories"):
+    for st in session.get(key, []) or []:
+      if st.get("outcome") == "parroted":
+        return True
   return False
 
 
@@ -295,6 +301,8 @@ def format_trajectory(session: dict) -> str:
     result += _format_tool_calls(session)
     if session.get("corrections"):
       result += f"User corrections: {session['corrections']}\n"
+    if session.get("verifications"):
+      result += f"User verification requests: {session['verifications']}\n"
     for dim in (
         "correctness",
         "tool_usage",
@@ -308,6 +316,41 @@ def format_trajectory(session: dict) -> str:
             f"{dim}: {score_data.get('score', '?')}/2 -"
             f" {score_data.get('reason', '')}\n"
         )
+    # Turn-boundary correction evidence, when the host's tagger extracts it:
+    # the wrong claim, the user's correction, and whether the agent recovered.
+    boundaries = session.get("correction_boundaries", []) or []
+    if boundaries:
+      result += "\n=== Correction Evidence ===\n"
+      for b in boundaries:
+        result += (
+            f"Turn {b.get('turn_index')}: Agent claimed:"
+            f" \"{b.get('wrong_claim', '')}\"\n"
+            f"  User corrected: \"{b.get('correct_fact', '')}\"\n"
+            f"  Agent recovered: {b.get('agent_recovered', False)}\n"
+        )
+
+    # Per-segment execution traces (hosts that capture routing/tool calls per
+    # correction segment). Preferred over the brief sub-trajectory outcome
+    # list because the analyst sees WHAT the agent executed in each segment.
+    exec_subtraj = session.get("execution_sub_trajectories", []) or []
+    if exec_subtraj:
+      result += "\n=== Execution sub-trajectories ===\n"
+      result += (
+          "Each segment shows agent routing/tool calls for that part of the"
+          " conversation. Compare [-] (wrong) vs [+] (recovered) vs [~]"
+          " (parroted) segments.\n\n"
+      )
+      for seg in exec_subtraj:
+        outcome = seg.get("outcome", "")
+        icon = {"recovered": "+", "parroted": "~"}.get(outcome, "-")
+        result += (
+            f"--- [{icon}] {seg.get('label', '')} (turns"
+            f" {seg.get('start_turn')}-{seg.get('end_turn')}) ->"
+            f" {outcome} ---\n"
+        )
+        result += (seg.get("trace", "") or "") + "\n\n"
+      return result
+
     # Surface the per-segment correction outcomes the turn tagger emits
     # (quality_report writes these as ``sub_trajectories``). This is the
     # parrot/recover evidence the Error Analyst is told to use.
@@ -324,6 +367,16 @@ def format_trajectory(session: dict) -> str:
         ):
           span = f" (turns {seg['start_turn']}-{seg['end_turn']})"
         result += f"[{icon}] {seg.get('label', '')}{span} -> {outcome}\n"
+
+    # Full-session execution trace (single undivided trace), when captured.
+    exec_trace = session.get("execution_trace", "")
+    if exec_trace:
+      result += "\n=== Execution trace ===\n"
+      result += (
+          "Shows agent routing, tool calls, and LLM requests. Look for:"
+          " missing tool calls, wrong routing, tool errors.\n\n"
+      )
+      result += exec_trace + "\n"
     return result
 
   return (
@@ -691,8 +744,18 @@ def collect_patches(
     max_success_samples=15,
     analyst_mode="both",
     tools=None,
+    error_analyst_fn=None,
 ):
-  """Run the analyst fleet over the report. Returns the list of kept patches."""
+  """Run the analyst fleet over the report. Returns the list of kept patches.
+
+  Args:
+    error_analyst_fn: Optional replacement analyst for FAILURE trajectories,
+      called as ``fn(client, model, session, current_skill, tools)`` and
+      returning patch text or None. Lets a host plug in a richer analyst
+      (e.g. an agentic investigator with tool access) while keeping the
+      fleet dispatch, quality gate, and consolidation from this engine.
+      Success trajectories always use the built-in single-pass analyst.
+  """
   successes, failures = partition_trajectories(report)
   logger.info(
       "Trajectories: %d successes, %d failures", len(successes), len(failures)
@@ -707,15 +770,20 @@ def collect_patches(
   with ThreadPoolExecutor(max_workers=max_workers) as executor:
     futures = {}
     for s in failures:
-      fut = executor.submit(
-          run_analyst,
-          client,
-          model,
-          ERROR_ANALYST_PROMPT,
-          s,
-          current_skill,
-          tools,
-      )
+      if error_analyst_fn is not None:
+        fut = executor.submit(
+            error_analyst_fn, client, model, s, current_skill, tools
+        )
+      else:
+        fut = executor.submit(
+            run_analyst,
+            client,
+            model,
+            ERROR_ANALYST_PROMPT,
+            s,
+            current_skill,
+            tools,
+        )
       futures[fut] = ("error", (s.get("question", "") or "")[:60])
     for s in successes:
       fut = executor.submit(
@@ -766,6 +834,7 @@ def select_candidate(
     current_skill: str,
     score_fn: Optional[Callable[[str], float]] = None,
     min_improvement: float = 0.5,
+    incumbent_score: Optional[float] = None,
 ) -> str:
   """Pick which evolved candidate to ship (pure; no model calls).
 
@@ -773,6 +842,11 @@ def select_candidate(
   - No ``score_fn`` -> return the median-size viable candidate.
   - With ``score_fn`` -> return the highest-scoring candidate ONLY if it beats
     the incumbent by at least ``min_improvement``; otherwise keep the base skill.
+
+  ``incumbent_score``, when given, is used as the incumbent's score instead of
+  calling ``score_fn(current_skill)``. Hosts that already measured the base
+  skill (e.g. the quality report the evolution run consumed) pass it to avoid
+  re-scoring the incumbent on fresh, noisy traffic.
 
   The last rule is the restraint property of a self-modifying system: when
   nothing clearly improves, leave the already-good skill alone.
@@ -787,7 +861,11 @@ def select_candidate(
     logger.info("Selected median-size candidate (%d chars).", len(selected))
     return selected
 
-  incumbent = score_fn(current_skill)
+  incumbent = (
+      incumbent_score
+      if incumbent_score is not None
+      else score_fn(current_skill)
+  )
   best, best_score = None, float("-inf")
   for cand in viable:
     score = score_fn(cand)
@@ -821,7 +899,9 @@ def evolve_skill(
     analyst_mode: str = "both",
     score_fn: Optional[Callable[[str], float]] = None,
     min_improvement: float = 0.5,
+    incumbent_score: Optional[float] = None,
     tools: Optional[str] = None,
+    error_analyst_fn=None,
     artifacts_dir: Optional[str] = None,
     version_label: str = "v1",
     client=None,
@@ -843,6 +923,11 @@ def evolve_skill(
       median-size viable candidate is returned (avoids truncated runts/bloat).
     min_improvement: A candidate must beat the incumbent score by at least this
       margin (in score_fn units) to be selected; otherwise the base is kept.
+    incumbent_score: Pre-measured score of ``current_skill`` (in score_fn
+      units). When given, the incumbent guard uses it instead of re-scoring
+      the base skill via ``score_fn(current_skill)``.
+    error_analyst_fn: Optional replacement analyst for failure trajectories;
+      see ``collect_patches``.
     artifacts_dir: If set, write the analyst patches, the best-of-N candidates,
       a prevalence summary, and a one-line selection record here (for
       inspection/audit) before returning.
@@ -870,6 +955,7 @@ def evolve_skill(
       max_success_samples=max_success_samples,
       analyst_mode=analyst_mode,
       tools=tools,
+      error_analyst_fn=error_analyst_fn,
   )
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")
@@ -906,7 +992,9 @@ def evolve_skill(
     c = sanitize_adk_vars(c)
     if not validate_evolved_skill(c, current_skill):
       viable.append(c)
-  selected = select_candidate(viable, current_skill, score_fn, min_improvement)
+  selected = select_candidate(
+      viable, current_skill, score_fn, min_improvement, incumbent_score
+  )
   if artifacts_dir:
     # Reconstruct WHY this outcome, so the incumbent guard leaves an audit
     # trail (selection.txt) instead of firing silently.

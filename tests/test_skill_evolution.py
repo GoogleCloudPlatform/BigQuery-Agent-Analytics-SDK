@@ -27,6 +27,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from skill_evolution import _has_parroted_recovery  # noqa: E402
 from skill_evolution import _write_evolution_artifacts
+from skill_evolution import collect_patches
 from skill_evolution import compute_prevalence_summary
 from skill_evolution import format_trajectory
 from skill_evolution import partition_trajectories
@@ -85,6 +86,17 @@ def test_has_parroted_recovery():
   assert not _has_parroted_recovery({})
 
 
+def test_has_parroted_recovery_in_execution_sub_trajectories():
+  # Hosts that segment execution traces per correction mark the outcome on
+  # execution_sub_trajectories; a parroted segment there reclassifies too.
+  assert _has_parroted_recovery(
+      {"execution_sub_trajectories": [{"outcome": "parroted"}]}
+  )
+  assert not _has_parroted_recovery(
+      {"execution_sub_trajectories": [{"outcome": "recovered"}]}
+  )
+
+
 # --- format_trajectory ------------------------------------------------------
 
 
@@ -135,6 +147,68 @@ def test_format_renders_subtrajectory_outcomes():
   assert "parroted" in out
   assert "post_correction_1" in out
   assert "[~]" in out  # parroted icon
+
+
+def test_format_renders_execution_sub_trajectories_with_traces():
+  # When per-segment execution traces exist, the analyst must see WHAT the
+  # agent executed in each segment (preferred over the brief outcome list).
+  s = _session(
+      "unhelpful",
+      conversation=[
+          {"role": "user", "text": "is it 25 days?", "tag": "CORRECTION"},
+          {"role": "assistant", "text": "yes, 25"},
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "agent->policy_agent (no tool call)",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution sub-trajectories ===" in out
+  assert "[~]" in out
+  assert "agent->policy_agent (no tool call)" in out
+
+
+def test_format_renders_correction_evidence_and_verifications():
+  s = _session(
+      "unhelpful",
+      conversation=[
+          {"role": "user", "text": "PTO is 25 days", "tag": "CORRECTION"},
+          {"role": "assistant", "text": "you are right"},
+      ],
+      corrections=1,
+      verifications=2,
+      correction_boundaries=[
+          {
+              "turn_index": 1,
+              "wrong_claim": "PTO is 20 days",
+              "correct_fact": "PTO is 25 days",
+              "agent_recovered": False,
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "User verification requests: 2" in out
+  assert "=== Correction Evidence ===" in out
+  assert "PTO is 20 days" in out
+  assert "Agent recovered: False" in out
+
+
+def test_format_renders_full_session_execution_trace():
+  # A single undivided trace renders when no per-segment traces exist.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_trace="invoke supervisor -> transfer policy_agent",
+  )
+  out = format_trajectory(s)
+  assert "=== Execution trace ===" in out
+  assert "invoke supervisor -> transfer policy_agent" in out
 
 
 def test_format_renders_tool_calls_single_turn():
@@ -345,6 +419,70 @@ def test_select_candidate_picks_better_when_it_clears_margin():
       ["cand1", "cand2"], "BASE", score_fn=scores.get, min_improvement=0.5
   )
   assert out == "cand1"
+
+
+def test_select_candidate_uses_incumbent_score_without_rescoring_base():
+  # A host that already measured the base skill passes incumbent_score;
+  # score_fn must then NEVER be called on the base (re-scoring on fresh
+  # traffic is noisy and expensive).
+  def score_fn(skill):
+    assert skill != "BASE", "must not re-score the incumbent"
+    return {"cand1": 0.95, "cand2": 0.60}[skill]
+
+  out = select_candidate(
+      ["cand1", "cand2"],
+      "BASE",
+      score_fn=score_fn,
+      min_improvement=0.5,
+      incumbent_score=0.40,
+  )
+  assert out == "cand1"
+
+
+def test_select_candidate_incumbent_score_gates_selection():
+  # The provided incumbent score participates in the margin gate.
+  scores = {"cand1": 0.95}
+  out = select_candidate(
+      ["cand1"],
+      "BASE",
+      score_fn=scores.get,
+      min_improvement=0.5,
+      incumbent_score=0.90,
+  )
+  assert out == "BASE"
+
+
+# --- collect_patches (host analyst hook) ------------------------------------
+
+
+def test_collect_patches_dispatches_error_analyst_fn():
+  # A host-supplied analyst replaces the built-in one for FAILURE
+  # trajectories; no client/model calls happen when it handles them all.
+  seen = []
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    seen.append(session["question"])
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool.\n"
+        "## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=fake_analyst,
+  )
+  assert sorted(seen) == ["q1", "q2"]
+  assert len(patches) == 2
 
 
 # --- _write_evolution_artifacts --------------------------------------------
