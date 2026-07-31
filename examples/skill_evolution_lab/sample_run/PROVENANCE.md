@@ -116,8 +116,12 @@ fresh `--rounds 2` gate run at that SHA.
   published markdown:
   `3c9b3ba5fd04951d30c40ee24ac4266f3f3a707e9e5845c2929a63b6daacfb1a`.
   Post-publication addendum: revision `c72af8eb` (2026-07-28T23:43Z) changed
-  three plugin-doc links (`adk.dev/integrations/…` → `adk.dev/observability/…`);
-  the gist HEAD therefore drifts from the hash above by exactly those lines.
+  three plugin-doc links (`adk.dev/integrations/…` → `adk.dev/observability/…`).
+  Both of those revisions describe the SUPERSEDED recording. The gist was
+  republished from the final recording's doc commit `bdd49e6` on 2026-07-31:
+  revision `f99a4c126adbb13c6ca19aa7eced30f7fda74145`, content SHA-256
+  `be83d1f7fa356c20ec52876257f47e855c527496244f7486fb3cce1533ac3ef9` — this is the
+  current canonical revision; sample links are pinned to `bdd49e6`.
 - Scratch teardown: `u6_ae7_20260728_180346`, `u6_ae8_20260728_181934`
   (failed attempt), and `u6_ae8_20260728_183340` all DELETED after the
   evidence above was captured and the Gist revision verified.
