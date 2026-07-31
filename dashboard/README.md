@@ -33,7 +33,7 @@ Ideal for a zero-install setup.
 ### ⚠️ Important Notes
 Before running the dashboard, please verify the following:
 
-* **Standard ADK Schema:** The BigQuery table **must** follow the standard ADK BigQuery Schema, [ADK BigQuery Schema Reference](https://adk.dev/integrations/bigquery-agent-analytics/#schema-reference) .
+* **Standard ADK Schema:** The BigQuery table **must** follow the standard ADK BigQuery Schema, [ADK BigQuery Schema Reference](https://adk.dev/observability/bigquery-agent-analytics/#schema-reference) .
 If your table uses custom column names or a different JSON structure for metadata, the queries in `app.py` may need manual adjustment.
 
 * **Replace Placeholders:** In the dashboard sidebar (or the `app.py` script), ensure you replace the placeholder values for:

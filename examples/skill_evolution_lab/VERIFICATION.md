@@ -24,7 +24,7 @@ model-drift note and the sweep below).
 > that loop on a deliberately **crippled** V0, so read it as "the loop reliably
 > finds and fixes real skill defects from traces" — the analyst votes and the
 > trace-tagged correction outcomes below show it found **both** planted defects
-> — not as "+60pp from any starting point." A fair, plausibly-written baseline
+> — not as "+65pp from any starting point." A fair, plausibly-written baseline
 > would show a smaller (still real) gain.
 
 ## Configuration
