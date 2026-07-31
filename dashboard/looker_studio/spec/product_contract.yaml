@@ -19,9 +19,9 @@ source:
 defaults:
   date_range:
     mode: rolling
-    start_offset_days: 365
-    end_offset_days: 1
-    include_today: false
+    start_offset_days: 364
+    end_offset_days: 0
+    include_today: true
     page_scope: all_dashboard_pages
 
 pages:
@@ -63,6 +63,22 @@ layout:
     trend_title_top: 611
     trend_chart_top: 670
     overlap_free: true
+  page_bounds:
+    minimum_bottom_padding_px: 24
+    acceptance_rule: component_top_plus_height_lte_page_height_minus_bottom_padding
+    coordinate_space: page_local_css_px
+    verification_status: verified
+    verified_date: "2026-07-29"
+    tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388
+    pages:
+      - name: Token Consumption
+        page_height: 1030
+        max_component_bottom: 999
+        bottom_padding: 31
+      - name: Latency
+        page_height: 1100
+        max_component_bottom: 1070
+        bottom_padding: 30
 
 behavioral_fixes:
   usage-llm-call-trends:

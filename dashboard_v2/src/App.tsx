@@ -15,7 +15,7 @@
  */
 
 import { useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { CommandBar } from './components/CommandBar';
 import { AnalyticsOverview } from './components/AnalyticsOverview';

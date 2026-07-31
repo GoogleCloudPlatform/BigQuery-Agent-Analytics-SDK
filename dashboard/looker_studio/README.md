@@ -91,8 +91,8 @@ fixture parity certification or M4 visual sign-off.
 Canonical published template:
 [BigQuery Agent Analytics — Template](https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40).
 
-All seven dashboard pages default to a rolling 365-day window ending
-yesterday. The Trace Inspector intentionally has no default date control.
+All seven dashboard pages default to a rolling 365-day window including
+today. The Trace Inspector intentionally has no default date control.
 
 The v1 report is a freeform desktop dashboard. Use a viewport at least 1280
 CSS pixels wide (1440 recommended). A cold load or page navigation can paint
@@ -102,6 +102,15 @@ separate responsive template and are not supported by v1. See
 [`docs/rendering-and-viewport-support.md`](docs/rendering-and-viewport-support.md).
 The latest live pass used a 1568-pixel viewport, so targeted validation at the
 documented 1280-pixel minimum is still pending.
+Issue
+[#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
+also found that lower charts on Token Consumption and Latency crossed the
+freeform page boundary. The pages were resized in the editor (1030 px and
+1100 px) and the report was republished on 2026-07-29; a published-version
+probe verified 31 px and 30 px of bottom padding, above the required 24 px
+minimum. Reports copied through the Linking API before that date keep their
+own snapshot of the old geometry — create a fresh copy from the configurator
+to pick up the fix.
 
 For the standard BQAA layout, open the
 [three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
@@ -110,6 +119,11 @@ and enter only:
 1. GCP project ID;
 2. BigQuery dataset ID;
 3. BQAA table ID (normally `agent_events`).
+
+For portable Linking API substitution, table IDs may use ASCII letters, digits,
+underscores, and hyphens, such as `events_agent_cur-phenix`. Dataset IDs retain
+BigQuery's no-hyphen restriction. Commas and backticks remain rejected because
+they would alter the `sqlReplace` binding list or the quoted SQL identifier.
 
 The configurator runs entirely in the browser and creates an official Looker
 Studio Linking API URL. Project, dataset, and table identifiers can also be

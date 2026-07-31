@@ -36,6 +36,12 @@ API URL entirely in the browser. URL query
 parameters can prefill the three inputs, but the page never opens the report
 without a user click.
 
+Dataset and table IDs use separate validators. Dataset IDs allow the established
+ASCII letter/digit/underscore subset. Table IDs additionally allow hyphens,
+which BigQuery supports and which remain safe inside the report's backticked
+table path. Commas and backticks stay invalid because they would change the
+Linking API replacement list or SQL identifier boundary.
+
 Looker Studio report parameters are not the binding mechanism. They can pass
 scalar values to BigQuery custom SQL, but BigQuery query parameters cannot
 replace identifiers in `FROM` paths. Connector-level Linking API
@@ -97,7 +103,7 @@ explicit chart title. Product titles use title case, “Over Time,” uppercase
 formerly inherited as “Events By Agent” is labeled **Tool Completions by
 Agent** because its metric intentionally counts only `TOOL_COMPLETED` rows.
 
-All seven dashboard pages use a rolling 365-day window ending yesterday.
+All seven dashboard pages use a rolling 365-day window including today.
 Looker Studio sends those bounds through `@DS_START_DATE` and
 `@DS_END_DATE`; the production query applies the frozen half-open UTC
 predicate. The generated manifest retains the pinned LookML's original
@@ -133,6 +139,17 @@ be converted in place without rebuilding their section layout and repeating
 parity, hydration, credential, and visual acceptance.
 The most recent live pass used a 1568-pixel viewport; targeted validation at
 the documented 1280-pixel minimum remains pending.
+
+Freeform layout acceptance includes vertical containment as well as
+non-overlap. For every page, each component must satisfy
+`top + height <= page height - 24 px`. Issue #388 found that the lower charts
+on Token Consumption and Latency violated this rule; those pages were resized
+(1030 px and 1100 px) and the report was republished on 2026-07-29, with a
+published-version probe verifying 31 px and 30 px of bottom padding.
+`spec/product_contract.yaml#layout.page_bounds` records the verified
+page-local measurements. The report remains mutable, so any later geometry
+edit requires a fresh published-version probe before the contract may keep
+claiming containment.
 
 ## Looker Studio measure mappings
 

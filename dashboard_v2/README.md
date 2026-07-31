@@ -38,7 +38,7 @@ their own query jobs.
 
 Before running the project, ensure you have:
 
-- Node.js >= 18
+- Node.js >= 22.22
 - npm or pnpm
 - A Google Cloud Platform account owned by the customer
 - BigQuery enabled

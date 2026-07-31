@@ -69,14 +69,48 @@ def test_portable_linking_api_configuration():
   ]
 
 
+def test_hyphenated_bigquery_table_ids_are_supported_by_python_tools():
+  table = "events_agent_cur-phenix"
+  hydration = _load_hydration_module()
+  live_validation = _load_dashboard_module("validate_live_bqaa")
+
+  assert hasattr(hydration, "DATASET_RE")
+  assert hasattr(hydration, "TABLE_RE")
+  assert hasattr(live_validation, "DATASET_RE")
+  assert hasattr(live_validation, "TABLE_RE")
+  assert (
+      hydration.require_identifier("table ID", table, hydration.TABLE_RE)
+      == table
+  )
+  assert (
+      live_validation.require_identifier(
+          "table ID", table, live_validation.TABLE_RE
+      )
+      == table
+  )
+
+  link = hydration.build_link(
+      "customer-project-123",
+      "agent_analytics",
+      table,
+      "billing-project-123",
+      "Customer BQAA",
+  )
+  sql_replace = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)[
+      "ds.ds230.sqlReplace"
+  ][0].split(",")
+  assert sql_replace[-2:] == ["sentinelbqaaevents", table]
+
+
 @pytest.mark.parametrize(
     ("label", "value", "pattern"),
     [
         ("project ID", "UPPERCASE", "PROJECT_RE"),
         ("project ID", "project;drop", "PROJECT_RE"),
-        ("dataset ID", "bad-dataset", "ID_RE"),
-        ("dataset ID", "data`set", "ID_RE"),
-        ("table ID", "table,other", "ID_RE"),
+        ("dataset ID", "bad-dataset", "DATASET_RE"),
+        ("dataset ID", "data`set", "DATASET_RE"),
+        ("table ID", "table,other", "TABLE_RE"),
+        ("table ID", "data`set", "TABLE_RE"),
     ],
 )
 def test_hydration_identifiers_fail_closed(label, value, pattern):
@@ -246,9 +280,9 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
   ]
   assert product["defaults"]["date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 365,
-      "end_offset_days": 1,
-      "include_today": False,
+      "start_offset_days": 364,
+      "end_offset_days": 0,
+      "include_today": True,
       "page_scope": "all_dashboard_pages",
   }
   assert product["layout"]["percentile_order"] == {
@@ -274,6 +308,29 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "trend_chart_top": 670,
       "overlap_free": True,
   }
+  page_bounds = product["layout"]["page_bounds"]
+  assert page_bounds["minimum_bottom_padding_px"] == 24
+  assert page_bounds["acceptance_rule"] == (
+      "component_top_plus_height_lte_page_height_minus_bottom_padding"
+  )
+  assert page_bounds["coordinate_space"] == "page_local_css_px"
+  assert page_bounds["verification_status"] == "verified"
+  assert page_bounds["verified_date"] == "2026-07-29"
+  assert page_bounds["tracking_issue"] == (
+      "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#388"
+  )
+  assert [page["name"] for page in page_bounds["pages"]] == [
+      "Token Consumption",
+      "Latency",
+  ]
+  for page in page_bounds["pages"]:
+    assert (
+        page["max_component_bottom"]
+        <= page["page_height"] - page_bounds["minimum_bottom_padding_px"]
+    )
+    assert page["bottom_padding"] == (
+        page["page_height"] - page["max_component_bottom"]
+    )
   assert product["filtering"]["top_user_rankings"] == {
       "group_remaining_as_others": False,
       "charts": [
@@ -375,9 +432,9 @@ def test_report_and_web_bindings_cannot_drift():
   assert web["dataSourceAlias"] == report["data_source_alias"]
   assert report["default_date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 365,
-      "end_offset_days": 1,
-      "include_today": False,
+      "start_offset_days": 364,
+      "end_offset_days": 0,
+      "include_today": True,
       "page_scope": "all_dashboard_pages",
   }
   assert web["sentinels"] == {
@@ -387,22 +444,25 @@ def test_report_and_web_bindings_cannot_drift():
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
+  assert report["published_date"] == "2026-07-29"
   assert attestation == {
       "sha256": hashlib.sha256(template).hexdigest(),
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-27",
+      "verified_date": "2026-07-29",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
+          "page_bounds_containment_probe",
           "sqlreplace_table_only_smoke_test",
           "canonical_viewer_credentials_review",
           "published_eight_page_ux_smoke_test",
           "published_non_degenerate_chart_data_capture",
           "editor_configuration_assertions",
           "published_tool_page_refresh",
+          "published_include_today_default_validation",
       ],
       "result": "PASSED",
       "limitation": "mutable_external_report_requires_reverification_after_changes",
@@ -418,7 +478,7 @@ def test_report_and_web_bindings_cannot_drift():
       ),
   }
   assert report["product_verification"] == {
-      "verified_date": "2026-07-27",
+      "verified_date": "2026-07-28",
       "pages": 8,
       "checks": [
           "expected_page_and_chart_titles_present",
@@ -433,9 +493,11 @@ def test_report_and_web_bindings_cannot_drift():
           "tool_charts_exclude_non_completed_rows",
           "multi_series_charts_use_categorical_legends",
           "no_partial_update_footer_after_refresh",
+          "default_date_range_includes_today_on_seven_dashboard_pages",
       ],
       "result": "PASSED",
   }
+  assert report["known_live_issues"] == []
   assert report["source_contract"] == {
       "mode": "BASE_TABLE",
       "generated_views_required": False,
@@ -447,6 +509,23 @@ def test_report_and_web_bindings_cannot_drift():
       "required_before_sharing": "VIEWERS",
       "verification_path": "Resource > Manage added data sources > Edit",
   }
+
+
+def test_default_date_range_includes_today_for_exactly_365_calendar_days():
+  product = yaml.safe_load(
+      (DASHBOARD / "spec/product_contract.yaml").read_text()
+  )
+  report = yaml.safe_load(
+      (DASHBOARD / "bindings/report_template.yaml").read_text()
+  )
+
+  date_range = product["defaults"]["date_range"]
+  assert report["default_date_range"] == date_range
+  assert date_range["include_today"] is True
+  assert date_range["end_offset_days"] == 0
+  assert (
+      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 365
+  )
 
 
 def test_base_table_query_and_preflight_cover_the_bqaa_contract():

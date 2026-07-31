@@ -16,7 +16,7 @@ generated_report_credential_gate:
   verification_path: Resource > Manage added data sources > Edit
 link_access: PUBLIC
 publishing_mode: MANUAL
-published_date: "2026-07-27"
+published_date: "2026-07-29"
 # This attestation covers the reviewed repository artifact. It does not prove
 # that the mutable external Looker Studio report still embeds these bytes.
 reviewed_template_sql:
@@ -24,18 +24,21 @@ reviewed_template_sql:
   reviewed_date: "2026-07-24"
   scope: repository_artifact_only
 live_template_verification:
-  verified_date: "2026-07-27"
+  verified_date: "2026-07-29"
   repository_sql_sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
   method:
     - connector_custom_query_review
+    - page_bounds_containment_probe
     - sqlreplace_table_only_smoke_test
     - canonical_viewer_credentials_review
     - published_eight_page_ux_smoke_test
     - published_non_degenerate_chart_data_capture
     - editor_configuration_assertions
     - published_tool_page_refresh
+    - published_include_today_default_validation
   result: PASSED
   limitation: mutable_external_report_requires_reverification_after_changes
+known_live_issues: []
 product_contract: spec/product_contract.yaml
 viewer_qa_contract:
   issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381
@@ -44,7 +47,7 @@ viewer_qa_contract:
   observed_baseline_comment: >-
     https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/383#issuecomment-5098030747
 product_verification:
-  verified_date: "2026-07-27"
+  verified_date: "2026-07-28"
   pages: 8
   checks:
     - expected_page_and_chart_titles_present
@@ -59,6 +62,7 @@ product_verification:
     - tool_charts_exclude_non_completed_rows
     - multi_series_charts_use_categorical_legends
     - no_partial_update_footer_after_refresh
+    - default_date_range_includes_today_on_seven_dashboard_pages
   result: PASSED
 source_contract:
   mode: BASE_TABLE
@@ -74,7 +78,7 @@ governance:
   transfer_status: PENDING_MAINTAINER
 default_date_range:
   mode: rolling
-  start_offset_days: 365
-  end_offset_days: 1
-  include_today: false
+  start_offset_days: 364
+  end_offset_days: 0
+  include_today: true
   page_scope: all_dashboard_pages
