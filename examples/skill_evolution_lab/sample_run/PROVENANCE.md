@@ -75,7 +75,7 @@ fresh `--rounds 2` gate run at that SHA.
 | --- | --- |
 | Commit (clean tree) | `a5ff27c` |
 | UTC times | run start 2026-07-29 07:49:51, wall 13m26s (end ≈ 08:03:17, incl. post-persist compare/gate/restore); first → last persisted row 07:49:53 → 08:01:20 |
-| Project / dataset | `agent-skill-lab-01` / `u6_ae8b_20260729_074933` (7-day table expiration, label `u6:ae8b`) |
+| Project / dataset | `agent-skill-lab-01` / `u6_ae8b_20260729_074933` (7-day table expiration, label `u6:ae8b`) — torn down after the persisted-data checks above were captured (2026-07-29); a 2026-07-31 read-only listing confirms no `u6_*` datasets remain |
 | Table / run label | `agent_events` (only table) / `lab_20260729_074951_467892704` |
 | Command | `DATASET_ID=u6_ae8b_… ./run_e2e_demo.sh --agent-model gemini-3.1-flash-lite --rounds 2` |
 | Models | unchanged: agent `gemini-3.1-flash-lite` (Vertex `global`); analyst `gemini-3.1-pro-preview`; judge `gemini-2.5-flash` @ `us-central1`, server-side |
@@ -156,8 +156,15 @@ reused_all3,first_row,last_row
 80,2026-07-28 18:33:57,2026-07-28 18:45:43
 ```
 
-**Re-verified on a seeded replica (2026-07-29).** The five committed
-traffic/report pairs were seeded into fresh expiring scratch
+**Re-verified on a seeded replica (2026-07-29).** Scope note: this replica
+was built at 02:29 UTC from the SUPERSEDED (`c143f83`) recording's
+traffic/report pairs — before the 07:49 replacement run existed — so it
+verifies that recording's row counts (166/220/256/338/332) and the SDK
+isolation behavior, not the current recording's counts (the current
+recording's persisted-data checks were run directly against its live gate
+dataset and are recorded in the replacement section above). The five
+committed traffic/report pairs of that recording were seeded into fresh
+expiring scratch
 `agent-skill-lab-01.u6_evid_20260729_022933` (7-day expiration, label
 `u6:evidence`) via `run_agent.py --seed-bigquery <traffic> --seed-report
 <report>` under the original run/slice labels — the replica reproduced the

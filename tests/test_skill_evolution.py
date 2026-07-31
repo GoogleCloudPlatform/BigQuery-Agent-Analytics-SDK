@@ -610,3 +610,65 @@ class TestToolSpanPairing:
         if r["event_type"] in ("USER_MESSAGE_RECEIVED", "LLM_RESPONSE")
     }
     assert starts[0]["span_id"] not in others
+
+
+class TestDocsMatchRecording:
+  """Public docs are pinned to the committed recording's result artifacts.
+
+  Requested in #385 review: another sample_run regeneration must not be able
+  to silently leave the repository narrative (README/VERIFICATION/examples
+  index/sample README) describing a superseded recording.
+  """
+
+  _LAB = os.path.join(
+      os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+  )
+
+  def _read(self, *parts):
+    with open(os.path.join(self._LAB, *parts)) as f:
+      return f.read()
+
+  def _overall(self, text):
+    import re
+
+    m = re.search(
+        r"\| Overall \| (\d+\.\d+% \(\d+/80\)) \| (\d+\.\d+% \(\d+/80\)) \|",
+        text,
+    )
+    assert m, "Overall row missing from result artifact"
+    return m.group(1), m.group(2)
+
+  def test_headline_rates_and_winner_pinned_everywhere(self):
+    v0_rate, v1_rate = self._overall(self._read("sample_run", "RESULT.md"))
+    r2 = self._read("sample_run", "RESULT_ROUND2.md")
+    v1_again, v2_rate = self._overall(r2)
+    assert v1_again == v1_rate, "RESULT vs RESULT_ROUND2 disagree on V1"
+
+    def pct(rate):
+      return float(rate.split("%")[0])
+
+    winner = "V2" if pct(v2_rate) > pct(v1_rate) else "V1"
+
+    docs = {
+        "VERIFICATION.md": self._read("VERIFICATION.md"),
+        "README.md": self._read("README.md"),
+        "sample_run/README.md": self._read("sample_run", "README.md"),
+        "examples/README.md": self._read("..", "README.md"),
+    }
+    for name, text in docs.items():
+      for rate in (v0_rate.split(" ")[0], v1_rate.split(" ")[0]):
+        assert rate in text, f"{name} missing headline rate {rate}"
+      assert v2_rate.split(" ")[0] in text, f"{name} missing V2 rate"
+    # The kept-version narrative must match the artifacts: when V2 wins, no
+    # doc may claim the incumbent was kept for THIS recording (and vice
+    # versa the numbers above pin the refusal story).
+    if winner == "V2":
+      assert (
+          "kept V2" in docs["README.md"]
+          or "kept **V2**" in docs["README.md"]
+          or "**kept V2**" in docs["README.md"]
+      ), "lab README does not state that V2 was kept"
+      assert (
+          "kept" in docs["VERIFICATION.md"]
+          and "97.5%" in docs["VERIFICATION.md"]
+      )

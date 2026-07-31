@@ -135,15 +135,15 @@ out-of-scope ones have no golden entry and are scored separately as declines):
 
 ```text
   ▶ STEP 1/4: V0 BASELINE (flawed skill)
-     V0 test:   30.0% (21/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V0 test:   28.6% (20/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 2/4: EVOLVE THE SKILL   (analyst=gemini-3.1-pro-preview -- the slow step)
   ▶ STEP 3/4: MEASURE V1 (held-out)
-     V1 test:   98.6% (69/70 matched to the answer key, of 80 total; 10 out-of-scope)
+     V1 test:   91.4% (64/70 matched to the answer key, of 80 total; 10 out-of-scope)
   ▶ STEP 4/4: COMPARE V0 vs V1
 
 | Metric                    | V0 (flawed)   | V1 (evolved)   | Delta    |
-| Overall                   | 35.0% (28/80) | 98.8% (79/80)  | +63.8pp  |
-| Corrections (anti-parrot) | 0.0% (0/15)   | 100.0% (15/15) | +100.0pp |
+| Overall                   | 32.5% (26/80) | 91.2% (73/80)  | +58.7pp  |
+| Corrections (anti-parrot) | 0.0% (0/15)   | 93.3% (14/15)  | +93.3pp  |
 ```
 
 Numbers vary slightly run-to-run (LLM nondeterminism), but the direction is
@@ -164,8 +164,9 @@ V1** — otherwise the incumbent V1 stays and `RESULT_ROUND2.md` +
 `v2_selection.txt` record why. Both outcomes are the demo working as designed:
 a gain proves the loop compounds; a kept incumbent proves the guard holds. The
 committed [`sample_run/`](sample_run/) is a `--rounds 2` recording — its V2
-came back *worse* overall and the gate kept the incumbent
-(`sample_run/RESULT_ROUND2.md`).
+fixed every remaining single-turn miss and beat V1 (91.2% → 97.5% overall),
+so the gate **kept V2** (`sample_run/RESULT_ROUND2.md`). An earlier recording
+in the PR history shows the opposite outcome: a worse V2 refused, V1 kept.
 
 ### BigQuery end to end: one shared table, server-side golden-grounded judging
 

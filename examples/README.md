@@ -100,10 +100,11 @@ cd skill_evolution_lab
 ```
 
 A verified run (gemini-3.1-flash-lite — the default agent — golden-graded,
-80-question held-out set): **V0 37.5% → V1 97.5%** overall (+60pp); corrections
-(anti-parroting) **0% → 100%** with parroted sub-trajectories **11 → 0**;
-evolved skill ~2.4KB. A committed round-2 recording shows the held-out gate
-refusing a V2 that merely tied V1. See the example's
+80-question held-out set, `--rounds 2`): **V0 32.5% → V1 91.2% → V2 97.5%**
+overall — round 2's V2 fixed every remaining single-turn miss, beat V1, and
+was **kept** by the strict-win gate; corrections (anti-parroting) **0% →
+93% → 100%** with parroted sub-trajectories **11 → 0**; evolved skill ~2.7KB.
+See the example's
 [README](skill_evolution_lab/README.md) and
 [VERIFICATION](skill_evolution_lab/VERIFICATION.md).
 

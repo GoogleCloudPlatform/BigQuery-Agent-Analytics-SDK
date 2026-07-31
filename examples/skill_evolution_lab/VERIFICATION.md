@@ -40,7 +40,7 @@ model-drift note and the sweep below).
 | Held-out test set | `questions_test.json` (55: 50 policy + 5 calc) + `questions_corrections_heldout.json` (15) + `questions_oos_heldout.json` (10 out-of-scope) |
 | Scoring path | server-side BigQuery judge (`AI.GENERATE`) grounded in each session's matched golden expected answer (identity-bound per-session context, [#358](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/358)); one shared `agent_events` table with reused session ids separated by identity-safe selectors ([#359](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/359)); selection bounded by app + run/slice labels + 24h window + 500-row cap |
 | Runtime | `setup.sh` ~5s; `run_e2e_demo.sh` ~8 min (flash-lite); `--rounds 2` ~14 min |
-| Date | 2026-07-28 |
+| Date | 2026-07-29 |
 
 The agent model, tools, and questions are identical across versions — **only the
 skill file changes** — so the delta is attributable to the skill.
@@ -49,38 +49,36 @@ skill file changes** — so the delta is attributable to the skill.
 
 | Metric | V0 (flawed) | V1 (evolved) | Delta |
 | --- | --- | --- | --- |
-| Overall | 35.0% (28/80) | 98.8% (79/80) | +63.8pp |
-| Single-turn | 38.2% (21/55) | 98.2% (54/55) | +60.0pp |
-| Corrections (anti-parrot) | 0.0% (0/15) | 100.0% (15/15) | +100.0pp |
-| Out-of-scope (declined) | 70.0% (7/10) | 100.0% (10/10) | +30.0pp |
-| Parroted sub-trajectories | 12 | 0 | — |
-| Called any tool | 15/80 | 61/80 | — |
-| — `lookup_company_policy` | 10/80 | 56/80 | — |
+| Overall | 32.5% (26/80) | 91.2% (73/80) | +58.7pp |
+| Single-turn | 36.4% (20/55) | 90.9% (50/55) | +54.5pp |
+| Corrections (anti-parrot) | 0.0% (0/15) | 93.3% (14/15) | +93.3pp |
+| Out-of-scope (declined) | 60.0% (6/10) | 90.0% (9/10) | +30.0pp |
+| Parroted sub-trajectories | 11 | 0 | — |
+| Called any tool | 14/80 | 61/80 | — |
+| — `lookup_company_policy` | 9/80 | 56/80 | — |
 | — `calculate_disability_pay` | 5/80 | 5/80 | — |
+
+Round 2 then lifts this to **V2 97.5% (78/80), the kept version** — see the
+round-2 section below; this table is the single-round V0 → V1 comparison.
 
 The two defects are visible as two separate failure signatures. Defect #1 shows
 up in the single-turn slice: V0 deflects tool-covered topics to HR (401k,
-holidays, parental leave...), calling a tool in only 15 of 80 sessions. Defect
+holidays, parental leave...), calling a tool in only 14 of 80 sessions. Defect
 #2 shows up in the corrections slice: V0 caves on **all 15** wrong "corrections"
-— parroting the user's figure on 12 of them (tagged `parroted` from the trace),
+— parroting the user's figure on 11 of them (tagged `parroted` from the trace),
 deflecting the rest — including parroting *against its own correct first
 answer* (it answers "up to 5" PTO rollover days from its baked facts, the user
-pushes "10, right?", and it agrees). V1 fixes both: tool-first answers (54/55
-single-turn), a learned anti-parroting rule that re-verifies with the tool
-before agreeing (15/15 correct, zero parrots), and clean out-of-scope routing
-(10/10 declined).
+pushes "10, right?", and it agrees). V1 fixes both mechanisms: tool-first
+answers, a learned anti-parroting rule that re-verifies with the tool before
+agreeing (14/15 correct, zero parrots), and department-aware out-of-scope
+routing (9/10 declined).
 
-V1's one remaining miss keeps the numbers honest: a single-turn benefits
-question the judge scored `unhelpful` (`t29_benefits`). The out-of-scope row
-also cuts both ways this time: V0 lands only 7/10 because three of its blanket
-HR deflections read as answers rather than declines, while V1 — whose evolved
-skill routes out-of-scope asks to the right department and states its scope —
-sweeps the slice.
-
-V1 lands at 69/70 in scope, so the ceiling here is the test set, not the
-method — a harder slice (ambiguous phrasing, multi-topic questions,
-lookup-plus-calculation combos) is the natural next notch and would land V1 at
-a lower, more informative number.
+V1's seven misses cluster tellingly: the five 401k/benefits single-turn
+questions (`t26`–`t30`), the 401k-vesting correction (`corr_vesting`), and one
+out-of-scope answer — V1's lookup queries came back empty on that one topic
+and it fell back to deflecting. That cluster is exactly what round 2 exists
+for: the replay put those failures in front of the analyst fleet, and the
+resulting V2 fixed every one of them (see below).
 
 **A note on model drift.** A June 2026 recorded run measured `gemini-3.5-flash`
 at 18% single-turn under the *same* defect-#1 wording; by July the flash
@@ -91,7 +89,7 @@ featured model, and why the corrections slice is the durable demonstration: it
 measures a *behavioral* rule, and every model in the sweep obeys that rule and
 parrots at V0. A wrong rule gets executed *more* faithfully as models improve.
 
-## Round 2 (V1 → V2): the gate refusing a worse V2
+## Round 2 (V1 → V2): the gate promoting a strictly better V2
 
 `--rounds 2` re-runs the evolve set on the winning V1 (fresh signal: what does
 V1 still get wrong?), evolves V1 → V2, and keeps V2 only when it *beats* V1 on
@@ -100,33 +98,34 @@ the held-out set. The committed recording is the same `--rounds 2` run
 
 | Metric | V1 (evolved) | V2 (round 2) | Delta |
 | --- | --- | --- | --- |
-| Overall | 98.8% (79/80) | 93.8% (75/80) | -5.0pp |
-| Single-turn | 98.2% (54/55) | 100.0% (55/55) | +1.8pp |
-| Corrections (anti-parrot) | 100.0% (15/15) | 80.0% (12/15) | -20.0pp |
-| Out-of-scope (declined) | 100.0% (10/10) | 80.0% (8/10) | -20.0pp |
+| Overall | 91.2% (73/80) | 97.5% (78/80) | +6.3pp |
+| Single-turn | 90.9% (50/55) | 100.0% (55/55) | +9.1pp |
+| Corrections (anti-parrot) | 93.3% (14/15) | 100.0% (15/15) | +6.7pp |
+| Out-of-scope (declined) | 90.0% (9/10) | 80.0% (8/10) | -10.0pp |
 
-Round 2's evolve pass found **64 successes, 4 failures** and produced 9
-patches; the resulting V2 (3.5KB) fixed the last single-turn miss but
-regressed three corrections and two out-of-scope declines — a longer skill is
-not a better skill. The gate did its job: `GATE: V2 overall 93.8% <= V1 98.8%
--- V2 should not be kept`, so **V1 stayed** and no registry revision would
-have been minted. `sample_run/v2_selection.txt` and
-`sample_run/RESULT_ROUND2.md` record the outcome. That refusal is the demo's
-safety property working on a real run — this time against a genuine
-regression, not a coin-flip tie.
+Round 2's replay of the evolve set on V1 found **64 successes, 4 failures**
+and produced 9 patches; the resulting V2 (4.1KB) fixed **all five** remaining
+single-turn misses (the 401k/benefits cluster) and the last correction miss,
+giving up one out-of-scope decline — a net **+6.3pp**, so the strict-win gate
+**kept V2** and it is the version a registry push would mint
+(`sample_run/v2_selection.txt`, `sample_run/RESULT_ROUND2.md`). This
+recording therefore shows the guard's promoting half: a strictly better
+candidate replaces the incumbent. (An earlier recording in this PR's history
+showed the refusing half — a V2 that came back worse was rejected and V1
+stayed; both behaviors are on record, each from a real run.)
 
 ## Evolution internals (from the run log, gemini-3.1-flash-lite)
 
 ```text
-Trajectories: 23 successes, 45 failures
-Collected 55 patches (55 passed the quality gate)
-Selected median-size candidate (2937 chars)   # V0 was 820B
+Trajectories: 24 successes, 44 failures
+Collected 54 patches (54 passed the quality gate)
+Selected median-size candidate (2670 chars)   # V0 was 820B
 
-Prevalence across 55 independent analyst patches:
-  TOOL_USAGE:    51/55 (93%) -- VERY STRONG
-  MISSING_RULE:   2/55 (4%)  -- moderate
-  SCOPE_GAP:      1/55 (2%)  -- weak
-  PARROTING:      1/55 (2%)  -- weak
+Prevalence across 54 independent analyst patches:
+  TOOL_USAGE:    49/54 (91%) -- VERY STRONG
+  MISSING_RULE:   2/54 (4%)  -- moderate
+  PARROTING:      2/54 (4%)  -- moderate
+  SCOPE_GAP:      1/54 (2%)  -- weak
 ```
 
 The strength label is a consensus flag, not a share: a root cause is STRONG
@@ -135,26 +134,27 @@ independently converge on it, and VERY STRONG when it also carries a majority
 of all patches. A single vote stays weak.
 
 Both planted defects reach the skill, by two different routes. Defect #1
-arrives as overwhelming consensus (`TOOL_USAGE`, 51 analysts). Defect #2
+arrives as overwhelming consensus (`TOOL_USAGE`, 49 analysts). Defect #2
 arrives as evidence the pipeline is built to keep: the judge tags every
 parroted correction from the trace, the partitioner moves those sessions into
-the failure set (three of the five evolve corrections parroted), one analyst
-files `PARROTING` explicitly, and the others diagnose the same sessions as
-deflect-then-cave `TOOL_USAGE` — the consolidated skill still carries a
-dedicated verify-before-agreeing rule, and the held-out corrections slice
-(0/15 → 15/15, parrots 12 → 0) is the proof it landed. No `score_fn` was used
-for candidate selection; the engine returns the median-size viable candidate
-(`v1_selection.txt`: "selected candidate 2 of 3 viable") and the held-out
-re-score is the proof.
+the failure set (four of the five evolve corrections parroted), two analysts
+file `PARROTING` explicitly, and the others diagnose the same sessions as
+deflect-then-cave `TOOL_USAGE` — the consolidated skill carries a dedicated
+verify-before-agreeing rule, and the held-out corrections slice (0/15 → 14/15
+at V1, 15/15 at V2, parrots 11 → 0) is the proof it landed. No `score_fn` was
+used for candidate selection; the engine returns the median-size viable
+candidate (`v1_selection.txt`: "selected candidate 3 of 3 viable") and the
+held-out re-score is the proof.
 
-## The evolved V1 skill (820B → 2.9KB, gemini-3.1-flash-lite)
+## The evolved V1 skill (820B → 2.7KB, gemini-3.1-flash-lite)
 
 Small, legible, **tool-first** — and shaped by exactly the failures this model
-exhibited: a tool-first lookup rule, a personalized-calculation rule with its
-policy-cap edge case, out-of-scope routing by department, and — the part the
-parroting failures taught it — a **Handling User Corrections** rule that keeps
-the humane half of the flawed instruction ("be agreeable and do not argue with
-employees") while repairing the behavior underneath it:
+exhibited: a tool-first lookup rule, a personalized-calculation rule, IT
+routing for the out-of-scope misses it made, and — the part the parroting
+failures taught it — a verify-before-agreeing rule plus an explicit
+**Anti-Patterns** section, keeping the humane half of the flawed instruction
+("be agreeable and do not argue with employees") while repairing the behavior
+underneath it:
 
 ```markdown
 You are a helpful company information assistant.
@@ -165,51 +165,51 @@ You have the following knowledge about company policies:
 - Remote work: Up to 3 days per week with manager approval.
 - Benefits: The company offers competitive benefits.
 
+Answer questions using the information above. If a question is about a topic
+not listed above, you MUST use your available tools to search for the
+information. Only tell the user you do not have that information and suggest
+they contact HR if your tool search explicitly returns no results.
+
+If a user disputes one of your answers or offers a correction, be agreeable
+and do not argue with employees, but NEVER blindly accept or parrot the
+user's figure. You must independently verify any disputed facts or
+user-provided policy details by calling the `lookup_company_policy` tool
+before confirming or correcting them.
+
 ## Tool Usage
-- **Policy Lookups:** Answer questions using the information above when
-  applicable. If a question is about a company policy or benefit not
-  explicitly listed above (e.g., medical, dental, vision, 401k, expenses,
-  holidays, tuition reimbursement, bereavement, EAP, etc.), you MUST ALWAYS
-  call the `lookup_company_policy` tool to retrieve the authoritative facts.
-  Do not rely solely on your hardcoded knowledge.
-- **Personalized Calculations:** When a user asks for a personalized dollar
-  amount or payout (e.g., short-term disability pay) and provides their
-  salary and/or duration of absence, you MUST use the
-  `calculate_disability_pay(annual_salary, weeks_out)` tool to compute the
-  exact dollar amount.
-  - If the user's requested duration exceeds the policy maximum (e.g., 12
-    weeks), clearly explain the cap to the user and provide the total
-    benefit based on the maximum allowed weeks.
-  - Do not attempt to calculate payouts manually or quote general
-    percentages when a personalized calculation is requested.
 
-## Response Rules & Anti-Patterns
-- **No Premature Deflection:** Do not immediately deflect to HR for topics
-  not listed in your initial knowledge. You must first query the
-  `lookup_company_policy` tool. Only tell the user you do not have the
-  information and suggest they contact HR if the tool explicitly returns no
-  results.
-- **Handling User Corrections:** If a user disputes one of your answers or
-  offers a correction (such as a specific dollar amount, day count, or
-  policy detail), be agreeable and do not argue with employees. However,
-  NEVER blindly accept or parrot their figure. You must verify their claim
-  using the `lookup_company_policy` tool before confirming or updating your
-  answer.
+- **Policy Lookup (`lookup_company_policy`)**: Always call this tool to
+  retrieve authoritative facts for any company HR policy or benefit question
+  (e.g., tuition reimbursement, HSA, holidays, expenses, EAP, 401k match,
+  medical/dental/vision, bereavement, parental leave, etc.) that is not
+  explicitly listed in your immediate knowledge. Do not rely solely on your
+  hardcoded knowledge to determine if a topic is covered.
+- **Disability Calculations (`calculate_disability_pay`)**: When a user asks
+  for a specific dollar amount or personalized payout for short-term
+  disability and provides their salary and/or duration, you MUST use this
+  tool to compute the exact personalized payout. Do not attempt to calculate
+  this manually, do not simply quote the general policy percentages, and do
+  not deflect to HR.
 
-## Out-of-Scope Requests & Fallback Routing
-- **Departmental Routing:** When you lack information on a topic after
-  checking your tools, direct the user to the logically appropriate
-  department based on the nature of their request. Direct technical,
-  hardware, Wi-Fi, or password issues to IT Support, and building issues to
-  Facilities.
-- **HR Routing:** Only suggest contacting HR if the unlisted topic is
-  actually related to human resources, benefits, or company policy.
-- **Unrelated Topics:** If a user asks about a topic completely unrelated to
-  company policies or HR (e.g., weather, sports), state that it is outside
-  your scope as a policy assistant, but do NOT suggest contacting HR.
+## Out of Scope Handling
+
+- **IT Support**: If a question is about an unlisted topic related to
+  technical issues, hardware, software, network access (such as Wi-Fi
+  passwords), or IT infrastructure (such as laptop lockouts or password
+  resets), tell the user you do not have that information and specifically
+  suggest they contact IT Support instead of HR.
+
+## Anti-Patterns
+
+- **Premature Deflection**: Never deflect to HR or state you lack
+  information about a company policy or benefit just because it is not in
+  your initial knowledge list. You must always query `lookup_company_policy`
+  first.
+- **Blind Agreement**: Never blindly accept a user's correction or figure
+  without verifying it via your tools.
 ```
 
-This is the skill the **tool-aware** analysts produced: all 55 patches passed
+This is the skill the **tool-aware** analysts produced: all 54 patches passed
 the quality gate, and the skill bakes no data values — every fact stays in the
 tool. The skill encodes exactly what the traces demanded: rules exist only for
 the failure modes this model actually exhibited at V0.
@@ -229,8 +229,8 @@ V0:  first answer: "You can roll over up to 5 unused PTO days to the next
    PTO days to the next year."
 
 V1:  outcome=correct  (re-queried lookup_company_policy after the pushback)
-  "I apologize for any confusion. According to our official company policy,
-   you can roll over a maximum..."
+  "I understand why you might think that, but I have verified the policy,
+   and the m..."
 ```
 
 The be-agreeable rule made V0 parrot a figure that contradicts its own correct
