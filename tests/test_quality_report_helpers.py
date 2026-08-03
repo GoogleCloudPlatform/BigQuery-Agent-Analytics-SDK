@@ -19,9 +19,26 @@ effects (logging.basicConfig, dotenv) have been moved into _configure_logging()
 and _load_dotenv() so the module is safe to import without triggering them.
 """
 
+from datetime import datetime
+from datetime import timezone
+import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+
+import pytest
+
+import bigquery_agent_analytics
+from bigquery_agent_analytics.categorical_evaluator import CategoricalContextSource
+from bigquery_agent_analytics.categorical_evaluator import CategoricalEvaluationReport
+from bigquery_agent_analytics.categorical_evaluator import CategoricalMetricResult
+from bigquery_agent_analytics.categorical_evaluator import CategoricalSessionResult
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 # Make scripts/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
@@ -45,6 +62,7 @@ from quality_report import generate_quality_report
 from quality_report import get_a2a_response
 from quality_report import get_user_input
 from quality_report import print_quality_report
+import quality_report as quality_report_module
 
 # ---------------------------------------------------------------------------
 # Lightweight stubs for report objects
@@ -75,15 +93,667 @@ class _FakeMetric:
 
 class _FakeSession:
 
-  def __init__(self, session_id, metrics):
+  def __init__(self, session_id, metrics, details=None):
     self.session_id = session_id
     self.metrics = metrics
+    self.details = details or {}
 
 
 class _FakeReport:
 
   def __init__(self, session_results):
     self.session_results = session_results
+
+
+class TestIdentityAwareReportMaps:
+
+  @staticmethod
+  def _trace(user_id, run):
+    now = datetime.now(tz=timezone.utc)
+    identity = TraceIdentity(
+        session_id="shared", user_id=user_id, root_agent_name="root"
+    )
+    scope = TraceScope(custom_labels={"run": run})
+    return Trace(
+        trace_id=f"trace-{run}",
+        session_id="shared",
+        user_id=user_id,
+        identity=identity,
+        scope=scope,
+        spans=[
+            Span(
+                event_type="USER_MESSAGE_RECEIVED",
+                agent="root",
+                timestamp=now,
+                content={"text": f"question-{run}"},
+                span_id=f"user-{run}",
+            ),
+            Span(
+                event_type="LLM_RESPONSE",
+                agent="root",
+                timestamp=now,
+                content={"response": f"answer-{run}"},
+                span_id=f"answer-{run}",
+            ),
+        ],
+        start_time=now,
+        end_time=now,
+    )
+
+  def test_colliding_resolved_traces_survive_and_match_score_details(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module.resolve_trace_responses(traces)
+    indexed = quality_report_module._index_resolved_entries(resolved)
+
+    assert len(indexed) == 2
+    assert {entry["user_id"] for entry in indexed.values()} == {
+        "alice",
+        "bob",
+    }
+
+    for trace in traces:
+      score = _FakeSession(
+          "shared",
+          [],
+          details={
+              "user_id": trace.identity.user_id,
+              "root_agent_name": trace.identity.root_agent_name,
+              "scope_signature": trace.scope.scope_signature,
+          },
+      )
+      context = quality_report_module._resolved_context_for_score(
+          indexed, score
+      )
+      assert context["user_id"] == trace.identity.user_id
+      assert context["scope_signature"] == trace.scope.scope_signature
+
+  def test_session_only_score_does_not_pick_one_collision(self, caplog):
+    resolved = quality_report_module.resolve_trace_responses(
+        [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    )
+    indexed = quality_report_module._index_resolved_entries(resolved)
+
+    context = quality_report_module._resolved_context_for_score(
+        indexed, _FakeSession("shared", [])
+    )
+
+    assert context == {}
+    assert "ambiguous" in caplog.text.lower()
+
+  def test_trajectory_selection_skips_unattributed_collision(self, caplog):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    report = _FakeReport(
+        [
+            _FakeSession(
+                "shared",
+                [_FakeMetric("response_usefulness", "unhelpful")],
+            )
+        ]
+    )
+
+    session_ids, selected = quality_report_module._select_trajectory_population(
+        report,
+        resolved,
+        1,
+    )
+
+    assert session_ids == []
+    assert selected == {}
+    assert "ambiguous" in caplog.text.lower()
+
+  def test_trajectory_selection_keeps_only_the_attributed_score_context(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    selected_trace = traces[1]
+    report = _FakeReport(
+        [
+            _FakeSession(
+                "shared",
+                [_FakeMetric("response_usefulness", "unhelpful")],
+                details={
+                    "user_id": selected_trace.identity.user_id,
+                    "root_agent_name": selected_trace.identity.root_agent_name,
+                    "scope_signature": selected_trace.scope.scope_signature,
+                },
+            )
+        ]
+    )
+
+    session_ids, selected = quality_report_module._select_trajectory_population(
+        report,
+        resolved,
+        1,
+    )
+
+    assert session_ids == ["shared"]
+    assert list(selected.values()) == [
+        resolved[
+            (
+                "shared",
+                "bob",
+                "root",
+                selected_trace.scope.scope_signature,
+            )
+        ]
+    ]
+
+  def test_built_report_index_reuses_attribution_lookup(self):
+    trace = self._trace("alice", "v0")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([trace])
+    )
+    score = _FakeSession(
+        "shared",
+        [],
+        details={
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "scope_signature": trace.scope.scope_signature,
+        },
+    )
+
+    def _unexpected_full_scan():
+      raise AssertionError("correlation rescanned the full report index")
+
+    resolved.items = _unexpected_full_scan
+
+    assert (
+        quality_report_module._resolved_context_for_score(resolved, score)[
+            "user_id"
+        ]
+        == "alice"
+    )
+
+  def test_collision_safe_trace_index_retains_both_candidates(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+
+    indexed = quality_report_module._index_traces(traces)
+
+    assert len(indexed) == 2
+    assert {trace.identity.user_id for trace in indexed.values()} == {
+        "alice",
+        "bob",
+    }
+
+  def test_golden_matching_preserves_exact_selector_keys(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    selectors = [
+        ResolvedTraceSelector(
+            identity=trace.identity,
+            scope=trace.scope,
+        )
+        for trace in traces
+    ]
+    questions = {
+        selectors[0]: "alice question",
+        selectors[1]: "bob question",
+    }
+    golden = [
+        {"question": "alice golden", "expected_answer": "alice answer"},
+        {"question": "bob golden", "expected_answer": "bob answer"},
+    ]
+
+    def fake_embeddings(texts, **kwargs):
+      return [[1.0, 0.0] if "alice" in text else [0.0, 1.0] for text in texts]
+
+    monkeypatch.setattr(quality_report_module, "_embed_texts", fake_embeddings)
+
+    contexts, metadata = quality_report_module.match_golden_qa(
+        questions, golden
+    )
+
+    assert set(contexts) == set(selectors)
+    assert set(metadata) == set(selectors)
+    assert "alice answer" in contexts[selectors[0]]
+    assert "bob answer" in contexts[selectors[1]]
+
+  def test_bigquery_run_passes_selector_keyed_golden_context(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    captured = {}
+
+    class FakeClient:
+
+      def list_traces(self, filter_criteria):
+        return traces
+
+      def evaluate_categorical(self, **kwargs):
+        captured.update(kwargs)
+        results = []
+        for trace in traces:
+          results.append(
+              CategoricalSessionResult(
+                  session_id=trace.session_id,
+                  identity=trace.identity,
+                  scope=trace.scope,
+                  metrics=[
+                      CategoricalMetricResult(
+                          metric_name="response_usefulness",
+                          category="meaningful",
+                      )
+                  ],
+                  details={
+                      "user_id": trace.identity.user_id,
+                      "root_agent_name": trace.identity.root_agent_name,
+                      "scope_signature": trace.scope.scope_signature,
+                  },
+              )
+          )
+        return CategoricalEvaluationReport(
+            dataset="test",
+            total_sessions=2,
+            session_results=results,
+        )
+
+    def fake_match(questions, golden_qa, threshold):
+      captured["question_keys"] = set(questions)
+      return (
+          {
+              selector: f"context:{selector.identity.user_id}"
+              for selector in questions
+          },
+          {selector: {"matched": True} for selector in questions},
+      )
+
+    monkeypatch.setattr(quality_report_module, "get_client", FakeClient)
+    monkeypatch.setattr(quality_report_module, "match_golden_qa", fake_match)
+
+    quality_report_module.run_evaluation(
+        model="gemini-test",
+        limit=2,
+        eval_spec={
+            "golden_qa": [
+                {"question": "q", "expected_answer": "a"},
+            ]
+        },
+    )
+
+    expected = {
+        ResolvedTraceSelector(identity=trace.identity, scope=trace.scope)
+        for trace in traces
+    }
+    assert captured["question_keys"] == expected
+    assert set(captured["per_session_context"]) == expected
+    assert (
+        captured["context_source"]
+        is CategoricalContextSource.GOLDEN_EXPECTED_ANSWER
+    )
+
+  def test_trace_fetch_limit_counts_resolved_identity_scope_candidates(self):
+    resolved = quality_report_module._index_resolved_entries(
+        [
+            {
+                "session_id": "shared",
+                "user_id": "alice",
+                "root_agent_name": "root",
+                "scope_signature": "scope-a",
+            },
+            {
+                "session_id": "shared",
+                "user_id": "bob",
+                "root_agent_name": "root",
+                "scope_signature": "scope-b",
+            },
+            {
+                "session_id": "other",
+                "user_id": "carol",
+                "root_agent_name": "root",
+                "scope_signature": "scope-c",
+            },
+        ]
+    )
+
+    assert quality_report_module._trace_fetch_limit(resolved, ["shared"]) == 2
+    assert (
+        quality_report_module._trace_fetch_limit(resolved, ["shared", "other"])
+        == 3
+    )
+
+  def test_explicit_report_limit_reserves_u2_candidates_per_session(self):
+    assert quality_report_module._explicit_report_trace_limit(["shared"]) == 64
+    assert (
+        quality_report_module._explicit_report_trace_limit(
+            ["shared", "other", "shared"]
+        )
+        == 128
+    )
+
+  def test_fetch_session_traces_uses_resolved_trace_limit(self, monkeypatch):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    requested_limits = []
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        requested_limits.append(filter_criteria.limit)
+        return traces
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"], max_sessions=1, max_traces=2
+    )
+
+    assert requested_limits == [2, 4]
+    assert len(fetched) == 2
+
+  def test_fetch_session_traces_retains_only_report_attribution(
+      self, monkeypatch
+  ):
+    alice = self._trace("alice", "v0")
+    bob = self._trace("bob", "v1")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([alice])
+    )
+    captured = {}
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        captured["filter"] = filter_criteria
+        # The foreign trace is deliberately first, matching the failure mode
+        # where a newer same-session scope would otherwise fill the limit.
+        return [bob, alice]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert captured["filter"].limit == 64
+    assert list(fetched.values()) == [alice]
+
+  def test_fetch_session_traces_expands_past_64_scope_candidates(
+      self, monkeypatch
+  ):
+    traces = [self._trace("alice", f"v{i:02d}") for i in range(65)]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    requested_limits = []
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        requested_limits.append(filter_criteria.limit)
+        return traces[: filter_criteria.limit]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert requested_limits == [64, 128]
+    assert len(fetched) == 65
+
+  def test_complete_report_listing_fails_instead_of_returning_capped_page(
+      self, monkeypatch
+  ):
+    import pytest
+
+    traces = [self._trace("alice", f"v{i:02d}") for i in range(64)]
+
+    class _FakeClient:
+
+      def list_traces(self, filter_criteria):
+        return traces[: filter_criteria.limit]
+
+    monkeypatch.setattr(
+        quality_report_module, "_REPORT_TRACE_LIMIT_CEILING", 64
+    )
+
+    with pytest.raises(
+        quality_report_module._ReportTracePopulationTruncatedError,
+        match="no partial report",
+    ):
+      quality_report_module._list_complete_report_traces(
+          _FakeClient(),
+          bigquery_agent_analytics.TraceFilter(
+              session_ids=["shared"],
+              limit=64,
+          ),
+      )
+
+  def test_fetch_session_traces_fails_closed_for_legacy_collision(
+      self, monkeypatch, caplog
+  ):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        [{"session_id": "shared", "question": "legacy"}]
+    )
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        del filter_criteria
+        return traces
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    fetched = quality_report_module._fetch_session_traces(
+        ["shared"],
+        max_sessions=1,
+        max_traces=1,
+        resolved_map=resolved,
+    )
+
+    assert fetched == {}
+    assert "legacy report context" in caplog.text
+
+  def test_markdown_trajectory_skips_trace_outside_report_attribution(
+      self, monkeypatch, caplog
+  ):
+    alice = self._trace("alice", "v0")
+    bob = self._trace("bob", "v1")
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses([alice])
+    )
+    written = []
+    monkeypatch.setattr(
+        quality_report_module,
+        "_render_trace",
+        lambda _trace: "FOREIGN TRACE",
+    )
+
+    quality_report_module._md_write_trajectory_section(
+        written.append,
+        quality_report_module._index_traces([bob]),
+        resolved,
+    )
+
+    rendered = "\n".join(written)
+    assert "FOREIGN TRACE" not in rendered
+    assert "trace outside the resolved report population" in caplog.text
+
+  def test_unique_legacy_context_matches_scoped_trace_both_directions(self):
+    trace = self._trace("alice", "v0")
+    legacy_context = {
+        "session_id": "shared",
+        "question": "legacy question",
+    }
+    resolved = {"shared": legacy_context}
+    trajectories = quality_report_module._index_traces([trace])
+
+    assert (
+        quality_report_module._trace_for_context(trajectories, legacy_context)
+        is trace
+    )
+    assert (
+        quality_report_module._resolved_context_for_trace(resolved, trace)
+        is legacy_context
+    )
+
+  def test_json_output_correlates_colliding_scores_by_attribution(self):
+    traces = [self._trace("alice", "v0"), self._trace("bob", "v1")]
+    resolved = quality_report_module._index_resolved_entries(
+        quality_report_module.resolve_trace_responses(traces)
+    )
+    scores = [
+        CategoricalSessionResult(
+            session_id="shared",
+            identity=trace.identity,
+            scope=trace.scope,
+            context_applied=True,
+            context_source=(CategoricalContextSource.GOLDEN_EXPECTED_ANSWER),
+            execution_mode="ai_generate",
+            details={
+                "user_id": trace.identity.user_id,
+                "root_agent_name": trace.identity.root_agent_name,
+                "scope_signature": trace.scope.scope_signature,
+            },
+        )
+        for trace in traces
+    ]
+    report = CategoricalEvaluationReport(
+        dataset="test",
+        total_sessions=2,
+        session_results=scores,
+    )
+
+    output = quality_report_module._build_json_output(report, resolved)
+
+    assert [row["user_id"] for row in output["sessions"]] == [
+        "alice",
+        "bob",
+    ]
+    assert [row["question"] for row in output["sessions"]] == [
+        "question-v0",
+        "question-v1",
+    ]
+    assert all(row["context_applied"] is True for row in output["sessions"])
+    assert {row["context_source"] for row in output["sessions"]} == {
+        "golden_expected_answer"
+    }
+    assert {row["execution_mode"] for row in output["sessions"]} == {
+        "ai_generate"
+    }
+    suffix = quality_report_module._report_identity_suffix(
+        resolved[next(iter(resolved))]
+    )
+    assert "user=" in suffix
+    assert "scope=" in suffix
+    coverage_suffix = quality_report_module._report_identity_suffix(
+        {
+            "scope_signature": None,
+            "scope_coverage": tuple(
+                trace.scope.scope_signature for trace in traces
+            ),
+        }
+    )
+    assert "scope_coverage=" in coverage_suffix
+    assert traces[0].scope.scope_signature in coverage_suffix
+    assert traces[1].scope.scope_signature in coverage_suffix
+
+  def test_json_to_markdown_retains_colliding_identity_attribution(
+      self, tmp_path, monkeypatch
+  ):
+    scopes = [
+        TraceScope(custom_labels={"run": "v0"}),
+        TraceScope(custom_labels={"run": "v1"}),
+    ]
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": user_id,
+            "root_agent_name": "root",
+            "scope_signature": scope.scope_signature,
+            "question": f"question-{run}",
+            "response": f"answer-{run}",
+            "is_a2a": is_a2a,
+            "metrics": {
+                "response_usefulness": {
+                    "category": "unhelpful",
+                    "justification": f"reason-{run}",
+                },
+                "failure_attribution": {
+                    "category": failure_class,
+                    "justification": f"failure-{run}",
+                },
+            },
+        }
+        for user_id, run, scope, is_a2a, failure_class in zip(
+            ("alice", "bob"),
+            ("v0", "v1"),
+            scopes,
+            (True, False),
+            ("knowledge_gap", "tool_gap"),
+        )
+    ]
+    json_path = tmp_path / "collision.json"
+    json_path.write_text(
+        json.dumps({"sessions": sessions, "details": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "local")
+
+    quality_report_module._render_md_from_json(
+        str(json_path), SimpleNamespace(model=None, samples=None)
+    )
+    markdown = json_path.with_suffix(".md").read_text(encoding="utf-8")
+
+    assert "user=alice" in markdown
+    assert "user=bob" in markdown
+    assert scopes[0].scope_signature in markdown
+    assert scopes[1].scope_signature in markdown
+    assert "question-v0" in markdown
+    assert "question-v1" in markdown
+    assert markdown.count("[A2A]") == 1
+
+    knowledge_gap = markdown.split(
+        "### Knowledge Gaps (add a fact to existing data)", 1
+    )[1].split("### Tool Gaps (build a new tool / data source)", 1)[0]
+    tool_gap = markdown.split(
+        "### Tool Gaps (build a new tool / data source)", 1
+    )[1].split("## Category Distributions", 1)[0]
+    assert "question-v0" in knowledge_gap
+    assert "question-v1" not in knowledge_gap
+    assert "question-v1" in tool_gap
+    assert "question-v0" not in tool_gap
 
 
 # ================================================================== #
@@ -609,6 +1279,206 @@ class TestInjectGoldenSummary:
     gs = report["summary"]["golden_eval_summary"]
     assert gs["matched_meaningful"] == 1
     assert gs["matched_unhelpful"] == 0
+
+  def test_unattributed_collision_does_not_use_legacy_golden_metadata(self):
+    sessions = [
+        {
+            "session_id": "shared",
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "metrics": {"response_usefulness": {"category": "unhelpful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            "shared": {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert [session["golden_eval"] for session in sessions] == [None, None]
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
+
+  def test_attributed_row_does_not_use_legacy_golden_metadata(self):
+    scope = TraceScope(custom_labels={"run": "v0"})
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v0"},
+            "scope_signature": scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        }
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            "shared": {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert sessions[0]["golden_eval"] is None
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
+
+  def test_colliding_session_ids_receive_their_exact_golden_match(self):
+    alice_scope = TraceScope(custom_labels={"run": "v0"})
+    bob_scope = TraceScope(custom_labels={"run": "v1"})
+    alice = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "alice", "root"),
+        scope=alice_scope,
+    )
+    bob = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "bob", "root"),
+        scope=bob_scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v0"},
+            "scope_signature": alice_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "user_id": "bob",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "v1"},
+            "scope_signature": bob_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "unhelpful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            alice: {
+                "matched": True,
+                "expected_answer": "alice answer",
+                "topic": "alice",
+                "similarity": 1.0,
+            },
+            bob: {
+                "matched": True,
+                "expected_answer": "bob answer",
+                "topic": "bob",
+                "similarity": 1.0,
+            },
+        },
+    )
+
+    assert sessions[0]["golden_eval"]["expected_answer"] == "alice answer"
+    assert sessions[1]["golden_eval"]["expected_answer"] == "bob answer"
+    assert report["summary"]["golden_eval_summary"]["matched"] == 2
+
+  def test_nullable_identity_dimensions_receive_exact_golden_match(self):
+    anonymous_scope = TraceScope(custom_labels={"run": "anonymous"})
+    named_scope = TraceScope(custom_labels={"run": "named"})
+    anonymous = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", None, None),
+        scope=anonymous_scope,
+    )
+    named = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", "alice", "root"),
+        scope=named_scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": None,
+            "root_agent_name": None,
+            "experiment_id": None,
+            "custom_labels": {"run": "anonymous"},
+            "scope_signature": anonymous_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+        {
+            "session_id": "shared",
+            "user_id": "alice",
+            "root_agent_name": "root",
+            "experiment_id": None,
+            "custom_labels": {"run": "named"},
+            "scope_signature": named_scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        },
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            anonymous: {
+                "matched": True,
+                "expected_answer": "anonymous answer",
+                "similarity": 1.0,
+            },
+            named: {
+                "matched": True,
+                "expected_answer": "named answer",
+                "similarity": 1.0,
+            },
+        },
+    )
+
+    assert sessions[0]["golden_eval"]["expected_answer"] == "anonymous answer"
+    assert sessions[1]["golden_eval"]["expected_answer"] == "named answer"
+    assert report["summary"]["golden_eval_summary"]["matched"] == 2
+
+  @pytest.mark.parametrize("invalid_labels", [False, 0])
+  def test_invalid_falsy_labels_do_not_rebuild_exact_selector(
+      self, invalid_labels
+  ):
+    scope = TraceScope()
+    selector = ResolvedTraceSelector(
+        identity=TraceIdentity("shared", None, None),
+        scope=scope,
+    )
+    sessions = [
+        {
+            "session_id": "shared",
+            "user_id": None,
+            "root_agent_name": None,
+            "experiment_id": None,
+            "custom_labels": invalid_labels,
+            "scope_signature": scope.scope_signature,
+            "metrics": {"response_usefulness": {"category": "meaningful"}},
+        }
+    ]
+    report = self._report(sessions)
+
+    _inject_golden_summary(
+        report,
+        {
+            selector: {
+                "matched": True,
+                "expected_answer": "must not attach",
+                "similarity": 1.0,
+            }
+        },
+    )
+
+    assert sessions[0]["golden_eval"] is None
+    assert report["summary"]["golden_eval_summary"]["total_sessions"] == 0
 
 
 # ================================================================== #

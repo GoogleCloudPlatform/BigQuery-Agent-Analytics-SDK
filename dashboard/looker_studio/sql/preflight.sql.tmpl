@@ -1,0 +1,55 @@
+-- preflight.sql.tmpl — structural BQAA base-table compatibility check.
+--
+-- Reports every missing required column and rejects an object that is not a
+-- physical base table or zero-copy table clone. Zero rows means the dashboard
+-- query can run without any generated views.
+WITH required AS (
+  SELECT column_name, data_type FROM UNNEST([
+    STRUCT('timestamp' AS column_name, 'TIMESTAMP' AS data_type),
+    ('event_type', 'STRING'),
+    ('agent', 'STRING'),
+    ('session_id', 'STRING'),
+    ('invocation_id', 'STRING'),
+    ('user_id', 'STRING'),
+    ('trace_id', 'STRING'),
+    ('span_id', 'STRING'),
+    ('parent_span_id', 'STRING'),
+    ('content', 'JSON'),
+    ('attributes', 'JSON'),
+    ('latency_ms', 'JSON'),
+    ('status', 'STRING'),
+    ('error_message', 'STRING'),
+    ('is_truncated', 'BOOL')
+  ])
+),
+actual AS (
+  SELECT column_name, data_type
+  FROM `{{PROJECT}}.{{DATASET}}`.INFORMATION_SCHEMA.COLUMNS
+  WHERE table_name = '{{TABLE}}'
+),
+object AS (
+  SELECT table_type
+  FROM `{{PROJECT}}.{{DATASET}}`.INFORMATION_SCHEMA.TABLES
+  WHERE table_name = '{{TABLE}}'
+)
+SELECT
+  '{{TABLE}}' AS table_name,
+  r.column_name,
+  r.data_type AS expected_type,
+  a.data_type AS observed_type,
+  o.table_type AS observed_object_type,
+  CASE
+    WHEN o.table_type IS NULL THEN 'MISSING_TABLE'
+    WHEN o.table_type NOT IN ('BASE TABLE', 'CLONE') THEN 'WRONG_OBJECT_TYPE'
+    WHEN a.column_name IS NULL THEN 'MISSING_COLUMN'
+    ELSE 'TYPE_MISMATCH'
+  END AS problem
+FROM required r
+CROSS JOIN (SELECT 1) anchor
+LEFT JOIN object o ON TRUE
+LEFT JOIN actual a USING (column_name)
+WHERE o.table_type IS NULL
+   OR o.table_type NOT IN ('BASE TABLE', 'CLONE')
+   OR a.column_name IS NULL
+   OR a.data_type != r.data_type
+ORDER BY r.column_name

@@ -34,8 +34,13 @@ from bigquery_agent_analytics.feedback import DriftReport
 from bigquery_agent_analytics.insights import AggregatedInsights
 from bigquery_agent_analytics.insights import InsightsReport
 from bigquery_agent_analytics.insights import SessionMetadata
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
 from bigquery_agent_analytics.trace import Span
 from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.trace import TraceSelector
 
 _NOW = datetime(2026, 3, 12, 10, 0, 0, tzinfo=timezone.utc)
 
@@ -61,6 +66,24 @@ def _mock_trace():
       start_time=_NOW,
       end_time=_NOW,
       total_latency_ms=200.0,
+  )
+
+
+def _mock_ambiguity():
+  identity = TraceIdentity(
+      session_id="s1", user_id="private-user", root_agent_name="root"
+  )
+  return AmbiguousSessionError(
+      [
+          ResolvedTraceSelector(
+              identity=identity,
+              scope=TraceScope(custom_labels={"run": "private-v0"}),
+          ),
+          ResolvedTraceSelector(
+              identity=identity,
+              scope=TraceScope(custom_labels={"run": "private-v1"}),
+          ),
+      ]
   )
 
 
@@ -205,21 +228,70 @@ class TestAnalyze:
 
   def test_analyze_basic(self, rf):
     client = MagicMock()
-    client.get_session_trace.return_value = _mock_trace()
+    client.get_trace_by_selector.return_value = _mock_trace()
 
     result = rf.dispatch(client, "analyze", {"session_id": "s1"})
     assert result["trace_id"] == "t1"
-    client.get_session_trace.assert_called_once_with("s1")
+    client.get_trace_by_selector.assert_called_once_with(
+        TraceSelector(session_id="s1"), allow_mixed_scope=False
+    )
 
   def test_analyze_json_safe(self, rf):
     client = MagicMock()
-    client.get_session_trace.return_value = _mock_trace()
+    client.get_trace_by_selector.return_value = _mock_trace()
 
     result = rf.dispatch(client, "analyze", {"session_id": "s1"})
     dumped = json.dumps(result)
     parsed = json.loads(dumped)
     assert isinstance(parsed["start_time"], str)
     assert "2026-03-12" in parsed["start_time"]
+
+  def test_analyze_selector_preserves_explicit_null(self, rf):
+    client = MagicMock()
+    client.get_trace_by_selector.return_value = _mock_trace()
+    payload = {
+        "session_id": "s1",
+        "user_id": None,
+        "root_agent_name": "root",
+        "experiment_id": None,
+        "custom_labels": {"run": "v1"},
+        "scope_signature": TraceScope(
+            custom_labels={"run": "v1"}
+        ).scope_signature,
+    }
+
+    rf.dispatch(
+        client,
+        "analyze",
+        {"selector": payload, "allow_mixed_scope": True},
+    )
+
+    client.get_trace_by_selector.assert_called_once_with(
+        TraceSelector(**payload), allow_mixed_scope=True
+    )
+
+  def test_analyze_additive_fields_leave_absent_dimensions_unset(self, rf):
+    client = MagicMock()
+    client.get_trace_by_selector.return_value = _mock_trace()
+
+    rf.dispatch(
+        client,
+        "analyze",
+        {
+            "session_id": "s1",
+            "user_id": "alice",
+            "custom_labels": {"run": "v1"},
+        },
+    )
+
+    client.get_trace_by_selector.assert_called_once_with(
+        TraceSelector(
+            session_id="s1",
+            user_id="alice",
+            custom_labels={"run": "v1"},
+        ),
+        allow_mixed_scope=False,
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -428,7 +500,7 @@ class TestProcessCalls:
 
   def test_batched_calls(self, rf):
     client = MagicMock()
-    client.get_session_trace.return_value = _mock_trace()
+    client.get_trace_by_selector.return_value = _mock_trace()
     client.evaluate.return_value = _mock_report(5, 5)
 
     replies = rf.process_calls(
@@ -450,7 +522,7 @@ class TestProcessCalls:
 
   def test_partial_failure(self, rf):
     client = MagicMock()
-    client.get_session_trace.side_effect = [
+    client.get_trace_by_selector.side_effect = [
         _mock_trace(),
         RuntimeError("not found"),
         _mock_trace(),
@@ -476,10 +548,29 @@ class TestProcessCalls:
     assert r1["_version"] == "1.0"
     assert r2["trace_id"] == "t1"
 
+  def test_ambiguity_partial_failure_has_retry_payload(self, rf):
+    client = MagicMock()
+    client.get_trace_by_selector.side_effect = _mock_ambiguity()
+
+    replies = rf.process_calls(
+        client,
+        [["analyze", '{"session_id": "s1"}']],
+    )
+
+    error = replies[0]["_error"]
+    assert error["code"] == "AmbiguousSessionError"
+    assert error["details"]["error"] == "ambiguous_session"
+    assert error["details"]["candidate_count"] == 2
+    assert (
+        error["details"]["candidates"][0]["selector"]["user_id"]
+        == "private-user"
+    )
+    assert "private-user" not in error["message"]
+
   def test_params_as_dict(self, rf):
     """params_json can be a dict (already parsed by BQ)."""
     client = MagicMock()
-    client.get_session_trace.return_value = _mock_trace()
+    client.get_trace_by_selector.return_value = _mock_trace()
 
     replies = rf.process_calls(
         client,
@@ -490,7 +581,7 @@ class TestProcessCalls:
   def test_all_operations_json_safe(self, rf):
     """Every reply from every operation must be JSON-safe."""
     client = MagicMock()
-    client.get_session_trace.return_value = _mock_trace()
+    client.get_trace_by_selector.return_value = _mock_trace()
     client.evaluate.return_value = _mock_report(3, 5)
     client.insights.return_value = _mock_insights()
     client.drift_detection.return_value = _mock_drift()

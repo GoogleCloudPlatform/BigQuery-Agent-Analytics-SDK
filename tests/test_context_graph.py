@@ -643,17 +643,105 @@ class TestContextGraphManager:
     mock_client.query.return_value = mock_job
     mgr = self._make_manager(mock_client)
 
-    rows = mgr.reconstruct_trace_gql(session_id="sess-1")
+    rows = mgr.reconstruct_trace_gql(session_id="sess-1", span_ids={"s1", "s2"})
     assert len(rows) == 1
     assert rows[0]["parent_span_id"] == "s1"
     assert rows[0]["child_span_id"] == "s2"
+
+  def test_reconstruct_trace_gql_restricts_query_to_resolved_span_ids(self):
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = []
+    mock_client.query.return_value = mock_job
+    mgr = self._make_manager(mock_client)
+
+    mgr.reconstruct_trace_gql(session_id="sess-1", span_ids={"child", "parent"})
+
+    query = mock_client.query.call_args.args[0]
+    job_config = mock_client.query.call_args.kwargs["job_config"]
+    assert "parent.session_id = @session_id" in query
+    assert "child.session_id = @session_id" in query
+    assert "parent.span_id IN UNNEST(@span_ids)" in query
+    assert "child.span_id IN UNNEST(@span_ids)" in query
+    assert " OR child.session_id" not in query
+    span_ids_param = next(
+        param
+        for param in job_config.query_parameters
+        if param.name == "span_ids"
+    )
+    assert set(span_ids_param.values) == {"parent", "child"}
+
+  def test_reconstruct_trace_gql_preserves_positional_graph_arguments(self):
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = []
+    mock_client.query.return_value = mock_job
+    mgr = self._make_manager(mock_client)
+
+    mgr.reconstruct_trace_gql(
+        "sess-1",
+        "custom_graph",
+        17,
+        span_ids={"s1", "s2"},
+    )
+
+    query = mock_client.query.call_args.args[0]
+    assert "GRAPH `test-project.test_dataset.custom_graph`" in query
+    limit_param = next(
+        param
+        for param in mock_client.query.call_args.kwargs[
+            "job_config"
+        ].query_parameters
+        if param.name == "result_limit"
+    )
+    assert limit_param.value == 17
+
+  def test_reconstruct_trace_gql_session_only_resolves_safe_population(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import Span
+    from bigquery_agent_analytics.trace import Trace
+
+    mock_client = MagicMock()
+    mock_job = MagicMock()
+    mock_job.result.return_value = []
+    mock_client.query.return_value = mock_job
+    mgr = self._make_manager(mock_client)
+    resolved = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        spans=[
+            Span(
+                event_type="USER_MESSAGE_RECEIVED",
+                agent="root",
+                timestamp=datetime.now(timezone.utc),
+                span_id="s1",
+            )
+        ],
+    )
+
+    with patch.object(
+        Client, "get_session_trace", return_value=resolved
+    ) as get:
+      assert mgr.reconstruct_trace_gql(session_id="sess-1") == []
+
+    get.assert_called_once_with("sess-1")
+    span_ids_param = next(
+        param
+        for param in mock_client.query.call_args.kwargs[
+            "job_config"
+        ].query_parameters
+        if param.name == "span_ids"
+    )
+    assert span_ids_param.values == ["s1"]
 
   def test_reconstruct_trace_gql_failure(self):
     mock_client = MagicMock()
     mock_client.query.side_effect = Exception("GQL error")
     mgr = self._make_manager(mock_client)
 
-    result = mgr.reconstruct_trace_gql(session_id="sess-1")
+    result = mgr.reconstruct_trace_gql(
+        session_id="sess-1", span_ids={"s1", "s2"}
+    )
     assert result == []
 
   def test_biz_node_has_evaluated_at_and_artifact_uri(self):
@@ -1865,10 +1953,12 @@ class TestClientContextGraph:
         assert mgr.config.graph_name == "custom_graph"
 
   def test_get_session_trace_gql_fallback_on_empty(self):
-    """GQL with no edges falls back to flat get_session_trace."""
+    """A unique session resolves once and returns the flat trace unchanged."""
     with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
+      from bigquery_agent_analytics.trace import Span
       from bigquery_agent_analytics.trace import Trace
+      from bigquery_agent_analytics.trace import TraceSelector
 
       with patch.object(Client, "_verify_schema"):
         client = Client(
@@ -1881,15 +1971,267 @@ class TestClientContextGraph:
             "reconstruct_trace_gql",
             return_value=[],
         ):
-          mock_trace = Trace(trace_id="t1", session_id="sess-1", spans=[])
+          mock_trace = Trace(
+              trace_id="t1",
+              session_id="sess-1",
+              spans=[
+                  Span(
+                      event_type="USER_MESSAGE_RECEIVED",
+                      agent="root",
+                      timestamp=datetime.now(timezone.utc),
+                      span_id="s1",
+                  )
+              ],
+          )
           with patch.object(
               Client,
-              "get_session_trace",
+              "get_trace_by_selector",
               return_value=mock_trace,
-          ) as mock_flat:
+          ) as mock_resolve:
             result = client.get_session_trace_gql(session_id="sess-1")
-            mock_flat.assert_called_once_with("sess-1")
-            assert result.session_id == "sess-1"
+            mock_resolve.assert_called_once_with(
+                TraceSelector(session_id="sess-1"),
+                allow_mixed_scope=False,
+            )
+            ContextGraphManager.reconstruct_trace_gql.assert_called_once_with(
+                session_id="sess-1",
+                span_ids=("s1",),
+            )
+            assert result is mock_trace
+
+  def test_get_session_trace_gql_propagates_exact_selector_pins(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import Trace
+    from bigquery_agent_analytics.trace import TraceScope
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    client = Client(
+        project_id="p",
+        dataset_id="d",
+        verify_schema=False,
+        bq_client=MagicMock(),
+    )
+    scope = TraceScope(experiment_id="exp-1", custom_labels={"run": "v1"})
+    flat_trace = Trace(trace_id="t1", session_id="sess-1", spans=[])
+    with patch.object(
+        Client, "get_trace_by_selector", return_value=flat_trace
+    ) as resolve:
+      result = client.get_session_trace_gql(
+          "sess-1",
+          user_id="alice",
+          root_agent_name="root",
+          experiment_id="exp-1",
+          custom_labels={"run": "v1"},
+          scope_signature=scope.scope_signature,
+          allow_mixed_scope=True,
+      )
+
+    resolve.assert_called_once_with(
+        TraceSelector(
+            session_id="sess-1",
+            user_id="alice",
+            root_agent_name="root",
+            experiment_id="exp-1",
+            custom_labels={"run": "v1"},
+            scope_signature=scope.scope_signature,
+        ),
+        allow_mixed_scope=True,
+    )
+    assert result is flat_trace
+
+  def test_get_trace_by_selector_gql_preserves_authoritative_metadata(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import ContentPart
+    from bigquery_agent_analytics.trace import Span
+    from bigquery_agent_analytics.trace import Trace
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    client = Client(
+        project_id="p",
+        dataset_id="d",
+        verify_schema=False,
+        bq_client=MagicMock(),
+    )
+    ts1 = datetime(2025, 6, 1, 12, 0, tzinfo=timezone.utc)
+    ts2 = datetime(2025, 6, 1, 12, 1, tzinfo=timezone.utc)
+    identity = TraceIdentity(
+        session_id="sess-1", user_id="alice", root_agent_name="root"
+    )
+    scope = TraceScope(experiment_id="exp-1", custom_labels={"run": "v1"})
+    flat_trace = Trace(
+        trace_id="trace-authoritative",
+        session_id="sess-1",
+        spans=[
+            Span(
+                event_type="LLM_REQUEST",
+                agent="root",
+                timestamp=ts2,
+                content={"request": {"text": "hello"}},
+                attributes={"custom_tags": {"run": "v1"}},
+                span_id="s2",
+                latency_ms=27,
+                status="OK",
+                content_parts=[
+                    ContentPart(mime_type="text/plain", text="hello")
+                ],
+                session_id="sess-1",
+                invocation_id="inv-1",
+                user_id="alice",
+                trace_id="trace-authoritative",
+                time_to_first_token_ms=4,
+            ),
+            Span(
+                event_type="USER_MESSAGE_RECEIVED",
+                agent="root",
+                timestamp=ts1,
+                content={"text": "hello"},
+                attributes={"custom_tags": {"run": "v1"}},
+                span_id="s1",
+                session_id="sess-1",
+                invocation_id="inv-1",
+                user_id="alice",
+                trace_id="trace-authoritative",
+            ),
+        ],
+        user_id="alice",
+        start_time=ts1,
+        end_time=ts2,
+        total_latency_ms=999,
+        identity=identity,
+        scope=scope,
+        scope_coverage=(scope.scope_signature,),
+    )
+    selector = TraceSelector(
+        session_id="sess-1",
+        user_id="alice",
+        root_agent_name="root",
+        scope_signature=scope.scope_signature,
+    )
+    gql_rows = [
+        {
+            "parent_span_id": "s1",
+            "child_span_id": "s2",
+            "session_id": "sess-1",
+        }
+    ]
+
+    with patch.object(
+        Client, "get_trace_by_selector", return_value=flat_trace
+    ) as resolve:
+      with patch.object(
+          ContextGraphManager,
+          "reconstruct_trace_gql",
+          return_value=gql_rows,
+      ) as reconstruct:
+        result = client.get_trace_by_selector_gql(selector)
+
+    resolve.assert_called_once_with(selector, allow_mixed_scope=False)
+    reconstruct.assert_called_once_with(
+        session_id="sess-1", span_ids=("s1", "s2")
+    )
+    assert result.trace_id == flat_trace.trace_id
+    assert result.session_id == flat_trace.session_id
+    assert result.user_id == flat_trace.user_id
+    assert result.start_time == flat_trace.start_time
+    assert result.end_time == flat_trace.end_time
+    assert result.total_latency_ms == flat_trace.total_latency_ms
+    assert result.identity == flat_trace.identity
+    assert result.scope == flat_trace.scope
+    assert result.scope_coverage == flat_trace.scope_coverage
+    assert [span.span_id for span in result.spans] == ["s1", "s2"]
+    by_id = {span.span_id: span for span in result.spans}
+    assert by_id["s2"].parent_span_id == "s1"
+    assert by_id["s2"].content == {"request": {"text": "hello"}}
+    assert by_id["s2"].attributes == {"custom_tags": {"run": "v1"}}
+    assert by_id["s2"].content_parts[0].text == "hello"
+    assert by_id["s2"].invocation_id == "inv-1"
+    assert by_id["s2"].user_id == "alice"
+    assert by_id["s2"].trace_id == "trace-authoritative"
+    assert by_id["s2"].time_to_first_token_ms == 4
+
+  def test_get_trace_by_selector_gql_skips_non_unique_span_ids(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import Span
+    from bigquery_agent_analytics.trace import Trace
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    client = Client(
+        project_id="p",
+        dataset_id="d",
+        verify_schema=False,
+        bq_client=MagicMock(),
+    )
+    flat_trace = Trace(
+        trace_id="t1",
+        session_id="sess-1",
+        spans=[
+            Span(
+                event_type="TOOL_STARTING",
+                agent="root",
+                timestamp=None,
+                span_id="dup",
+            ),
+            Span(
+                event_type="TOOL_COMPLETED",
+                agent="root",
+                timestamp=None,
+                span_id="dup",
+            ),
+        ],
+    )
+    selector = TraceSelector(session_id="sess-1")
+
+    with patch.object(Client, "get_trace_by_selector", return_value=flat_trace):
+      with patch.object(
+          ContextGraphManager, "reconstruct_trace_gql"
+      ) as reconstruct:
+        result = client.get_trace_by_selector_gql(selector)
+
+    assert result is flat_trace
+    reconstruct.assert_not_called()
+
+  def test_get_trace_by_selector_gql_propagates_resolver_ambiguity(self):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import AmbiguousSessionError
+    from bigquery_agent_analytics.trace import ResolvedTraceSelector
+    from bigquery_agent_analytics.trace import TraceIdentity
+    from bigquery_agent_analytics.trace import TraceScope
+    from bigquery_agent_analytics.trace import TraceSelector
+
+    client = Client(
+        project_id="p",
+        dataset_id="d",
+        verify_schema=False,
+        bq_client=MagicMock(),
+    )
+    identity = TraceIdentity(session_id="sess-1", user_id="alice")
+    ambiguity = AmbiguousSessionError(
+        candidates=[
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"run": "v1"}),
+            ),
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"run": "v2"}),
+            ),
+        ]
+    )
+    selector = TraceSelector(session_id="sess-1")
+    with patch.object(
+        Client, "get_trace_by_selector", side_effect=ambiguity
+    ) as resolve:
+      with patch.object(
+          ContextGraphManager, "reconstruct_trace_gql"
+      ) as reconstruct:
+        with pytest.raises(AmbiguousSessionError) as exc_info:
+          client.get_trace_by_selector_gql(selector)
+
+    assert exc_info.value is ambiguity
+    resolve.assert_called_once_with(selector, allow_mixed_scope=False)
+    reconstruct.assert_not_called()
 
   def test_get_session_trace_gql_merges_isolated_events(self):
     """GQL edges + flat SQL merge captures isolated events."""
@@ -1961,7 +2303,7 @@ class TestClientContextGraph:
         ):
           with patch.object(
               Client,
-              "get_session_trace",
+              "get_trace_by_selector",
               return_value=flat_trace,
           ):
             result = client.get_session_trace_gql(session_id="sess-1")
@@ -2066,7 +2408,7 @@ class TestClientContextGraph:
         ):
           with patch.object(
               Client,
-              "get_session_trace",
+              "get_trace_by_selector",
               return_value=flat_trace,
           ):
             result = client.get_session_trace_gql(session_id="sess-1")
@@ -2082,6 +2424,7 @@ class TestClientContextGraph:
     """Spans are returned in chronological order."""
     with patch("bigquery_agent_analytics.client.make_bq_client"):
       from bigquery_agent_analytics.client import Client
+      from bigquery_agent_analytics.trace import Span
       from bigquery_agent_analytics.trace import Trace
 
       with patch.object(Client, "_verify_schema"):
@@ -2140,7 +2483,26 @@ class TestClientContextGraph:
         flat_trace = Trace(
             trace_id="t1",
             session_id="sess-1",
-            spans=[],
+            spans=[
+                Span(
+                    event_type="TOOL_COMPLETED",
+                    agent="root",
+                    timestamp=ts3,
+                    span_id="s3",
+                ),
+                Span(
+                    event_type="LLM_REQUEST",
+                    agent="root",
+                    timestamp=ts2,
+                    span_id="s2",
+                ),
+                Span(
+                    event_type="USER_MESSAGE_RECEIVED",
+                    agent="root",
+                    timestamp=ts1,
+                    span_id="s1",
+                ),
+            ],
         )
         with patch.object(
             ContextGraphManager,
@@ -2149,7 +2511,7 @@ class TestClientContextGraph:
         ):
           with patch.object(
               Client,
-              "get_session_trace",
+              "get_trace_by_selector",
               return_value=flat_trace,
           ):
             result = client.get_session_trace_gql(session_id="sess-1")

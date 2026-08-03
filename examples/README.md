@@ -44,7 +44,7 @@ artifacts that demonstrate SDK capabilities.
 | File | Description |
 |------|-------------|
 | [e2e_demo.py](e2e_demo.py) | Complete end-to-end workflow |
-| [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example |
+| [cli_agent_tool.py](cli_agent_tool.py) | CLI agent tool example with structured ambiguous-session retry selectors |
 | [ci_eval_pipeline.sh](ci_eval_pipeline.sh) | CI evaluation pipeline |
 
 ## Demo Bundles

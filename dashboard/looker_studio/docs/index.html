@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Create a private Looker Studio dashboard from your BigQuery Agent Analytics installation."
+    >
+    <meta name="theme-color" content="#096b5a">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      property="og:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
+    <meta
+      property="og:url"
+      content="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="Configure BigQuery Agent Analytics">
+    <meta
+      name="twitter:description"
+      content="Create a private Looker Studio dashboard from your BQAA event table."
+    >
+    <title>Configure BigQuery Agent Analytics</title>
+    <link
+      rel="canonical"
+      href="https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/"
+    >
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div>
+          <div class="eyebrow">BigQuery Agent Analytics</div>
+          <h1>Your telemetry. Your dashboard.</h1>
+          <p class="lede">
+            Enter three BigQuery identifiers. We’ll prepare a private copy of
+            the published Looker Studio dashboard, connected with your Google
+            credentials.
+          </p>
+          <ul class="facts" aria-label="Dashboard facts">
+            <li>37 parity charts</li>
+            <li>8 report pages</li>
+            <li>No data leaves Google</li>
+          </ul>
+        </div>
+
+        <form class="card" id="configurator" novalidate>
+          <h2>Connect your BQAA data</h2>
+          <p class="card-intro">
+            Only the BQAA event table is required. Generated views are not
+            used.
+          </p>
+
+          <label for="project">Project ID</label>
+          <input
+            id="project"
+            name="project"
+            autocomplete="off"
+            placeholder="my-gcp-project"
+            aria-describedby="project-hint project-error"
+            required
+          >
+          <span class="field-hint" id="project-hint">
+            6–30 characters: lowercase letters, digits, and hyphens. Start
+            with a letter and end with a letter or digit.
+          </span>
+          <span class="field-error" id="project-error" aria-live="polite"></span>
+
+          <label for="dataset">Dataset ID</label>
+          <input
+            id="dataset"
+            name="dataset"
+            autocomplete="off"
+            placeholder="agent_analytics"
+            aria-describedby="dataset-hint dataset-error"
+            required
+          >
+          <span class="field-hint" id="dataset-hint">
+            Start with a letter or underscore; then use letters, digits, or
+            underscores.
+          </span>
+          <span class="field-error" id="dataset-error" aria-live="polite"></span>
+
+          <label for="table">BQAA table ID</label>
+          <input
+            id="table"
+            name="table"
+            autocomplete="off"
+            value="agent_events"
+            aria-describedby="table-hint table-error"
+            required
+          >
+          <span class="field-hint" id="table-hint">
+            Charts read this table directly and extract reporting fields from
+            its JSON columns. The standard BQAA table is
+            <code>agent_events</code>. Custom table IDs may use ASCII letters,
+            digits, underscores, and hyphens.
+          </span>
+          <span class="field-error" id="table-error" aria-live="polite"></span>
+
+          <details>
+            <summary>Advanced settings</summary>
+            <label for="billing-project">Billing project ID</label>
+            <input
+              id="billing-project"
+              name="billingProject"
+              autocomplete="off"
+              placeholder="Defaults to the source project"
+              aria-describedby="billing-project-hint billing-project-error"
+            >
+            <span class="field-hint" id="billing-project-hint">
+              Optional. Leave blank to run queries in the source project.
+            </span>
+            <span
+              class="field-error"
+              id="billing-project-error"
+              aria-live="polite"
+            ></span>
+          </details>
+
+          <p id="form-status" role="status" aria-live="polite"></p>
+          <div class="actions">
+            <a
+              class="button button-primary"
+              id="create-dashboard"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-disabled="true"
+            >Create my dashboard</a>
+            <button class="button button-secondary" id="copy-link" type="button">
+              Copy setup link
+            </button>
+          </div>
+          <p class="privacy">
+            This page has no backend. It sends no identifiers or credentials
+            to the template owner; it only creates a Google Looker Studio URL.
+          </p>
+        </form>
+      </section>
+
+      <section class="how" aria-label="How setup works">
+        <article class="step">
+          <span class="step-number">01</span>
+          <h3>Enter identifiers</h3>
+          <p>
+            Use the project, dataset, and base table configured for the ADK
+            BigQuery Agent Analytics plugin.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">02</span>
+          <h3>Review in Google</h3>
+          <p>
+            Looker Studio shows the substituted custom query and billing
+            project before creating anything.
+          </p>
+        </article>
+        <article class="step">
+          <span class="step-number">03</span>
+          <h3>Save, then secure sharing</h3>
+          <p>
+            Choose “Edit and share” to save it. Before sharing, set the new
+            data source’s credentials to <strong>Viewer’s Credentials</strong>
+            so every viewer must have their own BigQuery access.
+          </p>
+        </article>
+      </section>
+
+      <aside class="notice">
+        <strong>Keep the new report private until the credential check.</strong>
+        The Linking API creates a data source owned by the person opening the
+        link and its review dialog can show Owner’s Credentials. In the saved
+        report, open <em>Resource → Manage added data sources → Edit</em> and
+        verify <em>Data credentials: Viewer</em> before sharing.
+        <a href="https://docs.cloud.google.com/data-studio/data-credentials">
+          Learn about Looker Studio data credentials.
+        </a>
+      </aside>
+
+      <section class="post-create" aria-labelledby="post-create-title">
+        <div>
+          <div class="eyebrow">Required security check</div>
+          <h2 id="post-create-title">Before you share the new report</h2>
+          <p>
+            The Linking API creates a new data source owned by the person who
+            opens the link. Keep the report private until these checks pass.
+          </p>
+        </div>
+        <ol id="security-checklist">
+          <li>Select <strong>Edit and share</strong> to save your copy.</li>
+          <li>Keep the report private while configuring its data source.</li>
+          <li>
+            Open <strong>Resource → Manage added data sources → Edit</strong>.
+          </li>
+          <li>
+            Set <strong>Data credentials</strong> to
+            <strong>Viewer’s Credentials</strong>.
+          </li>
+          <li>Test the report with an account that has only viewer access.</li>
+        </ol>
+        <button
+          class="button button-secondary checklist-copy"
+          id="copy-checklist"
+          type="button"
+        >
+          Copy security checklist
+        </button>
+      </section>
+
+      <aside class="notice">
+        <strong>No generated views required.</strong>
+        The dashboard reads the configured BQAA event table directly. A
+        separate billing project is available under Advanced settings. For a
+        location override or verified preflight, use the repository’s CLI
+        helper.
+      </aside>
+
+      <aside class="notice" aria-labelledby="viewing-support-title">
+        <strong id="viewing-support-title">Desktop viewing.</strong>
+        Designed for desktop screens at least 1280 px wide. On a cold load or
+        after changing pages, native charts may paint after the surrounding
+        report controls; allow up to 90 seconds before treating a chart as
+        failed. A responsive mobile template is not part of v1.
+      </aside>
+
+      <footer>
+        <span>Open-source dashboard · Apache 2.0</span>
+        <span>
+          <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK">
+            GoogleCloudPlatform source and verified CLI
+          </a>
+          ·
+          <a href="https://lookerstudio.google.com/reporting/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40">
+            View template
+          </a>
+        </span>
+      </footer>
+    </main>
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

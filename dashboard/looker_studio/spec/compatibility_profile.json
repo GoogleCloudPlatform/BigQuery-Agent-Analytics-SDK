@@ -1,0 +1,43 @@
+{
+  "comment": "Machine-readable source contract for the portable Looker Studio dashboard.",
+  "source_object": "agent_events",
+  "source_object_type": "BASE TABLE",
+  "generated_views_required": false,
+  "required_columns": {
+    "timestamp": "TIMESTAMP",
+    "event_type": "STRING",
+    "agent": "STRING",
+    "session_id": "STRING",
+    "invocation_id": "STRING",
+    "user_id": "STRING",
+    "trace_id": "STRING",
+    "span_id": "STRING",
+    "parent_span_id": "STRING",
+    "content": "JSON",
+    "attributes": "JSON",
+    "latency_ms": "JSON",
+    "status": "STRING",
+    "error_message": "STRING",
+    "is_truncated": "BOOL"
+  },
+  "profiles": {
+    "1.27.0": {
+      "source_ref": "v1.27.0",
+      "status": "candidate"
+    },
+    "1.36.1": {
+      "source_ref": "v1.36.1",
+      "status": "candidate"
+    },
+    "2.4.0": {
+      "source_ref": "v2.4.0",
+      "status": "candidate"
+    }
+  },
+  "event_scope": "all base-table rows in the selected date range",
+  "specialized_extractions": [
+    "LLM_RESPONSE",
+    "TOOL_COMPLETED",
+    "TOOL_ERROR"
+  ]
+}

@@ -58,20 +58,269 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
+import hashlib
 import json
 import logging
 from typing import Any, Optional
 
+from google.cloud import bigquery
 from pydantic import BaseModel
 from pydantic import Field
+from pydantic import model_validator
 
 from bigquery_agent_analytics.evaluators import strip_markdown_fences
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
 
 logger = logging.getLogger("bigquery_agent_analytics." + __name__)
 
 DEFAULT_ENDPOINT = "gemini-2.5-flash"
+
+
+class CategoricalContextSource(str, Enum):
+  """SDK-defined provenance for trusted categorical judge context."""
+
+  TRUSTED_JUDGE_CONTEXT = "trusted_judge_context"
+  GOLDEN_EXPECTED_ANSWER = "golden_expected_answer"
+
+
+@dataclass(frozen=True, slots=True)
+class _CategoricalEvaluationInput:
+  """One exact resolved trace and its trusted judge input."""
+
+  selector: ResolvedTraceSelector
+  transcript: str
+  judge_context: Optional[str] = None
+  context_source: Optional[CategoricalContextSource] = None
+
+  @property
+  def evaluation_key(self) -> str:
+    """Stable internal key spanning intrinsic identity and exact scope."""
+    return _resolved_selector_key(self.selector)
+
+
+def _resolved_selector_key(selector: ResolvedTraceSelector) -> str:
+  """Returns an injective internal key for a resolved trace selector."""
+  if type(selector) is not ResolvedTraceSelector:
+    raise TypeError("selector must be a ResolvedTraceSelector.")
+  return json.dumps(
+      [
+          selector.identity.session_id,
+          selector.identity.user_id,
+          selector.identity.root_agent_name,
+          selector.scope_signature,
+      ],
+      ensure_ascii=False,
+      separators=(",", ":"),
+  )
+
+
+def _trace_content_text(content: Any) -> str:
+  """Mirrors the categorical transcript SQL's JSON_VALUE priority."""
+  if not isinstance(content, dict):
+    # JSON_VALUE returns NULL when asked to traverse a top-level
+    # scalar/array. Span is deliberately lenient about content, so
+    # mirror SQL here instead of calling .get() on the foreign shape.
+    return ""
+  candidates: list[Any] = [
+      content.get("text_summary"),
+      content.get("response"),
+  ]
+  artifacts = content.get("artifacts")
+  if isinstance(artifacts, list) and artifacts:
+    first_artifact = artifacts[0]
+    if isinstance(first_artifact, dict):
+      parts = first_artifact.get("parts")
+      if isinstance(parts, list) and parts and isinstance(parts[0], dict):
+        candidates.append(parts[0].get("text"))
+  candidates.append(content.get("tool"))
+  for value in candidates:
+    if value is None or isinstance(value, (dict, list)):
+      # JSON_VALUE returns NULL for objects and arrays, so COALESCE
+      # continues to the next candidate in the SQL transcript.
+      continue
+    if isinstance(value, bool):
+      # BigQuery renders JSON booleans with JSON's lowercase spelling.
+      return "true" if value else "false"
+    return value if isinstance(value, str) else str(value)
+  return ""
+
+
+def _spans_to_categorical_transcript(spans: list[Span]) -> str:
+  """Formats ordered spans like the categorical transcript SQL."""
+  lines = []
+  for span in spans:
+    agent = f" [{span.agent}]" if span.agent is not None else ""
+    lines.append(
+        f"{span.event_type}{agent}: {_trace_content_text(span.content)}"
+    )
+  return "\n".join(lines)
+
+
+def _trace_to_categorical_transcript(trace: Trace) -> str:
+  """Formats a materialized trace like the categorical transcript SQL."""
+  return _spans_to_categorical_transcript(trace.spans)
+
+
+def _normalize_categorical_evaluation_inputs(
+    traces: list[Trace],
+    per_session_context: Mapping[ResolvedTraceSelector | str, str],
+    context_source: CategoricalContextSource = (
+        CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+    ),
+) -> list[_CategoricalEvaluationInput]:
+  """Binds trusted context to a deduplicated exact-selector population.
+
+  Legacy session-id keys are accepted only when that id names one
+  transcript-eligible resolved trace in this evaluated population. The
+  ``LENGTH(transcript) > 10`` eligibility gate runs before this legacy
+  ambiguity check, so an ineligible colliding trace does not make the
+  surviving trace ambiguous. Exact selector keys avoid relying on that
+  population inference. Keys outside the population are ignored so a
+  caller can pass a context superset alongside a narrower
+  :class:`TraceFilter`.
+  """
+  context_snapshot = _validated_context_mapping(per_session_context)
+
+  exact_context: dict[ResolvedTraceSelector, str] = {}
+  legacy_context: dict[str, str] = {}
+  for key, value in context_snapshot.items():
+    if type(key) is ResolvedTraceSelector:
+      exact_context[key] = value
+    else:
+      legacy_context[key] = value
+
+  population: dict[ResolvedTraceSelector, str] = {}
+  by_session: dict[str, list[ResolvedTraceSelector]] = {}
+  for trace in traces:
+    if (
+        type(trace.identity) is not TraceIdentity
+        or type(trace.scope) is not TraceScope
+    ):
+      raise TypeError(
+          "Identity-bound categorical evaluation requires traces with"
+          " resolved TraceIdentity and TraceScope values."
+      )
+    selector = ResolvedTraceSelector(
+        identity=trace.identity,
+        scope=trace.scope,
+    )
+    if selector in population:
+      continue
+    transcript = _trace_to_categorical_transcript(trace)
+    # Preserve the existing transcript SQL's HAVING LENGTH > 10
+    # behavior before resolving legacy aliases.
+    if len(transcript) <= 10:
+      continue
+    population[selector] = transcript
+    by_session.setdefault(selector.identity.session_id, []).append(selector)
+
+  bound_context: dict[ResolvedTraceSelector, str] = {}
+
+  def _bind(selector: ResolvedTraceSelector, context: str) -> None:
+    prior = bound_context.get(selector)
+    if prior is not None and prior != context:
+      raise ValueError(
+          "Multiple mapping keys provide conflicting judge context"
+          " for one resolved trace selector."
+      )
+    bound_context[selector] = context
+
+  for session_id, context in legacy_context.items():
+    matches = by_session.get(session_id, [])
+    if len(matches) > 1:
+      raise AmbiguousSessionError(matches)
+    if matches:
+      _bind(matches[0], context)
+
+  for selector, context in exact_context.items():
+    if selector in population:
+      _bind(selector, context)
+
+  return [
+      _CategoricalEvaluationInput(
+          selector=selector,
+          transcript=transcript,
+          judge_context=bound_context.get(selector),
+          context_source=(
+              context_source if selector in bound_context else None
+          ),
+      )
+      for selector, transcript in population.items()
+  ]
+
+
+def _validated_context_mapping(
+    per_session_context: Mapping[ResolvedTraceSelector | str, str],
+) -> dict[ResolvedTraceSelector | str, str]:
+  """Validates and detaches caller-owned judge-context mapping state."""
+  if not isinstance(per_session_context, Mapping):
+    raise TypeError("per_session_context must be a mapping.")
+
+  snapshot: dict[ResolvedTraceSelector | str, str] = {}
+  for key, value in per_session_context.items():
+    if type(value) is not str:
+      raise TypeError("Judge context values must be strings.")
+    if type(key) is ResolvedTraceSelector:
+      snapshot[key] = value
+    elif type(key) is str:
+      snapshot[key] = value
+    else:
+      raise TypeError(
+          "Judge context keys must be exact ResolvedTraceSelector"
+          " instances or session-id strings."
+      )
+  return snapshot
+
+
+_EVALUATION_INPUT_STRUCT_TYPE = bigquery.StructQueryParameterType(
+    bigquery.ScalarQueryParameterType("STRING", name="evaluation_key"),
+    bigquery.ScalarQueryParameterType("STRING", name="session_id"),
+    bigquery.ScalarQueryParameterType("STRING", name="transcript"),
+    bigquery.ScalarQueryParameterType("STRING", name="judge_context"),
+)
+
+
+def _build_evaluation_inputs_parameter(
+    inputs: list[_CategoricalEvaluationInput],
+) -> bigquery.ArrayQueryParameter:
+  """Builds the typed selector/transcript/context array parameter.
+
+  The explicit ``StructQueryParameterType`` is retained for an empty
+  input list; BigQuery cannot infer an empty array's element fields.
+  """
+  values = [
+      bigquery.StructQueryParameter(
+          None,
+          bigquery.ScalarQueryParameter(
+              "evaluation_key", "STRING", item.evaluation_key
+          ),
+          bigquery.ScalarQueryParameter(
+              "session_id", "STRING", item.selector.identity.session_id
+          ),
+          bigquery.ScalarQueryParameter(
+              "transcript", "STRING", item.transcript
+          ),
+          bigquery.ScalarQueryParameter(
+              "judge_context", "STRING", item.judge_context
+          ),
+      )
+      for item in inputs
+  ]
+  return bigquery.ArrayQueryParameter(
+      "evaluation_inputs",
+      _EVALUATION_INPUT_STRUCT_TYPE,
+      values,
+  )
 
 
 # ------------------------------------------------------------------ #
@@ -171,8 +420,28 @@ class CategoricalSessionResult(BaseModel):
   """Classification results for all metrics on a single session."""
 
   session_id: str
+  identity: Optional[TraceIdentity] = None
+  scope: Optional[TraceScope] = None
+  context_applied: bool = False
+  context_source: Optional[CategoricalContextSource] = None
+  execution_mode: Optional[str] = None
   metrics: list[CategoricalMetricResult] = Field(default_factory=list)
   details: dict[str, Any] = Field(default_factory=dict)
+
+  @model_validator(mode="after")
+  def _validate_provenance(self):
+    if (
+        self.identity is not None
+        and self.identity.session_id != self.session_id
+    ):
+      raise ValueError("identity.session_id must match session_id.")
+    if (self.identity is None) != (self.scope is None):
+      raise ValueError("identity and scope must be attached together.")
+    if self.context_applied != (self.context_source is not None):
+      raise ValueError(
+          "context_source must be set exactly when context_applied is true."
+      )
+    return self
 
 
 class CategoricalEvaluationReport(BaseModel):
@@ -224,6 +493,13 @@ DEFAULT_RESULTS_TABLE = "categorical_results"
 CATEGORICAL_RESULTS_DDL = """\
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{results_table}` (
   session_id STRING,
+  user_id STRING,
+  root_agent_name STRING,
+  experiment_id STRING,
+  scope_key STRING,
+  identity_key STRING,
+  context_applied BOOL,
+  context_source STRING,
   metric_name STRING,
   category STRING,
   justification STRING,
@@ -236,6 +512,21 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.{results_table}` (
   created_at TIMESTAMP
 )
 """
+
+CATEGORICAL_RESULTS_MIGRATIONS = tuple(
+    f"""ALTER TABLE `{{project}}.{{dataset}}.{{results_table}}`
+ADD COLUMN IF NOT EXISTS {column}"""
+    for column in (
+        "user_id STRING",
+        "root_agent_name STRING",
+        "experiment_id STRING",
+        "scope_key STRING",
+        "identity_key STRING",
+        "context_applied BOOL",
+        "context_source STRING",
+        "execution_mode STRING",
+    )
+)
 
 CATEGORICAL_TRANSCRIPT_QUERY = """\
 SELECT
@@ -253,7 +544,7 @@ SELECT
         ''
       )
     ),
-    '\\n' ORDER BY timestamp
+    '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
   ) AS transcript
 FROM `{project}.{dataset}.{table}`
 WHERE {where}
@@ -280,7 +571,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
@@ -402,7 +693,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
@@ -433,6 +724,7 @@ def build_ai_generate_query(
     temperature: float,
     connection_id: Optional[str] = None,
     max_output_tokens: int = 8192,
+    identity_bound: bool = False,
 ) -> str:
   """Builds the AI.GENERATE categorical classification query.
 
@@ -447,6 +739,10 @@ def build_ai_generate_query(
       endpoint: Model endpoint.
       temperature: Sampling temperature.
       connection_id: Optional BQ connection ID.
+      max_output_tokens: Maximum model output tokens.
+      identity_bound: Read pre-resolved selector/transcript/context structs
+          from ``@evaluation_inputs`` instead of grouping source rows by
+          session id.
 
   Returns:
       Complete SQL query string.
@@ -455,6 +751,29 @@ def build_ai_generate_query(
   if connection_id:
     escaped = _escape_sql_string_literal(connection_id)
     connection_clause = f"\n    connection_id => '{escaped}',"
+
+  if identity_bound:
+    return f"""\
+SELECT
+  evaluation_key,
+  session_id,
+  transcript,
+  (AI.GENERATE(
+    CONCAT(
+      @categorical_prompt,
+      IF(
+        judge_context IS NULL,
+        '',
+        CONCAT('\\n\\n', judge_context)
+      ),
+      '\\n\\nTranscript:\\n', transcript
+    ),{connection_clause}
+    endpoint => '{_escape_sql_string_literal(endpoint)}',
+    model_params => JSON '{{"generationConfig": {{"temperature": {temperature}, "maxOutputTokens": {max_output_tokens}}}}}',
+    output_schema => 'classifications STRING'
+  )).classifications AS classifications
+FROM UNNEST(@evaluation_inputs)
+"""
 
   return f"""\
 WITH session_transcripts AS (
@@ -473,7 +792,7 @@ WITH session_transcripts AS (
           ''
         )
       ),
-      '\\n' ORDER BY timestamp
+      '\\n' ORDER BY timestamp, span_id, invocation_id, event_type
     ) AS transcript
   FROM `{project}.{dataset}.{table}`
   WHERE {where}
@@ -843,6 +1162,11 @@ async def classify_sessions_via_api(
     config: CategoricalEvaluationConfig,
     endpoint: str = DEFAULT_ENDPOINT,
     per_session_context: dict[str, str] | None = None,
+    resolved_selectors: dict[str, ResolvedTraceSelector] | None = None,
+    context_source: CategoricalContextSource = (
+        CategoricalContextSource.TRUSTED_JUDGE_CONTEXT
+    ),
+    execution_mode: str = "api_fallback",
 ) -> list[CategoricalSessionResult]:
   """Classifies sessions using the Gemini API (fallback).
 
@@ -865,12 +1189,40 @@ async def classify_sessions_via_api(
       config: Categorical evaluation configuration.
       endpoint: Model endpoint name.
       per_session_context: Optional per-session context to inject into the
-          judge prompt (e.g. matched golden eval expected answers).
+          judge prompt (e.g. matched golden eval expected answers). Values are
+          trusted evaluator material and use the same governance boundary as
+          evaluation prompts. When present, parse/exception logs redact model
+          text that could echo the context.
+      resolved_selectors: Optional internal-input-key to exact selector map.
+          When present, transcript/context keys remain internal correlation
+          keys while returned results carry the selector's public session id
+          plus reserved identity/scope attribution.
+      context_source: SDK-defined provenance assigned to results that received
+          trusted context.
+      execution_mode: Per-result execution provenance.
 
   Returns:
       One ``CategoricalSessionResult`` per session, in input order.
   """
   prompt_prefix = build_categorical_prompt(config)
+
+  if resolved_selectors is not None:
+    if set(resolved_selectors) != set(transcripts):
+      raise ValueError(
+          "resolved_selectors keys must exactly match transcript keys."
+      )
+    selectors = list(resolved_selectors.values())
+    if any(
+        type(selector) is not ResolvedTraceSelector for selector in selectors
+    ):
+      raise TypeError(
+          "resolved_selectors values must be exact"
+          " ResolvedTraceSelector instances."
+      )
+    if len(set(selectors)) != len(selectors):
+      raise ValueError(
+          "resolved_selectors cannot contain duplicate resolved selectors."
+      )
 
   try:
     from google import genai
@@ -883,16 +1235,34 @@ async def classify_sessions_via_api(
   semaphore = asyncio.Semaphore(config.api_concurrency)
 
   async def _classify_one(
-      sid: str, transcript: str
+      input_key: str, transcript: str
   ) -> CategoricalSessionResult:
     async with semaphore:
+      selector = (
+          resolved_selectors.get(input_key)
+          if resolved_selectors is not None
+          else None
+      )
+      sid = selector.identity.session_id if selector is not None else input_key
+      details = (
+          {
+              "user_id": selector.identity.user_id,
+              "root_agent_name": selector.identity.root_agent_name,
+              "scope_signature": selector.scope_signature,
+          }
+          if selector is not None
+          else {}
+      )
       text = transcript
       if len(text) > 25000:
         text = text[:25000] + "\n... [truncated]"
 
       session_ctx = ""
-      if per_session_context and sid in per_session_context:
-        session_ctx = "\n\n" + per_session_context[sid]
+      has_judge_context = bool(
+          per_session_context and input_key in per_session_context
+      )
+      if has_judge_context:
+        session_ctx = "\n\n" + per_session_context[input_key]
       full_prompt = prompt_prefix + session_ctx + "\n\nTranscript:\n" + text
 
       try:
@@ -911,41 +1281,103 @@ async def classify_sessions_via_api(
           finish_reason = None
           if response.candidates:
             finish_reason = response.candidates[0].finish_reason
-          logger.warning(
-              "API parse error for session %s: finish_reason=%s, "
-              "raw_text_len=%d, raw_text=%s",
-              sid,
-              finish_reason,
-              len(raw_text),
-              repr(raw_text[:500]),
-          )
-        return CategoricalSessionResult(
+          if has_judge_context:
+            logger.warning(
+                "API parse error for session %s: finish_reason=%s,"
+                " raw_text_len=%d (raw text redacted because trusted"
+                " judge context was present)",
+                sid,
+                finish_reason,
+                len(raw_text),
+            )
+          else:
+            logger.warning(
+                "API parse error for session %s: finish_reason=%s, "
+                "raw_text_len=%d, raw_text=%s",
+                sid,
+                finish_reason,
+                len(raw_text),
+                repr(raw_text[:500]),
+            )
+        result = CategoricalSessionResult(
             session_id=sid,
             metrics=metrics,
+            details=details,
         )
+        _apply_categorical_result_provenance(
+            result,
+            selector=selector,
+            context_applied=has_judge_context,
+            context_source=context_source if has_judge_context else None,
+            execution_mode=execution_mode,
+        )
+        return result
       except Exception as e:
-        logger.warning(
-            "Categorical API classification EXCEPTION for %s: %s (type=%s)",
-            sid,
-            e,
-            type(e).__name__,
-        )
-        return CategoricalSessionResult(
+        if has_judge_context:
+          logger.warning(
+              "Categorical API classification EXCEPTION for %s"
+              " (details redacted because trusted judge context was"
+              " present; type=%s)",
+              sid,
+              type(e).__name__,
+          )
+        else:
+          logger.warning(
+              "Categorical API classification EXCEPTION for %s: %s"
+              " (type=%s)",
+              sid,
+              e,
+              type(e).__name__,
+          )
+        result = CategoricalSessionResult(
             session_id=sid,
             metrics=[
                 CategoricalMetricResult(
                     metric_name=m.name,
                     parse_error=True,
                     passed_validation=False,
-                    raw_response=str(e),
+                    raw_response=None if has_judge_context else str(e),
                 )
                 for m in config.metrics
             ],
+            details=details,
         )
+        _apply_categorical_result_provenance(
+            result,
+            selector=selector,
+            context_applied=has_judge_context,
+            context_source=context_source if has_judge_context else None,
+            execution_mode=execution_mode,
+        )
+        return result
 
-  tasks = [_classify_one(sid, t) for sid, t in transcripts.items()]
+  tasks = [_classify_one(key, text) for key, text in transcripts.items()]
   results = await asyncio.gather(*tasks)
   return list(results)
+
+
+def _apply_categorical_result_provenance(
+    result: CategoricalSessionResult,
+    *,
+    selector: Optional[ResolvedTraceSelector],
+    context_applied: bool,
+    context_source: Optional[CategoricalContextSource],
+    execution_mode: str,
+) -> None:
+  """Assigns SDK-owned identity and execution provenance to one result."""
+  result.identity = selector.identity if selector is not None else None
+  result.scope = selector.scope if selector is not None else None
+  result.context_applied = context_applied
+  result.context_source = context_source if context_applied else None
+  result.execution_mode = execution_mode
+  if selector is not None:
+    result.details.update(
+        {
+            "user_id": selector.identity.user_id,
+            "root_agent_name": selector.identity.root_agent_name,
+            "scope_signature": selector.scope_signature,
+        }
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -958,7 +1390,12 @@ def flatten_results_to_rows(
     config: CategoricalEvaluationConfig,
     endpoint: str,
 ) -> list[dict]:
-  """Flattens session results to one row per (session_id, metric_name).
+  """Flattens session results to persistence rows with identity provenance.
+
+  Identity/scope fields are nullable for historical-compatible rows. Contextual
+  rows retain only SDK-owned provenance; their justification and raw response
+  are omitted so trusted judge/golden-answer context, including model echoes,
+  cannot be persisted.
 
   Args:
       report: The evaluation report to flatten.
@@ -972,20 +1409,70 @@ def flatten_results_to_rows(
   created_at = report.created_at.isoformat()
   rows = []
   for sr in report.session_results:
+    sr._validate_provenance()
+    identity = sr.identity
+    scope = sr.scope
+    identity_key = (
+        _categorical_identity_key(identity, scope)
+        if identity is not None
+        else None
+    )
+    result_execution_mode = sr.execution_mode or execution_mode
     for mr in sr.metrics:
       rows.append(
           {
               "session_id": sr.session_id,
+              "user_id": identity.user_id if identity is not None else None,
+              "root_agent_name": (
+                  identity.root_agent_name if identity is not None else None
+              ),
+              "experiment_id": (
+                  scope.experiment_id if scope is not None else None
+              ),
+              "scope_key": (
+                  scope.scope_signature if scope is not None else None
+              ),
+              "identity_key": identity_key,
+              "context_applied": sr.context_applied,
+              "context_source": (
+                  sr.context_source.value
+                  if sr.context_source is not None
+                  else None
+              ),
               "metric_name": mr.metric_name,
               "category": mr.category,
-              "justification": mr.justification,
+              "justification": (
+                  None if sr.context_applied else mr.justification
+              ),
               "passed_validation": mr.passed_validation,
               "parse_error": mr.parse_error,
-              "raw_response": mr.raw_response,
+              # A model may echo its trusted judge input. Persisting the raw
+              # envelope for a contextual evaluation could therefore copy a
+              # golden answer even though the SDK never writes the input
+              # directly.
+              "raw_response": (None if sr.context_applied else mr.raw_response),
               "endpoint": endpoint,
-              "execution_mode": execution_mode,
+              "execution_mode": result_execution_mode,
               "prompt_version": config.prompt_version,
               "created_at": created_at,
           }
       )
   return rows
+
+
+def _categorical_identity_key(
+    identity: TraceIdentity,
+    scope: Optional[TraceScope],
+) -> str:
+  """Returns a versioned stable key for one resolved trace identity/scope."""
+  canonical = json.dumps(
+      [
+          identity.session_id,
+          identity.user_id,
+          identity.root_agent_name,
+          scope.scope_signature if scope is not None else None,
+      ],
+      ensure_ascii=False,
+      separators=(",", ":"),
+  ).encode("utf-8")
+  return "v1:" + hashlib.sha256(canonical).hexdigest()

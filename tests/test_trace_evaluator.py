@@ -16,12 +16,22 @@
 
 from datetime import datetime
 from datetime import timezone
+import threading
 from unittest.mock import AsyncMock
+from unittest.mock import call
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
+from bigquery_agent_analytics.client import Client
+from bigquery_agent_analytics.trace import AmbiguousSessionError
+from bigquery_agent_analytics.trace import ResolvedTraceSelector
+from bigquery_agent_analytics.trace import Span
+from bigquery_agent_analytics.trace import Trace
+from bigquery_agent_analytics.trace import TraceIdentity
+from bigquery_agent_analytics.trace import TraceScope
+from bigquery_agent_analytics.trace import TraceSelector
 from bigquery_agent_analytics.trace_evaluator import BigQueryTraceEvaluator
 from bigquery_agent_analytics.trace_evaluator import EvalStatus
 from bigquery_agent_analytics.trace_evaluator import MatchType
@@ -148,6 +158,45 @@ class TestSessionTrace:
     assert tool_calls[0].status == "OK"
     assert tool_calls[1].tool_name == "format"
     assert tool_calls[1].status == "ERROR"
+
+  @pytest.mark.parametrize("terminal_type", ["TOOL_COMPLETED", "TOOL_ERROR"])
+  def test_extract_tool_trajectory_pairs_tied_terminal_before_start(
+      self, terminal_type
+  ):
+    """Shared resolver tie-breaks must not erase the tool arguments."""
+    timestamp = datetime.now(timezone.utc)
+    events = [
+        TraceEvent(
+            event_type=terminal_type,
+            agent="agent",
+            timestamp=timestamp,
+            content={"tool": "search", "result": {"data": "sunny"}},
+            attributes={},
+            span_id="span-1",
+            error_message=(
+                "search failed" if terminal_type == "TOOL_ERROR" else None
+            ),
+        ),
+        TraceEvent(
+            event_type="TOOL_STARTING",
+            agent="agent",
+            timestamp=timestamp,
+            content={"tool": "search", "args": {"query": "weather"}},
+            attributes={},
+            span_id="span-1",
+        ),
+    ]
+
+    trace = SessionTrace(
+        session_id="sess-1",
+        user_id="user-1",
+        events=events,
+    )
+
+    tool_calls = trace.extract_tool_trajectory()
+
+    assert len(tool_calls) == 1
+    assert tool_calls[0].args == {"query": "weather"}
 
   def test_extract_final_response_from_agent_completed(self):
     """Test extracting final response from AGENT_COMPLETED event."""
@@ -355,67 +404,141 @@ class TestBigQueryTraceEvaluator:
 
   @pytest.mark.asyncio
   async def test_get_session_trace(self, evaluator, mock_client):
-    """Test retrieving session trace."""
-    # Mock query results
-    mock_results = [
-        {
-            "event_type": "USER_MESSAGE_RECEIVED",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"text_summary": "Hello"}',
-            "attributes": "{}",
-            "span_id": "span-1",
-            "parent_span_id": None,
-            "latency_ms": None,
-            "status": "OK",
-            "error_message": None,
-            "user_id": "user-123",
-        },
-        {
-            "event_type": "TOOL_STARTING",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"tool": "greet", "args": {}}',
-            "attributes": "{}",
-            "span_id": "span-2",
-            "parent_span_id": "span-1",
-            "latency_ms": None,
-            "status": "OK",
-            "error_message": None,
-            "user_id": "user-123",
-        },
-        {
-            "event_type": "TOOL_COMPLETED",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"tool": "greet", "result": "Hi!"}',
-            "attributes": "{}",
-            "span_id": "span-2",
-            "parent_span_id": "span-1",
-            "latency_ms": '{"total_ms": 100}',
-            "status": "OK",
-            "error_message": None,
-            "user_id": "user-123",
-        },
+    """The async facade delegates one exact selector off the event loop."""
+    now = datetime.now(timezone.utc)
+    identity = TraceIdentity(
+        session_id="sess-123",
+        user_id="user-123",
+        root_agent_name="root",
+    )
+    scope = TraceScope(custom_labels={"run": "v1"})
+    sdk_trace = Trace(
+        trace_id="trace-1",
+        session_id="sess-123",
+        user_id="user-123",
+        identity=identity,
+        scope=scope,
+        scope_coverage=(scope.scope_signature,),
+        spans=[
+            Span(
+                event_type="USER_MESSAGE_RECEIVED",
+                agent="agent",
+                timestamp=now,
+                content={"text_summary": "Hello"},
+                attributes={},
+                span_id="span-1",
+                user_id="user-123",
+            ),
+            Span(
+                event_type="TOOL_STARTING",
+                agent="agent",
+                timestamp=now,
+                content={"tool": "greet", "args": {}},
+                attributes={},
+                span_id="span-2",
+                parent_span_id="span-1",
+                user_id="user-123",
+            ),
+            Span(
+                event_type="TOOL_COMPLETED",
+                agent="agent",
+                timestamp=now,
+                content={"tool": "greet", "result": "Hi!"},
+                attributes={},
+                span_id="span-2",
+                parent_span_id="span-1",
+                latency_ms=100.75,
+                user_id="user-123",
+            ),
+            Span(
+                event_type="IGNORED_EVENT",
+                agent="agent",
+                timestamp=now,
+                content={},
+                attributes={},
+                span_id="span-ignored",
+                user_id="user-123",
+            ),
+        ],
+    )
+    evaluator.include_event_types = [
+        "USER_MESSAGE_RECEIVED",
+        "TOOL_STARTING",
+        "TOOL_COMPLETED",
     ]
+    main_thread = threading.get_ident()
+    fetch_threads = []
 
-    mock_query_job = MagicMock()
-    mock_query_job.result.return_value = mock_results
-    mock_client.query.return_value = mock_query_job
+    def fetch(
+        _client,
+        selector,
+        *,
+        allow_mixed_scope=False,
+        event_types=None,
+    ):
+      fetch_threads.append(threading.get_ident())
+      assert selector == TraceSelector(
+          session_id="sess-123",
+          user_id="user-123",
+          root_agent_name="root",
+          experiment_id=None,
+          custom_labels={"run": "v1"},
+          scope_signature=scope.scope_signature,
+      )
+      assert allow_mixed_scope is True
+      assert event_types == evaluator.include_event_types
+      return sdk_trace
 
-    trace = await evaluator.get_session_trace("sess-123")
+    with patch.object(Client, "get_trace_by_selector", autospec=True) as get:
+      get.side_effect = fetch
+      trace = await evaluator.get_session_trace(
+          "sess-123",
+          user_id="user-123",
+          root_agent_name="root",
+          experiment_id=None,
+          custom_labels={"run": "v1"},
+          scope_signature=scope.scope_signature,
+          allow_mixed_scope=True,
+      )
 
     assert trace.session_id == "sess-123"
     assert trace.user_id == "user-123"
     assert len(trace.events) == 3
     assert len(trace.tool_calls) == 1
     assert trace.tool_calls[0].tool_name == "greet"
+    assert trace.tool_calls[0].latency_ms == 100.75
+    assert trace.identity == identity
+    assert trace.scope == scope
+    assert trace.scope_coverage == (scope.scope_signature,)
+    assert fetch_threads and fetch_threads[0] != main_thread
 
-    # Phase 2a: the query must be labeled so BigQuery Agent Analytics SDK
-    # usage shows up in INFORMATION_SCHEMA.JOBS with sdk_feature=trace-read.
-    job_config = mock_client.query.call_args.kwargs.get("job_config")
-    assert job_config is not None
-    assert dict(job_config.labels or {}).get("sdk_feature") == "trace-read"
+  @pytest.mark.asyncio
+  async def test_get_trace_by_selector_propagates_ambiguity(self, evaluator):
+    identity = TraceIdentity(session_id="sess-123", user_id="user-123")
+    ambiguity = AmbiguousSessionError(
+        [
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"run": "v0"}),
+            ),
+            ResolvedTraceSelector(
+                identity=identity,
+                scope=TraceScope(custom_labels={"run": "v1"}),
+            ),
+        ]
+    )
+    selector = TraceSelector(session_id="sess-123")
+
+    with patch.object(
+        Client,
+        "get_trace_by_selector",
+        autospec=True,
+        side_effect=ambiguity,
+    ):
+      with pytest.raises(AmbiguousSessionError) as exc_info:
+        await evaluator.get_trace_by_selector(selector)
+
+    assert exc_info.value is ambiguity
 
   def test_vanilla_client_emits_warn_once(self, caplog):
     # PR #25 review: mirror Phase 1 warn-once behavior on the evaluator's
@@ -447,40 +570,40 @@ class TestBigQueryTraceEvaluator:
   @pytest.mark.asyncio
   async def test_evaluate_session_with_trajectory(self, evaluator, mock_client):
     """Test evaluating session with golden trajectory."""
-    # Mock trace retrieval
-    mock_results = [
-        {
-            "event_type": "TOOL_STARTING",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"tool": "search", "args": {"q": "weather"}}',
-            "attributes": "{}",
-            "span_id": "span-1",
-            "status": "OK",
-        },
-        {
-            "event_type": "TOOL_COMPLETED",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"tool": "search", "result": "sunny"}',
-            "attributes": "{}",
-            "span_id": "span-1",
-            "status": "OK",
-        },
-        {
-            "event_type": "AGENT_COMPLETED",
-            "agent": "agent",
-            "timestamp": datetime.now(timezone.utc),
-            "content": '{"response": "The weather is sunny."}',
-            "attributes": "{}",
-            "span_id": "span-2",
-            "status": "OK",
-        },
-    ]
-
-    mock_query_job = MagicMock()
-    mock_query_job.result.return_value = mock_results
-    mock_client.query.return_value = mock_query_job
+    now = datetime.now(timezone.utc)
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id=None,
+        events=[
+            TraceEvent(
+                event_type="TOOL_STARTING",
+                agent="agent",
+                timestamp=now,
+                content={"tool": "search", "args": {"q": "weather"}},
+                attributes={},
+                span_id="span-1",
+            ),
+            TraceEvent(
+                event_type="TOOL_COMPLETED",
+                agent="agent",
+                timestamp=now,
+                content={"tool": "search", "result": "sunny"},
+                attributes={},
+                span_id="span-1",
+            ),
+            TraceEvent(
+                event_type="AGENT_COMPLETED",
+                agent="agent",
+                timestamp=now,
+                content={"response": "The weather is sunny."},
+                attributes={},
+                span_id="span-2",
+            ),
+        ],
+    )
+    trace.extract_tool_trajectory()
+    trace.final_response = trace.extract_final_response()
+    evaluator.get_session_trace = AsyncMock(return_value=trace)
 
     golden_trajectory = [{"tool_name": "search", "args": {"q": "weather"}}]
     golden_response = "The weather is sunny."
@@ -498,6 +621,77 @@ class TestBigQueryTraceEvaluator:
     assert result.scores["trajectory_exact_match"] == 1.0
     assert "response_match" in result.scores
     assert result.scores["response_match"] == 1.0
+
+  @pytest.mark.asyncio
+  async def test_evaluate_session_uses_exact_selector_and_attribution(
+      self, evaluator
+  ):
+    identity = TraceIdentity(
+        session_id="sess-123",
+        user_id="alice",
+        root_agent_name="root",
+    )
+    scope = TraceScope(experiment_id="exp-1", custom_labels={"run": "v1"})
+    selector = ResolvedTraceSelector(
+        identity=identity, scope=scope
+    ).to_selector()
+    trace = SessionTrace(
+        session_id="sess-123",
+        user_id="alice",
+        events=[],
+        identity=identity,
+        scope=scope,
+    )
+    evaluator.get_trace_by_selector = AsyncMock(return_value=trace)
+
+    result = await evaluator.evaluate_session(
+        session_id="sess-123",
+        selector=selector,
+    )
+
+    evaluator.get_trace_by_selector.assert_awaited_once_with(selector)
+    assert result.details["user_id"] == "alice"
+    assert result.details["root_agent_name"] == "root"
+    assert result.details["experiment_id"] == "exp-1"
+    assert result.details["scope_signature"] == scope.scope_signature
+
+  @pytest.mark.asyncio
+  async def test_evaluate_session_rejects_mismatched_selector(self, evaluator):
+    with pytest.raises(ValueError, match="session_id"):
+      await evaluator.evaluate_session(
+          session_id="sess-a",
+          selector=TraceSelector(session_id="sess-b"),
+      )
+
+  @pytest.mark.asyncio
+  async def test_evaluate_batch_accepts_selector_mapping(self, evaluator):
+    evaluator.evaluate_session = AsyncMock(return_value=MagicMock())
+    scope = TraceScope(custom_labels={"run": "v1"})
+    selector_payload = {
+        "session_id": "sess-123",
+        "user_id": None,
+        "root_agent_name": "root",
+        "experiment_id": None,
+        "custom_labels": {"run": "v1"},
+        "scope_signature": scope.scope_signature,
+    }
+
+    await evaluator.evaluate_batch([{"selector": selector_payload}])
+
+    call = evaluator.evaluate_session.await_args.kwargs
+    assert call["session_id"] == "sess-123"
+    assert call["selector"] == TraceSelector(**selector_payload)
+
+  @pytest.mark.asyncio
+  async def test_evaluate_batch_accepts_selector_object(self, evaluator):
+    evaluator.evaluate_session = AsyncMock(return_value=MagicMock())
+    selector = TraceSelector(session_id="sess-123", user_id="alice")
+
+    await evaluator.evaluate_batch([{"selector": selector}])
+
+    call = evaluator.evaluate_session.await_args.kwargs
+    assert call["session_id"] == "sess-123"
+    assert call["selector"] is selector
 
   def test_compute_response_match_exact(self, evaluator):
     """Test exact response matching."""
@@ -645,6 +839,32 @@ class TestTraceReplayRunner:
     assert callback_events == ["TOOL_COMPLETED"]
 
   @pytest.mark.asyncio
+  async def test_replay_session_accepts_exact_selector(
+      self, replay_runner, mock_evaluator
+  ):
+    selector = TraceSelector(session_id="sess-123", user_id="alice")
+    mock_evaluator.get_trace_by_selector = AsyncMock(
+        return_value=SessionTrace(
+            session_id="sess-123", user_id="alice", events=[]
+        )
+    )
+    mock_evaluator.get_session_trace = AsyncMock()
+
+    await replay_runner.replay_session("sess-123", selector=selector)
+
+    mock_evaluator.get_trace_by_selector.assert_awaited_once_with(selector)
+    mock_evaluator.get_session_trace.assert_not_awaited()
+
+  @pytest.mark.asyncio
+  async def test_replay_session_rejects_mismatched_selector(
+      self, replay_runner
+  ):
+    with pytest.raises(ValueError, match="session_id"):
+      await replay_runner.replay_session(
+          "sess-a", selector=TraceSelector(session_id="sess-b")
+      )
+
+  @pytest.mark.asyncio
   async def test_compare_replays(self, replay_runner, mock_evaluator):
     """Test comparing two session replays."""
     trace1 = SessionTrace(
@@ -677,3 +897,30 @@ class TestTraceReplayRunner:
     assert diff["tool_count_diff"] == 0
     assert len(diff["tool_differences"]) == 2  # Both tools differ
     assert diff["response_match"] is False
+
+  @pytest.mark.asyncio
+  async def test_compare_replays_accepts_exact_selectors(
+      self, replay_runner, mock_evaluator
+  ):
+    selector_1 = TraceSelector(session_id="sess-1", user_id="alice")
+    selector_2 = TraceSelector(session_id="sess-2", user_id="bob")
+    mock_evaluator.get_trace_by_selector = AsyncMock(
+        side_effect=[
+            SessionTrace(session_id="sess-1", user_id="alice", events=[]),
+            SessionTrace(session_id="sess-2", user_id="bob", events=[]),
+        ]
+    )
+    mock_evaluator.get_session_trace = AsyncMock()
+
+    await replay_runner.compare_replays(
+        "sess-1",
+        "sess-2",
+        selector_1=selector_1,
+        selector_2=selector_2,
+    )
+
+    assert mock_evaluator.get_trace_by_selector.await_args_list == [
+        call(selector_1),
+        call(selector_2),
+    ]
+    mock_evaluator.get_session_trace.assert_not_awaited()

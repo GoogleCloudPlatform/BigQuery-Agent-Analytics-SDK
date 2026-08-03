@@ -2,7 +2,7 @@
   "name": "react-example",
   "version": "0.0.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.22.0"
   },
   "type": "module",
   "scripts": {
@@ -23,9 +23,9 @@
     "date-fns": "^4.1.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
-    "react": "^19.0.1",
-    "react-dom": "^19.0.1",
-    "react-router-dom": "^7.15.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router": "^8.3.0",
     "recharts": "^3.8.1",
     "tailwind-merge": "^3.5.0"
   },

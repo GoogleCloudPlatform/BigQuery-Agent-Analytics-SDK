@@ -346,6 +346,36 @@ class TestParseErrorsInDetails:
     strict = _apply_strict_mode(report)
     assert strict.aggregate_scores == {"correctness": 0.9, "sentiment": 0.8}
 
+  def test_strict_parse_error_preserves_attribution_and_existing_details(self):
+    original_details = {
+        "user_id": "alice",
+        "root_agent_name": "root",
+        "scope_signature": "scope-v1",
+        "judge_metadata": {"attempt": 2},
+    }
+    report = EvaluationReport(
+        dataset="test",
+        evaluator_name="judge",
+        total_sessions=1,
+        passed_sessions=1,
+        failed_sessions=0,
+        session_scores=[
+            SessionScore(
+                session_id="s1",
+                scores={},
+                passed=True,
+                details=original_details,
+            ),
+        ],
+    )
+
+    strict = _apply_strict_mode(report)
+
+    assert strict.session_scores[0].details == {
+        **original_details,
+        "parse_error": True,
+    }
+
 
 # ================================================================== #
 # Feature: EvaluationReport.details field exists                       #

@@ -71,7 +71,12 @@ class SessionScore(BaseModel):
   )
   details: dict[str, Any] = Field(
       default_factory=dict,
-      description="Additional per-session details.",
+      description=(
+          "Additional per-session details. The SDK reserves user_id,"
+          " root_agent_name, and scope_signature for authoritative"
+          " attribution when one session expands into multiple"
+          " evaluated trace identities/scopes."
+      ),
   )
   llm_feedback: Optional[str] = Field(
       default=None,

@@ -562,6 +562,8 @@ class TraceFilter:
       # Same identity-skip as custom_labels, for += on the list.
       if value is not getattr(self, "session_ids", None):
         value = _normalized_session_ids(value)
+    if name == "event_types" and value is not None:
+      value = _normalized_event_types(value)
     object.__setattr__(self, name, value)
 
   @classmethod
@@ -771,13 +773,22 @@ class TraceFilter:
             )
         )
         params.append(bigquery.ScalarQueryParameter(param_val, "STRING", value))
-    if self.event_types:
+    # Same normalize-before-truthiness rule as session_ids and
+    # custom_labels (PR #371 review round 8, P2-5): the SQL boundary
+    # re-reads real storage through trusted paths so a lying
+    # container cannot erase or rewrite the predicate.
+    event_types = (
+        _normalized_event_types(self.event_types)
+        if self.event_types is not None
+        else None
+    )
+    if event_types:
       conditions.append("event_type IN UNNEST(@event_types)")
       params.append(
           bigquery.ArrayQueryParameter(
               "event_types",
               "STRING",
-              self.event_types,
+              event_types,
           )
       )
     if self.tool_origin:
@@ -813,6 +824,130 @@ class TraceFilter:
 
     where = " AND ".join(conditions) if conditions else "TRUE"
     return where, params
+
+  def snapshot(self) -> "TraceFilter":
+    """Fully detached copy: later mutation of this filter (or its
+    container fields) cannot affect queries built from the snapshot.
+
+    A shallow ``dataclasses.replace`` is not enough — plain list
+    fields like ``event_types`` would stay aliased, and an
+    ``ArrayQueryParameter`` holds its list by reference until job
+    submission (PR #371 review round 4, P1-6).
+    """
+    import dataclasses as _dataclasses
+
+    # Trusted reads (PR #371 review round 5, P1-5): public
+    # list()/dict() iteration would re-open the lying-container
+    # bypass — a hostile subclass injected through vars(filt) could
+    # present empty contents and erase filters from the snapshot.
+    session_ids = self.session_ids
+    if isinstance(session_ids, (list, tuple)):
+      session_ids = _trusted_sequence_snapshot(session_ids)
+    custom_labels = self.custom_labels
+    if isinstance(custom_labels, dict):
+      custom_labels = dict(dict.items(custom_labels))
+    event_types = self.event_types
+    if isinstance(event_types, (list, tuple)):
+      event_types = _trusted_sequence_snapshot(event_types)
+    elif event_types is not None:
+      # __setattr__ validation only admits list/tuple; anything else
+      # was injected past the guards and is rejected closed rather
+      # than iterated (PR #371 review round 6, P2-9).
+      raise TypeError(
+          "TraceFilter.event_types must be a list of strings or None."
+      )
+    return _dataclasses.replace(
+        self,
+        session_ids=session_ids,
+        custom_labels=custom_labels,
+        event_types=event_types,
+    )
+
+  def to_query_fragments(self, alias: str = "e") -> tuple[str, str, list]:
+    """Session WHERE, row-scope WHERE, and parameters from ONE snapshot.
+
+    ``to_sql_conditions()`` and ``row_scope_where()`` read the mutable
+    filter separately; a mutation between the two calls could leave
+    the candidate CTE pinned while the outer row fetch degrades to
+    ``TRUE`` and admits foreign scopes. Both fragments and the
+    parameters derive from one :meth:`snapshot`.
+    """
+    detached = self.snapshot()
+    where, params = detached.to_sql_conditions()
+    row_where = detached.row_scope_where(alias=alias)
+    return where, row_where, params
+
+  def row_scope_where(self, alias: str = "e") -> str:
+    """Alias-qualified row-scope predicates for the outer row fetch.
+
+    Issue #359: ``to_sql_conditions()`` selects candidate SESSIONS;
+    the composite anchor join then fetches every anchored row, so
+    caller-selected scope (custom labels and experiment) must be
+    re-applied to the fetched rows or a reused session id merges
+    foreign evaluation passes into one trace.
+
+    Label semantics, per the live-data characterization recorded on
+    issue #361: a pinned label ``k=v`` admits rows whose ``k`` equals
+    ``v`` and rows carrying NO custom-tag payload at all (fully
+    untagged shared conversation rows) — preserving complete-trace
+    semantics (R6) within the selected scope. A row that has OTHER
+    tags but lacks ``k`` belongs to a different pass and is excluded:
+    missing one key does not make a tagged row shared (PR #371
+    review, P1-1). The emitted fragment reuses the query parameters
+    that
+    ``to_sql_conditions()`` already declares (``@experiment_id``,
+    ``@label_key_N``/``@label_val_N``), so both must be rendered into
+    the same query.
+
+    Args:
+        alias: Table alias of the outer event-row fetch.
+
+    Returns:
+        A SQL boolean expression (``TRUE`` when no row-scope
+        dimension is pinned).
+    """
+    conditions = []
+    untagged = (
+        f"COALESCE(TO_JSON_STRING(JSON_QUERY({alias}.attributes,"
+        " '$.custom_tags')), 'null') IN ('null', '{}')"
+    )
+    experiment_id = _validated_filter_pin("experiment_id", self.experiment_id)
+    if experiment_id is SQL_NULL:
+      # No row predicate (PR #371 review round 6, P1-4): restricting
+      # the fetch to NULL-experiment rows would erase the non-NULL
+      # context needed to classify shared untagged NULL rows, letting
+      # them masquerade as a genuine empty NULL scope. The slot-level
+      # scope predicate selects NULL-experiment scopes after
+      # classification over the full identity context.
+      pass
+    elif experiment_id is not None:
+      # NULL-experiment rows are shared conversation rows only when
+      # they carry no tag payload; a tagged NULL-experiment row is a
+      # genuine NULL-scope pass and stays out of e1 reads (symmetric
+      # with _scope_subgroups).
+      conditions.append(
+          f"(JSON_VALUE({alias}.attributes, '$.experiment_id')"
+          " = @experiment_id"
+          f" OR (JSON_VALUE({alias}.attributes, '$.experiment_id')"
+          f" IS NULL AND {untagged}))"
+      )
+    labels = (
+        _normalized_filter_labels(self.custom_labels)
+        if self.custom_labels is not None
+        else None
+    )
+    if labels:
+      # Untagged shared rows appear as a missing custom_tags member,
+      # an explicit JSON null, or an empty object — IS NULL alone
+      # misses the latter two (verified against live BigQuery).
+      for i in range(len(labels)):
+        conditions.append(
+            f"(JSON_VALUE({alias}.attributes,"
+            f" CONCAT('$.custom_tags.', @label_key_{i}))"
+            f" = @label_val_{i}"
+            f" OR {untagged})"
+        )
+    return " AND ".join(conditions) if conditions else "TRUE"
 
 
 class _PinSentinel:
@@ -1620,6 +1755,31 @@ def _normalized_session_ids(session_ids: Any) -> list[str]:
   return _ValidatedSessionIds(session_ids)
 
 
+def _normalized_event_types(event_types: Any) -> list[str]:
+  """Normalize ``event_types`` into a trusted list of exact strings.
+
+  Trusted finite list/tuple of exact strings (PR #371 review round 6,
+  P2-9): arbitrary iterables are read through their public iterator,
+  which a hostile container could use to erase the filter into WHERE
+  TRUE. Called on assignment AND re-applied at the SQL boundary
+  (PR #371 review round 8, P2-5) — the same normalize-before-
+  truthiness rule as ``session_ids`` — so a ``vars()``-injected lying
+  container can neither hide real contents from the ``if`` check nor
+  feed a rewriting iterator into the array parameter.
+  """
+  if not isinstance(event_types, (list, tuple)):
+    raise TypeError(
+        "TraceFilter.event_types must be a list of strings or None."
+    )
+  snapshot = _trusted_sequence_snapshot(event_types)
+  normalized_events = []
+  for entry in snapshot:
+    if not isinstance(entry, str):
+      raise TypeError("TraceFilter.event_types entries must be strings.")
+    normalized_events.append(_exact_str(entry))
+  return normalized_events
+
+
 def _parse_scope_signature_labels(
     signature: str,
 ) -> Optional[dict[str, str]]:
@@ -2197,7 +2357,11 @@ class AmbiguousSessionError(ValueError):
   are allowed to return identity dimensions and scope signatures.
   """
 
-  def __init__(self, candidates: Sequence[ResolvedTraceSelector]):
+  def __init__(
+      self,
+      candidates: Sequence[ResolvedTraceSelector],
+      population_truncated: bool = False,
+  ):
     deduped = tuple(dict.fromkeys(_validated_candidates(candidates)))
     if len(deduped) < 2:
       raise ValueError(
@@ -2212,13 +2376,22 @@ class AmbiguousSessionError(ValueError):
           " not an ambiguity."
       )
     self._candidates: tuple[ResolvedTraceSelector, ...] = deduped
+    self._population_truncated = bool(population_truncated)
     self._retry_dimensions: tuple[str, ...] = self._differing_dimensions(
         deduped
     )
     dims = ", ".join(self._retry_dimensions) or "scope"
+    quantifier = "At least" if self._population_truncated else "Exactly"
+    truncation_note = (
+        " (candidate population truncated; the enumerated candidates"
+        " are a lower bound)"
+        if self._population_truncated
+        else ""
+    )
     super().__init__(
-        f"Ambiguous singular session lookup: {len(deduped)}"
-        f" candidates match. Retry with an explicit selector for: {dims}."
+        f"Ambiguous singular session lookup: {quantifier}"
+        f" {len(deduped)} candidates match{truncation_note}. Retry"
+        f" with an explicit selector for: {dims}."
     )
 
   @property
@@ -2236,12 +2409,19 @@ class AmbiguousSessionError(ValueError):
     """Dimension names that disambiguate a retry (read-only)."""
     return self._retry_dimensions
 
-  def __reduce__(self) -> tuple[Any, tuple[Any]]:
+  @property
+  def population_truncated(self) -> bool:
+    """True when the candidate population exceeded the enumeration
+    bound: the carried candidates are a lower bound, not the exact
+    ambiguity set (read-only)."""
+    return self._population_truncated
+
+  def __reduce__(self) -> tuple[Any, tuple[Any, bool]]:
     # Exception.args holds the redacted message, so default
     # copy/deepcopy/pickle reconstruction would call __init__ with a
     # string instead of the candidate sequence. Rebuild from the
     # stored candidates instead.
-    return (self.__class__, (self.candidates,))
+    return (self.__class__, (self.candidates, self._population_truncated))
 
   @staticmethod
   def _differing_dimensions(
@@ -2269,12 +2449,16 @@ class AmbiguousSessionError(ValueError):
     :meth:`ResolvedTraceSelector.to_retry_payload`: a ``selector``
     dict of :class:`TraceSelector` keyword arguments that retries the
     lookup in one step, plus the candidate's ``scope_signature``.
+    When ``population_truncated`` is true, ``candidate_count`` and
+    ``candidates`` describe only the enumerated lower bound; more
+    matching candidates may exist beyond the discovery cap.
     Carries candidate identity dimensions and scope signatures only;
     event content and judge context never appear here.
     """
     return {
         "error": "ambiguous_session",
         "candidate_count": len(self.candidates),
+        "population_truncated": self._population_truncated,
         "retry_dimensions": list(self.retry_dimensions),
         "candidates": [c.to_retry_payload() for c in self.candidates],
     }
@@ -2379,6 +2563,10 @@ class Trace(_WeakrefableSlotted):
   total_latency_ms: Optional[float] = None
   identity: Optional[TraceIdentity] = None
   scope: Optional[TraceScope] = None
+  # KTD4 coverage metadata for allow_mixed_scope reads: the scope
+  # signatures whose rows this conversation-complete trace contains
+  # (None on ordinary scoped reads, or when coverage was truncated).
+  scope_coverage: Optional[tuple[str, ...]] = None
 
   def __setattr__(self, name: str, value: Any) -> None:
     if name == "scope":

@@ -1,0 +1,84 @@
+# Public Looker Studio template metadata used by tools/hydrate_dashboard.py.
+#
+# The report contains one embedded BigQuery CUSTOM_QUERY data source. The
+# Linking API updates that source by alias and applies sqlReplace to the
+# executable sentinel values in bindings/template_bindings.yaml.
+report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
+data_source_alias: ds230
+default_report_name: BigQuery Agent Analytics
+# Credential mode of the canonical template source. Linking API creates a new
+# data source owned by the clicking user; its creation dialog can initially
+# label the new source as Owner's Credentials.
+credential_mode: VIEWERS
+generated_report_credential_gate:
+  observed_initial_mode: OWNERS
+  required_before_sharing: VIEWERS
+  verification_path: Resource > Manage added data sources > Edit
+link_access: PUBLIC
+publishing_mode: MANUAL
+published_date: "2026-07-29"
+# This attestation covers the reviewed repository artifact. It does not prove
+# that the mutable external Looker Studio report still embeds these bytes.
+reviewed_template_sql:
+  sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
+  reviewed_date: "2026-07-24"
+  scope: repository_artifact_only
+live_template_verification:
+  verified_date: "2026-07-29"
+  repository_sql_sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
+  method:
+    - connector_custom_query_review
+    - page_bounds_containment_probe
+    - sqlreplace_table_only_smoke_test
+    - canonical_viewer_credentials_review
+    - published_eight_page_ux_smoke_test
+    - published_non_degenerate_chart_data_capture
+    - editor_configuration_assertions
+    - published_tool_page_refresh
+    - published_include_today_default_validation
+  result: PASSED
+  limitation: mutable_external_report_requires_reverification_after_changes
+known_live_issues: []
+product_contract: spec/product_contract.yaml
+viewer_qa_contract:
+  issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381
+  protocol: docs/rendering-and-viewport-support.md
+  status: NOT_REPRODUCED_UNDER_PROTOCOL
+  observed_baseline_comment: >-
+    https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/383#issuecomment-5098030747
+product_verification:
+  verified_date: "2026-07-28"
+  pages: 8
+  checks:
+    - expected_page_and_chart_titles_present
+    - no_too_many_rows_errors
+    - no_date_control_chart_overlaps
+    - llm_call_volume_dimension_is_event_date
+    - llm_and_tool_percentile_order_is_p50_p75_p90_p99
+    - llm_and_token_p1_bindings_render_non_degenerate_data
+    - latency_sections_are_aligned_and_non_overlapping
+    - single_series_legends_do_not_expose_internal_field_names
+    - top_user_rankings_do_not_group_remaining_users_as_others
+    - tool_charts_exclude_non_completed_rows
+    - multi_series_charts_use_categorical_legends
+    - no_partial_update_footer_after_refresh
+    - default_date_range_includes_today_on_seven_dashboard_pages
+  result: PASSED
+source_contract:
+  mode: BASE_TABLE
+  generated_views_required: false
+  replacement_identifiers:
+    - PROJECT
+    - DATASET
+    - TABLE
+governance:
+  live_report_owner_class: CONTRIBUTOR_MANAGED
+  sentinel_fixture_owner_class: CONTRIBUTOR_MANAGED
+  target_owner_class: GOOGLE_MANAGED
+  transfer_status: PENDING_MAINTAINER
+default_date_range:
+  mode: rolling
+  start_offset_days: 364
+  end_offset_days: 0
+  include_today: true
+  page_scope: all_dashboard_pages
