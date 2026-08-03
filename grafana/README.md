@@ -1,7 +1,7 @@
 # Grafana Dashboard for BigQuery Agent Analytics
 
-Visualize BQAA telemetry straight from BigQuery in Grafana, with nothing to
-host. Works on the free tier of Grafana Cloud. It runs alongside the
+Visualize BQAA telemetry straight from BigQuery in Grafana.
+Works on the free tier of Grafana Cloud. It runs alongside the
 [`dashboard_v2/`](../dashboard_v2) React app rather than replacing it — both
 read the same data.
 
@@ -55,15 +55,34 @@ No real traffic yet? Seed a synthetic dataset:
 
 ```bash
 bqaa seed-events --scenario retail-returns \
-  --project-id YOUR_PROJECT --dataset-id YOUR_DATASET
+  --project-id YOUR_PROJECT --dataset-id YOUR_DATASET \
+  --events-table YOUR_TABLE --sessions 100
 ```
+
+`YOUR_TABLE` defaults to `agent_events`; pass `--events-table` only if you want
+a different name.
+
+Smoke-test the seed — an empty table looks exactly like a broken dashboard:
+
+```bash
+bq query --use_legacy_sql=false \
+  'SELECT COUNT(*) AS events, MAX(timestamp) AS latest
+   FROM `YOUR_PROJECT.YOUR_DATASET.YOUR_TABLE`'
+```
+
+Expect a non-zero count. If `latest` falls outside the dashboard's time range,
+every panel will read "No data".
 
 Then create the typed views the panels query. These un-nest the JSON columns of
 `agent_events` into typed columns:
 
 ```bash
-bq-agent-sdk views create-all --project-id YOUR_PROJECT --dataset-id YOUR_DATASET
+bq-agent-sdk views create-all --project-id YOUR_PROJECT --dataset-id YOUR_DATASET \
+  --table-id YOUR_TABLE
 ```
+
+`--table-id` must match the dashboard's `table` constant (step 5), or the views
+and the panels will read different tables.
 
 `ViewManager` prefixes them with `adk_` by default. Used a custom prefix? Set
 the dashboard's **View prefix** variable to match in step 5.
@@ -157,6 +176,11 @@ range.
 - **Trace detail** is the heaviest query. Pin a session before widening the
   default **Last 24 hours** range.
 
+Every panel filters on `timestamp`, and `agent_events` is partitioned on it
+(`bqaa seed-events` sets this up — partition your own table the same way), so
+the time picker prunes partitions rather than scanning them. A narrower range is
+genuinely cheaper, not just faster.
+
 Per-panel semantics live in the panel tooltips and
 [`queries/README.md`](queries/README.md).
 
@@ -194,28 +218,61 @@ dashboard: no template variables, no time-group macros, hardcoded cost rates, a
 locked **Last 72 hours** range with the time picker hidden, and no **Trace
 detail** panel. Not editable, no auto-refresh, fixed to UTC.
 
+Its queries are static — no variables to interpolate — and hardcode the 72-hour
+window in the SQL, not the time picker, so an anonymous viewer cannot widen the
+scan from a URL. They live in
+[`queries/public-demo/`](queries/README.md#the-public-demo-build) and are
+CI-checked against the panels, same as the interactive build.
+
 **1. Point it at your data** — with no variables, the target is written into
 every panel's SQL:
 
 ```bash
 sed -e 's/YOUR_PROJECT_ID/my-gcp-project/g' \
     -e 's/YOUR_DATASET_ID/my_demo_dataset/g' \
+    -e 's/agent_events/my_demo_table/g' \
     grafana/bqaa-public-demo.json > grafana/bqaa-public-demo.ready.json
 ```
 
-Import `bqaa-public-demo.ready.json` and select your BigQuery data source. On a
-custom view prefix, add `-e 's/adk_/my_prefix_/g'`.
+The third substitution only matters if your events table is not named
+`agent_events` — put your real table name in place of `my_demo_table`, or drop
+the line. If you generated your typed views using a custom table prefix instead
+of the default `adk_`, simply append `-e 's/adk_/my_prefix_/g'` to your command.
 
-**2. Be sure to cap the spend.** Set a [BigQuery custom
-quota](https://cloud.google.com/bigquery/docs/custom-quotas) on the demo
-project. 
+Import `bqaa-public-demo.ready.json` and select your BigQuery data source, see the
+next few steps for details on setting up the data source.
 
-**3. Enable public sharing** in the Grafana UI:
+**2. Give it a demo-only service account.** A public dashboard queries BigQuery
+as whatever account the data source holds, for anyone with the link. Do not
+reuse the account from [step 2](#2-create-a-service-account): create a separate
+one with `BigQuery Job User` on the demo project and `BigQuery Data Viewer`
+**on the demo dataset alone**. Then treat its JSON key as a live credential —
+rotate it on a schedule, and delete the downloaded file (and any old keys in
+**IAM → Service Accounts → Keys**) once Grafana has it.
+
+**3. Be sure to cap the spend.** There are two primary ways, it would be wise to
+set **both** as they bound different things:
+
+- **Max bytes billed** (**Connections → your BigQuery data source → Max bytes
+  billed**) caps **each query**, not how many run. Size it above what the
+  heaviest panel - **Recent sessions** - scans; the query editor prints the
+  estimate.
+- A [BigQuery custom quota](https://cloud.google.com/bigquery/docs/custom-quotas) on the demo
+  project acts as an approximate daily cost safeguard for on-demand pricing
+  models, making it essential for limiting surprise daily expenses.
+
+**4. Enable public sharing** in the Grafana UI:
 
 1. Open the dashboard → **Share**.
 2. Choose **Public dashboard** (**Share externally** in newer Grafana).
 3. Tick the acknowledgements → **Generate public URL**.
 4. Copy the link. Pause or revoke it from the same tab whenever you like.
+
+**5. Open the link in an incognito window** before you hand it out. Logged in
+you see it as an editor; incognito shows what the internet gets. Check every
+panel there — a rejected query still prints its normal empty-state text, so
+watch for the small red corner indicator and confirm the Overview stats show
+real numbers.
 
 **Pricing:** the **Estimated cost** panel hardcodes `1.25` and `5.00` USD per 1M
 tokens in its SQL — same unit as the [cost variables](#cost-variables). Edit the
@@ -253,7 +310,11 @@ its query. That makes [`queries/*.sql`](queries/README.md) the source of truth:
    in `bqaa-dashboard.json`. A change to one without the other is incomplete —
    `scripts/check_grafana_queries_sync.py` diffs them in CI and will fail.
 2. **Adding a panel?** Register its panel ID in that script's `PANEL_QUERIES`
-   map so its SQL is covered too.
+   map so its SQL is covered too. If you also port the panel into
+   [`bqaa-public-demo.json`](#option-a--the-public-demo-dashboard), save its
+   demo SQL under `queries/public-demo/` and register the ID in
+   `PUBLIC_DEMO_PANEL_QUERIES`. Both maps are exact in both directions: an
+   unregistered panel, or an unregistered `.sql` file, fails CI.
 3. **Changing what a filter applies to?** Update the [Variables](#variables)
    table above. It is the canonical statement, and everything else points at it.
 4. **Conventions** — the `'___ALL___'` sentinel, the shared error predicate, the

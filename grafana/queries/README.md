@@ -33,11 +33,13 @@ diffs SQL text, so keep the restatements few.
     [Cost variables](../README.md#cost-variables).
   - `$__timeFilter(...)`: Grafana time range macros.
 
-- **The `All` agent sentinel.** The `agent` variable's "All" option uses the
-  custom value `'___ALL___'`. Because of how Grafana handles multi-select
-  interpolation, queries pair every agent filter with this sentinel using
-  BigQuery array syntax to prevent injection and empty-array crashes:
-  `('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))`.
+- **The `All` sentinel.** The `agent`, `user_id`, `event_type` and `session_id`
+  variables all use the custom "All" value `'___ALL___'`. Because of how Grafana
+  handles multi-select interpolation, queries pair every such filter with this
+  sentinel using BigQuery array syntax to prevent injection and empty-array
+  crashes:
+  `('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))`,
+  and likewise for `user_id`, `event_type` and `session_id`.
 
 - **Error predicate.** An event counts as an error if any of these hold (used
   across overview and session queries):
@@ -105,6 +107,49 @@ diffs SQL text, so keep the restatements few.
 | `var_event_type.sql`          | Event Type template variable (uncapped)                           |
 | `var_session_id.sql`          | Session template variable (no cascade, capped at 1000)            |
 
+## The public demo build
+
+`public-demo/` holds the same relationship to
+[`../bqaa-public-demo.json`](../README.md#option-a--the-public-demo-dashboard)
+that this directory holds to `bqaa-dashboard.json`: one `.sql` file per panel,
+canonical, embedded as a copy in the JSON, and diffed as text in CI.
+
+It is a separate set of files rather than a reuse of the ones above because the
+demo evaluates no variables. Every `${...}` placeholder is gone (the project and
+dataset are the literal `YOUR_PROJECT_ID` / `YOUR_DATASET_ID` the documented
+`sed` replaces), `$__timeGroup` becomes `TIMESTAMP_TRUNC`, `$__timeFilter`
+becomes a hardcoded 72-hour predicate, the cost rates are inlined literals, and
+the panels that read another panel's result through the `-- Dashboard --`
+datasource each carry their own query instead — which is why the four Overview
+stats and `Total tokens` have one file each rather than sharing
+`overview_totals.sql` and `estimated_cost.sql`. There is no `trace_detail.sql`:
+the public build deliberately exposes no per-session event timeline.
+
+Those conventions are written down once in
+[`public-demo/README.md`](public-demo/README.md), which is why the demo's `.sql`
+files carry only a one- or two-line header. Read it before editing any of them.
+
+| File (`public-demo/`)            | Panel (demo row)                          |
+| -------------------------------- | ----------------------------------------- |
+| `overview_sessions.sql`          | Sessions (Overview)                       |
+| `overview_events.sql`            | Events (Overview)                         |
+| `overview_error_rate.sql`        | Error rate (Overview)                     |
+| `overview_avg_llm_latency.sql`   | Avg LLM latency (Overview)                |
+| `events_over_time.sql`           | Events over time (Overview)               |
+| `errors_over_time.sql`           | Errors over time (Overview)               |
+| `events_by_agent.sql`            | Events by agent (Overview)                |
+| `top_errors.sql`                 | Top error messages (Overview)             |
+| `llm_tokens_over_time.sql`       | Token usage over time (LLM & FinOps)      |
+| `llm_latency_percentiles.sql`    | LLM latency (p50 / p95 / TTFT)            |
+| `tokens_by_model.sql`            | Tokens by model (LLM & FinOps)            |
+| `estimated_cost.sql`             | Estimated cost (LLM & FinOps)             |
+| `total_tokens.sql`               | Total tokens (LLM & FinOps)               |
+| `llm_calls_total.sql`            | LLM calls (LLM & FinOps)                  |
+| `tool_usage.sql`                 | Tool invocations by tool (Tools)          |
+| `tool_latency.sql`               | Tool latency (Tools & Execution)          |
+| `tool_errors.sql`                | Tool errors (Tools & Execution)           |
+| `recent_sessions.sql`            | Recent sessions (Sessions)                |
+
 ## Adding a New Panel (CI Synchronization)
 
 The CI synchronization script uses an explicit `PANEL_QUERIES` dictionary
@@ -123,5 +168,9 @@ When adding a panel:
 1. Build the panel in Grafana and save the dashboard.
 2. Note the integer `id` Grafana assigned to the panel in the dashboard JSON.
 3. Save the query in a new file, such as `queries/new_feature.sql`.
-4. Explicitly add `id: "new_feature.sql"` to `PANEL_QUERIES` in the CI
+4. Explicitly add `<panel_id>: "new_feature.sql"` to `PANEL_QUERIES` in the CI
    synchronization script.
+5. Porting the panel to `bqaa-public-demo.json` too? Save its demo SQL as
+   `queries/public-demo/new_feature.sql` and add the demo panel's ID to
+   `PUBLIC_DEMO_PANEL_QUERIES`. Both directories are checked for `.sql` files
+   that no map covers, so an unregistered file fails CI.

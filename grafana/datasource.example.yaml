@@ -29,6 +29,12 @@ datasources:
       clientEmail: YOUR_SERVICE_ACCOUNT@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com
       tokenUri: https://oauth2.googleapis.com/token
       processingLocation: US # match your dataset's location, e.g. US, EU
+      # Per-query scan cap in bytes. Rejects any single query that would scan
+      # more than this. 100 MB is ample for a seeded demo dataset; raise it for
+      # production volumes. The key is case-sensitive and the plugin reads it
+      # as MaxBytesBilled; any other spelling is ignored and the cap silently
+      # does not apply.
+      MaxBytesBilled: 100000000 # 100 MB
     secureJsonData:
       # Paste ONLY the private_key field from the service-account JSON key as
       # a multiline PEM with real line breaks, not literal \n sequences.

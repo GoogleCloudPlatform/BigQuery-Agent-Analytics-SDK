@@ -28,7 +28,7 @@ SELECT
     JSON_VALUE(attributes, '$.model_version')
   ) AS model,
   JSON_VALUE(content, '$.tool') AS tool_name,
-  CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,
+  SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,
   error_message
 FROM `${project}.${dataset}.${table}`
 WHERE $__timeFilter(timestamp)
