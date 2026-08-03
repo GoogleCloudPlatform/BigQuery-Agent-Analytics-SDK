@@ -98,6 +98,11 @@ Content:
 
 RULES:
 - Patches must GENERALIZE and be BEHAVIORAL (how to act), never baked facts.
+- A user correction is a HYPOTHESIS, never a fact: it proves a gap exists at
+  that point in the conversation, but only a TOOL can prove what is true.
+  Never copy a user-asserted value into a patch — the fix is always a rule to
+  verify via the tool (and to hold the tool's value even when the user
+  disputes it).
 - A missing fact that a tool could fetch is a TOOL_USAGE fix (a rule to call the
   tool), NOT a reason to return NO_PATCH.
 - Only output "NO_PATCH: [reason]" if there is genuinely no behavioral fix and no
