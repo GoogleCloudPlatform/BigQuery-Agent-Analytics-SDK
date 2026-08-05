@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Skill-evolution lab on the shared-table, server-side path (#360 U6)** —
+  the two disclosed demo workarounds are removed now that #358/#359 have
+  landed: the lab writes every pass to one shared `agent_events` table
+  (rows labeled `custom_tags {run, slice}`, with reused held-out session ids
+  separated by the identity-safe selectors) and judges server-side with each
+  session's matched golden expected answer as identity-bound per-session
+  context. Scoring is bounded by app + exact run/slice labels + a 24h window
+  + a 500-row cap, and `quality_report`'s trajectory fetch now preserves
+  those CLI bounds when delegating to `TraceFilter`. The committed
+  `sample_run/` is a fresh recording of this end-to-end path (provenance in
+  `sample_run/PROVENANCE.md`). This closes the #358/#359 release-notes arc:
+  the example now exercises the shared-table, server-side contract end to
+  end.
+
 - **Identity-safe singular trace resolution (#359)** — `TraceIdentity`,
   `TraceScope`, `TraceSelector`, `ResolvedTraceSelector`, and
   `AmbiguousSessionError` distinguish a reusable conversation `session_id`

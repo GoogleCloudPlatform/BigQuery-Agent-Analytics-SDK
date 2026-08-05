@@ -800,3 +800,110 @@ class TestLiveCollisionFixture:
 
     with pytest.raises(ValueError, match="JSON object"):
       sdk_client.get_session_trace("poison-only")
+
+
+# --------------------------------------------------------------------- #
+# U6: label / time-window / limit bounds probe (issue #360, design #384) #
+# --------------------------------------------------------------------- #
+
+
+@pytest.fixture(scope="module")
+def bounds_probe_table(bq_client, collision_dataset):
+  """Seed the U6 bounds fixture under a dedicated, non-demo label.
+
+  Rows land in ``BQAA_U6_PROBE_DATASET`` when set (the populated AE8
+  scratch dataset, so the probe is recorded as U6 evidence; rows are
+  left to the dataset's default expiration) and otherwise in this
+  module's own scratch dataset. Fixture shape per design #384: three
+  recent traces with the probe label, one 48-hour-old trace with the
+  SAME label, and one recent trace with a foreign label.
+  """
+  import uuid
+
+  project, module_dataset = collision_dataset
+  dataset_id = os.environ.get("BQAA_U6_PROBE_DATASET") or module_dataset
+  probe = f"u6probe_{uuid.uuid4().hex[:8]}"
+  table = f"{project}.{dataset_id}.agent_events"
+  bq_client.query(
+      f"""
+      INSERT INTO `{table}`
+        (timestamp, event_type, agent, session_id, user_id, trace_id,
+         span_id, content, attributes, status)
+      VALUES
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r1',
+         'probe-user', 'tr-{probe}-1', 's1', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r2',
+         'probe-user', 'tr-{probe}-2', 's2', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-r3',
+         'probe-user', 'tr-{probe}-3', 's3', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 48 HOUR),
+         'LLM_RESPONSE', 'probe', '{probe}-old',
+         'probe-user', 'tr-{probe}-4', 's4', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "{probe}"}}}}', 'OK'),
+        (CURRENT_TIMESTAMP(), 'LLM_RESPONSE', 'probe', '{probe}-foreign',
+         'probe-user', 'tr-{probe}-5', 's5', JSON '{{}}',
+         JSON '{{"custom_tags": {{"u6probe": "someone-else"}}}}', 'OK')
+      """
+  ).result()
+  yield project, dataset_id, probe
+
+
+class TestU6BoundsProbeLive:
+  """Label + 24h window + limit enforcement on a shared events table.
+
+  The normal 80-session demo never reaches the 500-row score cap, so
+  this cheap fixture proves cap behavior without judging 500 synthetic
+  sessions: a read-only selector requesting the dedicated label, a 24h
+  window, and ``limit=2`` must return exactly two recent, correctly
+  labeled resolved traces — and neither sentinel (the 48h-old same-label
+  trace, or the recent foreign-label trace).
+  """
+
+  def test_label_window_and_limit_bounds_enforced(
+      self, bq_client, bounds_probe_table
+  ):
+    from bigquery_agent_analytics.client import Client
+    from bigquery_agent_analytics.trace import TraceFilter
+
+    project, dataset_id, probe = bounds_probe_table
+    client = Client(
+        project_id=project, dataset_id=dataset_id, verify_schema=False
+    )
+    recent = {f"{probe}-r1", f"{probe}-r2", f"{probe}-r3"}
+
+    # 1) Time-only, uncapped: proves the 24h predicate on its own. Exactly
+    #    the three recent labeled traces come back; the 48h-old same-label
+    #    sentinel is excluded by TIME (no limit can hide it at limit=50).
+    flt_time = TraceFilter.from_cli_args(
+        last="24h", custom_labels={"u6probe": probe}, limit=50
+    )
+    time_traces = client.list_traces(filter_criteria=flt_time)
+    assert {t.session_id for t in time_traces} == recent
+
+    # 2) Label-only, no time bound: the stale sentinel MUST appear, proving
+    #    the time predicate above is load-bearing (a regression that drops
+    #    start_time flips assertion 1, and this one detects a fixture where
+    #    the sentinel never matched the label at all).
+    flt_label = TraceFilter(custom_labels={"u6probe": probe}, limit=50)
+    label_traces = client.list_traces(filter_criteria=flt_label)
+    assert {t.session_id for t in label_traces} == recent | {f"{probe}-old"}
+
+    # 3) The capped read from the design: label + 24h + limit=2 returns
+    #    exactly two recent, correctly labeled resolved traces and neither
+    #    sentinel — the limit is enforced on the already time/label-bounded
+    #    population.
+    flt = TraceFilter.from_cli_args(
+        last="24h", custom_labels={"u6probe": probe}, limit=2
+    )
+    traces = client.list_traces(filter_criteria=flt)
+    assert len(traces) == 2
+    for trace in traces:
+      assert trace.session_id in recent
+      assert trace.scope is not None
+      assert trace.scope.labels_dict.get("u6probe") == probe
+    assert {t.session_id for t in traces}.isdisjoint(
+        {f"{probe}-old", f"{probe}-foreign"}
+    )

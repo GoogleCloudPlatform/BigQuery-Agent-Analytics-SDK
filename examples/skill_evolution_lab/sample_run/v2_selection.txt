@@ -1,1 +1,1 @@
-selected candidate 3 of 3 viable (3171 chars, median size)
+selected candidate 3 of 3 viable (4050 chars, median size)

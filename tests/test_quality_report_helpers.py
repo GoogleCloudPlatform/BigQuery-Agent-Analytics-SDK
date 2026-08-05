@@ -449,6 +449,66 @@ class TestIdentityAwareReportMaps:
     assert requested_limits == [2, 4]
     assert len(fetched) == 2
 
+  def test_fetch_session_traces_preserves_base_filter_bounds(self, monkeypatch):
+    alice = self._trace("alice", "v0")
+    captured = {}
+
+    class _FakeClient:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def list_traces(self, filter_criteria):
+        captured.setdefault("filters", []).append(filter_criteria)
+        return [alice]
+
+    monkeypatch.setattr(bigquery_agent_analytics, "Client", _FakeClient)
+    monkeypatch.setattr(
+        quality_report_module, "_import_render_timing_tree", lambda: True
+    )
+    monkeypatch.setattr(quality_report_module, "PROJECT_ID", "project")
+    monkeypatch.setattr(quality_report_module, "DATASET_ID", "dataset")
+
+    base = quality_report_module._cli_base_trace_filter(
+        app_name="skill-evolution-lab",
+        custom_labels={"run": "lab_1", "slice": "v0_test"},
+        time_period="24h",
+    )
+    base.limit = 500
+
+    quality_report_module._fetch_session_traces(
+        ["shared"], max_sessions=1, max_traces=2, base_filter=base
+    )
+
+    fetch_filter = captured["filters"][0]
+    # App/label/time bounds survive the delegation to the fetch filter...
+    assert fetch_filter.root_agent_name == "skill-evolution-lab"
+    assert fetch_filter.custom_labels == {"run": "lab_1", "slice": "v0_test"}
+    assert fetch_filter.start_time is not None
+    # ...while ONLY the session ids and display limit are replaced...
+    assert fetch_filter.session_ids == ["shared"]
+    assert fetch_filter.limit == 2
+    # ...and the caller's base filter is never mutated.
+    assert base.session_ids is None
+    assert base.limit == 500
+
+  def test_cli_base_trace_filter_bounds_and_unbounded_none(self):
+    base = quality_report_module._cli_base_trace_filter(
+        app_name="skill-evolution-lab",
+        custom_labels={"run": "lab_1"},
+        time_period="24h",
+    )
+    assert base.root_agent_name == "skill-evolution-lab"
+    assert base.custom_labels == {"run": "lab_1"}
+    assert base.start_time is not None
+
+    assert (
+        quality_report_module._cli_base_trace_filter(
+            app_name=None, custom_labels=None, time_period="all"
+        )
+        is None
+    )
+
   def test_fetch_session_traces_retains_only_report_attribution(
       self, monkeypatch
   ):
@@ -2117,3 +2177,97 @@ class TestHasFailureAttributionData:
     # tool_usage without correctness is not enough for the 2-way fallback.
     report = self._report(["response_usefulness", "tool_usage"])
     assert _has_failure_attribution_data(report) is False
+
+
+class TestEmbedTextsRetry:
+  """Golden-matching embeddings retry transient 429/503 per batch (#360 U6)."""
+
+  class _Transient(Exception):
+
+    def __init__(self, code):
+      super().__init__(f"transient {code}")
+      self.code = code
+
+  def _fake_genai(self, monkeypatch, failures):
+    import google.genai
+
+    calls = {"n": 0}
+
+    class _Embedding:
+      values = [3.0, 4.0]
+
+    class _Models:
+
+      def embed_content(self, **_kwargs):
+        calls["n"] += 1
+        if failures:
+          raise failures.pop(0)
+        resp = type("R", (), {})()
+        resp.embeddings = [_Embedding()]
+        return resp
+
+    class _Client:
+
+      def __init__(self, **_kwargs):
+        self.models = _Models()
+
+    monkeypatch.setattr(google.genai, "Client", _Client)
+    monkeypatch.setattr(quality_report_module.time, "sleep", lambda _s: None)
+    return calls
+
+  def test_transient_429_retried_then_succeeds(self, monkeypatch):
+    calls = self._fake_genai(
+        monkeypatch, [self._Transient(429), self._Transient(503)]
+    )
+    vectors = quality_report_module._embed_texts(["q"])
+    assert calls["n"] == 3
+    assert vectors == [[0.6, 0.8]]  # L2-normalised [3, 4]
+
+  def test_non_transient_error_raises_immediately(self, monkeypatch):
+    calls = self._fake_genai(monkeypatch, [self._Transient(400)])
+    with pytest.raises(self._Transient):
+      quality_report_module._embed_texts(["q"])
+    assert calls["n"] == 1
+
+  def test_exhausted_attempts_reraise(self, monkeypatch):
+    failures = [self._Transient(429) for _ in range(5)]
+    calls = self._fake_genai(monkeypatch, failures)
+    with pytest.raises(self._Transient):
+      quality_report_module._embed_texts(["q"], max_attempts=5)
+    assert calls["n"] == 5
+
+
+class TestEnrichmentBaseFilter:
+  """Enrichment bounds mirror the evaluator's effective selector (#385 P2)."""
+
+  def _args(self, **kw):
+    import argparse
+
+    defaults = dict(
+        app_name="skill-evolution-lab",
+        time_period="24h",
+        session=None,
+        session_ids_file=None,
+    )
+    defaults.update(kw)
+    return argparse.Namespace(**defaults)
+
+  def test_window_mode_keeps_time_bound(self):
+    base = quality_report_module._enrichment_base_filter(
+        self._args(), {"run": "lab_1"}
+    )
+    assert base.start_time is not None
+    assert base.root_agent_name == "skill-evolution-lab"
+    assert base.custom_labels == {"run": "lab_1"}
+
+  def test_explicit_sessions_drop_time_bound_keep_scope(self):
+    for kw in (
+        {"session": "sess-1"},
+        {"session_ids_file": "ids.json"},
+    ):
+      base = quality_report_module._enrichment_base_filter(
+          self._args(**kw), {"run": "lab_1"}
+      )
+      assert base.start_time is None
+      assert base.root_agent_name == "skill-evolution-lab"
+      assert base.custom_labels == {"run": "lab_1"}

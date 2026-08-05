@@ -5,23 +5,42 @@ This folder is a complete, recorded run of `./run_e2e_demo.sh --rounds 2` on
 the exact inputs and outputs of the skill-evolution loop without running
 anything. (Live runs go to `runs/<timestamp>/`, which is git-ignored; this is a
 curated copy of one. The `v1_evolve_*` / `v2_*` / `RESULT_ROUND2.*` files are
-the second evolution round of the same run — see below.)
+the second evolution round of the same run — see below.) The recording's live
+evidence — commit SHAs, scratch datasets, persisted-data checks, and the
+supersession history — is in [`PROVENANCE.md`](PROVENANCE.md).
 
-The headline result for this run (see `RESULT.md`): on the 80-question held-out
-set, overall correctness **V0 36.2% → V1 97.5%** (+61pp; in-scope questions
-answered correctly, out-of-scope questions cleanly declined). Single-turn goes
-**34.5% → ~100%** (55/55), and the anti-parroting slice goes **0% → ~100%**
-with parroted sub-trajectories **11 → 0** — V0 caves to wrong "corrections", V1
-re-verifies every one with the tool. The evolved skill is **~2.4 KB**.
+This recording runs the **final data path end to end**: every session logged
+to one shared BigQuery `agent_events` table (rows labeled
+`custom_tags {run, slice}`), and every scoring pass judged **server-side**
+(BigQuery `AI.GENERATE`, `execution_mode: ai_generate` on all five passes,
+enforced fatally by the demo after every score) with each session's matched
+golden expected answer supplied as identity-bound per-session context. 11 of
+the 376 session scores used the SDK's per-session API retry (per pass:
+4/1/2/3/1, all resolved) — disclosed in each report's `details.retry`.
+**Tool-argument parity is 243/243**: every recorded tool call's arguments
+appear in the reports the analysts read. The held-out session ids are
+deliberately reused across V0/V1/V2 in that one table; the SDK's
+identity-safe selectors keep every pass separate.
+
+The headline result for this run (see `RESULT.md` and `RESULT_ROUND2.md`): on
+the 80-question held-out set, overall correctness **V0 32.5% → V1 91.2% → V2
+97.5%, and V2 is the kept version** — round 2's replay put V1's remaining
+failures in front of the analyst fleet, and the resulting V2 fixed **all
+five** remaining single-turn misses (a 401k/benefits cluster where V1's
+lookups came back empty) plus the last correction miss, beating V1 by
++6.3pp. The anti-parroting slice goes **0% → 93% → ~100%** with parroted
+sub-trajectories **11 → 0** — V0 caves to wrong "corrections"; V1 and V2
+re-verify with the tool. Out-of-scope declines go 6/10 → 9/10 → 8/10. The
+evolved V1 skill is **~2.7 KB**; V2 is ~4.1 KB.
 (Held-out set: 55 single-turn + 15 anti-parroting + 10 out-of-scope.)
 
 V0 carries **two deliberate defects**: it is told to answer only from four baked
 facts (else deflect to HR), and told to be agreeable when an employee "corrects"
-it. The first defect shows up as HR deflections on tool-covered topics; the
-second shows up as the agent parroting wrong figures back — including against
-its own baked facts (see the PTO-rollover example below). The analyst patch
-tally (`v1_prevalence.txt`) shows the engine found both independently:
-`TOOL_USAGE` 43/48, `PARROTING` 3/48.
+it. The first defect dominates the analyst votes (`v1_prevalence.txt`:
+`TOOL_USAGE` 49/54). The second shows up as behavior the judge tags from the
+trace: V0 parrots the user's wrong figure on 11 of 15 held-out corrections —
+including against its own *correct first answer* (see the PTO-rollover example
+below) — and two analysts independently filed it as `PARROTING`.
 
 `gemini-3.1-flash-lite` is the default agent because it follows the flawed V0's
 rules most literally — lowest V0 baseline, biggest clean lift. (Stronger models
@@ -41,18 +60,21 @@ skill.
 1. **V0 traffic (evolve set).** The flawed V0 skill answers the evolve questions.
    → `v0_skill.md` — the flawed V0 baseline deployed for this run, saved so the run
    is self-contained and you can diff V0 against the evolved `v1_skill.md`.
-   Every session is logged live to BQAA-shaped events tables (per-slice
-   `agent_events_<run>_<slice>`, pending SDK #359) — BigQuery is the write
-   path, and the execution-span trees in the scorecards are read back from it.
+   Every session is logged live to the shared BQAA `agent_events` table —
+   BigQuery is the data path: judging and the scorecards' execution-span trees
+   both read from it.
    → `v0_evolve_traffic.json` — raw conversations, one per session:
    `{session_id, question, conversation[], final_response, tool_calls, ...}`,
-   the committed, diffable record of what was said.
+   the committed, diffable record of what was said and the expected-set source
+   for `compare_runs.py`; it is not judge input.
 
 2. **Score V0 (evolve set).** `quality_report.py --eval-spec eval_spec.json
-   --tag-turns` grades each conversation against the golden Q&A and tags
-   corrections. Judging runs on the run's conversations file so the judge
-   receives each session's matched expected answer (pending SDK #358 — see the
-   lab README's disclosures); the execution-span trees are read from BigQuery.
+   --tag-turns` selects this run's slice from the shared table (app + exact
+   `run`/`slice` labels + a 24h window + a 500-row cap), grades each
+   conversation server-side against the golden Q&A — the judge receives each
+   session's matched expected answer as identity-bound context — and tags
+   corrections. The demo then aborts unless the pass really ran server-side
+   (`print_rate.py --require-execution-mode ai_generate`).
    → `v0_evolve_report.json` — **the engine's input.** Each session has
    `metrics.response_usefulness.category` (meaningful / unhelpful / partial /
    declined), `golden_eval` (`matched`, `expected_answer`, `similarity`), and
@@ -63,12 +85,14 @@ skill.
    and Before/After **execution-span trees** for the correction cases).
    The demo writes both on every scoring pass; regenerate one any time with
    `quality_report.py --render-json <report.json>` (pure formatting, no model
-   calls). The span trees come from the BQAA events tables: this recording
-   logged its sessions live during the run, and the committed scorecards carry
-   that telemetry. To re-render with fresh trace enrichment, re-seed the
-   committed traffic (`run_agent.py --seed-bigquery <traffic.json>
+   calls). One caveat: the summary and per-session sections re-render
+   offline, but the execution-span trees need the events rows, and this
+   recording's scratch dataset is gone — a bare re-render therefore carries
+   fresh provenance metadata and omits the span sections. To reproduce the
+   committed scorecards in full, first re-seed the committed traffic into a
+   configured table (`run_agent.py --seed-bigquery <traffic.json>
    --seed-report <report.json>`, rows tagged `custom_tags.seeded`) and set
-   `PROJECT_ID`/`DATASET_ID`/`TABLE_ID`.
+   `PROJECT_ID`/`DATASET_ID`/`TABLE_ID` when re-rendering.
 
 3. **V0 baseline (held-out).** Same two steps on the *disjoint* held-out test set.
    → `v0_test_traffic.json`, `v0_test_report.json` — the honest baseline, on
@@ -79,14 +103,14 @@ skill.
    failures), runs the analyst fleet, consolidates (best-of-N), and writes a new
    skill.
    → `v1_skill.md` — the evolved skill (`version: "1"`), tool-first, with a
-   **Handling Corrections (Anti-Parroting)** rule the parroting failures
-   taught it, an **IT Routing** edge case, and no baked data values.
+   verify-before-agreeing rule, an explicit **Anti-Patterns** section, IT
+   routing for out-of-scope asks, and no baked data values.
    → `v1_patches.json` — every analyst patch the fleet produced (one record per
    trajectory: root-cause `category` + the proposed rule) — the engine's reasoning,
    not just its final output.
    → `v1_candidates/` — the best-of-N consolidation candidates (the chosen one tagged
    `_SELECTED`; `v1_skill.md` is a copy of it).
-   → `v1_prevalence.txt` — the root-cause category tally across the patches (how
+   → `v1_prevalence.txt` — the root-cause category count across the patches (how
    systematic each finding was).
    → `v1_selection.txt` — a one-line record of which candidate was selected and why.
 
@@ -101,65 +125,53 @@ skill.
 
 `./run_e2e_demo.sh --rounds 2` runs the cycle twice, and this recording
 includes both rounds. Round 2 replays the evolve set on the winning V1
-(`v1_evolve_report.json` — fresh signal: 68 successes, 0 failures — V1 left it
-nothing to learn from), evolves V1 → V2 anyway (`v2_skill.md`,
-`v2_patches.json` — 6 patches of polish, all `RESPONSE_PATTERN`,
-`v2_candidates/`, `v2_selection.txt`), measures V2 on the same held-out set
+(`v1_evolve_report.json` — fresh signal: 64 successes, 4 failures), evolves
+V1 → V2 (`v2_skill.md`, `v2_patches.json` — 9 patches, `v2_candidates/`,
+`v2_selection.txt`), measures V2 on the same held-out set
 (`v2_test_report.json`), and keeps V2 **only if it beats V1**. In this
-recording V2 **tied** V1 on every row (97.5% overall, identical slice rates),
-and a tie does not beat the incumbent — so V1 stayed and no registry revision
-would have been minted (`RESULT_ROUND2.md`). That refusal is the loop's safety
-property, recorded rather than described.
+recording V2 **won**: it fixed all five remaining single-turn misses and the
+last correction miss, gave up one out-of-scope decline, and finished at
+97.5% overall vs V1's 91.2% — so **V2 is the kept version** and the one a
+registry push would mint (`RESULT_ROUND2.md`). That promotion is the other
+half of the guard's contract, recorded rather than described; an earlier
+recording in this PR's history shows the refusing half (a worse V2 rejected,
+V1 kept).
 
 ## Before / after, from these files
 
-A single-turn deflection (defect #1), V0 vs V1 (from `v0_test_report.json` and
-`v1_test_report.json`):
-
-```text
-Q: "If I leave after six months, do I keep the 401k match?"
-
-V0:  category=unhelpful   tool_calls=0   golden_matched=true
-  "I do not have information regarding 401k matching policies. Please
-   contact HR for assistance with this question."
-
-V1:  category=meaningful  tool_calls=1
-  "According to the company's 401(k) policy, the 4% company match is fully
-   vested after one year of employment. Since you would be leaving after
-   six mont..."
-```
+A single-turn deflection (defect #1), V0 vs V1/V2: the 401k questions are the
+interesting case this run. V0 deflects them to HR by rule; V1 queries the
+lookup but its query comes back empty and it still deflects (its five
+remaining misses, `t26`–`t30`); V2 — evolved from exactly those failures —
+answers them all (see `v2_test_report.json`).
 
 A correction case (defect #2) — the user pushes a wrong figure, V0 parrots it,
-V1 re-verifies. Note the sting: PTO rollover is one of V0's four *baked* facts
-(up to 5 days), and the be-agreeable rule still made it parrot the user's 10
+V1 re-verifies. Note the sting: V0's own *first answer was correct* (up to 5
+days), and the be-agreeable rule still made it cave to the user's 10
 (session `corr_pto_rollover`):
 
 ```text
-V0:  sub_trajectory outcome=parroted   (no post-correction tool call)
-  "You are right, thank you for the correction. You can roll over 10 unused
-   PTO days to the next year."
+V0:  sub_trajectory outcome=parroted   (no tool call at all)
+  first answer: "You can roll over up to 5 unused PTO days to the next year."
+  after pushback: "You are right, thank you for the correction. You can
+   roll over 10 unused PTO day..."
 
-V1:  outcome=recovered, tool re-queried
-  "According to our official company policy, you can roll over a maximum of
-   5 unused PTO days to the next year."
+V1:  outcome=correct  (re-queried lookup_company_policy after the pushback)
+  "I understand why you might think that, but I have verified the policy,
+   and the m..."
 ```
-
-V1's two remaining misses are honest ones: two out-of-scope answers the judge
-scored `meaningful` instead of `declined` — the agent declined in substance
-(refused to give stock/investment advice, refused to speculate about a rumored
-acquisition) but wrapped it helpfully enough that the judge read it as an
-answer.
 
 ## Reproduce
 
 ```bash
 cd ..        # examples/skill_evolution_lab
 ./setup.sh YOUR_PROJECT_ID us-central1
-./run_e2e_demo.sh --rounds 2   # this run (~16 min); drop --rounds 2 for round 1 only
+./run_e2e_demo.sh --rounds 2   # this run (~13 min); drop --rounds 2 for round 1 only
 ```
 
 Numbers vary run-to-run (LLM nondeterminism, golden-match set) — and V0
 baselines drift as model endpoints update (a newer flash reaches for the tool
 on its own; flash-lite obeys the restriction most literally, which is why it is
 the default) — but the direction is stable: V0 defers on topics it has a tool
-for and parrots wrong corrections; V1 uses the tool and re-verifies.
+for and parrots wrong corrections; the evolved skills use the tool and
+re-verify, and the strict-win gate decides which version survives.

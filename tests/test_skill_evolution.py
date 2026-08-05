@@ -555,3 +555,258 @@ def test_prevalence_exact_tie_stays_strong():
   assert "B: 3/6 (50%) -- STRONG" in out
   out = compute_prevalence_summary([patch_a] * 4 + [patch_b] * 2)
   assert "A: 4/6 (67%) -- VERY STRONG" in out
+
+
+class TestDemoShellContract:
+  """run_e2e_demo.sh honors the final (post-#360) data-path contract."""
+
+  _DEMO = os.path.join(
+      os.path.dirname(__file__),
+      "..",
+      "examples",
+      "skill_evolution_lab",
+      "run_e2e_demo.sh",
+  )
+
+  def _text(self):
+    with open(self._DEMO) as f:
+      return f.read()
+
+  def test_no_workaround_remnants(self):
+    text = self._text()
+    assert "--conversations-file" not in text
+    assert "TODO(#360)" not in text
+    assert "agent_events_${RUN_LABEL}_" not in text
+    assert "pending SDK" not in text
+
+  def test_scoring_is_bounded_and_labeled(self):
+    text = self._text()
+    for required in (
+        "--app-name skill-evolution-lab",
+        '--label "run=$RUN_LABEL"',
+        "--time-period 24h",
+        "--limit 500",
+    ):
+      assert required in text, required
+
+
+class TestServerSideGate:
+  """score() aborts when a pass was not judged server-side (#385 P1)."""
+
+  _LAB = os.path.join(
+      os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+  )
+
+  def test_score_enforces_execution_mode(self):
+    with open(os.path.join(self._LAB, "run_e2e_demo.sh")) as f:
+      text = f.read()
+    assert "--require-execution-mode ai_generate" in text
+
+  def _run_print_rate(self, tmp_path, mode):
+    import subprocess
+
+    report = {
+        "summary": {
+            "golden_eval_summary": {
+                "matched_meaningful_rate": 100.0,
+                "matched_meaningful": 1,
+                "matched": 1,
+                "total_sessions": 1,
+            }
+        },
+        "sessions": [{"session_id": "t1", "golden_eval": {"matched": True}}],
+        "details": {"execution_mode": mode},
+    }
+    p = tmp_path / f"report_{mode}.json"
+    p.write_text(json.dumps(report))
+    return subprocess.run(
+        [
+            sys.executable,
+            os.path.join(self._LAB, "print_rate.py"),
+            "--require-execution-mode",
+            "ai_generate",
+            str(p),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+  def test_complete_fallback_pass_is_fatal(self, tmp_path):
+    result = self._run_print_rate(tmp_path, "api_fallback")
+    assert result.returncode == 1
+    assert "not judged server-side" in result.stderr
+
+  def test_server_side_pass_is_accepted(self, tmp_path):
+    result = self._run_print_rate(tmp_path, "ai_generate")
+    assert result.returncode == 0
+
+
+class TestToolSpanPairing:
+  """TOOL_STARTING/TOOL_COMPLETED share one span id so args survive (#385 P1)."""
+
+  def _rows_for(self, record):
+    import importlib.util
+    import unittest.mock as mock
+
+    lab_dir = os.path.join(
+        os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+    )
+    path = os.path.join(lab_dir, "run_agent.py")
+    spec = importlib.util.spec_from_file_location("skill_lab_run_agent", path)
+    run_agent = importlib.util.module_from_spec(spec)
+    # run_agent imports the lab-local `_quiet` helper, and `agent.agent`
+    # pulls the live Gemini/ADK stack (google.cloud.storage etc.) that CI
+    # does not install -- stub it: this test exercises only the BigQuery
+    # row writer, which needs neither build_config nor make_client.
+    import types
+
+    fake_pkg = types.ModuleType("agent")
+    fake_mod = types.ModuleType("agent.agent")
+    fake_mod.build_config = lambda *a, **k: None
+    fake_mod.make_client = lambda *a, **k: None
+    fake_pkg.agent = fake_mod
+    saved = {k: sys.modules.get(k) for k in ("agent", "agent.agent")}
+    sys.modules["agent"] = fake_pkg
+    sys.modules["agent.agent"] = fake_mod
+    sys.path.insert(0, lab_dir)
+    try:
+      spec.loader.exec_module(run_agent)
+    finally:
+      sys.path.remove(lab_dir)
+      for k, v in saved.items():
+        if v is None:
+          sys.modules.pop(k, None)
+        else:
+          sys.modules[k] = v
+
+    captured = {}
+
+    class _FakeBQ:
+
+      def __init__(self, **_kwargs):
+        pass
+
+      def create_dataset(self, *_a, **_k):
+        return object()
+
+      def create_table(self, *_a, **_k):
+        return object()
+
+      def insert_rows_json(self, _table, rows):
+        captured["rows"] = rows
+        return []
+
+    with mock.patch.dict(
+        os.environ,
+        {"PROJECT_ID": "p", "DATASET_ID": "d", "TABLE_ID": "agent_events"},
+    ):
+      with mock.patch.object(
+          run_agent, "_events_from_record", wraps=run_agent._events_from_record
+      ):
+        import google.cloud.bigquery as bq_mod
+
+        with mock.patch.object(bq_mod, "Client", _FakeBQ):
+          run_agent._write_bigquery([record], "skill-evolution-lab", {})
+    return captured["rows"]
+
+  def test_tool_args_pair_by_shared_span_id(self):
+    record = {
+        "session_id": "s1",
+        "error": None,
+        "conversation": [
+            {"role": "user", "text": "q"},
+            {"role": "agent", "text": "a"},
+        ],
+        "tool_calls_detail": [
+            {"name": "lookup_company_policy", "args": {"topic": "pto"}}
+        ],
+        "_events": [
+            ("USER_MESSAGE_RECEIVED", {"text": "q"}, 0),
+            (
+                "TOOL_STARTING",
+                {"tool": "lookup_company_policy", "args": {"topic": "pto"}},
+                0,
+            ),
+            (
+                "TOOL_COMPLETED",
+                {"tool": "lookup_company_policy", "result": "20 days"},
+                0,
+            ),
+            ("LLM_RESPONSE", {"response": "a"}, 0),
+        ],
+    }
+    rows = self._rows_for(record)
+    starts = [r for r in rows if r["event_type"] == "TOOL_STARTING"]
+    dones = [r for r in rows if r["event_type"] == "TOOL_COMPLETED"]
+    assert len(starts) == 1 and len(dones) == 1
+    assert starts[0]["span_id"] == dones[0]["span_id"]
+    assert json.loads(starts[0]["content"])["args"] == {"topic": "pto"}
+    # USER/LLM spans stay distinct.
+    others = {
+        r["span_id"]
+        for r in rows
+        if r["event_type"] in ("USER_MESSAGE_RECEIVED", "LLM_RESPONSE")
+    }
+    assert starts[0]["span_id"] not in others
+
+
+class TestDocsMatchRecording:
+  """Public docs are pinned to the committed recording's result artifacts.
+
+  Requested in #385 review: another sample_run regeneration must not be able
+  to silently leave the repository narrative (README/VERIFICATION/examples
+  index/sample README) describing a superseded recording.
+  """
+
+  _LAB = os.path.join(
+      os.path.dirname(__file__), "..", "examples", "skill_evolution_lab"
+  )
+
+  def _read(self, *parts):
+    with open(os.path.join(self._LAB, *parts)) as f:
+      return f.read()
+
+  def _overall(self, text):
+    import re
+
+    m = re.search(
+        r"\| Overall \| (\d+\.\d+% \(\d+/80\)) \| (\d+\.\d+% \(\d+/80\)) \|",
+        text,
+    )
+    assert m, "Overall row missing from result artifact"
+    return m.group(1), m.group(2)
+
+  def test_headline_rates_and_winner_pinned_everywhere(self):
+    v0_rate, v1_rate = self._overall(self._read("sample_run", "RESULT.md"))
+    r2 = self._read("sample_run", "RESULT_ROUND2.md")
+    v1_again, v2_rate = self._overall(r2)
+    assert v1_again == v1_rate, "RESULT vs RESULT_ROUND2 disagree on V1"
+
+    def pct(rate):
+      return float(rate.split("%")[0])
+
+    winner = "V2" if pct(v2_rate) > pct(v1_rate) else "V1"
+
+    docs = {
+        "VERIFICATION.md": self._read("VERIFICATION.md"),
+        "README.md": self._read("README.md"),
+        "sample_run/README.md": self._read("sample_run", "README.md"),
+        "examples/README.md": self._read("..", "README.md"),
+    }
+    for name, text in docs.items():
+      for rate in (v0_rate.split(" ")[0], v1_rate.split(" ")[0]):
+        assert rate in text, f"{name} missing headline rate {rate}"
+      assert v2_rate.split(" ")[0] in text, f"{name} missing V2 rate"
+    # The kept-version narrative must match the artifacts: when V2 wins, no
+    # doc may claim the incumbent was kept for THIS recording (and vice
+    # versa the numbers above pin the refusal story).
+    if winner == "V2":
+      assert (
+          "kept V2" in docs["README.md"]
+          or "kept **V2**" in docs["README.md"]
+          or "**kept V2**" in docs["README.md"]
+      ), "lab README does not state that V2 was kept"
+      assert (
+          "kept" in docs["VERIFICATION.md"]
+          and "97.5%" in docs["VERIFICATION.md"]
+      )

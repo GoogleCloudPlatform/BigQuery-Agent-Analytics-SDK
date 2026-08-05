@@ -350,8 +350,13 @@ def _build_scope_context(spec=None):
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-005")
 
 
-def _embed_texts(texts, model=None, batch_size=50):
-  """Embed *texts* for semantic similarity; returns L2-normalised vectors."""
+def _embed_texts(texts, model=None, batch_size=50, max_attempts=5):
+  """Embed *texts* for semantic similarity; returns L2-normalised vectors.
+
+  Transient quota/availability errors (429/503) are retried per batch with
+  exponential backoff — golden matching sits on the critical scoring path,
+  and a single unretried burst error would otherwise abort a whole run.
+  """
   from google import genai
   from google.genai import types
 
@@ -360,11 +365,27 @@ def _embed_texts(texts, model=None, batch_size=50):
   vectors = []
   for i in range(0, len(texts), batch_size):
     batch = texts[i : i + batch_size]
-    resp = client.models.embed_content(
-        model=model,
-        contents=batch,
-        config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
-    )
+    for attempt in range(1, max_attempts + 1):
+      try:
+        resp = client.models.embed_content(
+            model=model,
+            contents=batch,
+            config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY"),
+        )
+        break
+      except Exception as exc:  # pylint: disable=broad-except
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        if code not in (429, 503) or attempt == max_attempts:
+          raise
+        delay = 2**attempt
+        logger.warning(
+            "Embedding batch hit transient %s; retrying in %ds (%d/%d)",
+            code,
+            delay,
+            attempt,
+            max_attempts - 1,
+        )
+        time.sleep(delay)
     for e in resp.embeddings:
       v = list(e.values)
       norm = math.sqrt(sum(x * x for x in v)) or 1.0
@@ -1865,6 +1886,7 @@ def generate_quality_report_from_conversations(
     per_session_context=None,
     golden_threshold=_DEFAULT_GOLDEN_THRESHOLD,
     eval_config=None,
+    trace_filter=None,
 ) -> dict:
   """Evaluate local conversations and return a structured quality report.
 
@@ -1886,6 +1908,8 @@ def generate_quality_report_from_conversations(
       golden_threshold: Cosine-similarity threshold for golden matching.
       eval_config: Optional metric-definition override (same as the CLI
           ``--eval-config``); when None the built-in metrics are used.
+      trace_filter: Optional ``TraceFilter`` carrying app/label/time bounds
+          for the trajectory fetch; only its session_ids/limit are replaced.
 
   Returns:
       Dict with ``summary`` and ``sessions`` keys. When the eval spec carries
@@ -1919,6 +1943,7 @@ def generate_quality_report_from_conversations(
         trajectory_samples,
         max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
         resolved_map=trajectory_map,
+        base_filter=trace_filter,
     )
 
   output = _build_json_output(
@@ -2149,6 +2174,10 @@ def run_eval(args):
       k, v = item.split("=", 1)
       custom_labels[k] = v
 
+  # CLI-derived bounds for every trajectory fetch in this invocation: the
+  # trace reads stay scoped to the same app/labels/time the scoring ran with.
+  base_trace_filter = _enrichment_base_filter(args, custom_labels)
+
   if conversations_file:
     # --- Local conversations path (no BigQuery) ---
     logger.info("Source: local conversations file %s", conversations_file)
@@ -2318,6 +2347,7 @@ def run_eval(args):
         len(traj_sids),
         max_traces=_trace_fetch_limit(trajectory_map, traj_sids),
         resolved_map=trajectory_map,
+        base_filter=base_trace_filter,
     )
     if trajectories:
       logger.info("Fetched %d trajectories", len(trajectories))
@@ -2335,6 +2365,7 @@ def run_eval(args):
         max_sessions=1,
         max_traces=_trace_fetch_limit(result["resolved_map"], [args.session]),
         resolved_map=result["resolved_map"],
+        base_filter=base_trace_filter,
     )
     if trajectories:
       for trace_obj in trajectories.values():
@@ -3252,12 +3283,56 @@ def _retain_report_traces(fetched, resolved_map):
   return retained
 
 
+def _cli_base_trace_filter(app_name=None, custom_labels=None, time_period=None):
+  """Build the CLI-derived base TraceFilter for trajectory fetches.
+
+  Preserves the app/label/time bounds the evaluation ran with so the trace
+  fetch cannot select rows outside the scored population's scope (e.g. a
+  shared events table holding several passes that reuse session ids).
+  Returns None when no bound is set (legacy unbounded fetch).
+  """
+  if not app_name and not custom_labels and time_period in (None, "", "all"):
+    return None
+  try:
+    from bigquery_agent_analytics import TraceFilter as _TraceFilter
+  except ImportError:
+    return None
+  last = None if time_period in (None, "", "all") else time_period
+  base = _TraceFilter.from_cli_args(last=last, custom_labels=custom_labels)
+  if app_name:
+    base.root_agent_name = app_name
+  return base
+
+
+def _enrichment_base_filter(args, custom_labels):
+  """Derive the trajectory-fetch bounds from the evaluator's own selector.
+
+  Mirrors run_evaluation(): app + labels always apply; the time bound
+  applies ONLY when sessions are selected by window. Explicit session
+  selection (``--session`` / ``--session-ids-file``) documents
+  ``--time-period`` as ignored and the evaluator builds its selector
+  without a time bound — enrichment must drop it too, otherwise an older
+  explicitly selected session scores but silently loses its trace.
+  """
+  explicit_session_mode = bool(
+      getattr(args, "session", None) or getattr(args, "session_ids_file", None)
+  )
+  return _cli_base_trace_filter(
+      app_name=getattr(args, "app_name", None),
+      custom_labels=custom_labels,
+      time_period=(
+          None if explicit_session_mode else getattr(args, "time_period", None)
+      ),
+  )
+
+
 def _fetch_session_traces(
     session_ids,
     max_sessions=3,
     *,
     max_traces=None,
     resolved_map=None,
+    base_filter=None,
 ):
   """Fetch execution traces from BigQuery for the given session IDs.
 
@@ -3265,6 +3340,10 @@ def _fetch_session_traces(
   ``session_id`` key; reused sessions are keyed by identity/scope tuples.
   When ``resolved_map`` is supplied, only traces matching that report
   population are retained; legacy session-only rows fail closed on collision.
+  When ``base_filter`` is supplied (a ``TraceFilter``), the fetch delegates
+  to a snapshot of it and replaces ONLY the requested ``session_ids`` and
+  display ``limit`` — the caller's app/label/time bounds are preserved and
+  the caller's filter object is never mutated.
   Silently returns empty dict if BQ is not configured or unavailable.
   """
   if not session_ids:
@@ -3310,10 +3389,13 @@ def _fetch_session_traces(
   try:
     from bigquery_agent_analytics import TraceFilter as _TraceFilter
 
-    fetched, _ = _list_complete_report_traces(
-        client,
-        _TraceFilter(session_ids=wanted, limit=trace_limit),
-    )
+    if base_filter is not None:
+      fetch_filter = base_filter.snapshot()
+    else:
+      fetch_filter = _TraceFilter()
+    fetch_filter.session_ids = wanted
+    fetch_filter.limit = trace_limit
+    fetched, _ = _list_complete_report_traces(client, fetch_filter)
   except _ReportTracePopulationTruncatedError as exc:
     logger.warning("Skipping execution trajectories: %s", exc)
     return {}

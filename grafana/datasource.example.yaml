@@ -1,0 +1,45 @@
+# Example Grafana provisioning config for the BigQuery data source.
+#
+# OPTIONAL — only for self-managed Grafana (Docker, k8s, bare metal).
+# On Grafana Cloud, add the data source through the UI instead
+# (Connections -> Data sources -> Add data source -> "Google BigQuery");
+# see grafana/README.md.
+#
+# Usage (self-managed):
+#   1. Install the plugin:  grafana-cli plugins install grafana-bigquery-datasource
+#   2. Copy this file to /etc/grafana/provisioning/datasources/bqaa-bigquery.yaml
+#   3. Replace the placeholders below, then restart Grafana.
+#
+# SECURITY: never commit a real service-account key. Keep the placeholder
+# here and inject the actual key at deploy time (secret manager, mounted
+# secret, or environment-templated provisioning). The service account only
+# needs the "BigQuery Data Viewer" and "BigQuery Job User" roles.
+
+apiVersion: 1
+
+datasources:
+  - name: BQAA BigQuery
+    type: grafana-bigquery-datasource
+    access: proxy
+    isDefault: false
+    editable: true
+    jsonData:
+      authenticationType: jwt
+      defaultProject: YOUR_GCP_PROJECT_ID
+      clientEmail: YOUR_SERVICE_ACCOUNT@YOUR_GCP_PROJECT_ID.iam.gserviceaccount.com
+      tokenUri: https://oauth2.googleapis.com/token
+      processingLocation: US # match your dataset's location, e.g. US, EU
+      # Per-query scan cap in bytes. Rejects any single query that would scan
+      # more than this. 100 MB is ample for a seeded demo dataset; raise it for
+      # production volumes. The key is case-sensitive and the plugin reads it
+      # as MaxBytesBilled; any other spelling is ignored and the cap silently
+      # does not apply.
+      MaxBytesBilled: 100000000 # 100 MB
+    secureJsonData:
+      # Paste ONLY the private_key field from the service-account JSON key as
+      # a multiline PEM with real line breaks, not literal \n sequences.
+      # Do NOT commit a real key to version control.
+      privateKey: |
+        -----BEGIN PRIVATE KEY-----
+        REPLACE_WITH_YOUR_SERVICE_ACCOUNT_PRIVATE_KEY
+        -----END PRIVATE KEY-----
