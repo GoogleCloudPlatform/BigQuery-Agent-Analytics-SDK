@@ -44,9 +44,17 @@ from concurrent.futures import as_completed
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+import math
 import os
 import re
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+
+# Host analyst signature: fn(client, model, session, current_skill, tools)
+# -> patch text or None (see collect_patches).
+ErrorAnalystFn = Callable[[Any, str, dict, str, Optional[str]], Optional[str]]
+
+# Segment outcome icons shared by both sub-trajectory renderers.
+_SEGMENT_OUTCOME_ICONS = {"recovered": "+", "parroted": "~"}
 
 logger = logging.getLogger("skill_evolution")
 
@@ -289,6 +297,18 @@ def _format_tool_calls(session: dict) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _format_execution_trace(session) -> str:
+  """Render the full-session execution trace block, or '' when absent."""
+  exec_trace = session.get("execution_trace", "")
+  if not exec_trace:
+    return ""
+  return (
+      "\n=== Execution trace ===\n"
+      "Shows agent routing, tool calls, and LLM requests. Look for:"
+      " missing tool calls, wrong routing, tool errors.\n\n" + exec_trace + "\n"
+  )
+
+
 def format_trajectory(session: dict) -> str:
   """Format a session for analyst consumption (single- or multi-turn)."""
   metrics = session.get("metrics", {})
@@ -347,24 +367,27 @@ def format_trajectory(session: dict) -> str:
       )
       for seg in exec_subtraj:
         outcome = seg.get("outcome", "")
-        icon = {"recovered": "+", "parroted": "~"}.get(outcome, "-")
+        icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
         result += (
             f"--- [{icon}] {seg.get('label', '')} (turns"
             f" {seg.get('start_turn')}-{seg.get('end_turn')}) ->"
             f" {outcome} ---\n"
         )
         result += (seg.get("trace", "") or "") + "\n\n"
-      return result
 
     # Surface the per-segment correction outcomes the turn tagger emits
     # (quality_report writes these as ``sub_trajectories``). This is the
-    # parrot/recover evidence the Error Analyst is told to use.
+    # parrot/recover evidence the Error Analyst is told to use. Skipped when
+    # per-segment execution traces are present: those carry the same
+    # outcome labels plus the executed evidence, so the brief list would be
+    # redundant. The full-session ``execution_trace`` below still renders
+    # either way.
     subtraj = session.get("sub_trajectories", []) or []
-    if subtraj:
+    if subtraj and not exec_subtraj:
       result += "\n=== Correction sub-trajectories ===\n"
       for seg in subtraj:
         outcome = seg.get("outcome", "")
-        icon = {"recovered": "+", "parroted": "~"}.get(outcome, "-")
+        icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
         span = ""
         if (
             seg.get("start_turn") is not None
@@ -374,16 +397,13 @@ def format_trajectory(session: dict) -> str:
         result += f"[{icon}] {seg.get('label', '')}{span} -> {outcome}\n"
 
     # Full-session execution trace (single undivided trace), when captured.
-    exec_trace = session.get("execution_trace", "")
-    if exec_trace:
-      result += "\n=== Execution trace ===\n"
-      result += (
-          "Shows agent routing, tool calls, and LLM requests. Look for:"
-          " missing tool calls, wrong routing, tool errors.\n\n"
-      )
-      result += exec_trace + "\n"
+    result += _format_execution_trace(session)
     return result
 
+  # Single-turn session shape (question/response, no conversation list). The
+  # execution trace renders here too: quality_report emits supported sessions
+  # with question + response + execution_trace, and the analyst needs the
+  # routing/tool evidence regardless of session shape.
   return (
       f"Question: {session.get('question', '')}\n"
       f"Response: {session.get('response', '')}\n"
@@ -392,7 +412,7 @@ def format_trajectory(session: dict) -> str:
       f"Justification: {usefulness.get('justification', '')}\n"
       f"Grounding: {grounding.get('category', '')}\n"
       f"{_format_tool_calls(session)}"
-  ).rstrip("\n")
+  ).rstrip("\n") + _format_execution_trace(session).rstrip("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -749,7 +769,7 @@ def collect_patches(
     max_success_samples=15,
     analyst_mode="both",
     tools=None,
-    error_analyst_fn=None,
+    error_analyst_fn: Optional[ErrorAnalystFn] = None,
 ):
   """Run the analyst fleet over the report. Returns the list of kept patches.
 
@@ -761,6 +781,15 @@ def collect_patches(
       fleet dispatch, quality gate, and consolidation from this engine.
       Success trajectories always use the built-in single-pass analyst.
   """
+  if client is None and not (
+      error_analyst_fn is not None and analyst_mode == "error-only"
+  ):
+    raise ValueError(
+        "client is required unless error_analyst_fn is set AND"
+        " analyst_mode='error-only': every built-in analyst call would fail"
+        " inside its future and be swallowed as warnings, silently dropping"
+        " all patches after the fleet has run."
+    )
   successes, failures = partition_trajectories(report)
   logger.info(
       "Trajectories: %d successes, %d failures", len(successes), len(failures)
@@ -851,11 +880,29 @@ def select_candidate(
   ``incumbent_score``, when given, is used as the incumbent's score instead of
   calling ``score_fn(current_skill)``. Hosts that already measured the base
   skill (e.g. the quality report the evolution run consumed) pass it to avoid
-  re-scoring the incumbent on fresh, noisy traffic.
+  re-scoring the incumbent on fresh, noisy traffic. It has effect ONLY when
+  ``score_fn`` is also provided -- without one, selection is the ungated
+  median-size candidate and a warning is logged. Raises ``ValueError`` for a
+  non-finite ``incumbent_score`` (NaN/inf would silently defeat the gate).
 
   The last rule is the restraint property of a self-modifying system: when
   nothing clearly improves, leave the already-good skill alone.
   """
+  if incumbent_score is not None:
+    if not math.isfinite(incumbent_score):
+      raise ValueError(
+          f"incumbent_score must be finite (got {incumbent_score!r}): a"
+          " NaN/inf baseline makes every margin comparison False and would"
+          " silently disable the incumbent guard."
+      )
+    if score_fn is None:
+      logger.warning(
+          "incumbent_score=%.3f was provided but score_fn is None -- the"
+          " incumbent guard only runs with a score_fn, so selection falls"
+          " back to the UNGATED median-size candidate.",
+          incumbent_score,
+      )
+
   if not viable:
     logger.warning("No viable candidate passed guardrails; keeping base skill.")
     return current_skill
@@ -906,7 +953,7 @@ def evolve_skill(
     min_improvement: float = 0.5,
     incumbent_score: Optional[float] = None,
     tools: Optional[str] = None,
-    error_analyst_fn=None,
+    error_analyst_fn: Optional[ErrorAnalystFn] = None,
     artifacts_dir: Optional[str] = None,
     version_label: str = "v1",
     client=None,
@@ -916,7 +963,16 @@ def evolve_skill(
   Args:
     report: A quality report dict (or a path to its JSON). Must contain
       ``sessions`` with ``metrics.response_usefulness.category`` and either a
-      ``conversation`` or ``question``/``response`` per session.
+      ``conversation`` or ``question``/``response`` per session. Sessions may
+      carry optional enrichment keys the analysts render when present (see
+      ``scripts/quality_report.py`` for the reference producer):
+      ``verifications`` (list of {claim, verified} dicts),
+      ``correction_boundaries`` (list of {turn_index, wrong_claim,
+      correct_fact, agent_recovered}), ``sub_trajectories`` (turn-tagger
+      segments: {label, outcome, start_turn, end_turn}),
+      ``execution_sub_trajectories`` (same shape plus a per-segment
+      ``trace`` string of executed routing/tool calls), and
+      ``execution_trace`` (one full-session trace string).
     current_skill: The current SKILL.md content (the base to merge into).
     model: Gemini model for analysts + consolidator (Vertex AI).
     project, location: Vertex project/location (default: env GOOGLE_CLOUD_*).

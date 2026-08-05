@@ -485,6 +485,152 @@ def test_collect_patches_dispatches_error_analyst_fn():
   assert len(patches) == 2
 
 
+def test_collect_patches_requires_client_outside_hosted_error_only():
+  # client=None is legitimate ONLY with a host analyst in error-only mode;
+  # anywhere else every built-in analyst future would fail and be swallowed.
+  import pytest
+
+  report = {"sessions": [_session("unhelpful", question="q1")]}
+  with pytest.raises(ValueError, match="client is required"):
+    collect_patches(report, "BASE", client=None, model="unused")
+  with pytest.raises(ValueError, match="client is required"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="both",
+        error_analyst_fn=lambda *a: None,
+    )
+
+
+def test_select_candidate_rejects_non_finite_incumbent_score():
+  # NaN/inf make every margin comparison False -- the exact "never ship a
+  # worse skill" property this function enforces, silently defeated.
+  import pytest
+
+  for bad in (float("nan"), float("-inf"), float("inf")):
+    with pytest.raises(ValueError, match="finite"):
+      select_candidate(
+          ["CAND"], "BASE", score_fn=lambda _s: 1.0, incumbent_score=bad
+      )
+
+
+def test_select_candidate_warns_when_incumbent_score_unused(caplog):
+  # incumbent_score without score_fn: median-size selection, no gate -- the
+  # host must be told the guard is NOT active.
+  import logging
+
+  with caplog.at_level(logging.WARNING):
+    out = select_candidate(["A", "BB", "CCC"], "BASE", incumbent_score=0.9)
+  assert out == "BB"
+  assert any("UNGATED" in r.message for r in caplog.records)
+
+
+def test_format_renders_both_segment_and_full_session_traces():
+  # A session carrying BOTH per-segment traces and a full-session trace
+  # renders both: segments suppress only the brief sub_trajectories outcome
+  # list (redundant), never the full-session evidence.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[
+          {
+              "label": "corr",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+          }
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "corr",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+      execution_trace="FULL-SESSION-TRACE",
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "FULL-SESSION-TRACE" in out
+  assert "=== Execution sub-trajectories ===" in out
+  assert "=== Execution trace ===" in out
+  assert "=== Correction sub-trajectories ===" not in out
+
+
+def test_format_renders_execution_trace_for_single_turn_sessions():
+  # question/response sessions (no conversation list) are a supported
+  # quality_report shape and must not silently lose their trace evidence.
+  s = _session(
+      "unhelpful",
+      question="What is the meal limit?",
+      response="Ask HR.",
+      execution_trace="invoke supervisor -> NO tool call",
+  )
+  s.pop("conversation", None)
+  out = format_trajectory(s)
+  assert "Question: What is the meal limit?" in out
+  assert "=== Execution trace ===" in out
+  assert "invoke supervisor -> NO tool call" in out
+
+
+def test_error_analyst_fn_in_both_mode_keeps_builtin_for_successes():
+  # Docstring contract: the host analyst replaces FAILURE analysts only;
+  # success trajectories always use the built-in single-pass analyst.
+  calls = {"host": [], "builtin": []}
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    calls["host"].append(session["question"])
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool.\n"
+        "## Proposed Patch\nContent: call the tool first."
+    )
+
+  class _FakeModels:
+
+    def generate_content(self, **_kw):
+      raise AssertionError("built-in analyst should be stubbed")
+
+  class _FakeClient:
+    models = _FakeModels()
+
+  import skill_evolution as _se
+
+  original = _se.run_analyst
+
+  def spy_run_analyst(client, model, prompt, session, current_skill, *a, **kw):
+    calls["builtin"].append(session["question"])
+    return (
+        "## Pattern\nRESPONSE_PATTERN: kept the derived rate.\n"
+        "## Proposed Patch\nContent: keep deriving rates."
+    )
+
+  _se.run_analyst = spy_run_analyst
+  try:
+    report = {
+        "sessions": [
+            _session("unhelpful", question="fail-1"),
+            _session("meaningful", question="win-1"),
+        ]
+    }
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=_FakeClient(),
+        model="unused",
+        analyst_mode="both",
+        error_analyst_fn=fake_analyst,
+    )
+  finally:
+    _se.run_analyst = original
+  assert calls["host"] == ["fail-1"]
+  assert calls["builtin"] == ["win-1"]
+  assert len(patches) == 2
+
+
 # --- _write_evolution_artifacts --------------------------------------------
 
 
