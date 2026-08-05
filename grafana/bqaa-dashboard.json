@@ -1,0 +1,1640 @@
+{
+  "title": "BigQuery Agent Analytics",
+  "uid": "bqaa-dashboard",
+  "description": "Interactive dashboard for the BigQuery Agent Analytics SDK. Panels query the raw agent_events table and the typed ViewManager views (adk_* by default). Panel SQL is maintained in grafana/queries/*.sql \u2014 treat those files as the source of truth.",
+  "tags": [
+    "bqaa",
+    "bigquery",
+    "agents",
+    "llm"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "",
+  "timezone": "browser",
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "type": "dashboard",
+        "name": "Annotations & Alerts",
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)"
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "BigQuery datasource",
+        "description": "The Grafana BigQuery data source to query.",
+        "query": "grafana-bigquery-datasource",
+        "current": {},
+        "options": [],
+        "refresh": 1,
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "type": "constant",
+        "name": "project",
+        "label": "GCP project",
+        "description": "Google Cloud project containing the BQAA dataset. Locked to a constant so viewers cannot repoint panels at arbitrary projects.",
+        "query": "my-project",
+        "current": {
+          "selected": false,
+          "text": "my-project",
+          "value": "my-project"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "my-project",
+            "value": "my-project"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "constant",
+        "name": "dataset",
+        "label": "BigQuery dataset",
+        "description": "Dataset holding agent_events and the ViewManager views. Locked to a constant so viewers cannot explore arbitrary datasets.",
+        "query": "agent_analytics",
+        "current": {
+          "selected": false,
+          "text": "agent_analytics",
+          "value": "agent_analytics"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "agent_analytics",
+            "value": "agent_analytics"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "constant",
+        "name": "table",
+        "label": "Events table",
+        "description": "Raw events table name (ViewManager table_id). Locked to a constant so viewers cannot repoint panels at arbitrary tables.",
+        "query": "agent_events",
+        "current": {
+          "selected": false,
+          "text": "agent_events",
+          "value": "agent_events"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "agent_events",
+            "value": "agent_events"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "constant",
+        "name": "view_prefix",
+        "label": "View prefix",
+        "description": "Prefix ViewManager applies to view names (default adk_). Locked to a constant so viewers cannot repoint panels at arbitrary views.",
+        "query": "adk_",
+        "current": {
+          "selected": false,
+          "text": "adk_",
+          "value": "adk_"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "adk_",
+            "value": "adk_"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "constant",
+        "name": "price_per_1m_input_tokens",
+        "label": "Input price (USD per 1M tokens)",
+        "description": "USD charged per 1,000,000 input tokens, read by the Estimated cost panel. The default 1.25 is a placeholder — edit it to match the pricing of the model(s) you run. Locked to a constant, like the project and dataset above, so a crafted dashboard URL cannot substitute arbitrary text into the cost arithmetic.",
+        "query": "1.25",
+        "current": {
+          "selected": false,
+          "text": "1.25",
+          "value": "1.25"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "1.25",
+            "value": "1.25"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "constant",
+        "name": "price_per_1m_output_tokens",
+        "label": "Output price (USD per 1M tokens)",
+        "description": "USD charged per 1,000,000 output tokens, read by the Estimated cost panel. The default 5.00 is a placeholder — edit it to match the pricing of the model(s) you run. Locked to a constant, like the project and dataset above, so a crafted dashboard URL cannot substitute arbitrary text into the cost arithmetic.",
+        "query": "5.00",
+        "current": {
+          "selected": false,
+          "text": "5.00",
+          "value": "5.00"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "5.00",
+            "value": "5.00"
+          }
+        ],
+        "hide": 2,
+        "skipUrlSync": true
+      },
+      {
+        "type": "query",
+        "name": "agent",
+        "label": "Agent",
+        "description": "Select one or more AI Agents to filter metrics by. The dropdown lists at most 1000 agents active in the time range; type or paste any other agent name to select one the list left out.",
+        "datasource": {
+          "type": "grafana-bigquery-datasource",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "refId": "tempvar",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Variable: agent dropdown options.\n-- Lists every agent active in the time range, alphabetically.\n-- The LIMIT is a defensive cap, not an expected truncation: agent cardinality\n-- is normally a handful of names, so 1000 only bites on a runaway deployment\n-- that would otherwise hand Grafana more options than its frontend can render.\n-- Truncation drops the alphabetically last agents; narrow the dashboard's time\n-- range so the window holds fewer than 1000 agents to bring them back, or type\n-- the agent name straight into the picker, which accepts custom values.\nSELECT DISTINCT agent\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND agent IS NOT NULL\nORDER BY agent\nLIMIT 1000\n",
+          "format": 1,
+          "location": ""
+        },
+        "definition": "-- Variable: agent dropdown options.\n-- Lists every agent active in the time range, alphabetically.\n-- The LIMIT is a defensive cap, not an expected truncation: agent cardinality\n-- is normally a handful of names, so 1000 only bites on a runaway deployment\n-- that would otherwise hand Grafana more options than its frontend can render.\n-- Truncation drops the alphabetically last agents; narrow the dashboard's time\n-- range so the window holds fewer than 1000 agents to bring them back, or type\n-- the agent name straight into the picker, which accepts custom values.\nSELECT DISTINCT agent\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND agent IS NOT NULL\nORDER BY agent\nLIMIT 1000\n",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allowCustomValue": true,
+        "allValue": "'___ALL___'",
+        "current": {},
+        "options": [],
+        "sort": 0,
+        "regex": "",
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "type": "query",
+        "name": "user_id",
+        "label": "User ID",
+        "description": "Filter panels by one or more User IDs. The dropdown lists the 1000 most recently active users in the time range; type or paste any other user ID to select one the list left out.",
+        "datasource": {
+          "type": "grafana-bigquery-datasource",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "refId": "tempvar",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Variable: user_id dropdown options.\n-- Lists every user active in the time range, most recently active first.\n-- The LIMIT is a guard against user_id's cardinality: a consumer-facing\n-- deployment can touch far more users in a day than Grafana's dropdown can\n-- render, and the search box runs entirely in the frontend over the options it\n-- was given, so an oversized list degrades into an unusable picker. Capping at\n-- the 1000 most recently active users keeps the variable renderable.\n-- Truncated older users are still reachable: narrow the dashboard's time range\n-- so the window they fall in holds fewer than 1000 users, or type the user ID\n-- straight into the picker, which accepts custom values.\nSELECT user_id\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND user_id IS NOT NULL\nGROUP BY user_id\nORDER BY MAX(timestamp) DESC\nLIMIT 1000\n",
+          "format": 1,
+          "location": ""
+        },
+        "definition": "-- Variable: user_id dropdown options.\n-- Lists every user active in the time range, most recently active first.\n-- The LIMIT is a guard against user_id's cardinality: a consumer-facing\n-- deployment can touch far more users in a day than Grafana's dropdown can\n-- render, and the search box runs entirely in the frontend over the options it\n-- was given, so an oversized list degrades into an unusable picker. Capping at\n-- the 1000 most recently active users keeps the variable renderable.\n-- Truncated older users are still reachable: narrow the dashboard's time range\n-- so the window they fall in holds fewer than 1000 users, or type the user ID\n-- straight into the picker, which accepts custom values.\nSELECT user_id\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND user_id IS NOT NULL\nGROUP BY user_id\nORDER BY MAX(timestamp) DESC\nLIMIT 1000\n",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allowCustomValue": true,
+        "allValue": "'___ALL___'",
+        "current": {},
+        "options": [],
+        "sort": 0,
+        "regex": "",
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "type": "query",
+        "name": "event_type",
+        "label": "Event Type",
+        "description": "Filter by specific event types. Applies to the general raw-table panels: Events Over Time, Events by Agent, Recent Sessions and Trace Detail. Ignored by the Overview stats, Errors Over Time, and LLM/Tool specific panels.",
+        "datasource": {
+          "type": "grafana-bigquery-datasource",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "refId": "tempvar",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT DISTINCT event_type FROM `${project}.${dataset}.${table}` WHERE event_type IS NOT NULL AND $__timeFilter(timestamp) ORDER BY event_type\n",
+          "format": 1,
+          "location": ""
+        },
+        "definition": "SELECT DISTINCT event_type FROM `${project}.${dataset}.${table}` WHERE event_type IS NOT NULL AND $__timeFilter(timestamp) ORDER BY event_type\n",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "'___ALL___'",
+        "current": {},
+        "options": [],
+        "sort": 0,
+        "regex": "",
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "type": "query",
+        "name": "session_id",
+        "label": "Session",
+        "description": "Filter panels to one or more specific sessions. The dropdown lists the 1000 most recently active sessions in the time range; type or paste any other session ID to select one the list left out.",
+        "datasource": {
+          "type": "grafana-bigquery-datasource",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "refId": "tempvar",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Variable: session_id dropdown options (independent filter).\n-- This variable intentionally does not cascade from any other filter: no agent,\n-- user_id, or event_type clause appears below, so the list is a global scan for\n-- every session active in the time range, most recently active first.\n-- Cascading would make an upstream filter change drop the active session out of\n-- this list, and Grafana would then silently re-select a different session (or,\n-- with multi-select, prune the user's selection down to whatever survived). We\n-- prefer the dashboard to show \"No Data\" for contradictory filter selections\n-- rather than forcefully changing the user's selected sessions behind their\n-- back.\n-- Trade-off: the dropdown lists sessions that may not match the current Agent /\n-- User ID / Event Type selections, so picking one can legitimately render every\n-- panel empty. That is the intended, recoverable outcome — widen the other\n-- filters to bring the data back.\n-- The LIMIT is a guard against session_id's cardinality, which is unbounded in\n-- a way that agent, user_id and event_type are not: a busy deployment can open\n-- hundreds of thousands of sessions in a single day, and handing that many\n-- options to Grafana exhausts the frontend rather than producing a usable\n-- dropdown. Capping at the 1000 most recently active sessions keeps the\n-- variable renderable. Truncated older sessions are still reachable: narrow the\n-- dashboard's time range so the window they fall in holds fewer than 1000\n-- sessions, and they move back into the list.\nSELECT session_id\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND session_id IS NOT NULL\nGROUP BY session_id\nORDER BY MAX(timestamp) DESC\nLIMIT 1000\n",
+          "format": 1,
+          "location": ""
+        },
+        "definition": "-- Variable: session_id dropdown options (independent filter).\n-- This variable intentionally does not cascade from any other filter: no agent,\n-- user_id, or event_type clause appears below, so the list is a global scan for\n-- every session active in the time range, most recently active first.\n-- Cascading would make an upstream filter change drop the active session out of\n-- this list, and Grafana would then silently re-select a different session (or,\n-- with multi-select, prune the user's selection down to whatever survived). We\n-- prefer the dashboard to show \"No Data\" for contradictory filter selections\n-- rather than forcefully changing the user's selected sessions behind their\n-- back.\n-- Trade-off: the dropdown lists sessions that may not match the current Agent /\n-- User ID / Event Type selections, so picking one can legitimately render every\n-- panel empty. That is the intended, recoverable outcome — widen the other\n-- filters to bring the data back.\n-- The LIMIT is a guard against session_id's cardinality, which is unbounded in\n-- a way that agent, user_id and event_type are not: a busy deployment can open\n-- hundreds of thousands of sessions in a single day, and handing that many\n-- options to Grafana exhausts the frontend rather than producing a usable\n-- dropdown. Capping at the 1000 most recently active sessions keeps the\n-- variable renderable. Truncated older sessions are still reachable: narrow the\n-- dashboard's time range so the window they fall in holds fewer than 1000\n-- sessions, and they move back into the list.\nSELECT session_id\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND session_id IS NOT NULL\nGROUP BY session_id\nORDER BY MAX(timestamp) DESC\nLIMIT 1000\n",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allowCustomValue": true,
+        "allValue": "'___ALL___'",
+        "current": {},
+        "options": [],
+        "sort": 0,
+        "regex": "",
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "links": [],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview (Filters: Agent, User, Session | Event Type: Events over time and Events by agent only)",
+      "collapsed": false,
+      "id": 1,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Sessions",
+      "id": 2,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "description": "Distinct session_ids in the selected time range. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Overview stats (Sessions, Events, Error rate, Avg LLM latency).\n-- One row, four columns; each Grafana stat panel picks one field.\n-- NOTE: The avg_llm_latency_ms subquery performs an extra full scan of llm_responses.\n-- This is an intentional UX decision to provide a top-level scalar metric alongside\n-- the dedicated time-series panel below.\n-- The event_type filter is intentionally NOT applied anywhere in this query.\n-- Errors arrive as their own event types (LLM_ERROR, TOOL_ERROR, ...), so a\n-- selection like LLM_RESPONSE would exclude every error row and report a 0%\n-- error rate when errors did occur — the same exemption errors_over_time.sql\n-- makes. The llm_responses subquery is exempt for a second reason: that view\n-- already holds exactly one event type, so filtering it would blank the metric\n-- for every non-LLM selection.\n-- HAVING COUNT(*) > 0 keeps the no-data contract: an unaggregated SELECT over\n-- aggregates always emits one row, so an empty filter intersection would\n-- otherwise report a confident \"0 sessions, 0 events, 0% error rate\" instead of\n-- letting the stat panels fall back to their \"No matching data\" text.\nSELECT\n  COUNT(DISTINCT e.session_id) AS sessions,\n  COUNT(*) AS events,\n  SAFE_DIVIDE(\n    COUNTIF(ENDS_WITH(e.event_type, '_ERROR') OR e.error_message IS NOT NULL OR UPPER(e.status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate,\n  (\n    SELECT AVG(r.total_ms)\n    FROM `${project}.${dataset}.${view_prefix}llm_responses` AS r\n    WHERE $__timeFilter(r.timestamp)\n      AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR r.agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n      AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR r.user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n      AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR r.session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\n  ) AS avg_llm_latency_ms\nFROM `${project}.${dataset}.${table}` AS e\nWHERE $__timeFilter(e.timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR e.agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR e.user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR e.session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nHAVING COUNT(*) > 0\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^sessions$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Events",
+      "id": 3,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "description": "Total agent_events rows in the selected time range. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 2
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^events$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Error rate",
+      "id": 4,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "description": "Share of events counted as errors: event_type ending in _ERROR, or a non-NULL error_message, or UPPER(status) = 'ERROR'. See grafana/queries/README.md. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 2
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^error_rate$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Avg LLM latency",
+      "id": 5,
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "description": "Mean total_ms across LLM responses. Reads 'No matching data' rather than 0 when no LLM latency telemetry matches the current filters. Ignores the Event Type filter: the four Overview stats share one query that stays unfiltered so the error rate keeps its global context.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 2
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^avg_llm_latency_ms$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Events over time",
+      "id": 6,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "description": "Event volume per event_type. Honors the Event Type filter — the only panel in this row that does.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Events over time, one series per event_type (Overview row).\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS events\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY time, event_type\nORDER BY time\n",
+          "format": 0,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors over time",
+      "id": 7,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "description": "Error events per event_type. An event counts as an error when event_type ends in _ERROR, error_message is non-NULL, or UPPER(status) = 'ERROR'. An empty panel reads \"No errors in range\": the query returns no rows, which is not a broken panel. It cannot tell \"no errors\" apart from \"no events matched the filters\" — check the Overview stat panels, which read \"No matching data\" when the filter combination matches nothing at all.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Errors over time, one series per event_type (Overview row).\n-- The event_type filter is intentionally NOT applied here. Errors arrive as\n-- their own event types (LLM_ERROR, TOOL_ERROR, ...), so filtering on a\n-- selection like LLM_RESPONSE would exclude every error row and make the panel\n-- report zero errors when errors did occur.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  event_type,\n  COUNT(*) AS errors\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND (ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR')\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY time, event_type\nORDER BY time\n",
+          "format": 0,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No errors in range",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "gradientMode": "opacity",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Events by agent",
+      "id": 21,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "description": "Event volume per agent over the raw ${table}. Honors the Event Type filter — with a selection active the bars read \"events of the selected type(s) per agent\". Events written without an agent group under \"unknown\" rather than being dropped, so with Event Type on All the bars add up to the Events stat above.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Events by agent (Overview row).\n-- Event volume per agent over the raw ${table}, so every event type counts, not\n-- just the ones a typed view exposes.\n-- This query DOES honor the Event Type filter: neither exemption in\n-- queries/README.md applies (it reads the raw table, and it does not count\n-- errors), so with a selection active the bars read \"events of the selected\n-- type(s) per agent\". It is the second panel in the Overview row to do so.\n-- agent is nullable on the raw table; IFNULL groups those rows under \"unknown\"\n-- rather than dropping them, so the bars still add up to the Events stat above\n-- whenever the Event Type filter is on All.\n-- The output column is agent_name, not agent, so the GROUP BY names the IFNULL\n-- alias instead of resolving back to the raw nullable column.\n-- HAVING COUNT(*) > 0 is a written-down contract rather than a live filter: the\n-- GROUP BY already emits no rows when nothing matches, which is what lets the\n-- panel fall back to its \"No matching data\" text. Stating it next to the\n-- aggregate keeps a later edit that widens the input set (an outer join, or a\n-- COUNTIF replacing the count) from silently drawing zero-height bars.\nSELECT\n  IFNULL(agent, 'unknown') AS agent_name,\n  COUNT(*) AS events\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY agent_name\nHAVING COUNT(*) > 0\nORDER BY events DESC\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisLabel": ""
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "barWidth": 0.85,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Top error messages",
+      "id": 22,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "description": "Distinct error_message strings in range, most frequent first, capped at 50. Only events carrying a non-NULL error_message appear: an error that recorded no message (event_type ending in _ERROR, or UPPER(status) = 'ERROR', with a NULL error_message) has no string to group under, so these counts are a subset of what Errors over time charts. Ignores the Event Type filter for the same reason Errors over time does — errors carry their own *_ERROR event types. sessions and agents count the distinct sessions and agents that hit each message; last_seen is the most recent occurrence in range.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Top error messages (Overview row).\n-- Ranks the distinct error_message strings in the window by how often they\n-- occur, so the loudest failure mode is the first row.\n-- Scope: only events carrying a non-NULL error_message. An error event that\n-- recorded no message (event_type ending in _ERROR, or UPPER(status) = 'ERROR',\n-- with error_message NULL) has no string to group under and is intentionally\n-- absent, so these counts are a subset of what Errors over time charts.\n-- No event_type filter: errors arrive as their own event types (LLM_ERROR,\n-- TOOL_ERROR, ...), so honoring a selection like LLM_RESPONSE would report zero\n-- errors when errors did occur — the same exemption errors_over_time.sql makes.\n-- HAVING COUNT(*) > 0 is a written-down contract rather than a live filter: the\n-- GROUP BY already emits no rows when nothing matches, which is what lets the\n-- panel fall back to its \"No errors in range\" text. Stating it next to the\n-- aggregate keeps a later edit that widens the input set (an outer join, or the\n-- error predicate moved out of the WHERE into a COUNTIF) from silently listing\n-- zero-count rows.\nSELECT\n  error_message,\n  COUNT(*) AS errors,\n  COUNT(DISTINCT session_id) AS sessions,\n  COUNT(DISTINCT agent) AS agents,\n  MAX(timestamp) AS last_seen\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND error_message IS NOT NULL\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY error_message\nHAVING COUNT(*) > 0\nORDER BY errors DESC\nLIMIT 50\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No errors in range",
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "errors",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "LLM & FinOps (Filters: Agent, User, Session | Ignores: Event Type)",
+      "collapsed": false,
+      "id": 8,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Token usage over time",
+      "id": 9,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "description": "Prompt / completion / total tokens from ${view_prefix}llm_responses. Missing usage telemetry degrades to 0.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Token usage over time (LLM & FinOps row).\n-- Uses the typed llm_responses view. Missing usage telemetry\n-- degrades to 0 for sums (IFNULL) rather than dropping the bucket.\n-- No event_type filter: the view is already scoped to a single event type,\n-- so filtering it would blank the panel for every non-LLM selection.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY time\nORDER BY time\n",
+          "format": 0,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM latency (p50 / p95 / TTFT)",
+      "id": 10,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "description": "Latency percentiles from ${view_prefix}llm_responses. Gaps mean missing latency telemetry.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).\n-- Latency aggregates deliberately stay NULL when telemetry is missing so\n-- the chart shows gaps instead of fake zeros.\n-- No event_type filter: the view is already scoped to a single event type,\n-- so filtering it would blank the panel for every non-LLM selection.\nSELECT\n  $__timeGroup(timestamp, $__interval) AS time,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms,\n  APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY time\nORDER BY time\n",
+          "format": 0,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "gradientMode": "opacity"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "Tokens by model",
+      "id": 11,
+      "gridPos": {
+        "h": 12,
+        "w": 16,
+        "x": 0,
+        "y": 30
+      },
+      "description": "Token totals grouped by model_version (response-side attribute).",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Tokens by model (LLM & FinOps row).\n-- model_version is the response-side attribute exposed by the\n-- llm_responses view; rows without it group under \"unknown\".\n-- No event_type filter: the view is already scoped to a single event type,\n-- so filtering it would blank the panel for every non-LLM selection.\nSELECT\n  IFNULL(model_version, 'unknown') AS model,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens,\n  COUNT(*) AS responses\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY model\nORDER BY total_tokens DESC\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisLabel": ""
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "total_tokens"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "tooltip": false,
+                  "viz": true,
+                  "legend": true
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "responses"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "tooltip": false,
+                  "viz": true,
+                  "legend": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "barWidth": 0.85,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Estimated cost (placeholder rates)",
+      "id": 12,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "description": "DERIVED estimate, not telemetry: token counts x the per-1M-token rates held in the price_per_1m_input_tokens and price_per_1m_output_tokens dashboard variables. The defaults are placeholders — edit those two variables (Dashboard settings → Variables) to match your model pricing. Token counts are the primary FinOps signal.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Costs are DERIVED, not telemetry: the SDK records token counts only.\n-- The rates come from the price_per_1m_input_tokens /\n-- price_per_1m_output_tokens\n-- dashboard variables, whose defaults are placeholders \u2014 edit them in\n-- Dashboard settings > Variables to match the pricing of the model(s) you\n-- actually run, rather than editing this file. Both variables are read as\n-- USD per 1,000,000 tokens, which is the unit model price lists publish.\n-- The panel is intentionally labeled \"Estimated Cost\" for this reason;\n-- token counts are the primary FinOps signal.\n-- The two variables are `constant`s with skipUrlSync, so a crafted dashboard\n-- URL cannot substitute arbitrary text into the arithmetic below.\n-- No event_type filter: the llm_responses view is already scoped to a\n-- single event type, so filtering it would blank the panel for every\n-- non-LLM selection.\n-- HAVING COUNT(*) > 0 keeps the no-data contract: an unaggregated SELECT over\n-- aggregates always emits one row, so an empty filter intersection would\n-- otherwise report a confident zero cost / zero tokens instead of letting the\n-- panels fall back to their \"No matching data\" text.\nSELECT\n  IFNULL(SUM(usage_prompt_tokens), 0) / 1e6 * ${price_per_1m_input_tokens}    -- $ / 1M input tokens\n    + IFNULL(SUM(usage_completion_tokens), 0) / 1e6 * ${price_per_1m_output_tokens}  -- $ / 1M output tokens\n    AS estimated_cost_usd,\n  -- NOTE: This column is consumed dynamically by the dependent 'Total tokens' panel\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nHAVING COUNT(*) > 0\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^estimated_cost_usd$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Total tokens",
+      "id": 20,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 34
+      },
+      "description": "Sum of the provider-reported usage.total token count (usage_total_tokens in ${view_prefix}llm_responses) over the selected time range and filters. This is the provider's own total rather than prompt + completion added up here, so it can differ from that sum when a provider bills cached, reasoning or other tokens it does not report in those two fields.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 12
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^total_tokens$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "LLM calls",
+      "id": 23,
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 38
+      },
+      "description": "Count of LLM_RESPONSE events in range — the number of completed model calls the rest of this row aggregates over. Read from ${view_prefix}llm_responses, which holds exactly that one event type, so the Event Type filter is ignored (honoring it would blank the stat for every non-LLM selection). Divide the token and cost panels by this to get a per-call average.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: LLM calls (LLM & FinOps row).\n-- Total number of LLM_RESPONSE events in the window: the call volume the token,\n-- latency and cost panels in this row are averaging and summing over.\n-- No event_type filter: the llm_responses view is already scoped to a single\n-- event type, so COUNT(*) is the LLM_RESPONSE count by construction and adding\n-- the filter would blank the stat for every non-LLM selection.\n-- HAVING COUNT(*) > 0 keeps the no-data contract: an unaggregated SELECT over an\n-- aggregate always emits one row, so an empty filter intersection would\n-- otherwise report a confident \"0 calls\" instead of letting the stat panel fall\n-- back to its \"No matching data\" text.\nSELECT\n  COUNT(*) AS llm_calls\nFROM `${project}.${dataset}.${view_prefix}llm_responses`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nHAVING COUNT(*) > 0\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No matching data",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^llm_calls$/",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "textMode": "auto"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Tools & Execution (Filters: Agent, User, Session | Ignores: Event Type)",
+      "collapsed": false,
+      "id": 13,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "type": "barchart",
+      "title": "Tool invocations by tool",
+      "id": 14,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 43
+      },
+      "description": "Invocations per tool from ${view_prefix}tool_starts, so failed invocations are counted (${view_prefix}tool_completions would drop them).",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Tool invocations by tool (Tools row).\n-- Uses the typed tool_starts view so failed invocations are included in the\n-- volume (the tool_completions view would drop them).\n-- No event_type filter: the view is already scoped to a single event type,\n-- so filtering it would blank the panel for every non-tool selection.\nSELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM `${project}.${dataset}.${view_prefix}tool_starts`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY tool_name\nORDER BY invocations DESC\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "gradientMode": "none",
+            "axisLabel": ""
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "xTickLabelRotation": 0,
+        "showValue": "auto",
+        "barWidth": 0.85,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Tool latency",
+      "id": 15,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 43
+      },
+      "description": "Per-tool latency; NULLs mean missing latency telemetry.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Tool latency by tool (Tools row).\n-- Latency stays NULL when missing (no IFNULL) so averages aren't skewed.\n-- No event_type filter: the view is already scoped to a single event type,\n-- so filtering it would blank the panel for every non-tool selection.\nSELECT\n  tool_name,\n  COUNT(*) AS completions,\n  AVG(total_ms) AS avg_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY tool_name\nORDER BY p95_ms DESC\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*_ms$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "p95_ms",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Tool errors",
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 43
+      },
+      "description": "TOOL_ERROR events plus completions that carry a non-NULL error_message or UPPER(status) = 'ERROR'. UNION ALL is intentional: one logical failure that emits both a TOOL_ERROR and an error-status TOOL_COMPLETED appears as two rows.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Combines the dedicated TOOL_ERROR view with any error-status completions.\n-- UNION ALL intentionally preserves both telemetry records when one logical\n-- failure emits a TOOL_ERROR and an error-status TOOL_COMPLETED event.\n-- No event_type filter: both views are already scoped to a single event\n-- type each, so filtering them would blank the panel for every non-tool\n-- selection.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_errors`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `${project}.${dataset}.${view_prefix}tool_completions`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nORDER BY timestamp DESC\nLIMIT 100\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Sessions & Traces (Filters: Agent, User, Event Type, Session)",
+      "collapsed": false,
+      "id": 17,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 51
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Recent sessions",
+      "id": 18,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "description": "Session rollups over the raw ${table} table, capped at the 250 most recently active sessions in the time range — narrow the time range to reach older ones. All four filters are honored, but Agent, User and Event Type only select WHICH sessions are listed: each listed session's counts then cover that whole session, including the events those filters excluded, so they will not match the Overview stats. Filter to one agent and session_agents_in_window can still read 2, and session_errors_in_window can still include another agent's errors. session_errors_in_window counts events whose event_type ends in _ERROR, or that carry a non-NULL error_message, or whose UPPER(status) = 'ERROR'. session_users_in_window lists every distinct user_id in the session, so it can name more than one. session_input_tokens_in_window / session_output_tokens_in_window sum $.usage.prompt / $.usage.completion over the session's LLM_RESPONSE events — the same values the LLM & FinOps panels report as prompt/completion tokens. Click a session_id to pin it into the Session variable (the time range and the other three filters are carried over) and drive the Trace detail panel below; the Session dropdown above still accepts a typed or pasted value.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Recent sessions (Sessions & Traces row).\n-- Session-level rollup over the raw agent_events table.\n-- All four filters apply, but agent, user_id and event_type only decide *which\n-- sessions are listed*: each gets its own LOGICAL_OR(...) in the HAVING over\n-- the GROUP BY, and the three are ANDed. A session is kept when it contains a\n-- match for each filter somewhere in the window — the matches need not be the\n-- same event. Applying them in the outer WHERE would drop events before the\n-- GROUP BY, so every rollup below would describe a filtered slice of the\n-- session while still being labelled as the session itself.\n-- HAVING rather than a `session_id IN (SELECT ...)` subquery: the subquery\n-- expresses the same predicate but reads the table a second time, and BigQuery\n-- bills bytes scanned per reference rather than collapsing the two reads.\n-- Consequently the per-session rollup columns below cover every event the\n-- session has in the window, including events the Agent / User / Event Type\n-- filters excluded, so they will not sum to the Overview stats.\n-- session_id IS NOT NULL matches var_session_id.sql: events written without a\n-- session would otherwise collapse into one NULL row that names no session and\n-- that the Session dropdown cannot select for the trace panel below.\n-- The LIMIT caps the table at the 250 most recently active sessions in the\n-- window. Truncated older sessions are reachable by narrowing the dashboard's\n-- time range, the same escape hatch var_session_id.sql documents.\n-- session_users_in_window is a STRING_AGG rather than ANY_VALUE: nothing in the\n-- schema stops two user_ids from sharing a session, and ANY_VALUE would silently\n-- name one of them. It reads like COUNT(DISTINCT agent) below — the column is\n-- there to show when a session is not the single-user thing it was assumed to\n-- be, so it lists every user rather than picking one.\n-- The token columns read $.usage.prompt / $.usage.completion straight off the\n-- raw content payload: this panel groups the raw table, so it cannot use the\n-- typed ${view_prefix}llm_responses view that exposes the same two extractions\n-- to the LLM & FinOps panels as usage_prompt_tokens / usage_completion_tokens.\n-- They are named input/output to match the price_per_1m_input_tokens /\n-- price_per_1m_output_tokens variables that price them. Only LLM_RESPONSE\n-- carries a usage block, and the IF() says so explicitly rather than leaning on\n-- the path being absent from every other event type's content — the view these\n-- numbers mirror is scoped to LLM_RESPONSE, and this sum has to scope itself.\n-- Like the counts, they cover the whole session in the window and so will not\n-- tie out against Token usage over time whenever a filter is active.\nSELECT\n  session_id,\n  STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id) AS session_users_in_window,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS session_agents_in_window,\n  COUNT(*) AS session_events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)\n    AS session_input_tokens_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)\n    AS session_output_tokens_in_window\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND session_id IS NOT NULL\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nGROUP BY session_id\nHAVING LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND LOGICAL_OR('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\nORDER BY last_event_in_window_at DESC\nLIMIT 250\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "session_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Pin this session",
+                    "url": "${__url.path}?${__url_time_range}&${datasource:queryparam}&${agent:queryparam}&${user_id:queryparam}&${event_type:queryparam}&var-session_id=${__data.fields.session_id:percentencode}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "last_event_in_window_at",
+            "desc": true
+          }
+        ],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Trace detail \u2014 ${session_id:text}",
+      "id": 19,
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "description": "Event timeline within the active time window for the selected session. Capped at the 500 most recent events, so with Session on All you see the newest activity rather than the oldest; click the timestamp header to re-sort a pinned session into chronological order. model is COALESCE($.model, $.model_version) since requests and responses store it under different attribute keys.",
+      "datasource": {
+        "type": "grafana-bigquery-datasource",
+        "uid": "${datasource}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-bigquery-datasource",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "-- Panel: Trace detail for the selected session (Sessions & Traces row).\n-- Queries the raw table so every event type appears in one timeline.\n-- - The session_id variable is interpolated with the sqlstring formatter below,\n--   so Grafana SQL-escapes the value (injection-safe).\n-- - session_id is selected explicitly: when the session filter is left on All,\n--   or several sessions are picked, the timeline interleaves events from\n--   different sessions and the column is the only way to tell them apart.\n-- - COALESCE(model, model_version): `model` exists on LLM_REQUEST attributes,\n--   `model_version` on LLM_RESPONSE attributes \u2014 one column covers both.\n-- - ORDER BY ... DESC decides *which* 500 rows survive the LIMIT, and that is\n--   the part a user cannot recover from. With the session filter on All the\n--   ascending order returned the oldest 500 events in the range, so a busy\n--   window showed the first few minutes and nothing since. Reading one pinned\n--   session as a chronological timeline is still available: the panel is a\n--   Grafana table, so clicking the `timestamp` header re-sorts the returned\n--   rows client-side.\nSELECT\n  timestamp,\n  session_id,\n  event_type,\n  agent,\n  invocation_id,\n  span_id,\n  parent_span_id,\n  status,\n  COALESCE(\n    JSON_VALUE(attributes, '$.model'),\n    JSON_VALUE(attributes, '$.model_version')\n  ) AS model,\n  JSON_VALUE(content, '$.tool') AS tool_name,\n  SAFE_CAST(JSON_VALUE(latency_ms, '$.total_ms') AS INT64) AS total_ms,\n  error_message\nFROM `${project}.${dataset}.${table}`\nWHERE $__timeFilter(timestamp)\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]) OR agent IN UNNEST(ARRAY<STRING>[${agent:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]) OR user_id IN UNNEST(ARRAY<STRING>[${user_id:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]) OR event_type IN UNNEST(ARRAY<STRING>[${event_type:sqlstring}]))\n  AND ('___ALL___' IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]) OR session_id IN UNNEST(ARRAY<STRING>[${session_id:sqlstring}]))\nORDER BY timestamp DESC\nLIMIT 500\n",
+          "format": 1,
+          "location": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*_ms$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [],
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false
+        }
+      }
+    }
+  ]
+}
