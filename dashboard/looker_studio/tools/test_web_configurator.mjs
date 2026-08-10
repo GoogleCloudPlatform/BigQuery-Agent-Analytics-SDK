@@ -60,6 +60,32 @@ assert.match(pageSource, /sql\/events_v1\.template\.sql/);
 assert.match(pageSource, /class="notice notice-warning"/);
 assert.doesNotMatch(pageSource, /#096b5a/);
 
+// #398 requires the transient-error warning both at the button AND in
+// step 02, and the stated duration must be the same everywhere it appears.
+const dontClose = pageSource.match(/don’t close it/g) ?? [];
+assert.ok(
+  dontClose.length >= 2,
+  "the do-not-close warning must appear at the button and in step 02",
+);
+assert.match(
+  pageSource,
+  /provisions your copy — don’t close it\. Looker Studio then\s+shows an acknowledgement dialog/,
+  "step 02 must repeat the transient-error warning before the dialog",
+);
+
+const appSource = readFileSync(
+  new URL("../docs/app.mjs", import.meta.url),
+  "utf8",
+);
+const waitingDuration = appSource.match(/up to (~\d+ seconds)/)?.[1];
+const noteDuration = pageSource.match(/up to\s+(~\d+ seconds)/s)?.[1];
+assert.ok(waitingDuration, "WAITING_MESSAGE must state a duration");
+assert.equal(
+  noteDuration,
+  waitingDuration,
+  "the static wait note and WAITING_MESSAGE must state the same duration",
+);
+
 const stylesSource = readFileSync(
   new URL("../docs/styles.css", import.meta.url),
   "utf8",

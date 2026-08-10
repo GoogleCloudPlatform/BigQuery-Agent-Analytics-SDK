@@ -660,6 +660,7 @@ def test_googlecloudplatform_pages_configuration():
   # explanation with the exact SQL linked, and the Google Blue palette.
   assert 'content="#1967d2"' in page
   assert "create-wait-note" in page
+  assert page.count("don’t close it") >= 2  # at the button AND in step 02
   assert "lookerstudio.google.com" in page
   assert "sql/events_v1.template.sql" in page
   assert 'class="notice notice-warning"' in page
