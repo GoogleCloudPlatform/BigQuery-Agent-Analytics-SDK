@@ -346,6 +346,9 @@ jobs:
     needs: [verify, build-image, build]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -362,9 +365,9 @@ jobs:
       - name: Render customer-first release notes (PR-tested script)
         run: |
           python3 producers/scripts/render_release_notes.py \
-            --version "${{ needs.verify.outputs.version }}" \
-            --digest "${{ needs.build-image.outputs.digest }}" \
-            --public-image "${{ env.PUBLIC_IMAGE }}" \
+            --version "${VERSION}" \
+            --digest "${IMAGE_DIGEST}" \
+            --public-image "${PUBLIC_IMAGE}" \
             --out release_body.md
 
       - name: Fail closed on existing-release state
@@ -602,6 +605,9 @@ jobs:
       # No contents: write — promote copies the image and asserts digests;
       # only finalize touches the GitHub release.
       id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
       - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
         # Supply-chain guard: never fetch a mutable 'latest' binary in a
@@ -632,19 +638,19 @@ jobs:
           gcloud auth print-access-token \
             | crane auth login us-docker.pkg.dev -u oauth2accesstoken --password-stdin
           set +e
-          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" 2> digest.err)
+          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${VERSION}" 2> digest.err)
           RC=$?
           set -e
           if [ $RC -eq 0 ]; then
-            test "$EXISTING" = "${{ needs.build-image.outputs.digest }}" \
-              || (echo "::error::public tag exists with digest ${EXISTING}, expected ${{ needs.build-image.outputs.digest }} — version is burned" && exit 1)
+            test "$EXISTING" = "${IMAGE_DIGEST}" \
+              || (echo "::error::public tag exists with digest ${EXISTING}, expected ${IMAGE_DIGEST} — version is burned" && exit 1)
             echo "public tag already carries the expected digest (rerun) — skipping copy"
           elif grep -qi "MANIFEST_UNKNOWN\|manifest unknown" digest.err; then
             # ONLY an explicit manifest-not-found enters the mutating path;
             # auth/rate-limit/network failures must never become a copy.
             crane copy \
-              "${STAGING_IMAGE}@${{ needs.build-image.outputs.digest }}" \
-              "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}"
+              "${STAGING_IMAGE}@${IMAGE_DIGEST}" \
+              "${PUBLIC_IMAGE}:${VERSION}"
           else
             echo "::error::registry state INDETERMINATE: $(head -1 digest.err)"
             exit 1
@@ -652,10 +658,10 @@ jobs:
 
       - name: Assert public digest equals the packaged constant
         run: |
-          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}")
+          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${VERSION}")
           echo "public:  ${PUBLIC_DIGEST}"
-          echo "staged:  ${{ needs.build-image.outputs.digest }}"
-          test "${PUBLIC_DIGEST}" = "${{ needs.build-image.outputs.digest }}" \
+          echo "staged:  ${IMAGE_DIGEST}"
+          test "${PUBLIC_DIGEST}" = "${IMAGE_DIGEST}" \
             || (echo "::error::digest drift between staging and public" && exit 1)
 
   publish-pypi:
@@ -745,6 +751,8 @@ jobs:
     needs: [verify, build, github-release, publish-pypi]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -973,8 +981,8 @@ jobs:
             # title/body/prerelease are verified on every snapshot and
             # repaired where GitHub permits edits (#356 rounds 12-13).
             python3 producers/scripts/publish_release_body.py \
-              --version "${{ needs.verify.outputs.version }}" \
-              --public-image "${{ env.PUBLIC_IMAGE }}" \
+              --version "${VERSION}" \
+              --public-image "${PUBLIC_IMAGE}" \
               --anchor-dir anchor/ \
               --tag "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
