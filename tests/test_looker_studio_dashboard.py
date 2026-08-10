@@ -560,6 +560,33 @@ def test_browser_configurator_javascript_contract():
   )
 
 
+def _chrome_available():
+  candidates = [
+      "google-chrome",
+      "google-chrome-stable",
+      "chromium-browser",
+      "chromium",
+  ]
+  if any(shutil.which(c) for c in candidates):
+    return True
+  return Path(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  ).exists()
+
+
+@pytest.mark.skipif(
+    not _chrome_available(), reason="No Chrome/Chromium available"
+)
+def test_configurator_loads_in_a_real_browser():
+  # Runs inside the required Test (Python N) checks so the browser-level
+  # gate is enforced by the existing main ruleset, not by an optional job.
+  subprocess.run(
+      ["bash", "tools/browser_smoke.sh"],
+      cwd=DASHBOARD,
+      check=True,
+  )
+
+
 def test_googlecloudplatform_pages_configuration():
   page = (DASHBOARD / "docs/index.html").read_text()
   styles = (DASHBOARD / "docs/styles.css").read_text()
