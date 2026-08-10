@@ -64,23 +64,33 @@ To be compared — not assumed:
    repo to build (agent definition + golden questions + provisioning
    path only).
 2. **Custom persistent CA data agent**: provisioned once per installation
-   via the CA API, linked from the report. Now justified only where the
-   first-party route falls short (e.g. context transfer or entry-point
-   placement).
+   via the CA API, linked from the report.
 3. **Stateless chat**: the shape already prototyped in
    `haiyuan-eng-google/bigquery_agent_analytics_skill#5` — CA through
    stateless chat with inline schema context per request. The comparison
    evaluates that prototype **at a pinned commit**; the PR is a moving
    branch and must not be cited unpinned.
 
-**Pre-selection evaluation:** run the pinned prototype and the first-party
-route against a small frozen fixture of `agent_events` rows and a
-representative subset of the golden questions. The recommendation must
-rest on observed answers, not description.
+**Two-stage evaluation gate.** Stage 1 evaluates shapes 1 and 3 — the
+first-party route and the stateless prototype — against a small frozen
+fixture of `agent_events` rows and a representative subset of the golden
+questions, **and** against every mandatory criterion in the per-shape
+matrix below. Shape 2 (the custom persistent agent) is deliberately *not*
+evaluated in stage 1: it enters a stage-2 evaluation **only if the
+stage-1 record names a specific first-party failure** (a mandatory
+criterion the first-party route cannot satisfy — e.g. context transfer or
+entry-point placement). This is the explicit trigger; without a named
+failure, shape 2 is out and the pick is between shapes 1 and 3. The
+recommendation must rest on observed answers and filled criteria rows,
+not description.
 
 ## Evaluation record — REQUIRED before the option pick (currently empty)
 
-The selection cannot happen until this section is filled in. Slots:
+The selection cannot happen until **both** parts are filled: the run
+metadata *and* the per-shape criteria matrix. A record with filled
+metadata but empty matrix rows does not satisfy this gate.
+
+**Run metadata:**
 
 - Prototype commit evaluated (SHA): _pending_
 - First-party experience version/date evaluated: _pending_
@@ -88,18 +98,39 @@ The selection cannot happen until this section is filled in. Slots:
 - Golden-question subset (IDs and count): _pending_
 - Per-question results (answer correct? SQL sane? latency): _pending_
 - Evidence-backed recommendation: _pending_
+- Named first-party failure triggering stage 2 (or "none"): _pending_
 - Evaluator + date: _pending_
 
-## Decision criteria (both B-shapes must answer all of these)
+**Per-shape criteria matrix** — one evidence cell per mandatory criterion
+per evaluated shape. Every cell must cite observed behavior or a primary
+document, not an assumption:
+
+| Mandatory criterion | 1. First-party | 3. Stateless prototype | 2. Custom agent (stage 2 only) |
+| --- | --- | --- | --- |
+| Viewer flow & context transfer | _pending_ | _pending_ | — |
+| Path states (all five) | _pending_ | _pending_ | — |
+| Executing principal & IAM grants | _pending_ | _pending_ | — |
+| Data egress from BigQuery | _pending_ | _pending_ | — |
+| Retention / residency / auditability | _pending_ | _pending_ | — |
+| Allowlist enforcement (IAM-side) | _pending_ | _pending_ | — |
+| Cost controls & quotas | _pending_ | _pending_ | — |
+| Answer lifecycle & accessibility | _pending_ | _pending_ | — |
+| Sharp edges encoded in agent context | _pending_ | _pending_ | — |
+
+The stage-2 column stays "—" unless the named-failure trigger fires; it
+must then be filled completely before shape 2 can be recommended.
+
+## Decision criteria (every evaluated shape must answer all of these)
 
 - **Viewer flow.** How a report viewer reaches the surface; whether
   project/dataset/table, the selected date window, and agent-filter context
   transfer or must be re-entered.
 - **Path states.** Provisioned, unprovisioned, permission-denied,
   first-question, and return-to-report — each defined, none left implicit.
-- **Caller identity and IAM.** Who calls the CA API (end user vs service
-  account), the exact grants required, and how that composes with the
-  dashboard's Viewer's Credentials posture.
+- **Executing principal and IAM.** Which principal executes the query or
+  service call (end user, service account, or shared agent identity), the
+  exact grants required, and how that composes with the dashboard's
+  Viewer's Credentials posture.
 - **Data egress.** Exactly what telemetry, schema, and query text leaves
   BigQuery in each request; conversation persistence, retention, deletion,
   data residency, and auditability.
