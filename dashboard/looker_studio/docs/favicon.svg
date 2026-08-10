@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="BigQuery Agent Analytics">
-  <rect width="64" height="64" rx="14" fill="#096b5a"/>
+  <rect width="64" height="64" rx="14" fill="#1967d2"/>
   <path d="M17 18h12v12H17zm18 0h12v12H35zM17 36h12v12H17zm18 0h12v12H35z" fill="#fff"/>
-  <circle cx="23" cy="24" r="3" fill="#7dd3c7"/>
+  <circle cx="23" cy="24" r="3" fill="#8ab4f8"/>
   <circle cx="41" cy="42" r="3" fill="#f9ab00"/>
   <path d="M26 26l12 12M29 42h6M41 30v6" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
 </svg>

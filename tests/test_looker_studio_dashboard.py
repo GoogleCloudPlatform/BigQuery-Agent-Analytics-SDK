@@ -656,6 +656,17 @@ def test_googlecloudplatform_pages_configuration():
   assert "@media (prefers-color-scheme: dark)" in styles
   assert (DASHBOARD / "docs/favicon.svg").is_file()
 
+  # Trust cluster (#398/#399/#400): pre-click wait expectation, dialog
+  # explanation with the exact SQL linked, and the Google Blue palette.
+  assert 'content="#1967d2"' in page
+  assert "create-wait-note" in page
+  assert "lookerstudio.google.com" in page
+  assert "sql/events_v1.template.sql" in page
+  assert 'class="notice notice-warning"' in page
+  assert "--action: #1967d2" in styles
+  assert "#096b5a" not in page
+  assert "#096b5a" not in styles
+
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
   assert "path: dashboard/looker_studio/docs" in workflow
   assert "pages: write" in workflow
