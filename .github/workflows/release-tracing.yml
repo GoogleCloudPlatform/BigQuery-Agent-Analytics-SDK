@@ -106,6 +106,10 @@ on:
     tags:
       - 'tracing-v*'
 
+# Deny by default at the workflow level; each job below grants only
+# the scopes it needs.
+permissions: {}
+
 concurrency:
   group: release-tracing-${{ github.ref }}
   cancel-in-progress: false
@@ -126,6 +130,8 @@ jobs:
   verify:
     name: Verify version + tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     defaults:
       run:
@@ -136,6 +142,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify the tag points at the CURRENT protected-main head
         # Tag provenance: any tracing-v* tag triggers this workflow, and
@@ -196,6 +203,8 @@ jobs:
       staging_ref: ${{ steps.digest.outputs.staging_ref }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - name: Build image (repo root context, per Dockerfile contract)
         run: |
@@ -243,6 +252,8 @@ jobs:
   build:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     needs: [verify, build-image]
     outputs:
@@ -256,6 +267,8 @@ jobs:
         working-directory: producers
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
@@ -326,6 +339,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -491,6 +506,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -644,6 +661,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -719,6 +738,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
