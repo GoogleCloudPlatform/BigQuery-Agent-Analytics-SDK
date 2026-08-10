@@ -15,6 +15,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -574,12 +575,40 @@ def _chrome_available():
   ).exists()
 
 
-@pytest.mark.skipif(
-    not _chrome_available(), reason="No Chrome/Chromium available"
-)
+def _browser_gate_disposition(chrome_available, in_ci):
+  """A missing browser may downgrade the gate locally, never in CI.
+
+  Returns "run" or "skip"; raises when the required merge gate would be
+  silently lost (CI without a browser must be a hard failure, not a skip).
+  """
+  if chrome_available:
+    return "run"
+  if in_ci:
+    raise AssertionError(
+        "Chrome/Chromium is missing on a CI runner: the browser gate would"
+        " be silently skipped inside a required check. Provision a browser"
+        " or fail loudly — do not skip."
+    )
+  return "skip"
+
+
+def test_browser_gate_cannot_silently_skip_in_ci():
+  assert _browser_gate_disposition(True, True) == "run"
+  assert _browser_gate_disposition(True, False) == "run"
+  assert _browser_gate_disposition(False, False) == "skip"
+  with pytest.raises(AssertionError, match="silently skipped"):
+    _browser_gate_disposition(False, True)
+
+
 def test_configurator_loads_in_a_real_browser():
   # Runs inside the required Test (Python N) checks so the browser-level
   # gate is enforced by the existing main ruleset, not by an optional job.
+  # In CI a missing browser is a hard failure (see disposition above).
+  disposition = _browser_gate_disposition(
+      _chrome_available(), bool(os.environ.get("CI"))
+  )
+  if disposition == "skip":
+    pytest.skip("No Chrome/Chromium available outside CI")
   subprocess.run(
       ["bash", "tools/browser_smoke.sh"],
       cwd=DASHBOARD,

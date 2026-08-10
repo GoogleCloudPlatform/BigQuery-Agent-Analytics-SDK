@@ -102,6 +102,27 @@ HTML
   fi
   echo "self-test 3 OK: nonzero browser exit is detected"
 
+  # 4. A browser that writes a healthy-looking instrumented DOM (markers
+  #    that would satisfy every DOM assertion), lingers briefly, and THEN
+  #    exits nonzero. Only honest exit-status reaping catches this one.
+  FAKE_CHROME="$OUT_DIR/fake-chrome-slow-nonzero.sh"
+  cat > "$FAKE_CHROME" <<'FAKE'
+#!/usr/bin/env bash
+cat <<'DOM'
+<html><body>
+<input aria-invalid="true">
+<div id="smoke-result" data-errors="0" data-detail=""></div>
+</body></html>
+DOM
+sleep 1
+exit 42
+FAKE
+  chmod +x "$FAKE_CHROME"
+  if CHROME_BIN="$FAKE_CHROME" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 4 FAILED: nonzero exit after healthy DOM passed"
+  fi
+  echo "self-test 4 OK: nonzero exit after healthy DOM is detected"
+
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
 fi
@@ -180,17 +201,19 @@ done
 [ -n "$READY" ] || fail "server did not become ready on port $PORT (occupied by another process, or failed to start)"
 
 # Chrome occasionally lingers after dumping the DOM, so it runs in the
-# background with a deadline; a natural nonzero exit is a failure.
+# background with a deadline. The child's exit status is ALWAYS reaped and
+# honored: a natural nonzero exit fails the check even when it happens
+# after a healthy-looking DOM was written. The only exempt exit is the
+# deliberate timeout kill below — and only when this script's own kill
+# succeeded, so a racing natural exit still surfaces its real status.
 "$CHROME_BIN" --headless=new --disable-gpu --no-first-run --no-sandbox \
   --user-data-dir="$OUT_DIR/profile" --enable-logging=stderr \
   --virtual-time-budget=5000 --dump-dom "http://127.0.0.1:$PORT/index.html" \
   > "$OUT_DIR/dom.html" 2> "$OUT_DIR/console.log" &
 CHROME_PID=$!
 
-CHROME_STATUS=""
 for _ in $(seq 1 45); do
   if ! kill -0 "$CHROME_PID" 2>/dev/null; then
-    wait "$CHROME_PID" && CHROME_STATUS=0 || CHROME_STATUS=$?
     break
   fi
   if [ -s "$OUT_DIR/dom.html" ]; then
@@ -198,14 +221,23 @@ for _ in $(seq 1 45); do
   fi
   sleep 1
 done
-if [ -z "$CHROME_STATUS" ] && kill -0 "$CHROME_PID" 2>/dev/null; then
-  sleep 2
-  kill "$CHROME_PID" 2>/dev/null || true
-  wait "$CHROME_PID" 2>/dev/null || true
-  CHROME_STATUS=0
+# Grace window: let a browser that already produced output finish and
+# report its real status instead of assuming success.
+for _ in $(seq 1 10); do
+  if ! kill -0 "$CHROME_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+TIMED_OUT_KILL=""
+if kill -0 "$CHROME_PID" 2>/dev/null; then
+  if kill "$CHROME_PID" 2>/dev/null; then
+    TIMED_OUT_KILL=1
+  fi
 fi
+wait "$CHROME_PID" && CHROME_STATUS=0 || CHROME_STATUS=$?
 CHROME_PID=""
-if [ -n "$CHROME_STATUS" ] && [ "$CHROME_STATUS" -ne 0 ]; then
+if [ -z "$TIMED_OUT_KILL" ] && [ "$CHROME_STATUS" -ne 0 ]; then
   fail "browser exited with status $CHROME_STATUS"
 fi
 
