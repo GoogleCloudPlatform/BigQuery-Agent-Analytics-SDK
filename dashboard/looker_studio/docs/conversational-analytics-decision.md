@@ -9,8 +9,22 @@ before selecting.
 
 Field feedback asked for natural-language Q&A over the same telemetry the
 37 charts read — the Looker demo experience (Gemini in Looker plus the
-Agent Analytics block). Looker Studio has no in-report conversational pane,
-so this cannot be a straight port; it needs a product decision first.
+Agent Analytics block). Looker Studio has no **in-report** conversational
+pane, so this cannot be a straight port; it needs a product decision first.
+
+**However, the first-party landscape has moved and the decision must
+account for it:** Looker Studio (Data Studio) now ships a first-party
+[Conversational Analytics experience](https://docs.cloud.google.com/data-studio/conversational-analytics-overview)
+— in Preview, available to all Data Studio users (Code Interpreter remains
+Pro/Gemini-gated) — that chats with **data agents created in BigQuery and
+shared to Data Studio**; agents cannot be created inside Data Studio
+itself. See also the
+[setup contract](https://docs.cloud.google.com/data-studio/conversational-analytics-setup)
+(names `bigquery.jobs.create`, `roles/bigquery.dataViewer`, and the
+separate agent/conversation permissions) and the
+[data agents page](https://docs.cloud.google.com/data-studio/conversational-analytics-data-agents).
+This is best understood as the concrete first-party implementation of
+Option B's persistent-agent shape, not a fourth top-level option.
 
 ## Primary decision: A, B, or C
 
@@ -35,24 +49,46 @@ Analytics block plus Gemini in Looker is literally the demo. Zero build.
 Ships regardless of the A/B decision — see the README's "Already on
 Looker?" section added alongside this document.
 
-## Nested decision (only if B): persistent agent vs stateless chat
+## Nested decision (only if B): three candidate shapes
 
-Two candidate shapes, to be compared — not assumed:
+To be compared — not assumed:
 
-1. **Persistent CA data agent**: provisioned once per installation over the
-   user's `agent_events` table, schema description and golden questions
-   pre-loaded, linked from the report.
-2. **Stateless chat**: the shape already prototyped in
+1. **First-party route (new baseline)**: create the data agent in BigQuery
+   over the user's `agent_events` table and share it to Data Studio's
+   built-in Conversational Analytics experience. Potentially removes the
+   custom provisioning surface and companion UI this document previously
+   implied. Must be evaluated on: Preview status and its limited-support
+   terms; the publish/share flow (who shares, to whom); the IAM contract
+   from the setup page; whether report context (table, date window,
+   filters) transfers; retention/auditability; and what remains for this
+   repo to build (agent definition + golden questions + provisioning
+   path only).
+2. **Custom persistent CA data agent**: provisioned once per installation
+   via the CA API, linked from the report. Now justified only where the
+   first-party route falls short (e.g. context transfer or entry-point
+   placement).
+3. **Stateless chat**: the shape already prototyped in
    `haiyuan-eng-google/bigquery_agent_analytics_skill#5` — CA through
    stateless chat with inline schema context per request. The comparison
-   evaluates that prototype **at a pinned commit** (record the exact SHA
-   evaluated in this document when the evaluation runs; the PR is a moving
-   branch and must not be cited unpinned).
+   evaluates that prototype **at a pinned commit**; the PR is a moving
+   branch and must not be cited unpinned.
 
-**Pre-selection evaluation:** run the pinned prototype against a small
-frozen fixture of `agent_events` rows and a representative subset of the
-golden questions. The recommendation must rest on observed answers, not
-description.
+**Pre-selection evaluation:** run the pinned prototype and the first-party
+route against a small frozen fixture of `agent_events` rows and a
+representative subset of the golden questions. The recommendation must
+rest on observed answers, not description.
+
+## Evaluation record — REQUIRED before the option pick (currently empty)
+
+The selection cannot happen until this section is filled in. Slots:
+
+- Prototype commit evaluated (SHA): _pending_
+- First-party experience version/date evaluated: _pending_
+- Frozen fixture (table snapshot id + row count + date range): _pending_
+- Golden-question subset (IDs and count): _pending_
+- Per-question results (answer correct? SQL sane? latency): _pending_
+- Evidence-backed recommendation: _pending_
+- Evaluator + date: _pending_
 
 ## Decision criteria (both B-shapes must answer all of these)
 
