@@ -668,6 +668,13 @@ def test_googlecloudplatform_pages_configuration():
   assert "#096b5a" not in page
   assert "#096b5a" not in styles
 
+  # The recurring #399 dialog verification is a durable release control,
+  # not an issue comment: it must stay in the implementation contract.
+  impl = (DASHBOARD / "docs/dashboard-implementation.md").read_text()
+  assert "## Configurator release checks" in impl
+  assert "acknowledgement-dialog comparison" in impl
+  assert "every template republish" in impl
+
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
   assert "path: dashboard/looker_studio/docs" in workflow
   assert "pages: write" in workflow

@@ -76,6 +76,18 @@ installations, in this order:
 Malformed metadata values use `SAFE_CAST` and fall through instead of
 aborting every report chart.
 
+## Configurator release checks
+
+Every configurator release and every template republish re-runs the dated
+acknowledgement-dialog comparison required by issue #399: a maintainer
+opens the real authenticated Linking API flow, confirms the configurator's
+step-02 description still matches the acknowledgement dialog Looker Studio
+actually shows, and records the date and result on #399. The step-02 copy
+must not drift from the live dialog between releases. The stated
+provisioning duration in the configurator comes from measured cold-cache
+runs recorded on #398; the test suite forces the static note and the
+click-time status message to state the same value.
+
 ## Pages and chart inventory
 
 The report implements all 37 manifest charts plus one non-parity Trace
