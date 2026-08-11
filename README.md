@@ -86,6 +86,12 @@ With BigFrames support:
 pip install bigquery-agent-analytics[bigframes]
 ```
 
+With LangSmith export support:
+
+```bash
+pip install bigquery-agent-analytics[langsmith]
+```
+
 ## Quick Start
 
 ```python
@@ -95,6 +101,52 @@ client = Client(project_id="my-project", dataset_id="analytics")
 trace = client.get_trace("trace-abc-123")
 trace.render()
 ```
+
+### Export traces to LangSmith
+
+Export the standard ADK `agent_events` schema with Application Default
+Credentials and LangSmith's standard environment variables:
+
+```bash
+export LANGSMITH_API_KEY=lsv2_...
+export LANGSMITH_PROJECT=agent-production
+
+bq-agent-sdk export langsmith \
+  --source=my-project.analytics.agent_events \
+  --since=2026-08-01T00:00:00Z
+```
+
+The CLI intentionally accepts the API key only through
+`LANGSMITH_API_KEY`, keeping it out of shell history and process arguments.
+
+The exporter reconstructs span parents, derives stable LangSmith UUIDs, and
+uses batch upserts, so replaying an overlapping window does not duplicate runs.
+For scheduled syncs, add `--incremental --watermark-file=state.json`. The JSON
+summary bounds row-level diagnostics with `--max-dropped-rows` and reports the
+number omitted as `dropped_rows_truncated`.
+
+Custom schemas use a YAML mapping from LangSmith fields to source column or
+nested paths. Unmapped columns remain in `extra.metadata`; payload values are
+opaque and are never classified by event type:
+
+```yaml
+fields:
+  run_id: event_key
+  trace_id: trace.key
+  parent_run_id: parent_key
+  name: kind
+  start_time: occurred_at
+  inputs: payload
+```
+
+```bash
+bq-agent-sdk export langsmith \
+  --source='SELECT * FROM `my-project.custom.events`' \
+  --mapping=mapping.yaml --source-id=custom-events-v1
+```
+
+See [SDK.md](SDK.md#23-langsmith-export) for the Python API, incremental
+watermark contract, filtering, and operational controls.
 
 For session reads, `session_id` is a reusable conversation identifier rather
 than a unique trace key. `client.get_session_trace()` resolves user, root agent,
@@ -229,6 +281,12 @@ src/bigquery_agent_analytics/
 │   ├── insights.py                # Multi-stage insights pipeline
 │   ├── feedback.py                # Drift detection & question distribution
 │   └── memory_service.py          # Long-horizon agent memory
+│
+├── Export
+│   └── export/
+│       ├── __init__.py             # Stable public export API
+│       ├── cli.py                  # bq-agent-sdk export command group
+│       └── langsmith.py            # Schema-agnostic LangSmith connector
 │
 ├── Agent Context Graph
 │   ├── context_graph.py           # Decision-trace extraction & GQL traversal

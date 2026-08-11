@@ -19,8 +19,8 @@ load job (`LoadJobConfig.labels`) it submits.
 | ------------------ | ------------------------------------------ | ----- |
 | `sdk`              | constant `bigquery-agent-analytics`        | every SDK job |
 | `sdk_version`      | `__version__`, BQ-safe (e.g. `0-4-0`)      | every SDK job |
-| `sdk_surface`      | `python` \| `cli` \| `remote-function`     | every SDK job |
-| `sdk_feature`      | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` | per-call site |
+| `sdk_surface`      | `python` \| `cli` \| `remote-function` \| `langsmith_export` | every SDK job |
+| `sdk_feature`      | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` | per-call site |
 | `sdk_ai_function`  | `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` | AI/ML invocations only |
 
 **Reserved namespace.** All `sdk*` keys are managed by the SDK. If a
@@ -142,8 +142,8 @@ ORDER BY day DESC, jobs DESC;
 
 ### 5. Surface attribution (who is calling the SDK?)
 
-Split spend across direct Python users, CLI invocations, and the
-deployed remote-function runtime.
+Split spend across direct Python users, CLI invocations, LangSmith exports,
+and the deployed remote-function runtime.
 
 ```sql
 SELECT
