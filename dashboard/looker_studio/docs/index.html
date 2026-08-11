@@ -7,7 +7,7 @@
       name="description"
       content="Create a private Looker Studio dashboard from your BigQuery Agent Analytics installation."
     >
-    <meta name="theme-color" content="#096b5a">
+    <meta name="theme-color" content="#1967d2">
     <meta property="og:type" content="website">
     <meta property="og:title" content="Configure BigQuery Agent Analytics">
     <meta
@@ -132,14 +132,24 @@
               target="_blank"
               rel="noopener noreferrer"
               aria-disabled="true"
+              aria-describedby="create-wait-note"
             >Create my dashboard</a>
             <button class="button button-secondary" id="copy-link" type="button">
               Copy setup link
             </button>
           </div>
+          <p class="create-note" id="create-wait-note">
+            Opens <code>lookerstudio.google.com</code> in a new tab. Building
+            your private copy can take up to ~10 seconds, and the tab may
+            briefly show an error page while Google provisions the report —
+            don’t close it.
+          </p>
           <p class="privacy">
             This page has no backend. It sends no identifiers or credentials
             to the template owner; it only creates a Google Looker Studio URL.
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/dashboard/looker_studio/docs">
+              Verify in this page’s source.
+            </a>
           </p>
         </form>
       </section>
@@ -157,8 +167,16 @@
           <span class="step-number">02</span>
           <h3>Review in Google</h3>
           <p>
-            Looker Studio shows the substituted custom query and billing
-            project before creating anything.
+            The new tab may briefly show a loading or “not found” page while
+            Google provisions your copy — don’t close it. Looker Studio then
+            shows an acknowledgement dialog. It appears because you’re about
+            to create a data source that runs a SQL query this page supplied —
+            <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
+              read the exact query</a>. The dialog lists that query, your
+            billing project, and that the new data source initially uses
+            Owner’s Credentials; nothing is created until you acknowledge it.
+            The query reads only your table, using the opener’s credentials,
+            in your billing project.
           </p>
         </article>
         <article class="step">
@@ -172,7 +190,7 @@
         </article>
       </section>
 
-      <aside class="notice">
+      <aside class="notice notice-warning">
         <strong>Keep the new report private until the credential check.</strong>
         The Linking API creates a data source owned by the person opening the
         link and its review dialog can show Owner’s Credentials. In the saved

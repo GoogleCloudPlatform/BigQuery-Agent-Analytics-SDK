@@ -196,6 +196,19 @@ publication review must repeat the live check after every template change.
 `--table` is both the object validated by the CLI and the only BigQuery object
 queried by the dashboard.
 
+## Already on Looker? Natural-language Q&A today
+
+If your organization already runs Looker (not just Looker Studio), the
+conversational experience this dashboard's users ask about exists today
+without any of this repository's tooling: install the
+[Looker Agent Analytics block](https://marketplace.looker.com/marketplace/detail/agent_analytics)
+over the same BigQuery table and use Gemini in Looker to ask questions in
+plain language over that telemetry. This dashboard exists for teams
+*without* Looker; a Conversational Analytics companion for those teams is
+under evaluation in
+[`docs/conversational-analytics-decision.md`](docs/conversational-analytics-decision.md)
+(issue #402).
+
 ## Large-table operating guidance
 
 Every chart reads the same date-pruned custom query over the configured

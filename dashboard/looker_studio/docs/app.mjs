@@ -128,10 +128,15 @@ for (const input of tableInputs) {
 
 inputs.billingProject.addEventListener("input", refresh);
 
+const WAITING_MESSAGE =
+  "Opening Looker Studio in a new tab. Building your report copy can take " +
+  "up to ~10 seconds and may briefly show an error page — don’t close it.";
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   refresh();
   if (createLink.href) {
+    setStatus(WAITING_MESSAGE, "waiting");
     window.open(createLink.href, "_blank", "noopener,noreferrer");
   }
 });
@@ -140,7 +145,9 @@ createLink.addEventListener("click", (event) => {
   if (!createLink.href) {
     event.preventDefault();
     refresh();
+    return;
   }
+  setStatus(WAITING_MESSAGE, "waiting");
 });
 
 copyButton.addEventListener("click", async () => {

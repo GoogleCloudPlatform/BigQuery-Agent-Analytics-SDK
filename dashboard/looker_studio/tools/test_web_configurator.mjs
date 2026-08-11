@@ -50,6 +50,52 @@ assert.match(
 );
 assert.match(pageSource, /allow up to 90 seconds/);
 
+// Trust-cluster contract (#398/#399/#400): the wait expectation is set
+// before the click, the acknowledgement dialog is explained with a link to
+// the exact SQL, and the palette carries no legacy teal.
+assert.match(pageSource, /aria-describedby="create-wait-note"/);
+assert.match(pageSource, /id="create-wait-note"/);
+assert.match(pageSource, /lookerstudio\.google\.com/);
+assert.match(pageSource, /sql\/events_v1\.template\.sql/);
+assert.match(pageSource, /class="notice notice-warning"/);
+assert.doesNotMatch(pageSource, /#096b5a/);
+
+// #398 requires the transient-error warning both at the button AND in
+// step 02, and the stated duration must be the same everywhere it appears.
+const dontClose = pageSource.match(/don’t close it/g) ?? [];
+assert.ok(
+  dontClose.length >= 2,
+  "the do-not-close warning must appear at the button and in step 02",
+);
+assert.match(
+  pageSource,
+  /provisions your copy — don’t close it\. Looker Studio then\s+shows an acknowledgement dialog/,
+  "step 02 must repeat the transient-error warning before the dialog",
+);
+
+const appSource = readFileSync(
+  new URL("../docs/app.mjs", import.meta.url),
+  "utf8",
+);
+const waitingDuration = appSource.match(/up to (~\d+ seconds)/)?.[1];
+const noteDuration = pageSource.match(/up to\s+(~\d+ seconds)/s)?.[1];
+assert.ok(waitingDuration, "WAITING_MESSAGE must state a duration");
+assert.equal(
+  noteDuration,
+  waitingDuration,
+  "the static wait note and WAITING_MESSAGE must state the same duration",
+);
+
+const stylesSource = readFileSync(
+  new URL("../docs/styles.css", import.meta.url),
+  "utf8",
+);
+assert.match(stylesSource, /--action: #1967d2/);
+assert.match(stylesSource, /--focus: #1a73e8/);
+assert.match(stylesSource, /\.notice-warning/);
+assert.match(stylesSource, /@media \(prefers-color-scheme: dark\)/);
+assert.doesNotMatch(stylesSource, /#096b5a|#7dd3c7|#a6e4dc/);
+
 const values = {
   project: "customer-project-123",
   dataset: "agent_analytics",
@@ -630,6 +676,61 @@ for (const field of ["project", "dataset", "table"]) {
     `qualified ID pasted into ${field} fills all identifier fields`,
   );
 }
+
+// #398: clicking the enabled create link sets the provisioning expectation
+// without blocking navigation, and the message clears on the next change.
+resetTableInputs();
+fakeElements.get("#project").listeners.input({
+  target: fakeElements.get("#project"),
+});
+assert.match(fakeElements.get("#form-status").textContent, /^Ready for /);
+
+let navigationPrevented = false;
+fakeElements.get("#create-dashboard").listeners.click({
+  preventDefault() {
+    navigationPrevented = true;
+  },
+});
+assert.equal(
+  navigationPrevented,
+  false,
+  "an enabled create link must still navigate",
+);
+assert.match(
+  fakeElements.get("#form-status").textContent,
+  /may briefly show an error page/,
+  "clicking the enabled link warns about the provisioning delay",
+);
+assert.equal(fakeElements.get("#form-status").dataset.kind, "waiting");
+
+fakeElements.get("#project").listeners.input({
+  target: fakeElements.get("#project"),
+});
+assert.doesNotMatch(
+  fakeElements.get("#form-status").textContent,
+  /error page/,
+  "the waiting message clears on the next valid state change",
+);
+
+fakeElements.get("#configurator").listeners.submit({ preventDefault() {} });
+assert.equal(
+  fakeElements.get("#form-status").dataset.kind,
+  "waiting",
+  "submitting the form sets the same provisioning expectation",
+);
+
+fakeElements.get("#create-dashboard").href = "";
+navigationPrevented = false;
+fakeElements.get("#create-dashboard").listeners.click({
+  preventDefault() {
+    navigationPrevented = true;
+  },
+});
+assert.equal(
+  navigationPrevented,
+  true,
+  "a disabled create link must not navigate",
+);
 
 console.log(
   "web configurator OK: identifiers and sentinels validated; Linking API URL deterministic",
