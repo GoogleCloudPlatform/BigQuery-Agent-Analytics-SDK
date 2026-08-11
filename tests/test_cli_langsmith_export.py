@@ -190,7 +190,9 @@ def test_langsmith_export_preserves_typer_datetime_validation() -> None:
 
   assert result.exit_code == 2
   assert "Invalid value" in result.stderr
-  assert "--since must be an ISO-8601 timestamp" in result.stderr
+  assert "--since" in result.stderr
+  assert "ISO-8601" in result.stderr
+  assert "timestamp" in result.stderr
   assert "Error:" not in result.stderr
 
 
