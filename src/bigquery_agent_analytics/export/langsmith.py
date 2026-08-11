@@ -1163,14 +1163,6 @@ def export(
       except Exception as exc:
         if not _is_conflict(exc):
           raise
-      _call_with_retry(
-          lambda: langsmith_client.batch_ingest_runs(
-              update=copy.deepcopy(pending.runs)
-          ),
-          config=config,
-          limiter=limiter,
-          sleep=time.sleep,
-      )
     except Exception as exc:
       failed += len(pending.source_run_ids)
       for source_run_id in pending.source_run_ids:

@@ -2291,9 +2291,10 @@ The optional LangSmith connector exports a BigQuery table or arbitrary SQL
 result as LangSmith run trees. It streams rows ordered by trace, reconstructs
 the existing `span_id` / `parent_span_id` hierarchy, and adds one stable
 structural root per trace. Every source event gets a UUID derived from the
-canonical source, trace ID, and run ID. Each batch uses separate create and
-update requests, so overlapping backfills update the same LangSmith runs
-instead of creating duplicates or silently leaving stale data.
+canonical source, trace ID, and run ID. The exporter treats created runs as
+immutable: overlapping backfills are idempotent no-ops for existing run IDs
+while still creating previously unseen IDs. Correcting already-exported data
+requires a fresh LangSmith project or a deliberately versioned `--source-id`.
 
 ### Install and authenticate
 
@@ -2334,11 +2335,14 @@ print(stats.to_dict())
 `ExportStats.to_dict()` reports source rows read, exported, skipped, failed,
 successful traces, batches, the current watermark, bounded `dropped_rows`
 details, and `dropped_rows_truncated` (the number omitted from that list).
+`exported` counts source rows in batches accepted by the client, not destination
+mutations, so a replay of existing IDs can report exported rows while leaving
+the server-side runs unchanged.
 Retryable 408/425/429 and 5xx errors use bounded exponential backoff. A create
-conflict is expected during replay, is not retried, and is followed by the
-update request. `requests_per_second` and `max_retries` govern exporter calls
-to `batch_ingest_runs`; the LangSmith SDK may split or retry transport requests
-inside one call. A failed batch never advances incremental state.
+conflict is expected during replay, is not retried, and is treated as an
+idempotent success. `requests_per_second` and `max_retries` govern exporter
+calls to `batch_ingest_runs`; the LangSmith SDK may split or retry transport
+requests inside one call. A failed batch never advances incremental state.
 
 ### Custom schemas and opaque values
 
@@ -2435,8 +2439,10 @@ be retained.
 The cursor is based on source event time. A row that arrives after the cursor
 has advanced but carries an equal or earlier `start_time` is not discovered by
 a later incremental run. Schedule an overlapping bounded backfill when the
-source permits late arrival; stable IDs and update batches make that replay
-safe.
+source permits late arrival. Stable IDs make the replay idempotent: previously
+unseen run IDs are created, but existing runs remain unchanged. To correct an
+already-exported run, export to a fresh LangSmith project or use a deliberately
+versioned `--source-id`.
 
 Each query window reconstructs hierarchy only from rows present in that
 window. If a child arrives after its parent was exported in an earlier window,

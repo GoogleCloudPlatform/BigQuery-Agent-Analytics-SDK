@@ -133,21 +133,18 @@ class _FailOnCallLangSmithClient(_LangSmithClient):
     super().batch_ingest_runs(create=create, update=update)
 
 
-class _StatefulLangSmithClient(_LangSmithClient):
+class _CreateOnlyLangSmithClient(_LangSmithClient):
 
   def __init__(self) -> None:
     super().__init__()
     self.runs: dict[str, dict[str, Any]] = {}
 
   def batch_ingest_runs(self, *, create=None, update=None) -> None:
+    if update is not None:
+      raise AssertionError("the exporter must not send run updates")
     super().batch_ingest_runs(create=create, update=update)
     for run in create or []:
       self.runs.setdefault(str(run["id"]), dict(run))
-    for run in update or []:
-      run_id = str(run["id"])
-      if run_id not in self.runs:
-        raise AssertionError("cannot update a run before it is created")
-      self.runs[run_id].update(run)
 
 
 class _RetryableError(RuntimeError):
@@ -600,7 +597,7 @@ def test_unsafe_or_invalid_table_ids_are_not_interpolated_as_identifiers(
   assert "SELECT * FROM (" in sql
 
 
-def test_export_batches_create_then_update_and_reports_rows() -> None:
+def test_export_batches_create_only_and_reports_rows() -> None:
   bq = _BigQueryClient(_standard_rows())
   langsmith = _LangSmithClient()
   stats = export(
@@ -618,23 +615,23 @@ def test_export_batches_create_then_update_and_reports_rows() -> None:
   assert stats.exported == 2
   assert stats.failed == 0
   assert stats.traces_exported == 1
-  assert len(langsmith.calls) == 2
+  assert len(langsmith.calls) == 1
   assert langsmith.calls[0]["create"] is not None
   assert langsmith.calls[0]["update"] is None
-  assert langsmith.calls[1]["create"] is None
-  assert langsmith.calls[1]["update"] is not None
   query_config = bq.queries[0][1]
   assert query_config.labels["sdk_feature"] == "langsmith-export"
 
 
-def test_replaying_window_updates_changed_runs_without_duplicates() -> None:
-  langsmith = _StatefulLangSmithClient()
+def test_replaying_window_keeps_existing_runs_immutable_without_duplicates() -> (
+    None
+):
+  langsmith = _CreateOnlyLangSmithClient()
   config = ExportConfig(
       langsmith_project="destination", requests_per_second=None
   )
 
   first_rows = _standard_rows()
-  export(
+  first = export(
       "project.dataset.agent_events",
       config=config,
       bq_client=_BigQueryClient(first_rows),
@@ -643,14 +640,18 @@ def test_replaying_window_updates_changed_runs_without_duplicates() -> None:
   replay_rows = _standard_rows()
   replay_rows[1]["error_message"] = "backfilled failure detail"
   replay_rows[1]["content"] = {"backfilled": True}
-  export(
+  replay = export(
       "project.dataset.agent_events",
       config=config,
       bq_client=_BigQueryClient(replay_rows),
       langsmith_client=langsmith,
   )
 
-  assert len(langsmith.calls) == 4
+  assert first.exported == 2
+  assert first.failed == 0
+  assert replay.exported == 2
+  assert replay.failed == 0
+  assert len(langsmith.calls) == 2
   assert len(langsmith.runs) == 3
   child = next(
       run
@@ -658,13 +659,11 @@ def test_replaying_window_updates_changed_runs_without_duplicates() -> None:
       if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
       == "span-child"
   )
-  assert child["error"] == "backfilled failure detail"
-  assert child["inputs"] == {"backfilled": True}
+  assert child["error"] == "tool failed"
+  assert child["inputs"] == {"value": ["opaque", {"payload": True}]}
 
 
-def test_surfaced_create_conflict_is_not_retried_and_update_still_runs() -> (
-    None
-):
+def test_surfaced_create_conflict_is_treated_as_idempotent_success() -> None:
   class _ConflictOnCreateClient(_LangSmithClient):
 
     def __init__(self) -> None:
@@ -686,9 +685,7 @@ def test_surfaced_create_conflict_is_not_retried_and_update_still_runs() -> (
   )
 
   assert langsmith.create_attempts == 1
-  assert len(langsmith.calls) == 1
-  assert langsmith.calls[0]["create"] is None
-  assert langsmith.calls[0]["update"] is not None
+  assert langsmith.calls == []
   assert stats.exported == 2
   assert stats.failed == 0
 
@@ -1013,7 +1010,7 @@ def test_batch_size_and_rate_limit_apply_between_api_requests() -> None:
     )
 
   assert stats.batches == 2
-  assert sleeps == [0.5, 0.5, 0.5]
+  assert sleeps == [0.5]
 
 
 def test_batch_size_is_hard_limit_for_one_oversized_trace() -> None:
@@ -1071,7 +1068,7 @@ def test_partial_oversized_trace_failure_is_not_counted_or_watermarked(
           requests_per_second=None,
       ),
       bq_client=_BigQueryClient(rows),
-      langsmith_client=_FailOnCallLangSmithClient(call_number=3),
+      langsmith_client=_FailOnCallLangSmithClient(call_number=2),
   )
 
   assert stats.exported == 3
@@ -1221,7 +1218,7 @@ def test_real_client_adapter_resurfaces_sdk_swallowed_ingest_errors() -> None:
     client.batch_ingest_runs(create=[{"id": "run"}])
 
 
-def test_real_langsmith_client_serializes_separate_create_and_update_batches(
+def test_real_langsmith_client_serializes_one_create_only_batch(
     monkeypatch,
 ) -> None:
   langsmith = pytest.importorskip("langsmith")
@@ -1246,21 +1243,12 @@ def test_real_langsmith_client_serializes_separate_create_and_update_batches(
   )
 
   assert stats.exported == 2
-  assert len(request_bodies) == 2
+  assert len(request_bodies) == 1
   assert len(request_bodies[0]["post"]) == 3
   assert "patch" not in request_bodies[0]
-  assert len(request_bodies[1]["patch"]) == 3
-  assert "post" not in request_bodies[1]
-  child_update = next(
-      run
-      for run in request_bodies[1]["patch"]
-      if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
-      == "span-child"
-  )
-  assert child_update["error"] == "tool failed"
 
 
-def test_real_langsmith_retry_rebuilds_mutated_update_payloads(
+def test_real_langsmith_retry_rebuilds_mutated_create_payloads(
     monkeypatch,
 ) -> None:
   langsmith = pytest.importorskip("langsmith")
@@ -1269,18 +1257,18 @@ def test_real_langsmith_retry_rebuilds_mutated_update_payloads(
       auto_batch_tracing=False,
       info={},
   )
-  patch_bodies: list[dict[str, Any]] = []
+  request_bodies: list[dict[str, Any]] = []
 
-  def fail_first_patch(_client, body: bytes, **kwargs) -> None:
+  def fail_first_create(_client, body: bytes, **kwargs) -> None:
     del _client, kwargs
     decoded = json.loads(body)
-    if "patch" not in decoded:
-      return
-    patch_bodies.append(decoded)
-    if len(patch_bodies) == 1:
+    request_bodies.append(decoded)
+    if len(request_bodies) == 1:
       raise _RetryableError(429)
 
-  monkeypatch.setattr(type(client), "_post_batch_ingest_runs", fail_first_patch)
+  monkeypatch.setattr(
+      type(client), "_post_batch_ingest_runs", fail_first_create
+  )
 
   stats = export(
       "project.dataset.agent_events",
@@ -1294,10 +1282,11 @@ def test_real_langsmith_retry_rebuilds_mutated_update_payloads(
   )
 
   assert stats.exported == 2
-  assert len(patch_bodies) == 2
+  assert len(request_bodies) == 2
+  assert all("patch" not in body for body in request_bodies)
   retried_child = next(
       run
-      for run in patch_bodies[1]["patch"]
+      for run in request_bodies[1]["post"]
       if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
       == "span-child"
   )

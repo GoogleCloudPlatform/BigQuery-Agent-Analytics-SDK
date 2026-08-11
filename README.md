@@ -119,10 +119,12 @@ bq-agent-sdk export langsmith \
 The CLI intentionally accepts the API key only through
 `LANGSMITH_API_KEY`, keeping it out of shell history and process arguments.
 
-The exporter reconstructs span parents, derives stable LangSmith UUIDs, and
-uses separate create and update batches, so replaying an overlapping window
-updates existing runs without creating duplicates. For scheduled syncs, add
-`--incremental --watermark-file=state.json`. The JSON summary bounds row-level
+The exporter reconstructs span parents and derives stable LangSmith UUIDs. It
+treats created runs as immutable: replaying an overlapping window is an
+idempotent no-op for existing run IDs while still creating previously unseen
+IDs. To correct already-exported data, use a fresh LangSmith project or a
+deliberately versioned `--source-id`. For scheduled syncs, use `--incremental`
+with `--watermark-file=state.json`. The JSON summary bounds row-level
 diagnostics with `--max-dropped-rows` and reports the number omitted as
 `dropped_rows_truncated`.
 
