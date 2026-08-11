@@ -14,11 +14,12 @@
 #
 # Usage:
 #   browser_smoke.sh              run the check against ../docs
-#   browser_smoke.sh --self-test  run the four negative fixtures (a page
-#                                 with a console error, an occupied port, a
-#                                 failing browser binary, and a browser that
-#                                 writes healthy DOM then exits nonzero) and
-#                                 require each to fail
+#   browser_smoke.sh --self-test  run the negative fixtures and require each
+#                                 to fail: an immediate console error, an
+#                                 occupied port, a failing browser binary, a
+#                                 browser that writes healthy DOM then exits
+#                                 nonzero, and a console error delayed past
+#                                 the marker's creation
 #
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery.
 set -euo pipefail
@@ -125,6 +126,27 @@ FAKE
   fi
   echo "self-test 4 OK: nonzero exit after healthy DOM is detected"
 
+  # 5. A generic console error that fires AFTER the marker is created
+  #    (900 ms past load, inside the virtual-time budget). Only a live
+  #    marker — not a one-shot snapshot — catches this one.
+  DELAYED="$OUT_DIR/fixture-delayed-error"
+  mkdir -p "$DELAYED"
+  cat > "$DELAYED/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input aria-invalid="true">
+<script>
+window.addEventListener("load", function () {
+  setTimeout(function () { console.error("generic delayed boom"); }, 900);
+});
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$DELAYED" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 5 FAILED: a delayed console error passed"
+  fi
+  echo "self-test 5 OK: post-snapshot delayed error is detected"
+
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
 fi
@@ -149,8 +171,20 @@ source = path.read_text()
 instrument = """<script>
 window.__smokeErrors = [];
 (function () {
+  // The marker is LIVE: every recorded error re-stamps it, so anything
+  // that fires before the DOM dump (the whole virtual-time budget) is
+  // reflected, not just errors before a one-shot snapshot.
+  var marker = null;
+  var stamp = function () {
+    if (!marker) {
+      return;
+    }
+    marker.setAttribute("data-errors", String(window.__smokeErrors.length));
+    marker.setAttribute("data-detail", window.__smokeErrors.join(" | ").slice(0, 500));
+  };
   var record = function (message) {
     window.__smokeErrors.push(String(message));
+    stamp();
   };
   window.addEventListener("error", function (event) {
     record(event.message || (event.target && (event.target.src || event.target.href)) || "resource error");
@@ -165,11 +199,10 @@ window.__smokeErrors = [];
   };
   window.addEventListener("load", function () {
     setTimeout(function () {
-      var el = document.createElement("div");
-      el.id = "smoke-result";
-      el.setAttribute("data-errors", String(window.__smokeErrors.length));
-      el.setAttribute("data-detail", window.__smokeErrors.join(" | ").slice(0, 500));
-      document.body.appendChild(el);
+      marker = document.createElement("div");
+      marker.id = "smoke-result";
+      document.body.appendChild(marker);
+      stamp();
     }, 400);
   });
 })();
