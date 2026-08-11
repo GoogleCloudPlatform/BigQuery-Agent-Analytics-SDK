@@ -19,10 +19,10 @@ source:
 defaults:
   date_range:
     mode: rolling
-    start_offset_days: 364
+    start_offset_days: 89
     end_offset_days: 0
     include_today: true
-    page_scope: all_dashboard_pages
+    page_scope: all_report_pages
 
 pages:
   - name: Token Consumption
@@ -48,7 +48,8 @@ layout:
     left: 68
     top_range: [43, 45]
   date_control:
-    present_on_dashboard_pages: true
+    scope: report_level
+    present_on_all_pages: true
     left: 825
     top_range: [43, 45]
   scorecard_start:
@@ -112,6 +113,13 @@ filtering:
       - model_version
   date_controls:
     apply_to_all_charts_on_page: true
+    report_level_override:
+      field: agent_events.timestamp_date
+      default_range_days: 90
+      persists_across_pages: true
+      supersedes:
+        - usage-control-date
+        - performance-control-date
   predefined_tool_name_control:
     status: intentionally_not_published
     reason: >-

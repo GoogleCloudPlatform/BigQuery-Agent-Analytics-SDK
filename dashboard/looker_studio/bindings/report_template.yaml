@@ -78,7 +78,7 @@ governance:
   transfer_status: PENDING_MAINTAINER
 default_date_range:
   mode: rolling
-  start_offset_days: 364
+  start_offset_days: 89
   end_offset_days: 0
   include_today: true
-  page_scope: all_dashboard_pages
+  page_scope: all_report_pages

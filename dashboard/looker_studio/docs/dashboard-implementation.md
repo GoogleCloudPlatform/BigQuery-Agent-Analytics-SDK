@@ -115,13 +115,14 @@ explicit chart title. Product titles use title case, “Over Time,” uppercase
 formerly inherited as “Events By Agent” is labeled **Tool Completions by
 Agent** because its metric intentionally counts only `TOOL_COMPLETED` rows.
 
-All seven dashboard pages use a rolling 365-day window including today.
-Looker Studio sends those bounds through `@DS_START_DATE` and
-`@DS_END_DATE`; the production query applies the frozen half-open UTC
-predicate. The generated manifest retains the pinned LookML's original
-14-day Usage and 7-day Performance defaults as source-provenance metadata;
-the published template intentionally overrides them for the product default.
-The Trace Inspector has no default date control.
+All eight report pages share one report-level date control with a rolling
+90-day window including today. Looker Studio sends those bounds through
+`@DS_START_DATE` and `@DS_END_DATE`; the production query applies the frozen
+half-open UTC predicate. Changing the range on any page persists across page
+navigation, including the Trace Inspector. The generated manifest retains the
+pinned LookML's original 14-day Usage and 7-day Performance defaults as
+source-provenance metadata; the published template intentionally overrides
+them for the product default.
 
 The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
 timestamp dimension exceeded Looker Studio's chart row limit on the canonical

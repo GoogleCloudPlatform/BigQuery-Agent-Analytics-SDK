@@ -281,10 +281,28 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
   ]
   assert product["defaults"]["date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 364,
+      "start_offset_days": 89,
       "end_offset_days": 0,
       "include_today": True,
-      "page_scope": "all_dashboard_pages",
+      "page_scope": "all_report_pages",
+  }
+  assert product["layout"]["date_control"] == {
+      "scope": "report_level",
+      "present_on_all_pages": True,
+      "left": 825,
+      "top_range": [43, 45],
+  }
+  assert product["filtering"]["date_controls"] == {
+      "apply_to_all_charts_on_page": True,
+      "report_level_override": {
+          "field": "agent_events.timestamp_date",
+          "default_range_days": 90,
+          "persists_across_pages": True,
+          "supersedes": [
+              "usage-control-date",
+              "performance-control-date",
+          ],
+      },
   }
   assert product["layout"]["percentile_order"] == {
       "llm": ["P50", "P75", "P90", "P99"],
@@ -433,10 +451,10 @@ def test_report_and_web_bindings_cannot_drift():
   assert web["dataSourceAlias"] == report["data_source_alias"]
   assert report["default_date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 364,
+      "start_offset_days": 89,
       "end_offset_days": 0,
       "include_today": True,
-      "page_scope": "all_dashboard_pages",
+      "page_scope": "all_report_pages",
   }
   assert web["sentinels"] == {
       "project": bindings["PROJECT"],
@@ -512,7 +530,7 @@ def test_report_and_web_bindings_cannot_drift():
   }
 
 
-def test_default_date_range_includes_today_for_exactly_365_calendar_days():
+def test_report_level_date_range_includes_today_for_exactly_90_calendar_days():
   product = yaml.safe_load(
       (DASHBOARD / "spec/product_contract.yaml").read_text()
   )
@@ -524,9 +542,39 @@ def test_default_date_range_includes_today_for_exactly_365_calendar_days():
   assert report["default_date_range"] == date_range
   assert date_range["include_today"] is True
   assert date_range["end_offset_days"] == 0
+  assert date_range["page_scope"] == "all_report_pages"
   assert (
-      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 365
+      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 90
   )
+
+  date_controls = product["filtering"]["date_controls"]
+  report_override = date_controls["report_level_override"]
+  assert report_override["default_range_days"] == 90
+  assert report_override["persists_across_pages"] is True
+  assert report_override["supersedes"] == [
+      "usage-control-date",
+      "performance-control-date",
+  ]
+
+
+def test_report_level_override_preserves_the_immutable_source_controls():
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/chart_manifest.yaml").read_text()
+  )
+
+  date_controls = {
+      control["id"]: control
+      for control in manifest["controls"]
+      if control["id"] in {"usage-control-date", "performance-control-date"}
+  }
+  assert date_controls["usage-control-date"]["default_value"] == "14 day"
+  assert date_controls["performance-control-date"]["default_value"] == "7 day"
+  assert {
+      control["source_dashboard"] for control in date_controls.values()
+  } == {
+      "usage",
+      "performance",
+  }
 
 
 def test_base_table_query_and_preflight_cover_the_bqaa_contract():
