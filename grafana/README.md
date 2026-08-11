@@ -21,6 +21,31 @@ AI Agent app ──SDK──▶ BigQuery agent_events ──ViewManager──▶
 
 ## Setup
 
+### Quick start (local, one command)
+
+On macOS or Linux with `gcloud auth application-default login` already run:
+
+```bash
+python3 grafana/run_local.py --project YOUR_PROJECT --dataset YOUR_DATASET
+```
+
+That downloads a pinned Grafana (cached after the first run), installs the
+BigQuery plugin, provisions the datasource against your Application Default
+Credentials (no service-account key needed for local evaluation), fills in
+all six dashboard constants, creates the `adk_*` views when `bq-agent-sdk`
+is on PATH, and prints the dashboard URL. `--sa-key key.json` switches to
+the JWT auth documented below; `--stop` tears it down; everything generated
+lives in the disposable, gitignored `grafana/.local/`. Production setups
+should still follow the full steps below with a scoped service account.
+
+> **Known pitfalls if you run Grafana your own way instead:**
+> the current plugin requires **Grafana ≥ 11.6.11** (its
+> `grafanaDependency` also accepts 12.0.10+/12.1.7+/12.2.5+), and a failed
+> background plugin preinstall can break **all** plugin loading with an
+> opaque `react/jsx-runtime` 404 on every panel — launch with
+> `GF_PLUGINS_PREINSTALL_DISABLED=true` to rule that out. The quick-start
+> script handles both.
+
 ### 1. Check prerequisites
 
 - A GCP project with the SDK installed (`pip install bigquery-agent-analytics`)
