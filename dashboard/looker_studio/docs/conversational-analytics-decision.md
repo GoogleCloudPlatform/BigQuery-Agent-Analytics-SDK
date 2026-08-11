@@ -1,9 +1,9 @@
 # Conversational Analytics over `agent_events` — decision document
 
-Status: **awaiting product decision** (issue #402; plan #404 rev 5.1).
-Nothing in this document is implemented; it defines the options, the
-criteria a selection must satisfy, and the evaluation that must happen
-before selecting.
+Status: **evaluation complete; first-party route recommended, awaiting
+maintainer acceptance and an implementation owner** (issue #402; plan
+#404). The evaluation below chooses the shape; it does not claim that the
+report link, provisioning asset, or user-facing capability has shipped.
 
 ## Request and constraint
 
@@ -84,7 +84,7 @@ failure, shape 2 is out and the pick is between shapes 1 and 3. The
 recommendation must rest on observed answers and filled criteria rows,
 not description.
 
-## Evaluation record — REQUIRED before the option pick (currently empty)
+## Evaluation record — completed 2026-08-11 UTC
 
 The selection cannot happen until **both** parts are filled: the run
 metadata *and* the per-shape criteria matrix. A record with filled
@@ -92,14 +92,56 @@ metadata but empty matrix rows does not satisfy this gate.
 
 **Run metadata:**
 
-- Prototype commit evaluated (SHA): _pending_
-- First-party experience version/date evaluated: _pending_
-- Frozen fixture (table snapshot id + row count + date range): _pending_
-- Golden-question subset (IDs and count): _pending_
-- Per-question results (answer correct? SQL sane? latency): _pending_
-- Evidence-backed recommendation: _pending_
-- Named first-party failure triggering stage 2 (or "none"): _pending_
-- Evaluator + date: _pending_
+- Prototype commit evaluated (SHA):
+  [`62f794fdd6e38d622235d87fc9fb438a7b029795`](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/tree/62f794fdd6e38d622235d87fc9fb438a7b029795/mcp-apps/bqaa-dashboard).
+- First-party experience version/date evaluated: Data Studio Conversational
+  Analytics **Preview**, Data Studio app version `20260802_0000`, exercised
+  in an authenticated browser on 2026-08-11 UTC. The published agent appeared
+  automatically under **All agents** and one question was completed through
+  the real Data Studio UI.
+- Frozen fixture: snapshot
+  `test-project-0728-467323.bqaa_e2e_real.ca_eval_agent_events_20260810`,
+  77 rows, evaluated over
+  `[2026-07-27T20:06:27Z, 2026-07-27T20:30:44Z)`. Queries used the expiring
+  curated view `ca_eval_agent_events_allowlist_20260810`, which exposes 14
+  analysis fields and excludes raw content, prompts, user IDs, error text,
+  authorization data, and trace identifiers. Both resources expire after
+  30 days; they are reproducibility evidence, not production assets.
+- Golden-question subset: `GQ-01` through `GQ-06` (six questions): event row
+  count, distinct sessions, prompt+completion tokens, p95 LLM-response
+  latency, tool failure rate, and highest-volume event types with ties.
+- Evidence-backed recommendation: choose **B1, the first-party BigQuery data
+  agent shared to Data Studio**. Both shapes were 6/6 correct, but B1 already
+  supplies discovery, consent, a persistent conversation surface, SQL/result
+  inspection, and viewer-credential execution without a custom service or UI.
+  Report date/filter context does not transfer automatically and must be made
+  explicit in the link-out UX.
+- Named first-party failure triggering stage 2: **none**. Manual re-entry of
+  report filters is a documented flow constraint, not a criterion B1 cannot
+  satisfy. Shape 2 therefore remains out of scope.
+- Evaluator + date: authenticated test-project run by `@caohy1988`, assisted
+  by Codex, 2026-08-11 UTC.
+
+**Per-question results:** each row used the same fixture, bounds, and 10 MiB
+per-generated-query cap. "SQL sane" means the generated SQL referenced only
+the curated view, included a timestamp predicate, and avoided excluded raw
+fields. Latency is end-to-end API wall time; it is directional evidence, not
+a performance SLO.
+
+| ID | Expected result | 1. First-party | 3. Stateless prototype |
+| --- | --- | --- | --- |
+| GQ-01 | 77 event rows | Correct; SQL sane; 14.5 s | Correct; SQL sane; 19.5 s |
+| GQ-02 | 7 distinct sessions | Correct; SQL sane; 14.4 s | Correct; SQL sane; 16.2 s |
+| GQ-03 | 1,703 prompt+completion tokens; thinking excluded | Correct; SQL sane; 22.4 s | Correct; SQL sane; 19.7 s |
+| GQ-04 | 2,562 ms p95 LLM-response latency | Correct; SQL sane; 18.5 s | Correct; SQL sane; 19.7 s |
+| GQ-05 | 7 runs, 0 failures, 0% | Correct; SQL sane; 18.4 s | Correct; SQL sane; 18.3 s |
+| GQ-06 | `LLM_REQUEST` and `LLM_RESPONSE`, 12 each | Correct; SQL sane; 33.3 s | Correct; SQL sane; 24.9 s |
+
+The authenticated Data Studio GQ-01 run separately showed the visible
+`Analyzing` -> query-completed -> answer/SQL/result lifecycle in about 15
+seconds and created a returnable Recent conversation. The exact pinned
+stateless implementation also returned 1,703 for GQ-03 with
+`scope.verified: true`; its `ca.test.mjs` suite passed 24/24.
 
 **Per-shape criteria matrix** — one evidence cell per mandatory criterion
 per evaluated shape. Every cell must cite observed behavior or a primary
@@ -107,15 +149,36 @@ document, not an assumption:
 
 | Mandatory criterion | 1. First-party | 3. Stateless prototype | 2. Custom agent (stage 2 only) |
 | --- | --- | --- | --- |
-| Viewer flow & context transfer | _pending_ | _pending_ | — |
-| Path states (all five) | _pending_ | _pending_ | — |
-| Executing principal & IAM grants | _pending_ | _pending_ | — |
-| Data egress from BigQuery | _pending_ | _pending_ | — |
-| Retention / residency / auditability | _pending_ | _pending_ | — |
-| Allowlist enforcement (IAM-side) | _pending_ | _pending_ | — |
-| Cost controls & quotas | _pending_ | _pending_ | — |
-| Answer lifecycle & accessibility | _pending_ | _pending_ | — |
-| Sharp edges encoded in agent context | _pending_ | _pending_ | — |
+| Viewer flow & context transfer | **Pass with an explicit boundary.** Authenticated observation: a published BigQuery agent automatically appeared on Data Studio's Chat with your data page; its detail panel exposed project, knowledge source, labels, publish time, and a copy-link control. A report link can carry project+agent and open a new tab, but report date/agent filters do not transfer and must be shown for re-entry. This matches the documented [Data Studio agent flow](https://docs.cloud.google.com/data-studio/conversational-analytics-data-agents). | **Pass, more repo work.** The companion can accept table/window/filter parameters and keep a report-return link, but requires deploying and authenticating the pinned [web/MCP surface](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/blob/62f794fdd6e38d622235d87fc9fb438a7b029795/mcp-apps/bqaa-dashboard/DESIGN.md). | — |
+| Path states (all five) | **Defined.** Provisioned: agent card. Unprovisioned: empty Recent/agent-discovery state. Permission-denied: inactive card with the missing grant named by Data Studio. First-question: one-time interaction disclosure, then prompt. Return: Recent conversation; the report stays open in the originating tab. The first, third, and fourth states are also described in [Converse with Data Studio data](https://docs.cloud.google.com/data-studio/conversational-analytics-data). | **Defined in the pinned surface.** Provisioned: authenticated Ask UI. Unprovisioned: CA-disabled/configuration error. Permission-denied: HTTP/API error without partial answer. First-question: bounded Ask request. Return: host or report link. These states are owned by this repo/service rather than Data Studio. | — |
+| Executing principal & IAM grants | **Pass.** Data Studio disclosed that the agent uses the viewer's credentials. Required grants are agent-level `roles/geminidataanalytics.dataAgentUser`, BigQuery data access plus `bigquery.jobs.create`, and `cloudaicompanion.topics.create` through `roles/cloudaicompanion.user` or `roles/bigquery.studioUser`; see [BigQuery agent sharing](https://docs.cloud.google.com/bigquery/docs/create-data-agents#share_data_studio) and [CA IAM](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/access-control). This composes directly with Viewer's Credentials. | **Pass with a different principal.** The deployed service uses its runtime service account/ADC with `roles/geminidataanalytics.dataAgentStatelessUser`, BigQuery read, and job creation; the caller separately authenticates to the companion. That is an additional trust surface. | — |
+| Data egress from BigQuery | **Pass with the curated view.** The question, agent context/schema, generated SQL, and aggregate result transit Google's CA/Data Studio services; the evaluated view made raw content and identifiers unavailable to the datasource. The UI warns that generated queries are visible to project administrators. | **Pass with an extra hop.** The same CA material also traverses the custom web/MCP service and up to three bounded history exchanges are resent. The prototype limits displayed rows to 100, but service/host logging must be configured as part of deployment. | — |
+| Retention / residency / auditability | **Pass with deployment choices recorded.** Data Studio persisted the conversation and exposed Recent/delete controls. DataAgent and Conversation state is covered by [CA data residency](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/data-residency); the test used `global`, which has no residency commitment, so production must select `us`, `eu`, or an approved regional endpoint when required. CA emits Admin Activity and Data Access logs per its [security and audit contract](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/security-privacy-compliance). | **Pass only if host retention is specified.** Inline chat does not create a managed Conversation; the caller resends bounded history. CA endpoint residency still applies, while Cloud Run/MCP host request logs, retention, deletion, and audit access become repo/operator responsibilities. | — |
+| Allowlist enforcement (IAM-side) | **Pass as a required provisioning contract.** Evaluation used a curated view, but the evaluator retained broader test-project access. Production viewers must receive BigQuery access to the view only; agent IAM controls agent access, not underlying BigQuery access ([CA IAM](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/access-control)). Agent instructions/table selection are defense in depth, not the boundary. | **Pass as a required service-account contract.** Configure the runtime service account with view-only BigQuery access. The pinned prototype's table configuration and prompt checks are useful defense in depth but cannot replace IAM. | — |
+| Cost controls & quotas | **Pass.** Published and staging contexts used `big_query_max_billed_bytes=10485760`; every scored query completed under it. Production also needs project/user BigQuery quotas and awareness of the 30 chat requests/minute project/user limits; see [CA cost controls](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/manage-costs) and [quotas](https://docs.cloud.google.com/gemini/data-agents/conversational-analytics-api/quotas). | **Pass.** Same 10 MiB cap; the pinned server adds a 150-second whole-request deadline and three-request concurrency admission cap. BigQuery and CA project/user quotas remain mandatory because the byte cap is per generated query, not per question. | — |
+| Answer lifecycle & accessibility | **Pass.** Observed keyboard-addressable tabs, agent cards, consent controls, prompt textbox, send/stop controls, details, SQL, result table, success text, and persistent conversation. Loading and query-complete states were announced in text. Permission/no-data/error states remain product-owned and must be included in release QA. | **Pass at the pinned commit.** The UI supplies loading, success, table fallbacks, errors, cancellation, keyboard operation, and screen-reader output; the pinned [CA tests](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/blob/62f794fdd6e38d622235d87fc9fb438a7b029795/mcp-apps/bqaa-dashboard/tests/ca.test.mjs) show parser/scope validation failing closed without an uncertified partial result. Deployments must preserve these tests. | — |
+| Sharp edges encoded in agent context | **Pass.** The published evaluation context explicitly says prompt+completion is `prompt_token_count + candidates_token_count` with thinking separate, and that zero-latency local tool events are valid. GQ-03 returned 1,703 correctly. The production agent asset must retain both statements. | **Gap in the pinned commit.** It describes token and latency fields but does not encode either #382 rule explicitly. The explicit GQ-03 wording produced the right result, but that does not satisfy the context contract; adopting this shape would require an asset/code change before ship. | — |
+
+## Recommendation and implementation boundary
+
+Select **B1 (first-party BigQuery data agent -> Data Studio)**. There is no
+named first-party mandatory failure, so the custom persistent-agent stage is
+not triggered. The stateless prototype remains a useful implementation for
+#396 and a fallback if the first-party route later fails a mandatory
+criterion, but it does not justify adding a custom service to this feature.
+
+This decision does **not** close #402 by itself. Closure requires either the
+capability to ship or a maintainer to accept a named implementation handoff.
+The implementation handoff must own all of the following:
+
+1. a versioned agent-definition/golden-question artifact that preserves the
+   curated view, timestamp, cost, and #382 sharp-edge contracts;
+2. a provisioning guide or command for the view, least-privilege IAM, agent,
+   publish/share operation, and approved regional endpoint;
+3. report and configurator links that open Data Studio in a new tab and make
+   the non-transferred date/agent filters explicit; and
+4. tests and a named owner for compatibility with `events_v1` and Data
+   Studio's Preview surface.
 
 The stage-2 column stays "—" unless the named-failure trigger fires; it
 must then be filled completely before shape 2 can be recommended.
@@ -151,7 +214,7 @@ must then be filled completely before shape 2 can be recommended.
   not part of prompt+completion totals, and zero-latency local tool calls
   are real events, not data errors.
 
-## Shared asset with #396 (MCP app) — specified here, built after the decision
+## Shared asset with #396 (MCP app) — selected implementation dependency
 
 One canonical, versioned artifact (JSON or YAML), built once and consumed
 by both this feature and the #396 MCP app:
@@ -167,5 +230,5 @@ by both this feature and the #396 MCP app:
 - A named owner and a compatibility-test plan tying the artifact version to
   the `events_v1` schema version.
 
-Building the artifact and its tests is implementation work, gated on the
-product decision above.
+Building the artifact and its tests is the next implementation step after a
+maintainer accepts the B1 recommendation and names its owner.
