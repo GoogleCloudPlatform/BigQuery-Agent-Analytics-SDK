@@ -130,7 +130,7 @@ inputs.billingProject.addEventListener("input", refresh);
 
 const WAITING_MESSAGE =
   "Opening Looker Studio in a new tab. Building your report copy can take " +
-  "up to ~15 seconds and may briefly show an error page — don’t close it.";
+  "up to ~10 seconds and may briefly show an error page — don’t close it.";
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();

@@ -140,7 +140,7 @@
           </div>
           <p class="create-note" id="create-wait-note">
             Opens <code>lookerstudio.google.com</code> in a new tab. Building
-            your private copy can take up to ~15 seconds, and the tab may
+            your private copy can take up to ~10 seconds, and the tab may
             briefly show an error page while Google provisions the report —
             don’t close it.
           </p>
@@ -173,9 +173,10 @@
             to create a data source that runs a SQL query this page supplied —
             <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
               read the exact query</a>. The dialog lists that query, your
-            billing project, and the new data source’s owner; nothing is
-            created until you acknowledge it. The query reads only your
-            table, with your credentials, in your billing project.
+            billing project, and that the new data source initially uses
+            Owner’s Credentials; nothing is created until you acknowledge it.
+            The query reads only your table, using the opener’s credentials,
+            in your billing project.
           </p>
         </article>
         <article class="step">
