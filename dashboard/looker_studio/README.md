@@ -101,8 +101,10 @@ native charts after the surrounding report controls; allow up to 90 seconds
 for non-degenerate chart output. Phone and narrow-tablet layouts require a
 separate responsive template and are not supported by v1. See
 [`docs/rendering-and-viewport-support.md`](docs/rendering-and-viewport-support.md).
-The latest live pass used a 1568-pixel viewport, so targeted validation at the
-documented 1280-pixel minimum is still pending.
+The 2026-08-11 live pass validated every page at the documented 1280-pixel
+minimum with the Looker Studio navigation drawer collapsed. At that width the
+expanded drawer is viewer chrome that overlays the report canvas; collapse it
+to keep the full left edge visible.
 Issue
 [#388](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/388)
 also found that lower charts on Token Consumption and Latency crossed the

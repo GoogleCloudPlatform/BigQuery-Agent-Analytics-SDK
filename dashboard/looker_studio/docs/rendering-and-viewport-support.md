@@ -88,9 +88,11 @@ must independently pass chart parity, Linking API hydration, Viewer
 Credentials, query-cost, and phone/tablet visual validation before it can
 replace or accompany the v1 template.
 
-The 1280-pixel minimum is a documented product-support boundary. The latest
-live pass ran at 1568 pixels, so targeted visual validation at 1280 pixels
-remains pending.
+The 1280-pixel minimum is a documented product-support boundary. The
+2026-08-11 publication pass validated all eight pages at 1280 pixels with the
+Looker Studio navigation drawer collapsed. At that width the expanded drawer
+is viewer chrome that overlays the report canvas; collapse it to keep the full
+left edge visible.
 
 Viewport width does not prove that freeform components remain inside the page
 canvas. Release-candidate validation must also capture the editor's page height

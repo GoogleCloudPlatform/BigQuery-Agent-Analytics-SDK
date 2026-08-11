@@ -7,7 +7,7 @@ meta:
   contract_version: 1
   review_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#377
   source_parity_contract: spec/chart_manifest.yaml
-  live_review_date: "2026-07-27"
+  live_review_date: "2026-08-11"
   report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
 
 source:
@@ -201,8 +201,10 @@ viewport_support:
   recommended_width_css_px: 1440
   narrow_screen_support: not_supported_in_v1
   responsive_template: separate_report_required
-  minimum_width_validation: pending
-  last_validated_width_css_px: 1568
+  minimum_width_validation: passed
+  minimum_width_navigation_drawer_state: collapsed
+  last_validated_width_css_px: 1280
+  last_validated_date: "2026-08-11"
 
 charts:
   - id: usage-token-usage-split-by-agent

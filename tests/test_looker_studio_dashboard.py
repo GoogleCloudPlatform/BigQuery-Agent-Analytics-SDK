@@ -417,8 +417,10 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "recommended_width_css_px": 1440,
       "narrow_screen_support": "not_supported_in_v1",
       "responsive_template": "separate_report_required",
-      "minimum_width_validation": "pending",
-      "last_validated_width_css_px": 1568,
+      "minimum_width_validation": "passed",
+      "minimum_width_navigation_drawer_state": "collapsed",
+      "last_validated_width_css_px": 1280,
+      "last_validated_date": "2026-08-11",
   }
   assert "live_series_mode" not in product["visual_system"]
   deferred = {item["id"] for item in product["deferred_enhancements"]}
@@ -463,14 +465,14 @@ def test_report_and_web_bindings_cannot_drift():
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
-  assert report["published_date"] == "2026-07-29"
+  assert report["published_date"] == "2026-08-11"
   assert attestation == {
       "sha256": hashlib.sha256(template).hexdigest(),
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-29",
+      "verified_date": "2026-08-11",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
@@ -497,7 +499,7 @@ def test_report_and_web_bindings_cannot_drift():
       ),
   }
   assert report["product_verification"] == {
-      "verified_date": "2026-07-28",
+      "verified_date": "2026-08-11",
       "pages": 8,
       "checks": [
           "expected_page_and_chart_titles_present",
@@ -512,7 +514,7 @@ def test_report_and_web_bindings_cannot_drift():
           "tool_charts_exclude_non_completed_rows",
           "multi_series_charts_use_categorical_legends",
           "no_partial_update_footer_after_refresh",
-          "default_date_range_includes_today_on_seven_dashboard_pages",
+          "default_date_range_includes_today_on_all_eight_report_pages",
       ],
       "result": "PASSED",
   }

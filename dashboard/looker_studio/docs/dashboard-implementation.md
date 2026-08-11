@@ -150,8 +150,10 @@ of 1280 CSS pixels and a recommended width of 1440 CSS pixels. A responsive
 mobile report is a separate template: the current multi-component pages cannot
 be converted in place without rebuilding their section layout and repeating
 parity, hydration, credential, and visual acceptance.
-The most recent live pass used a 1568-pixel viewport; targeted validation at
-the documented 1280-pixel minimum remains pending.
+The 2026-08-11 live pass validated all eight pages at the documented
+1280-pixel minimum with the Looker Studio navigation drawer collapsed. At that
+width the expanded drawer is viewer chrome that overlays the report canvas;
+collapse it to keep the full left edge visible.
 
 Freeform layout acceptance includes vertical containment as well as
 non-overlap. For every page, each component must satisfy
@@ -203,3 +205,13 @@ On 2026-07-24, the base-table-only implementation:
 No live result rows or source identifiers are committed. This smoke result
 proves installation compatibility and query executability; it does not replace
 seeded parity certification or M4 visual sign-off.
+
+The 2026-08-11 90-day publication gate repeated the table-only hydration and
+exact-production-query checks against a sanctioned real BQAA test table. With
+`@DS_START_DATE=20260514` and `@DS_END_DATE=20260811`, the uncached query
+processed 60,248 bytes and billed 10,485,760 bytes. A subsequent authenticated
+**Refresh data** walk of all eight published pages produced five query-cache
+hits and billed zero additional bytes. The absolute 90-day measurement is
+environment-specific; it does not imply a linear cost reduction from the
+former 365-day default. The same exact-query check verified that events dated
+2026-08-11 were included, preserving the include-today contract.

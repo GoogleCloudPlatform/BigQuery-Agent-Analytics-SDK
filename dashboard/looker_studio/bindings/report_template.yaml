@@ -16,7 +16,7 @@ generated_report_credential_gate:
   verification_path: Resource > Manage added data sources > Edit
 link_access: PUBLIC
 publishing_mode: MANUAL
-published_date: "2026-07-29"
+published_date: "2026-08-11"
 # This attestation covers the reviewed repository artifact. It does not prove
 # that the mutable external Looker Studio report still embeds these bytes.
 reviewed_template_sql:
@@ -24,7 +24,7 @@ reviewed_template_sql:
   reviewed_date: "2026-07-24"
   scope: repository_artifact_only
 live_template_verification:
-  verified_date: "2026-07-29"
+  verified_date: "2026-08-11"
   repository_sql_sha256: 5a4f455f9d17286d95396d1ced9e55ca35cbca7b33849e5ef3ced25ab25513b0
   method:
     - connector_custom_query_review
@@ -47,7 +47,7 @@ viewer_qa_contract:
   observed_baseline_comment: >-
     https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/pull/383#issuecomment-5098030747
 product_verification:
-  verified_date: "2026-07-28"
+  verified_date: "2026-08-11"
   pages: 8
   checks:
     - expected_page_and_chart_titles_present
@@ -62,7 +62,7 @@ product_verification:
     - tool_charts_exclude_non_completed_rows
     - multi_series_charts_use_categorical_legends
     - no_partial_update_footer_after_refresh
-    - default_date_range_includes_today_on_seven_dashboard_pages
+    - default_date_range_includes_today_on_all_eight_report_pages
   result: PASSED
 source_contract:
   mode: BASE_TABLE
