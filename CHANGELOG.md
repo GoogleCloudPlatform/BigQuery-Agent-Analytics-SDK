@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-11
+
+### Release highlights
+
+Two new export/observability surfaces and a rebuilt dashboard first-run
+experience. The wheel gains the BigQuery-to-LangSmith export connector
+(`bqaa export langsmith`) and the native Grafana integration; the published
+Looker Studio dashboard (repo/live-template side, tracked in #404) now
+defaults to one rolling 90-day report-level date control across all eight
+pages, ships a trust-hardened configurator, and is guarded by a
+browser-level CI gate.
+
 ### Added
 
+- **BigQuery-to-LangSmith export connector (#410, #414)** — new
+  `bigquery_agent_analytics.export` subpackage plus the `bqaa export
+  langsmith` CLI: dumps BQAA `agent_events` rows to a LangSmith project,
+  schema/row-content agnostic, with bounded batching and structured error
+  handling. Verified against a real LangSmith project.
+- **Native Grafana dashboard integration (#339, #373).**
 - **Skill-evolution lab on the shared-table, server-side path (#360 U6)** —
   the two disclosed demo workarounds are removed now that #358/#359 have
   landed: the lab writes every pass to one shared `agent_events` table
@@ -22,6 +40,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sample_run/PROVENANCE.md`). This closes the #358/#359 release-notes arc:
   the example now exercises the shared-table, server-side contract end to
   end.
+
+### Changed (dashboard, repo/live-template side — issue #404)
+
+- **Configurator accepts a pasted fully qualified table ID (#403, #405)** —
+  `project.dataset.table` (plus backticked, legacy-colon, and
+  trailing-punctuation forms) pastes into any field and distributes across
+  all three, with paste-immediate and change-committed semantics that never
+  hijack hand-typing. Community contribution.
+- **First-run trust cluster (#398, #399, #400, #408)** — the create flow
+  sets a measured ~10-second provisioning expectation before and at the
+  click, step 02 mirrors the real "Review data access" dialog (exact SQL
+  linked, Owner's-Credentials mode explained), and the page moved to a
+  WCAG-AA-verified Google Cloud palette in both themes. The recurring
+  dialog comparison is a durable "Configurator release checks" contract.
+- **Rolling 90-day report-level date range (#401, #417)** — one date
+  control now applies to and persists across all eight report pages,
+  including the Trace Inspector, replacing the 365-day page-scoped
+  defaults; republished under the full nine-method publication gate with
+  re-dated attestations, a validated 1280 px minimum viewport, and a
+  recorded bytes-billed measurement.
+- **Browser-level configurator CI gate (#407)** — headless-Chrome smoke
+  check with instrumented page-error detection, nonce-verified server
+  ownership, honored browser exit status, and five negative fixtures, all
+  enforced through the required test matrix (a Node-only suite cannot see
+  browser-fatal failures).
+
+### Fixed
+
+- **Lock generation converges again under pip 26.2 (#412)** and GitHub
+  Actions workflows hardened for the zizmor policy (#411); `nanoid`
+  upgraded past its advisory (#413).
+
+### Decisions
+
+- **Conversational Analytics over `agent_events` (#402, #409, #416)** —
+  decision framework plus a completed authenticated evaluation: the
+  first-party BigQuery data agent shared to Data Studio (B1) is selected
+  (both stage-1 shapes scored 6/6; no first-party mandatory failure), and
+  implementation is handed off to #418. Dashboard usage attribution is
+  tracked as evidence-gated backlog in #415.
+
+## [0.4.1] - 2026-07-30
+
+_Section cut retroactively: the `v0.4.1` tag (2026-07-30) shipped these
+entries, but the changelog section was not carved out of Unreleased at
+release time._
+
+### Added
 
 - **Identity-safe singular trace resolution (#359)** — `TraceIdentity`,
   `TraceScope`, `TraceSelector`, `ResolvedTraceSelector`, and
@@ -87,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Context is trusted prompt material: it is a query parameter/model input,
   never SQL text, a job label, or persisted input. U5 now provides the
   identity-safe persistence/view-cardinality path for contextual results.
+
+### Fixed
+
+- **dashboard_v2: React Router upgraded past GHSA-qwww-vcr4-c8h2 (#394)**
+  and postcss bumped (#393).
 
 ## [0.4.0] - 2026-06-18
 
