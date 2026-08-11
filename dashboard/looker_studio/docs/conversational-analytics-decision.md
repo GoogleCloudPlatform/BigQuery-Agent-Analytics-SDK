@@ -86,9 +86,9 @@ not description.
 
 ## Evaluation record — completed 2026-08-11 UTC
 
-The selection cannot happen until **both** parts are filled: the run
-metadata *and* the per-shape criteria matrix. A record with filled
-metadata but empty matrix rows does not satisfy this gate.
+A valid selection requires **both** completed parts: the run metadata *and*
+the per-shape criteria matrix. A record with filled metadata but empty matrix
+rows does not satisfy this gate.
 
 **Run metadata:**
 
@@ -107,6 +107,9 @@ metadata but empty matrix rows does not satisfy this gate.
   analysis fields and excludes raw content, prompts, user IDs, error text,
   authorization data, and trace identifiers. Both resources expire after
   30 days; they are reproducibility evidence, not production assets.
+  The evaluation DataAgent `bqaa-issue-402-eval-20260810` remains published
+  only for reviewer reproducibility; delete it after this PR merges and the
+  #402 option pick is recorded, and do not promote it as a production asset.
 - Golden-question subset: `GQ-01` through `GQ-06` (six questions): event row
   count, distinct sessions, prompt+completion tokens, p95 LLM-response
   latency, tool failure rate, and highest-volume event types with ties.
@@ -159,6 +162,9 @@ document, not an assumption:
 | Answer lifecycle & accessibility | **Pass.** Observed keyboard-addressable tabs, agent cards, consent controls, prompt textbox, send/stop controls, details, SQL, result table, success text, and persistent conversation. Loading and query-complete states were announced in text. Permission/no-data/error states remain product-owned and must be included in release QA. | **Pass at the pinned commit.** The UI supplies loading, success, table fallbacks, errors, cancellation, keyboard operation, and screen-reader output; the pinned [CA tests](https://github.com/haiyuan-eng-google/bigquery_agent_analytics_skill/blob/62f794fdd6e38d622235d87fc9fb438a7b029795/mcp-apps/bqaa-dashboard/tests/ca.test.mjs) show parser/scope validation failing closed without an uncertified partial result. Deployments must preserve these tests. | — |
 | Sharp edges encoded in agent context | **Pass.** The published evaluation context explicitly says prompt+completion is `prompt_token_count + candidates_token_count` with thinking separate, and that zero-latency local tool events are valid. GQ-03 returned 1,703 correctly. The production agent asset must retain both statements. | **Gap in the pinned commit.** It describes token and latency fields but does not encode either #382 rule explicitly. The explicit GQ-03 wording produced the right result, but that does not satisfy the context contract; adopting this shape would require an asset/code change before ship. | — |
 
+The stage-2 column stays "—" unless the named-failure trigger fires; it
+must then be filled completely before shape 2 can be recommended.
+
 ## Recommendation and implementation boundary
 
 Select **B1 (first-party BigQuery data agent -> Data Studio)**. There is no
@@ -175,13 +181,12 @@ The implementation handoff must own all of the following:
    curated view, timestamp, cost, and #382 sharp-edge contracts;
 2. a provisioning guide or command for the view, least-privilege IAM, agent,
    publish/share operation, and approved regional endpoint;
-3. report and configurator links that open Data Studio in a new tab and make
-   the non-transferred date/agent filters explicit; and
+3. report and configurator links that open Data Studio in a new tab, make
+   the non-transferred date/agent filters explicit, and set the expectation
+   that this evaluation's answers took 14.4–33.3 seconds (directional, not a
+   performance SLO); and
 4. tests and a named owner for compatibility with `events_v1` and Data
    Studio's Preview surface.
-
-The stage-2 column stays "—" unless the named-failure trigger fires; it
-must then be filled completely before shape 2 can be recommended.
 
 ## Decision criteria (every evaluated shape must answer all of these)
 
