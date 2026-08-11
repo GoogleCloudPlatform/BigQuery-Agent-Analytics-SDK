@@ -2250,8 +2250,8 @@ pipeline.
 | --- | ----- |
 | `sdk` | constant `bigquery-agent-analytics` |
 | `sdk_version` | package version, BQ-safe (e.g. `0-4-0`) |
-| `sdk_surface` | `python` \| `cli` \| `remote-function` |
-| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` |
+| `sdk_surface` | `python` \| `cli` \| `remote-function` \| `langsmith-export` |
+| `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` |
 | `sdk_ai_function` | set only on AI/ML invocations: `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` |
 
 All labels also apply to load jobs submitted by the SDK (e.g. the
@@ -2285,6 +2285,177 @@ and surface attribution.
 
 ---
 
+## 23. LangSmith Export
+
+The optional LangSmith connector exports a BigQuery table or arbitrary SQL
+result as LangSmith run trees. It streams rows ordered by trace, reconstructs
+the existing `span_id` / `parent_span_id` hierarchy, and adds one stable
+structural root per trace. Every source event gets a UUID derived from the
+canonical source, trace ID, and run ID. The exporter treats created runs as
+immutable: overlapping backfills are idempotent no-ops for existing run IDs
+while still creating previously unseen IDs. Correcting already-exported data
+requires a fresh LangSmith project or a deliberately versioned `--source-id`.
+
+### Install and authenticate
+
+```bash
+pip install 'bigquery-agent-analytics[langsmith]'
+
+export LANGSMITH_API_KEY=lsv2_...
+export LANGSMITH_PROJECT=agent-production
+# Required only for organization-scoped keys:
+export LANGSMITH_WORKSPACE_ID=...
+```
+
+BigQuery uses Application Default Credentials, consistent with the rest of the
+SDK. The export query carries `sdk_surface=langsmith-export` and
+`sdk_feature=langsmith-export` labels.
+
+### Python API
+
+```python
+from pathlib import Path
+
+from bigquery_agent_analytics.export import export
+from bigquery_agent_analytics.export import ExportConfig
+
+stats = export(
+    "my-project.analytics.agent_events",
+    config=ExportConfig(
+        langsmith_project="agent-production",
+        since=None,
+        batch_size=100,
+        requests_per_second=5,
+        max_retries=3,
+    ),
+)
+print(stats.to_dict())
+```
+
+`ExportStats.to_dict()` reports source rows read, exported, skipped, failed,
+successful traces, batches, the current watermark, bounded `dropped_rows`
+details, and `dropped_rows_truncated` (the number omitted from that list).
+`exported` counts source rows in batches accepted by the client, not destination
+mutations, so a replay of existing IDs can report exported rows while leaving
+the server-side runs unchanged.
+Retryable 408/425/429 and 5xx errors use bounded exponential backoff. A create
+conflict is expected during replay, is not retried, and is treated as an
+idempotent success. `requests_per_second` and `max_retries` govern exporter
+calls to `batch_ingest_runs`; the LangSmith SDK may split or retry transport
+requests inside one call. A failed batch never advances incremental state.
+
+### Custom schemas and opaque values
+
+The default `FieldMapping.standard_adk()` targets the standard ADK
+`agent_events` fields. A YAML/JSON mapping uses LangSmith field names on the
+left and source columns or nested mapping paths on the right:
+
+```yaml
+fields:
+  run_id: event_key
+  trace_id: trace.key
+  parent_run_id: parent_key
+  name: event_kind
+  run_type: operation_type
+  start_time: occurred_at
+  end_time: completed_at
+  latency_ms: timing.total_ms
+  error: failure_message
+  inputs: payload
+  outputs: result
+```
+
+Only declared paths are traversed, and omitted optional fields remain unmapped;
+custom mappings never inherit ADK defaults. Custom JSON strings are not decoded
+or interpreted. The built-in ADK mapping is the narrow exception: it decodes
+the standard `content` and `latency_ms` JSON columns because BigQuery clients
+may return those JSON values as either mappings or strings. A mapped
+scalar/list is wrapped as `{"value": ...}` because LangSmith inputs and outputs
+are objects. Unmapped columns are copied to `extra.metadata`. When a nested
+path is mapped, the original top-level column also remains in metadata so
+sibling data is not lost. Non-JSON BigQuery scalars use loss-minimizing
+transport encodings: decimal/date/time values become strings and bytes become
+a tagged base64 object.
+
+```python
+from bigquery_agent_analytics.export import FieldMapping
+
+mapping = FieldMapping.from_file("mapping.yaml")
+stats = export(
+    "SELECT * FROM `my-project.custom.events` WHERE environment = 'prod'",
+    config=ExportConfig(
+        mapping=mapping,
+        # Stabilizes IDs and watermark ownership if harmless SQL text changes.
+        source_id="custom-events-v1",
+    ),
+)
+```
+
+### Backfill and incremental CLI
+
+```bash
+# Bounded backfill. --filter is trusted SQL appended to the outer query.
+bq-agent-sdk export langsmith \
+  --source=my-project.analytics.agent_events \
+  --since=2026-08-01T00:00:00Z \
+  --until=2026-08-08T00:00:00Z \
+  --filter="status != 'DEBUG'"
+
+# Scheduler-friendly incremental sync.
+bq-agent-sdk export langsmith \
+  --source=my-project.analytics.agent_events \
+  --incremental \
+  --watermark-file=/var/lib/bqaa/langsmith-watermark.json \
+  --max-dropped-rows=1000
+```
+
+For CLI use, `LANGSMITH_API_KEY` is intentionally environment-only so the
+secret does not appear in shell history or process arguments. Python callers
+may still pass `langsmith_api_key` to `ExportConfig` explicitly.
+
+The synthetic root keeps a fixed epoch segment only in `dotted_order`, where a
+stable prefix is required across overlapping windows. When mapped source times
+are valid, its displayed `start_time` and `end_time` use the earliest and latest
+source-run times in the current window instead of forcing the root to 1970.
+
+Incremental state contains a timestamp plus source run-ID tie breaker and is
+atomically replaced. It is bound to the canonical source and field-mapping
+fingerprint; reusing it for another table/query or mapping fails closed. Use a
+separate state file per export job and a single scheduler writer. For mutable
+SQL text, set `--source-id` to a stable logical source name. Incremental mode
+requires a `start_time` mapping. Time predicates safely cast the mapped value
+to `TIMESTAMP`, so ISO-8601 STRING columns are supported; unparseable values do
+not match a filtered query.
+
+Successfully processed rows, including rows reported as skipped, advance the
+cursor so one permanently malformed row cannot wedge every later scheduled
+run. A LangSmith batch failure blocks advancement for the whole invocation.
+Exit code `1` means at least one source row was skipped or a LangSmith batch
+failed; configuration/query failures use exit code `2`. The JSON summary
+always reports total skipped/failed counts; `--max-dropped-rows` only bounds
+retained per-row diagnostics. Set it to `0` when row-level details should not
+be retained.
+
+The cursor is based on source event time. A row that arrives after the cursor
+has advanced but carries an equal or earlier `start_time` is not discovered by
+a later incremental run. Schedule an overlapping bounded backfill when the
+source permits late arrival. Stable IDs make the replay idempotent: previously
+unseen run IDs are created, but existing runs remain unchanged. To correct an
+already-exported run, export to a fresh LangSmith project or use a deliberately
+versioned `--source-id`.
+
+Each query window reconstructs hierarchy only from rows present in that
+window. If a child arrives after its parent was exported in an earlier window,
+the child is attached to the synthetic root and its original parent ID remains
+in `extra.bqaa.source_parent_run_id`. For sources with long-lived traces,
+prefer filtering for traces that have been quiescent for an appropriate delay
+before export to avoid these cross-window splits.
+
+The v1 connector is one-way and scheduled/batch only. It does not import
+LangSmith data or provide a real-time streaming surface.
+
+---
+
 ## Module Architecture
 
 ```
@@ -2310,6 +2481,12 @@ bigquery_agent_analytics/
 │   ├── ai_ml_integration.py   ← AI.GENERATE, embeddings, anomaly detection
 │   ├── memory_service.py      ← Long-horizon agent memory (requires google-adk)
 │   └── bigframes_evaluator.py ← BigFrames DataFrame evaluator (optional)
+│
+│   Export
+│   └── export/
+│       ├── __init__.py         ← Stable public export API
+│       ├── cli.py              ← `bq-agent-sdk export` command group
+│       └── langsmith.py        ← BigQuery-to-LangSmith connector (optional)
 │
 │   Agent Context Graph
 │   └── context_graph.py       ← Decision-trace extraction, GQL, world-change

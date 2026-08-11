@@ -42,6 +42,7 @@ import typer
 from .evaluators import EvaluationReport
 from .evaluators import LLMAsJudge
 from .evaluators import SystemEvaluator
+from .export.cli import export_app
 from .formatter import format_output
 from .trace import AmbiguousSessionError
 from .trace import TraceFilter
@@ -52,6 +53,9 @@ app = typer.Typer(
     help="BigQuery Agent Analytics SDK CLI.",
     add_completion=False,
 )
+
+app.add_typer(export_app, name="export")
+
 
 # Product-facing CLI surface. Wraps the same handlers that ``bq-agent-sdk``
 # exposes under their implementation-shaped names, but presents them with

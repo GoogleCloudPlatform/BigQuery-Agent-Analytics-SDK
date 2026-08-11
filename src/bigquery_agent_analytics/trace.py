@@ -396,6 +396,24 @@ class Span:
     return text
 
 
+def _build_span_tree(spans: Sequence[Span]) -> list[Span]:
+  """Link spans by ``parent_span_id`` and return their roots."""
+  by_id: dict[str, Span] = {}
+  for span in spans:
+    if span.span_id:
+      by_id[span.span_id] = span
+    span.children = []
+
+  roots: list[Span] = []
+  for span in spans:
+    parent = span.parent_span_id
+    if parent and parent in by_id:
+      by_id[parent].children.append(span)
+    else:
+      roots.append(span)
+  return roots
+
+
 _TIME_WINDOW_RE = re.compile(r"^(\d+)([mhd])$")
 
 
@@ -2661,21 +2679,7 @@ class Trace(_WeakrefableSlotted):
 
   def _build_tree(self) -> list[Span]:
     """Builds a tree of spans using parent_span_id relationships."""
-    by_id: dict[str, Span] = {}
-    for span in self.spans:
-      if span.span_id:
-        by_id[span.span_id] = span
-      span.children = []
-
-    roots: list[Span] = []
-    for span in self.spans:
-      parent = span.parent_span_id
-      if parent and parent in by_id:
-        by_id[parent].children.append(span)
-      else:
-        roots.append(span)
-
-    return roots
+    return _build_span_tree(self.spans)
 
   def render(self, format: str = "tree", color: bool = False) -> str:
     """Renders the trace as a hierarchical DAG view.
