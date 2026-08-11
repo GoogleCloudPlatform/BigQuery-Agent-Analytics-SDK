@@ -186,14 +186,16 @@ def test_langsmith_export_preserves_typer_datetime_validation() -> None:
           "--source=project.dataset.events",
           "--since=not-a-timestamp",
       ],
+      color=True,
   )
 
+  error_text = click.unstyle(result.stderr)
   assert result.exit_code == 2
-  assert "Invalid value" in result.stderr
-  assert "--since" in result.stderr
-  assert "ISO-8601" in result.stderr
-  assert "timestamp" in result.stderr
-  assert "Error:" not in result.stderr
+  assert "Invalid value" in error_text
+  assert "--since" in error_text
+  assert "ISO-8601" in error_text
+  assert "timestamp" in error_text
+  assert "Error:" not in error_text
 
 
 def test_langsmith_export_does_not_mask_unexpected_programming_errors() -> None:
