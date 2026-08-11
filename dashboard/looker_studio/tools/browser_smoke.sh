@@ -14,9 +14,11 @@
 #
 # Usage:
 #   browser_smoke.sh              run the check against ../docs
-#   browser_smoke.sh --self-test  run the negative fixtures (a page with a
-#                                 console error, an occupied port, a failing
-#                                 browser binary) and require each to fail
+#   browser_smoke.sh --self-test  run the four negative fixtures (a page
+#                                 with a console error, an occupied port, a
+#                                 failing browser binary, and a browser that
+#                                 writes healthy DOM then exits nonzero) and
+#                                 require each to fail
 #
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery.
 set -euo pipefail

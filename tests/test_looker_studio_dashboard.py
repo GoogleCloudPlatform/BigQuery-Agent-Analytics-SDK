@@ -616,6 +616,23 @@ def test_configurator_loads_in_a_real_browser():
   )
 
 
+def test_browser_smoke_negative_fixtures_are_detected():
+  # The four negative fixtures — including the nonzero-exit-after-healthy-
+  # DOM regression — must be enforced by the required Test checks, not
+  # only by the optional standalone smoke job: a reintroduced false-pass
+  # path has to turn a REQUIRED check red.
+  disposition = _browser_gate_disposition(
+      _chrome_available(), bool(os.environ.get("CI"))
+  )
+  if disposition == "skip":
+    pytest.skip("No Chrome/Chromium available outside CI")
+  subprocess.run(
+      ["bash", "tools/browser_smoke.sh", "--self-test"],
+      cwd=DASHBOARD,
+      check=True,
+  )
+
+
 def test_googlecloudplatform_pages_configuration():
   page = (DASHBOARD / "docs/index.html").read_text()
   styles = (DASHBOARD / "docs/styles.css").read_text()
