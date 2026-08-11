@@ -2250,7 +2250,7 @@ pipeline.
 | --- | ----- |
 | `sdk` | constant `bigquery-agent-analytics` |
 | `sdk_version` | package version, BQ-safe (e.g. `0-4-0`) |
-| `sdk_surface` | `python` \| `cli` \| `remote-function` \| `langsmith_export` |
+| `sdk_surface` | `python` \| `cli` \| `remote-function` \| `langsmith-export` |
 | `sdk_feature` | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` |
 | `sdk_ai_function` | set only on AI/ML invocations: `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` |
 
@@ -2291,8 +2291,9 @@ The optional LangSmith connector exports a BigQuery table or arbitrary SQL
 result as LangSmith run trees. It streams rows ordered by trace, reconstructs
 the existing `span_id` / `parent_span_id` hierarchy, and adds one stable
 structural root per trace. Every source event gets a UUID derived from the
-canonical source, trace ID, and run ID; overlapping backfills therefore upsert
-the same LangSmith runs instead of creating duplicates.
+canonical source, trace ID, and run ID. Each batch uses separate create and
+update requests, so overlapping backfills update the same LangSmith runs
+instead of creating duplicates or silently leaving stale data.
 
 ### Install and authenticate
 
@@ -2306,7 +2307,7 @@ export LANGSMITH_WORKSPACE_ID=...
 ```
 
 BigQuery uses Application Default Credentials, consistent with the rest of the
-SDK. The export query carries `sdk_surface=langsmith_export` and
+SDK. The export query carries `sdk_surface=langsmith-export` and
 `sdk_feature=langsmith-export` labels.
 
 ### Python API
@@ -2333,8 +2334,11 @@ print(stats.to_dict())
 `ExportStats.to_dict()` reports source rows read, exported, skipped, failed,
 successful traces, batches, the current watermark, bounded `dropped_rows`
 details, and `dropped_rows_truncated` (the number omitted from that list).
-Retryable 408/409/425/429 and 5xx errors use bounded exponential backoff. A
-failed batch never advances incremental state.
+Retryable 408/425/429 and 5xx errors use bounded exponential backoff. A create
+conflict is expected during replay, is not retried, and is followed by the
+update request. `requests_per_second` and `max_retries` govern exporter calls
+to `batch_ingest_runs`; the LangSmith SDK may split or retry transport requests
+inside one call. A failed batch never advances incremental state.
 
 ### Custom schemas and opaque values
 
@@ -2357,14 +2361,17 @@ fields:
   outputs: result
 ```
 
-Only declared paths are traversed, and only when the source value is already a
-mapping. JSON strings are not decoded or interpreted. A mapped scalar/list is
-wrapped as `{"value": ...}` because LangSmith inputs and outputs are objects.
-Unmapped columns are copied to `extra.metadata`. When a nested path is mapped,
-the original top-level column also remains in metadata so sibling data is not
-lost. Non-JSON BigQuery scalars use loss-minimizing transport encodings:
-decimal/date/time values become strings and bytes become a tagged base64
-object.
+Only declared paths are traversed, and omitted optional fields remain unmapped;
+custom mappings never inherit ADK defaults. Custom JSON strings are not decoded
+or interpreted. The built-in ADK mapping is the narrow exception: it decodes
+the standard `content` and `latency_ms` JSON columns because BigQuery clients
+may return those JSON values as either mappings or strings. A mapped
+scalar/list is wrapped as `{"value": ...}` because LangSmith inputs and outputs
+are objects. Unmapped columns are copied to `extra.metadata`. When a nested
+path is mapped, the original top-level column also remains in metadata so
+sibling data is not lost. Non-JSON BigQuery scalars use loss-minimizing
+transport encodings: decimal/date/time values become strings and bytes become
+a tagged base64 object.
 
 ```python
 from bigquery_agent_analytics.export import FieldMapping
@@ -2402,16 +2409,41 @@ For CLI use, `LANGSMITH_API_KEY` is intentionally environment-only so the
 secret does not appear in shell history or process arguments. Python callers
 may still pass `langsmith_api_key` to `ExportConfig` explicitly.
 
+The synthetic root keeps a fixed epoch segment only in `dotted_order`, where a
+stable prefix is required across overlapping windows. When mapped source times
+are valid, its displayed `start_time` and `end_time` use the earliest and latest
+source-run times in the current window instead of forcing the root to 1970.
+
 Incremental state contains a timestamp plus source run-ID tie breaker and is
 atomically replaced. It is bound to the canonical source and field-mapping
 fingerprint; reusing it for another table/query or mapping fails closed. Use a
 separate state file per export job and a single scheduler writer. For mutable
-SQL text, set `--source-id` to a stable logical source name. Exit code `1`
-means at least one source row was skipped or LangSmith batch failed;
-configuration/query failures use exit code `2`. The JSON summary always
-reports total skipped/failed counts;
-`--max-dropped-rows` only bounds retained per-row diagnostics. Set it to `0`
-when row-level details should not be retained.
+SQL text, set `--source-id` to a stable logical source name. Incremental mode
+requires a `start_time` mapping. Time predicates safely cast the mapped value
+to `TIMESTAMP`, so ISO-8601 STRING columns are supported; unparseable values do
+not match a filtered query.
+
+Successfully processed rows, including rows reported as skipped, advance the
+cursor so one permanently malformed row cannot wedge every later scheduled
+run. A LangSmith batch failure blocks advancement for the whole invocation.
+Exit code `1` means at least one source row was skipped or a LangSmith batch
+failed; configuration/query failures use exit code `2`. The JSON summary
+always reports total skipped/failed counts; `--max-dropped-rows` only bounds
+retained per-row diagnostics. Set it to `0` when row-level details should not
+be retained.
+
+The cursor is based on source event time. A row that arrives after the cursor
+has advanced but carries an equal or earlier `start_time` is not discovered by
+a later incremental run. Schedule an overlapping bounded backfill when the
+source permits late arrival; stable IDs and update batches make that replay
+safe.
+
+Each query window reconstructs hierarchy only from rows present in that
+window. If a child arrives after its parent was exported in an earlier window,
+the child is attached to the synthetic root and its original parent ID remains
+in `extra.bqaa.source_parent_run_id`. For sources with long-lived traces,
+prefer filtering for traces that have been quiescent for an appropriate delay
+before export to avoid these cross-window splits.
 
 The v1 connector is one-way and scheduled/batch only. It does not import
 LangSmith data or provide a real-time streaming surface.

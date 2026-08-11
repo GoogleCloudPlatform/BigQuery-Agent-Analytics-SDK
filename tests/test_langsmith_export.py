@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from datetime import date
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from decimal import Decimal
 import json
@@ -31,9 +32,12 @@ import uuid
 import pytest
 
 from bigquery_agent_analytics.export.langsmith import _build_source_query
+from bigquery_agent_analytics.export.langsmith import _canonical_source
 from bigquery_agent_analytics.export.langsmith import _create_langsmith_client
+from bigquery_agent_analytics.export.langsmith import _DroppedRowCollector
 from bigquery_agent_analytics.export.langsmith import _is_retryable
 from bigquery_agent_analytics.export.langsmith import _prepare_trace_runs
+from bigquery_agent_analytics.export.langsmith import _Watermark
 from bigquery_agent_analytics.export.langsmith import export
 from bigquery_agent_analytics.export.langsmith import ExportConfig
 from bigquery_agent_analytics.export.langsmith import FieldMapping
@@ -60,6 +64,44 @@ class _BigQueryClient:
     self.queries: list[tuple[str, Any]] = []
 
   def query(self, sql: str, *, job_config: Any):
+    self.queries.append((sql, job_config))
+    return self.job
+
+
+class _IncrementalBigQueryClient(_BigQueryClient):
+
+  def __init__(self, rows: list[dict[str, Any]]) -> None:
+    super().__init__(rows)
+    self._source_rows = rows
+
+  def query(self, sql: str, *, job_config: Any):
+    parameters = {
+        parameter.name: parameter.value
+        for parameter in job_config.query_parameters
+    }
+    watermark_time = parameters.get("bqaa_watermark_timestamp")
+    if watermark_time is None:
+      selected = self._source_rows
+    else:
+      watermark_trace = parameters["bqaa_watermark_trace_id"]
+      watermark_run = parameters["bqaa_watermark_run_id"]
+
+      def follows_watermark(row: dict[str, Any]) -> bool:
+        timestamp = row.get("timestamp")
+        if not isinstance(timestamp, datetime):
+          return False
+        if timestamp != watermark_time:
+          return timestamp > watermark_time
+        trace_id = row.get("trace_id")
+        if not isinstance(trace_id, str):
+          return False
+        if trace_id != watermark_trace:
+          return trace_id > watermark_trace
+        run_id = row.get("span_id")
+        return isinstance(run_id, str) and run_id > watermark_run
+
+      selected = [row for row in self._source_rows if follows_watermark(row)]
+    self.job = _QueryJob(selected)
     self.queries.append((sql, job_config))
     return self.job
 
@@ -99,8 +141,13 @@ class _StatefulLangSmithClient(_LangSmithClient):
 
   def batch_ingest_runs(self, *, create=None, update=None) -> None:
     super().batch_ingest_runs(create=create, update=update)
-    for run in create or update or []:
-      self.runs[str(run["id"])] = run
+    for run in create or []:
+      self.runs.setdefault(str(run["id"]), dict(run))
+    for run in update or []:
+      run_id = str(run["id"])
+      if run_id not in self.runs:
+        raise AssertionError("cannot update a run before it is created")
+      self.runs[run_id].update(run)
 
 
 class _RetryableError(RuntimeError):
@@ -218,6 +265,89 @@ def test_custom_mapping_treats_payload_as_opaque_and_keeps_unknown_columns() -> 
       "key": "custom-trace",
       "other": "covered column",
   }
+
+
+def test_custom_mapping_does_not_inherit_undeclared_adk_fields() -> None:
+  mapping = FieldMapping.from_dict(
+      {"run_id": "event_key", "trace_id": "trace_key"}
+  )
+  row = {
+      "event_key": "custom-1",
+      "trace_key": "trace-1",
+      "status": "ERROR",
+      "error_message": "domain error, not a trace failure",
+      "latency_ms": 42,
+  }
+
+  run = _prepare_trace_runs(
+      [row], mapping=mapping, source_fingerprint="custom", project_name="p"
+  ).runs[1]
+
+  assert mapping.status is None
+  assert mapping.error is None
+  assert mapping.latency_ms is None
+  assert "error" not in run
+  assert "end_time" not in run
+  assert run["extra"]["metadata"]["status"] == "ERROR"
+  assert run["extra"]["metadata"]["error_message"] == (
+      "domain error, not a trace failure"
+  )
+  assert run["extra"]["metadata"]["latency_ms"] == 42
+
+
+def test_default_mapping_decodes_adk_json_string_content_and_latency() -> None:
+  row = {
+      **_standard_rows()[0],
+      "content": json.dumps({"prompt": "decoded ADK payload"}),
+      "latency_ms": json.dumps({"total_ms": 1250}),
+  }
+
+  run = _prepare_trace_runs(
+      [row],
+      mapping=FieldMapping.standard_adk(),
+      source_fingerprint="source",
+      project_name="p",
+  ).runs[1]
+
+  assert run["inputs"] == {"prompt": "decoded ADK payload"}
+  assert run["end_time"] == _T0.replace(microsecond=0) + timedelta(
+      milliseconds=1250
+  )
+
+
+@pytest.mark.parametrize(
+    ("latency", "expected_end_time"),
+    [
+        (Decimal("12.5"), _T0 + timedelta(milliseconds=12.5)),
+        (True, None),
+    ],
+)
+def test_latency_accepts_decimal_but_not_bool(
+    latency: object, expected_end_time: datetime | None
+) -> None:
+  mapping = FieldMapping.from_dict(
+      {
+          "run_id": "event_key",
+          "trace_id": "trace_key",
+          "start_time": "occurred_at",
+          "latency_ms": "duration_ms",
+      }
+  )
+  run = _prepare_trace_runs(
+      [
+          {
+              "event_key": "custom-1",
+              "trace_key": "trace-1",
+              "occurred_at": _T0,
+              "duration_ms": latency,
+          }
+      ],
+      mapping=mapping,
+      source_fingerprint="custom",
+      project_name="p",
+  ).runs[1]
+
+  assert run.get("end_time") == expected_end_time
 
 
 def test_non_json_bigquery_scalars_use_loss_minimizing_metadata_encoding() -> (
@@ -357,6 +487,73 @@ def test_table_and_sql_sources_are_wrapped_without_rewriting_payloads() -> None:
   assert "CAST(bqaa_source.`odd` AS STRING)" in custom_sql
 
 
+def test_time_filters_cast_string_mapped_timestamps() -> None:
+  sql, _ = _build_source_query(
+      "project.dataset.events",
+      mapping=FieldMapping.from_dict(
+          {
+              "run_id": "event_key",
+              "trace_id": "trace_key",
+              "start_time": "occurred_at",
+          }
+      ),
+      since=_T0,
+      until=_T1,
+      where=None,
+      watermark=None,
+  )
+
+  timestamp = "SAFE_CAST(bqaa_source.`occurred_at` AS TIMESTAMP)"
+  assert f"{timestamp} >= @bqaa_since" in sql
+  assert f"{timestamp} < @bqaa_until" in sql
+  assert (
+      "ORDER BY COALESCE(CAST(bqaa_source.`trace_key` AS STRING), ''), "
+      "COALESCE(SAFE_CAST(bqaa_source.`occurred_at` AS TIMESTAMP), "
+      "TIMESTAMP('1970-01-01T00:00:00+00:00'))" in sql
+  )
+
+
+def test_watermark_query_coalesces_invalid_cursor_components() -> None:
+  mapping = FieldMapping.from_dict(
+      {
+          "run_id": "event_key",
+          "trace_id": "trace_key",
+          "start_time": "occurred_at",
+      }
+  )
+  sql, _ = _build_source_query(
+      "project.dataset.events",
+      mapping=mapping,
+      since=None,
+      until=None,
+      where=None,
+      watermark=_Watermark(datetime(1970, 1, 1, tzinfo=timezone.utc), "", ""),
+  )
+
+  assert (
+      "COALESCE(SAFE_CAST(bqaa_source.`occurred_at` AS TIMESTAMP), "
+      "TIMESTAMP('1970-01-01T00:00:00+00:00')) > "
+      "@bqaa_watermark_timestamp" in sql
+  )
+  assert (
+      "COALESCE(CAST(bqaa_source.`trace_key` AS STRING), '') > "
+      "@bqaa_watermark_trace_id" in sql
+  )
+  assert (
+      "COALESCE(CAST(bqaa_source.`event_key` AS STRING), '') > "
+      "@bqaa_watermark_run_id" in sql
+  )
+
+
+def test_table_source_identity_preserves_case() -> None:
+  upper = _canonical_source("Project.DataSet.Events", None)
+  lower = _canonical_source("project.dataset.events", None)
+
+  assert upper == "table:Project.DataSet.Events"
+  assert lower == "table:project.dataset.events"
+  assert upper != lower
+
+
 @pytest.mark.parametrize(
     "table",
     [
@@ -403,7 +600,7 @@ def test_unsafe_or_invalid_table_ids_are_not_interpolated_as_identifiers(
   assert "SELECT * FROM (" in sql
 
 
-def test_export_batches_upserts_and_reports_rows() -> None:
+def test_export_batches_create_then_update_and_reports_rows() -> None:
   bq = _BigQueryClient(_standard_rows())
   langsmith = _LangSmithClient()
   stats = export(
@@ -421,34 +618,79 @@ def test_export_batches_upserts_and_reports_rows() -> None:
   assert stats.exported == 2
   assert stats.failed == 0
   assert stats.traces_exported == 1
-  assert len(langsmith.calls) == 1
+  assert len(langsmith.calls) == 2
   assert langsmith.calls[0]["create"] is not None
   assert langsmith.calls[0]["update"] is None
+  assert langsmith.calls[1]["create"] is None
+  assert langsmith.calls[1]["update"] is not None
   query_config = bq.queries[0][1]
   assert query_config.labels["sdk_feature"] == "langsmith-export"
 
 
-def test_replaying_window_upserts_without_duplicate_runs() -> None:
+def test_replaying_window_updates_changed_runs_without_duplicates() -> None:
   langsmith = _StatefulLangSmithClient()
   config = ExportConfig(
       langsmith_project="destination", requests_per_second=None
   )
 
+  first_rows = _standard_rows()
   export(
       "project.dataset.agent_events",
       config=config,
-      bq_client=_BigQueryClient(_standard_rows()),
+      bq_client=_BigQueryClient(first_rows),
       langsmith_client=langsmith,
   )
+  replay_rows = _standard_rows()
+  replay_rows[1]["error_message"] = "backfilled failure detail"
+  replay_rows[1]["content"] = {"backfilled": True}
   export(
       "project.dataset.agent_events",
       config=config,
+      bq_client=_BigQueryClient(replay_rows),
+      langsmith_client=langsmith,
+  )
+
+  assert len(langsmith.calls) == 4
+  assert len(langsmith.runs) == 3
+  child = next(
+      run
+      for run in langsmith.runs.values()
+      if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
+      == "span-child"
+  )
+  assert child["error"] == "backfilled failure detail"
+  assert child["inputs"] == {"backfilled": True}
+
+
+def test_surfaced_create_conflict_is_not_retried_and_update_still_runs() -> (
+    None
+):
+  class _ConflictOnCreateClient(_LangSmithClient):
+
+    def __init__(self) -> None:
+      super().__init__()
+      self.create_attempts = 0
+
+    def batch_ingest_runs(self, *, create=None, update=None) -> None:
+      if create is not None:
+        self.create_attempts += 1
+        raise _RetryableError(409)
+      super().batch_ingest_runs(create=create, update=update)
+
+  langsmith = _ConflictOnCreateClient()
+  stats = export(
+      "project.dataset.agent_events",
+      config=ExportConfig(requests_per_second=None),
       bq_client=_BigQueryClient(_standard_rows()),
       langsmith_client=langsmith,
   )
 
-  assert len(langsmith.calls) == 2
-  assert len(langsmith.runs) == 3
+  assert langsmith.create_attempts == 1
+  assert len(langsmith.calls) == 1
+  assert langsmith.calls[0]["create"] is None
+  assert langsmith.calls[0]["update"] is not None
+  assert stats.exported == 2
+  assert stats.failed == 0
 
 
 def test_same_span_id_in_different_traces_gets_distinct_run_ids() -> None:
@@ -503,7 +745,12 @@ def test_synthetic_root_identity_and_order_are_stable_across_windows() -> None:
 
   assert first["id"] == second["id"]
   assert first["dotted_order"] == second["dotted_order"]
-  assert first["start_time"] == second["start_time"]
+  assert first["start_time"] == parent["timestamp"]
+  assert first["end_time"] == parent["timestamp"] + timedelta(milliseconds=1000)
+  assert second["start_time"] == child["timestamp"]
+  assert second["end_time"] == child["timestamp"] + timedelta(milliseconds=25)
+  assert first["start_time"].year != 1970
+  assert second["start_time"].year != 1970
 
 
 def test_incremental_export_persists_and_reuses_watermark(
@@ -548,28 +795,81 @@ def test_incremental_export_persists_and_reuses_watermark(
   assert second.exported == 0
 
 
-def test_skipped_row_blocks_incremental_watermark_advancement(
+def test_skipped_row_is_checkpointed_and_does_not_stall_incremental_sync(
     tmp_path: Path,
 ) -> None:
   valid = _standard_rows()[0]
-  invalid = {**valid, "span_id": None}
+  invalid = {**valid, "timestamp": _T1, "span_id": None}
+  invalid_time = {
+      **valid,
+      "timestamp": "not-a-timestamp",
+      "trace_id": "trace-2",
+      "span_id": "bad-time",
+  }
   watermark_path = tmp_path / "watermark.json"
+  config = ExportConfig(
+      incremental=True,
+      watermark_path=watermark_path,
+      requests_per_second=None,
+  )
+  bq = _IncrementalBigQueryClient([valid, invalid, invalid_time])
 
-  stats = export(
+  first = export(
       "project.dataset.agent_events",
-      config=ExportConfig(
-          incremental=True,
-          watermark_path=watermark_path,
-          requests_per_second=None,
-      ),
-      bq_client=_BigQueryClient([valid, invalid]),
+      config=config,
+      bq_client=bq,
       langsmith_client=_LangSmithClient(),
   )
 
-  assert stats.exported == 1
-  assert stats.skipped == 1
-  assert stats.traces_exported == 0
-  assert not watermark_path.exists()
+  assert first.exported == 2
+  assert first.skipped == 1
+  assert first.traces_exported == 2
+  stored = json.loads(watermark_path.read_text(encoding="utf-8"))
+  assert stored["timestamp"] == _T1.isoformat()
+  assert stored["trace_id"] == "trace-1"
+  assert stored["run_id"] == ""
+
+  second = export(
+      "project.dataset.agent_events",
+      config=config,
+      bq_client=bq,
+      langsmith_client=_LangSmithClient(),
+  )
+
+  assert second.rows_read == 0
+  assert second.watermark == _T1
+  sql, job_config = bq.queries[1]
+  assert "@bqaa_watermark_timestamp" in sql
+  parameters = {item.name: item.value for item in job_config.query_parameters}
+  assert parameters["bqaa_watermark_timestamp"] == _T1
+
+
+def test_incremental_mapping_requires_start_time_before_query(
+    tmp_path: Path,
+) -> None:
+  bq = _BigQueryClient([])
+  langsmith = _LangSmithClient()
+  mapping = FieldMapping.from_dict(
+      {"run_id": "event_key", "trace_id": "trace_key"}
+  )
+
+  with pytest.raises(
+      ValueError, match="incremental export requires a start_time mapping"
+  ):
+    export(
+        "project.dataset.events",
+        config=ExportConfig(
+            mapping=mapping,
+            incremental=True,
+            watermark_path=tmp_path / "watermark.json",
+            requests_per_second=None,
+        ),
+        bq_client=bq,
+        langsmith_client=langsmith,
+    )
+
+  assert bq.queries == []
+  assert langsmith.calls == []
 
 
 def test_watermark_total_order_includes_trace_id(tmp_path: Path) -> None:
@@ -669,7 +969,7 @@ def test_incremental_watermark_rejects_a_different_source(
     )
 
 
-def test_default_client_uses_langsmith_export_surface() -> None:
+def test_default_client_uses_hyphenated_langsmith_export_surface() -> None:
   bq = _BigQueryClient([])
   with patch(
       "bigquery_agent_analytics.export.langsmith.make_bq_client",
@@ -682,7 +982,7 @@ def test_default_client_uses_langsmith_export_surface() -> None:
     )
 
   make_client.assert_called_once_with(
-      "project", location=None, sdk_surface="langsmith_export"
+      "project", location=None, sdk_surface="langsmith-export"
   )
 
 
@@ -690,7 +990,7 @@ def test_batch_size_and_rate_limit_apply_between_api_requests() -> None:
   rows = [_standard_rows()[0]]
   rows.append({**rows[0], "trace_id": "trace-2", "span_id": "span-2"})
   sleeps: list[float] = []
-  clock = iter([0.0, 0.0, 0.5])
+  clock = iter([0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.5])
   with (
       patch(
           "bigquery_agent_analytics.export.langsmith.time.sleep",
@@ -713,7 +1013,7 @@ def test_batch_size_and_rate_limit_apply_between_api_requests() -> None:
     )
 
   assert stats.batches == 2
-  assert sleeps == [0.5]
+  assert sleeps == [0.5, 0.5, 0.5]
 
 
 def test_batch_size_is_hard_limit_for_one_oversized_trace() -> None:
@@ -738,6 +1038,7 @@ def test_batch_size_is_hard_limit_for_one_oversized_trace() -> None:
   source_counts = [
       sum("source_run_id" in run["extra"]["bqaa"] for run in call["create"])
       for call in langsmith.calls
+      if call["create"] is not None
   ]
   assert source_counts == [2, 2, 1]
   assert stats.exported == 5
@@ -770,7 +1071,7 @@ def test_partial_oversized_trace_failure_is_not_counted_or_watermarked(
           requests_per_second=None,
       ),
       bq_client=_BigQueryClient(rows),
-      langsmith_client=_FailOnCallLangSmithClient(call_number=2),
+      langsmith_client=_FailOnCallLangSmithClient(call_number=3),
   )
 
   assert stats.exported == 3
@@ -792,7 +1093,9 @@ def test_cycle_is_broken_below_synthetic_root_without_dropping_rows() -> None:
   )
 
   assert len(prepared.runs) == 3
-  assert set(prepared.source_run_ids) == {"span-root", "span-child"}
+  assert {
+      run["extra"]["bqaa"]["source_run_id"] for run in prepared.runs[1:]
+  } == {"span-root", "span-child"}
 
 
 def test_deep_trace_does_not_depend_on_python_recursion_limit() -> None:
@@ -876,6 +1179,25 @@ def test_dropped_row_details_are_capped_without_losing_totals() -> None:
   assert stats.to_dict()["dropped_rows_truncated"] == 3
 
 
+def test_trace_preparation_uses_shared_bounded_dropped_row_collector() -> None:
+  template = _standard_rows()[0]
+  rows = [{**template, "span_id": None} for _ in range(5)]
+  dropped_rows = _DroppedRowCollector(maximum=2)
+
+  prepared = _prepare_trace_runs(
+      rows,
+      mapping=FieldMapping.standard_adk(),
+      source_fingerprint="source",
+      project_name="p",
+      dropped_rows=dropped_rows,
+  )
+
+  assert prepared.skipped_count == 5
+  assert dropped_rows.total == 5
+  assert len(dropped_rows.rows) == 2
+  assert dropped_rows.truncated == 3
+
+
 def test_invalid_mapping_rejects_missing_identity_fields() -> None:
   with pytest.raises(ValueError, match="run_id"):
     FieldMapping.from_dict({"run_id": None, "trace_id": "trace"})
@@ -899,6 +1221,90 @@ def test_real_client_adapter_resurfaces_sdk_swallowed_ingest_errors() -> None:
     client.batch_ingest_runs(create=[{"id": "run"}])
 
 
+def test_real_langsmith_client_serializes_separate_create_and_update_batches(
+    monkeypatch,
+) -> None:
+  langsmith = pytest.importorskip("langsmith")
+  client = langsmith.Client(
+      api_key="test-key",
+      auto_batch_tracing=False,
+      info={},
+  )
+  request_bodies: list[dict[str, Any]] = []
+
+  def capture_batch(_client, body: bytes, **kwargs) -> None:
+    del _client, kwargs
+    request_bodies.append(json.loads(body))
+
+  monkeypatch.setattr(type(client), "_post_batch_ingest_runs", capture_batch)
+
+  stats = export(
+      "project.dataset.agent_events",
+      config=ExportConfig(requests_per_second=None),
+      bq_client=_BigQueryClient(_standard_rows()),
+      langsmith_client=client,
+  )
+
+  assert stats.exported == 2
+  assert len(request_bodies) == 2
+  assert len(request_bodies[0]["post"]) == 3
+  assert "patch" not in request_bodies[0]
+  assert len(request_bodies[1]["patch"]) == 3
+  assert "post" not in request_bodies[1]
+  child_update = next(
+      run
+      for run in request_bodies[1]["patch"]
+      if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
+      == "span-child"
+  )
+  assert child_update["error"] == "tool failed"
+
+
+def test_real_langsmith_retry_rebuilds_mutated_update_payloads(
+    monkeypatch,
+) -> None:
+  langsmith = pytest.importorskip("langsmith")
+  client = langsmith.Client(
+      api_key="test-key",
+      auto_batch_tracing=False,
+      info={},
+  )
+  patch_bodies: list[dict[str, Any]] = []
+
+  def fail_first_patch(_client, body: bytes, **kwargs) -> None:
+    del _client, kwargs
+    decoded = json.loads(body)
+    if "patch" not in decoded:
+      return
+    patch_bodies.append(decoded)
+    if len(patch_bodies) == 1:
+      raise _RetryableError(429)
+
+  monkeypatch.setattr(type(client), "_post_batch_ingest_runs", fail_first_patch)
+
+  stats = export(
+      "project.dataset.agent_events",
+      config=ExportConfig(
+          requests_per_second=None,
+          max_retries=1,
+          retry_backoff_seconds=0,
+      ),
+      bq_client=_BigQueryClient(_standard_rows()),
+      langsmith_client=client,
+  )
+
+  assert stats.exported == 2
+  assert len(patch_bodies) == 2
+  retried_child = next(
+      run
+      for run in patch_bodies[1]["patch"]
+      if run.get("extra", {}).get("bqaa", {}).get("source_run_id")
+      == "span-child"
+  )
+  assert retried_child["inputs"] == {"value": ["opaque", {"payload": True}]}
+  assert retried_child["error"] == "tool failed"
+
+
 def test_real_langsmith_transient_errors_and_groups_are_retryable() -> None:
   langsmith_utils = pytest.importorskip("langsmith.utils")
   transient = [
@@ -917,3 +1323,5 @@ def test_real_langsmith_transient_errors_and_groups_are_retryable() -> None:
           exceptions=[transient[0], langsmith_utils.LangSmithAuthError("auth")]
       )
   )
+  assert not _is_retryable(langsmith_utils.LangSmithConflictError("conflict"))
+  assert not _is_retryable(_RetryableError(409))

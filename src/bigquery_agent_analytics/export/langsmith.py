@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Iterable, Mapping
+import copy
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
@@ -63,6 +64,20 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MISSING = object()
 _SOURCE_STATUS_ERROR = "[SOURCE_STATUS_ERROR]"
 _WATERMARK_VERSION = 1
+_FIELD_MAPPING_NAMES = (
+    "run_id",
+    "trace_id",
+    "parent_run_id",
+    "name",
+    "run_type",
+    "start_time",
+    "end_time",
+    "latency_ms",
+    "error",
+    "status",
+    "inputs",
+    "outputs",
+)
 
 
 @dataclass(frozen=True)
@@ -70,8 +85,9 @@ class FieldMapping:
   """Source paths used to populate LangSmith run fields.
 
   Paths are tuples of mapping keys. Dotted strings in configuration files are
-  converted to tuples; they are traversed only when the source value is already
-  a mapping. JSON strings are never decoded or inspected.
+  converted to tuples; custom mappings traverse only values that are already
+  mappings. The built-in ADK mapping also accepts JSON columns returned as
+  strings by BigQuery clients.
   """
 
   run_id: tuple[str, ...]
@@ -86,6 +102,9 @@ class FieldMapping:
   status: tuple[str, ...] | None = None
   inputs: tuple[str, ...] | None = None
   outputs: tuple[str, ...] | None = None
+  _decode_standard_adk_json: bool = field(
+      default=False, repr=False, compare=False
+  )
 
   @classmethod
   def standard_adk(cls) -> FieldMapping:
@@ -100,6 +119,7 @@ class FieldMapping:
         error=("error_message",),
         status=("status",),
         inputs=("content",),
+        _decode_standard_adk_json=True,
     )
 
   @classmethod
@@ -111,15 +131,14 @@ class FieldMapping:
         raise ValueError("mapping.fields must be an object")
       values = nested
 
-    defaults = asdict(cls.standard_adk())
-    unknown = set(values) - set(defaults)
+    unknown = set(values) - set(_FIELD_MAPPING_NAMES)
     if unknown:
       raise ValueError(
           "unknown mapping field(s): " + ", ".join(sorted(unknown))
       )
     parsed: dict[str, tuple[str, ...] | None] = {}
-    for name, default in defaults.items():
-      raw = values.get(name, default)
+    for name in _FIELD_MAPPING_NAMES:
+      raw = values.get(name)
       parsed[name] = _parse_path(raw, field_name=name)
     if not parsed["run_id"]:
       raise ValueError("mapping run_id is required")
@@ -137,7 +156,9 @@ class FieldMapping:
 
   def fingerprint(self) -> str:
     """Return a stable fingerprint used to bind incremental state."""
-    payload = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+    mapping = {name: getattr(self, name) for name in _FIELD_MAPPING_NAMES}
+    mapping["_decode_standard_adk_json"] = self._decode_standard_adk_json
+    payload = json.dumps(mapping, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
   def mapped_whole_columns(self) -> frozenset[str]:
@@ -148,7 +169,8 @@ class FieldMapping:
     """
     return frozenset(
         path[0]
-        for name, path in asdict(self).items()
+        for name in _FIELD_MAPPING_NAMES
+        if (path := getattr(self, name)) is not None
         if name != "status" and path is not None and len(path) == 1
     )
 
@@ -257,7 +279,6 @@ class _MappedRow:
   start_time: datetime
   end_time: datetime | None
   error: str | None
-  status: str | None
   inputs: dict[str, Any]
   outputs: dict[str, Any] | None
   metadata: dict[str, Any]
@@ -266,10 +287,7 @@ class _MappedRow:
 @dataclass(frozen=True)
 class _PreparedTrace:
   runs: list[dict[str, Any]]
-  source_run_ids: tuple[str, ...]
-  skipped: tuple[DroppedRow, ...] = ()
   skipped_count: int = 0
-  watermark_candidate: _Watermark | None = None
 
 
 @dataclass
@@ -300,7 +318,6 @@ class _PendingBatch:
 class _TraceProgress:
   remaining_chunks: int
   successful: bool
-  watermark: _Watermark | None
 
 
 @dataclass
@@ -313,13 +330,6 @@ class _DroppedRowCollector:
     self.total += 1
     if len(self.rows) < self.maximum:
       self.rows.append(row)
-
-  def extend(self, rows: Iterable[DroppedRow]) -> None:
-    for row in rows:
-      self.add(row)
-
-  def record_omitted(self, count: int) -> None:
-    self.total += count
 
   @property
   def truncated(self) -> int:
@@ -342,14 +352,29 @@ def _parse_path(value: Any, *, field_name: str) -> tuple[str, ...] | None:
   return path
 
 
-def _path_value(row: Mapping[str, Any], path: tuple[str, ...] | None) -> Any:
+def _path_value(
+    row: Mapping[str, Any],
+    path: tuple[str, ...] | None,
+    *,
+    decode_json: bool = False,
+) -> Any:
   if path is None:
     return _MISSING
   value: Any = row
   for segment in path:
+    if decode_json and isinstance(value, str):
+      try:
+        value = json.loads(value)
+      except (json.JSONDecodeError, TypeError):
+        return _MISSING
     if not isinstance(value, Mapping) or segment not in value:
       return _MISSING
     value = value[segment]
+  if decode_json and isinstance(value, str):
+    try:
+      return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+      pass
   return value
 
 
@@ -433,14 +458,31 @@ def _map_row(
   run_type = _optional_string(row, mapping.run_type) or "chain"
   start_time = _as_datetime(_path_value(row, mapping.start_time)) or _EPOCH
   end_time = _as_datetime(_path_value(row, mapping.end_time))
-  latency = _path_value(row, mapping.latency_ms)
-  if end_time is None and isinstance(latency, (int, float)):
+  latency = _path_value(
+      row,
+      mapping.latency_ms,
+      decode_json=mapping._decode_standard_adk_json,
+  )
+  if (
+      end_time is None
+      and not isinstance(latency, bool)
+      and isinstance(latency, (int, float, Decimal))
+  ):
     end_time = start_time + timedelta(milliseconds=float(latency))
   error = _optional_string(row, mapping.error)
   status = _optional_string(row, mapping.status)
   if not error and status is not None and status.upper() == "ERROR":
     error = _SOURCE_STATUS_ERROR
-  inputs = _as_io(_path_value(row, mapping.inputs)) or {}
+  inputs = (
+      _as_io(
+          _path_value(
+              row,
+              mapping.inputs,
+              decode_json=mapping._decode_standard_adk_json,
+          )
+      )
+      or {}
+  )
   outputs = _as_io(_path_value(row, mapping.outputs))
   metadata = {
       key: _json_compatible(value)
@@ -456,7 +498,6 @@ def _map_row(
       start_time=start_time,
       end_time=end_time,
       error=error,
-      status=status,
       inputs=inputs,
       outputs=outputs,
       metadata=metadata,
@@ -478,7 +519,7 @@ def _prepare_trace_runs(
     mapping: FieldMapping,
     source_fingerprint: str,
     project_name: str,
-    max_dropped_rows: int | None = None,
+    dropped_rows: _DroppedRowCollector | None = None,
 ) -> _PreparedTrace:
   """Map one source trace to a LangSmith run tree.
 
@@ -487,7 +528,6 @@ def _prepare_trace_runs(
   root, including source traces with multiple roots.
   """
   mapped: list[_MappedRow] = []
-  skipped: list[DroppedRow] = []
   skipped_count = 0
   seen: set[tuple[str, str]] = set()
   consumed_columns = mapping.mapped_whole_columns()
@@ -495,8 +535,8 @@ def _prepare_trace_runs(
   def record_skipped(row: DroppedRow) -> None:
     nonlocal skipped_count
     skipped_count += 1
-    if max_dropped_rows is None or len(skipped) < max_dropped_rows:
-      skipped.append(row)
+    if dropped_rows is not None:
+      dropped_rows.add(row)
 
   for index, row in enumerate(rows):
     try:
@@ -513,12 +553,7 @@ def _prepare_trace_runs(
     mapped.append(item)
 
   if not mapped:
-    return _PreparedTrace(
-        runs=[],
-        source_run_ids=(),
-        skipped=tuple(skipped),
-        skipped_count=skipped_count,
-    )
+    return _PreparedTrace(runs=[], skipped_count=skipped_count)
 
   trace_ids = {item.source_trace_id for item in mapped}
   if len(trace_ids) != 1:
@@ -542,11 +577,12 @@ def _prepare_trace_runs(
 
   trace_uuid = _stable_uuid(source_fingerprint, "trace", source_trace_id)
   # The synthetic root may be emitted by multiple overlapping or incremental
-  # windows. A fixed structural timestamp keeps its wire representation and
-  # every descendant's dotted-order prefix stable when a window does not
-  # contain the source trace's first event. Source event timestamps remain
-  # unchanged on their individual runs.
+  # windows. A fixed structural dotted-order segment keeps every descendant's
+  # prefix stable when a window omits the trace's first event. The root's
+  # displayed times below still reflect the current source window.
   root_dotted = _dotted_segment(_EPOCH, trace_uuid)
+  root_start_time = min(item.start_time for item in mapped)
+  root_end_time = max(item.end_time or item.start_time for item in mapped)
   runs: list[dict[str, Any]] = [
       {
           "id": trace_uuid,
@@ -557,8 +593,8 @@ def _prepare_trace_runs(
           "name": "BQAA trace",
           "run_type": "chain",
           "inputs": {},
-          "start_time": _EPOCH,
-          "end_time": _EPOCH,
+          "start_time": root_start_time,
+          "end_time": root_end_time,
           "extra": {
               "metadata": {},
               "bqaa": {"source_trace_id": source_trace_id},
@@ -649,23 +685,9 @@ def _prepare_trace_runs(
     if item.source_run_id not in visited:
       append_component(span, trace_uuid, root_dotted)
 
-  watermark_candidate = max(
-      (
-          _Watermark(
-              item.start_time,
-              item.source_trace_id,
-              item.source_run_id,
-          )
-          for item in mapped
-      ),
-      key=lambda item: (item.timestamp, item.trace_id, item.run_id),
-  )
   return _PreparedTrace(
       runs=runs,
-      source_run_ids=tuple(item.source_run_id for item in mapped),
-      skipped=tuple(skipped),
       skipped_count=skipped_count,
-      watermark_candidate=watermark_candidate,
   )
 
 
@@ -677,6 +699,29 @@ def _sql_path(path: tuple[str, ...] | None, *, field_name: str) -> str:
         f"mapping {field_name} must contain BigQuery identifier segments"
     )
   return "bqaa_source." + ".".join(f"`{segment}`" for segment in path)
+
+
+def _sql_timestamp_path(
+    path: tuple[str, ...] | None, *, field_name: str
+) -> str:
+  return f"SAFE_CAST({_sql_path(path, field_name=field_name)} AS TIMESTAMP)"
+
+
+def _sql_cursor_timestamp_path(
+    path: tuple[str, ...] | None, *, field_name: str
+) -> str:
+  return (
+      f"COALESCE({_sql_timestamp_path(path, field_name=field_name)}, "
+      "TIMESTAMP('1970-01-01T00:00:00+00:00'))"
+  )
+
+
+def _sql_cursor_string_path(
+    path: tuple[str, ...] | None, *, field_name: str
+) -> str:
+  return (
+      f"COALESCE(CAST({_sql_path(path, field_name=field_name)} AS STRING), '')"
+  )
 
 
 def _normalize_sql_source(source: str) -> str:
@@ -705,27 +750,29 @@ def _build_source_query(
   conditions: list[str] = []
   parameters: list[bigquery.ScalarQueryParameter] = []
   if since is not None:
-    timestamp = _sql_path(mapping.start_time, field_name="start_time")
+    timestamp = _sql_timestamp_path(mapping.start_time, field_name="start_time")
     conditions.append(f"{timestamp} >= @bqaa_since")
     parameters.append(
         bigquery.ScalarQueryParameter("bqaa_since", "TIMESTAMP", since)
     )
   if until is not None:
-    timestamp = _sql_path(mapping.start_time, field_name="start_time")
+    timestamp = _sql_timestamp_path(mapping.start_time, field_name="start_time")
     conditions.append(f"{timestamp} < @bqaa_until")
     parameters.append(
         bigquery.ScalarQueryParameter("bqaa_until", "TIMESTAMP", until)
     )
   if watermark is not None:
-    timestamp = _sql_path(mapping.start_time, field_name="start_time")
-    trace_id = _sql_path(mapping.trace_id, field_name="trace_id")
-    run_id = _sql_path(mapping.run_id, field_name="run_id")
+    timestamp = _sql_cursor_timestamp_path(
+        mapping.start_time, field_name="start_time"
+    )
+    trace_id = _sql_cursor_string_path(mapping.trace_id, field_name="trace_id")
+    run_id = _sql_cursor_string_path(mapping.run_id, field_name="run_id")
     conditions.append(
         f"({timestamp} > @bqaa_watermark_timestamp OR "
         f"({timestamp} = @bqaa_watermark_timestamp AND "
-        f"(CAST({trace_id} AS STRING) > @bqaa_watermark_trace_id OR "
-        f"(CAST({trace_id} AS STRING) = @bqaa_watermark_trace_id AND "
-        f"CAST({run_id} AS STRING) > @bqaa_watermark_run_id))))"
+        f"({trace_id} > @bqaa_watermark_trace_id OR "
+        f"({trace_id} = @bqaa_watermark_trace_id AND "
+        f"{run_id} > @bqaa_watermark_run_id))))"
     )
     parameters.extend(
         [
@@ -744,12 +791,12 @@ def _build_source_query(
     conditions.append(f"({where})")
   if conditions:
     sql += "\nWHERE " + " AND ".join(conditions)
-  trace_path = _sql_path(mapping.trace_id, field_name="trace_id")
-  run_path = _sql_path(mapping.run_id, field_name="run_id")
-  ordering = [f"CAST({trace_path} AS STRING)"]
+  ordering = [_sql_cursor_string_path(mapping.trace_id, field_name="trace_id")]
   if mapping.start_time is not None:
-    ordering.append(_sql_path(mapping.start_time, field_name="start_time"))
-  ordering.append(f"CAST({run_path} AS STRING)")
+    ordering.append(
+        _sql_cursor_timestamp_path(mapping.start_time, field_name="start_time")
+    )
+  ordering.append(_sql_cursor_string_path(mapping.run_id, field_name="run_id"))
   sql += "\nORDER BY " + ", ".join(ordering)
   return sql, parameters
 
@@ -759,9 +806,18 @@ def _canonical_source(source: str, source_id: str | None) -> str:
     return source_id
   stripped = source.strip()
   if _TABLE_REFERENCE_RE.fullmatch(stripped):
-    return "table:" + stripped.lower()
+    return "table:" + stripped
   normalized = _normalize_sql_source(stripped)
   return "sql:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _row_watermark(row: Mapping[str, Any], mapping: FieldMapping) -> _Watermark:
+  """Return a total-order cursor even when the row itself is malformed."""
+  return _Watermark(
+      _as_datetime(_path_value(row, mapping.start_time)) or _EPOCH,
+      _optional_string(row, mapping.trace_id) or "",
+      _optional_string(row, mapping.run_id) or "",
+  )
 
 
 def _load_watermark(
@@ -833,6 +889,29 @@ def _save_watermark(
     raise
 
 
+def _is_conflict(exc: Exception) -> bool:
+  nested = getattr(exc, "exceptions", None)
+  if isinstance(nested, (list, tuple)):
+    return bool(nested) and all(
+        isinstance(item, Exception) and _is_conflict(item) for item in nested
+    )
+
+  try:
+    from langsmith import utils as langsmith_utils
+  except ImportError:
+    langsmith_utils = None
+  if langsmith_utils is not None:
+    conflict_type = getattr(langsmith_utils, "LangSmithConflictError", None)
+    if isinstance(conflict_type, type) and isinstance(exc, conflict_type):
+      return True
+
+  status = getattr(exc, "status_code", None)
+  if status is None:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+  return status == 409
+
+
 def _is_retryable(exc: Exception) -> bool:
   nested = getattr(exc, "exceptions", None)
   if isinstance(nested, (list, tuple)):
@@ -849,7 +928,6 @@ def _is_retryable(exc: Exception) -> bool:
         exception_type
         for name in (
             "LangSmithAPIError",
-            "LangSmithConflictError",
             "LangSmithConnectionError",
             "LangSmithRateLimitError",
             "LangSmithRequestTimeout",
@@ -865,7 +943,7 @@ def _is_retryable(exc: Exception) -> bool:
   if status is None:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
-  if status in (408, 409, 425, 429):
+  if status in (408, 425, 429):
     return True
   if isinstance(status, int) and status >= 500:
     return True
@@ -1009,6 +1087,8 @@ def export(
     resolved_mapping = mapping
   else:
     resolved_mapping = FieldMapping.from_dict(mapping)
+  if config.incremental and resolved_mapping.start_time is None:
+    raise ValueError("incremental export requires a start_time mapping")
 
   canonical_source = _canonical_source(source, config.source_id)
   project_name = (
@@ -1043,7 +1123,7 @@ def export(
     bq_client = make_bq_client(
         project,
         location=config.location,
-        sdk_surface="langsmith_export",
+        sdk_surface="langsmith-export",
     )
   job_config = bigquery.QueryJobConfig(query_parameters=parameters)
   job_config = with_sdk_labels(job_config, feature="langsmith-export")
@@ -1060,21 +1140,33 @@ def export(
   failed = 0
   batches = 0
   traces_exported = 0
-  exported_watermark: _Watermark | None = None
+  read_watermark: _Watermark | None = None
   pending = _PendingBatch()
   trace_progress: dict[int, _TraceProgress] = {}
   next_trace_token = 0
 
   def flush() -> None:
     nonlocal exported, failed, batches, traces_exported
-    nonlocal exported_watermark
     if not pending.runs:
       return
     batches += 1
-    batch_runs = list(pending.runs)
     try:
+      try:
+        _call_with_retry(
+            lambda: langsmith_client.batch_ingest_runs(
+                create=copy.deepcopy(pending.runs)
+            ),
+            config=config,
+            limiter=limiter,
+            sleep=time.sleep,
+        )
+      except Exception as exc:
+        if not _is_conflict(exc):
+          raise
       _call_with_retry(
-          lambda: langsmith_client.batch_ingest_runs(create=batch_runs),
+          lambda: langsmith_client.batch_ingest_runs(
+              update=copy.deepcopy(pending.runs)
+          ),
           config=config,
           limiter=limiter,
           sleep=time.sleep,
@@ -1098,9 +1190,6 @@ def export(
       if progress.remaining_chunks == 0:
         if progress.successful:
           traces_exported += 1
-          exported_watermark = _max_watermark(
-              exported_watermark, progress.watermark
-          )
         del trace_progress[token]
     _LOGGER.info(
         "LangSmith export progress: exported=%d skipped=%d failed=%d",
@@ -1113,8 +1202,6 @@ def export(
   def enqueue(trace: _PreparedTrace) -> None:
     nonlocal skipped, next_trace_token
     skipped += trace.skipped_count
-    dropped_rows.extend(trace.skipped)
-    dropped_rows.record_omitted(trace.skipped_count - len(trace.skipped))
     if not trace.runs:
       return
     root = trace.runs[0]
@@ -1122,16 +1209,13 @@ def export(
     source_run_ids = [
         str(run["extra"]["bqaa"]["source_run_id"]) for run in source_runs
     ]
-    if len(source_runs) != len(trace.source_run_ids):
-      raise ValueError("prepared trace run/source accounting is inconsistent")
     source_count = len(source_runs)
     chunk_count = (source_count + config.batch_size - 1) // config.batch_size
     trace_token = next_trace_token
     next_trace_token += 1
     trace_progress[trace_token] = _TraceProgress(
         remaining_chunks=chunk_count,
-        successful=trace.skipped_count == 0,
-        watermark=trace.watermark_candidate,
+        successful=True,
     )
 
     if pending.source_run_ids and (
@@ -1155,6 +1239,10 @@ def export(
     row_index = rows_read
     rows_read += 1
     row = _row_dict(raw_row)
+    if config.incremental:
+      read_watermark = _max_watermark(
+          read_watermark, _row_watermark(row, resolved_mapping)
+      )
     try:
       trace_id = _required_string(row, resolved_mapping.trace_id, "trace_id")
     except ValueError as exc:
@@ -1171,9 +1259,7 @@ def export(
               mapping=resolved_mapping,
               source_fingerprint=canonical_source,
               project_name=project_name,
-              max_dropped_rows=max(
-                  config.max_dropped_rows - len(dropped_rows.rows), 0
-              ),
+              dropped_rows=dropped_rows,
           )
       )
       current_rows = []
@@ -1186,9 +1272,7 @@ def export(
             mapping=resolved_mapping,
             source_fingerprint=canonical_source,
             project_name=project_name,
-            max_dropped_rows=max(
-                config.max_dropped_rows - len(dropped_rows.rows), 0
-            ),
+            dropped_rows=dropped_rows,
         )
     )
   flush()
@@ -1196,13 +1280,8 @@ def export(
   final_watermark = watermark.timestamp if watermark else None
   # Never advance past a failed API batch. Replaying successful rows is safe
   # because IDs are stable, while advancing could permanently skip failures.
-  if (
-      config.incremental
-      and skipped == 0
-      and failed == 0
-      and exported_watermark is not None
-  ):
-    next_watermark = exported_watermark
+  if config.incremental and failed == 0 and read_watermark is not None:
+    next_watermark = read_watermark
     _save_watermark(
         config.watermark_path,
         next_watermark,

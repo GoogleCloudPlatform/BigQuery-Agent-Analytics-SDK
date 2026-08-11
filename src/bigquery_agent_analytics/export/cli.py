@@ -22,7 +22,10 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from google.api_core.exceptions import GoogleAPIError
+from google.auth.exceptions import GoogleAuthError
 import typer
+import yaml
 
 export_app = typer.Typer(
     name="export",
@@ -30,6 +33,17 @@ export_app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+
+
+def _langsmith_error_types() -> tuple[type[Exception], ...]:
+  try:
+    from langsmith import utils as langsmith_utils
+  except ImportError:
+    return ()
+  error_type = getattr(langsmith_utils, "LangSmithError", None)
+  if isinstance(error_type, type) and issubclass(error_type, Exception):
+    return (error_type,)
+  return ()
 
 
 @export_app.callback()
@@ -109,10 +123,10 @@ def export_langsmith(
         100, min=1, help="Maximum source rows per LangSmith batch."
     ),
     requests_per_second: float = typer.Option(
-        5.0, min=0.001, help="Maximum LangSmith API requests per second."
+        5.0, min=0.001, help="Maximum exporter batch calls per second."
     ),
     max_retries: int = typer.Option(
-        3, min=0, help="Retries for transient LangSmith API errors."
+        3, min=0, help="Retries for transient LangSmith batch-call errors."
     ),
     max_dropped_rows: int = typer.Option(
         1000,
@@ -121,11 +135,11 @@ def export_langsmith(
     ),
 ) -> None:
   """Export a BigQuery table or SQL result to LangSmith run trees."""
-  try:
-    from . import export
-    from . import ExportConfig
-    from . import FieldMapping
+  from . import export
+  from . import ExportConfig
+  from . import FieldMapping
 
+  try:
     field_mapping = (
         FieldMapping.from_file(mapping)
         if mapping is not None
@@ -149,12 +163,24 @@ def export_langsmith(
         max_retries=max_retries,
         max_dropped_rows=max_dropped_rows,
     )
-    stats = export(source, config=config)
-    typer.echo(json.dumps(stats.to_dict(), sort_keys=True))
-    if stats.failed or stats.skipped:
-      raise typer.Exit(code=1)
-  except typer.Exit:
-    raise
-  except Exception as exc:
+  except (OSError, ValueError, yaml.YAMLError) as exc:
     typer.echo(f"Error: {exc}", err=True)
     raise typer.Exit(code=2)
+
+  operational_errors = (
+      ImportError,
+      OSError,
+      ValueError,
+      GoogleAPIError,
+      GoogleAuthError,
+      yaml.YAMLError,
+      *_langsmith_error_types(),
+  )
+  try:
+    stats = export(source, config=config)
+  except operational_errors as exc:
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+  typer.echo(json.dumps(stats.to_dict(), sort_keys=True))
+  if stats.failed or stats.skipped:
+    raise typer.Exit(code=1)

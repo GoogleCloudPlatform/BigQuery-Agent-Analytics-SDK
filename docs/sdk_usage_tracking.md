@@ -19,7 +19,7 @@ load job (`LoadJobConfig.labels`) it submits.
 | ------------------ | ------------------------------------------ | ----- |
 | `sdk`              | constant `bigquery-agent-analytics`        | every SDK job |
 | `sdk_version`      | `__version__`, BQ-safe (e.g. `0-4-0`)      | every SDK job |
-| `sdk_surface`      | `python` \| `cli` \| `remote-function` \| `langsmith_export` | every SDK job |
+| `sdk_surface`      | `python` \| `cli` \| `remote-function` \| `langsmith-export` | every SDK job |
 | `sdk_feature`      | `trace-read` \| `eval-code` \| `eval-llm-judge` \| `eval-categorical` \| `insights` \| `drift` \| `memory` \| `context-graph` \| `ontology-build` \| `ontology-gql` \| `views` \| `ai-ml` \| `feedback` \| `langsmith-export` | per-call site |
 | `sdk_ai_function`  | `ai-generate` \| `ai-embed` \| `ai-classify` \| `ai-forecast` \| `ai-detect-anomalies` \| `ml-generate-text` \| `ml-generate-embedding` \| `ml-detect-anomalies` \| `ml-forecast` | AI/ML invocations only |
 

@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import click
+from google.api_core import exceptions as google_exceptions
 import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
@@ -94,6 +95,9 @@ def test_langsmith_export_command_builds_config_and_mapping(
   config = run_export.call_args.kwargs["config"]
   assert source == "project.dataset.events"
   assert config.mapping.run_id == ("event_key",)
+  assert config.mapping.status is None
+  assert config.mapping.error is None
+  assert config.mapping.latency_ms is None
   assert config.project_id == "project"
   assert config.location == "US"
   # The CLI leaves authentication to LangSmith's standard environment
@@ -171,6 +175,73 @@ def test_langsmith_export_rejects_api_key_option() -> None:
   assert result.exit_code != 0
   assert "No such option" in result.stderr
   assert "must-not-enter-argv" not in result.stderr
+
+
+def test_langsmith_export_preserves_typer_datetime_validation() -> None:
+  result = runner.invoke(
+      app,
+      [
+          "export",
+          "langsmith",
+          "--source=project.dataset.events",
+          "--since=not-a-timestamp",
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert "Invalid value" in result.stderr
+  assert "--since must be an ISO-8601 timestamp" in result.stderr
+  assert "Error:" not in result.stderr
+
+
+def test_langsmith_export_does_not_mask_unexpected_programming_errors() -> None:
+  with patch(
+      "bigquery_agent_analytics.export.export",
+      side_effect=RuntimeError("unexpected implementation bug"),
+  ):
+    result = runner.invoke(
+        app,
+        ["export", "langsmith", "--source=project.dataset.events"],
+    )
+
+  assert result.exit_code == 1
+  assert isinstance(result.exception, RuntimeError)
+  assert "Error: unexpected implementation bug" not in result.output
+
+
+def test_langsmith_export_reports_google_operational_errors() -> None:
+  with patch(
+      "bigquery_agent_analytics.export.export",
+      side_effect=google_exceptions.ServiceUnavailable("service unavailable"),
+  ):
+    result = runner.invoke(
+        app,
+        ["export", "langsmith", "--source=project.dataset.events"],
+    )
+
+  assert result.exit_code == 2
+  assert "Error: 503 service unavailable" in result.stderr
+
+
+def test_langsmith_export_reports_malformed_mapping_yaml(
+    tmp_path: Path,
+) -> None:
+  mapping_path = tmp_path / "invalid.yaml"
+  mapping_path.write_text("fields: [", encoding="utf-8")
+
+  result = runner.invoke(
+      app,
+      [
+          "export",
+          "langsmith",
+          "--source=project.dataset.events",
+          f"--mapping={mapping_path}",
+      ],
+  )
+
+  assert result.exit_code == 2
+  assert "Error:" in result.stderr
+  assert result.exception is not None
 
 
 def test_langsmith_export_is_not_added_to_bqaa() -> None:

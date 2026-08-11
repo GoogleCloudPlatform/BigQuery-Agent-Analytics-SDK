@@ -120,14 +120,16 @@ The CLI intentionally accepts the API key only through
 `LANGSMITH_API_KEY`, keeping it out of shell history and process arguments.
 
 The exporter reconstructs span parents, derives stable LangSmith UUIDs, and
-uses batch upserts, so replaying an overlapping window does not duplicate runs.
-For scheduled syncs, add `--incremental --watermark-file=state.json`. The JSON
-summary bounds row-level diagnostics with `--max-dropped-rows` and reports the
-number omitted as `dropped_rows_truncated`.
+uses separate create and update batches, so replaying an overlapping window
+updates existing runs without creating duplicates. For scheduled syncs, add
+`--incremental --watermark-file=state.json`. The JSON summary bounds row-level
+diagnostics with `--max-dropped-rows` and reports the number omitted as
+`dropped_rows_truncated`.
 
 Custom schemas use a YAML mapping from LangSmith fields to source column or
 nested paths. Unmapped columns remain in `extra.metadata`; payload values are
-opaque and are never classified by event type:
+opaque and are never classified by event type. Optional fields omitted from a
+custom mapping remain unmapped rather than inheriting ADK column names:
 
 ```yaml
 fields:
