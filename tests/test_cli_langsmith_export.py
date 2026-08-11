@@ -22,6 +22,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
@@ -146,11 +147,12 @@ def test_langsmith_export_help_is_nested() -> None:
       for parameter in langsmith_command.params
       for option in getattr(parameter, "opts", ())
   }
+  help_text = click.unstyle(result.stdout)
 
   assert result.exit_code == 0
-  assert "--source" in result.stdout
-  assert "--mapping" in result.stdout
-  assert "--incremental" in result.stdout
+  assert "--source" in help_text
+  assert "--mapping" in help_text
+  assert "--incremental" in help_text
   assert "--max-dropped-rows" in option_names
   assert "--langsmith-api-key" not in option_names
 
