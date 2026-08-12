@@ -2293,8 +2293,11 @@ the existing `span_id` / `parent_span_id` hierarchy, and adds one stable
 structural root per trace. Every source event gets a UUID derived from the
 canonical source, trace ID, and run ID. The exporter treats created runs as
 immutable: overlapping backfills are idempotent no-ops for existing run IDs
-while still creating previously unseen IDs. Correcting already-exported data
-requires a fresh LangSmith project or a deliberately versioned `--source-id`.
+while still creating previously unseen IDs. The destination project is not one
+of those UUID inputs, so exporting to a fresh LangSmith project reuses the same
+run IDs and creates nothing: the runs already exist and are immutable, and the
+new project stays empty. Correcting already-exported data therefore requires a
+deliberately versioned `--source-id`.
 
 ### Install and authenticate
 
@@ -2441,8 +2444,9 @@ has advanced but carries an equal or earlier `start_time` is not discovered by
 a later incremental run. Schedule an overlapping bounded backfill when the
 source permits late arrival. Stable IDs make the replay idempotent: previously
 unseen run IDs are created, but existing runs remain unchanged. To correct an
-already-exported run, export to a fresh LangSmith project or use a deliberately
-versioned `--source-id`.
+already-exported run, use a deliberately versioned `--source-id`. Exporting to
+a fresh LangSmith project does not achieve this, because the destination does
+not participate in run ID derivation.
 
 Each query window reconstructs hierarchy only from rows present in that
 window. If a child arrives after its parent was exported in an earlier window,

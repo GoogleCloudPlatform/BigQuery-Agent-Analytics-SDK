@@ -122,11 +122,12 @@ The CLI intentionally accepts the API key only through
 The exporter reconstructs span parents and derives stable LangSmith UUIDs. It
 treats created runs as immutable: replaying an overlapping window is an
 idempotent no-op for existing run IDs while still creating previously unseen
-IDs. To correct already-exported data, use a fresh LangSmith project or a
-deliberately versioned `--source-id`. For scheduled syncs, use `--incremental`
-with `--watermark-file=state.json`. The JSON summary bounds row-level
-diagnostics with `--max-dropped-rows` and reports the number omitted as
-`dropped_rows_truncated`.
+IDs. Run IDs derive from the source identity and not the destination, so
+exporting to a fresh LangSmith project reuses the same IDs and creates nothing.
+To correct already-exported data, use a deliberately versioned `--source-id`.
+For scheduled syncs, use `--incremental` with `--watermark-file=state.json`.
+The JSON summary bounds row-level diagnostics with `--max-dropped-rows` and
+reports the number omitted as `dropped_rows_truncated`.
 
 Custom schemas use a YAML mapping from LangSmith fields to source column or
 nested paths. Unmapped columns remain in `extra.metadata`; payload values are
