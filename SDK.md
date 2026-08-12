@@ -2412,6 +2412,22 @@ bq-agent-sdk export langsmith \
   --max-dropped-rows=1000
 ```
 
+LangSmith Cloud accepts a run only when its `start_time` lies within 24 hours
+of the current time, in either direction. Rows outside that window are rejected
+by the ingest endpoint:
+
+```text
+422 Unprocessable entity: error parsing run: start_time for post must be
+within ±24 hours of current time
+```
+
+The rejection applies per batch, so a backfill over an older window fails every
+row and reports `exported: 0` with a non-zero `failed` count. The bounded
+backfill above is useful for re-running a recent window or for narrowing a
+sync with `--filter`; it cannot import trace history that has aged out. Keep
+`--incremental` on a schedule frequent enough that rows reach LangSmith inside
+the window. Self-hosted LangSmith deployments may enforce a different limit.
+
 For CLI use, `LANGSMITH_API_KEY` is intentionally environment-only so the
 secret does not appear in shell history or process arguments. Python callers
 may still pass `langsmith_api_key` to `ExportConfig` explicitly.

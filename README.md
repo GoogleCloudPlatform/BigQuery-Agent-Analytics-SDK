@@ -129,6 +129,12 @@ For scheduled syncs, use `--incremental` with `--watermark-file=state.json`.
 The JSON summary bounds row-level diagnostics with `--max-dropped-rows` and
 reports the number omitted as `dropped_rows_truncated`.
 
+LangSmith Cloud rejects runs whose `start_time` is more than 24 hours from now,
+so an export covers recent traces rather than aged trace history. Run
+`--incremental` on a schedule frequent enough to stay inside that window. See
+[SDK.md](SDK.md#23-langsmith-export) for the exact error and its effect on
+bounded backfills.
+
 Custom schemas use a YAML mapping from LangSmith fields to source column or
 nested paths. Unmapped columns remain in `extra.metadata`; payload values are
 opaque and are never classified by event type. Optional fields omitted from a
