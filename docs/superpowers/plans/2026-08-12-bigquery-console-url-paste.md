@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Accept only HTTPS URLs on `pantheon.corp.google.com` or `console.cloud.google.com` with exact path `/bigquery`.
-- Require exactly one `ws` parameter and exactly one complete `!1m5!1m4!4m3!1sPROJECT!2sDATASET!3sTABLE` reference.
+- Require exactly one `ws` parameter and at least one complete `!4m3!1sPROJECT!2sDATASET!3sTABLE` reference, all naming the same table (the enclosing group counts vary with Console UI-state fields, so they are not matched).
 - Apply `PROJECT_RE`, `DATASET_RE`, and `TABLE_RE` to URL-derived components before recognizing the URL.
 - Rejected URLs must not fill any other identifier field.
 - Preserve all merged #405 qualified-ID, validation, and fallback behavior.

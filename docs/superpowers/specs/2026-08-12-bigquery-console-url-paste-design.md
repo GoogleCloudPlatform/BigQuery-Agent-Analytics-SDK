@@ -19,8 +19,13 @@ An accepted URL must:
 2. use one of the two exact hostnames above;
 3. use the exact `/bigquery` path;
 4. contain exactly one `ws` query parameter; and
-5. contain exactly one complete decoded
-   `!1m5!1m4!4m3!1sPROJECT!2sDATASET!3sTABLE` table reference in `ws`.
+5. contain at least one complete decoded
+   `!4m3!1sPROJECT!2sDATASET!3sTABLE` table reference in `ws`, with every
+   such reference naming the same table. The group counts that precede the
+   `!4m3` core (for example `!1m5!1m4` or `!1m6!1m5`) vary with UI-state
+   fields the Console appends, such as `!23sRESOURCE_LIST`, so they are not
+   part of the contract. A workspace naming two different tables is
+   ambiguous and is rejected.
 
 `URL` and `URLSearchParams` perform percent-decoding before the workspace
 reference is parsed. The extracted components must satisfy the existing

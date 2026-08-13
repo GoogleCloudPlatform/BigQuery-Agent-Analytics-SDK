@@ -186,11 +186,31 @@ const encodedConsoleTableUrl =
   "https://console.cloud.google.com/bigquery?ws=" +
   "%211m5%211m4%214m3%211shaiyuan-anarres-dev-806843" +
   "%212sbqaa_looker_demo%213sagent_events";
+// The live Console appends UI-state fields such as `!23sRESOURCE_LIST`
+// (clicked table) or `!23sWS_URL_PARAM` (link navigation), which also bump
+// the enclosing group counts from `!1m5!1m4` to `!1m6!1m5`. Captured from a
+// real session on 2026-08-12.
+const clickedTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  "!1m6!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sRESOURCE_LIST";
+const linkNavigationTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  "!1m6!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sWS_URL_PARAM";
+// One table open in two workspace tabs still names a single table.
+const repeatedReferenceTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  workspaceReference +
+  workspaceReference;
 
 for (const url of [
   pantheonTableUrl,
   publicConsoleTableUrl,
   encodedConsoleTableUrl,
+  clickedTableUrl,
+  linkNavigationTableUrl,
+  repeatedReferenceTableUrl,
 ]) {
   assert.deepEqual(
     parseBigQueryConsoleTableUrl(url),
@@ -223,8 +243,15 @@ for (const rejectedUrl of [
     workspaceReference + "&ws=" + workspaceReference,
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  // Two different tables in one workspace are ambiguous.
   "https://console.cloud.google.com/bigquery?ws=" +
-    workspaceReference + workspaceReference,
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!3sother_table",
+  // A dataset view (`!3m2` marker) names no table.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!23sRESOURCE_LIST",
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
   "https://console.cloud.google.com/bigquery?ws=" +
@@ -760,6 +787,7 @@ for (const field of ["project", "dataset", "table"]) {
 for (const [description, consoleUrl] of [
   ["Pantheon", pantheonTableUrl],
   ["public Console", publicConsoleTableUrl],
+  ["clicked-table", clickedTableUrl],
 ]) {
   for (const field of ["project", "dataset", "table"]) {
     resetTableInputs();

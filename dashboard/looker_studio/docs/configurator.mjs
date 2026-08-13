@@ -8,8 +8,11 @@ const BIGQUERY_CONSOLE_HOSTS = new Set([
   "console.cloud.google.com",
   "pantheon.corp.google.com",
 ]);
-const BIGQUERY_WORKSPACE_TABLE_RE =
-  /!1m5!1m4!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)(?=!|$)/g;
+// The `!4m3!1s<project>!2s<dataset>!3s<table>` submessage is the stable core
+// of a Console table reference. The group counts that precede it (for example
+// `!1m5!1m4` or `!1m6!1m5`) vary with UI-state fields the Console appends,
+// such as `!23sRESOURCE_LIST`, so they must not be part of the contract.
+const BIGQUERY_WORKSPACE_TABLE_RE = /!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)/g;
 const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 const VALIDATION_MESSAGES = Object.freeze({
@@ -175,7 +178,19 @@ export function parseBigQueryConsoleTableUrl(value) {
   const matches = [
     ...workspaceValues[0].matchAll(BIGQUERY_WORKSPACE_TABLE_RE),
   ];
-  if (matches.length !== 1) {
+  if (matches.length === 0) {
+    return null;
+  }
+
+  // A workspace URL can reference the same table more than once (for example
+  // one entry per open tab). That is still unambiguous, so collapse the
+  // matches and only reject when they name different tables.
+  const distinctReferences = new Set(
+    matches.map(([, project, dataset, table]) =>
+      [project, dataset, table].join("!"),
+    ),
+  );
+  if (distinctReferences.size !== 1) {
     return null;
   }
 
