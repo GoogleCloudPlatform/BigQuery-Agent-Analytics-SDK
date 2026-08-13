@@ -203,6 +203,13 @@ const repeatedReferenceTableUrl =
   "https://console.cloud.google.com/bigquery?ws=" +
   workspaceReference +
   workspaceReference;
+// A table tab alongside the Console's left-panel group (`!16m3`, not a
+// table or dataset resource). Captured from a real session on 2026-08-12.
+const leftPanelTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  "!1m12!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sWS_URL_PARAM" +
+  "!1m5!16m3!1m1!1shaiyuan-anarres-dev-806843!3e2!23sLEFT_PANEL";
 
 for (const url of [
   pantheonTableUrl,
@@ -211,6 +218,7 @@ for (const url of [
   clickedTableUrl,
   linkNavigationTableUrl,
   repeatedReferenceTableUrl,
+  leftPanelTableUrl,
 ]) {
   assert.deepEqual(
     parseBigQueryConsoleTableUrl(url),
@@ -262,6 +270,8 @@ for (const rejectedUrl of [
   "https://console.cloud.google.com/bigquery?ws=" +
     workspaceReference +
     "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  // So does a workspace truncated exactly at a dangling terminal marker.
+  "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
   // URL-shaped input whose URL constructor throws.
   "https://",
   "https://console.cloud.google.com/bigquery?ws=" +
@@ -852,6 +862,10 @@ for (const rejectedUrl of [
     workspaceReference +
     "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
     "!2sother_dataset!23sRESOURCE_LIST",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
   "https://",
 ]) {
   resetTableInputs();

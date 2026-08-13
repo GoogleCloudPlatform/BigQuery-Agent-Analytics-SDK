@@ -15,7 +15,9 @@ const BIGQUERY_CONSOLE_HOSTS = new Set([
 const BIGQUERY_WORKSPACE_TABLE_RE = /!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)/g;
 // Every table submessage starts with this marker; comparing marker starts to
 // complete matches rejects workspaces holding a truncated table reference.
-const BIGQUERY_WORKSPACE_TABLE_MARKER_RE = /!4m3!/g;
+// The lookahead accepts a following field delimiter or end of string, so a
+// workspace truncated exactly at a dangling `!4m3` still counts as a marker.
+const BIGQUERY_WORKSPACE_TABLE_MARKER_RE = /!4m3(?=!|$)/g;
 // Dataset views encode a `!3m2!1s<project>!2s<dataset>` resource. When one
 // coexists with a table reference the active resource cannot be proved from
 // the undocumented `ws` encoding, so such workspaces are rejected outright.
