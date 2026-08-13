@@ -3,9 +3,12 @@ import { readFileSync, readdirSync } from "node:fs";
 import {
   buildDashboardUrl,
   buildSetupUrl,
-  validateConfiguration,
-  splitQualifiedTableId,
+  parseBigQueryConsoleTableUrl,
   parseQualifiedTableIdForInput,
+  parseTableReference,
+  parseTableReferenceForInput,
+  splitQualifiedTableId,
+  validateConfiguration,
 } from "../docs/configurator.mjs";
 import { REPORT_CONFIG } from "../docs/report-config.mjs";
 
@@ -165,6 +168,142 @@ assert.equal(
   parseQualifiedTableIdForInput("my-project.my_dataset.table@1234"),
   null,
 );
+
+const consoleTableId = {
+  project: "haiyuan-anarres-dev-806843",
+  dataset: "bqaa_looker_demo",
+  table: "agent_events",
+};
+const workspaceReference =
+  "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events";
+const pantheonTableUrl =
+  "https://pantheon.corp.google.com/bigquery?ws=" + workspaceReference;
+const publicConsoleTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  workspaceReference;
+const encodedConsoleTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  "%211m5%211m4%214m3%211shaiyuan-anarres-dev-806843" +
+  "%212sbqaa_looker_demo%213sagent_events";
+// The live Console appends UI-state fields such as `!23sRESOURCE_LIST`
+// (clicked table) or `!23sWS_URL_PARAM` (link navigation), which also bump
+// the enclosing group counts from `!1m5!1m4` to `!1m6!1m5`. Captured from a
+// real session on 2026-08-12.
+const clickedTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  "!1m6!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sRESOURCE_LIST";
+const linkNavigationTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  "!1m6!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sWS_URL_PARAM";
+// One table open in two workspace tabs still names a single table.
+const repeatedReferenceTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  workspaceReference +
+  workspaceReference;
+// Browsers accept the slashless `https:` spelling and canonicalize it to
+// the `://` form, so an allowlisted link keeps working without slashes.
+const slashlessConsoleTableUrl =
+  "https:console.cloud.google.com/bigquery?ws=" + workspaceReference;
+// A table tab alongside the Console's left-panel group (`!16m3`, not a
+// table or dataset resource). Captured from a real session on 2026-08-12.
+const leftPanelTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  "!1m12!1m5!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events!23sWS_URL_PARAM" +
+  "!1m5!16m3!1m1!1shaiyuan-anarres-dev-806843!3e2!23sLEFT_PANEL";
+
+for (const url of [
+  pantheonTableUrl,
+  publicConsoleTableUrl,
+  encodedConsoleTableUrl,
+  clickedTableUrl,
+  linkNavigationTableUrl,
+  repeatedReferenceTableUrl,
+  leftPanelTableUrl,
+  slashlessConsoleTableUrl,
+]) {
+  assert.deepEqual(
+    parseBigQueryConsoleTableUrl(url),
+    consoleTableId,
+    `${url} resolves to the copied BigQuery table`,
+  );
+  assert.deepEqual(
+    parseTableReference(url),
+    consoleTableId,
+    `${url} is accepted by the unified paste parser`,
+  );
+  assert.deepEqual(
+    parseTableReferenceForInput(url),
+    consoleTableId,
+    `${url} is accepted by the committed-input parser`,
+  );
+}
+
+for (const rejectedUrl of [
+  "http://console.cloud.google.com/bigquery?ws=" + workspaceReference,
+  "https://evil.example/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com.evil.example/bigquery?ws=" +
+    workspaceReference,
+  "https://user@console.cloud.google.com/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com:8443/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery/?ws=" + workspaceReference,
+  "https://console.cloud.google.com/not-bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference + "&ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  // Two different tables in one workspace are ambiguous.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!3sother_table",
+  // A dataset view (`!3m2` marker) names no table.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!23sRESOURCE_LIST",
+  // A dataset view alongside a table reference leaves the active resource
+  // unprovable, so the table must not be autofilled.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sother_dataset!23sRESOURCE_LIST",
+  // A truncated second table marker signals malformed workspace state.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  // So does a workspace truncated exactly at a dangling terminal marker.
+  "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
+  // URL-shaped input whose URL constructor throws.
+  "https://",
+  // Slashless HTTP(S) spellings canonicalize to real URLs and must not fall
+  // through to the legacy colon-form normalization.
+  "https:evil.example",
+  "HTTPS:evil.example",
+  "http:evil.example",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbad-dataset!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!3stable$20260812",
+]) {
+  assert.equal(
+    parseBigQueryConsoleTableUrl(rejectedUrl),
+    null,
+    `${rejectedUrl} is rejected without extracting identifiers`,
+  );
+  assert.equal(
+    parseTableReference(rejectedUrl),
+    null,
+    `${rejectedUrl} cannot fall through to qualified-ID parsing`,
+  );
+}
 
 const dashboard = new URL(buildDashboardUrl(values));
 assert.equal(dashboard.origin, "https://lookerstudio.google.com");
@@ -675,6 +814,88 @@ for (const field of ["project", "dataset", "table"]) {
     qualifiedTableId,
     `qualified ID pasted into ${field} fills all identifier fields`,
   );
+}
+
+for (const [description, consoleUrl] of [
+  ["Pantheon", pantheonTableUrl],
+  ["public Console", publicConsoleTableUrl],
+  ["clicked-table", clickedTableUrl],
+]) {
+  for (const field of ["project", "dataset", "table"]) {
+    resetTableInputs();
+
+    assert.equal(
+      pasteIntoProject(field, consoleUrl),
+      true,
+      `${description} URL pasted into ${field} is handled`,
+    );
+    assert.deepEqual(
+      {
+        project: fakeElements.get("#project").value,
+        dataset: fakeElements.get("#dataset").value,
+        table: fakeElements.get("#table").value,
+      },
+      consoleTableId,
+      `${description} URL pasted into ${field} fills all identifier fields`,
+    );
+    assert.equal(
+      fakeElements.get("#form-status").textContent,
+      'Split "haiyuan-anarres-dev-806843.bqaa_looker_demo.agent_events" into the three fields.',
+      `${description} URL reports the extracted table`,
+    );
+    assert.equal(fakeElements.get("#form-status").dataset.kind, "ready");
+  }
+}
+
+resetTableInputs();
+fakeElements.get("#dataset").value = encodedConsoleTableUrl;
+fakeElements.get("#dataset").listeners.change({
+  target: fakeElements.get("#dataset"),
+});
+assert.deepEqual(
+  {
+    project: fakeElements.get("#project").value,
+    dataset: fakeElements.get("#dataset").value,
+    table: fakeElements.get("#table").value,
+  },
+  consoleTableId,
+  "the committed-input fallback recognizes an encoded Console URL",
+);
+
+for (const rejectedUrl of [
+  "https://evil.example/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sother_dataset!23sRESOURCE_LIST",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
+  "https://",
+  "https:evil.example",
+]) {
+  resetTableInputs();
+  assert.equal(
+    pasteIntoProject("dataset", rejectedUrl),
+    false,
+    "a rejected Console URL retains ordinary paste behavior",
+  );
+  assert.equal(fakeElements.get("#project").value, values.project);
+  assert.equal(fakeElements.get("#dataset").value, values.dataset);
+  assert.equal(fakeElements.get("#table").value, values.table);
+
+  // Simulate the browser applying the unintercepted paste to its target.
+  fakeElements.get("#dataset").value = rejectedUrl;
+  fakeElements.get("#dataset").listeners.input({
+    target: fakeElements.get("#dataset"),
+  });
+  assert.equal(fakeElements.get("#project").value, values.project);
+  assert.equal(fakeElements.get("#table").value, values.table);
 }
 
 // #398: clicking the enabled create link sets the provisioning expectation

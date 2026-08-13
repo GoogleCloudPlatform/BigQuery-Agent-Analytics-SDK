@@ -701,6 +701,9 @@ def test_googlecloudplatform_pages_configuration():
   assert 'name="twitter:card"' in page
   assert "Copy security checklist" in page
   assert "billing-project-hint" in page
+  assert (
+      "Paste a fully qualified table ID or BigQuery Console table link" in page
+  )
   assert "Designed for desktop screens at least 1280 px wide" in page
   assert "allow up to 90 seconds" in page
   assert "@media (prefers-color-scheme: dark)" in styles
