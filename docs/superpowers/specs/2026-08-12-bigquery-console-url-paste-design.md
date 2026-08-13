@@ -34,9 +34,11 @@ reference is parsed. The extracted components must satisfy the existing
 `PROJECT_RE`, `DATASET_RE`, and `TABLE_RE` validators.
 
 Foreign hosts, HTTP URLs, unrelated paths, missing or repeated `ws`
-parameters, incomplete or repeated table-reference markers, and invalid
-identifiers are not recognized. An unrecognized URL follows ordinary browser
-paste behavior and never fills the other identifier fields.
+parameters, incomplete table-reference markers, complete references naming
+different tables, and invalid identifiers are not recognized. Repeated
+complete references that all name the same table remain supported, per the
+rules above. An unrecognized URL follows ordinary browser paste behavior and
+never fills the other identifier fields.
 
 ## Code structure
 

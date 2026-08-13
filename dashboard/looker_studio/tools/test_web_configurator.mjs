@@ -203,6 +203,10 @@ const repeatedReferenceTableUrl =
   "https://console.cloud.google.com/bigquery?ws=" +
   workspaceReference +
   workspaceReference;
+// Browsers accept the slashless `https:` spelling and canonicalize it to
+// the `://` form, so an allowlisted link keeps working without slashes.
+const slashlessConsoleTableUrl =
+  "https:console.cloud.google.com/bigquery?ws=" + workspaceReference;
 // A table tab alongside the Console's left-panel group (`!16m3`, not a
 // table or dataset resource). Captured from a real session on 2026-08-12.
 const leftPanelTableUrl =
@@ -219,6 +223,7 @@ for (const url of [
   linkNavigationTableUrl,
   repeatedReferenceTableUrl,
   leftPanelTableUrl,
+  slashlessConsoleTableUrl,
 ]) {
   assert.deepEqual(
     parseBigQueryConsoleTableUrl(url),
