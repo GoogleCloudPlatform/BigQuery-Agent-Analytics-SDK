@@ -14,6 +14,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -573,12 +574,16 @@ def _fake_live_instance(tmp_path, home):
   )
   probe = runner._probe_process(process.pid)
   assert probe is not None
+  # Record the executable exactly as ps reports it: Ubuntu and macOS
+  # canonicalize the bash path differently, and the identity matcher
+  # requires an exact command prefix.
+  reported_exe = probe[1].split(" ", 1)[0]
   (tmp_path / "grafana.pid").write_text(
       json.dumps(
           {
               "pid": process.pid,
               "home": str(home),
-              "exe": "/bin/bash",
+              "exe": reported_exe,
               "start": probe[0],
               "port": 39987,
           }
@@ -674,3 +679,48 @@ def test_cached_extraction_honors_explicit_checksum(tmp_path):
   with pytest.raises(RuntimeError, match="SHA256 mismatch"):
     runner.ensure_grafana(workdir, archive, "0" * 64)
   assert not home.exists()
+
+
+def test_launch_lock_is_exclusive(tmp_path):
+  first = runner.acquire_launch_lock(tmp_path)
+  assert first is not None
+  # A second open file description on the same lock must not acquire it,
+  # even within one process.
+  assert runner.acquire_launch_lock(tmp_path) is None
+  first.close()
+  released = runner.acquire_launch_lock(tmp_path)
+  assert released is not None
+  released.close()
+
+
+def test_concurrent_launches_yield_exactly_one_owner(tmp_path):
+  # The check-then-act race: two contenders that both observe no pidfile
+  # must not both proceed — the flock is taken before the liveness check
+  # and held through publication, so exactly one may own the sequence.
+  # The test-only hold widens the critical section deterministically.
+  env = dict(os.environ, _BQAA_RUN_LOCAL_TEST_HOLD_LOCK="1.5")
+  argv = [
+      sys.executable,
+      str(RUNNER),
+      "--project",
+      "customer-project-123",
+      "--dataset",
+      "agent_analytics",
+      "--provision-only",
+      "--workdir",
+      str(tmp_path),
+  ]
+  first = subprocess.Popen(
+      argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+  )
+  second = subprocess.Popen(
+      argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+  )
+  out_a = first.communicate(timeout=30)
+  out_b = second.communicate(timeout=30)
+  codes = sorted([first.returncode, second.returncode])
+  assert codes == [0, 1], (codes, out_a, out_b)
+  loser_err = out_a[1] if first.returncode == 1 else out_b[1]
+  assert "already in progress" in loser_err
+  # The winner's provisioning exists exactly once and intact.
+  assert (tmp_path / "provisioning" / "datasources" / "bigquery.yaml").exists()

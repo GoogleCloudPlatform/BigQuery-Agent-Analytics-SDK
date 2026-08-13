@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import fcntl
 import hashlib
 import inspect
 import json
@@ -553,6 +554,27 @@ def make_stop_hint(workdir: Path) -> str:
   return hint
 
 
+def acquire_launch_lock(workdir: Path):
+  """Exclusive, non-blocking ownership of the workdir's launch lifecycle.
+
+  live_instance() alone is a check-then-act race: two overlapping launches
+  can both observe no pidfile, and the loser's record overwrite would
+  orphan the winner's Grafana. The flock is taken before the liveness
+  check and held through process launch and pidfile publication, so
+  exactly one contender may own the sequence. Returns the open lock file
+  (keep it referenced until publication is done) or None if another
+  launcher holds it.
+  """
+  workdir.mkdir(parents=True, exist_ok=True)
+  lock_file = open(workdir / "launch.lock", "w")
+  try:
+    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except OSError:
+    lock_file.close()
+    return None
+  return lock_file
+
+
 def live_instance(workdir: Path) -> dict | None:
   """Returns the pidfile record if it still identifies a live launcher-owned
   Grafana; removes a stale pidfile and returns None otherwise.
@@ -574,6 +596,14 @@ def live_instance(workdir: Path) -> dict | None:
 
 
 def stop(workdir: Path) -> int:
+  lock = acquire_launch_lock(workdir)
+  if lock is None:
+    print(
+        "a launch is in progress in this workdir; retry --stop once it"
+        " finishes.",
+        file=sys.stderr,
+    )
+    return 1
   pidfile = workdir / "grafana.pid"
   if not pidfile.exists():
     print(f"nothing to stop (no {pidfile})")
@@ -664,7 +694,20 @@ def main(argv: list[str] | None = None) -> int:
   workdir = args.workdir.resolve()
   if args.stop:
     return stop(workdir)
-  running = live_instance(workdir) if workdir.exists() else None
+  launch_lock = acquire_launch_lock(workdir)
+  if launch_lock is None:
+    print(
+        "another launch is already in progress in this workdir; wait for it"
+        " or use a different --workdir.",
+        file=sys.stderr,
+    )
+    return 1
+  # Test-only seam: lets the concurrency regression widen the race window
+  # deterministically. Has no effect unless the variable is set.
+  test_hold = float(os.environ.get("_BQAA_RUN_LOCAL_TEST_HOLD_LOCK", 0) or 0)
+  if test_hold:
+    time.sleep(test_hold)
+  running = live_instance(workdir)
   if running is not None:
     print(
         f"a launcher-owned grafana is already running from this workdir"
