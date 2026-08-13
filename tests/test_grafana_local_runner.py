@@ -407,3 +407,174 @@ def test_sha256_verification(tmp_path):
   runner.verify_sha256(archive, f"{good}  a.tar.gz\n")
   with pytest.raises(RuntimeError, match="SHA256 mismatch"):
     runner.verify_sha256(archive, "0" * 64)
+
+
+def _tar_with(tmp_path, name, members):
+  import tarfile as tarlib
+
+  archive = tmp_path / name
+  with tarlib.open(archive, "w:gz") as tar:
+    for member_name, kind in members:
+      info = tarlib.TarInfo(member_name)
+      if kind == "dir":
+        info.type = tarlib.DIRTYPE
+        info.mode = 0o755
+        tar.addfile(info)
+      elif kind == "link":
+        info.type = tarlib.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+      else:
+        payload = b"x"
+        info.size = len(payload)
+        info.mode = 0o644
+        import io
+
+        tar.addfile(info, io.BytesIO(payload))
+  return archive
+
+
+def test_fallback_extraction_rejects_traversal(tmp_path):
+  # The pre-3.10.12 code path must never fall back to unrestricted
+  # extractall: a member named ../escaped.txt has to fail loudly and
+  # write nothing outside the destination.
+  import tarfile as tarlib
+
+  archive = _tar_with(tmp_path, "evil.tgz", [("../escaped.txt", "file")])
+  dest = tmp_path / "dest"
+  dest.mkdir()
+  with tarlib.open(archive) as tar:
+    with pytest.raises(RuntimeError, match="escapes the destination"):
+      runner._extract_without_filter(tar, dest)
+  assert not (tmp_path / "escaped.txt").exists()
+
+
+@pytest.mark.parametrize(
+    ("member", "kind", "match"),
+    [
+        ("/abs.txt", "file", "absolute path"),
+        ("link", "link", "regular files and directories"),
+    ],
+)
+def test_fallback_extraction_rejects_unsafe_members(
+    tmp_path, member, kind, match
+):
+  import tarfile as tarlib
+
+  archive = _tar_with(tmp_path, "evil2.tgz", [(member, kind)])
+  dest = tmp_path / "dest2"
+  dest.mkdir()
+  with tarlib.open(archive) as tar:
+    with pytest.raises(RuntimeError, match=match):
+      runner._extract_without_filter(tar, dest)
+
+
+def test_fallback_extraction_allows_benign_archives(tmp_path):
+  import tarfile as tarlib
+
+  archive = _tar_with(
+      tmp_path, "ok.tgz", [("top", "dir"), ("top/bin/file.txt", "file")]
+  )
+  dest = tmp_path / "dest3"
+  dest.mkdir()
+  with tarlib.open(archive) as tar:
+    runner._extract_without_filter(tar, dest)
+  assert (dest / "top" / "bin" / "file.txt").read_bytes() == b"x"
+
+
+def test_stop_identity_rejects_lookalike_and_reused_pids():
+  record = {
+      "pid": 12345,
+      "home": "/work/grafana-home-12.3.0",
+      "exe": "/work/grafana-home-12.3.0/bin/grafana",
+      "start": "Tue Aug 12 09:00:00 2026",
+  }
+  good = (
+      "/work/grafana-home-12.3.0/bin/grafana server --homepath"
+      " /work/grafana-home-12.3.0"
+  )
+  assert runner._identity_matches(record, "Tue Aug 12 09:00:00 2026", good)
+  # An unrelated process that merely mentions the home path as an
+  # argument must never be signalled (the reviewer's sleep repro).
+  lookalike = "python3 -c sleep /work/grafana-home-12.3.0"
+  assert not runner._identity_matches(
+      record, "Tue Aug 12 09:00:00 2026", lookalike
+  )
+  # Same command shape but a different start time means the pid was
+  # recycled into a new process.
+  assert not runner._identity_matches(record, "Tue Aug 12 10:30:00 2026", good)
+  # Prefix-spoofed executables do not match the exact-exe rule.
+  spoofed = good.replace("bin/grafana ", "bin/grafana-evil ")
+  assert not runner._identity_matches(
+      record, "Tue Aug 12 09:00:00 2026", spoofed
+  )
+
+
+def test_stop_never_signals_live_lookalike_process(tmp_path):
+  # End-to-end: a real unrelated process whose argv contains the home
+  # path survives a stop() call against a pidfile pointing at it.
+  home = tmp_path / "grafana-home-12.3.0"
+  victim = subprocess.Popen(
+      [sys.executable, "-c", f"import time; '{home}'; time.sleep(30)"]
+  )
+  try:
+    probe = runner._probe_process(victim.pid)
+    assert probe is not None
+    (tmp_path / "grafana.pid").write_text(
+        json.dumps(
+            {
+                "pid": victim.pid,
+                "home": str(home),
+                "exe": str(home / "bin" / "grafana"),
+                "start": probe[0],
+            }
+        )
+    )
+    assert runner.stop(tmp_path) == 0
+    assert victim.poll() is None, "stop() signalled an unrelated process"
+  finally:
+    victim.kill()
+    victim.wait()
+
+
+def test_plugin_pin_enforced_against_cached_manifests(tmp_path):
+  plugin_dir = tmp_path / runner.PLUGIN_ID
+  plugin_dir.mkdir()
+  assert runner.plugin_needs_install(tmp_path)  # no manifest
+  manifest = plugin_dir / "plugin.json"
+  manifest.write_text(json.dumps({"info": {"version": "0.0.1"}}))
+  assert runner.plugin_needs_install(tmp_path)  # version mismatch
+  manifest.write_text("{corrupt")
+  assert runner.plugin_needs_install(tmp_path)  # unreadable manifest
+  manifest.write_text(json.dumps({"info": {"version": runner.PLUGIN_VERSION}}))
+  assert not runner.plugin_needs_install(tmp_path)
+
+
+def test_cached_extraction_honors_explicit_checksum(tmp_path):
+  # Build a tiny valid "grafana" archive.
+  import io
+  import tarfile as tarlib
+
+  archive = tmp_path / "grafana.tgz"
+  with tarlib.open(archive, "w:gz") as tar:
+    info = tarlib.TarInfo("grafana-x/bin/grafana")
+    payload = b"#!/bin/sh\n"
+    info.size = len(payload)
+    tar.addfile(info, io.BytesIO(payload))
+  good = runner.sha256_of(archive)
+
+  workdir = tmp_path / "work"
+  workdir.mkdir()
+  home = runner.ensure_grafana(workdir, archive, good)
+  assert (home / "bin" / "grafana").exists()
+  provenance = json.loads((home / ".provenance.json").read_text())
+  assert provenance["sha256"] == good
+
+  # Reuse with the matching hash: same home, no rebuild needed.
+  assert runner.ensure_grafana(workdir, archive, good) == home
+  # A cached home must not satisfy a DIFFERENT explicit hash: the stale
+  # extraction is discarded and the archive re-verified — here the
+  # mismatch fails closed before anything is reused.
+  with pytest.raises(RuntimeError, match="SHA256 mismatch"):
+    runner.ensure_grafana(workdir, archive, "0" * 64)
+  assert not home.exists()

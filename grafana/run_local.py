@@ -351,13 +351,53 @@ def verify_sha256(archive: Path, expected: str) -> None:
     )
 
 
+def _validated_members(tar: tarfile.TarFile, dest: Path) -> list:
+  """Containment-checked member list for interpreters without tar filters.
+
+  Mirrors the intent of the stdlib "data" filter: only regular files and
+  directories, no absolute paths, no `..` traversal, no links, no special
+  files. Anything else is rejected loudly rather than skipped, so a
+  tampered archive cannot partially extract.
+  """
+  dest = dest.resolve()
+  safe = []
+  for member in tar.getmembers():
+    if not (member.isreg() or member.isdir()):
+      raise RuntimeError(
+          f"refusing to extract {member.name!r}: only regular files and"
+          " directories are allowed."
+      )
+    name = member.name
+    if name.startswith(("/", "\\")) or (len(name) > 1 and name[1] == ":"):
+      raise RuntimeError(f"refusing to extract absolute path {name!r}.")
+    target = (dest / name).resolve()
+    if dest != target and dest not in target.parents:
+      raise RuntimeError(
+          f"refusing to extract {name!r}: it escapes the destination."
+      )
+    safe.append(member)
+  return safe
+
+
+def _extract_without_filter(tar: tarfile.TarFile, dest: Path) -> None:
+  members = _validated_members(tar, dest)
+  if "filter" in inspect.signature(tar.extractall).parameters:
+    # Belt and braces where the stdlib filter exists (this path still runs
+    # under tests on modern interpreters); legacy interpreters rely on the
+    # explicit validation above.
+    tar.extractall(dest, members=members, filter="data")
+  else:
+    tar.extractall(dest, members=members)
+
+
 def _extractall(tar: tarfile.TarFile, dest: Path) -> None:
   # The "data" filter exists on 3.12+ and the 3.10.12/3.11.4 security
-  # backports; older 3.10/3.11 patch releases lack the parameter.
+  # backports; older supported patch releases fall back to an explicit
+  # containment check — never to unrestricted extraction.
   if "filter" in inspect.signature(tar.extractall).parameters:
     tar.extractall(dest, filter="data")
   else:
-    tar.extractall(dest)  # pre-backport interpreter; no filter available
+    _extract_without_filter(tar, dest)
 
 
 def ensure_grafana(
@@ -368,10 +408,26 @@ def ensure_grafana(
   Downloads are verified against the .sha256 published alongside the
   release tarball (integrity against corruption/truncation; it shares the
   origin, so pass --grafana-sha256 for an independently pinned hash).
+  A verified extraction records its archive hash in .provenance.json; an
+  explicitly supplied hash is always honored — a cached extraction whose
+  provenance disagrees is discarded and rebuilt, never silently reused.
   """
   extracted = workdir / f"grafana-home-{GRAFANA_VERSION}"
+  provenance_file = extracted / ".provenance.json"
   if (extracted / "bin").is_dir():
-    return extracted
+    if archive_sha256 is None:
+      return extracted
+    expected = archive_sha256.strip().split()[0].lower()
+    recorded = None
+    if provenance_file.exists():
+      recorded = json.loads(provenance_file.read_text()).get("sha256")
+    if recorded == expected:
+      return extracted
+    print(
+        f"cached extraction provenance ({recorded}) does not match the"
+        f" requested SHA256 ({expected}); rebuilding from the archive."
+    )
+    shutil.rmtree(extracted)
   if archive is None:
     dist = pick_dist()
     archive = workdir / f"grafana-{GRAFANA_VERSION}.{dist}.tar.gz"
@@ -407,12 +463,37 @@ def ensure_grafana(
     raise RuntimeError(f"unexpected archive layout: {roots}")
   roots[0].rename(extracted)
   staging.rmdir()
+  provenance_file.write_text(
+      json.dumps({"sha256": sha256_of(archive), "source": str(archive)})
+  )
   return extracted
 
 
+def plugin_needs_install(plugins_dir: Path) -> bool:
+  """True unless a cached plugin manifest matches the pinned version.
+
+  A cached directory with a different (or unreadable) manifest would
+  silently bypass the version pin across reruns, so mismatches are
+  reinstalled rather than trusted.
+  """
+  manifest = plugins_dir / PLUGIN_ID / "plugin.json"
+  if not manifest.exists():
+    return True
+  try:
+    version = json.loads(manifest.read_text())["info"]["version"]
+  except (ValueError, KeyError, TypeError):
+    return True
+  return version != PLUGIN_VERSION
+
+
 def install_plugin(home: Path, plugins_dir: Path) -> None:
-  if (plugins_dir / PLUGIN_ID / "plugin.json").exists():
+  if not plugin_needs_install(plugins_dir):
     return
+  cached = plugins_dir / PLUGIN_ID
+  if cached.exists():
+    print(f"cached plugin does not match the {PLUGIN_VERSION} pin;"
+          " reinstalling.")
+    shutil.rmtree(cached)
   subprocess.run(
       build_plugin_install_command(home, plugins_dir), check=True, cwd=home
   )
@@ -433,17 +514,36 @@ def maybe_create_views(
     )
 
 
-def _pid_matches_home(pid: int, home_marker: str) -> bool:
+def _probe_process(pid: int) -> tuple | None:
+  """Returns (start_time, command) for a live pid, or None."""
   try:
     listing = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "command="],
+        ["ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
         capture_output=True,
         text=True,
         check=True,
-    ).stdout
+    ).stdout.strip()
   except subprocess.CalledProcessError:
+    return None
+  if not listing:
+    return None
+  # lstart is a fixed-width 24-char timestamp ("Tue Aug 12 09:00:00 2026").
+  return listing[:24].strip(), listing[24:].strip()
+
+
+def _identity_matches(record: dict, start: str, command: str) -> bool:
+  """Strong launch identity: exact executable, homepath arg, start time.
+
+  A substring check alone would let --stop signal any process that merely
+  mentions the home path in an argument, and PID reuse would defeat a
+  command-only check — the start time recorded at launch guards that.
+  """
+  expected_exe = record["exe"]
+  if not (command == expected_exe or command.startswith(expected_exe + " ")):
     return False
-  return home_marker in listing
+  if f"--homepath {record['home']}" not in command:
+    return False
+  return start == record["start"]
 
 
 def stop(workdir: Path) -> int:
@@ -452,18 +552,23 @@ def stop(workdir: Path) -> int:
     print(f"nothing to stop (no {pidfile})")
     return 0
   record = json.loads(pidfile.read_text())
-  pid, home = int(record["pid"]), record["home"]
-  if not _pid_matches_home(pid, home):
+  pid = int(record["pid"])
+
+  def matches() -> bool:
+    probe = _probe_process(pid)
+    return probe is not None and _identity_matches(record, *probe)
+
+  if not matches():
     print(
-        f"pid {pid} is not this launcher's grafana anymore (stale pidfile);"
-        " not sending any signal."
+        f"pid {pid} is not this launcher's grafana anymore (stale pidfile"
+        " or reused pid); not sending any signal."
     )
     pidfile.unlink()
     return 0
   os.kill(pid, signal.SIGTERM)
   deadline = time.monotonic() + 15
   while time.monotonic() < deadline:
-    if not _pid_matches_home(pid, home):
+    if not matches():
       print(f"stopped grafana (pid {pid})")
       pidfile.unlink()
       return 0
@@ -627,8 +732,14 @@ def main(argv: list[str] | None = None) -> int:
         stdout=log_handle,
         stderr=log_handle,
     )
+  probe = _probe_process(process.pid)
   (workdir / "grafana.pid").write_text(
-      json.dumps({"pid": process.pid, "home": str(home)})
+      json.dumps({
+          "pid": process.pid,
+          "home": str(home),
+          "exe": str(home / "bin" / "grafana"),
+          "start": probe[0] if probe else "",
+      })
   )
 
   deadline = time.monotonic() + 90
