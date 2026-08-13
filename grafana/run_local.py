@@ -519,7 +519,10 @@ def _probe_process(pid: int) -> tuple | None:
   """Returns (start_time, command) for a live pid, or None."""
   try:
     listing = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
+        # -ww: unlimited width on both procps and BSD ps — without it,
+        # Linux truncates the command at ~80 columns, cutting long
+        # --homepath values and making live instances look stale.
+        ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
         capture_output=True,
         text=True,
         check=True,
