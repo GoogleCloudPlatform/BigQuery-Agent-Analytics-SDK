@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import * as configurator from "../docs/configurator.mjs";
 import {
   buildDashboardUrl,
   buildSetupUrl,
-  validateConfiguration,
-  splitQualifiedTableId,
+  parseBigQueryConsoleTableUrl,
   parseQualifiedTableIdForInput,
+  parseTableReference,
+  parseTableReferenceForInput,
+  splitQualifiedTableId,
+  validateConfiguration,
 } from "../docs/configurator.mjs";
 import { REPORT_CONFIG } from "../docs/report-config.mjs";
 
@@ -117,24 +119,6 @@ const qualifiedTableId = {
   table: "my_table",
 };
 
-assert.equal(
-  typeof configurator.parseBigQueryConsoleTableUrl,
-  "function",
-  "the configurator exports a pure BigQuery Console URL parser",
-);
-
-assert.equal(
-  typeof configurator.parseTableReference,
-  "function",
-  "the configurator exports a unified paste parser",
-);
-
-assert.equal(
-  typeof configurator.parseTableReferenceForInput,
-  "function",
-  "the configurator exports a validated committed-input parser",
-);
-
 assert.deepEqual(
   splitQualifiedTableId("my-project.my_dataset.my_table"),
   qualifiedTableId,
@@ -209,17 +193,17 @@ for (const url of [
   encodedConsoleTableUrl,
 ]) {
   assert.deepEqual(
-    configurator.parseBigQueryConsoleTableUrl(url),
+    parseBigQueryConsoleTableUrl(url),
     consoleTableId,
     `${url} resolves to the copied BigQuery table`,
   );
   assert.deepEqual(
-    configurator.parseTableReference(url),
+    parseTableReference(url),
     consoleTableId,
     `${url} is accepted by the unified paste parser`,
   );
   assert.deepEqual(
-    configurator.parseTableReferenceForInput(url),
+    parseTableReferenceForInput(url),
     consoleTableId,
     `${url} is accepted by the committed-input parser`,
   );
@@ -251,12 +235,12 @@ for (const rejectedUrl of [
     "!2sbqaa_looker_demo!3stable$20260812",
 ]) {
   assert.equal(
-    configurator.parseBigQueryConsoleTableUrl(rejectedUrl),
+    parseBigQueryConsoleTableUrl(rejectedUrl),
     null,
     `${rejectedUrl} is rejected without extracting identifiers`,
   );
   assert.equal(
-    configurator.parseTableReference(rejectedUrl),
+    parseTableReference(rejectedUrl),
     null,
     `${rejectedUrl} cannot fall through to qualified-ID parsing`,
   );
