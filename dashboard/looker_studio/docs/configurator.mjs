@@ -4,6 +4,14 @@ export const PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 export const DATASET_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
 export const TABLE_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$/;
 
+const BIGQUERY_CONSOLE_HOSTS = new Set([
+  "console.cloud.google.com",
+  "pantheon.corp.google.com",
+]);
+const BIGQUERY_WORKSPACE_TABLE_RE =
+  /!1m5!1m4!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)(?=!|$)/g;
+const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
 const VALIDATION_MESSAGES = Object.freeze({
   project:
     "Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.",
@@ -125,17 +133,66 @@ export function splitQualifiedTableId(value) {
 export function parseQualifiedTableIdForInput(value) {
   const parsed = splitQualifiedTableId(value);
 
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
+}
+
+function hasValidTableIdentifiers(parsed) {
   if (!parsed) {
+    return false;
+  }
+
+  return (
+    PROJECT_RE.test(parsed.project) &&
+    DATASET_RE.test(parsed.dataset) &&
+    TABLE_RE.test(parsed.table)
+  );
+}
+
+export function parseBigQueryConsoleTableUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value ?? "").trim());
+  } catch {
     return null;
   }
 
   if (
-    !PROJECT_RE.test(parsed.project) ||
-    !DATASET_RE.test(parsed.dataset) ||
-    !TABLE_RE.test(parsed.table)
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !BIGQUERY_CONSOLE_HOSTS.has(url.hostname) ||
+    url.pathname !== "/bigquery"
   ) {
     return null;
   }
 
-  return parsed;
+  const workspaceValues = url.searchParams.getAll("ws");
+  if (workspaceValues.length !== 1) {
+    return null;
+  }
+
+  const matches = [
+    ...workspaceValues[0].matchAll(BIGQUERY_WORKSPACE_TABLE_RE),
+  ];
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  const [, project, dataset, table] = matches[0];
+  const parsed = { project, dataset, table };
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
+}
+
+export function parseTableReference(value) {
+  const normalized = String(value ?? "").trim();
+  if (ABSOLUTE_URL_RE.test(normalized)) {
+    return parseBigQueryConsoleTableUrl(normalized);
+  }
+  return splitQualifiedTableId(normalized);
+}
+
+export function parseTableReferenceForInput(value) {
+  const parsed = parseTableReference(value);
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
+import * as configurator from "../docs/configurator.mjs";
 import {
   buildDashboardUrl,
   buildSetupUrl,
@@ -116,6 +117,24 @@ const qualifiedTableId = {
   table: "my_table",
 };
 
+assert.equal(
+  typeof configurator.parseBigQueryConsoleTableUrl,
+  "function",
+  "the configurator exports a pure BigQuery Console URL parser",
+);
+
+assert.equal(
+  typeof configurator.parseTableReference,
+  "function",
+  "the configurator exports a unified paste parser",
+);
+
+assert.equal(
+  typeof configurator.parseTableReferenceForInput,
+  "function",
+  "the configurator exports a validated committed-input parser",
+);
+
 assert.deepEqual(
   splitQualifiedTableId("my-project.my_dataset.my_table"),
   qualifiedTableId,
@@ -165,6 +184,83 @@ assert.equal(
   parseQualifiedTableIdForInput("my-project.my_dataset.table@1234"),
   null,
 );
+
+const consoleTableId = {
+  project: "haiyuan-anarres-dev-806843",
+  dataset: "bqaa_looker_demo",
+  table: "agent_events",
+};
+const workspaceReference =
+  "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+  "!2sbqaa_looker_demo!3sagent_events";
+const pantheonTableUrl =
+  "https://pantheon.corp.google.com/bigquery?ws=" + workspaceReference;
+const publicConsoleTableUrl =
+  "https://console.cloud.google.com/bigquery?project=another-project&ws=" +
+  workspaceReference;
+const encodedConsoleTableUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  "%211m5%211m4%214m3%211shaiyuan-anarres-dev-806843" +
+  "%212sbqaa_looker_demo%213sagent_events";
+
+for (const url of [
+  pantheonTableUrl,
+  publicConsoleTableUrl,
+  encodedConsoleTableUrl,
+]) {
+  assert.deepEqual(
+    configurator.parseBigQueryConsoleTableUrl(url),
+    consoleTableId,
+    `${url} resolves to the copied BigQuery table`,
+  );
+  assert.deepEqual(
+    configurator.parseTableReference(url),
+    consoleTableId,
+    `${url} is accepted by the unified paste parser`,
+  );
+  assert.deepEqual(
+    configurator.parseTableReferenceForInput(url),
+    consoleTableId,
+    `${url} is accepted by the committed-input parser`,
+  );
+}
+
+for (const rejectedUrl of [
+  "http://console.cloud.google.com/bigquery?ws=" + workspaceReference,
+  "https://evil.example/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com.evil.example/bigquery?ws=" +
+    workspaceReference,
+  "https://user@console.cloud.google.com/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com:8443/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery/?ws=" + workspaceReference,
+  "https://console.cloud.google.com/not-bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference + "&ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference + workspaceReference,
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbad-dataset!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!3stable$20260812",
+]) {
+  assert.equal(
+    configurator.parseBigQueryConsoleTableUrl(rejectedUrl),
+    null,
+    `${rejectedUrl} is rejected without extracting identifiers`,
+  );
+  assert.equal(
+    configurator.parseTableReference(rejectedUrl),
+    null,
+    `${rejectedUrl} cannot fall through to qualified-ID parsing`,
+  );
+}
 
 const dashboard = new URL(buildDashboardUrl(values));
 assert.equal(dashboard.origin, "https://lookerstudio.google.com");
