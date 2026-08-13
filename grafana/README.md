@@ -29,14 +29,20 @@ On macOS or Linux with `gcloud auth application-default login` already run:
 python3 grafana/run_local.py --project YOUR_PROJECT --dataset YOUR_DATASET
 ```
 
-That downloads a pinned Grafana (cached after the first run), installs the
-BigQuery plugin, provisions the datasource against your Application Default
-Credentials (no service-account key needed for local evaluation), fills in
-all six dashboard constants, creates the `adk_*` views when `bq-agent-sdk`
-is on PATH, and prints the dashboard URL. `--sa-key key.json` switches to
-the JWT auth documented below; `--stop` tears it down; everything generated
-lives in the disposable, gitignored `grafana/.local/`. Production setups
-should still follow the full steps below with a scoped service account.
+That downloads a pinned Grafana (cached and checksum-verified after the
+first run), installs the pinned BigQuery plugin, provisions the datasource
+against your Application Default Credentials (no service-account key needed
+for local evaluation), fills in all six dashboard constants, creates the
+prefixed views when `bq-agent-sdk` is on PATH, and prints the dashboard
+URL. The instance binds to **127.0.0.1 only**, and the generated datasource
+keeps the example file's **100 MB per-query `MaxBytesBilled` cap**
+(`--max-bytes-billed` to change it). Datasets outside the `US` multi-region
+work by default — the job location is selected automatically; pass
+`--processing-location EU` (or a region) to pin it. `--sa-key key.json`
+switches to the JWT auth documented below and writes the credential file
+with `0600` permissions; `--stop` tears it down; everything generated lives
+in the disposable, gitignored `grafana/.local/`. Production setups should
+still follow the full steps below with a scoped service account.
 
 > **Known pitfalls if you run Grafana your own way instead:**
 > the current plugin requires **Grafana ≥ 11.6.11** (its

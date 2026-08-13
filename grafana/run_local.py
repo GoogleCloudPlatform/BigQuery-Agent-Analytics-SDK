@@ -17,13 +17,13 @@
     python3 grafana/run_local.py --project MY_PROJECT --dataset MY_DATASET
 
 does everything the manual setup chain in grafana/README.md does: downloads
-a pinned Grafana, installs the BigQuery datasource plugin, provisions the
-datasource (Application Default Credentials by default, --sa-key for the
+a pinned Grafana, installs the pinned BigQuery datasource plugin, provisions
+the datasource (Application Default Credentials by default, --sa-key for the
 documented JWT path), writes a copy of bqaa-dashboard.json with the six
-constant variables filled in, and launches with the plugin preinstaller
-disabled. `--stop` tears it down. Everything generated lives under
-grafana/.local/ and is disposable; the committed dashboard and example
-files are never modified.
+constant variables filled in, and launches bound to 127.0.0.1 with the
+plugin preinstaller disabled. `--stop` tears it down. Everything generated
+lives under grafana/.local/ and is disposable; the committed dashboard and
+example files are never modified.
 
 Requires only the Python standard library. Views (`adk_*`) are created via
 `bq-agent-sdk views create-all` when that CLI is on PATH; otherwise the
@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -53,11 +55,17 @@ import urllib.request
 # grafanaDependency ">=11.6.11-0 <12 || >=12.0.10-0 <12.1 || ...
 # || >=12.2.5-0". A stock 11.6.0 fails with an opaque
 # "react/jsx-runtime 404" (issue #421); this pin satisfies the
-# unbounded ">=12.2.5-0" range.
+# unbounded ">=12.2.5-0" range. The plugin version is pinned too so a
+# future plugin release cannot silently raise the floor above this
+# Grafana pin and reintroduce the same failure.
 GRAFANA_VERSION = "12.3.0"
 PLUGIN_ID = "grafana-bigquery-datasource"
+PLUGIN_VERSION = "3.3.1"
 DASHBOARD_UID = "bqaa-dashboard"
 DATASOURCE_UID = "bqaa-bigquery"
+# Matches grafana/datasource.example.yaml: a per-query BigQuery cost cap of
+# 100 MB billed. The key spelling is significant (see the example file).
+DEFAULT_MAX_BYTES_BILLED = "100000000"
 
 # Identifier rules mirror dashboard/looker_studio/tools/hydrate_dashboard.py
 # (the repository's source of truth for BigQuery identifier hygiene).
@@ -65,10 +73,14 @@ PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 DATASET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,1023}$")
 TABLE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$")
 VIEW_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# BigQuery locations: multi-regions ("US", "EU") or regions
+# ("us-central1", "asia-northeast1").
+LOCATION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,31}$")
 # The two price constants are interpolated into panel arithmetic
 # (grafana/README.md warns a Textbox there is an injection risk), so only a
-# strict decimal literal is accepted.
+# strict decimal literal is accepted. Same reasoning for the bytes cap.
 PRICE_RE = re.compile(r"^\d{1,9}(\.\d{1,9})?$")
+BYTES_RE = re.compile(r"^[1-9]\d{0,17}$")
 
 CONSTANT_VARIABLES = (
     "project",
@@ -96,6 +108,16 @@ def require_price(label: str, value: str) -> str:
     raise ValueError(
         f"{label} {value!r} must be a plain decimal like 1.25 (it is"
         " interpolated into panel arithmetic; see grafana/README.md)."
+    )
+  return value
+
+
+def require_max_bytes(value: str) -> str:
+  value = str(value).strip()
+  if not BYTES_RE.fullmatch(value):
+    raise ValueError(
+        f"max bytes billed {value!r} must be a positive integer (bytes);"
+        " to run uncapped, edit the generated datasource YAML deliberately."
     )
   return value
 
@@ -147,7 +169,10 @@ def load_service_account_key(path: Path) -> dict:
 
 
 def render_datasource_yaml(
-    default_project: str, sa_key: dict | None = None
+    default_project: str,
+    sa_key: dict | None = None,
+    processing_location: str | None = None,
+    max_bytes_billed: str = DEFAULT_MAX_BYTES_BILLED,
 ) -> str:
   """Provisioning YAML for the BigQuery datasource.
 
@@ -156,6 +181,11 @@ def render_datasource_yaml(
   service-account key needed for local evaluation. With a key: the JWT path
   documented in grafana/README.md, with the private key as a real YAML
   block scalar (never literal \\n escapes).
+
+  `processingLocation` is omitted by default so the plugin selects the job
+  location automatically; hard-coding a multi-region breaks datasets that
+  live anywhere else. `MaxBytesBilled` preserves the per-query cost cap
+  from grafana/datasource.example.yaml.
   """
   header = (
       "apiVersion: 1\n"
@@ -167,11 +197,18 @@ def render_datasource_yaml(
       "    isDefault: true\n"
       "    jsonData:\n"
   )
+  location_line = (
+      f"      processingLocation: {processing_location}\n"
+      if processing_location
+      else ""
+  )
+  guard_line = f"      MaxBytesBilled: {max_bytes_billed}\n"
   if sa_key is None:
     return header + (
         "      authenticationType: gce\n"
         f"      defaultProject: {default_project}\n"
-        "      processingLocation: US\n"
+        + location_line
+        + guard_line
     )
   private_key = "".join(
       f"        {line}\n" for line in sa_key["private_key"].splitlines()
@@ -181,8 +218,9 @@ def render_datasource_yaml(
       f"      clientEmail: {sa_key['client_email']}\n"
       f"      defaultProject: {default_project}\n"
       f"      tokenUri: {sa_key['token_uri']}\n"
-      "      processingLocation: US\n"
-      "    secureJsonData:\n"
+      + location_line
+      + guard_line
+      + "    secureJsonData:\n"
       "      privateKey: |\n"
       f"{private_key}"
   )
@@ -197,6 +235,79 @@ def render_dashboards_yaml(dashboards_dir: Path) -> str:
       "    options:\n"
       f"      path: {dashboards_dir}\n"
   )
+
+
+def write_private(path: Path, text: str) -> None:
+  """Writes a credential-bearing file atomically with mode 0600.
+
+  The parent directory is tightened to 0700 first so no window exists in
+  which another local account can list or read the provisioning secrets
+  (the JWT path copies a service-account private key into this file).
+  """
+  os.chmod(path.parent, 0o700)
+  tmp = path.with_suffix(path.suffix + ".tmp")
+  descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+  try:
+    with os.fdopen(descriptor, "w") as handle:
+      handle.write(text)
+  except Exception:
+    tmp.unlink(missing_ok=True)
+    raise
+  os.replace(tmp, path)
+
+
+def launch_env(workdir: Path, provisioning: Path, port: int) -> dict:
+  """Environment for the Grafana process. Pure, so tests can pin it.
+
+  GF_SERVER_HTTP_ADDR is 127.0.0.1: Grafana's default (empty) http_addr
+  binds every interface, which would expose an admin/admin instance backed
+  by the operator's own credentials to the local network.
+  GF_PLUGINS_PREINSTALL_DISABLED avoids the failed-preinstall import-map
+  poisoning that breaks all plugin loading (issue #421).
+  """
+  return dict(
+      os.environ,
+      GF_PATHS_DATA=str(workdir / "data"),
+      GF_PATHS_PLUGINS=str(workdir / "plugins"),
+      GF_PATHS_PROVISIONING=str(provisioning),
+      GF_SERVER_HTTP_ADDR="127.0.0.1",
+      GF_SERVER_HTTP_PORT=str(port),
+      GF_ANALYTICS_REPORTING_ENABLED="false",
+      GF_PLUGINS_PREINSTALL_DISABLED="true",
+  )
+
+
+def build_views_command(
+    project: str, dataset: str, table: str, prefix: str
+) -> list:
+  return [
+      "bq-agent-sdk",
+      "views",
+      "create-all",
+      "--project-id",
+      project,
+      "--dataset-id",
+      dataset,
+      "--table-id",
+      table,
+      "--prefix",
+      prefix,
+  ]
+
+
+def build_plugin_install_command(home: Path, plugins_dir: Path) -> list:
+  return [
+      str(home / "bin" / "grafana"),
+      "cli",
+      "--homepath",
+      str(home),
+      "--pluginsDir",
+      str(plugins_dir),
+      "plugins",
+      "install",
+      PLUGIN_ID,
+      PLUGIN_VERSION,
+  ]
 
 
 def pick_dist(system: str | None = None, machine: str | None = None) -> str:
@@ -222,31 +333,75 @@ def port_free(port: int) -> bool:
     return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
-def ensure_grafana(workdir: Path, archive: Path | None) -> Path:
-  """Downloads (or reuses) and extracts the pinned Grafana; returns homepath."""
+def sha256_of(path: Path) -> str:
+  digest = hashlib.sha256()
+  with open(path, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+      digest.update(chunk)
+  return digest.hexdigest()
+
+
+def verify_sha256(archive: Path, expected: str) -> None:
+  expected = expected.strip().split()[0].lower()
+  actual = sha256_of(archive)
+  if actual != expected:
+    raise RuntimeError(
+        f"SHA256 mismatch for {archive}: expected {expected}, got {actual};"
+        " delete the file and retry."
+    )
+
+
+def _extractall(tar: tarfile.TarFile, dest: Path) -> None:
+  # The "data" filter exists on 3.12+ and the 3.10.12/3.11.4 security
+  # backports; older 3.10/3.11 patch releases lack the parameter.
+  if "filter" in inspect.signature(tar.extractall).parameters:
+    tar.extractall(dest, filter="data")
+  else:
+    tar.extractall(dest)  # pre-backport interpreter; no filter available
+
+
+def ensure_grafana(
+    workdir: Path, archive: Path | None, archive_sha256: str | None = None
+) -> Path:
+  """Downloads (or reuses) and extracts the pinned Grafana; returns homepath.
+
+  Downloads are verified against the .sha256 published alongside the
+  release tarball (integrity against corruption/truncation; it shares the
+  origin, so pass --grafana-sha256 for an independently pinned hash).
+  """
   extracted = workdir / f"grafana-home-{GRAFANA_VERSION}"
   if (extracted / "bin").is_dir():
     return extracted
   if archive is None:
     dist = pick_dist()
     archive = workdir / f"grafana-{GRAFANA_VERSION}.{dist}.tar.gz"
+    url = (
+        "https://dl.grafana.com/oss/release/"
+        f"grafana-{GRAFANA_VERSION}.{dist}.tar.gz"
+    )
     if not archive.exists():
-      url = (
-          "https://dl.grafana.com/oss/release/"
-          f"grafana-{GRAFANA_VERSION}.{dist}.tar.gz"
-      )
       print(f"downloading {url} (~250 MB, cached for next time)")
       with urllib.request.urlopen(url) as response:
         partial = archive.with_suffix(".partial")
         with open(partial, "wb") as out:
           shutil.copyfileobj(response, out)
         partial.rename(archive)
+    if archive_sha256 is None:
+      with urllib.request.urlopen(url + ".sha256") as response:
+        archive_sha256 = response.read().decode()
+  if archive_sha256:
+    verify_sha256(archive, archive_sha256)
+  else:
+    print(
+        f"note: no checksum given for {archive}; pass --grafana-sha256 to"
+        " verify a locally supplied archive."
+    )
   staging = workdir / "extract-staging"
   if staging.exists():
     shutil.rmtree(staging)
   staging.mkdir(parents=True)
   with tarfile.open(archive) as tar:
-    tar.extractall(staging, filter="data")
+    _extractall(tar, staging)
   roots = [p for p in staging.iterdir() if p.is_dir()]
   if len(roots) != 1:
     raise RuntimeError(f"unexpected archive layout: {roots}")
@@ -259,43 +414,36 @@ def install_plugin(home: Path, plugins_dir: Path) -> None:
   if (plugins_dir / PLUGIN_ID / "plugin.json").exists():
     return
   subprocess.run(
-      [
-          str(home / "bin" / "grafana"),
-          "cli",
-          "--homepath",
-          str(home),
-          "--pluginsDir",
-          str(plugins_dir),
-          "plugins",
-          "install",
-          PLUGIN_ID,
-      ],
-      check=True,
-      cwd=home,
+      build_plugin_install_command(home, plugins_dir), check=True, cwd=home
   )
 
 
-def maybe_create_views(project: str, dataset: str, table: str) -> None:
-  command = [
-      "bq-agent-sdk",
-      "views",
-      "create-all",
-      "--project-id",
-      project,
-      "--dataset-id",
-      dataset,
-      "--table-id",
-      table,
-  ]
+def maybe_create_views(
+    project: str, dataset: str, table: str, prefix: str
+) -> None:
+  command = build_views_command(project, dataset, table, prefix)
   if shutil.which("bq-agent-sdk"):
-    print("creating adk_* views (idempotent):", " ".join(command))
+    print("creating typed views (idempotent):", " ".join(command))
     subprocess.run(command, check=True)
   else:
     print(
-        "bq-agent-sdk not on PATH — the dashboard reads adk_* views, so"
+        "bq-agent-sdk not on PATH — the dashboard reads prefixed views, so"
         " before expecting data run:\n  pip install"
         " bigquery-agent-analytics && " + " ".join(command)
     )
+
+
+def _pid_matches_home(pid: int, home_marker: str) -> bool:
+  try:
+    listing = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+  except subprocess.CalledProcessError:
+    return False
+  return home_marker in listing
 
 
 def stop(workdir: Path) -> int:
@@ -303,14 +451,25 @@ def stop(workdir: Path) -> int:
   if not pidfile.exists():
     print(f"nothing to stop (no {pidfile})")
     return 0
-  pid = int(pidfile.read_text().strip())
-  try:
-    os.kill(pid, signal.SIGTERM)
-    print(f"stopped grafana (pid {pid})")
-  except ProcessLookupError:
-    print(f"grafana (pid {pid}) was not running")
-  pidfile.unlink()
-  return 0
+  record = json.loads(pidfile.read_text())
+  pid, home = int(record["pid"]), record["home"]
+  if not _pid_matches_home(pid, home):
+    print(
+        f"pid {pid} is not this launcher's grafana anymore (stale pidfile);"
+        " not sending any signal."
+    )
+    pidfile.unlink()
+    return 0
+  os.kill(pid, signal.SIGTERM)
+  deadline = time.monotonic() + 15
+  while time.monotonic() < deadline:
+    if not _pid_matches_home(pid, home):
+      print(f"stopped grafana (pid {pid})")
+      pidfile.unlink()
+      return 0
+    time.sleep(0.5)
+  print(f"grafana (pid {pid}) did not exit within 15s", file=sys.stderr)
+  return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -325,6 +484,17 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--output-price", default="5.00")
   parser.add_argument("--port", type=int, default=3000)
   parser.add_argument(
+      "--processing-location",
+      help="BigQuery job location (e.g. EU, us-central1); default lets the"
+      " plugin select automatically",
+  )
+  parser.add_argument(
+      "--max-bytes-billed",
+      default=DEFAULT_MAX_BYTES_BILLED,
+      help="per-query BigQuery cost cap in bytes (default 100000000, matching"
+      " grafana/datasource.example.yaml)",
+  )
+  parser.add_argument(
       "--sa-key",
       type=Path,
       help="service-account key JSON for the documented JWT auth path;"
@@ -334,6 +504,11 @@ def main(argv: list[str] | None = None) -> int:
       "--grafana-archive",
       type=Path,
       help="reuse a local grafana tarball instead of downloading",
+  )
+  parser.add_argument(
+      "--grafana-sha256",
+      help="expected SHA256 of the grafana archive (downloads verify against"
+      " the published .sha256 automatically)",
   )
   parser.add_argument(
       "--time-from", help="dashboard default range start (ISO), e.g. for demos"
@@ -359,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
     return stop(workdir)
   if not args.project or not args.dataset:
     parser.error("--project and --dataset are required (except with --stop)")
+  if bool(args.time_from) != bool(args.time_to):
+    parser.error("--time-from and --time-to must be given together")
 
   try:
     constants = {
@@ -375,6 +552,14 @@ def main(argv: list[str] | None = None) -> int:
             "output price", args.output_price
         ),
     }
+    location = (
+        require_identifier(
+            "processing location", args.processing_location, LOCATION_RE
+        )
+        if args.processing_location
+        else None
+    )
+    max_bytes = require_max_bytes(args.max_bytes_billed)
   except ValueError as error:
     parser.error(str(error))
 
@@ -386,8 +571,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.mkdir(parents=True, exist_ok=True)
 
   sa_key = load_service_account_key(args.sa_key) if args.sa_key else None
-  datasource_yaml = render_datasource_yaml(constants["project"], sa_key)
-  (provisioning / "datasources" / "bigquery.yaml").write_text(datasource_yaml)
+  datasource_yaml = render_datasource_yaml(
+      constants["project"],
+      sa_key,
+      processing_location=location,
+      max_bytes_billed=max_bytes,
+  )
+  write_private(
+      provisioning / "datasources" / "bigquery.yaml", datasource_yaml
+  )
   (provisioning / "dashboards" / "bqaa.yaml").write_text(
       render_dashboards_yaml(dashboards_dir)
   )
@@ -416,23 +608,16 @@ def main(argv: list[str] | None = None) -> int:
 
   if not args.skip_views:
     maybe_create_views(
-        constants["project"], constants["dataset"], constants["table"]
+        constants["project"],
+        constants["dataset"],
+        constants["table"],
+        constants["view_prefix"],
     )
 
-  home = ensure_grafana(workdir, args.grafana_archive)
+  home = ensure_grafana(workdir, args.grafana_archive, args.grafana_sha256)
   install_plugin(home, workdir / "plugins")
 
-  env = dict(
-      os.environ,
-      GF_PATHS_DATA=str(workdir / "data"),
-      GF_PATHS_PLUGINS=str(workdir / "plugins"),
-      GF_PATHS_PROVISIONING=str(provisioning),
-      GF_SERVER_HTTP_PORT=str(args.port),
-      GF_ANALYTICS_REPORTING_ENABLED="false",
-      # A failed background preinstall can break ALL plugin frontend
-      # loading with an opaque react/jsx-runtime 404 (issue #421).
-      GF_PLUGINS_PREINSTALL_DISABLED="true",
-  )
+  env = launch_env(workdir, provisioning, args.port)
   log = workdir / "grafana.log"
   with open(log, "ab") as log_handle:
     process = subprocess.Popen(
@@ -442,10 +627,12 @@ def main(argv: list[str] | None = None) -> int:
         stdout=log_handle,
         stderr=log_handle,
     )
-  (workdir / "grafana.pid").write_text(str(process.pid))
+  (workdir / "grafana.pid").write_text(
+      json.dumps({"pid": process.pid, "home": str(home)})
+  )
 
   deadline = time.monotonic() + 90
-  url = f"http://localhost:{args.port}"
+  url = f"http://127.0.0.1:{args.port}"
   while time.monotonic() < deadline:
     if process.poll() is not None:
       print(f"grafana exited early; see {log}", file=sys.stderr)
@@ -461,12 +648,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"grafana did not become healthy in 90s; see {log}", file=sys.stderr)
     return 1
 
+  stop_hint = f"python3 {Path(__file__).name} --stop"
+  if workdir != (Path(__file__).parent / ".local").resolve():
+    stop_hint += f" --workdir {workdir}"
   print(
-      f"\nGrafana is up: {url}/d/{DASHBOARD_UID}\n"
+      f"\nGrafana is up (bound to 127.0.0.1 only): {url}/d/{DASHBOARD_UID}\n"
       "  login: admin / admin (fresh instance; it will offer a password"
       " change)\n"
       "  panels query on first view; allow a few seconds per row.\n"
-      f"  stop with: python3 {Path(__file__).name} --stop\n"
+      f"  stop with: {stop_hint}\n"
   )
   return 0
 

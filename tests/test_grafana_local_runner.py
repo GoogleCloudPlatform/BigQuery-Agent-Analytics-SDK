@@ -260,3 +260,150 @@ def test_rejects_bad_identifiers_before_writing(tmp_path):
   )
   assert result.returncode != 0
   assert not (tmp_path / "provisioning").exists()
+
+
+def test_launch_env_binds_loopback_and_disables_preinstall(tmp_path):
+  env = runner.launch_env(tmp_path, tmp_path / "provisioning", 3123)
+  # An empty http_addr binds every interface, exposing an admin/admin
+  # instance backed by the operator's own credentials to the network.
+  assert env["GF_SERVER_HTTP_ADDR"] == "127.0.0.1"
+  assert env["GF_SERVER_HTTP_PORT"] == "3123"
+  assert env["GF_PLUGINS_PREINSTALL_DISABLED"] == "true"
+  assert env["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
+
+
+def test_views_command_forwards_the_validated_prefix():
+  assert runner.build_views_command(
+      "customer-project-123", "agent_analytics", "agent_events", "custom_"
+  ) == [
+      "bq-agent-sdk",
+      "views",
+      "create-all",
+      "--project-id",
+      "customer-project-123",
+      "--dataset-id",
+      "agent_analytics",
+      "--table-id",
+      "agent_events",
+      "--prefix",
+      "custom_",
+  ]
+
+
+def test_plugin_install_command_pins_the_version(tmp_path):
+  command = runner.build_plugin_install_command(tmp_path, tmp_path / "p")
+  assert command[-2:] == [runner.PLUGIN_ID, runner.PLUGIN_VERSION]
+  assert runner.PLUGIN_VERSION == "3.3.1"
+
+
+def test_datasource_yaml_keeps_the_cost_guard_in_both_shapes(tmp_path):
+  adc = runner.render_datasource_yaml("customer-project-123")
+  assert f"MaxBytesBilled: {runner.DEFAULT_MAX_BYTES_BILLED}" in adc
+  key_path = tmp_path / "key.json"
+  key_path.write_text(
+      json.dumps(
+          {
+              "client_email": "g@example.com",
+              "private_key": "-----BEGIN PRIVATE KEY-----\nA\n-----END-----\n",
+              "token_uri": "https://oauth2.example.com/token",
+          }
+      )
+  )
+  jwt = runner.render_datasource_yaml(
+      "customer-project-123",
+      runner.load_service_account_key(key_path),
+      max_bytes_billed="42000000",
+  )
+  assert "MaxBytesBilled: 42000000" in jwt
+  # The cap must sit under jsonData, before the secure block.
+  assert jwt.index("MaxBytesBilled") < jwt.index("secureJsonData")
+
+
+def test_datasource_yaml_omits_processing_location_by_default():
+  # Hard-coding a multi-region breaks any dataset outside it; the plugin
+  # selects the job location automatically when the field is absent.
+  rendered = runner.render_datasource_yaml("customer-project-123")
+  assert "processingLocation" not in rendered
+  explicit = runner.render_datasource_yaml(
+      "customer-project-123", processing_location="EU"
+  )
+  assert "processingLocation: EU" in explicit
+
+
+@pytest.mark.parametrize("value", ["100000000", "1", "42000000"])
+def test_max_bytes_accepted(value):
+  assert runner.require_max_bytes(value) == value
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1e6", "abc", "", "1.5"])
+def test_max_bytes_rejected(value):
+  with pytest.raises(ValueError):
+    runner.require_max_bytes(value)
+
+
+def test_one_sided_time_flags_are_rejected(tmp_path):
+  result = subprocess.run(
+      [
+          sys.executable,
+          str(RUNNER),
+          "--project",
+          "customer-project-123",
+          "--dataset",
+          "agent_analytics",
+          "--time-from",
+          "2026-06-15T00:00:00Z",
+          "--provision-only",
+          "--workdir",
+          str(tmp_path),
+      ],
+      capture_output=True,
+      text=True,
+  )
+  assert result.returncode != 0
+  assert "must be given together" in result.stderr
+
+
+def test_jwt_provisioning_file_is_private(tmp_path):
+  key_path = tmp_path / "key.json"
+  key_path.write_text(
+      json.dumps(
+          {
+              "client_email": "g@example.com",
+              "private_key": "-----BEGIN PRIVATE KEY-----\nA\n-----END-----\n",
+              "token_uri": "https://oauth2.example.com/token",
+          }
+      )
+  )
+  workdir = tmp_path / "work"
+  subprocess.run(
+      [
+          sys.executable,
+          str(RUNNER),
+          "--project",
+          "customer-project-123",
+          "--dataset",
+          "agent_analytics",
+          "--sa-key",
+          str(key_path),
+          "--provision-only",
+          "--workdir",
+          str(workdir),
+      ],
+      capture_output=True,
+      text=True,
+      check=True,
+  )
+  datasource = workdir / "provisioning" / "datasources" / "bigquery.yaml"
+  assert (datasource.stat().st_mode & 0o777) == 0o600
+  assert (datasource.parent.stat().st_mode & 0o777) == 0o700
+  assert not datasource.with_suffix(".yaml.tmp").exists()
+
+
+def test_sha256_verification(tmp_path):
+  archive = tmp_path / "a.tar.gz"
+  archive.write_bytes(b"grafana bytes")
+  good = runner.sha256_of(archive)
+  runner.verify_sha256(archive, good)
+  runner.verify_sha256(archive, f"{good}  a.tar.gz\n")
+  with pytest.raises(RuntimeError, match="SHA256 mismatch"):
+    runner.verify_sha256(archive, "0" * 64)
