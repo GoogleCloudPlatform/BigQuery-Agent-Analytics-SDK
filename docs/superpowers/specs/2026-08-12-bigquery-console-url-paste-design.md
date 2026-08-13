@@ -25,7 +25,9 @@ An accepted URL must:
    `!4m3` core (for example `!1m5!1m4` or `!1m6!1m5`) vary with UI-state
    fields the Console appends, such as `!23sRESOURCE_LIST`, so they are not
    part of the contract. A workspace naming two different tables is
-   ambiguous and is rejected.
+   ambiguous and is rejected, as is one holding a truncated `!4m3` table
+   marker or a coexisting `!3m2` dataset-view resource — in either case
+   the active selection cannot be proved from the undocumented encoding.
 
 `URL` and `URLSearchParams` perform percent-decoding before the workspace
 reference is parsed. The extracted components must satisfy the existing

@@ -13,6 +13,13 @@ const BIGQUERY_CONSOLE_HOSTS = new Set([
 // `!1m5!1m4` or `!1m6!1m5`) vary with UI-state fields the Console appends,
 // such as `!23sRESOURCE_LIST`, so they must not be part of the contract.
 const BIGQUERY_WORKSPACE_TABLE_RE = /!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)/g;
+// Every table submessage starts with this marker; comparing marker starts to
+// complete matches rejects workspaces holding a truncated table reference.
+const BIGQUERY_WORKSPACE_TABLE_MARKER_RE = /!4m3!/g;
+// Dataset views encode a `!3m2!1s<project>!2s<dataset>` resource. When one
+// coexists with a table reference the active resource cannot be proved from
+// the undocumented `ws` encoding, so such workspaces are rejected outright.
+const BIGQUERY_WORKSPACE_DATASET_RE = /!3m2!1s[^!]+!2s[^!]+/;
 const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 const VALIDATION_MESSAGES = Object.freeze({
@@ -175,10 +182,18 @@ export function parseBigQueryConsoleTableUrl(value) {
     return null;
   }
 
-  const matches = [
-    ...workspaceValues[0].matchAll(BIGQUERY_WORKSPACE_TABLE_RE),
-  ];
+  const workspace = workspaceValues[0];
+  const matches = [...workspace.matchAll(BIGQUERY_WORKSPACE_TABLE_RE)];
   if (matches.length === 0) {
+    return null;
+  }
+
+  const markerStarts = workspace.match(BIGQUERY_WORKSPACE_TABLE_MARKER_RE);
+  if ((markerStarts?.length ?? 0) !== matches.length) {
+    return null;
+  }
+
+  if (BIGQUERY_WORKSPACE_DATASET_RE.test(workspace)) {
     return null;
   }
 

@@ -252,6 +252,18 @@ for (const rejectedUrl of [
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
     "!2sbqaa_looker_demo!23sRESOURCE_LIST",
+  // A dataset view alongside a table reference leaves the active resource
+  // unprovable, so the table must not be autofilled.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sother_dataset!23sRESOURCE_LIST",
+  // A truncated second table marker signals malformed workspace state.
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  // URL-shaped input whose URL constructor throws.
+  "https://",
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
   "https://console.cloud.google.com/bigquery?ws=" +
@@ -836,6 +848,11 @@ for (const rejectedUrl of [
     "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
+    "!2sother_dataset!23sRESOURCE_LIST",
+  "https://",
 ]) {
   resetTableInputs();
   assert.equal(
