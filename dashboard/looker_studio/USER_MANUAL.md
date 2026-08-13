@@ -7,9 +7,9 @@ the rest of this repository. If you want to change or validate the dashboard
 itself, see the [contributor README](README.md) instead.
 
 **What you get:** your own copy of an 8-page Looker Studio dashboard — token
-consumption, sessions, tool usage, LLM calls, user analytics, latency, errors,
-and a trace inspector — built on the `agent_events` table your agents already
-write. Your copy is private, reads your data with your credentials, and bills
+consumption, sessions, tool usage, LLM calls, user analytics, latency, tool
+errors, and a trace inspector — built on the `agent_events` table your agents
+already write. Your copy is private, reads your data with your credentials, and bills
 your project. Setting it up takes about five minutes.
 
 ---
@@ -98,17 +98,24 @@ In Looker Studio:
    until every step below is done.
 3. Open **Resource → Manage added data sources → Edit**.
 4. Set **Data credentials** to **Viewer**.
-5. Before sharing widely, **test the report with an account that has only
-   viewer access** — it should see charts only if that account can read the
-   BigQuery table.
+5. Before sharing widely, run **both** of these tests:
+   - Share with an account that has **no access to the BigQuery table**. It
+     must see errors or empty charts, **not data**. If it sees data, the
+     report is still on Owner's credentials — go back to step 4.
+   - Share with an account that **should** have access (table read plus
+     permission to run BigQuery jobs in the billing project — the same two
+     permissions from [Before you start](#before-you-start)). It must render
+     charts.
 
 Step 4 is the one that matters most: with Viewer's credentials, every person
-you share the report with sees data only if *they* can read the underlying
-BigQuery table. With Owner's credentials (which the creation dialog may
-default to), everyone you share with would see the data using **your**
-access. Step 5 is how you prove it worked. The configurator page has a
-**Copy security checklist** button with these same five steps, ready to paste
-into a handoff note.
+you share the report with sees data only through *their own* BigQuery access.
+With Owner's credentials (which the creation dialog may default to), everyone
+you share with would see the data using **your** access — which is exactly why
+a viewer test that shows data can be a *failure*, not a success. Step 5's two
+checks prove both halves: no-access accounts are locked out, authorized
+viewers get charts. The configurator page has a **Copy security checklist**
+button with a compact version of these steps, ready to paste into a handoff
+note.
 
 That's it — you now have your own dashboard.
 
@@ -126,7 +133,7 @@ That's it — you now have your own dashboard.
 | **LLM Interactions** | How many model calls, and how are they trending? |
 | **User Analytics** | Who uses the agents most — events, sessions, tokens, traces per user? |
 | **Latency** | How slow are LLM and tool calls — averages, p50/p75/p90/p99, trends? |
-| **Errors** | How many errors, and which agents and tools produce them? |
+| **Errors** | How many **tool** errors, and which agents and tools produce them? (LLM errors are not charted in v1.) |
 | **Trace Inspector** | Drill into individual events: timestamp, type, agent, user, trace, span, status. |
 
 ### The date control
@@ -186,7 +193,17 @@ date window you select and how much you interact:
 ### Check compatibility before creating (optional, needs a terminal)
 
 If you'd like a preflight — for a non-standard setup, or to validate the table
-before rolling the dashboard out — clone this repository and run:
+before rolling the dashboard out — you need the `bq` CLI installed and
+authenticated, plus one Python package. Install the package first:
+
+```sh
+python3 -m pip install pyyaml
+```
+
+Then clone this repository and run the helper, using your dataset's actual
+location (shown in the dataset's **Details** panel in the BigQuery console —
+for example `US`, `EU`, or `us-central1`; a mismatched location makes
+BigQuery reject the job):
 
 ```sh
 cd dashboard/looker_studio
@@ -194,16 +211,11 @@ python3 tools/hydrate_dashboard.py \
   --project YOUR_PROJECT_ID \
   --dataset YOUR_DATASET_ID \
   --table agent_events \
-  --location US
+  --location YOUR_DATASET_LOCATION
 ```
 
 It verifies the required columns and prints the same kind of creation URL the
-configurator produces. Requires the `bq` CLI, authenticated, plus one Python
-package:
-
-```sh
-python3 -m pip install pyyaml
-```
+configurator produces.
 
 ---
 
@@ -220,7 +232,7 @@ python3 -m pip install pyyaml
 | Looker Studio asks me to sign in or authorize | Expected. The dashboard uses your credentials to read your data. Authorize BigQuery access on your own account. |
 | "Not found: Table …" in Looker Studio | One of the three identifiers is wrong, or your account can't read the table. Open the table in the BigQuery console to confirm the exact IDs and your access, then re-create from the configurator. |
 | Permission errors on charts | Your account needs to read the table *and* run BigQuery jobs in the billing project (see [Before you start](#before-you-start) for how to check each). If you set an Advanced billing project, you need the **BigQuery Job User** role there. |
-| Quota or reservation errors on charts | The billing project has hit a BigQuery limit — the error names which one. Quotas reset on their own schedule (daily quotas at midnight Pacific), so shortening the date range and waiting can be enough; otherwise ask the billing project's administrator to raise the quota or adjust reservations. Granting more IAM access will not fix a quota error. |
+| Quota or reservation errors on charts | The billing project has hit a BigQuery limit — the error names which one, and the reset behavior depends on that specific limit (many daily quotas replenish at intervals throughout the day; custom query quotas reset at midnight Pacific). Shortening the date range reduces what each chart scans. If the limit keeps biting, ask the billing project's administrator to raise that quota; if the project uses reservations, capacity is the administrator's dial, not a quota reset. Granting more IAM access will not fix a quota error. |
 | Numbers look stale | Check the date range includes today, then use Looker Studio's refresh. Ignore the footer's "Data Last Updated" — it's a connector timestamp, not your latest event. |
 | A colleague I shared with sees an error instead of data | Working as intended if they lack BigQuery access — the report uses Viewer's credentials (see Step 3), so each viewer needs read access to the table *and* permission to run BigQuery jobs in the billing project. Grant those, or don't. |
 
@@ -236,6 +248,7 @@ Still stuck? Open an issue:
   and bills your project. The template owner cannot see your data.
 - **Viewers bring their own access.** With the Step 3 credentials setting,
   sharing the report never shares the data — each viewer needs their own
-  BigQuery read access.
+  BigQuery table read access and their own permission to run BigQuery jobs
+  in the billing project.
 - **You pay only for BigQuery queries your charts run.** No services are
   installed, and the dashboard creates no BigQuery objects in your project.
