@@ -614,7 +614,14 @@ def test_second_launch_refused_while_instance_lives(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1
+    assert result.returncode == 1, {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "probe": runner._probe_process(victim.pid),
+        "pidfile": (tmp_path / "grafana.pid").read_text()
+        if (tmp_path / "grafana.pid").exists()
+        else "GONE",
+    }
     assert "already running" in result.stderr
     assert "--stop" in result.stderr
     # The live record must survive untouched and the process unharmed.
