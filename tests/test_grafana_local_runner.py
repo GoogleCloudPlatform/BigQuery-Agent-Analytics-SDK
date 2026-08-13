@@ -552,6 +552,100 @@ def test_plugin_pin_enforced_against_cached_manifests(tmp_path):
   assert not runner.plugin_needs_install(tmp_path)
 
 
+def _fake_live_instance(tmp_path, home):
+  """A live process whose identity record matches like a launched Grafana.
+
+  /bin/bash is exec'd by its literal path, so ps reports a command that
+  begins with the recorded executable — the same property a directly
+  launched grafana binary has (macOS rewrites sys.executable to the
+  framework binary, so python is unsuitable here).
+  """
+  process = subprocess.Popen(
+      [
+          "/bin/bash",
+          "-c",
+          "sleep 30; true",
+          "grafana",
+          "server",
+          "--homepath",
+          str(home),
+      ]
+  )
+  probe = runner._probe_process(process.pid)
+  assert probe is not None
+  (tmp_path / "grafana.pid").write_text(
+      json.dumps(
+          {
+              "pid": process.pid,
+              "home": str(home),
+              "exe": "/bin/bash",
+              "start": probe[0],
+              "port": 39987,
+          }
+      )
+  )
+  return process
+
+
+def test_second_launch_refused_while_instance_lives(tmp_path):
+  # The duplicate-launch hole: overwriting the single pidfile would orphan
+  # the first Grafana — --stop would report success while an admin/admin
+  # instance kept running with no record left to stop it.
+  home = tmp_path / "grafana-home-12.3.0"
+  victim = _fake_live_instance(tmp_path, home)
+  try:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "--project",
+            "customer-project-123",
+            "--dataset",
+            "agent_analytics",
+            "--provision-only",
+            "--workdir",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    assert "already running" in result.stderr
+    assert "--stop" in result.stderr
+    # The live record must survive untouched and the process unharmed.
+    assert (tmp_path / "grafana.pid").exists()
+    assert victim.poll() is None
+    assert not (tmp_path / "provisioning").exists()
+  finally:
+    victim.kill()
+    victim.wait()
+
+
+def test_stale_pidfile_is_cleared_and_launch_proceeds(tmp_path):
+  home = tmp_path / "grafana-home-12.3.0"
+  victim = _fake_live_instance(tmp_path, home)
+  victim.kill()
+  victim.wait()
+  result = subprocess.run(
+      [
+          sys.executable,
+          str(RUNNER),
+          "--project",
+          "customer-project-123",
+          "--dataset",
+          "agent_analytics",
+          "--provision-only",
+          "--workdir",
+          str(tmp_path),
+      ],
+      capture_output=True,
+      text=True,
+      check=True,
+  )
+  assert "provisioning written" in result.stdout
+  assert not (tmp_path / "grafana.pid").exists()
+
+
 def test_cached_extraction_honors_explicit_checksum(tmp_path):
   # Build a tiny valid "grafana" archive.
   import io

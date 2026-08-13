@@ -546,6 +546,33 @@ def _identity_matches(record: dict, start: str, command: str) -> bool:
   return start == record["start"]
 
 
+def make_stop_hint(workdir: Path) -> str:
+  hint = f"python3 {Path(__file__).name} --stop"
+  if workdir != (Path(__file__).parent / ".local").resolve():
+    hint += f" --workdir {workdir}"
+  return hint
+
+
+def live_instance(workdir: Path) -> dict | None:
+  """Returns the pidfile record if it still identifies a live launcher-owned
+  Grafana; removes a stale pidfile and returns None otherwise.
+
+  A workdir holds exactly one pidfile, so a second launch that overwrote it
+  would orphan the first instance: --stop would tear down only the newer
+  process and report success while an admin/admin Grafana backed by the
+  operator's credentials kept running with no record left to stop it.
+  """
+  pidfile = workdir / "grafana.pid"
+  if not pidfile.exists():
+    return None
+  record = json.loads(pidfile.read_text())
+  probe = _probe_process(int(record["pid"]))
+  if probe is not None and _identity_matches(record, *probe):
+    return record
+  pidfile.unlink()
+  return None
+
+
 def stop(workdir: Path) -> int:
   pidfile = workdir / "grafana.pid"
   if not pidfile.exists():
@@ -637,6 +664,15 @@ def main(argv: list[str] | None = None) -> int:
   workdir = args.workdir.resolve()
   if args.stop:
     return stop(workdir)
+  running = live_instance(workdir) if workdir.exists() else None
+  if running is not None:
+    print(
+        f"a launcher-owned grafana is already running from this workdir"
+        f" (pid {running['pid']}, port {running.get('port', '?')});"
+        f" stop it first with: {make_stop_hint(workdir)}",
+        file=sys.stderr,
+    )
+    return 1
   if not args.project or not args.dataset:
     parser.error("--project and --dataset are required (except with --stop)")
   if bool(args.time_from) != bool(args.time_to):
@@ -739,6 +775,7 @@ def main(argv: list[str] | None = None) -> int:
           "home": str(home),
           "exe": str(home / "bin" / "grafana"),
           "start": probe[0] if probe else "",
+          "port": args.port,
       })
   )
 
@@ -759,9 +796,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"grafana did not become healthy in 90s; see {log}", file=sys.stderr)
     return 1
 
-  stop_hint = f"python3 {Path(__file__).name} --stop"
-  if workdir != (Path(__file__).parent / ".local").resolve():
-    stop_hint += f" --workdir {workdir}"
+  stop_hint = make_stop_hint(workdir)
   print(
       f"\nGrafana is up (bound to 127.0.0.1 only): {url}/d/{DASHBOARD_UID}\n"
       "  login: admin / admin (fresh instance; it will offer a password"
