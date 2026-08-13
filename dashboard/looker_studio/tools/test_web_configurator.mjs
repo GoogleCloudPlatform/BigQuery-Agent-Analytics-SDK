@@ -773,6 +773,77 @@ for (const field of ["project", "dataset", "table"]) {
   );
 }
 
+for (const [description, consoleUrl] of [
+  ["Pantheon", pantheonTableUrl],
+  ["public Console", publicConsoleTableUrl],
+]) {
+  for (const field of ["project", "dataset", "table"]) {
+    resetTableInputs();
+
+    assert.equal(
+      pasteIntoProject(field, consoleUrl),
+      true,
+      `${description} URL pasted into ${field} is handled`,
+    );
+    assert.deepEqual(
+      {
+        project: fakeElements.get("#project").value,
+        dataset: fakeElements.get("#dataset").value,
+        table: fakeElements.get("#table").value,
+      },
+      consoleTableId,
+      `${description} URL pasted into ${field} fills all identifier fields`,
+    );
+    assert.equal(
+      fakeElements.get("#form-status").textContent,
+      'Split "haiyuan-anarres-dev-806843.bqaa_looker_demo.agent_events" into the three fields.',
+      `${description} URL reports the extracted table`,
+    );
+    assert.equal(fakeElements.get("#form-status").dataset.kind, "ready");
+  }
+}
+
+resetTableInputs();
+fakeElements.get("#dataset").value = encodedConsoleTableUrl;
+fakeElements.get("#dataset").listeners.change({
+  target: fakeElements.get("#dataset"),
+});
+assert.deepEqual(
+  {
+    project: fakeElements.get("#project").value,
+    dataset: fakeElements.get("#dataset").value,
+    table: fakeElements.get("#table").value,
+  },
+  consoleTableId,
+  "the committed-input fallback recognizes an encoded Console URL",
+);
+
+for (const rejectedUrl of [
+  "https://evil.example/bigquery?ws=" + workspaceReference,
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
+  "https://console.cloud.google.com/bigquery?ws=" +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
+]) {
+  resetTableInputs();
+  assert.equal(
+    pasteIntoProject("dataset", rejectedUrl),
+    false,
+    "a rejected Console URL retains ordinary paste behavior",
+  );
+  assert.equal(fakeElements.get("#project").value, values.project);
+  assert.equal(fakeElements.get("#dataset").value, values.dataset);
+  assert.equal(fakeElements.get("#table").value, values.table);
+
+  // Simulate the browser applying the unintercepted paste to its target.
+  fakeElements.get("#dataset").value = rejectedUrl;
+  fakeElements.get("#dataset").listeners.input({
+    target: fakeElements.get("#dataset"),
+  });
+  assert.equal(fakeElements.get("#project").value, values.project);
+  assert.equal(fakeElements.get("#table").value, values.table);
+}
+
 // #398: clicking the enabled create link sets the provisioning expectation
 // without blocking navigation, and the message clears on the next change.
 resetTableInputs();

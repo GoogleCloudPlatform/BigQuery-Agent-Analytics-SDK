@@ -2,8 +2,8 @@ import {
   buildDashboardUrl,
   buildSetupUrl,
   validateConfiguration,
-  splitQualifiedTableId,
-  parseQualifiedTableIdForInput,
+  parseTableReference,
+  parseTableReferenceForInput,
 } from "./configurator.mjs";
 import { REPORT_CONFIG } from "./report-config.mjs";
 
@@ -104,7 +104,7 @@ if (!inputs.table.value) {
 for (const input of tableInputs) {
   input.addEventListener("input", refresh);
   input.addEventListener("change", (event) => {
-    const parsed = parseQualifiedTableIdForInput(event.target.value);
+    const parsed = parseTableReferenceForInput(event.target.value);
 
     if (parsed) {
       afterQualifiedTableId(parsed);
@@ -117,7 +117,7 @@ for (const input of tableInputs) {
 for (const input of tableInputs) {
   input.addEventListener("paste", (event) => {
     const text = event.clipboardData.getData("text");
-    const parsed = splitQualifiedTableId(text);
+    const parsed = parseTableReference(text);
 
     if (parsed) {
       event.preventDefault();
