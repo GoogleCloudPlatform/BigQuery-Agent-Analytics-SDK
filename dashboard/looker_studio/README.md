@@ -6,6 +6,11 @@ built directly on the event table populated by the
 [ADK BigQuery Agent Analytics plugin](https://adk.dev/observability/bigquery-agent-analytics/).
 For teams that run BQAA but do not run Looker.
 
+**Just want to use the dashboard?** Read the
+[User Manual](USER_MANUAL.md) — prerequisites, three-step setup, page guide,
+and troubleshooting, written for dashboard users rather than contributors.
+This README is the contributor and operations reference.
+
 The implementation and acceptance contract is tracked in
 [issue #365](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/365).
 This directory is self-contained and has no dependency on the SDK runtime.

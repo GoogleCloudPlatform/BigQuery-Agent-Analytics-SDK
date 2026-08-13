@@ -255,6 +255,7 @@ with a runnable ADK agent.
 |----------|-------------|
 | [SDK Feature Reference](SDK.md) | Complete API walkthrough with working code examples |
 | [Looker Studio Dashboard](dashboard/looker_studio/README.md) | Published 37-chart BQAA observability template with project/dataset/table configurator |
+| [Dashboard User Manual](dashboard/looker_studio/USER_MANUAL.md) | End-user guide to the Looker Studio dashboard: setup in three steps, page guide, sharing, troubleshooting |
 | [Agent Context Graph Codelab](docs/codelabs/periodic_materialization.md) | Extract decision traces from your agent's context graph, end to end (~35 min) |
 | [Scheduled Deploy Runbook](docs/guides/scheduled-context-graph-deploy.md) | Keep the context graph fresh on a Cloud Run + Cloud Scheduler cron |
 | [Design Documents](docs/README.md) | Architecture decisions and design rationale |
