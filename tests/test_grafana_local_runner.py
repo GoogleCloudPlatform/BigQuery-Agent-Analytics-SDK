@@ -473,7 +473,9 @@ def test_fallback_extraction_allows_benign_archives(tmp_path):
   import tarfile as tarlib
 
   archive = _tar_with(
-      tmp_path, "ok.tgz", [("top", "dir"), ("top/bin/file.txt", "file")]
+      tmp_path,
+      "ok.tgz",
+      [("top", "dir"), ("top/bin", "dir"), ("top/bin/file.txt", "file")],
   )
   dest = tmp_path / "dest3"
   dest.mkdir()
