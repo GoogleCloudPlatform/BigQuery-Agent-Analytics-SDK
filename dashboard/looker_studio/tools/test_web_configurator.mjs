@@ -274,6 +274,11 @@ for (const rejectedUrl of [
   "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
   // URL-shaped input whose URL constructor throws.
   "https://",
+  // Slashless HTTP(S) spellings canonicalize to real URLs and must not fall
+  // through to the legacy colon-form normalization.
+  "https:evil.example",
+  "HTTPS:evil.example",
+  "http:evil.example",
   "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
   "https://console.cloud.google.com/bigquery?ws=" +
@@ -867,6 +872,7 @@ for (const rejectedUrl of [
     "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
   "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
   "https://",
+  "https:evil.example",
 ]) {
   resetTableInputs();
   assert.equal(

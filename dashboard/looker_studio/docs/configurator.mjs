@@ -22,7 +22,13 @@ const BIGQUERY_WORKSPACE_TABLE_MARKER_RE = /!4m3(?=!|$)/g;
 // coexists with a table reference the active resource cannot be proved from
 // the undocumented `ws` encoding, so such workspaces are rejected outright.
 const BIGQUERY_WORKSPACE_DATASET_RE = /!3m2!1s[^!]+!2s[^!]+/;
-const ABSOLUTE_URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+// Any scheme followed by `//` is URL-shaped, and so are slashless `http:` /
+// `https:` spellings, which `new URL()` canonicalizes to the `://` form
+// (`https:evil.example` parses as `https://evil.example/`). Routing those
+// spellings here keeps them out of the legacy `project:dataset.table` colon
+// normalization; no legitimate colon-form paste can start with them because
+// `PROJECT_RE` requires at least six characters.
+const URL_SHAPED_RE = /^(?:[a-z][a-z0-9+.-]*:\/\/|https?:)/i;
 
 const VALIDATION_MESSAGES = Object.freeze({
   project:
@@ -218,7 +224,7 @@ export function parseBigQueryConsoleTableUrl(value) {
 
 export function parseTableReference(value) {
   const normalized = String(value ?? "").trim();
-  if (ABSOLUTE_URL_RE.test(normalized)) {
+  if (URL_SHAPED_RE.test(normalized)) {
     return parseBigQueryConsoleTableUrl(normalized);
   }
   return splitQualifiedTableId(normalized);
