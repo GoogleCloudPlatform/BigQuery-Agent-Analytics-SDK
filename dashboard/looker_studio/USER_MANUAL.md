@@ -21,10 +21,16 @@ You need three things:
 1. **A BQAA table with data in it.** If your agents run with the ADK BigQuery
    Agent Analytics plugin, this already exists — it is the table the plugin
    writes to, normally named `agent_events`.
-2. **A Google account that can read that table and run BigQuery jobs** in the
-   project that will pay for queries. If you can open the table in the
-   [BigQuery console](https://console.cloud.google.com/bigquery) and click
-   **Preview**, you are set.
+2. **A Google account that can read that table _and_ run BigQuery jobs** in
+   the project that will pay for queries. These are two separate permissions:
+   - *Read:* open the table in the
+     [BigQuery console](https://console.cloud.google.com/bigquery) and click
+     **Preview**. Seeing rows proves read access — and only read access.
+   - *Run jobs:* in that same console window, run a tiny query such as
+     `SELECT COUNT(*)` on the table. If it completes, you can run jobs in the
+     selected project. If it fails with a permission error, ask your admin
+     for the **BigQuery Job User** role in the project that will pay for
+     queries.
 3. **A desktop browser window at least 1280 pixels wide.** The dashboard is a
    desktop layout; phones and narrow tablets are not supported.
 
@@ -70,29 +76,38 @@ When every field is valid, the status line reads
 
 ### Step 2 — Click "Create my dashboard"
 
-The button opens Looker Studio with your copy of the dashboard template,
-already pointed at your table. When Looker Studio asks, **authorize BigQuery
-access** — this is Google asking for your consent, on your account; nothing is
-shared with the template's owner.
+The button opens Looker Studio in a new tab with your copy of the dashboard
+template, already pointed at your table. **Building your copy can take about
+10 seconds, and the tab may briefly show a loading, not-found, or error page
+while Google provisions the report — don't close it.** It resolves on its
+own.
 
-The first screen can take a moment. Allow up to 90 seconds on a cold load
-before every chart is painted.
+When Looker Studio asks, **authorize BigQuery access** — this is Google
+asking for your consent, on your account; nothing is shared with the
+template's owner.
+
+Once the report itself appears, the charts take longer than the controls.
+Allow up to 90 seconds on a cold load before every chart is painted.
 
 ### Step 3 — Save your copy, then secure it
 
 In Looker Studio:
 
 1. Select **Edit and share** to save the report to your account.
-2. Keep the new report **private** for now.
+2. Keep the new report **private** while you configure its data source — and
+   until every step below is done.
 3. Open **Resource → Manage added data sources → Edit**.
-4. Set **Data credentials** to **Viewer** before you share the report with
-   anyone.
+4. Set **Data credentials** to **Viewer**.
+5. Before sharing widely, **test the report with an account that has only
+   viewer access** — it should see charts only if that account can read the
+   BigQuery table.
 
-That last step matters: with Viewer's credentials, every person you share the
-report with sees data only if *they* can read the underlying BigQuery table.
-With Owner's credentials (which the creation dialog may default to), everyone
-you share with would see the data using **your** access. The configurator page
-has a **Copy security checklist** button with these same steps, ready to paste
+Step 4 is the one that matters most: with Viewer's credentials, every person
+you share the report with sees data only if *they* can read the underlying
+BigQuery table. With Owner's credentials (which the creation dialog may
+default to), everyone you share with would see the data using **your**
+access. Step 5 is how you prove it worked. The configurator page has a
+**Copy security checklist** button with these same five steps, ready to paste
 into a handoff note.
 
 That's it — you now have your own dashboard.
@@ -183,7 +198,12 @@ python3 tools/hydrate_dashboard.py \
 ```
 
 It verifies the required columns and prints the same kind of creation URL the
-configurator produces. Requires the `bq` CLI, authenticated.
+configurator produces. Requires the `bq` CLI, authenticated, plus one Python
+package:
+
+```sh
+python3 -m pip install pyyaml
+```
 
 ---
 
@@ -191,6 +211,7 @@ configurator produces. Requires the `bq` CLI, authenticated.
 
 | What you see | What's happening and what to do |
 |---|---|
+| The new tab shows loading, not-found, or an error page right after clicking **Create my dashboard** | Google is still provisioning your report copy — this resolves within about 10 seconds. Don't close the tab. If it's still broken after a minute, close it and click the button again. |
 | Charts blank or trickling in after opening a page | Normal on a cold load — allow up to 90 seconds. If a chart is still empty after that, widen the date range: your table may have no events in the selected window. |
 | Layout looks cut off on the left | Collapse the Looker Studio navigation drawer, and make the window at least 1280 px wide. Phones and narrow tablets aren't supported. |
 | Bottom charts clipped on Token Consumption or Latency | You're on a copy created before 2026-07-29, which keeps the old page geometry. Create a fresh copy from the configurator. |
@@ -198,9 +219,10 @@ configurator produces. Requires the `bq` CLI, authenticated.
 | A field shows a red validation error | Fix just that field: project IDs are 6–30 lowercase characters; dataset IDs allow letters, digits, and underscores (no hyphens — that's a BigQuery rule); table IDs also allow hyphens. |
 | Looker Studio asks me to sign in or authorize | Expected. The dashboard uses your credentials to read your data. Authorize BigQuery access on your own account. |
 | "Not found: Table …" in Looker Studio | One of the three identifiers is wrong, or your account can't read the table. Open the table in the BigQuery console to confirm the exact IDs and your access, then re-create from the configurator. |
-| Permission or quota errors on charts | Your account needs to read the table *and* run BigQuery jobs in the billing project. If you set an Advanced billing project, check your access there. |
+| Permission errors on charts | Your account needs to read the table *and* run BigQuery jobs in the billing project (see [Before you start](#before-you-start) for how to check each). If you set an Advanced billing project, you need the **BigQuery Job User** role there. |
+| Quota or reservation errors on charts | The billing project has hit a BigQuery limit — the error names which one. Quotas reset on their own schedule (daily quotas at midnight Pacific), so shortening the date range and waiting can be enough; otherwise ask the billing project's administrator to raise the quota or adjust reservations. Granting more IAM access will not fix a quota error. |
 | Numbers look stale | Check the date range includes today, then use Looker Studio's refresh. Ignore the footer's "Data Last Updated" — it's a connector timestamp, not your latest event. |
-| A colleague I shared with sees an error instead of data | Working as intended if they lack BigQuery access to the table — the report uses Viewer's credentials (see Step 3). Grant them read access to the table, or don't. |
+| A colleague I shared with sees an error instead of data | Working as intended if they lack BigQuery access — the report uses Viewer's credentials (see Step 3), so each viewer needs read access to the table *and* permission to run BigQuery jobs in the billing project. Grant those, or don't. |
 
 Still stuck? Open an issue:
 <https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues>.
