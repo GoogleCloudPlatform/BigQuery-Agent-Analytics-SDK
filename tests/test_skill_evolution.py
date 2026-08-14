@@ -631,6 +631,272 @@ def test_error_analyst_fn_in_both_mode_keeps_builtin_for_successes():
   assert len(patches) == 2
 
 
+def test_format_renders_uncovered_brief_outcomes_alongside_segments():
+  # execution_sub_trajectories can be PARTIAL (the producer skips segments it
+  # cannot align to trace spans) -- a parroted outcome with no traced
+  # counterpart must still render, matched on start/end turns.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[
+          {
+              "label": "covered",
+              "outcome": "recovered",
+              "start_turn": 1,
+              "end_turn": 2,
+          },
+          {
+              "label": "uncovered",
+              "outcome": "parroted",
+              "start_turn": 3,
+              "end_turn": 4,
+          },
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "covered",
+              "outcome": "recovered",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "uncovered" in out and "parroted" in out
+  assert "=== Correction sub-trajectories ===" in out
+  # The covered segment's brief entry stays suppressed (redundant); the
+  # traced segment header ("--- [+] covered ...") is the only occurrence.
+  assert "\n[+] covered" not in out
+  assert "--- [+] covered" in out
+
+
+def test_format_coerces_structured_execution_trace():
+  # A host supplying a structured (non-str) trace must get a readable dump,
+  # not a per-session TypeError swallowed inside the analyst future.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_trace=[{"event": "TOOL_STARTING", "tool": "lookup"}],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution trace ===" in out
+  assert "TOOL_STARTING" in out
+
+
+def test_partition_survives_malformed_segment_entries():
+  # A non-dict entry in a host-supplied segment list must not kill
+  # partitioning for the whole report.
+  report = {
+      "sessions": [
+          _session(
+              "meaningful",
+              execution_sub_trajectories=["not-a-dict", None],
+          )
+      ]
+  }
+  successes, failures = partition_trajectories(report)
+  assert len(successes) == 1 and not failures
+
+
+def test_select_candidate_rejects_non_finite_computed_incumbent():
+  # The guard covers the score_fn(current_skill) fallback too, not just the
+  # incumbent_score parameter.
+  import pytest
+
+  def scorer(text):
+    return float("nan") if text == "BASE" else 1.0
+
+  with pytest.raises(ValueError, match="non-finite incumbent"):
+    select_candidate(["CAND"], "BASE", score_fn=scorer)
+
+
+def test_host_patch_envelope_enforced_with_reason_logged(caplog):
+  # A well-typed host patch that misses the envelope is dropped with a
+  # logged reason; a valid one passes the gate.
+  import logging
+
+  results = iter(
+      [
+          "too short",
+          (
+              "## Root Cause\nTOOL_USAGE: skipped the tool despite having"
+              " it available.\n## Proposed Patch\nContent: call the tool"
+              " first."
+          ),
+      ]
+  )
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    return next(results)
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("Quality gate rejected" in r.message for r in caplog.records)
+
+
+def test_non_string_host_patch_dropped_not_crashed(caplog):
+  # A truthy non-string return must be dropped with a warning BEFORE the
+  # quality gate, never crash after the full fleet spend.
+  import logging
+
+  results = iter(
+      [
+          {"patch": "structured"},
+          (
+              "## Root Cause\nTOOL_USAGE: skipped the tool despite having"
+              " it available.\n## Proposed Patch\nContent: call the tool"
+              " first."
+          ),
+      ]
+  )
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    return next(results)
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("instead of patch text" in r.message for r in caplog.records)
+
+
+def test_raising_host_analyst_partial_failure_tolerated(caplog):
+  # One raising host analyst degrades to a warning; the surviving patch is
+  # still collected and no exception propagates.
+  import logging
+
+  def fake_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "boom":
+      raise RuntimeError("host exploded")
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="boom"),
+          _session("partial", question="ok"),
+      ]
+  }
+  with caplog.at_level(logging.WARNING):
+    patches = collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=fake_analyst,
+    )
+  assert len(patches) == 1
+  assert any("failed: host exploded" in r.message for r in caplog.records)
+
+
+def test_all_host_analysts_failing_raises():
+  # A systematically broken host analyst must not degrade into a
+  # clean-looking zero-patch run.
+  import pytest
+
+  def broken_analyst(client, model, session, current_skill, tools):
+    raise RuntimeError("bad credentials")
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=broken_analyst,
+    )
+
+
+def test_analyst_timeout_bounds_a_hung_host_analyst(caplog):
+  # A blocking host analyst must not hang collect_patches; the timed-out
+  # future degrades to a warning like any other analyst failure.
+  import logging
+  import threading
+
+  release = threading.Event()
+
+  def hung_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("partial", question="ok"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=hung_analyst,
+          analyst_timeout_s=0.3,
+      )
+  finally:
+    release.set()
+  assert len(patches) == 1
+  assert any("failed" in r.message for r in caplog.records)
+
+
+def test_legacy_sessions_render_without_new_sections():
+  # Backward-compat parity: sessions without any of the new keys must not
+  # gain new section headings, in either session shape.
+  conv = _session("unhelpful", conversation=[{"role": "user", "text": "q"}])
+  single = _session("unhelpful", question="q", response="a")
+  single.pop("conversation", None)
+  for sess in (conv, single):
+    out = format_trajectory(sess)
+    assert "=== Execution" not in out
+    assert "=== Correction" not in out
+
+
 # --- _write_evolution_artifacts --------------------------------------------
 
 

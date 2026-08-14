@@ -233,7 +233,9 @@ def _has_parroted_recovery(session: dict) -> bool:
   """
   for key in ("sub_trajectories", "execution_sub_trajectories"):
     for st in session.get(key, []) or []:
-      if st.get("outcome") == "parroted":
+      # Host-supplied lists may carry malformed entries; a non-dict must not
+      # kill partitioning for the whole report.
+      if isinstance(st, dict) and st.get("outcome") == "parroted":
         return True
   return False
 
@@ -297,11 +299,57 @@ def _format_tool_calls(session: dict) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _format_correction_evidence(session) -> str:
+  """Render turn-boundary correction evidence, or '' when absent."""
+  boundaries = session.get("correction_boundaries", []) or []
+  if not boundaries:
+    return ""
+  result = "\n=== Correction Evidence ===\n"
+  for b in boundaries:
+    result += (
+        f"Turn {b.get('turn_index')}: Agent claimed:"
+        f" \"{b.get('wrong_claim', '')}\"\n"
+        f"  User corrected: \"{b.get('correct_fact', '')}\"\n"
+        f"  Agent recovered: {b.get('agent_recovered', False)}\n"
+    )
+  return result
+
+
+def _format_execution_subtrajectories(exec_subtraj) -> str:
+  """Render per-segment execution traces, or '' when absent."""
+  if not exec_subtraj:
+    return ""
+  result = "\n=== Execution sub-trajectories ===\n"
+  result += (
+      "Each segment shows agent routing/tool calls for that part of the"
+      " conversation. Compare [-] (wrong) vs [+] (recovered) vs [~]"
+      " (parroted) segments.\n\n"
+  )
+  for seg in exec_subtraj:
+    outcome = seg.get("outcome", "")
+    icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
+    result += (
+        f"--- [{icon}] {seg.get('label', '')} (turns"
+        f" {seg.get('start_turn')}-{seg.get('end_turn')}) ->"
+        f" {outcome} ---\n"
+    )
+    result += (seg.get("trace", "") or "") + "\n\n"
+  return result
+
+
 def _format_execution_trace(session) -> str:
   """Render the full-session execution trace block, or '' when absent."""
   exec_trace = session.get("execution_trace", "")
   if not exec_trace:
     return ""
+  if not isinstance(exec_trace, str):
+    # format_trajectory runs inside analyst futures; a structured (list/dict)
+    # trace from a host must degrade to a readable dump, not a per-session
+    # TypeError swallowed as a warning (which zeroes out the whole run).
+    try:
+      exec_trace = json.dumps(exec_trace, indent=1, default=str)
+    except (TypeError, ValueError):
+      exec_trace = str(exec_trace)
   return (
       "\n=== Execution trace ===\n"
       "Shows agent routing, tool calls, and LLM requests. Look for:"
@@ -343,49 +391,38 @@ def format_trajectory(session: dict) -> str:
         )
     # Turn-boundary correction evidence, when the host's tagger extracts it:
     # the wrong claim, the user's correction, and whether the agent recovered.
-    boundaries = session.get("correction_boundaries", []) or []
-    if boundaries:
-      result += "\n=== Correction Evidence ===\n"
-      for b in boundaries:
-        result += (
-            f"Turn {b.get('turn_index')}: Agent claimed:"
-            f" \"{b.get('wrong_claim', '')}\"\n"
-            f"  User corrected: \"{b.get('correct_fact', '')}\"\n"
-            f"  Agent recovered: {b.get('agent_recovered', False)}\n"
-        )
+    result += _format_correction_evidence(session)
 
     # Per-segment execution traces (hosts that capture routing/tool calls per
     # correction segment). Preferred over the brief sub-trajectory outcome
     # list because the analyst sees WHAT the agent executed in each segment.
-    exec_subtraj = session.get("execution_sub_trajectories", []) or []
-    if exec_subtraj:
-      result += "\n=== Execution sub-trajectories ===\n"
-      result += (
-          "Each segment shows agent routing/tool calls for that part of the"
-          " conversation. Compare [-] (wrong) vs [+] (recovered) vs [~]"
-          " (parroted) segments.\n\n"
-      )
-      for seg in exec_subtraj:
-        outcome = seg.get("outcome", "")
-        icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
-        result += (
-            f"--- [{icon}] {seg.get('label', '')} (turns"
-            f" {seg.get('start_turn')}-{seg.get('end_turn')}) ->"
-            f" {outcome} ---\n"
-        )
-        result += (seg.get("trace", "") or "") + "\n\n"
+    exec_subtraj = [
+        seg
+        for seg in (session.get("execution_sub_trajectories", []) or [])
+        if isinstance(seg, dict)
+    ]
+    result += _format_execution_subtrajectories(exec_subtraj)
 
     # Surface the per-segment correction outcomes the turn tagger emits
-    # (quality_report writes these as ``sub_trajectories``). This is the
-    # parrot/recover evidence the Error Analyst is told to use. Skipped when
-    # per-segment execution traces are present: those carry the same
-    # outcome labels plus the executed evidence, so the brief list would be
-    # redundant. The full-session ``execution_trace`` below still renders
-    # either way.
-    subtraj = session.get("sub_trajectories", []) or []
-    if subtraj and not exec_subtraj:
+    # (quality_report writes these as ``sub_trajectories``). A traced segment
+    # makes its brief entry redundant (same labels plus executed evidence),
+    # but ``execution_sub_trajectories`` can be PARTIAL -- the reference
+    # producer's ``_segment_trace_by_turns`` skips segments it cannot align
+    # to trace spans -- so brief entries with no traced counterpart (matched
+    # on start/end turns) still render: a parroted outcome must never
+    # disappear just because its segment lacked a trace.
+    covered_spans = {
+        (seg.get("start_turn"), seg.get("end_turn")) for seg in exec_subtraj
+    }
+    uncovered = [
+        seg
+        for seg in (session.get("sub_trajectories", []) or [])
+        if isinstance(seg, dict)
+        and (seg.get("start_turn"), seg.get("end_turn")) not in covered_spans
+    ]
+    if uncovered:
       result += "\n=== Correction sub-trajectories ===\n"
-      for seg in subtraj:
+      for seg in uncovered:
         outcome = seg.get("outcome", "")
         icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
         span = ""
@@ -465,15 +502,22 @@ def run_analyst(
   return text or None
 
 
+def _quality_gate_reason(patch: str) -> Optional[str]:
+  """Why a patch fails the quality gate, or None when it passes."""
+  if len(patch.strip()) < 50:
+    return "shorter than 50 chars"
+  if not any(cat in patch for cat in ROOT_CAUSE_CATEGORIES):
+    return "no recognized root-cause category token"
+  if not ("## Root Cause" in patch or "## Pattern" in patch):
+    return "missing '## Root Cause' / '## Pattern' marker"
+  if not ("## Proposed Patch" in patch or "Content:" in patch):
+    return "missing '## Proposed Patch' / 'Content:' marker"
+  return None
+
+
 def passes_quality_gate(patch: str) -> bool:
   """Reject patches lacking structure or a root-cause category."""
-  if len(patch.strip()) < 50:
-    return False
-  if not any(cat in patch for cat in ROOT_CAUSE_CATEGORIES):
-    return False
-  has_analysis = "## Root Cause" in patch or "## Pattern" in patch
-  has_patch = "## Proposed Patch" in patch or "Content:" in patch
-  return has_analysis and has_patch
+  return _quality_gate_reason(patch) is None
 
 
 # ---------------------------------------------------------------------------
@@ -770,6 +814,7 @@ def collect_patches(
     analyst_mode="both",
     tools=None,
     error_analyst_fn: Optional[ErrorAnalystFn] = None,
+    analyst_timeout_s: Optional[float] = None,
 ):
   """Run the analyst fleet over the report. Returns the list of kept patches.
 
@@ -780,6 +825,20 @@ def collect_patches(
       (e.g. an agentic investigator with tool access) while keeping the
       fleet dispatch, quality gate, and consolidation from this engine.
       Success trajectories always use the built-in single-pass analyst.
+      The required patch ENVELOPE (enforced by the quality gate, rejects
+      logged with their reason): a str of >= 50 chars containing one of the
+      ``ROOT_CAUSE_CATEGORIES`` tokens, a ``## Root Cause`` (or
+      ``## Pattern``) section, and a ``## Proposed Patch`` (or ``Content:``)
+      section -- the same shape ``ERROR_ANALYST_PROMPT`` instructs the
+      built-in analyst to produce. A truthy non-string return is dropped
+      with a warning. If EVERY host call fails, collect_patches raises
+      RuntimeError instead of degrading a broken host analyst into a
+      clean-looking zero-patch run (partial failures stay tolerated).
+    analyst_timeout_s: Optional per-analyst timeout in seconds. A future
+      exceeding it is treated like any other analyst failure (warning,
+      skipped); its worker thread may linger until the callable returns,
+      but collect_patches itself stops waiting. Default None (no timeout;
+      see issue #397).
   """
   if client is None and not (
       error_analyst_fn is not None and analyst_mode == "error-only"
@@ -801,7 +860,8 @@ def collect_patches(
   successes = successes[:max_success_samples]
 
   patches = []
-  with ThreadPoolExecutor(max_workers=max_workers) as executor:
+  executor = ThreadPoolExecutor(max_workers=max_workers)
+  try:
     futures = {}
     for s in failures:
       if error_analyst_fn is not None:
@@ -830,16 +890,53 @@ def collect_patches(
           tools,
       )
       futures[fut] = ("success", (s.get("question", "") or "")[:60])
-    for fut in as_completed(futures):
-      kind, question = futures[fut]
+    host_total = host_failed = 0
+    first_host_error: Optional[BaseException] = None
+    # Plain iteration (not as_completed) so the per-future timeout applies:
+    # a hung future must bound OUR wait, not just reorder completions.
+    for fut, (kind, question) in list(futures.items()):
+      is_host = error_analyst_fn is not None and kind == "error"
+      if is_host:
+        host_total += 1
       try:
-        result = fut.result()
+        result = fut.result(timeout=analyst_timeout_s)
+        if result and not isinstance(result, str):
+          logger.warning(
+              "analyst [%s] %s returned %s instead of patch text; dropping"
+              " (the analyst contract is 'patch text or None').",
+              kind,
+              question,
+              type(result).__name__,
+          )
+          continue
         if result:
           patches.append(result)
       except Exception as e:  # noqa: BLE001
+        if is_host:
+          host_failed += 1
+          if first_host_error is None:
+            first_host_error = e
         logger.warning("analyst [%s] %s failed: %s", kind, question, e)
+  finally:
+    # wait=False + cancel_futures so a timed-out (hung) analyst cannot make
+    # this function hang again at executor shutdown.
+    executor.shutdown(wait=analyst_timeout_s is None, cancel_futures=True)
 
-  kept = [p for p in patches if passes_quality_gate(p)]
+  if error_analyst_fn is not None and host_total and host_failed == host_total:
+    raise RuntimeError(
+        f"every host error_analyst_fn call failed ({host_failed}/"
+        f"{host_total}); first error: {first_host_error!r}. Refusing to"
+        " degrade a broken host analyst into a clean-looking zero-patch"
+        " run (partial failures are tolerated)."
+    )
+
+  kept = []
+  for patch in patches:
+    reason = _quality_gate_reason(patch)
+    if reason is None:
+      kept.append(patch)
+    else:
+      logger.warning("Quality gate rejected a patch (%s): %.80r", reason, patch)
   logger.info(
       "Collected %d patches (%d passed the quality gate).",
       len(patches),
@@ -861,6 +958,31 @@ def _make_client(project, location):
       project=project or os.environ.get("GOOGLE_CLOUD_PROJECT"),
       location=location or os.environ.get("GOOGLE_CLOUD_LOCATION", "global"),
   )
+
+
+def _validate_incumbent_score(incumbent_score, score_fn) -> None:
+  """Reject unusable incumbent baselines BEFORE any model spend.
+
+  Raises ValueError for a non-finite ``incumbent_score`` (NaN/inf make every
+  margin comparison False and silently disable the incumbent guard) and warns
+  when a baseline is supplied without a ``score_fn`` (the guard only runs
+  with one, so selection would be the ungated median-size candidate).
+  """
+  if incumbent_score is None:
+    return
+  if not math.isfinite(incumbent_score):
+    raise ValueError(
+        f"incumbent_score must be finite (got {incumbent_score!r}): a"
+        " NaN/inf baseline makes every margin comparison False and would"
+        " silently disable the incumbent guard."
+    )
+  if score_fn is None:
+    logger.warning(
+        "incumbent_score=%.3f was provided but score_fn is None -- the"
+        " incumbent guard only runs with a score_fn, so selection falls"
+        " back to the UNGATED median-size candidate.",
+        incumbent_score,
+    )
 
 
 def select_candidate(
@@ -888,20 +1010,7 @@ def select_candidate(
   The last rule is the restraint property of a self-modifying system: when
   nothing clearly improves, leave the already-good skill alone.
   """
-  if incumbent_score is not None:
-    if not math.isfinite(incumbent_score):
-      raise ValueError(
-          f"incumbent_score must be finite (got {incumbent_score!r}): a"
-          " NaN/inf baseline makes every margin comparison False and would"
-          " silently disable the incumbent guard."
-      )
-    if score_fn is None:
-      logger.warning(
-          "incumbent_score=%.3f was provided but score_fn is None -- the"
-          " incumbent guard only runs with a score_fn, so selection falls"
-          " back to the UNGATED median-size candidate.",
-          incumbent_score,
-      )
+  _validate_incumbent_score(incumbent_score, score_fn)
 
   if not viable:
     logger.warning("No viable candidate passed guardrails; keeping base skill.")
@@ -918,6 +1027,11 @@ def select_candidate(
       if incumbent_score is not None
       else score_fn(current_skill)
   )
+  if not math.isfinite(incumbent):
+    raise ValueError(
+        f"score_fn(current_skill) returned a non-finite incumbent"
+        f" ({incumbent!r}); the margin gate cannot run against it."
+    )
   best, best_score = None, float("-inf")
   for cand in viable:
     score = score_fn(cand)
@@ -954,6 +1068,7 @@ def evolve_skill(
     incumbent_score: Optional[float] = None,
     tools: Optional[str] = None,
     error_analyst_fn: Optional[ErrorAnalystFn] = None,
+    analyst_timeout_s: Optional[float] = None,
     artifacts_dir: Optional[str] = None,
     version_label: str = "v1",
     client=None,
@@ -966,7 +1081,7 @@ def evolve_skill(
       ``conversation`` or ``question``/``response`` per session. Sessions may
       carry optional enrichment keys the analysts render when present (see
       ``scripts/quality_report.py`` for the reference producer):
-      ``verifications`` (list of {claim, verified} dicts),
+      ``verifications`` (int count of user verification requests),
       ``correction_boundaries`` (list of {turn_index, wrong_claim,
       correct_fact, agent_recovered}), ``sub_trajectories`` (turn-tagger
       segments: {label, outcome, start_turn, end_turn}),
@@ -988,7 +1103,10 @@ def evolve_skill(
       units). When given, the incumbent guard uses it instead of re-scoring
       the base skill via ``score_fn(current_skill)``.
     error_analyst_fn: Optional replacement analyst for failure trajectories;
-      see ``collect_patches``.
+      see ``collect_patches`` for the full contract, including the required
+      patch envelope and the all-host-failures RuntimeError.
+    analyst_timeout_s: Optional per-analyst timeout in seconds (see
+      ``collect_patches``).
     artifacts_dir: If set, write the analyst patches, the best-of-N candidates,
       a prevalence summary, and a one-line selection record here (for
       inspection/audit) before returning.
@@ -1001,10 +1119,14 @@ def evolve_skill(
     The evolved SKILL.md content, or the unchanged ``current_skill`` if no
     improvement was found.
   """
+  _validate_incumbent_score(incumbent_score, score_fn)
   if isinstance(report, str):
     with open(report) as f:
       report = json.load(f)
   summary = report.get("summary", {})
+  # A client is ALWAYS required here: even in hosted error-only analyst mode
+  # the consolidator uses it. The client-free path collect_patches supports
+  # applies to standalone collect_patches usage only.
   client = client or _make_client(project, location)
 
   patches = collect_patches(
@@ -1017,6 +1139,7 @@ def evolve_skill(
       analyst_mode=analyst_mode,
       tools=tools,
       error_analyst_fn=error_analyst_fn,
+      analyst_timeout_s=analyst_timeout_s,
   )
   if not patches:
     logger.warning("No patches to consolidate; returning the current skill.")
