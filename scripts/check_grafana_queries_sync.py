@@ -106,9 +106,13 @@ PUBLIC_DEMO_PROPERTIES = {
 # Panel 19 (Trace detail) renders a raw event timeline, so the public build
 # must not carry it at all, under any data source.
 PUBLIC_DEMO_EXCLUDED_PANEL = 19
-# The public build has no time picker, so each query bounds its own scan.
-PUBLIC_DEMO_TIME_PREDICATE = (
-    "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)"
+# The public build has no time picker, so each query freezes its own half-open
+# window. Both sides are required: with only the lower bound, a future-dated
+# event is reported before it happens and future partitions stay eligible for
+# the scan, so "Last 72 hours" would not be the truth.
+PUBLIC_DEMO_TIME_PREDICATES = (
+    "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)",
+    "timestamp < CURRENT_TIMESTAMP()",
 )
 # Grafana interpolation syntax: variables, macros and the legacy variable
 # form. The public build interpolates nothing, so its SQL must run as written.
@@ -379,15 +383,6 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
     label = repository_path(PUBLIC_DEMO_QUERIES_DIRECTORY / filename)
     executable = active_sql(query)
 
-    if not any(
-        PUBLIC_DEMO_TIME_PREDICATE in line for line in executable.splitlines()
-    ):
-      fail(
-          f"public demo query {label} must carry the uncommented predicate "
-          f"{PUBLIC_DEMO_TIME_PREDICATE}"
-      )
-      errors += 1
-
     for syntax in PUBLIC_DEMO_FORBIDDEN_SYNTAX:
       if syntax in executable:
         fail(
@@ -396,8 +391,12 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
         )
         errors += 1
 
-    backticked = executable.count("`" + PUBLIC_DEMO_TABLE_PLACEHOLDER + ".")
-    if not backticked or backticked != executable.count(
+    # Every file names exactly one backticked placeholder path per table it
+    # scans: tool_errors.sql UNIONs two, the other seventeen read one. That
+    # count is therefore the number of branches each time bound must appear in,
+    # which is what stops a new UNION arm from shipping unbounded.
+    table_scans = executable.count("`" + PUBLIC_DEMO_TABLE_PLACEHOLDER + ".")
+    if not table_scans or table_scans != executable.count(
         PUBLIC_DEMO_TABLE_PLACEHOLDER
     ):
       fail(
@@ -405,6 +404,17 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
           f"`{PUBLIC_DEMO_TABLE_PLACEHOLDER}.<table>`"
       )
       errors += 1
+      continue
+
+    for predicate in PUBLIC_DEMO_TIME_PREDICATES:
+      found = sum(predicate in line for line in executable.splitlines())
+      if found != table_scans:
+        fail(
+            f"public demo query {label} scans {table_scans} table(s) but "
+            f"carries {found} uncommented {predicate!r} predicate(s): every "
+            "table-scan branch must freeze the same half-open 72-hour window"
+        )
+        errors += 1
   return errors
 
 
@@ -743,11 +753,11 @@ def main() -> int:
   7. Public Demo Safety: The public build keeps the settings that bound an
      anonymous viewer's BigQuery scan, and declares and wires the BigQuery
      data source through its import input.
-  8. Public Demo SQL Policy: Every public query bounds its own scan with the
-     hard 72-hour predicate outside any comment, interpolates no Grafana
-     variable or macro, and names its tables through backticked placeholder
-     paths only. Its panels map onto interactive counterparts and exclude the
-     trace-detail panel.
+  8. Public Demo SQL Policy: Every public query bounds its own scan with both
+     sides of the hard half-open 72-hour window, outside any comment and once
+     per table-scan branch, interpolates no Grafana variable or macro, and
+     names its tables through backticked placeholder paths only. Its panels map
+     onto interactive counterparts and exclude the trace-detail panel.
   """
   errors = check_main_dashboard()
   errors += check_public_demo_dashboard()

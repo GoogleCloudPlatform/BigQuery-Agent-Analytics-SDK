@@ -35,10 +35,7 @@ Two reasons, both about keeping things simple:
   expands them for an anonymous viewer, so they would reach BigQuery verbatim.
 - **Hourly buckets via `TIMESTAMP_TRUNC`.** BigQuery's native function, not a
   time-group macro.
-- **Hardcoded 72-hour bound.** Every file scans
-  `timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)`. The SQL is
-  the only thing capping what a public dashboard can bill — hiding the time
-  picker does not. Review every new file for it.
+- **Strict 72-hour window enforced across all queries.**
 - **One standalone query per stat panel.** No panel reads another panel's result
   via the `-- Dashboard --` datasource; each stat pays for its own scan. See
   [`../../README.md`](../../README.md) on setting a BigQuery Custom Quota.
@@ -75,7 +72,7 @@ by message text.
 | `tokens_by_model.sql`          | Tokens by model (FinOps)        | `model_version` is response-side; missing → `unknown`.                    |
 | `estimated_cost.sql`           | Estimated cost (FinOps)         | Rates are inlined USD-per-1M literals; edit to match your models.         |
 | `total_tokens.sql`             | Total tokens (FinOps)           | Provider-reported `usage.total`, so it can exceed prompt + completion.    |
-| `llm_calls_total.sql`          | LLM calls (FinOps)              | The view holds one event type, so `COUNT(*)` *is* the LLM_RESPONSE count. |
+| `llm_calls_total.sql`          | LLM calls (FinOps)              | Distinct `trace_id`/`span_id`, so streaming chunks count as one call.     |
 | `tool_usage.sql`               | Tool invocations by tool        | Uses `adk_tool_starts` so failed invocations still count.                 |
 | `tool_latency.sql`             | Tool latency (Tools)            | No `IFNULL`, so averages are not skewed.                                  |
 | `tool_errors.sql`              | Tool errors (Tools)             | `UNION ALL` keeps both records when one failure logs two events.          |
