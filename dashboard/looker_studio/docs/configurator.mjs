@@ -4,6 +4,32 @@ export const PROJECT_RE = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 export const DATASET_RE = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
 export const TABLE_RE = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,1023}$/;
 
+const BIGQUERY_CONSOLE_HOSTS = new Set([
+  "console.cloud.google.com",
+  "pantheon.corp.google.com",
+]);
+// The `!4m3!1s<project>!2s<dataset>!3s<table>` submessage is the stable core
+// of a Console table reference. The group counts that precede it (for example
+// `!1m5!1m4` or `!1m6!1m5`) vary with UI-state fields the Console appends,
+// such as `!23sRESOURCE_LIST`, so they must not be part of the contract.
+const BIGQUERY_WORKSPACE_TABLE_RE = /!4m3!1s([^!]+)!2s([^!]+)!3s([^!]+)/g;
+// Every table submessage starts with this marker; comparing marker starts to
+// complete matches rejects workspaces holding a truncated table reference.
+// The lookahead accepts a following field delimiter or end of string, so a
+// workspace truncated exactly at a dangling `!4m3` still counts as a marker.
+const BIGQUERY_WORKSPACE_TABLE_MARKER_RE = /!4m3(?=!|$)/g;
+// Dataset views encode a `!3m2!1s<project>!2s<dataset>` resource. When one
+// coexists with a table reference the active resource cannot be proved from
+// the undocumented `ws` encoding, so such workspaces are rejected outright.
+const BIGQUERY_WORKSPACE_DATASET_RE = /!3m2!1s[^!]+!2s[^!]+/;
+// Any scheme followed by `//` is URL-shaped, and so are slashless `http:` /
+// `https:` spellings, which `new URL()` canonicalizes to the `://` form
+// (`https:evil.example` parses as `https://evil.example/`). Routing those
+// spellings here keeps them out of the legacy `project:dataset.table` colon
+// normalization; no legitimate colon-form paste can start with them because
+// `PROJECT_RE` requires at least six characters.
+const URL_SHAPED_RE = /^(?:[a-z][a-z0-9+.-]*:\/\/|https?:)/i;
+
 const VALIDATION_MESSAGES = Object.freeze({
   project:
     "Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit.",
@@ -104,4 +130,107 @@ export function buildSetupUrl(input, pageUrl) {
   url.search = new URLSearchParams(params).toString();
   url.hash = "";
   return url.toString();
+}
+
+export function splitQualifiedTableId(value) {
+  const normalized = String(value ?? "")
+  .trim()
+  .replace(/`/g, "")
+  .replace(/^([^.:]+):/, "$1.")
+  .replace(/[;,]+$/, "");
+
+  const parts = normalized.split(".");
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
+    return null;
+  }
+
+  const [project, dataset, table] = parts;
+  return { project, dataset, table };
+}
+
+export function parseQualifiedTableIdForInput(value) {
+  const parsed = splitQualifiedTableId(value);
+
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
+}
+
+function hasValidTableIdentifiers(parsed) {
+  if (!parsed) {
+    return false;
+  }
+
+  return (
+    PROJECT_RE.test(parsed.project) &&
+    DATASET_RE.test(parsed.dataset) &&
+    TABLE_RE.test(parsed.table)
+  );
+}
+
+export function parseBigQueryConsoleTableUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value ?? "").trim());
+  } catch {
+    return null;
+  }
+
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.port ||
+    !BIGQUERY_CONSOLE_HOSTS.has(url.hostname) ||
+    url.pathname !== "/bigquery"
+  ) {
+    return null;
+  }
+
+  const workspaceValues = url.searchParams.getAll("ws");
+  if (workspaceValues.length !== 1) {
+    return null;
+  }
+
+  const workspace = workspaceValues[0];
+  const matches = [...workspace.matchAll(BIGQUERY_WORKSPACE_TABLE_RE)];
+  if (matches.length === 0) {
+    return null;
+  }
+
+  const markerStarts = workspace.match(BIGQUERY_WORKSPACE_TABLE_MARKER_RE);
+  if ((markerStarts?.length ?? 0) !== matches.length) {
+    return null;
+  }
+
+  if (BIGQUERY_WORKSPACE_DATASET_RE.test(workspace)) {
+    return null;
+  }
+
+  // A workspace URL can reference the same table more than once (for example
+  // one entry per open tab). That is still unambiguous, so collapse the
+  // matches and only reject when they name different tables.
+  const distinctReferences = new Set(
+    matches.map(([, project, dataset, table]) =>
+      [project, dataset, table].join("!"),
+    ),
+  );
+  if (distinctReferences.size !== 1) {
+    return null;
+  }
+
+  const [, project, dataset, table] = matches[0];
+  const parsed = { project, dataset, table };
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
+}
+
+export function parseTableReference(value) {
+  const normalized = String(value ?? "").trim();
+  if (URL_SHAPED_RE.test(normalized)) {
+    return parseBigQueryConsoleTableUrl(normalized);
+  }
+  return splitQualifiedTableId(normalized);
+}
+
+export function parseTableReferenceForInput(value) {
+  const parsed = parseTableReference(value);
+  return hasValidTableIdentifiers(parsed) ? parsed : null;
 }

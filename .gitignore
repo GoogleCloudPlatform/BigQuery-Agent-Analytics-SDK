@@ -36,6 +36,7 @@ deploy/streaming_evaluation/.streaming_evaluation_state.json
 .DS_Store?
 ._*
 grafana/datasource.yaml
+grafana/.local/
 
 # Service-account credentials (never commit downloaded JSON keys).
 grafana/*.json

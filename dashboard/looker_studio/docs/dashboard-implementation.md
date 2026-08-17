@@ -76,6 +76,18 @@ installations, in this order:
 Malformed metadata values use `SAFE_CAST` and fall through instead of
 aborting every report chart.
 
+## Configurator release checks
+
+Every configurator release and every template republish re-runs the dated
+acknowledgement-dialog comparison required by issue #399: a maintainer
+opens the real authenticated Linking API flow, confirms the configurator's
+step-02 description still matches the acknowledgement dialog Looker Studio
+actually shows, and records the date and result on #399. The step-02 copy
+must not drift from the live dialog between releases. The stated
+provisioning duration in the configurator comes from measured cold-cache
+runs recorded on #398; the test suite forces the static note and the
+click-time status message to state the same value.
+
 ## Pages and chart inventory
 
 The report implements all 37 manifest charts plus one non-parity Trace
@@ -103,13 +115,14 @@ explicit chart title. Product titles use title case, “Over Time,” uppercase
 formerly inherited as “Events By Agent” is labeled **Tool Completions by
 Agent** because its metric intentionally counts only `TOOL_COMPLETED` rows.
 
-All seven dashboard pages use a rolling 365-day window including today.
-Looker Studio sends those bounds through `@DS_START_DATE` and
-`@DS_END_DATE`; the production query applies the frozen half-open UTC
-predicate. The generated manifest retains the pinned LookML's original
-14-day Usage and 7-day Performance defaults as source-provenance metadata;
-the published template intentionally overrides them for the product default.
-The Trace Inspector has no default date control.
+All eight report pages share one report-level date control with a rolling
+90-day window including today. Looker Studio sends those bounds through
+`@DS_START_DATE` and `@DS_END_DATE`; the production query applies the frozen
+half-open UTC predicate. Changing the range on any page persists across page
+navigation, including the Trace Inspector. The generated manifest retains the
+pinned LookML's original 14-day Usage and 7-day Performance defaults as
+source-provenance metadata; the published template intentionally overrides
+them for the product default.
 
 The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
 timestamp dimension exceeded Looker Studio's chart row limit on the canonical
@@ -137,8 +150,10 @@ of 1280 CSS pixels and a recommended width of 1440 CSS pixels. A responsive
 mobile report is a separate template: the current multi-component pages cannot
 be converted in place without rebuilding their section layout and repeating
 parity, hydration, credential, and visual acceptance.
-The most recent live pass used a 1568-pixel viewport; targeted validation at
-the documented 1280-pixel minimum remains pending.
+The 2026-08-11 live pass validated all eight pages at the documented
+1280-pixel minimum with the Looker Studio navigation drawer collapsed. At that
+width the expanded drawer is viewer chrome that overlays the report canvas;
+collapse it to keep the full left edge visible.
 
 Freeform layout acceptance includes vertical containment as well as
 non-overlap. For every page, each component must satisfy
@@ -190,3 +205,13 @@ On 2026-07-24, the base-table-only implementation:
 No live result rows or source identifiers are committed. This smoke result
 proves installation compatibility and query executability; it does not replace
 seeded parity certification or M4 visual sign-off.
+
+The 2026-08-11 90-day publication gate repeated the table-only hydration and
+exact-production-query checks against a sanctioned real BQAA test table. With
+`@DS_START_DATE=20260514` and `@DS_END_DATE=20260811`, the uncached query
+processed 60,248 bytes and billed 10,485,760 bytes. A subsequent authenticated
+**Refresh data** walk of all eight published pages produced five query-cache
+hits and billed zero additional bytes. The absolute 90-day measurement is
+environment-specific; it does not imply a linear cost reduction from the
+former 365-day default. The same exact-query check verified that events dated
+2026-08-11 were included, preserving the include-today contract.

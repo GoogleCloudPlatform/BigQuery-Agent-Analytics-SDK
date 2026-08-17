@@ -2,3 +2,26 @@
 # to read producers/pyproject.toml metadata without isolation.
 pip-tools
 hatchling
+
+# Hold pip below 26.2 until pip-tools supports it.
+#
+# pip-tools drives pip's internal API. pip 26.2 (2026-07-29) added a
+# required `allow_editables` keyword argument to
+# RequirementCommand.make_requirement_preparer(), which pip-compile does
+# not pass:
+#
+#   TypeError: RequirementCommand.make_requirement_preparer() missing 1
+#   required keyword-only argument: 'allow_editables'
+#
+# `pip` is resolved into pip-tools.lock via --allow-unsafe, so without a
+# bound the convergence loop upgrades it to the latest release; phase 2
+# then installs that candidate and pip-compile crashes, which is why the
+# hash-lock drift check has failed since pip 26.2 shipped.
+#
+# Upgrading the generator does not help: pip-tools' newest release
+# (7.6.0, 2026-07-18) predates pip 26.2 and is equally affected. Both
+# 7.5.3 and 7.6.0 declare only `pip>=22.2`, so the metadata provides no
+# protection and the bound has to live here.
+#
+# Remove this pin once a pip-tools release advertises pip 26.2 support.
+pip<26.2

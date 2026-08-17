@@ -2,6 +2,8 @@ import {
   buildDashboardUrl,
   buildSetupUrl,
   validateConfiguration,
+  parseTableReference,
+  parseTableReferenceForInput,
 } from "./configurator.mjs";
 import { REPORT_CONFIG } from "./report-config.mjs";
 
@@ -17,6 +19,11 @@ const inputs = {
   table: document.querySelector("#table"),
   billingProject: document.querySelector("#billing-project"),
 };
+const tableInputs = [
+  inputs.project,
+  inputs.dataset,
+  inputs.table,
+];
 const errors = {
   project: document.querySelector("#project-error"),
   dataset: document.querySelector("#dataset-error"),
@@ -68,6 +75,23 @@ function refresh() {
   }
 }
 
+function handleQualifiedTableId(parsed) {
+  inputs.project.value = parsed.project;
+  inputs.dataset.value = parsed.dataset;
+  inputs.table.value = parsed.table;
+}
+
+function afterQualifiedTableId(parsed) {
+  handleQualifiedTableId(parsed);
+  refresh();
+  if (createLink.href) {
+    setStatus(
+      `Split "${parsed.project}.${parsed.dataset}.${parsed.table}" into the three fields.`,
+      "ready",
+    );
+  }
+}
+
 const query = new URLSearchParams(window.location.search);
 for (const [name, input] of Object.entries(inputs)) {
   if (query.has(name)) {
@@ -77,14 +101,42 @@ for (const [name, input] of Object.entries(inputs)) {
 if (!inputs.table.value) {
   inputs.table.value = REPORT_CONFIG.defaultTable;
 }
-for (const input of Object.values(inputs)) {
+for (const input of tableInputs) {
   input.addEventListener("input", refresh);
+  input.addEventListener("change", (event) => {
+    const parsed = parseTableReferenceForInput(event.target.value);
+
+    if (parsed) {
+      afterQualifiedTableId(parsed);
+    } else {
+      refresh();
+    }
+  });
 }
+
+for (const input of tableInputs) {
+  input.addEventListener("paste", (event) => {
+    const text = event.clipboardData.getData("text");
+    const parsed = parseTableReference(text);
+
+    if (parsed) {
+      event.preventDefault();
+      afterQualifiedTableId(parsed);
+    }
+  });
+}
+
+inputs.billingProject.addEventListener("input", refresh);
+
+const WAITING_MESSAGE =
+  "Opening Looker Studio in a new tab. Building your report copy can take " +
+  "up to ~10 seconds and may briefly show an error page — don’t close it.";
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   refresh();
   if (createLink.href) {
+    setStatus(WAITING_MESSAGE, "waiting");
     window.open(createLink.href, "_blank", "noopener,noreferrer");
   }
 });
@@ -93,7 +145,9 @@ createLink.addEventListener("click", (event) => {
   if (!createLink.href) {
     event.preventDefault();
     refresh();
+    return;
   }
+  setStatus(WAITING_MESSAGE, "waiting");
 });
 
 copyButton.addEventListener("click", async () => {

@@ -15,6 +15,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -280,10 +281,28 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
   ]
   assert product["defaults"]["date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 364,
+      "start_offset_days": 89,
       "end_offset_days": 0,
       "include_today": True,
-      "page_scope": "all_dashboard_pages",
+      "page_scope": "all_report_pages",
+  }
+  assert product["layout"]["date_control"] == {
+      "scope": "report_level",
+      "present_on_all_pages": True,
+      "left": 825,
+      "top_range": [43, 45],
+  }
+  assert product["filtering"]["date_controls"] == {
+      "apply_to_all_charts_on_page": True,
+      "report_level_override": {
+          "field": "agent_events.timestamp_date",
+          "default_range_days": 90,
+          "persists_across_pages": True,
+          "supersedes": [
+              "usage-control-date",
+              "performance-control-date",
+          ],
+      },
   }
   assert product["layout"]["percentile_order"] == {
       "llm": ["P50", "P75", "P90", "P99"],
@@ -398,8 +417,10 @@ def test_product_contract_covers_every_parity_chart_and_live_fix():
       "recommended_width_css_px": 1440,
       "narrow_screen_support": "not_supported_in_v1",
       "responsive_template": "separate_report_required",
-      "minimum_width_validation": "pending",
-      "last_validated_width_css_px": 1568,
+      "minimum_width_validation": "passed",
+      "minimum_width_navigation_drawer_state": "collapsed",
+      "last_validated_width_css_px": 1280,
+      "last_validated_date": "2026-08-11",
   }
   assert "live_series_mode" not in product["visual_system"]
   deferred = {item["id"] for item in product["deferred_enhancements"]}
@@ -432,10 +453,10 @@ def test_report_and_web_bindings_cannot_drift():
   assert web["dataSourceAlias"] == report["data_source_alias"]
   assert report["default_date_range"] == {
       "mode": "rolling",
-      "start_offset_days": 364,
+      "start_offset_days": 89,
       "end_offset_days": 0,
       "include_today": True,
-      "page_scope": "all_dashboard_pages",
+      "page_scope": "all_report_pages",
   }
   assert web["sentinels"] == {
       "project": bindings["PROJECT"],
@@ -444,14 +465,14 @@ def test_report_and_web_bindings_cannot_drift():
   }
   attestation = report["reviewed_template_sql"]
   template = (DASHBOARD / "sql/events_v1.template.sql").read_bytes()
-  assert report["published_date"] == "2026-07-29"
+  assert report["published_date"] == "2026-08-11"
   assert attestation == {
       "sha256": hashlib.sha256(template).hexdigest(),
       "reviewed_date": "2026-07-24",
       "scope": "repository_artifact_only",
   }
   assert report["live_template_verification"] == {
-      "verified_date": "2026-07-29",
+      "verified_date": "2026-08-11",
       "repository_sql_sha256": hashlib.sha256(template).hexdigest(),
       "method": [
           "connector_custom_query_review",
@@ -478,7 +499,7 @@ def test_report_and_web_bindings_cannot_drift():
       ),
   }
   assert report["product_verification"] == {
-      "verified_date": "2026-07-28",
+      "verified_date": "2026-08-11",
       "pages": 8,
       "checks": [
           "expected_page_and_chart_titles_present",
@@ -493,7 +514,7 @@ def test_report_and_web_bindings_cannot_drift():
           "tool_charts_exclude_non_completed_rows",
           "multi_series_charts_use_categorical_legends",
           "no_partial_update_footer_after_refresh",
-          "default_date_range_includes_today_on_seven_dashboard_pages",
+          "default_date_range_includes_today_on_all_eight_report_pages",
       ],
       "result": "PASSED",
   }
@@ -511,7 +532,7 @@ def test_report_and_web_bindings_cannot_drift():
   }
 
 
-def test_default_date_range_includes_today_for_exactly_365_calendar_days():
+def test_report_level_date_range_includes_today_for_exactly_90_calendar_days():
   product = yaml.safe_load(
       (DASHBOARD / "spec/product_contract.yaml").read_text()
   )
@@ -523,9 +544,39 @@ def test_default_date_range_includes_today_for_exactly_365_calendar_days():
   assert report["default_date_range"] == date_range
   assert date_range["include_today"] is True
   assert date_range["end_offset_days"] == 0
+  assert date_range["page_scope"] == "all_report_pages"
   assert (
-      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 365
+      date_range["start_offset_days"] - date_range["end_offset_days"] + 1 == 90
   )
+
+  date_controls = product["filtering"]["date_controls"]
+  report_override = date_controls["report_level_override"]
+  assert report_override["default_range_days"] == 90
+  assert report_override["persists_across_pages"] is True
+  assert report_override["supersedes"] == [
+      "usage-control-date",
+      "performance-control-date",
+  ]
+
+
+def test_report_level_override_preserves_the_immutable_source_controls():
+  manifest = yaml.safe_load(
+      (DASHBOARD / "spec/chart_manifest.yaml").read_text()
+  )
+
+  date_controls = {
+      control["id"]: control
+      for control in manifest["controls"]
+      if control["id"] in {"usage-control-date", "performance-control-date"}
+  }
+  assert date_controls["usage-control-date"]["default_value"] == "14 day"
+  assert date_controls["performance-control-date"]["default_value"] == "7 day"
+  assert {
+      control["source_dashboard"] for control in date_controls.values()
+  } == {
+      "usage",
+      "performance",
+  }
 
 
 def test_base_table_query_and_preflight_cover_the_bqaa_contract():
@@ -560,6 +611,79 @@ def test_browser_configurator_javascript_contract():
   )
 
 
+def _chrome_available():
+  candidates = [
+      "google-chrome",
+      "google-chrome-stable",
+      "chromium-browser",
+      "chromium",
+  ]
+  if any(shutil.which(c) for c in candidates):
+    return True
+  return Path(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  ).exists()
+
+
+def _browser_gate_disposition(chrome_available, in_ci):
+  """A missing browser may downgrade the gate locally, never in CI.
+
+  Returns "run" or "skip"; raises when the required merge gate would be
+  silently lost (CI without a browser must be a hard failure, not a skip).
+  """
+  if chrome_available:
+    return "run"
+  if in_ci:
+    raise AssertionError(
+        "Chrome/Chromium is missing on a CI runner: the browser gate would"
+        " be silently skipped inside a required check. Provision a browser"
+        " or fail loudly — do not skip."
+    )
+  return "skip"
+
+
+def test_browser_gate_cannot_silently_skip_in_ci():
+  assert _browser_gate_disposition(True, True) == "run"
+  assert _browser_gate_disposition(True, False) == "run"
+  assert _browser_gate_disposition(False, False) == "skip"
+  with pytest.raises(AssertionError, match="silently skipped"):
+    _browser_gate_disposition(False, True)
+
+
+def test_configurator_loads_in_a_real_browser():
+  # Runs inside the required Test (Python N) checks so the browser-level
+  # gate is enforced by the existing main ruleset, not by an optional job.
+  # In CI a missing browser is a hard failure (see disposition above).
+  disposition = _browser_gate_disposition(
+      _chrome_available(), bool(os.environ.get("CI"))
+  )
+  if disposition == "skip":
+    pytest.skip("No Chrome/Chromium available outside CI")
+  subprocess.run(
+      ["bash", "tools/browser_smoke.sh"],
+      cwd=DASHBOARD,
+      check=True,
+  )
+
+
+def test_browser_smoke_negative_fixtures_are_detected():
+  # The five negative fixtures — including nonzero-exit-after-healthy-DOM
+  # and the delayed error that only the live marker reflects (the 5 s
+  # virtual-time budget is the observation window) — must be enforced by
+  # the required Test checks, not only by the optional standalone smoke
+  # job: a reintroduced false-pass path has to turn a REQUIRED check red.
+  disposition = _browser_gate_disposition(
+      _chrome_available(), bool(os.environ.get("CI"))
+  )
+  if disposition == "skip":
+    pytest.skip("No Chrome/Chromium available outside CI")
+  subprocess.run(
+      ["bash", "tools/browser_smoke.sh", "--self-test"],
+      cwd=DASHBOARD,
+      check=True,
+  )
+
+
 def test_googlecloudplatform_pages_configuration():
   page = (DASHBOARD / "docs/index.html").read_text()
   styles = (DASHBOARD / "docs/styles.css").read_text()
@@ -577,10 +701,32 @@ def test_googlecloudplatform_pages_configuration():
   assert 'name="twitter:card"' in page
   assert "Copy security checklist" in page
   assert "billing-project-hint" in page
+  assert (
+      "Paste a fully qualified table ID or BigQuery Console table link" in page
+  )
   assert "Designed for desktop screens at least 1280 px wide" in page
   assert "allow up to 90 seconds" in page
   assert "@media (prefers-color-scheme: dark)" in styles
   assert (DASHBOARD / "docs/favicon.svg").is_file()
+
+  # Trust cluster (#398/#399/#400): pre-click wait expectation, dialog
+  # explanation with the exact SQL linked, and the Google Blue palette.
+  assert 'content="#1967d2"' in page
+  assert "create-wait-note" in page
+  assert page.count("don’t close it") >= 2  # at the button AND in step 02
+  assert "lookerstudio.google.com" in page
+  assert "sql/events_v1.template.sql" in page
+  assert 'class="notice notice-warning"' in page
+  assert "--action: #1967d2" in styles
+  assert "#096b5a" not in page
+  assert "#096b5a" not in styles
+
+  # The recurring #399 dialog verification is a durable release control,
+  # not an issue comment: it must stay in the implementation contract.
+  impl = (DASHBOARD / "docs/dashboard-implementation.md").read_text()
+  assert "## Configurator release checks" in impl
+  assert "acknowledgement-dialog comparison" in impl
+  assert "every template republish" in impl
 
   workflow = (ROOT / ".github/workflows/looker-studio-pages.yml").read_text()
   assert "path: dashboard/looker_studio/docs" in workflow

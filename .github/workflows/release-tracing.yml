@@ -106,6 +106,10 @@ on:
     tags:
       - 'tracing-v*'
 
+# Deny by default at the workflow level; each job below grants only
+# the scopes it needs.
+permissions: {}
+
 concurrency:
   group: release-tracing-${{ github.ref }}
   cancel-in-progress: false
@@ -126,6 +130,8 @@ jobs:
   verify:
     name: Verify version + tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 30
     defaults:
       run:
@@ -133,9 +139,10 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Verify the tag points at the CURRENT protected-main head
         # Tag provenance: any tracing-v* tag triggers this workflow, and
@@ -194,13 +201,19 @@ jobs:
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
       staging_ref: ${{ steps.digest.outputs.staging_ref }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Build image (repo root context, per Dockerfile contract)
         run: |
           docker build -f deploy/otlp_receiver/Dockerfile \
-            -t "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" .
+            -t "${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" .
 
       - name: Self-test image BEFORE anything is pushed (checked-in script)
         # deploy/otlp_receiver/selftest.sh — also executed by PR CI, so
@@ -209,8 +222,8 @@ jobs:
         # host installs while this job holds id-token: write).
         id: selftest
         run: |
-          IMG="${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
-          bash deploy/otlp_receiver/selftest.sh "$IMG" "${{ needs.verify.outputs.version }}" | tee selftest.log
+          IMG="${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}"
+          bash deploy/otlp_receiver/selftest.sh "$IMG" "${VERSION}" | tee selftest.log
           echo "image_id=$(grep '^SELFTEST_IMAGE_ID=' selftest.log | cut -d= -f2)" >> "$GITHUB_OUTPUT"
 
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
@@ -219,14 +232,16 @@ jobs:
           service_account: ${{ env.RELEASE_SA }}
 
       - name: Push candidate to the private staging repo
+        env:
+          SELFTEST_IMAGE_ID: ${{ steps.selftest.outputs.image_id }}
         # The image ID is re-checked against the one the self-test ran:
         # nothing that executed since (including the auth action) can
         # swap in untested bytes.
         run: |
-          IMG="${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}"
+          IMG="${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}"
           NOW=$(docker inspect "$IMG" --format '{{.Id}}')
-          test "$NOW" = "${{ steps.selftest.outputs.image_id }}" \
-            || (echo "::error::image ID changed after self-test (${NOW} != ${{ steps.selftest.outputs.image_id }})" && exit 1)
+          test "$NOW" = "${SELFTEST_IMAGE_ID}" \
+            || (echo "::error::image ID changed after self-test (${NOW} != ${SELFTEST_IMAGE_ID})" && exit 1)
           gcloud auth configure-docker us-docker.pkg.dev --quiet
           docker push "$IMG"
 
@@ -234,15 +249,17 @@ jobs:
         id: digest
         run: |
           DIGEST=$(gcloud artifacts docker images describe \
-            "${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" \
+            "${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" \
             --format='value(image_summary.digest)')
           echo "staged: ${STAGING_IMAGE}@${DIGEST}"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
-          echo "staging_ref=${STAGING_IMAGE}:${{ needs.verify.outputs.version }}-candidate.${{ github.run_id }}.${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          echo "staging_ref=${STAGING_IMAGE}:${VERSION}-candidate.${RUN_ID}.${RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build wheel + plugin tarball
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     needs: [verify, build-image]
     outputs:
@@ -254,8 +271,13 @@ jobs:
     defaults:
       run:
         working-directory: producers
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
@@ -275,8 +297,8 @@ jobs:
         run: |
           python scripts/release_image_tool.py inject \
             --target src/bigquery_agent_analytics_tracing/otlp/_release.py \
-            --coordinate "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" \
-            --digest "${{ needs.build-image.outputs.digest }}"
+            --coordinate "${PUBLIC_IMAGE}:${VERSION}" \
+            --digest "${IMAGE_DIGEST}"
 
       - name: Build wheel and sdist (no isolation — locked backend)
         run: python -m build --no-isolation
@@ -284,9 +306,9 @@ jobs:
       - name: Digest-equality gate (wheel == sdist == expected)
         run: |
           python scripts/release_image_tool.py verify \
-            --wheel dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl \
-            --sdist dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
-            --expected "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}@${{ needs.build-image.outputs.digest }}"
+            --wheel dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl \
+            --sdist dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz \
+            --expected "${PUBLIC_IMAGE}:${VERSION}@${IMAGE_DIGEST}"
 
       - name: Install built wheel (metadata only, no dependency resolution)
         # importlib.metadata.version() needs to see the dist-info so
@@ -301,11 +323,11 @@ jobs:
       - name: Verify all expected artifacts are present
         run: |
           ls -la dist/
-          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}.tar.gz \
+          test -f dist/bigquery_agent_analytics_tracing-${VERSION}.tar.gz \
             || (echo "::error::missing sdist" && exit 1)
-          test -f dist/bigquery_agent_analytics_tracing-${{ needs.verify.outputs.version }}-py3-none-any.whl \
+          test -f dist/bigquery_agent_analytics_tracing-${VERSION}-py3-none-any.whl \
             || (echo "::error::missing wheel" && exit 1)
-          test -f dist/bigquery-agent-analytics-tracing-claude-code-${{ needs.verify.outputs.version }}.tar.gz \
+          test -f dist/bigquery-agent-analytics-tracing-claude-code-${VERSION}.tar.gz \
             || (echo "::error::missing plugin tarball" && exit 1)
 
       - name: Write SHA256SUMS
@@ -324,8 +346,13 @@ jobs:
     needs: [verify, build-image, build]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -338,9 +365,9 @@ jobs:
       - name: Render customer-first release notes (PR-tested script)
         run: |
           python3 producers/scripts/render_release_notes.py \
-            --version "${{ needs.verify.outputs.version }}" \
-            --digest "${{ needs.build-image.outputs.digest }}" \
-            --public-image "${{ env.PUBLIC_IMAGE }}" \
+            --version "${VERSION}" \
+            --digest "${IMAGE_DIGEST}" \
+            --public-image "${PUBLIC_IMAGE}" \
             --out release_body.md
 
       - name: Fail closed on existing-release state
@@ -490,7 +517,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -576,6 +605,9 @@ jobs:
       # No contents: write — promote copies the image and asserts digests;
       # only finalize touches the GitHub release.
       id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
     steps:
       - name: Install crane (pinned + checksum-verified, BEFORE credentials exist)
         # Supply-chain guard: never fetch a mutable 'latest' binary in a
@@ -606,19 +638,19 @@ jobs:
           gcloud auth print-access-token \
             | crane auth login us-docker.pkg.dev -u oauth2accesstoken --password-stdin
           set +e
-          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}" 2> digest.err)
+          EXISTING=$(crane digest "${PUBLIC_IMAGE}:${VERSION}" 2> digest.err)
           RC=$?
           set -e
           if [ $RC -eq 0 ]; then
-            test "$EXISTING" = "${{ needs.build-image.outputs.digest }}" \
-              || (echo "::error::public tag exists with digest ${EXISTING}, expected ${{ needs.build-image.outputs.digest }} — version is burned" && exit 1)
+            test "$EXISTING" = "${IMAGE_DIGEST}" \
+              || (echo "::error::public tag exists with digest ${EXISTING}, expected ${IMAGE_DIGEST} — version is burned" && exit 1)
             echo "public tag already carries the expected digest (rerun) — skipping copy"
           elif grep -qi "MANIFEST_UNKNOWN\|manifest unknown" digest.err; then
             # ONLY an explicit manifest-not-found enters the mutating path;
             # auth/rate-limit/network failures must never become a copy.
             crane copy \
-              "${STAGING_IMAGE}@${{ needs.build-image.outputs.digest }}" \
-              "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}"
+              "${STAGING_IMAGE}@${IMAGE_DIGEST}" \
+              "${PUBLIC_IMAGE}:${VERSION}"
           else
             echo "::error::registry state INDETERMINATE: $(head -1 digest.err)"
             exit 1
@@ -626,10 +658,10 @@ jobs:
 
       - name: Assert public digest equals the packaged constant
         run: |
-          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${{ needs.verify.outputs.version }}")
+          PUBLIC_DIGEST=$(crane digest "${PUBLIC_IMAGE}:${VERSION}")
           echo "public:  ${PUBLIC_DIGEST}"
-          echo "staged:  ${{ needs.build-image.outputs.digest }}"
-          test "${PUBLIC_DIGEST}" = "${{ needs.build-image.outputs.digest }}" \
+          echo "staged:  ${IMAGE_DIGEST}"
+          test "${PUBLIC_DIGEST}" = "${IMAGE_DIGEST}" \
             || (echo "::error::digest drift between staging and public" && exit 1)
 
   publish-pypi:
@@ -643,7 +675,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -717,8 +751,12 @@ jobs:
     needs: [verify, build, github-release, publish-pypi]
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -943,8 +981,8 @@ jobs:
             # title/body/prerelease are verified on every snapshot and
             # repaired where GitHub permits edits (#356 rounds 12-13).
             python3 producers/scripts/publish_release_body.py \
-              --version "${{ needs.verify.outputs.version }}" \
-              --public-image "${{ env.PUBLIC_IMAGE }}" \
+              --version "${VERSION}" \
+              --public-image "${PUBLIC_IMAGE}" \
               --anchor-dir anchor/ \
               --tag "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
