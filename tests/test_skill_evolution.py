@@ -26,6 +26,7 @@ import sys
 # Make scripts/ importable.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from skill_evolution import _has_parroted_recovery  # noqa: E402
+from skill_evolution import _validate_incumbent_score
 from skill_evolution import _write_evolution_artifacts
 from skill_evolution import collect_patches
 from skill_evolution import compute_prevalence_summary
@@ -748,6 +749,63 @@ def test_host_patch_envelope_enforced_with_reason_logged(caplog):
     )
   assert len(patches) == 1
   assert any("Quality gate rejected" in r.message for r in caplog.records)
+
+
+def test_all_type_violating_host_raises_like_all_failures():
+  # A host returning a non-string for EVERY session is the same failure
+  # class as raising for every session: zero usable host patches.
+  import pytest
+
+  def dict_analyst(client, model, session, current_skill, tools):
+    return {"patch": "structured"}
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("partial", question="q2"),
+      ]
+  }
+  with pytest.raises(RuntimeError, match="unusable"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=dict_analyst,
+    )
+
+
+def test_spanless_traced_segment_does_not_suppress_spanless_brief_entries():
+  # A traced segment with no turn keys must not blanket-suppress brief
+  # entries that also lack spans ((None, None) collision).
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      sub_trajectories=[{"label": "brief-spanless", "outcome": "parroted"}],
+      execution_sub_trajectories=[
+          {
+              "label": "traced-spanless",
+              "outcome": "recovered",
+              "trace": "SEGMENT-TRACE",
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "SEGMENT-TRACE" in out
+  assert "brief-spanless" in out and "parroted" in out
+
+
+def test_ungated_warning_logs_once_through_evolve_flow(caplog):
+  # evolve_skill validates early with warn_ungated=False; the warning fires
+  # exactly once, inside select_candidate.
+  import logging
+
+  with caplog.at_level(logging.WARNING):
+    _validate_incumbent_score(0.9, None, warn_ungated=False)
+    select_candidate(["A", "BB", "CCC"], "BASE", incumbent_score=0.9)
+  ungated = [r for r in caplog.records if "UNGATED" in r.message]
+  assert len(ungated) == 1
 
 
 def test_non_string_host_patch_dropped_not_crashed(caplog):

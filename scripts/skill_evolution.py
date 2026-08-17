@@ -412,7 +412,9 @@ def format_trajectory(session: dict) -> str:
     # on start/end turns) still render: a parroted outcome must never
     # disappear just because its segment lacked a trace.
     covered_spans = {
-        (seg.get("start_turn"), seg.get("end_turn")) for seg in exec_subtraj
+        (seg.get("start_turn"), seg.get("end_turn"))
+        for seg in exec_subtraj
+        if seg.get("start_turn") is not None or seg.get("end_turn") is not None
     }
     uncovered = [
         seg
@@ -837,8 +839,10 @@ def collect_patches(
     analyst_timeout_s: Optional per-analyst timeout in seconds. A future
       exceeding it is treated like any other analyst failure (warning,
       skipped); its worker thread may linger until the callable returns,
-      but collect_patches itself stops waiting. Default None (no timeout;
-      see issue #397).
+      but collect_patches itself stops waiting. The bound is PER ANALYST,
+      applied in submission order -- the worst-case total wait for a wholly
+      hung fleet is N x analyst_timeout_s, not analyst_timeout_s overall.
+      Default None (no timeout; see issue #397).
   """
   if client is None and not (
       error_analyst_fn is not None and analyst_mode == "error-only"
@@ -901,6 +905,16 @@ def collect_patches(
       try:
         result = fut.result(timeout=analyst_timeout_s)
         if result and not isinstance(result, str):
+          # Contract violation, not a quality issue: counts toward the
+          # all-host-failures guard, so a host returning dicts for every
+          # session cannot masquerade as a healthy zero-patch run.
+          if is_host:
+            host_failed += 1
+            if first_host_error is None:
+              first_host_error = TypeError(
+                  f"error_analyst_fn returned {type(result).__name__},"
+                  " expected patch text or None"
+              )
           logger.warning(
               "analyst [%s] %s returned %s instead of patch text; dropping"
               " (the analyst contract is 'patch text or None').",
@@ -924,10 +938,11 @@ def collect_patches(
 
   if error_analyst_fn is not None and host_total and host_failed == host_total:
     raise RuntimeError(
-        f"every host error_analyst_fn call failed ({host_failed}/"
-        f"{host_total}); first error: {first_host_error!r}. Refusing to"
-        " degrade a broken host analyst into a clean-looking zero-patch"
-        " run (partial failures are tolerated)."
+        "every host error_analyst_fn call failed or returned an unusable"
+        f" result ({host_failed}/{host_total}); first error:"
+        f" {first_host_error!r}. Refusing to degrade a broken host analyst"
+        " into a clean-looking zero-patch run (partial failures are"
+        " tolerated)."
     )
 
   kept = []
@@ -960,7 +975,9 @@ def _make_client(project, location):
   )
 
 
-def _validate_incumbent_score(incumbent_score, score_fn) -> None:
+def _validate_incumbent_score(
+    incumbent_score, score_fn, *, warn_ungated: bool = True
+) -> None:
   """Reject unusable incumbent baselines BEFORE any model spend.
 
   Raises ValueError for a non-finite ``incumbent_score`` (NaN/inf make every
@@ -976,7 +993,7 @@ def _validate_incumbent_score(incumbent_score, score_fn) -> None:
         " NaN/inf baseline makes every margin comparison False and would"
         " silently disable the incumbent guard."
     )
-  if score_fn is None:
+  if score_fn is None and warn_ungated:
     logger.warning(
         "incumbent_score=%.3f was provided but score_fn is None -- the"
         " incumbent guard only runs with a score_fn, so selection falls"
@@ -1119,7 +1136,9 @@ def evolve_skill(
     The evolved SKILL.md content, or the unchanged ``current_skill`` if no
     improvement was found.
   """
-  _validate_incumbent_score(incumbent_score, score_fn)
+  # Raise on an unusable baseline BEFORE any spend; the UNGATED warning is
+  # left to select_candidate so it logs exactly once per run.
+  _validate_incumbent_score(incumbent_score, score_fn, warn_ungated=False)
   if isinstance(report, str):
     with open(report) as f:
       report = json.load(f)
