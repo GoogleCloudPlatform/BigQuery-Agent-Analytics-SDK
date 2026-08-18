@@ -255,7 +255,10 @@ scan from a URL. The window is half-open: `timestamp >=
 TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR) AND timestamp <
 CURRENT_TIMESTAMP()`. They live in
 [`queries/public-demo/`](queries/README.md#the-public-demo-build) and are
-CI-checked against the panels, same as the interactive build.
+CI-checked against the panels, same as the interactive build. The check is a
+text-level lint: it catches a dropped bound or a real table path, not SQL
+written to slip past it. Read these queries yourself before you point a public
+dashboard at real data.
 
 **1. Point it at your data** — with no variables, the target is written into
 every panel's SQL:

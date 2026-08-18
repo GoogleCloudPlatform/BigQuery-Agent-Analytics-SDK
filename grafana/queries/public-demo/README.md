@@ -15,18 +15,16 @@ Two reasons, both about keeping things simple:
   file with syntax highlighting — instead of as an escaped one-line string
   buried in a large JSON document.
 - **Straightforward CI check.** `scripts/check_grafana_queries_sync.py` compares
-  each file to the panel's query as **plain text**. Because the canonical form
-  is a file on disk, the check needs no SQL parser or fancy workarounds,
-  just a string comparison. Keeping that check trivial is a deliberate
-  design goal; do not add anything to these files that would require CI to
-  interpret them.
+  each file to the panel's query as **plain text**. Keep it that way: do not add
+  anything to these files that CI would have to interpret.
 
-> **CI scope.** The check guards three things: silent drift between a `.sql` file
-> and the dashboard JSON, SQL that would run unbounded or uninterpolated for an
+> **CI scope.** The lint checks three things: drift between a `.sql` file and
+> the dashboard JSON, SQL that would run unbounded or uninterpolated for an
 > anonymous viewer, and real project identifiers shipping in place of the
-> placeholders. Everything else, including formatting, style, and exhaustive
-> edge cases, is left to future review, not overengineered predictive
-> automation. Keeping the check trivial is worth more than catching every case.
+> placeholders. It compares strings, so it catches honest mistakes, not
+> deliberate ones — `WHERE <bound> OR TRUE` still reads as bounded. That is a
+> known gap: such a query must still fail review. Formatting, style, and edge
+> cases are review's job, not CI's.
 
 ## Conventions for every file in this directory
 
@@ -35,7 +33,14 @@ Two reasons, both about keeping things simple:
   expands them for an anonymous viewer, so they would reach BigQuery verbatim.
 - **Hourly buckets via `TIMESTAMP_TRUNC`.** BigQuery's native function, not a
   time-group macro.
-- **Strict 72-hour window enforced across all queries.**
+- **Half-open 72-hour window in every table-scan branch.** `timestamp >=
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR) AND timestamp <
+  CURRENT_TIMESTAMP()`. CI counts the uncommented lines carrying each half
+  across the whole file and requires that total to equal the number of
+  backticked placeholder table paths. That count is global, not positional: it
+  catches a new `UNION` arm that scans a table without adding a bound, but two
+  copies in one arm and none in another balance out. Keeping each bound in the
+  branch it belongs to is on review, not on CI.
 - **One standalone query per stat panel.** No panel reads another panel's result
   via the `-- Dashboard --` datasource; each stat pays for its own scan. See
   [`../../README.md`](../../README.md) on setting a BigQuery Custom Quota.
