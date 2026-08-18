@@ -125,7 +125,10 @@ PUBLIC_DEMO_TABLE_PLACEHOLDER = "YOUR_PROJECT_ID.YOUR_DATASET_ID"
 # so `FROM project.dataset.table` names a real table without ever touching one.
 # Match the dotted path after FROM or JOIN so the foreign-path check below sees
 # the unquoted form too. Public demo queries are SELECT-only, so those two
-# keywords cover every table reference they can make.
+# keywords cover every table reference they can make. The capture starts at an
+# identifier character, so its caller strips backticks first: that is what makes
+# a mixed `project`.`dataset`.`table` — dots outside the quotes, invisible to a
+# search for a dotted path between two backticks — read as the bare form here.
 UNQUOTED_TABLE_PATH = re.compile(
     r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)", re.IGNORECASE
 )
@@ -431,7 +434,7 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
     # UNION arm naming a real project would otherwise ship in a query anonymous
     # viewers run.
     candidate_paths = re.findall(r"`([^`]*\.[^`]*)`", executable)
-    candidate_paths += UNQUOTED_TABLE_PATH.findall(executable)
+    candidate_paths += UNQUOTED_TABLE_PATH.findall(executable.replace("`", ""))
     foreign_paths = sorted(
         {
             path

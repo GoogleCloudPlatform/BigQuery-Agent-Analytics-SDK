@@ -20,7 +20,8 @@ accepted. Two are now rejected and stay rejected here:
 1. the required 72-hour predicate present only inside a `/* ... */` block
    comment, with a wider bound the one that actually runs;
 2. a correctly-placeholdered table UNIONed with a real project path such as
-   `customer-prod.private.agent_events`, quoted or bare.
+   `customer-prod.private.agent_events` — quoted, bare, or quoted identifier by
+   identifier, since BigQuery reads all of those as the same table.
 
 The third, `WHERE <required predicate> OR TRUE`, is not caught today. It is a
 gap, not a permitted pattern: such a query is unbounded and must fail review.
@@ -92,6 +93,23 @@ FOREIGN_PATH_MUTANT_UNQUOTED = FOREIGN_PATH_MUTANT.replace(
     "`customer-prod.private.agent_events`", "customer-prod.private.agent_events"
 )
 
+# Quoting each identifier separately puts the dots outside the backticks, which
+# is the same table again in a form neither scan used to read. Searching between
+# two backticks finds the bare `.` separators, not a path, so the lint used to
+# reject this file while reporting `['.']` and never naming the real project.
+FOREIGN_PATH_MUTANT_SEGMENT_QUOTED = FOREIGN_PATH_MUTANT.replace(
+    "`customer-prod.private.agent_events`",
+    "`customer-prod`.`private`.`agent_events`",
+)
+
+# Mixed quoting: one identifier quoted, the dots bare. Nothing used to see this
+# path at all — the file failed only because its extra UNION arm unbalanced the
+# predicate count, which says nothing about the table it names.
+FOREIGN_PATH_MUTANT_MIXED_QUOTED = FOREIGN_PATH_MUTANT.replace(
+    "`customer-prod.private.agent_events`",
+    "customer-prod.`private`.agent_events",
+)
+
 # Mutant 3: both halves of the window are present and uncommented, so the lint
 # counts them and passes, even though `OR TRUE` makes the scan unbounded.
 OR_TRUE_MUTANT = """SELECT COUNT(DISTINCT session_id) AS sessions
@@ -154,16 +172,43 @@ def test_active_sql_strips_block_comments():
     [
         ("mutant_foreign_path_backticked.sql", FOREIGN_PATH_MUTANT),
         ("mutant_foreign_path_bare.sql", FOREIGN_PATH_MUTANT_UNQUOTED),
+        (
+            "mutant_foreign_path_segment_quoted.sql",
+            FOREIGN_PATH_MUTANT_SEGMENT_QUOTED,
+        ),
+        (
+            "mutant_foreign_path_mixed_quoted.sql",
+            FOREIGN_PATH_MUTANT_MIXED_QUOTED,
+        ),
     ],
 )
 def test_foreign_table_path_mutant_is_rejected(filename, query, capsys):
-  """A real project path beside the placeholders must fail, quoted or not."""
+  """A real project path beside the placeholders must fail and be named.
+
+  Quoted, bare, or quoted identifier by identifier: every spelling of the same
+  table has to reach the author as the path they wrote, not as a fragment of it.
+  """
 
   assert _lint(query, filename) > 0
 
   message = capsys.readouterr().err
   assert filename in message
   assert "customer-prod.private.agent_events" in message
+
+
+def test_unquoted_table_path_needs_backticks_stripped():
+  """Unit-level companion: the regex only reads a mixed path once quotes go.
+
+  The capture begins at an identifier character, so a backtick immediately
+  after `FROM ` ends the search. Stripping backticks is what the call site does
+  about that, and this pins both halves of it.
+  """
+
+  mixed = "FROM customer-prod.`private`.agent_events"
+  assert check.UNQUOTED_TABLE_PATH.findall(mixed) == []
+  assert check.UNQUOTED_TABLE_PATH.findall(mixed.replace("`", "")) == [
+      "customer-prod.private.agent_events"
+  ]
 
 
 def test_or_true_mutant_is_not_caught_today():
