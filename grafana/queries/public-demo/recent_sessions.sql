@@ -18,6 +18,7 @@ SELECT
     AS session_output_tokens_in_window
 FROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+  AND timestamp < CURRENT_TIMESTAMP()
   AND session_id IS NOT NULL
 GROUP BY session_id
 ORDER BY last_event_in_window_at DESC
