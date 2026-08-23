@@ -8,8 +8,7 @@ meta:
   review_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#377
   source_parity_contract: spec/chart_manifest.yaml
   live_review_date: "2026-08-11"
-  report_id: 5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40
-
+  report_id: https://datastudio.google.com/reporting/ea99cfa7-f4c9-4f53-aafe-a7e2d0a4b132
 source:
   mode: BASE_TABLE
   object_default: agent_events
