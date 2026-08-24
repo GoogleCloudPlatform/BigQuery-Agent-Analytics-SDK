@@ -14,6 +14,7 @@
 
 """Tests for the SDK evaluators module."""
 
+import re
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -477,6 +478,16 @@ class TestAIGenerateJudgeBatchQuery:
 class TestSessionSummaryQuery:
   """Tests for SESSION_SUMMARY_QUERY token fields."""
 
+  @staticmethod
+  def _metric_sql(alias):
+    match = re.search(
+        rf"SUM\(COALESCE\((.*?)\)\) AS {alias}",
+        SESSION_SUMMARY_QUERY,
+        re.DOTALL,
+    )
+    assert match is not None
+    return " ".join(match.group(1).split())
+
   def test_contains_input_tokens(self):
     assert "input_tokens" in SESSION_SUMMARY_QUERY
 
@@ -492,6 +503,57 @@ class TestSessionSummaryQuery:
 
   def test_contains_cache_telemetry_events(self):
     assert "cache_telemetry_events" in SESSION_SUMMARY_QUERY
+
+  def test_usage_metadata_token_alias_precedence(self):
+    input_sql = self._metric_sql("input_tokens")
+    input_paths = (
+        "$.usage_metadata.prompt_token_count",
+        "$.usage_metadata.prompt_tokens",
+        "$.usage.prompt",
+        "$.input_tokens",
+    )
+    input_positions = [input_sql.index(path) for path in input_paths]
+    assert input_positions == sorted(input_positions)
+
+    output_sql = self._metric_sql("output_tokens")
+    output_paths = (
+        "$.usage_metadata.candidates_token_count",
+        "$.usage_metadata.completion_tokens",
+        "$.usage.completion",
+        "$.output_tokens",
+    )
+    output_positions = [output_sql.index(path) for path in output_paths]
+    assert output_positions == sorted(output_positions)
+
+    total_sql = self._metric_sql("total_tokens")
+    total_paths = (
+        "$.usage_metadata.total_token_count",
+        "$.usage_metadata.total_tokens",
+        "$.usage.total",
+    )
+    total_positions = [total_sql.index(path) for path in total_paths]
+    assert total_positions == sorted(total_positions)
+
+  def test_total_token_fallback_uses_input_and_output_aliases(self):
+    total_sql = self._metric_sql("total_tokens")
+    for path in (
+        "$.usage_metadata.prompt_token_count",
+        "$.usage_metadata.prompt_tokens",
+        "$.usage.prompt",
+        "$.input_tokens",
+        "$.usage_metadata.candidates_token_count",
+        "$.usage_metadata.completion_tokens",
+        "$.usage.completion",
+        "$.output_tokens",
+    ):
+      assert path in total_sql
+
+  @pytest.mark.parametrize(
+      "alias", ("input_tokens", "output_tokens", "total_tokens")
+  )
+  def test_token_extraction_uses_safe_cast(self, alias):
+    metric_sql = self._metric_sql(alias)
+    assert re.search(r"(?<!SAFE_)CAST\(JSON_VALUE\(", metric_sql) is None
 
 
 class TestTokenEfficiencyPrebuilt:

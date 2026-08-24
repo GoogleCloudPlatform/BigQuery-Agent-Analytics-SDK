@@ -954,25 +954,32 @@ SELECT
     OR error_message IS NOT NULL
     OR status = 'ERROR'
   ) > 0 AS has_error,
+  -- Keep token-key precedence aligned with the dashboard extraction contract.
   SUM(COALESCE(
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
       attributes, '$.usage_metadata.prompt_token_count'
     ) AS INT64),
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.usage_metadata.prompt_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
       content, '$.usage.prompt'
     ) AS INT64),
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
       attributes, '$.input_tokens'
     ) AS INT64)
   )) AS input_tokens,
   SUM(COALESCE(
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
       attributes, '$.usage_metadata.candidates_token_count'
     ) AS INT64),
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.usage_metadata.completion_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
       content, '$.usage.completion'
     ) AS INT64),
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
       attributes, '$.output_tokens'
     ) AS INT64)
   )) AS output_tokens,
@@ -1054,18 +1061,39 @@ SELECT
     )
   ) IS NOT NULL) AS cache_telemetry_events,
   SUM(COALESCE(
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
       attributes, '$.usage_metadata.total_token_count'
     ) AS INT64),
-    CAST(JSON_VALUE(
+    SAFE_CAST(JSON_VALUE(
+      attributes, '$.usage_metadata.total_tokens'
+    ) AS INT64),
+    SAFE_CAST(JSON_VALUE(
       content, '$.usage.total'
     ) AS INT64),
     COALESCE(
-      CAST(JSON_VALUE(
+      SAFE_CAST(JSON_VALUE(
+        attributes, '$.usage_metadata.prompt_token_count'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
+        attributes, '$.usage_metadata.prompt_tokens'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
+        content, '$.usage.prompt'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
         attributes, '$.input_tokens'
       ) AS INT64), 0
     ) + COALESCE(
-      CAST(JSON_VALUE(
+      SAFE_CAST(JSON_VALUE(
+        attributes, '$.usage_metadata.candidates_token_count'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
+        attributes, '$.usage_metadata.completion_tokens'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
+        content, '$.usage.completion'
+      ) AS INT64),
+      SAFE_CAST(JSON_VALUE(
         attributes, '$.output_tokens'
       ) AS INT64), 0
     )
