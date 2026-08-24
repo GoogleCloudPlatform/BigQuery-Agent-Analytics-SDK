@@ -194,6 +194,18 @@ evaluator = SystemEvaluator.cost_per_session(
 )
 ```
 
+`token_efficiency()` uses the session's `total_tokens`. When source telemetry
+provides Gemini `usage_metadata.total_token_count`, that provider-reported
+total can include `usage_metadata.thoughts_token_count`; it is therefore not
+guaranteed to equal `prompt_token_count + candidates_token_count`. If no
+provider total exists, the session query falls back to input plus output
+tokens.
+
+`cost_per_session()` is a separate estimate based only on `input_tokens` and
+`output_tokens` plus the configured rates. It does not consume a separate
+`thoughts_token_count` field, so do not treat it as provider invoice
+reconciliation when thinking tokens are present.
+
 `context_cache_hit_rate()` requires source telemetry that includes
 Gemini `usage_metadata.cached_content_token_count`. Older plugin data
 may not contain that field. When cache telemetry is absent, the

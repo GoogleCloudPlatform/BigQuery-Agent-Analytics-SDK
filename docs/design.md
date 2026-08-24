@@ -480,6 +480,16 @@ value strictly exceeds the budget.
 | `ttft(threshold_ms)` | `avg_ttft_ms` | `observed <= threshold_ms` |
 | `cost_per_session(max_cost_usd, ...)` | `(input_tokens/1K)*input_rate + (output_tokens/1K)*output_rate` | `observed <= max_cost_usd` |
 
+For `token_efficiency()`, `total_tokens` prefers the provider-reported
+`usage_metadata.total_token_count`. Gemini can include
+`usage_metadata.thoughts_token_count` in that total, so the value is not
+guaranteed to equal prompt plus completion tokens. When a provider total is
+absent, the session summary falls back to input plus output tokens.
+
+`cost_per_session()` does not consume a separate `thoughts_token_count` field;
+it remains an estimate over the extracted input and output counts and the
+caller-supplied rates.
+
 `context_cache_hit_rate()` treats missing cache telemetry as unknown,
 not as a cache miss. Older plugin rows without
 `usage_metadata.cached_content_token_count` report
