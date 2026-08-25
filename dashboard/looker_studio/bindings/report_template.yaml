@@ -41,19 +41,23 @@ live_template_verification:
 # link_access above records intent; whether an external identity can actually
 # copy the template is a live fact none of the owner-side methods in
 # live_template_verification can observe. Anonymous HTTP cannot observe it
-# either: the embed shell is byte-identical for public, private, and
-# nonexistent report IDs (#445). Two separate controls are required because
-# the Permissions API exposes the link role but not the separate "disable
-# download, print, and copy for viewers" control, so only an end-to-end copy
-# canary from a signed-in, non-owner, out-of-domain identity clears the whole
-# path the configurator depends on.
+# either: it serves the same application shell for public, private, and
+# nonexistent report IDs (sizes differ only by the echoed id), so access is
+# indistinguishable without an identity (#445). Two separate controls are
+# required because the Permissions API exposes the link role but not the
+# separate "disable download, print, and copy for viewers" control, so only
+# an end-to-end copy canary from a signed-in, non-owner, out-of-domain
+# identity clears the whole path the configurator depends on.
 external_access_verification:
   controls:
     - method: permissions_api_link_role_check
       protocol: >-
         Authenticated GET
         https://datastudio.googleapis.com/v1/assets/{report_id}/permissions
-        must list role LINK_VIEWER with member allUsers.
+        must list role LINK_VIEWER with member allUsers. Call it from a
+        Google Workspace or Cloud Identity account holding the datastudio
+        OAuth scope; other callers get PERMISSION_DENIED, which is a caller
+        constraint, not a sharing regression.
       limitation: does_not_expose_viewer_copy_disable_control
       last_observed_date: "2026-08-25"
       last_result: LINK_VIEWER_ALLUSERS_PRESENT
@@ -63,11 +67,12 @@ external_access_verification:
         /reporting/create?c.reportId={report_id}&c.mode=view&c.explain=true
         and confirm it reaches the Linking API copy/review flow rather than
         the terminal "This report isn't shared with you" dialog. On failure,
-        record which Google account the dialog selected before changing any
-        setting.
+        record privately which Google account the dialog selected before
+        changing any setting; never post account identifiers publicly.
       link_access_verified_date: null
       last_result: FAILURE_REPORTED
   cadence: monthly_manual_until_automated
+  next_due_date: "2026-09-24"
   status: FAILING
   tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445
 known_live_issues:

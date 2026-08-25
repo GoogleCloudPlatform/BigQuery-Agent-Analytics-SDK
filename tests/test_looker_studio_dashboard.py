@@ -547,7 +547,11 @@ def test_report_and_web_bindings_cannot_drift():
               "protocol": (
                   "Authenticated GET https://datastudio.googleapis.com/v1"
                   "/assets/{report_id}/permissions must list role"
-                  " LINK_VIEWER with member allUsers."
+                  " LINK_VIEWER with member allUsers. Call it from a Google"
+                  " Workspace or Cloud Identity account holding the"
+                  " datastudio OAuth scope; other callers get"
+                  " PERMISSION_DENIED, which is a caller constraint, not a"
+                  " sharing regression."
               ),
               "limitation": "does_not_expose_viewer_copy_disable_control",
               "last_observed_date": "2026-08-25",
@@ -561,14 +565,16 @@ def test_report_and_web_bindings_cannot_drift():
                   "&c.mode=view&c.explain=true and confirm it reaches the"
                   " Linking API copy/review flow rather than the terminal"
                   ' "This report isn\'t shared with you" dialog. On'
-                  " failure, record which Google account the dialog"
-                  " selected before changing any setting."
+                  " failure, record privately which Google account the"
+                  " dialog selected before changing any setting; never post"
+                  " account identifiers publicly."
               ),
               "link_access_verified_date": None,
               "last_result": "FAILURE_REPORTED",
           },
       ],
       "cadence": "monthly_manual_until_automated",
+      "next_due_date": "2026-09-24",
       "status": "FAILING",
       "tracking_issue": (
           "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445"
@@ -593,11 +599,19 @@ def test_external_access_attestation_is_dated_or_tracked():
   Two controls are required — the Permissions API exposes the link role but
   not the separate viewer copy-disable control, so only the end-to-end copy
   canary clears the whole path. The attestation must never claim more than
-  was observed: PASSING requires the canary's verification date to be no
-  older than the published template, and FAILING requires a tracking issue
-  plus a matching OPEN known_live_issues entry, so an outage stays
-  repository-visible until the canary is re-run from a signed-in, non-owner,
-  out-of-domain account.
+  was observed, in either direction:
+
+  - PASSING requires success evidence on BOTH controls, a canary date no
+    older than the published template, and no matching OPEN live issue —
+    so the status cannot flip while contradictory failure evidence remains.
+  - FAILING requires failure evidence on the canary plus a matching OPEN
+    known_live_issues entry, so an outage stays repository-visible until
+    the canary is re-run from a signed-in, non-owner, out-of-domain account.
+
+  Dates must not be in the future, and next_due_date must schedule the next
+  manual run within the monthly cadence of the newest observation. Nothing
+  here fails purely by wall-clock passage (that would break unrelated PRs);
+  a scheduled staleness check consuming next_due_date is tracked on #445.
   """
   report = yaml.safe_load(
       (DASHBOARD / "bindings/report_template.yaml").read_text()
@@ -608,28 +622,57 @@ def test_external_access_attestation_is_dated_or_tracked():
       "permissions_api_link_role_check",
       "external_identity_link_access_check",
   }
+  today = datetime.date.today()
+
   api_check = controls["permissions_api_link_role_check"]
   assert (
       api_check["limitation"] == "does_not_expose_viewer_copy_disable_control"
   )
-  datetime.date.fromisoformat(api_check["last_observed_date"])
+  assert api_check["last_result"] in {
+      "LINK_VIEWER_ALLUSERS_PRESENT",
+      "LINK_VIEWER_ALLUSERS_ABSENT",
+  }
+  observed = datetime.date.fromisoformat(api_check["last_observed_date"])
+  assert observed <= today, "an observation cannot be dated in the future"
 
   canary = controls["external_identity_link_access_check"]
   assert "c.explain=true" in canary["protocol"]
+  assert canary["last_result"] in {"PASSED", "FAILURE_REPORTED"}
   assert attestation["cadence"] == "monthly_manual_until_automated"
+
+  observation_dates = [observed]
+  tracking_issue = attestation["tracking_issue"]
+  open_tracked = any(
+      entry["issue"] == tracking_issue and entry["status"] == "OPEN"
+      for entry in report["known_live_issues"]
+  )
   assert attestation["status"] in {"PASSING", "FAILING"}
   if attestation["status"] == "PASSING":
+    assert canary["last_result"] == "PASSED"
+    assert api_check["last_result"] == "LINK_VIEWER_ALLUSERS_PRESENT"
     verified = datetime.date.fromisoformat(canary["link_access_verified_date"])
+    assert verified <= today, "a verification cannot be dated in the future"
     published = datetime.date.fromisoformat(report["published_date"])
     assert verified >= published
+    observation_dates.append(verified)
+    assert not open_tracked, (
+        "PASSING contradicts an OPEN live issue: close the known_live_issues"
+        " entry (or reopen the investigation) before flipping the status"
+    )
   else:
+    assert canary["last_result"] == "FAILURE_REPORTED"
     assert canary["link_access_verified_date"] is None
-    tracking_issue = attestation["tracking_issue"]
     assert tracking_issue
-    assert any(
-        entry["issue"] == tracking_issue and entry["status"] == "OPEN"
-        for entry in report["known_live_issues"]
+    assert (
+        open_tracked
     ), "a FAILING external-access status must be an OPEN known live issue"
+
+  next_due = datetime.date.fromisoformat(attestation["next_due_date"])
+  newest = max(observation_dates)
+  assert newest < next_due <= newest + datetime.timedelta(days=35), (
+      "next_due_date must schedule the next manual run within the monthly"
+      " cadence of the newest recorded observation"
+  )
 
 
 def test_docs_name_the_terminal_report_not_shared_dialog():
@@ -640,8 +683,14 @@ def test_docs_name_the_terminal_report_not_shared_dialog():
   into the wait-it-out guidance written for the #398 provisioning flicker.
   """
   fragments = ("This report isn", "shared with you")
-  for relative in ("docs/index.html", "README.md", "USER_MANUAL.md"):
-    # Collapse the markdown line wrapping so the quote may reflow.
+  surfaces = (
+      "docs/index.html",
+      "docs/app.mjs",  # the dynamic status a user watches after clicking
+      "README.md",
+      "USER_MANUAL.md",
+  )
+  for relative in surfaces:
+    # Collapse line wrapping and string-concat breaks so the quote may reflow.
     text = " ".join((DASHBOARD / relative).read_text().split())
     for fragment in fragments:
       assert fragment in text, f"{relative} must quote the dialog verbatim"

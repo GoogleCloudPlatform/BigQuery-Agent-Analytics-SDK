@@ -152,11 +152,14 @@ report's ACL before any `ds.*` parameter is applied, so this failure is on the
 shared template's copy path, not the user's data, IAM, or identifiers.
 Confirm the browser's default Google account is the intended one; if the
 dialog persists, report it on
-[#445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445)
-with the account the dialog selected. The link role alone may not explain a
-denial — Looker Studio's "disable download, print, and copy for viewers"
-control blocks the copy with the same dialog and is invisible to the
-Permissions API — so external access is attested in
+[#445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445),
+saying only whether the signed-in account is personal or part of an
+organization — never post the account's email address (reporter identifiers
+are redacted per *Publication safety* below). The link role alone may not
+explain a denial — Looker Studio's "disable download, print, and copy for
+viewers" control also prevents copying and is invisible to the Permissions
+API, so it remains a candidate cause for this dialog until an end-to-end
+reproduction confirms it — which is why external access is attested in
 `bindings/report_template.yaml` → `external_access_verification` through two
 controls: an authenticated link-role read and a dated end-to-end copy canary
 from a signed-in, non-owner, out-of-domain account (anonymous HTTP cannot
