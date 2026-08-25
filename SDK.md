@@ -2491,6 +2491,33 @@ LangSmith data or provide a real-time streaming surface.
 
 ---
 
+## 24. EvalBench Import Reader
+
+The optional `bigquery_agent_analytics.evalbench` submodule reads one
+EvalBench `job_id` from its BigQuery `configs`, `results`, and `scores` tables
+and maps each scenario to BQAA-compatible synthetic trace rows. Source queries
+filter by a parameterized `job_id`; agentic and NL2SQL result aliases are both
+supported.
+
+```python
+from bigquery_agent_analytics.evalbench import EvalBenchRun
+
+run = EvalBenchRun.from_bigquery(
+    project_id="benchmark-project",
+    evalbench_dataset="evalbench",
+    job_id="abc123",
+    location="US",
+)
+rows = run.to_agent_event_rows()
+```
+
+This reader phase performs no writes. See
+[docs/evalbench.md](docs/evalbench.md) for the mapping contract, schema
+caveats, and the remaining materialization and CLI phases tracked by issue
+#97.
+
+---
+
 ## Module Architecture
 
 ```
@@ -2502,6 +2529,7 @@ bigquery_agent_analytics/
 │   └── evaluators.py          ← SystemEvaluator + LLMAsJudge + SQL templates
 │
 │   Evaluation Harness
+│   ├── evalbench.py           ← EvalBench BigQuery reader + event mapping
 │   ├── trace_evaluator.py     ← BigQueryTraceEvaluator, trajectory matching, replay
 │   ├── multi_trial.py         ← TrialRunner, pass@k, pass^k
 │   ├── grader_pipeline.py     ← GraderPipeline + scoring strategies
