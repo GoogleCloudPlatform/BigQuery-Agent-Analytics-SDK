@@ -72,8 +72,36 @@ assert.ok(
 );
 assert.match(
   pageSource,
-  /provisions your copy — don’t close it\. Looker Studio then\s+shows an acknowledgement dialog/,
+  /provisions your copy — don’t close it\./,
   "step 02 must repeat the transient-error warning before the dialog",
+);
+assert.match(
+  pageSource,
+  /Looker Studio then\s+shows an acknowledgement dialog/,
+  "step 02 must still explain the acknowledgement dialog",
+);
+
+// #445: the terminal "This report isn’t shared with you" denial must be
+// distinguished from the transient flicker everywhere the flicker is
+// described, and explained once with a report-it link — never folded into
+// the wait-it-out guidance.
+assert.match(pageSource, /id="report-not-shared"/);
+const terminalDialogRefs =
+  pageSource.match(/href="#report-not-shared"/g) ?? [];
+assert.ok(
+  terminalDialogRefs.length >= 2,
+  "both wait-it-out notes must point at the terminal-dialog explainer",
+);
+const dialogQuotes =
+  pageSource.match(/This report isn’t shared with you/g) ?? [];
+assert.ok(
+  dialogQuotes.length >= 3,
+  "the dialog must be quoted at the button, in step 02, and in the explainer",
+);
+assert.match(
+  pageSource,
+  /issues\/445/,
+  "the explainer must link the tracking issue for reporting regressions",
 );
 
 const appSource = readFileSync(

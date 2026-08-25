@@ -144,7 +144,10 @@
             Opens <code>lookerstudio.google.com</code> in a new tab. Building
             your private copy can take up to ~10 seconds, and the tab may
             briefly show an error page while Google provisions the report —
-            don’t close it.
+            don’t close it. One dialog is different: if the tab says
+            <strong>“This report isn’t shared with you”</strong>, waiting will
+            not fix it — see
+            <a href="#report-not-shared">the note below</a>.
           </p>
           <p class="privacy">
             This page has no backend. It sends no identifiers or credentials
@@ -170,7 +173,9 @@
           <h3>Review in Google</h3>
           <p>
             The new tab may briefly show a loading or “not found” page while
-            Google provisions your copy — don’t close it. Looker Studio then
+            Google provisions your copy — don’t close it. (A dialog quoting
+            <em>“This report isn’t shared with you”</em> is not that flicker;
+            see <a href="#report-not-shared">below</a>.) Looker Studio then
             shows an acknowledgement dialog. It appears because you’re about
             to create a data source that runs a SQL query this page supplied —
             <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
@@ -191,6 +196,25 @@
           </p>
         </article>
       </section>
+
+      <aside class="notice notice-warning" id="report-not-shared">
+        <strong>“This report isn’t shared with you” is not a setup error.</strong>
+        That dialog is terminal — it offers <em>Reload</em> / <em>Return to
+        report list</em> / <em>Go to report template</em> and does not resolve
+        by waiting. It means the shared dashboard template is unavailable to
+        the Google account signed in to that tab; nothing is wrong with your
+        project, dataset, table, IAM setup, or the identifiers you entered.
+        First confirm the tab is using the account you intend (Looker Studio
+        uses the browser’s default Google account). If it is, the template’s
+        copy path is blocked on the owner’s side —
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
+          report it on issue #445</a>, noting which Google account the dialog
+        selected. The repository’s CLI preflight can still validate your
+        table, but it copies the same template, so it is not a workaround;
+        while the template is blocked, use the
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/grafana">
+          Grafana dashboard</a>.
+      </aside>
 
       <aside class="notice notice-warning">
         <strong>Keep the new report private until the credential check.</strong>

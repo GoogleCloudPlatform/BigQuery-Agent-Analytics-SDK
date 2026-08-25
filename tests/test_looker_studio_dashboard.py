@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -518,7 +519,61 @@ def test_report_and_web_bindings_cannot_drift():
       ],
       "result": "PASSED",
   }
-  assert report["known_live_issues"] == []
+  assert report["known_live_issues"] == [
+      {
+          "issue": "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445",
+          "symptom": (
+              'Linking API copy fails for external identities with "This'
+              " report isn't shared with you\" before any ds.* parameter is"
+              " applied."
+          ),
+          "scope": "external_non_owner_identities",
+          "reported_date": "2026-08-24",
+          "cause_isolation": (
+              "NOT_ISOLATED: a 2026-08-25 authenticated Permissions API read"
+              " returned LINK_VIEWER allUsers and assets:search listed the"
+              " report non-trashed, so the link role alone does not explain"
+              " the denial. Remaining credible causes: the viewer"
+              " copy-disable control, multi-account browser state, or a"
+              " transient sharing/service state."
+          ),
+          "status": "OPEN",
+      },
+  ]
+  assert report["external_access_verification"] == {
+      "controls": [
+          {
+              "method": "permissions_api_link_role_check",
+              "protocol": (
+                  "Authenticated GET https://datastudio.googleapis.com/v1"
+                  "/assets/{report_id}/permissions must list role"
+                  " LINK_VIEWER with member allUsers."
+              ),
+              "limitation": "does_not_expose_viewer_copy_disable_control",
+              "last_observed_date": "2026-08-25",
+              "last_result": "LINK_VIEWER_ALLUSERS_PRESENT",
+          },
+          {
+              "method": "external_identity_link_access_check",
+              "protocol": (
+                  "From a signed-in, non-owner, out-of-domain Google"
+                  " account, open /reporting/create?c.reportId={report_id}"
+                  "&c.mode=view&c.explain=true and confirm it reaches the"
+                  " Linking API copy/review flow rather than the terminal"
+                  ' "This report isn\'t shared with you" dialog. On'
+                  " failure, record which Google account the dialog"
+                  " selected before changing any setting."
+              ),
+              "link_access_verified_date": None,
+              "last_result": "FAILURE_REPORTED",
+          },
+      ],
+      "cadence": "monthly_manual_until_automated",
+      "status": "FAILING",
+      "tracking_issue": (
+          "GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445"
+      ),
+  }
   assert report["source_contract"] == {
       "mode": "BASE_TABLE",
       "generated_views_required": False,
@@ -530,6 +585,74 @@ def test_report_and_web_bindings_cannot_drift():
       "required_before_sharing": "VIEWERS",
       "verification_path": "Resource > Manage added data sources > Edit",
   }
+
+
+def test_external_access_attestation_is_dated_or_tracked():
+  """#445: external copy access is a live fact only an identity can observe.
+
+  Two controls are required — the Permissions API exposes the link role but
+  not the separate viewer copy-disable control, so only the end-to-end copy
+  canary clears the whole path. The attestation must never claim more than
+  was observed: PASSING requires the canary's verification date to be no
+  older than the published template, and FAILING requires a tracking issue
+  plus a matching OPEN known_live_issues entry, so an outage stays
+  repository-visible until the canary is re-run from a signed-in, non-owner,
+  out-of-domain account.
+  """
+  report = yaml.safe_load(
+      (DASHBOARD / "bindings/report_template.yaml").read_text()
+  )
+  attestation = report["external_access_verification"]
+  controls = {control["method"]: control for control in attestation["controls"]}
+  assert set(controls) == {
+      "permissions_api_link_role_check",
+      "external_identity_link_access_check",
+  }
+  api_check = controls["permissions_api_link_role_check"]
+  assert (
+      api_check["limitation"] == "does_not_expose_viewer_copy_disable_control"
+  )
+  datetime.date.fromisoformat(api_check["last_observed_date"])
+
+  canary = controls["external_identity_link_access_check"]
+  assert "c.explain=true" in canary["protocol"]
+  assert attestation["cadence"] == "monthly_manual_until_automated"
+  assert attestation["status"] in {"PASSING", "FAILING"}
+  if attestation["status"] == "PASSING":
+    verified = datetime.date.fromisoformat(canary["link_access_verified_date"])
+    published = datetime.date.fromisoformat(report["published_date"])
+    assert verified >= published
+  else:
+    assert canary["link_access_verified_date"] is None
+    tracking_issue = attestation["tracking_issue"]
+    assert tracking_issue
+    assert any(
+        entry["issue"] == tracking_issue and entry["status"] == "OPEN"
+        for entry in report["known_live_issues"]
+    ), "a FAILING external-access status must be an OPEN known live issue"
+
+
+def test_docs_name_the_terminal_report_not_shared_dialog():
+  """#445 acceptance: every user-facing surface names the terminal denial.
+
+  The configurator and both manuals must quote the dialog, attribute it to
+  the shared template's access (not the user's setup), and must not fold it
+  into the wait-it-out guidance written for the #398 provisioning flicker.
+  """
+  fragments = ("This report isn", "shared with you")
+  for relative in ("docs/index.html", "README.md", "USER_MANUAL.md"):
+    # Collapse the markdown line wrapping so the quote may reflow.
+    text = " ".join((DASHBOARD / relative).read_text().split())
+    for fragment in fragments:
+      assert fragment in text, f"{relative} must quote the dialog verbatim"
+
+  page = (DASHBOARD / "docs/index.html").read_text()
+  assert 'id="report-not-shared"' in page
+  assert page.count('href="#report-not-shared"') >= 2, (
+      "both wait-it-out notes must distinguish the terminal dialog from the"
+      " provisioning flicker"
+  )
+  assert "issues/445" in page
 
 
 def test_report_level_date_range_includes_today_for_exactly_90_calendar_days():

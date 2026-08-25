@@ -145,6 +145,27 @@ The standard path queries the provided table and uses the source project for
 BigQuery billing. Teams with a separate billing project can set it under
 **Advanced settings**.
 
+If the new tab shows the terminal dialog **"This report isn't shared with
+you"** (offering *Reload* / *Return to report list* / *Go to report
+template*), do not wait it out: `/reporting/create` resolves the *template*
+report's ACL before any `ds.*` parameter is applied, so this failure is on the
+shared template's copy path, not the user's data, IAM, or identifiers.
+Confirm the browser's default Google account is the intended one; if the
+dialog persists, report it on
+[#445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445)
+with the account the dialog selected. The link role alone may not explain a
+denial — Looker Studio's "disable download, print, and copy for viewers"
+control blocks the copy with the same dialog and is invisible to the
+Permissions API — so external access is attested in
+`bindings/report_template.yaml` → `external_access_verification` through two
+controls: an authenticated link-role read and a dated end-to-end copy canary
+from a signed-in, non-owner, out-of-domain account (anonymous HTTP cannot
+observe either). While the template is unavailable, the
+`tools/hydrate_dashboard.py` preflight below still validates the table — but
+its creation URL copies the same template, so it is not an outage workaround;
+the [Grafana dashboard](../../grafana/) and the Looker Agent Analytics block
+(below) remain available.
+
 Looker Studio report parameters are intentionally not used for these values:
 BigQuery query parameters represent scalar query values, not project, dataset,
 table, or view identifiers. The Linking API's `sqlReplace` is the supported
