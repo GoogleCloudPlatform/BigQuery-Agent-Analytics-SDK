@@ -50,14 +50,22 @@ live_template_verification:
 # identity clears the whole path the configurator depends on.
 external_access_verification:
   controls:
+    # The 2026-08-25 observation, verbatim (token from a Workspace/Cloud
+    # Identity account with the datastudio.readonly scope):
+    #   curl -s -H "Authorization: Bearer ${DATASTUDIO_READONLY_TOKEN}" \
+    #     https://datastudio.googleapis.com/v1/assets/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40/permissions
+    #   -> {"LINK_VIEWER": {"members": ["allUsers"]}}
     - method: permissions_api_link_role_check
       protocol: >-
         Authenticated GET
         https://datastudio.googleapis.com/v1/assets/{report_id}/permissions
         must list role LINK_VIEWER with member allUsers. Call it from a
-        Google Workspace or Cloud Identity account holding the datastudio
-        OAuth scope; other callers get PERMISSION_DENIED, which is a caller
-        constraint, not a sharing regression.
+        Google Workspace or Cloud Identity account holding the
+        datastudio.readonly OAuth scope (least privilege for this read).
+        Treat PERMISSION_DENIED as indeterminate: it can mean a caller
+        constraint (non-org account, missing scope) or lost asset
+        authorization, so verify the principal, its organization
+        authorization, and the scope before reading a denial as either.
       limitation: does_not_expose_viewer_copy_disable_control
       last_observed_date: "2026-08-25"
       last_result: LINK_VIEWER_ALLUSERS_PRESENT
@@ -66,12 +74,17 @@ external_access_verification:
         From a signed-in, non-owner, out-of-domain Google account, open
         /reporting/create?c.reportId={report_id}&c.mode=view&c.explain=true
         and confirm it reaches the Linking API copy/review flow rather than
-        the terminal "This report isn't shared with you" dialog. On failure,
-        record privately which Google account the dialog selected before
-        changing any setting; never post account identifiers publicly.
+        the terminal "This report isn't shared with you" dialog. Record
+        last_observed_date on every run, pass or fail. On failure, record
+        privately which Google account the dialog selected before changing
+        any setting; never post account identifiers publicly.
+      last_observed_date: "2026-08-24"
       link_access_verified_date: null
       last_result: FAILURE_REPORTED
   cadence: monthly_manual_until_automated
+  # Anchored to the end-to-end canary's last_observed_date (never to the
+  # API read alone), enforced by tests/test_looker_studio_dashboard.py and
+  # consumed by .github/workflows/external-access-staleness.yml.
   next_due_date: "2026-09-24"
   status: FAILING
   tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445

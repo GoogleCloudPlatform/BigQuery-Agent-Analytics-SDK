@@ -549,9 +549,12 @@ def test_report_and_web_bindings_cannot_drift():
                   "/assets/{report_id}/permissions must list role"
                   " LINK_VIEWER with member allUsers. Call it from a Google"
                   " Workspace or Cloud Identity account holding the"
-                  " datastudio OAuth scope; other callers get"
-                  " PERMISSION_DENIED, which is a caller constraint, not a"
-                  " sharing regression."
+                  " datastudio.readonly OAuth scope (least privilege for"
+                  " this read). Treat PERMISSION_DENIED as indeterminate:"
+                  " it can mean a caller constraint (non-org account,"
+                  " missing scope) or lost asset authorization, so verify"
+                  " the principal, its organization authorization, and the"
+                  " scope before reading a denial as either."
               ),
               "limitation": "does_not_expose_viewer_copy_disable_control",
               "last_observed_date": "2026-08-25",
@@ -564,11 +567,13 @@ def test_report_and_web_bindings_cannot_drift():
                   " account, open /reporting/create?c.reportId={report_id}"
                   "&c.mode=view&c.explain=true and confirm it reaches the"
                   " Linking API copy/review flow rather than the terminal"
-                  ' "This report isn\'t shared with you" dialog. On'
+                  ' "This report isn\'t shared with you" dialog. Record'
+                  " last_observed_date on every run, pass or fail. On"
                   " failure, record privately which Google account the"
                   " dialog selected before changing any setting; never post"
                   " account identifiers publicly."
               ),
+              "last_observed_date": "2026-08-24",
               "link_access_verified_date": None,
               "last_result": "FAILURE_REPORTED",
           },
@@ -608,10 +613,14 @@ def test_external_access_attestation_is_dated_or_tracked():
     known_live_issues entry, so an outage stays repository-visible until
     the canary is re-run from a signed-in, non-owner, out-of-domain account.
 
-  Dates must not be in the future, and next_due_date must schedule the next
-  manual run within the monthly cadence of the newest observation. Nothing
-  here fails purely by wall-clock passage (that would break unrelated PRs);
-  a scheduled staleness check consuming next_due_date is tracked on #445.
+  Dates must not be in the future; a PASSING canary must postdate every
+  recorded incident for the tracked issue (recovery evidence cannot predate
+  the outage it claims to resolve); and next_due_date is anchored to the
+  end-to-end canary's own last_observed_date — never to the API read alone,
+  so refreshing the weaker control cannot advance the deadline. Nothing here
+  fails purely by wall-clock passage (that would break unrelated PRs); the
+  wall-clock half of the contract is the scheduled
+  external-access-staleness.yml workflow, which consumes next_due_date.
   """
   report = yaml.safe_load(
       (DASHBOARD / "bindings/report_template.yaml").read_text()
@@ -632,29 +641,42 @@ def test_external_access_attestation_is_dated_or_tracked():
       "LINK_VIEWER_ALLUSERS_PRESENT",
       "LINK_VIEWER_ALLUSERS_ABSENT",
   }
-  observed = datetime.date.fromisoformat(api_check["last_observed_date"])
-  assert observed <= today, "an observation cannot be dated in the future"
+  api_observed = datetime.date.fromisoformat(api_check["last_observed_date"])
+  assert api_observed <= today, "an observation cannot be dated in the future"
 
   canary = controls["external_identity_link_access_check"]
   assert "c.explain=true" in canary["protocol"]
   assert canary["last_result"] in {"PASSED", "FAILURE_REPORTED"}
+  canary_observed = datetime.date.fromisoformat(canary["last_observed_date"])
+  assert (
+      canary_observed <= today
+  ), "an observation cannot be dated in the future"
   assert attestation["cadence"] == "monthly_manual_until_automated"
 
-  observation_dates = [observed]
   tracking_issue = attestation["tracking_issue"]
-  open_tracked = any(
-      entry["issue"] == tracking_issue and entry["status"] == "OPEN"
+  tracked_entries = [
+      entry
       for entry in report["known_live_issues"]
-  )
+      if entry["issue"] == tracking_issue
+  ]
+  open_tracked = any(entry["status"] == "OPEN" for entry in tracked_entries)
   assert attestation["status"] in {"PASSING", "FAILING"}
   if attestation["status"] == "PASSING":
     assert canary["last_result"] == "PASSED"
     assert api_check["last_result"] == "LINK_VIEWER_ALLUSERS_PRESENT"
     verified = datetime.date.fromisoformat(canary["link_access_verified_date"])
-    assert verified <= today, "a verification cannot be dated in the future"
+    assert verified == canary_observed, (
+        "a PASSING canary's verification date is its observation date —"
+        " they cannot diverge"
+    )
     published = datetime.date.fromisoformat(report["published_date"])
     assert verified >= published
-    observation_dates.append(verified)
+    for entry in tracked_entries:
+      incident = datetime.date.fromisoformat(entry["reported_date"])
+      assert verified > incident, (
+          "recovery evidence cannot predate the outage it claims to"
+          f" resolve: canary {verified} vs incident reported {incident}"
+      )
     assert not open_tracked, (
         "PASSING contradicts an OPEN live issue: close the known_live_issues"
         " entry (or reopen the investigation) before flipping the status"
@@ -668,11 +690,54 @@ def test_external_access_attestation_is_dated_or_tracked():
     ), "a FAILING external-access status must be an OPEN known live issue"
 
   next_due = datetime.date.fromisoformat(attestation["next_due_date"])
-  newest = max(observation_dates)
-  assert newest < next_due <= newest + datetime.timedelta(days=35), (
-      "next_due_date must schedule the next manual run within the monthly"
-      " cadence of the newest recorded observation"
+  assert (
+      canary_observed
+      < next_due
+      <= canary_observed + datetime.timedelta(days=35)
+  ), (
+      "next_due_date must schedule the next end-to-end canary run within the"
+      " monthly cadence of the canary's own last observation — refreshing"
+      " the Permissions API read alone must not advance the deadline"
   )
+
+
+def test_staleness_check_consumes_the_attestation_deadline():
+  """#445: the wall-clock half of the cadence contract must stay wired.
+
+  The unit tests above never compare attestation dates to today, so the
+  monthly cadence only recurs if the scheduled workflow actually runs the
+  staleness script against next_due_date. Pin both: the script's verdicts on
+  either side of the deadline, and the workflow invoking it on a schedule.
+  """
+  spec = importlib.util.spec_from_file_location(
+      "check_external_access_staleness",
+      ROOT / "scripts" / "check_external_access_staleness.py",
+  )
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+
+  report = yaml.safe_load(
+      (DASHBOARD / "bindings/report_template.yaml").read_text()
+  )
+  next_due = datetime.date.fromisoformat(
+      report["external_access_verification"]["next_due_date"]
+  )
+  code, message = module.staleness(report, next_due)
+  assert code == 0 and "current" in message
+  code, message = module.staleness(
+      report, next_due + datetime.timedelta(days=1)
+  )
+  assert code == 1
+  assert "OVERDUE" in message
+  assert "external_identity_link_access_check" in message
+  assert report["external_access_verification"]["tracking_issue"] in message
+
+  workflow = (
+      ROOT / ".github" / "workflows" / "external-access-staleness.yml"
+  ).read_text()
+  assert "schedule" in workflow
+  assert "scripts/check_external_access_staleness.py" in workflow
 
 
 def test_docs_name_the_terminal_report_not_shared_dialog():
