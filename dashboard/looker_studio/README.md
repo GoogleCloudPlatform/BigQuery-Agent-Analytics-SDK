@@ -150,8 +150,12 @@ you"** (offering *Reload* / *Return to report list* / *Go to report
 template*), do not wait it out: `/reporting/create` resolves the *template*
 report's ACL before any `ds.*` parameter is applied, so this failure is on the
 shared template's copy path, not the user's data, IAM, or identifiers.
-Confirm the browser's default Google account is the intended one; if the
-dialog persists, report it on
+Confirm the browser's default Google account is the intended one, and note
+that the blockage is not necessarily owner-side: a recipient organization's
+Workspace sharing policy can prevent its members from receiving Looker
+Studio assets owned by external domains, so a managed account can hit this
+dialog against a fully public template — try a personal account if
+possible. If the dialog persists, report it on
 [#445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445),
 saying only whether the signed-in account is personal or part of an
 organization — never post the account's email address (reporter identifiers

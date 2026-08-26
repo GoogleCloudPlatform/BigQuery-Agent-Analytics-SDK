@@ -205,8 +205,11 @@
         the Google account signed in to that tab; nothing is wrong with your
         project, dataset, table, IAM setup, or the identifiers you entered.
         First confirm the tab is using the account you intend (Looker Studio
-        uses the browser’s default Google account). If it is, the template’s
-        copy path is blocked on the owner’s side —
+        uses the browser’s default Google account). If you are signed in
+        with an organization-managed account, your own organization’s
+        sharing policy can also block receiving Looker Studio assets from
+        external domains — try a personal account if you can. If the dialog
+        still persists, the template’s copy path is blocked —
         <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
           report it on issue #445</a> — say only whether the signed-in
         account is personal or part of an organization; do not post the

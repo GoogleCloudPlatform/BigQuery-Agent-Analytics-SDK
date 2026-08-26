@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import urllib.parse
@@ -534,8 +535,9 @@ def test_report_and_web_bindings_cannot_drift():
               " returned LINK_VIEWER allUsers and assets:search listed the"
               " report non-trashed, so the link role alone does not explain"
               " the denial. Remaining credible causes: the viewer"
-              " copy-disable control, multi-account browser state, or a"
-              " transient sharing/service state."
+              " copy-disable control, recipient-side Workspace sharing"
+              " policy on the reporter's own organization, multi-account"
+              " browser state, or a transient sharing/service state."
           ),
           "status": "OPEN",
       },
@@ -564,15 +566,22 @@ def test_report_and_web_bindings_cannot_drift():
               "method": "external_identity_link_access_check",
               "protocol": (
                   "From a signed-in, non-owner, out-of-domain Google"
-                  " account, open /reporting/create?c.reportId={report_id}"
+                  " account holding no direct grant on the report — either"
+                  " a personal account, or a managed account whose"
+                  " Workspace policy is recorded as allowing Looker Studio"
+                  " assets from untrusted external domains (recipient-side"
+                  " policy can block a fully public template, which would"
+                  " misread as an owner-side outage) — open"
+                  " /reporting/create?c.reportId={report_id}"
                   "&c.mode=view&c.explain=true and confirm it reaches the"
                   " Linking API copy/review flow rather than the terminal"
                   ' "This report isn\'t shared with you" dialog. Record'
-                  " last_observed_date on every run, pass or fail. On"
-                  " failure, record privately which Google account the"
-                  " dialog selected before changing any setting; never post"
-                  " account identifiers publicly."
+                  " last_observed_date and last_identity_class on every"
+                  " run, pass or fail. On failure, record privately which"
+                  " Google account the dialog selected before changing any"
+                  " setting; never post account identifiers publicly."
               ),
+              "last_identity_class": "unknown",
               "last_observed_date": "2026-08-24",
               "link_access_verified_date": None,
               "last_result": "FAILURE_REPORTED",
@@ -613,9 +622,19 @@ def test_external_access_attestation_is_dated_or_tracked():
     known_live_issues entry, so an outage stays repository-visible until
     the canary is re-run from a signed-in, non-owner, out-of-domain account.
 
-  Dates must not be in the future; a PASSING canary must postdate every
-  recorded incident for the tracked issue (recovery evidence cannot predate
-  the outage it claims to resolve); and next_due_date is anchored to the
+  Dates must not be in the future; incident history is durable — the
+  tracked issue must keep at least one known_live_issues entry in BOTH
+  states, transitioning to RESOLVED rather than being deleted, so recovery
+  can never become provable by erasing the outage it claims to resolve.
+  Because date-only values cannot prove within-day order, a RESOLVED entry
+  must carry an explicit resolution_observed_date equal to the passing
+  canary's date and no earlier than the incident: the ordered recovery
+  marker is that recorded attestation, not an unsound strict date
+  inequality. PASSING further requires the Permissions API evidence to be
+  from the same attestation date as the canary (stale link-role evidence
+  cannot combine with a fresh canary), and a canary identity class that
+  rules out recipient-side Workspace policy (personal, or a managed account
+  with verified policy — never unknown). next_due_date is anchored to the
   end-to-end canary's own last_observed_date — never to the API read alone,
   so refreshing the weaker control cannot advance the deadline. Nothing here
   fails purely by wall-clock passage (that would break unrelated PRs); the
@@ -647,6 +666,11 @@ def test_external_access_attestation_is_dated_or_tracked():
   canary = controls["external_identity_link_access_check"]
   assert "c.explain=true" in canary["protocol"]
   assert canary["last_result"] in {"PASSED", "FAILURE_REPORTED"}
+  assert canary["last_identity_class"] in {
+      "personal",
+      "managed_verified_policy",
+      "unknown",
+  }
   canary_observed = datetime.date.fromisoformat(canary["last_observed_date"])
   assert (
       canary_observed <= today
@@ -659,11 +683,31 @@ def test_external_access_attestation_is_dated_or_tracked():
       for entry in report["known_live_issues"]
       if entry["issue"] == tracking_issue
   ]
+  assert tracked_entries, (
+      "incident history is durable: the tracked issue must keep at least"
+      " one known_live_issues entry (transition it to RESOLVED, never"
+      " delete it) — otherwise recovery becomes provable by erasing the"
+      " outage"
+  )
+  for entry in tracked_entries:
+    assert entry["status"] in {"OPEN", "RESOLVED"}
   open_tracked = any(entry["status"] == "OPEN" for entry in tracked_entries)
   assert attestation["status"] in {"PASSING", "FAILING"}
   if attestation["status"] == "PASSING":
     assert canary["last_result"] == "PASSED"
     assert api_check["last_result"] == "LINK_VIEWER_ALLUSERS_PRESENT"
+    assert api_observed == canary_observed, (
+        "PASSING needs the link-role evidence from the same attestation"
+        " date as the canary: a stale LINK_VIEWER read cannot vouch for a"
+        " fresh copy"
+    )
+    assert canary["last_identity_class"] in {
+        "personal",
+        "managed_verified_policy",
+    }, (
+        "a PASSING canary must rule out recipient-side Workspace policy:"
+        " use a personal account or a managed account with recorded policy"
+    )
     verified = datetime.date.fromisoformat(canary["link_access_verified_date"])
     assert verified == canary_observed, (
         "a PASSING canary's verification date is its observation date —"
@@ -671,16 +715,21 @@ def test_external_access_attestation_is_dated_or_tracked():
     )
     published = datetime.date.fromisoformat(report["published_date"])
     assert verified >= published
+    assert not open_tracked, (
+        "PASSING contradicts an OPEN live issue: resolve the"
+        " known_live_issues entry (or reopen the investigation) before"
+        " flipping the status"
+    )
     for entry in tracked_entries:
       incident = datetime.date.fromisoformat(entry["reported_date"])
-      assert verified > incident, (
-          "recovery evidence cannot predate the outage it claims to"
-          f" resolve: canary {verified} vs incident reported {incident}"
+      resolution = datetime.date.fromisoformat(
+          entry["resolution_observed_date"]
       )
-    assert not open_tracked, (
-        "PASSING contradicts an OPEN live issue: close the known_live_issues"
-        " entry (or reopen the investigation) before flipping the status"
-    )
+      assert incident <= resolution == verified, (
+          "a RESOLVED incident must carry the passing canary's date as its"
+          " explicit ordered recovery marker, no earlier than the incident:"
+          f" reported {incident}, resolution {resolution}, canary {verified}"
+      )
   else:
     assert canary["last_result"] == "FAILURE_REPORTED"
     assert canary["link_access_verified_date"] is None
@@ -706,8 +755,16 @@ def test_staleness_check_consumes_the_attestation_deadline():
 
   The unit tests above never compare attestation dates to today, so the
   monthly cadence only recurs if the scheduled workflow actually runs the
-  staleness script against next_due_date. Pin both: the script's verdicts on
-  either side of the deadline, and the workflow invoking it on a schedule.
+  staleness script against next_due_date. Pin all three layers:
+
+  - the script's stdlib field extraction agrees with a real YAML parse (the
+    script deliberately avoids installing PyYAML in the scheduled job, so
+    an attestation restructuring must fail here, not misparse there);
+  - the script's verdicts flip exactly at the deadline;
+  - the workflow, parsed structurally rather than substring-matched, has an
+    active cron schedule, a read-only job whose executable step invokes the
+    script and installs nothing, and a separate issue-writing job gated on
+    the overdue output that performs no checkout and no package downloads.
   """
   spec = importlib.util.spec_from_file_location(
       "check_external_access_staleness",
@@ -717,27 +774,58 @@ def test_staleness_check_consumes_the_attestation_deadline():
   module = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(module)
 
-  report = yaml.safe_load(
-      (DASHBOARD / "bindings/report_template.yaml").read_text()
-  )
-  next_due = datetime.date.fromisoformat(
-      report["external_access_verification"]["next_due_date"]
-  )
-  code, message = module.staleness(report, next_due)
+  attestation_text = (DASHBOARD / "bindings/report_template.yaml").read_text()
+  attestation = yaml.safe_load(attestation_text)["external_access_verification"]
+  fields = module.read_attestation_fields(attestation_text)
+  assert fields == {
+      "next_due_date": attestation["next_due_date"],
+      "status": attestation["status"],
+      "tracking_issue": attestation["tracking_issue"],
+  }, "the script's stdlib extraction drifted from the YAML structure"
+
+  next_due = datetime.date.fromisoformat(fields["next_due_date"])
+  code, message = module.staleness(fields, next_due)
   assert code == 0 and "current" in message
   code, message = module.staleness(
-      report, next_due + datetime.timedelta(days=1)
+      fields, next_due + datetime.timedelta(days=1)
   )
   assert code == 1
   assert "OVERDUE" in message
   assert "external_identity_link_access_check" in message
-  assert report["external_access_verification"]["tracking_issue"] in message
+  assert fields["tracking_issue"] in message
 
-  workflow = (
-      ROOT / ".github" / "workflows" / "external-access-staleness.yml"
-  ).read_text()
-  assert "schedule" in workflow
-  assert "scripts/check_external_access_staleness.py" in workflow
+  workflow = yaml.safe_load(
+      (
+          ROOT / ".github" / "workflows" / "external-access-staleness.yml"
+      ).read_text()
+  )
+  # PyYAML reads the bare `on:` key as boolean True (YAML 1.1).
+  triggers = workflow.get("on", workflow.get(True))
+  assert triggers["schedule"], "the staleness check must run on a schedule"
+  assert all("cron" in entry for entry in triggers["schedule"])
+
+  check_job = workflow["jobs"]["check"]
+  assert check_job["permissions"] == {"contents": "read"}
+  check_runs = [step["run"] for step in check_job["steps"] if "run" in step]
+  assert any(
+      "scripts/check_external_access_staleness.py" in run for run in check_runs
+  ), "the read-only job must execute the staleness script"
+  assert not any(
+      "pip install" in run for run in check_runs
+  ), "the scheduled jobs must not resolve mutable package dependencies"
+
+  report_job = workflow["jobs"]["report"]
+  assert report_job["permissions"] == {"issues": "write"}
+  assert report_job["needs"] == "check"
+  assert "overdue" in report_job["if"]
+  report_runs = [step["run"] for step in report_job["steps"] if "run" in step]
+  assert len(report_job["steps"]) == len(report_runs), (
+      "the issue-writing job must run no actions: no checkout, no package"
+      " downloads — only the gh mutation"
+  )
+  assert any(
+      "gh issue create" in run and "exit 1" in run for run in report_runs
+  ), "the overdue path must open the tracking issue and fail the run"
 
 
 def test_docs_name_the_terminal_report_not_shared_dialog():
@@ -746,19 +834,51 @@ def test_docs_name_the_terminal_report_not_shared_dialog():
   The configurator and both manuals must quote the dialog, attribute it to
   the shared template's access (not the user's setup), and must not fold it
   into the wait-it-out guidance written for the #398 provisioning flicker.
+  Each surface must also keep the substance of the guidance, not just the
+  quote: the dialog does not resolve by waiting, reporting surfaces must
+  forbid posting account identifiers, and the pre-#446 wording that asked
+  for the selected account must never come back.
   """
   fragments = ("This report isn", "shared with you")
+  no_wait_guidance = re.compile(
+      r"not (?:resolve|fix)\w* by waiting"
+      r"|do not wait it out"
+      r"|waiting will not fix"
+      r"|never resolves by waiting"
+  )
+  privacy_prohibition = re.compile(
+      r"(?:do not|never) post the account[’']s email address"
+  )
   surfaces = (
       "docs/index.html",
       "docs/app.mjs",  # the dynamic status a user watches after clicking
       "README.md",
       "USER_MANUAL.md",
   )
+  reporting_surfaces = {"docs/index.html", "README.md", "USER_MANUAL.md"}
   for relative in surfaces:
-    # Collapse line wrapping and string-concat breaks so the quote may reflow.
-    text = " ".join((DASHBOARD / relative).read_text().split())
+    # Collapse line wrapping and JS string-concat breaks ('" + "') so the
+    # guidance may reflow across source lines.
+    text = " ".join(
+        re.sub(r'"\s*\+\s*"', "", (DASHBOARD / relative).read_text()).split()
+    )
     for fragment in fragments:
       assert fragment in text, f"{relative} must quote the dialog verbatim"
+    assert no_wait_guidance.search(text), (
+        f"{relative} must say the terminal dialog is not resolved by"
+        " waiting or retrying"
+    )
+    assert "account the dialog selected" not in text, (
+        f"{relative} must not solicit the selected account: reporter"
+        " identifiers are redacted per Publication safety"
+    )
+    if relative in reporting_surfaces:
+      assert privacy_prohibition.search(
+          text
+      ), f"{relative} must forbid posting the account's email address"
+      assert (
+          "personal or part of an organization" in text
+      ), f"{relative} must ask only for non-identifying account context"
 
   page = (DASHBOARD / "docs/index.html").read_text()
   assert 'id="report-not-shared"' in page
@@ -767,6 +887,10 @@ def test_docs_name_the_terminal_report_not_shared_dialog():
       " provisioning flicker"
   )
   assert "issues/445" in page
+  styles = (DASHBOARD / "docs/styles.css").read_text()
+  assert re.search(
+      r"#report-not-shared\s*\{[^}]*font-size:\s*1rem", styles
+  ), "the recovery guidance must render as body text, not fine print"
 
 
 def test_report_level_date_range_includes_today_for_exactly_90_calendar_days():

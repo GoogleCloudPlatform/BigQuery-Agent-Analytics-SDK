@@ -71,13 +71,23 @@ external_access_verification:
       last_result: LINK_VIEWER_ALLUSERS_PRESENT
     - method: external_identity_link_access_check
       protocol: >-
-        From a signed-in, non-owner, out-of-domain Google account, open
+        From a signed-in, non-owner, out-of-domain Google account holding no
+        direct grant on the report — either a personal account, or a managed
+        account whose Workspace policy is recorded as allowing Looker Studio
+        assets from untrusted external domains (recipient-side policy can
+        block a fully public template, which would misread as an owner-side
+        outage) — open
         /reporting/create?c.reportId={report_id}&c.mode=view&c.explain=true
         and confirm it reaches the Linking API copy/review flow rather than
         the terminal "This report isn't shared with you" dialog. Record
-        last_observed_date on every run, pass or fail. On failure, record
-        privately which Google account the dialog selected before changing
-        any setting; never post account identifiers publicly.
+        last_observed_date and last_identity_class on every run, pass or
+        fail. On failure, record privately which Google account the dialog
+        selected before changing any setting; never post account identifiers
+        publicly.
+      # The 2026-08-24 failure came through a private feedback channel; the
+      # reporter's account class and org sharing policy were not captured,
+      # which is itself part of why the cause is not isolated.
+      last_identity_class: unknown
       last_observed_date: "2026-08-24"
       link_access_verified_date: null
       last_result: FAILURE_REPORTED
@@ -99,8 +109,9 @@ known_live_issues:
       NOT_ISOLATED: a 2026-08-25 authenticated Permissions API read returned
       LINK_VIEWER allUsers and assets:search listed the report non-trashed,
       so the link role alone does not explain the denial. Remaining credible
-      causes: the viewer copy-disable control, multi-account browser state,
-      or a transient sharing/service state.
+      causes: the viewer copy-disable control, recipient-side Workspace
+      sharing policy on the reporter's own organization, multi-account
+      browser state, or a transient sharing/service state.
     status: OPEN
 product_contract: spec/product_contract.yaml
 viewer_qa_contract:
