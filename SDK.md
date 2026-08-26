@@ -194,12 +194,15 @@ evaluator = SystemEvaluator.cost_per_session(
 )
 ```
 
-`token_efficiency()` uses the session's `total_tokens`. When source telemetry
-provides Gemini `usage_metadata.total_token_count`, that provider-reported
-total can include `usage_metadata.thoughts_token_count`; it is therefore not
-guaranteed to equal `prompt_token_count + candidates_token_count`. If no
-provider total exists, the session query falls back to input plus output
-tokens.
+`token_efficiency()` uses the session's `total_tokens`. The session query
+prefers an explicit provider total: Gemini
+`usage_metadata.total_token_count`, followed by `content.usage.total` from
+other telemetry shapes. Gemini's total can include
+`usage_metadata.thoughts_token_count`; it is therefore not guaranteed to equal
+`prompt_token_count + candidates_token_count`. If neither provider total
+exists, the query falls back specifically to the raw `attributes.input_tokens`
+plus `attributes.output_tokens` event fields. That fallback does not reuse all
+alternate paths recognized by the separate input and output counters.
 
 `cost_per_session()` is a separate estimate based only on `input_tokens` and
 `output_tokens` plus the configured rates. It does not consume a separate
