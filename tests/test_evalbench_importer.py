@@ -202,6 +202,36 @@ def test_current_agentic_row_maps_prompt_tools_response_and_identity() -> None:
   assert rows[-1]["content"]["response"] == (
       "The customer qualifies for a refund."
   )
+  assert "evalbench_error_fields" not in rows[0]["attributes"]
+
+
+def test_failed_tool_emits_tool_error_for_session_summary() -> None:
+  stdout = json.dumps(
+      {
+          "response": "The lookup failed.",
+          "tool_calls": [
+              {
+                  "tool_name": "orders__lookup",
+                  "parameters": {"order_id": "missing"},
+                  "error": "order not found",
+              }
+          ],
+      }
+  )
+
+  rows = _run(
+      {"eval_id": "tool-error-1", "prompt": "Find the order", "stdout": stdout}
+  ).to_agent_event_rows()
+
+  assert [row["event_type"] for row in rows] == [
+      "USER_MESSAGE_RECEIVED",
+      "TOOL_STARTING",
+      "TOOL_ERROR",
+      "AGENT_COMPLETED",
+  ]
+  tool_error = rows[2]
+  assert tool_error["status"] == "ERROR"
+  assert tool_error["error_message"] == "order not found"
 
 
 def test_synthetic_rows_satisfy_judge_text_and_response_contracts() -> None:
@@ -258,7 +288,7 @@ def test_missing_scenario_id_is_a_hard_failure() -> None:
     run.to_agent_event_rows()
 
 
-def test_agentic_token_and_latency_stats_map_to_bqaa_fields() -> None:
+def test_agentic_multimodel_tokens_sum_without_multiplying_latency() -> None:
   stdout = json.dumps(
       {
           "response": "Done",
@@ -272,7 +302,16 @@ def test_agentic_token_and_latency_stats_map_to_bqaa_fields() -> None:
                           "total": 150,
                           "cached": 20,
                       },
-                  }
+                  },
+                  "gemini-2.5-pro": {
+                      "api": {"totalLatencyMs": 850},
+                      "tokens": {
+                          "input": 20,
+                          "candidates": 10,
+                          "total": 30,
+                          "cached": 5,
+                      },
+                  },
               }
           },
       }
@@ -283,13 +322,13 @@ def test_agentic_token_and_latency_stats_map_to_bqaa_fields() -> None:
   completed = rows[-1]
 
   assert completed["latency_ms"] == {"total_ms": 850}
-  assert completed["attributes"]["input_tokens"] == 120
-  assert completed["attributes"]["output_tokens"] == 30
+  assert completed["attributes"]["input_tokens"] == 140
+  assert completed["attributes"]["output_tokens"] == 40
   assert completed["attributes"]["usage_metadata"] == {
-      "prompt_token_count": 120,
-      "candidates_token_count": 30,
-      "total_token_count": 150,
-      "cached_content_token_count": 20,
+      "prompt_token_count": 140,
+      "candidates_token_count": 40,
+      "total_token_count": 180,
+      "cached_content_token_count": 25,
   }
 
 
@@ -351,3 +390,13 @@ def test_mapping_is_deterministic_and_sorts_unique_scenarios() -> None:
   assert first == second
   assert first[0]["session_id"] == "evalbench:job-123:a"
   assert first[2]["session_id"] == "evalbench:job-123:b"
+
+
+def test_duplicate_scenario_ids_are_rejected() -> None:
+  run = _run(
+      {"id": "duplicate", "nl_prompt": "First", "generated_sql": "SELECT 1"},
+      {"id": "duplicate", "nl_prompt": "Retry", "generated_sql": "SELECT 2"},
+  )
+
+  with pytest.raises(ValueError, match="duplicate scenario id 'duplicate'"):
+    run.to_agent_event_rows()

@@ -75,17 +75,22 @@ inventing a current timestamp.
 |---|---|---|
 | Prompt | `USER_MESSAGE_RECEIVED` | `text`, `text_summary` |
 | Tool call | `TOOL_STARTING` | `tool`, `args`, `text_summary` |
-| Tool result | `TOOL_COMPLETED` | `tool`, `result`, `text_summary` |
+| Tool result | `TOOL_COMPLETED` or `TOOL_ERROR` | `tool`, `result`, `text_summary` |
 | Final response or generated SQL | `AGENT_COMPLETED` | `response`, `text_summary` |
 
 Missing tool data emits no `TOOL_*` rows. Missing final output omits
 `AGENT_COMPLETED`. Missing `nl_prompt`/`prompt` is a hard error because a valid
-scenario trace cannot be built without the user message.
+scenario trace cannot be built without the user message. Duplicate scenario IDs
+are also rejected because they would otherwise produce colliding trace and span
+identifiers.
 
 Every row includes `attributes.experiment_id = job_id` and
 `attributes.evalbench_scenario_id = scenario_id`. Agentic token and latency
 metadata found in `stdout.stats.models` is normalized onto the terminal row as
 `usage_metadata`, `input_tokens`, `output_tokens`, and `latency_ms.total_ms`.
+Token counts are summed across model entries. Latency uses the maximum reported
+model duration because some EvalBench producers repeat one run-level duration
+for every model used by the run.
 
 ## Why These Fields Matter
 

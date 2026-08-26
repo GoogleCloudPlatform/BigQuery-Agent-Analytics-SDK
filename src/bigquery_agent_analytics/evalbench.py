@@ -148,8 +148,17 @@ class EvalBenchRun:
     config_run_time = _first_run_time(self.config_rows)
 
     prepared: list[tuple[str, int, dict[str, Any]]] = []
+    scenario_indexes: dict[str, int] = {}
     for source_index, result in enumerate(self.results):
       scenario_id = _scenario_id(result)
+      previous_index = scenario_indexes.get(scenario_id)
+      if previous_index is not None:
+        raise ValueError(
+            f"EvalBench job {self.job_id!r} contains duplicate scenario id "
+            f"{scenario_id!r} at result indexes {previous_index} and "
+            f"{source_index}"
+        )
+      scenario_indexes[scenario_id] = source_index
       prepared.append((scenario_id, source_index, result))
 
     rows: list[dict[str, Any]] = []
@@ -241,7 +250,7 @@ class EvalBenchRun:
         result_summary = f"{tool_name} -> {_one_line(rendered_result)}"
         rows.append(
             _event_row(
-                event_type="TOOL_COMPLETED",
+                event_type="TOOL_ERROR" if tool_error else "TOOL_COMPLETED",
                 timestamp=run_time + timedelta(microseconds=sequence),
                 agent=agent,
                 session_id=session_id,
@@ -583,11 +592,13 @@ def _source_error_fields(result: Mapping[str, Any]) -> dict[str, Any]:
       "golden_error",
       "error",
       "stderr",
-      "returncode",
   ):
     value = result.get(key)
     if _usable_text(value) is not None:
       fields[key] = _json_safe(_structured(value))
+  returncode = result.get("returncode")
+  if _failed_returncode(returncode):
+    fields["returncode"] = _json_safe(_structured(returncode))
   return fields
 
 
@@ -607,16 +618,19 @@ def _source_error_message(
       parts.append(f"{key}: {text}")
 
   returncode = result.get("returncode")
-  try:
-    failed_returncode = returncode is not None and int(returncode) != 0
-  except (TypeError, ValueError):
-    failed_returncode = _usable_text(returncode) is not None
-  if failed_returncode:
+  if _failed_returncode(returncode):
     parts.append(f"returncode: {returncode}")
     stderr = _usable_text(error_fields.get("stderr"))
     if stderr is not None:
       parts.append(f"stderr: {stderr}")
   return "; ".join(parts) if parts else None
+
+
+def _failed_returncode(returncode: Any) -> bool:
+  try:
+    return returncode is not None and int(returncode) != 0
+  except (TypeError, ValueError):
+    return _usable_text(returncode) is not None
 
 
 def _usage_and_latency(
@@ -655,7 +669,8 @@ def _usage_and_latency(
     api = _as_mapping(_structured(model_data.get("api")))
     latency_value = _first_int(api, ("totalLatencyMs", "total_latency_ms"))
     if latency_value is not None:
-      total_latency_ms += latency_value
+      # Some EvalBench producers repeat one run-level duration for each model.
+      total_latency_ms = max(total_latency_ms, latency_value)
       found_latency = True
 
   direct_values = {
