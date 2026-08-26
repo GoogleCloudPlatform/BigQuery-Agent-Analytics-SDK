@@ -282,14 +282,14 @@ SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint
 FROM `proj.ds.ontology_concept_index__meta`;
 ```
 
-`OntologyRuntime` performs this strict verification eagerly when a concept-index
+`OntologyRuntime` verifies the `__meta` fingerprint eagerly when a concept-index
 table is attached, exposes `verify()` for explicit re-checks, and constrains
-every lookup by the expected fingerprint. The queries above remain useful for
-one-off operator inspection and debugging.
+every main-table lookup by the expected fingerprint. The queries above remain
+useful for one-off operator inspection and debugging.
 
-## 9. Out of scope (Phase 1)
+## 9. Out of scope
 
-- **Shadow-swap fallback for `>50K` rows** (A6) — Phase 3 deferred. v1 emits a single inline-UNNEST statement; very large indices may need a `_shadow` rename pattern. Tracked in the implementation plan.
+- **Shadow-swap fallback for `>50K` rows** (A6) — The compiler emits a single inline-UNNEST statement; very large indices may need a `_shadow` rename pattern. Tracked in the implementation plan.
 - **Embedding-fuzzy matching** — `AI.EMBED` over labels + `ML.DISTANCE` is a future composition, not in core. See RFC §12.
 - **Live-agent resolver package** — the `bigquery_agent_analytics` SDK is the trace-consumption side; turn-time resolution from a live agent is a separate future package. See RFC §11.
 
