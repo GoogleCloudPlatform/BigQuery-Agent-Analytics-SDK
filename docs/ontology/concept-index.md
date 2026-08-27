@@ -1,15 +1,24 @@
-# Concept Index — Reference (Phase 1)
+# Concept Index — Reference
 
-Status: draft
-Scope: the BigQuery sidecar tables emitted by `gm compile --emit-concept-index`. Phase 1 ships the SQL emission only; the runtime consumer in `bigquery_agent_analytics` (`OntologyRuntime`, resolvers, strict verification) lands in Phases 2–3 per [`docs/implementation_plan_concept_index_runtime.md`](../implementation_plan_concept_index_runtime.md). Companion to [`compilation.md`](compilation.md) (`gm compile` core) and [`cli.md`](cli.md) (`gm` flag reference).
+Status: implemented
+Scope: the BigQuery sidecar tables emitted by `gm compile --emit-concept-index` and consumed by the SDK's [`OntologyRuntime`](../ontology_runtime_reader.md). Companion to [`compilation.md`](compilation.md) (`gm compile` core) and [`cli.md`](cli.md) (`gm` flag reference).
 
-The concept index is **opt-in**: a `gm compile` invocation without `--emit-concept-index` is byte-identical to today and writes no extra DDL.
+The concept index is an SDK-generated pair of ordinary BigQuery tables. It is
+not a BigQuery-native `SEARCH INDEX`, `VECTOR INDEX`, or other automatically
+maintained index object. Here, *concept* is an SDK domain term for an ontology
+entity visible to resolvers, including but not limited to imported
+`skos:Concept` resources.
+
+The concept index is **opt-in**: a `gm compile` invocation without
+`--emit-concept-index` is byte-identical to plain compilation and writes no
+extra DDL. The command emits SQL text; an operator creates or refreshes the
+tables by executing that SQL. BigQuery does not maintain them automatically.
 
 ## 1. What it is
 
-Two BigQuery tables emitted as a sidecar to the property-graph DDL:
+Two ordinary BigQuery tables emitted as a sidecar to the property-graph DDL:
 
-- **`<output_table>`** — the main concept index, one row per `(entity_name, label, label_kind, language, scheme)` tuple, plus per-entity provenance columns. Resolvers run SQL against this.
+- **`<output_table>`** — the main concept index, one row per `(entity_name, label, label_kind, language, scheme)` tuple. Every row repeats the compile-level `compile_id` and `compile_fingerprint` provenance used by strict readers. Resolvers run SQL against this.
 - **`<output_table>__meta`** — a single-row sibling carrying the full provenance fingerprints. The runtime layer uses this to verify that the index in BigQuery still corresponds to the `(Ontology, Binding)` it was loaded from.
 
 Both tables are written in the same `gm compile` run via `CREATE OR REPLACE TABLE T AS SELECT * FROM UNNEST(ARRAY<STRUCT<...>>[...])`. Each statement is atomic per BigQuery's DDL semantics; pair-consistency between main and meta is enforced at runtime via a shared `compile_fingerprint` rather than a DDL transaction (BigQuery doesn't have those for cross-table DDL).
@@ -22,7 +31,11 @@ The concept index is the read-side fabric for **Direction 3** of the SDK — run
 - A curation script that canonicalizes a column of historical user inputs into declared entity keys for an eval dataset.
 - A pre-processing job that resolves brief parameters against the ontology before briefs are enqueued downstream.
 
-A future Phase 2 will ship `OntologyRuntime` + `EntityResolver` in `bigquery_agent_analytics` as the Python surface over this index. For Phase 1 (and for bulk analytics in general), a SQL pushdown directly against the index table is the supported pattern; see §8 "Common SQL patterns" below.
+The SDK ships `OntologyRuntime`, the `EntityResolver` protocol, and reference
+resolvers as the Python surface over this index; see the
+[runtime reader guide](../ontology_runtime_reader.md). For bulk analytics, SQL
+pushdown directly against the index table remains a supported pattern; see §8
+"Common SQL patterns" below.
 
 ## 3. Emit the SQL
 
@@ -101,6 +114,12 @@ One row per `(entity_name, label, label_kind, language, scheme)` membership tupl
 - **Abstract entities** are always included regardless of binding — they're informational and never need to be bound to a table.
 - **Concrete entities** are included iff they appear in `binding.entities`.
 
+A standalone `skos:Concept` that is not also typed as `owl:Class` is imported
+as an abstract entity and deterministically renamed with the `skos_` prefix.
+A resource typed as both `owl:Class` and `skos:Concept` remains concrete and
+unprefixed: OWL supplies its structure while SKOS contributes labels,
+notation, and scheme metadata.
+
 ### Schemes
 
 `annotations["skos:inScheme"]` and `annotations["skos:topConceptOf"]` are unioned and deduped. A concept declared as the top of a scheme is a member of that scheme. Entities with no scheme membership produce rows with `scheme = NULL`.
@@ -157,7 +176,10 @@ The concept index carries two provenance columns with **distinct roles**:
 
 Structural invariant: `compile_id == compile_fingerprint[:12]`. The short form is always derived from the full form, never the reverse. This is enforced inside `_fingerprint.py` (the function `compile_id` literally returns `compile_fingerprint(...)[:12]`). A future refactor cannot let the two drift out of sync — see RFC §11 "Decisions pinned" (Option 2).
 
-The Phase 3 strict-verification layer (when it lands) will use `compile_fingerprint` exclusively; `compile_id` is not on the verification path. A reducer "optimization" that swaps a strict query from `compile_fingerprint` to `compile_id` would reintroduce a 48-bit collision hole — the W2 watchpoint in the implementation plan calls this out and the Phase 3 tests will pin it.
+The shipped strict-verification layer uses `compile_fingerprint` exclusively;
+`compile_id` is not on the verification path. A reducer "optimization" that
+swaps a strict query from `compile_fingerprint` to `compile_id` would
+reintroduce a 48-bit collision hole. Runtime tests pin this contract.
 
 ## 7. Determinism
 
@@ -175,7 +197,9 @@ If `--compiler-version` is left at its default (the installed package version), 
 
 ## 8. Common SQL patterns
 
-A future Phase 2 will ship `OntologyRuntime` + resolvers as a Python surface over this index. Until then — and as the supported path for bulk analytics regardless — SQL pushdown directly against the index is the natural pattern. The patterns below are written against the schema this PR emits; nothing in them depends on Phase 2 / 3 code shipping.
+`OntologyRuntime` and its resolvers provide the Python surface over this index.
+For bulk analytics, SQL pushdown directly against the index is also a natural
+pattern. The examples below use only the compiler-emitted table schema.
 
 ### Bulk resolution report
 
@@ -258,11 +282,14 @@ SELECT compile_fingerprint, ontology_fingerprint, binding_fingerprint
 FROM `proj.ds.ontology_concept_index__meta`;
 ```
 
-A future Phase 3 will wire the strict-verification layer into `OntologyRuntime` so it runs these checks automatically on first access and on a configurable TTL. Until then, the queries above are the supported manual path for ad-hoc operator inspection — and they remain useful afterwards for one-off debugging even once the runtime layer ships.
+`OntologyRuntime` verifies the `__meta` fingerprint eagerly when a concept-index
+table is attached, exposes `verify()` for explicit re-checks, and constrains
+every main-table lookup by the expected fingerprint. The queries above remain
+useful for one-off operator inspection and debugging.
 
-## 9. Out of scope (Phase 1)
+## 9. Out of scope
 
-- **Shadow-swap fallback for `>50K` rows** (A6) — Phase 3 deferred. v1 emits a single inline-UNNEST statement; very large indices may need a `_shadow` rename pattern. Tracked in the implementation plan.
+- **Shadow-swap fallback for `>50K` rows** (A6) — The compiler emits a single inline-UNNEST statement; very large indices may need a `_shadow` rename pattern. Tracked in the implementation plan.
 - **Embedding-fuzzy matching** — `AI.EMBED` over labels + `ML.DISTANCE` is a future composition, not in core. See RFC §12.
 - **Live-agent resolver package** — the `bigquery_agent_analytics` SDK is the trace-consumption side; turn-time resolution from a live agent is a separate future package. See RFC §11.
 
