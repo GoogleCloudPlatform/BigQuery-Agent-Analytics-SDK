@@ -146,7 +146,7 @@ All eight pages share **one date range control**. It defaults to a rolling
 other page, including the Trace Inspector. Shorter windows are cheaper and
 faster — pick the shortest range that answers your question.
 
-### Three things worth knowing
+### Four things worth knowing
 
 - **First paint is not instant.** A cold load or page switch can take up to 90
   seconds before every chart on the page is drawn. The report controls appear
@@ -157,6 +157,11 @@ faster — pick the shortest range that answers your question.
 - **"Data Last Updated" in the footer is not your data's freshness.** It is
   Looker Studio's connector refresh time. Your newest events may be newer or
   older than that stamp.
+- **Total tokens can exceed prompt plus completion.** The dashboard uses the
+  provider-reported total token count. Gemini telemetry can include thinking
+  tokens in that total, so prompt and completion counts in the source data may
+  not add up to the displayed total. The dashboard does not chart thinking
+  tokens separately.
 
 ---
 
