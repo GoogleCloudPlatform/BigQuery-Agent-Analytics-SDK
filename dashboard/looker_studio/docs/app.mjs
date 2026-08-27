@@ -130,7 +130,9 @@ inputs.billingProject.addEventListener("input", refresh);
 
 const WAITING_MESSAGE =
   "Opening Looker Studio in a new tab. Building your report copy can take " +
-  "up to ~10 seconds and may briefly show an error page — don’t close it.";
+  "up to ~10 seconds and may briefly show an error page — don’t close it. " +
+  "One exception: “This report isn’t shared with you” will not resolve by " +
+  "waiting — see the note under the Create button.";
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();

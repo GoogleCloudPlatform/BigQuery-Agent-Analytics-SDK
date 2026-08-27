@@ -38,7 +38,81 @@ live_template_verification:
     - published_include_today_default_validation
   result: PASSED
   limitation: mutable_external_report_requires_reverification_after_changes
-known_live_issues: []
+# link_access above records intent; whether an external identity can actually
+# copy the template is a live fact none of the owner-side methods in
+# live_template_verification can observe. Anonymous HTTP cannot observe it
+# either: it serves the same application shell for public, private, and
+# nonexistent report IDs (sizes differ only by the echoed id), so access is
+# indistinguishable without an identity (#445). Two separate controls are
+# required because the Permissions API exposes the link role but not the
+# separate "disable download, print, and copy for viewers" control, so only
+# an end-to-end copy canary from a signed-in, non-owner, out-of-domain
+# identity clears the whole path the configurator depends on.
+external_access_verification:
+  controls:
+    # The 2026-08-25 observation, verbatim (token from a Workspace/Cloud
+    # Identity account with the datastudio.readonly scope):
+    #   curl -s -H "Authorization: Bearer ${DATASTUDIO_READONLY_TOKEN}" \
+    #     https://datastudio.googleapis.com/v1/assets/5a3f85ef-fc9c-4730-8ef2-8ef9129ddb40/permissions
+    #   -> {"LINK_VIEWER": {"members": ["allUsers"]}}
+    - method: permissions_api_link_role_check
+      protocol: >-
+        Authenticated GET
+        https://datastudio.googleapis.com/v1/assets/{report_id}/permissions
+        must list role LINK_VIEWER with member allUsers. Call it from a
+        Google Workspace or Cloud Identity account holding the
+        datastudio.readonly OAuth scope (least privilege for this read).
+        Treat PERMISSION_DENIED as indeterminate: it can mean a caller
+        constraint (non-org account, missing scope) or lost asset
+        authorization, so verify the principal, its organization
+        authorization, and the scope before reading a denial as either.
+      limitation: does_not_expose_viewer_copy_disable_control
+      last_observed_date: "2026-08-25"
+      last_result: LINK_VIEWER_ALLUSERS_PRESENT
+    - method: external_identity_link_access_check
+      protocol: >-
+        From a signed-in, non-owner, out-of-domain Google account holding no
+        direct grant on the report — either a personal account, or a managed
+        account whose Workspace policy is recorded as allowing Looker Studio
+        assets from untrusted external domains (recipient-side policy can
+        block a fully public template, which would misread as an owner-side
+        outage) — open
+        /reporting/create?c.reportId={report_id}&c.mode=view&c.explain=true
+        and confirm it reaches the Linking API copy/review flow rather than
+        the terminal "This report isn't shared with you" dialog. Record
+        last_observed_date and last_identity_class on every run, pass or
+        fail. On failure, record privately which Google account the dialog
+        selected before changing any setting; never post account identifiers
+        publicly.
+      # The 2026-08-24 failure came through a private feedback channel; the
+      # reporter's account class and org sharing policy were not captured,
+      # which is itself part of why the cause is not isolated.
+      last_identity_class: unknown
+      last_observed_date: "2026-08-24"
+      link_access_verified_date: null
+      last_result: FAILURE_REPORTED
+  cadence: monthly_manual_until_automated
+  # Anchored to the end-to-end canary's last_observed_date (never to the
+  # API read alone), enforced by tests/test_looker_studio_dashboard.py and
+  # consumed by .github/workflows/external-access-staleness.yml.
+  next_due_date: "2026-09-24"
+  status: FAILING
+  tracking_issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445
+known_live_issues:
+  - issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#445
+    symptom: >-
+      Linking API copy fails for external identities with "This report isn't
+      shared with you" before any ds.* parameter is applied.
+    scope: external_non_owner_identities
+    reported_date: "2026-08-24"
+    cause_isolation: >-
+      NOT_ISOLATED: a 2026-08-25 authenticated Permissions API read returned
+      LINK_VIEWER allUsers and assets:search listed the report non-trashed,
+      so the link role alone does not explain the denial. Remaining credible
+      causes: the viewer copy-disable control, recipient-side Workspace
+      sharing policy on the reporter's own organization, multi-account
+      browser state, or a transient sharing/service state.
+    status: OPEN
 product_contract: spec/product_contract.yaml
 viewer_qa_contract:
   issue: GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK#381

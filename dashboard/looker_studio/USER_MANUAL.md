@@ -80,7 +80,10 @@ The button opens Looker Studio in a new tab with your copy of the dashboard
 template, already pointed at your table. **Building your copy can take about
 10 seconds, and the tab may briefly show a loading, not-found, or error page
 while Google provisions the report — don't close it.** It resolves on its
-own.
+own — with one exception: a dialog quoting **"This report isn't shared with
+you"** is terminal and will not resolve by waiting. It means the template
+itself is unavailable to your signed-in account, not that anything is wrong
+with your setup — see [Troubleshooting](#troubleshooting).
 
 When Looker Studio asks, **authorize BigQuery access** — this is Google
 asking for your consent, on your account; nothing is shared with the
@@ -223,7 +226,8 @@ configurator produces.
 
 | What you see | What's happening and what to do |
 |---|---|
-| The new tab shows loading, not-found, or an error page right after clicking **Create my dashboard** | Google is still provisioning your report copy — this resolves within about 10 seconds. Don't close the tab. If it's still broken after a minute, close it and click the button again. |
+| The new tab shows loading, not-found, or an error page right after clicking **Create my dashboard** | Google is still provisioning your report copy — this resolves within about 10 seconds. Don't close the tab. If it's still broken after a minute, close it and click the button again. (Exception: the "This report isn't shared with you" dialog below never resolves by waiting or retrying.) |
+| The new tab shows **"This report isn't shared with you"** with *Reload* / *Return to report list* / *Go to report template* buttons | The shared dashboard *template* is unavailable to the Google account signed in to that tab — nothing is wrong with your project, dataset, table, access, or the identifiers you entered; they haven't been consulted yet. First check the tab is using the account you intend (Looker Studio uses the browser's default Google account — switch accounts or use a profile signed in to only the right one, then click **Create my dashboard** again). If you're on a work or school account, your own organization's sharing policy can also block receiving Looker Studio assets from outside domains — try a personal account if you can. If the dialog still persists, the template's copy path is blocked: report it on [issue #445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445) — say only whether your signed-in account is personal or part of an organization; do not post the account's email address. While it's blocked, the [compatibility check](#check-compatibility-before-creating-optional-needs-a-terminal) still validates your table (it is not a workaround — its URL copies the same template), and the repository's [Grafana dashboard](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/grafana) works independently of Looker Studio. |
 | Charts blank or trickling in after opening a page | Normal on a cold load — allow up to 90 seconds. If a chart is still empty after that, widen the date range: your table may have no events in the selected window. |
 | Layout looks cut off on the left | Collapse the Looker Studio navigation drawer, and make the window at least 1280 px wide. Phones and narrow tablets aren't supported. |
 | Bottom charts clipped on Token Consumption or Latency | You're on a copy created before 2026-07-29, which keeps the old page geometry. Create a fresh copy from the configurator. |

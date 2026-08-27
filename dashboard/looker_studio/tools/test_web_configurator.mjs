@@ -72,13 +72,53 @@ assert.ok(
 );
 assert.match(
   pageSource,
-  /provisions your copy — don’t close it\. Looker Studio then\s+shows an acknowledgement dialog/,
+  /provisions your copy — don’t close it\./,
   "step 02 must repeat the transient-error warning before the dialog",
+);
+assert.match(
+  pageSource,
+  /Looker Studio then\s+shows an acknowledgement dialog/,
+  "step 02 must still explain the acknowledgement dialog",
+);
+assert.ok(
+  pageSource.indexOf("provisions your copy — don’t close it.") <
+    pageSource.indexOf("shows an acknowledgement dialog"),
+  "step 02 must keep the transient warning ahead of the dialog explanation",
+);
+
+// #445: the terminal "This report isn’t shared with you" denial must be
+// distinguished from the transient flicker everywhere the flicker is
+// described, and explained once with a report-it link — never folded into
+// the wait-it-out guidance.
+assert.match(pageSource, /id="report-not-shared"/);
+const terminalDialogRefs =
+  pageSource.match(/href="#report-not-shared"/g) ?? [];
+assert.ok(
+  terminalDialogRefs.length >= 2,
+  "both wait-it-out notes must point at the terminal-dialog explainer",
+);
+const dialogQuotes =
+  pageSource.match(/This report isn’t shared with you/g) ?? [];
+assert.ok(
+  dialogQuotes.length >= 3,
+  "the dialog must be quoted at the button, in step 02, and in the explainer",
+);
+assert.match(
+  pageSource,
+  /issues\/445/,
+  "the explainer must link the tracking issue for reporting regressions",
 );
 
 const appSource = readFileSync(
   new URL("../docs/app.mjs", import.meta.url),
   "utf8",
+);
+// #445: the dynamic status a user actually watches after clicking must not
+// train them to wait out the terminal denial either.
+assert.match(
+  appSource,
+  /This report isn’t shared with you.*will not resolve by/s,
+  "WAITING_MESSAGE must except the terminal dialog from the wait guidance",
 );
 const waitingDuration = appSource.match(/up to (~\d+ seconds)/)?.[1];
 const noteDuration = pageSource.match(/up to\s+(~\d+ seconds)/s)?.[1];
