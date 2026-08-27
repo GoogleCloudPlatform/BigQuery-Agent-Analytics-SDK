@@ -3,7 +3,6 @@ import {
   PROJECT_RE,
   buildDashboardUrl,
   buildSetupUrl,
-  parseTableReference,
   validateQualifiedTableId,
 } from "./configurator.mjs";
 
@@ -15,6 +14,7 @@ const checklist = document.querySelector("#security-checklist");
 const status = document.querySelector("#form-status");
 const tableIdInput = document.querySelector("#table-id");
 const tableIdError = document.querySelector("#table-id-error");
+const advancedSettings = document.querySelector("#advanced-settings");
 const billingInput = document.querySelector("#billing-project");
 const billingError = document.querySelector("#billing-project-error");
 
@@ -27,6 +27,10 @@ const billingError = document.querySelector("#billing-project-error");
 let derived = null;
 let lastValidRaw = null;
 let revealTableErrors = false;
+// Bumped on every state mutation and at the start of every async copy, so a
+// clipboard completion that is no longer current cannot restore a stale
+// status over what the user's later edit cleared (#449 review).
+let statusEpoch = 0;
 
 function setStatus(message, kind = "") {
   status.textContent = message;
@@ -57,12 +61,23 @@ function clearBillingError() {
 function showBillingError(message) {
   billingInput.setAttribute("aria-invalid", "true");
   billingError.textContent = message;
+  // The override lives inside the Advanced disclosure: an error written
+  // into a closed <details> would leave both actions disabled with no
+  // visible explanation, so surface it. Correction never auto-closes.
+  advancedSettings.open = true;
+}
+
+// The single normalization both validation and URL construction consume: a
+// whitespace-only override must behave exactly like blank (billing the
+// project segment), never reach validateConfiguration as truthy text.
+function billingOverride() {
+  return billingInput.value.trim();
 }
 
 // A blank override bills the project segment of the fully qualified ID, so
 // blank is always valid; anything else must be a project ID.
 function billingOverrideIsValid() {
-  const value = billingInput.value.trim();
+  const value = billingOverride();
   if (!value || PROJECT_RE.test(value)) {
     clearBillingError();
     return true;
@@ -72,6 +87,7 @@ function billingOverrideIsValid() {
 }
 
 function refresh() {
+  statusEpoch += 1;
   let parsed;
   try {
     parsed = validateQualifiedTableId(tableIdInput.value);
@@ -102,7 +118,7 @@ function refresh() {
   try {
     createLink.href = buildDashboardUrl({
       ...derived,
-      billingProject: billingInput.value,
+      billingProject: billingOverride(),
     });
     createLink.removeAttribute("aria-disabled");
     copyButton.disabled = false;
@@ -141,13 +157,22 @@ tableIdInput.addEventListener("change", () => {
 tableIdInput.addEventListener("paste", (event) => {
   const text = event.clipboardData.getData("text");
   revealTableErrors = true;
-  const parsed = parseTableReference(text);
+  // Normalize the displayed value only after FULL validation succeeds; any
+  // invalid paste — unparseable, bad segment, or sentinel collision — must
+  // land as the exact clipboard text so the raw invalid input is retained
+  // alongside its immediate error (#448 decision 2, #449 review).
+  let parsed = null;
+  try {
+    parsed = validateQualifiedTableId(text);
+  } catch {
+    parsed = null;
+  }
   if (parsed) {
     event.preventDefault();
     tableIdInput.value = `${parsed.project}.${parsed.dataset}.${parsed.table}`;
     refresh();
   }
-  // An unparseable paste lands in the field; its input event validates it
+  // An invalid paste lands in the field; its input event validates it
   // immediately because revealTableErrors is already set.
 });
 
@@ -159,15 +184,33 @@ const WAITING_MESSAGE =
   "One exception: “This report isn’t shared with you” will not resolve by " +
   "waiting — see the note under the Create button.";
 
-form.addEventListener("submit", (event) => {
-  event.preventDefault();
+// The attempted-action path (#448 decision 1): reveal deferred errors,
+// revalidate, and open exactly one tab when actionable. Reached by the
+// form's submit event and — because this form has two text inputs and no
+// native submit control, so browsers never run implicit submission — by an
+// explicit Enter bridge on both fields (#449 review, P1).
+function attemptCreate() {
   revealTableErrors = true;
   refresh();
   if (createLink.href) {
     setStatus(WAITING_MESSAGE, "waiting");
     window.open(createLink.href, "_blank", "noopener,noreferrer");
   }
+}
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  attemptCreate();
 });
+
+for (const input of [tableIdInput, billingInput]) {
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      attemptCreate();
+    }
+  });
+}
 
 createLink.addEventListener("click", (event) => {
   if (!createLink.href) {
@@ -183,27 +226,37 @@ copyButton.addEventListener("click", async () => {
   if (!derived) {
     return;
   }
+  const epoch = ++statusEpoch;
   try {
     const setupUrl = buildSetupUrl(
-      { ...derived, billingProject: billingInput.value },
+      { ...derived, billingProject: billingOverride() },
       window.location.href,
     );
     await navigator.clipboard.writeText(setupUrl);
-    setStatus("Setup link copied. It contains identifiers, never credentials.", "ready");
+    if (epoch === statusEpoch) {
+      setStatus("Setup link copied. It contains identifiers, never credentials.", "ready");
+    }
   } catch (error) {
-    setStatus(error.message || "Could not copy the setup link.", "error");
+    if (epoch === statusEpoch) {
+      setStatus(error.message || "Could not copy the setup link.", "error");
+    }
   }
 });
 
 checklistButton.addEventListener("click", async () => {
+  const epoch = ++statusEpoch;
   const text = [...checklist.querySelectorAll("li")]
     .map((item, index) => `${index + 1}. ${item.textContent.trim()}`)
     .join("\n");
   try {
     await navigator.clipboard.writeText(text);
-    setStatus("Security checklist copied.", "ready");
+    if (epoch === statusEpoch) {
+      setStatus("Security checklist copied.", "ready");
+    }
   } catch {
-    setStatus("Could not copy the security checklist.", "error");
+    if (epoch === statusEpoch) {
+      setStatus("Could not copy the security checklist.", "error");
+    }
   }
 });
 

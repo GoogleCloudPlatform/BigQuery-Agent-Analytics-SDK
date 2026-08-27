@@ -529,6 +529,34 @@ assert.throws(
     /clearly name exactly one BigQuery table/.test(error.message),
   "an ambiguous Console link is a whole-field error",
 );
+// #449 review: a structurally unambiguous supported-host link with an
+// invalid identifier has three identifiable segments, so it gets segment
+// attribution — while the strict public parser still returns null for it.
+for (const [segment, badWorkspace] of [
+  ["project", "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events"],
+  [
+    "dataset",
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbad-dataset!3sagent_events",
+  ],
+  [
+    "table",
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+      "!2sbqaa_looker_demo!3stable$20260812",
+  ],
+]) {
+  const badSegmentUrl =
+    "https://console.cloud.google.com/bigquery?ws=" + badWorkspace;
+  assert.throws(
+    () => validateQualifiedTableId(badSegmentUrl),
+    (error) => error.segment === segment,
+    `a Console link with a bad ${segment} reports that segment`,
+  );
+  assert.equal(
+    parseBigQueryConsoleTableUrl(badSegmentUrl),
+    null,
+    "the strict public Console parser still rejects invalid identifiers",
+  );
+}
 
 // #448: a generated setup link round-trips through the single field while
 // retaining the existing three-parameter query format.
@@ -599,6 +627,7 @@ const fakeElements = new Map([
   ["#form-status", new FakeElement()],
   ["#table-id", new FakeElement("")],
   ["#table-id-error", new FakeElement()],
+  ["#advanced-settings", new FakeElement()],
   ["#billing-project", new FakeElement("")],
   ["#billing-project-error", new FakeElement()],
 ]);
@@ -609,20 +638,36 @@ globalThis.document = {
     return fakeElements.get(selector);
   },
 };
+let openedUrls = [];
 globalThis.window = {
   location: {
     href: "https://example.test/configure",
     search: "",
   },
-  open() {},
+  open(url) {
+    openedUrls.push(url);
+  },
 };
 let copiedText = "";
+// Controllable clipboard: tests can hold a write pending to exercise the
+// stale-completion guard, or let it resolve immediately.
+let pendingWrites = [];
+let holdClipboard = false;
 Object.defineProperty(globalThis, "navigator", {
   configurable: true,
   value: {
     clipboard: {
-      async writeText(text) {
-        copiedText = text;
+      writeText(text) {
+        if (!holdClipboard) {
+          copiedText = text;
+          return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+          pendingWrites.push(() => {
+            copiedText = text;
+            resolve();
+          });
+        });
       },
     },
   },
@@ -819,10 +864,16 @@ for (const [description, consoleUrl] of [
   assert.match(formStatus.textContent, /^Ready for /);
 }
 
-// A paste that parses but carries an invalid segment reports immediately:
-// paste is a validation trigger, no blur needed.
+// #449 review (P3): a paste that parses structurally but fails validation
+// must NOT be normalized — the exact clipboard text lands and the error
+// reports immediately, because paste is a validation trigger.
 typeIntoField("");
-assert.equal(pasteIntoField("BADPROJECT.dataset.table"), true);
+assert.equal(
+  pasteIntoField("BADPROJECT.dataset.table"),
+  false,
+  "an invalid-segment paste retains ordinary paste behavior",
+);
+typeIntoField("BADPROJECT.dataset.table");
 assert.equal(field.value, "BADPROJECT.dataset.table");
 assert.match(
   fieldError.textContent,
@@ -830,6 +881,46 @@ assert.match(
   "a pasted invalid segment reports without waiting for blur",
 );
 assertActionsDisabled("pasted segment error");
+
+// Normalization-changing invalid paste: the wrapped raw form is preserved
+// verbatim rather than rewritten to dotted form before rejection.
+typeIntoField("");
+assert.equal(pasteIntoField("`BADPROJECT.dataset.table`;"), false);
+typeIntoField("`BADPROJECT.dataset.table`;");
+assert.equal(
+  field.value,
+  "`BADPROJECT.dataset.table`;",
+  "the exact clipboard text is retained for an invalid wrapped paste",
+);
+assert.match(fieldError.textContent, /^Project segment: /);
+assertActionsDisabled("wrapped invalid paste");
+
+// A sentinel-colliding paste is invalid too, so it also lands raw.
+typeIntoField("");
+assert.equal(
+  pasteIntoField("xsentinelbqaaevents.my_dataset.my_table"),
+  false,
+  "a sentinel-colliding paste retains ordinary paste behavior",
+);
+typeIntoField("xsentinelbqaaevents.my_dataset.my_table");
+assert.match(fieldError.textContent, /reserved dashboard template value/);
+
+// A supported-host Console link with an invalid identifier has three
+// identifiable segments: it lands raw and reports the segment, not the
+// whole-link error (#449 review, taxonomy).
+typeIntoField("");
+const badProjectConsoleUrl =
+  "https://console.cloud.google.com/bigquery?ws=" +
+  "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events";
+assert.equal(pasteIntoField(badProjectConsoleUrl), false);
+typeIntoField(badProjectConsoleUrl);
+assert.match(
+  fieldError.textContent,
+  /^Project segment: /,
+  "a Console link with a bad project reports the segment, not the link",
+);
+assert.equal(field.value, badProjectConsoleUrl, "the raw link is retained");
+assertActionsDisabled("console segment error");
 
 // An unparseable paste lands as raw text; its input event validates it
 // immediately because paste is a validation trigger.
@@ -993,6 +1084,112 @@ assert.match(
   "the attempted action reveals the field error",
 );
 
+// #449 review (P1): Enter is a real attempted action on both fields. The
+// form has two text inputs and no native submit control, so browsers never
+// run implicit submission — the explicit keydown bridge is the mechanism,
+// and these tests drive that exact listener.
+openedUrls = [];
+field.listeners.keydown({ key: "Enter", preventDefault() {} });
+assert.equal(openedUrls.length, 0, "Enter on invalid input opens nothing");
+assert.match(
+  fieldError.textContent,
+  /three dot-separated segments/,
+  "Enter on invalid input reveals the validation error",
+);
+
+typeIntoField("my-project.my_dataset.my_table");
+openedUrls = [];
+field.listeners.keydown({ key: "Enter", preventDefault() {} });
+assert.equal(
+  openedUrls.length,
+  1,
+  "Enter on a valid ID opens exactly one tab",
+);
+assert.equal(formStatus.dataset.kind, "waiting");
+
+openedUrls = [];
+billing.listeners.keydown({ key: "Enter", preventDefault() {} });
+assert.equal(
+  openedUrls.length,
+  1,
+  "Enter in the billing field is the same attempted action",
+);
+
+openedUrls = [];
+field.listeners.keydown({ key: "a", preventDefault() {} });
+assert.equal(openedUrls.length, 0, "other keys are not attempted actions");
+
+// #449 review (P2): a whitespace-only billing override behaves exactly
+// like blank input — same validity, same billed project.
+billing.value = "   ";
+billing.listeners.input({ target: billing });
+assert.match(
+  formStatus.textContent,
+  /^Ready for /,
+  "whitespace-only billing behaves like blank",
+);
+assert.equal(billingErrorEl.textContent, "");
+{
+  const linkParams = new URL(createLink.href).searchParams;
+  assert.equal(
+    linkParams.get("ds.ds230.billingProjectId"),
+    "my-project",
+    "a whitespace-only override bills the ID's project segment",
+  );
+}
+
+// #449 review (P2): a billing error opens the Advanced disclosure so the
+// only visible explanation is not hidden; correction never auto-closes it.
+const advancedDisclosure = fakeElements.get("#advanced-settings");
+advancedDisclosure.open = false;
+billing.value = "UPPERCASE";
+billing.listeners.input({ target: billing });
+assert.equal(
+  advancedDisclosure.open,
+  true,
+  "a billing error opens the disclosure",
+);
+billing.value = "";
+billing.listeners.input({ target: billing });
+assert.equal(
+  advancedDisclosure.open,
+  true,
+  "correction does not auto-close the disclosure",
+);
+
+// #449 review (P2): a clipboard completion that is no longer current must
+// not restore a stale status over a later edit.
+typeIntoField("my-project.my_dataset.my_table");
+holdClipboard = true;
+const staleCopy = copyButton.listeners.click();
+typeIntoField("my-project.my_dataset.");
+pendingWrites.splice(0).forEach((complete) => complete());
+await staleCopy;
+assert.equal(
+  formStatus.textContent,
+  "",
+  "a stale copy completion cannot restore the copied status",
+);
+
+// Reversed completions: the last-started operation owns the status.
+typeIntoField("my-project.my_dataset.my_table");
+const earlierCopy = copyButton.listeners.click();
+const laterChecklistCopy = fakeElements.get("#copy-checklist").listeners.click();
+{
+  const writers = pendingWrites.splice(0);
+  writers[1]();
+  await laterChecklistCopy;
+  assert.equal(formStatus.textContent, "Security checklist copied.");
+  writers[0]();
+  await earlierCopy;
+  assert.equal(
+    formStatus.textContent,
+    "Security checklist copied.",
+    "an out-of-order completion cannot overwrite the current status",
+  );
+}
+holdClipboard = false;
+
 // #448: an existing three-parameter setup link prefills the single field
 // and validates immediately; the regenerated link is identical.
 window.location.search =
@@ -1016,6 +1213,31 @@ assert.equal(
   "?project=my-project&dataset=my_dataset&table=my_table",
   "the regenerated setup link retains the three-parameter format",
 );
+
+// #449 review (P2): an invalid billing prefill must not hide the only
+// explanation inside the closed Advanced disclosure.
+window.location.search =
+  "?project=my-project&dataset=my_dataset&table=my_table" +
+  "&billingProject=UPPERCASE";
+advancedDisclosure.open = false;
+await import("../docs/app.mjs?prefill=invalid-billing");
+assert.equal(
+  field.value,
+  "my-project.my_dataset.my_table",
+  "the table prefill still composes with an invalid billing parameter",
+);
+assert.match(
+  billingErrorEl.textContent,
+  /6–30 lowercase letters/,
+  "the invalid billing prefill reports the billing error",
+);
+assert.equal(
+  advancedDisclosure.open,
+  true,
+  "the disclosure opens so the billing error is visible",
+);
+assertActionsDisabled("invalid billing prefill");
+assertFieldClean("table field during invalid billing prefill");
 
 console.log(
   "web configurator OK: single-field states, error classes, and Linking API URL deterministic",

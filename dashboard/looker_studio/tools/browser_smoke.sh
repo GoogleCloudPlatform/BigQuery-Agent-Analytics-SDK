@@ -79,7 +79,9 @@ if [ "${1:-}" = "--self-test" ]; then
   cat > "$FIXTURE/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<a aria-disabled="true"></a>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
 <script>
 document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
 console.error("generic boom");
@@ -122,7 +124,9 @@ HTML
 #!/usr/bin/env bash
 cat <<'DOM'
 <html data-bqaa-app-initialized="true"><body>
-<a aria-disabled="true"></a>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
 <div id="smoke-result" data-errors="0" data-detail=""></div>
 </body></html>
 DOM
@@ -143,7 +147,9 @@ FAKE
   cat > "$DELAYED/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<a aria-disabled="true"></a>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
 <script>
 document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
 window.addEventListener("load", function () {
@@ -166,7 +172,9 @@ HTML
   cat > "$UNINITIALIZED/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<a aria-disabled="true"></a>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
 </body></html>
 HTML
   if SMOKE_DOCS_DIR="$UNINITIALIZED" "$SCRIPT_PATH" >/dev/null 2>&1; then
@@ -320,12 +328,36 @@ fi
 grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
   || fail "app-initialized marker missing — app.mjs did not execute in the browser"
 # With no query parameters the first load is the pristine state (#448):
-# the empty field carries no error and both actions are disabled.
-if grep -q 'aria-invalid=' "$OUT_DIR/dom.html"; then
+# assert the exact elements and states, not generic attribute greps — a
+# generic aria-disabled search is already satisfied by the static markup
+# and would prove nothing about the runtime state (#449 review).
+FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
+TABLE_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<input[^>]*id="table-id"[^>]*>' | head -1)"
+[ -n "$TABLE_TAG" ] || fail "pristine first load must render the table-id field"
+case "$TABLE_TAG" in
+  *aria-invalid*) fail "pristine table-id field must not be marked invalid" ;;
+esac
+case "$TABLE_TAG" in
+  *value=*) fail "pristine table-id field must be empty" ;;
+esac
+CREATE_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<a[^>]*id="create-dashboard"[^>]*>' | head -1)"
+[ -n "$CREATE_TAG" ] || fail "pristine first load must render the create link"
+case "$CREATE_TAG" in
+  *'aria-disabled="true"'*) : ;;
+  *) fail "pristine create link must be aria-disabled" ;;
+esac
+case "$CREATE_TAG" in
+  *href=*) fail "pristine create link must carry no URL" ;;
+esac
+COPY_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<button[^>]*id="copy-link"[^>]*>' | head -1)"
+[ -n "$COPY_TAG" ] || fail "pristine first load must render the copy button"
+case "$COPY_TAG" in
+  *disabled*) : ;;
+  *) fail "pristine copy button must be disabled" ;;
+esac
+if printf '%s' "$FLAT_DOM" | grep -q 'aria-invalid='; then
   fail "pristine first load must not mark any field invalid"
 fi
-grep -q 'aria-disabled="true"' "$OUT_DIR/dom.html" \
-  || fail "pristine first load must keep the create action disabled"
 # Belt and braces: anything Chrome itself logs as an error still fails.
 if grep -Eiq 'CONSOLE.*\b(error|blocked|failed|uncaught)\b' "$OUT_DIR/console.log"; then
   fail "browser stderr reported console errors"

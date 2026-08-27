@@ -39,9 +39,9 @@
           <div class="eyebrow">BigQuery Agent Analytics</div>
           <h1>Your telemetry. Your dashboard.</h1>
           <p class="lede">
-            Enter three BigQuery identifiers. We’ll prepare a private copy of
-            the published Looker Studio dashboard, connected with your Google
-            credentials.
+            Enter your fully qualified BQAA table ID. We’ll prepare a private
+            copy of the published Looker Studio dashboard, connected with
+            your Google credentials.
           </p>
           <ul class="facts" aria-label="Dashboard facts">
             <li>37 parity charts</li>
@@ -77,7 +77,7 @@
           </span>
           <span class="field-error" id="table-id-error" aria-live="polite"></span>
 
-          <details>
+          <details id="advanced-settings">
             <summary>Advanced settings</summary>
             <label for="billing-project">Billing project ID</label>
             <input

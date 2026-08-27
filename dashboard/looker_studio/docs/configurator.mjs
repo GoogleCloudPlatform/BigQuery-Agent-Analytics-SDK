@@ -195,7 +195,11 @@ function hasValidTableIdentifiers(parsed) {
   );
 }
 
-export function parseBigQueryConsoleTableUrl(value) {
+// Structural extraction only: returns the project/dataset/table tuple of an
+// unambiguous supported-host Console link without judging the identifiers,
+// so validateQualifiedTableId can attribute a bad segment to its segment
+// (#449 review). The public parser below stays strict.
+function extractBigQueryConsoleTableReference(value) {
   let url;
   try {
     url = new URL(String(value ?? "").trim());
@@ -247,7 +251,11 @@ export function parseBigQueryConsoleTableUrl(value) {
   }
 
   const [, project, dataset, table] = matches[0];
-  const parsed = { project, dataset, table };
+  return { project, dataset, table };
+}
+
+export function parseBigQueryConsoleTableUrl(value) {
+  const parsed = extractBigQueryConsoleTableReference(value);
   return hasValidTableIdentifiers(parsed) ? parsed : null;
 }
 
@@ -276,8 +284,13 @@ export function validateQualifiedTableId(value, config = REPORT_CONFIG) {
   if (!raw) {
     throw new ConfigurationError("tableId", TABLE_ID_MESSAGES.empty);
   }
+  // The URL branch uses the structural extractor, not the strict public
+  // parser: a supported-host link that unambiguously names one table but
+  // carries an invalid identifier has three identifiable segments, so it
+  // must reach the segment loop below rather than collapse into the
+  // whole-field link error.
   const parsed = URL_SHAPED_RE.test(raw)
-    ? parseBigQueryConsoleTableUrl(raw)
+    ? extractBigQueryConsoleTableReference(raw)
     : splitQualifiedTableId(raw);
   if (!parsed) {
     throw new ConfigurationError(
