@@ -304,6 +304,13 @@ input:focus-visible {
   border-left-color: var(--warning);
 }
 
+/* Critical recovery guidance must read as body text, not fine print
+   (#445): failure diagnosis and privacy instructions stay at >= 16px. */
+#report-not-shared {
+  font-size: 1rem;
+  line-height: 1.6;
+}
+
 .notice strong {
   color: var(--ink);
 }
