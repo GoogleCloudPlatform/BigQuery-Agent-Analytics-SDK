@@ -57,54 +57,25 @@
             used.
           </p>
 
-          <label for="project">Project ID</label>
+          <label for="table-id">Fully qualified BQAA table ID</label>
           <input
-            id="project"
-            name="project"
+            id="table-id"
+            name="tableId"
             autocomplete="off"
-            placeholder="my-gcp-project"
-            aria-describedby="project-hint project-error"
+            placeholder="my-project.my_dataset.agent_events"
+            aria-describedby="table-id-hint table-id-error"
             required
           >
-          <span class="field-hint" id="project-hint">
-            6–30 characters: lowercase letters, digits, and hyphens. Start
-            with a letter and end with a letter or digit.
-            Paste a fully qualified table ID or BigQuery Console table link
-            into any identifier field to fill all three.
+          <span class="field-hint" id="table-id-hint">
+            <code>project.dataset.table</code> — one ID names all three.
+            The plugin’s standard table is <code>agent_events</code>. Paste
+            a fully qualified table ID or a BigQuery Console table link;
+            backticks, a legacy colon after the project, and a trailing
+            <code>;</code> or <code>,</code> are cleaned up automatically.
+            Charts read this table directly and extract reporting fields
+            from its JSON columns.
           </span>
-          <span class="field-error" id="project-error" aria-live="polite"></span>
-
-          <label for="dataset">Dataset ID</label>
-          <input
-            id="dataset"
-            name="dataset"
-            autocomplete="off"
-            placeholder="agent_analytics"
-            aria-describedby="dataset-hint dataset-error"
-            required
-          >
-          <span class="field-hint" id="dataset-hint">
-            Start with a letter or underscore; then use letters, digits, or
-            underscores.
-          </span>
-          <span class="field-error" id="dataset-error" aria-live="polite"></span>
-
-          <label for="table">BQAA table ID</label>
-          <input
-            id="table"
-            name="table"
-            autocomplete="off"
-            value="agent_events"
-            aria-describedby="table-hint table-error"
-            required
-          >
-          <span class="field-hint" id="table-hint">
-            Charts read this table directly and extract reporting fields from
-            its JSON columns. The standard BQAA table is
-            <code>agent_events</code>. Custom table IDs may use ASCII letters,
-            digits, underscores, and hyphens.
-          </span>
-          <span class="field-error" id="table-error" aria-live="polite"></span>
+          <span class="field-error" id="table-id-error" aria-live="polite"></span>
 
           <details>
             <summary>Advanced settings</summary>
@@ -162,10 +133,11 @@
       <section class="how" aria-label="How setup works">
         <article class="step">
           <span class="step-number">01</span>
-          <h3>Enter identifiers</h3>
+          <h3>Enter your table ID</h3>
           <p>
-            Use the project, dataset, and base table configured for the ADK
-            BigQuery Agent Analytics plugin.
+            Paste or type the fully qualified ID of the base table configured
+            for the ADK BigQuery Agent Analytics plugin —
+            <code>project.dataset.table</code>, one value naming all three.
           </p>
         </article>
         <article class="step">

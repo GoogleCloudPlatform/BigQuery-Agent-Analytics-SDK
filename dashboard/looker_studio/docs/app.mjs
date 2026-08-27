@@ -1,11 +1,11 @@
 import {
+  BILLING_PROJECT_MESSAGE,
+  PROJECT_RE,
   buildDashboardUrl,
   buildSetupUrl,
-  validateConfiguration,
   parseTableReference,
-  parseTableReferenceForInput,
+  validateQualifiedTableId,
 } from "./configurator.mjs";
-import { REPORT_CONFIG } from "./report-config.mjs";
 
 const form = document.querySelector("#configurator");
 const createLink = document.querySelector("#create-dashboard");
@@ -13,120 +13,145 @@ const copyButton = document.querySelector("#copy-link");
 const checklistButton = document.querySelector("#copy-checklist");
 const checklist = document.querySelector("#security-checklist");
 const status = document.querySelector("#form-status");
-const inputs = {
-  project: document.querySelector("#project"),
-  dataset: document.querySelector("#dataset"),
-  table: document.querySelector("#table"),
-  billingProject: document.querySelector("#billing-project"),
-};
-const tableInputs = [
-  inputs.project,
-  inputs.dataset,
-  inputs.table,
-];
-const errors = {
-  project: document.querySelector("#project-error"),
-  dataset: document.querySelector("#dataset-error"),
-  table: document.querySelector("#table-error"),
-  billingProject: document.querySelector("#billing-project-error"),
-};
+const tableIdInput = document.querySelector("#table-id");
+const tableIdError = document.querySelector("#table-id-error");
+const billingInput = document.querySelector("#billing-project");
+const billingError = document.querySelector("#billing-project-error");
 
-function currentValues() {
-  return Object.fromEntries(
-    Object.entries(inputs).map(([name, input]) => [name, input.value]),
-  );
-}
+// #448 field state. `derived` is the parsed triple behind the last valid
+// field value; `lastValidRaw` is that value verbatim, so any mutation away
+// from it is detected synchronously. `revealTableErrors` implements the
+// validation-timing contract: paste and setup-link prefill validate
+// immediately; manual entry first reports errors on blur or an attempted
+// action; once touched or invalid, every input revalidates.
+let derived = null;
+let lastValidRaw = null;
+let revealTableErrors = false;
 
 function setStatus(message, kind = "") {
   status.textContent = message;
   status.dataset.kind = kind;
 }
 
-function clearFieldErrors() {
-  for (const [name, input] of Object.entries(inputs)) {
-    input.removeAttribute("aria-invalid");
-    errors[name].textContent = "";
+function disableActions() {
+  createLink.removeAttribute("href");
+  createLink.setAttribute("aria-disabled", "true");
+  copyButton.disabled = true;
+}
+
+function clearTableError() {
+  tableIdInput.removeAttribute("aria-invalid");
+  tableIdError.textContent = "";
+}
+
+function showTableError(message) {
+  tableIdInput.setAttribute("aria-invalid", "true");
+  tableIdError.textContent = message;
+}
+
+function clearBillingError() {
+  billingInput.removeAttribute("aria-invalid");
+  billingError.textContent = "";
+}
+
+function showBillingError(message) {
+  billingInput.setAttribute("aria-invalid", "true");
+  billingError.textContent = message;
+}
+
+// A blank override bills the project segment of the fully qualified ID, so
+// blank is always valid; anything else must be a project ID.
+function billingOverrideIsValid() {
+  const value = billingInput.value.trim();
+  if (!value || PROJECT_RE.test(value)) {
+    clearBillingError();
+    return true;
   }
+  showBillingError(BILLING_PROJECT_MESSAGE);
+  return false;
 }
 
 function refresh() {
-  clearFieldErrors();
+  let parsed;
   try {
-    const values = validateConfiguration(currentValues());
-    createLink.href = buildDashboardUrl(values);
+    parsed = validateQualifiedTableId(tableIdInput.value);
+    clearTableError();
+  } catch (error) {
+    derived = null;
+    lastValidRaw = null;
+    disableActions();
+    setStatus("");
+    if (revealTableErrors) {
+      showTableError(error.message);
+    } else {
+      clearTableError();
+    }
+    billingOverrideIsValid();
+    return;
+  }
+  derived = parsed;
+  lastValidRaw = tableIdInput.value;
+  // #448 decision 3: a valid table ID alone is not actionable — the billing
+  // override must be blank or valid too, and an invalid override keeps the
+  // parsed triple while disabling both actions.
+  if (!billingOverrideIsValid()) {
+    disableActions();
+    setStatus("");
+    return;
+  }
+  try {
+    createLink.href = buildDashboardUrl({
+      ...derived,
+      billingProject: billingInput.value,
+    });
     createLink.removeAttribute("aria-disabled");
     copyButton.disabled = false;
     setStatus(
-      `Ready for ${values.project}.${values.dataset}.${values.table}.`,
+      `Ready for ${derived.project}.${derived.dataset}.${derived.table}.`,
       "ready",
     );
   } catch (error) {
-    createLink.removeAttribute("href");
-    createLink.setAttribute("aria-disabled", "true");
-    copyButton.disabled = true;
-    const hasFieldError = Boolean(error.field && inputs[error.field]);
-    if (hasFieldError) {
-      inputs[error.field].setAttribute("aria-invalid", "true");
-      errors[error.field].textContent = error.message;
-      setStatus("");
-    } else {
-      setStatus(error.message, "error");
-    }
+    // Unreachable through the field validators; keep the page honest if
+    // the template configuration itself is broken.
+    derived = null;
+    lastValidRaw = null;
+    disableActions();
+    setStatus(error.message, "error");
   }
 }
 
-function handleQualifiedTableId(parsed) {
-  inputs.project.value = parsed.project;
-  inputs.dataset.value = parsed.dataset;
-  inputs.table.value = parsed.table;
-}
-
-function afterQualifiedTableId(parsed) {
-  handleQualifiedTableId(parsed);
+tableIdInput.addEventListener("input", () => {
+  if (tableIdInput.value !== lastValidRaw) {
+    // Fail closed on every mutation away from the last valid value: the
+    // derived triple, both actions, and any prior Ready/status announcement
+    // are revoked immediately; only error *presentation* may wait for the
+    // validation trigger below.
+    derived = null;
+    disableActions();
+    setStatus("");
+  }
   refresh();
-  if (createLink.href) {
-    setStatus(
-      `Split "${parsed.project}.${parsed.dataset}.${parsed.table}" into the three fields.`,
-      "ready",
-    );
+});
+
+tableIdInput.addEventListener("change", () => {
+  revealTableErrors = true;
+  refresh();
+});
+
+tableIdInput.addEventListener("paste", (event) => {
+  const text = event.clipboardData.getData("text");
+  revealTableErrors = true;
+  const parsed = parseTableReference(text);
+  if (parsed) {
+    event.preventDefault();
+    tableIdInput.value = `${parsed.project}.${parsed.dataset}.${parsed.table}`;
+    refresh();
   }
-}
+  // An unparseable paste lands in the field; its input event validates it
+  // immediately because revealTableErrors is already set.
+});
 
-const query = new URLSearchParams(window.location.search);
-for (const [name, input] of Object.entries(inputs)) {
-  if (query.has(name)) {
-    input.value = query.get(name);
-  }
-}
-if (!inputs.table.value) {
-  inputs.table.value = REPORT_CONFIG.defaultTable;
-}
-for (const input of tableInputs) {
-  input.addEventListener("input", refresh);
-  input.addEventListener("change", (event) => {
-    const parsed = parseTableReferenceForInput(event.target.value);
-
-    if (parsed) {
-      afterQualifiedTableId(parsed);
-    } else {
-      refresh();
-    }
-  });
-}
-
-for (const input of tableInputs) {
-  input.addEventListener("paste", (event) => {
-    const text = event.clipboardData.getData("text");
-    const parsed = parseTableReference(text);
-
-    if (parsed) {
-      event.preventDefault();
-      afterQualifiedTableId(parsed);
-    }
-  });
-}
-
-inputs.billingProject.addEventListener("input", refresh);
+billingInput.addEventListener("input", refresh);
 
 const WAITING_MESSAGE =
   "Opening Looker Studio in a new tab. Building your report copy can take " +
@@ -136,6 +161,7 @@ const WAITING_MESSAGE =
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  revealTableErrors = true;
   refresh();
   if (createLink.href) {
     setStatus(WAITING_MESSAGE, "waiting");
@@ -146,6 +172,7 @@ form.addEventListener("submit", (event) => {
 createLink.addEventListener("click", (event) => {
   if (!createLink.href) {
     event.preventDefault();
+    revealTableErrors = true;
     refresh();
     return;
   }
@@ -153,8 +180,14 @@ createLink.addEventListener("click", (event) => {
 });
 
 copyButton.addEventListener("click", async () => {
+  if (!derived) {
+    return;
+  }
   try {
-    const setupUrl = buildSetupUrl(currentValues(), window.location.href);
+    const setupUrl = buildSetupUrl(
+      { ...derived, billingProject: billingInput.value },
+      window.location.href,
+    );
     await navigator.clipboard.writeText(setupUrl);
     setStatus("Setup link copied. It contains identifiers, never credentials.", "ready");
   } catch (error) {
@@ -174,4 +207,25 @@ checklistButton.addEventListener("click", async () => {
   }
 });
 
-refresh();
+// Setup-link prefill keeps the existing three-parameter contract: all three
+// identifier parameters compose the fully qualified ID and validate
+// immediately; anything less leaves the field pristine.
+const query = new URLSearchParams(window.location.search);
+if (query.has("billingProject")) {
+  billingInput.value = query.get("billingProject");
+}
+const prefill = ["project", "dataset", "table"].map((name) => query.get(name));
+if (prefill.every((part) => part)) {
+  tableIdInput.value = prefill.join(".");
+  revealTableErrors = true;
+  refresh();
+} else {
+  // Pristine: empty field, no error, actions disabled, no status.
+  disableActions();
+}
+
+// Written only at runtime; the browser smoke test asserts its presence in
+// the live DOM and its absence from the static HTML, proving this module
+// actually executed (the pre-#448 proof — an initial validation error — no
+// longer exists in the pristine state).
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");

@@ -18,8 +18,14 @@
 #                                 to fail: an immediate console error, an
 #                                 occupied port, a failing browser binary, a
 #                                 browser that writes healthy DOM then exits
-#                                 nonzero, and a console error delayed past
-#                                 the marker's creation
+#                                 nonzero, a console error delayed past the
+#                                 marker's creation, and a page that never
+#                                 writes the app-initialized marker
+#
+# Every fixture except the missing-initialization one satisfies the full
+# healthy baseline (#448): the runtime data-bqaa-app-initialized marker (set
+# by script, never static), an aria-disabled action, and no aria-invalid
+# anywhere — so each fixture's injected fault is the sole reason it fails.
 #
 # Env: CHROME_BIN, SMOKE_PORT, SMOKE_DOCS_DIR override discovery.
 set -euo pipefail
@@ -66,15 +72,18 @@ if [ "${1:-}" = "--self-test" ]; then
   [ -n "$CHROME" ] || fail "no Chrome/Chromium binary found (set CHROME_BIN)"
 
   # 1. A page that reports a generic console error (no keyword the old
-  #    grep would have matched) but otherwise looks healthy, including the
-  #    aria-invalid marker.
+  #    grep would have matched) but otherwise satisfies the full healthy
+  #    baseline: runtime marker, pristine field, disabled action.
   FIXTURE="$OUT_DIR/fixture-console-error"
   mkdir -p "$FIXTURE"
   cat > "$FIXTURE/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<input aria-invalid="true">
-<script>console.error("generic boom");</script>
+<a aria-disabled="true"></a>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+console.error("generic boom");
+</script>
 </body></html>
 HTML
   if SMOKE_DOCS_DIR="$FIXTURE" "$SCRIPT_PATH" >/dev/null 2>&1; then
@@ -112,8 +121,8 @@ HTML
   cat > "$FAKE_CHROME" <<'FAKE'
 #!/usr/bin/env bash
 cat <<'DOM'
-<html><body>
-<input aria-invalid="true">
+<html data-bqaa-app-initialized="true"><body>
+<a aria-disabled="true"></a>
 <div id="smoke-result" data-errors="0" data-detail=""></div>
 </body></html>
 DOM
@@ -134,8 +143,9 @@ FAKE
   cat > "$DELAYED/index.html" <<'HTML'
 <!doctype html>
 <html><body>
-<input aria-invalid="true">
+<a aria-disabled="true"></a>
 <script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
 window.addEventListener("load", function () {
   setTimeout(function () { console.error("generic delayed boom"); }, 900);
 });
@@ -146,6 +156,23 @@ HTML
     fail "self-test 5 FAILED: a delayed console error passed"
   fi
   echo "self-test 5 OK: post-snapshot delayed error is detected"
+
+  # 6. A page that looks completely healthy — no errors, pristine field,
+  #    disabled action — but never writes the runtime app-initialized
+  #    marker. Only the marker assertion catches a module that silently
+  #    failed to execute.
+  UNINITIALIZED="$OUT_DIR/fixture-missing-initialization"
+  mkdir -p "$UNINITIALIZED"
+  cat > "$UNINITIALIZED/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<a aria-disabled="true"></a>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$UNINITIALIZED" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 6 FAILED: a page without the app-initialized marker passed"
+  fi
+  echo "self-test 6 OK: missing app initialization is detected"
 
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
@@ -282,14 +309,26 @@ if ! grep -q 'data-errors="0"' "$OUT_DIR/dom.html"; then
   DETAIL="$(grep -o 'data-detail="[^"]*"' "$OUT_DIR/dom.html" | head -1)"
   fail "page-level errors recorded: ${DETAIL:-unknown}"
 fi
-# With no query parameters the project field is empty, so a successfully
-# loaded module runs refresh() and marks the field invalid. Static HTML
-# never contains this attribute; its presence proves app.mjs executed.
-grep -q 'aria-invalid="true"' "$OUT_DIR/dom.html" \
-  || fail "validation never ran — app.mjs did not execute in the browser"
+# The app-initialized marker is written only at runtime by the module, so
+# its presence in the live DOM — and its absence from the static source —
+# proves app.mjs executed (#448; replaces the pre-#448 initial-error proof).
+# Match the marker only as a static tag attribute: a fixture's inline
+# script may name it in setAttribute() without shipping it statically.
+if grep -Eq '<[A-Za-z!][^>]*data-bqaa-app-initialized' "$DOCS_DIR/index.html"; then
+  fail "the app-initialized marker must not appear in static HTML"
+fi
+grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
+  || fail "app-initialized marker missing — app.mjs did not execute in the browser"
+# With no query parameters the first load is the pristine state (#448):
+# the empty field carries no error and both actions are disabled.
+if grep -q 'aria-invalid=' "$OUT_DIR/dom.html"; then
+  fail "pristine first load must not mark any field invalid"
+fi
+grep -q 'aria-disabled="true"' "$OUT_DIR/dom.html" \
+  || fail "pristine first load must keep the create action disabled"
 # Belt and braces: anything Chrome itself logs as an error still fails.
 if grep -Eiq 'CONSOLE.*\b(error|blocked|failed|uncaught)\b' "$OUT_DIR/console.log"; then
   fail "browser stderr reported console errors"
 fi
 
-echo "browser smoke OK: module loaded, zero page-level errors, validation ran"
+echo "browser smoke OK: module initialized, zero page-level errors, pristine first load"

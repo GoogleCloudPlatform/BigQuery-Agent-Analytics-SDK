@@ -9,6 +9,7 @@ import {
   parseTableReferenceForInput,
   splitQualifiedTableId,
   validateConfiguration,
+  validateQualifiedTableId,
 } from "../docs/configurator.mjs";
 import { REPORT_CONFIG } from "../docs/report-config.mjs";
 
@@ -440,7 +441,114 @@ for (const collision of [
 ]) {
   assert.throws(
     () => buildDashboardUrl(collision),
-    /reserved dashboard template value/,
+    // #448: the collision is attributed to the offending segment so the
+    // single-field UI reports it in the segment-level error class; the
+    // collision logic and Linking API output are unchanged.
+    (error) =>
+      error.field === "tableId" &&
+      ["project", "dataset"].includes(error.segment) &&
+      /reserved dashboard template value/.test(error.message),
+  );
+}
+
+// #448: the combined-field validator returns the parsed triple and throws
+// in exactly two error classes: whole-field (segment: null) for input with
+// no truthful segments to blame, and segment-level (segment named) when
+// exactly three segments exist and one violates its rule — including
+// sentinel collisions, which must fail here and never after Ready.
+assert.deepEqual(
+  validateQualifiedTableId("my-project.my_dataset.my_table"),
+  qualifiedTableId,
+);
+assert.deepEqual(
+  validateQualifiedTableId("`my-project.my_dataset.my_table`;"),
+  qualifiedTableId,
+  "SQL-copy punctuation is normalized by the combined-field validator",
+);
+assert.throws(
+  () => validateQualifiedTableId(""),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /project\.dataset\.table/.test(error.message),
+  "empty input is a whole-field error",
+);
+assert.throws(
+  () => validateQualifiedTableId("a.b.c.d"),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === null &&
+    /three dot-separated segments/.test(error.message),
+  "wrong arity is a whole-field error",
+);
+assert.throws(
+  () => validateQualifiedTableId("BADPROJECT.dataset.table"),
+  (error) =>
+    error.field === "tableId" &&
+    error.segment === "project" &&
+    /^Project segment: /.test(error.message),
+  "an invalid project is a segment-level error naming the segment",
+);
+assert.throws(
+  () => validateQualifiedTableId("my-project.bad-dataset.table"),
+  (error) =>
+    error.segment === "dataset" && /^Dataset segment: /.test(error.message),
+);
+assert.throws(
+  () => validateQualifiedTableId("my-project.my_dataset.table$20260807"),
+  (error) =>
+    error.segment === "table" && /^Table segment: /.test(error.message),
+);
+assert.throws(
+  () => validateQualifiedTableId("xsentinelbqaaevents.my_dataset.my_table"),
+  (error) =>
+    error.segment === "project" &&
+    /reserved dashboard template value/.test(error.message),
+  "a sentinel collision fails segment-attributed before Ready",
+);
+assert.deepEqual(
+  validateQualifiedTableId(publicConsoleTableUrl),
+  consoleTableId,
+  "a supported Console link validates through the combined field",
+);
+assert.deepEqual(
+  validateQualifiedTableId(pantheonTableUrl),
+  consoleTableId,
+  "both supported Console hosts validate through the combined field",
+);
+assert.throws(
+  () =>
+    validateQualifiedTableId(
+      "https://console.cloud.google.com/bigquery?ws=" +
+        workspaceReference +
+        "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+        "!2sbqaa_looker_demo!3sother_table",
+    ),
+  (error) =>
+    error.segment === null &&
+    /clearly name exactly one BigQuery table/.test(error.message),
+  "an ambiguous Console link is a whole-field error",
+);
+
+// #448: a generated setup link round-trips through the single field while
+// retaining the existing three-parameter query format.
+{
+  const roundTripSetup = new URL(
+    buildSetupUrl(values, "https://example.test/configure"),
+  );
+  const prefillId = [
+    roundTripSetup.searchParams.get("project"),
+    roundTripSetup.searchParams.get("dataset"),
+    roundTripSetup.searchParams.get("table"),
+  ].join(".");
+  const reparsed = validateQualifiedTableId(prefillId);
+  assert.equal(
+    buildSetupUrl(
+      { ...reparsed, billingProject: "" },
+      "https://example.test/configure",
+    ),
+    roundTripSetup.toString(),
+    "the setup link survives a field round-trip byte-for-byte",
   );
 }
 
@@ -489,16 +597,14 @@ const fakeElements = new Map([
   ["#copy-checklist", new FakeElement()],
   ["#security-checklist", new FakeElement()],
   ["#form-status", new FakeElement()],
-  ["#project", new FakeElement(values.project)],
-  ["#dataset", new FakeElement(values.dataset)],
-  ["#table", new FakeElement(values.table)],
+  ["#table-id", new FakeElement("")],
+  ["#table-id-error", new FakeElement()],
   ["#billing-project", new FakeElement("")],
-  ["#project-error", new FakeElement()],
-  ["#dataset-error", new FakeElement()],
-  ["#table-error", new FakeElement()],
   ["#billing-project-error", new FakeElement()],
 ]);
+const fakeDocumentElement = new FakeElement();
 globalThis.document = {
+  documentElement: fakeDocumentElement,
   querySelector(selector) {
     return fakeElements.get(selector);
   },
@@ -510,33 +616,57 @@ globalThis.window = {
   },
   open() {},
 };
+let copiedText = "";
 Object.defineProperty(globalThis, "navigator", {
   configurable: true,
   value: {
     clipboard: {
-      async writeText() {},
+      async writeText(text) {
+        copiedText = text;
+      },
     },
   },
 });
 
-await import("../docs/app.mjs");
+const field = fakeElements.get("#table-id");
+const fieldError = fakeElements.get("#table-id-error");
+const billing = fakeElements.get("#billing-project");
+const billingErrorEl = fakeElements.get("#billing-project-error");
+const createLink = fakeElements.get("#create-dashboard");
+const copyButton = fakeElements.get("#copy-link");
+const formStatus = fakeElements.get("#form-status");
 
-function resetTableInputs() {
-  fakeElements.get("#project").value = values.project;
-  fakeElements.get("#dataset").value = values.dataset;
-  fakeElements.get("#table").value = values.table;
-
-  fakeElements.get("#form-status").textContent = "";
-  fakeElements.get("#form-status").dataset.kind = "";
-
-  fakeElements.get("#project-error").textContent = "";
-  fakeElements.get("#dataset-error").textContent = "";
-  fakeElements.get("#table-error").textContent = "";
+function assertActionsDisabled(context) {
+  assert.equal(createLink.href, "", `${context}: create link has no URL`);
+  assert.equal(
+    createLink.attributes.get("aria-disabled"),
+    "true",
+    `${context}: create link is aria-disabled`,
+  );
+  assert.equal(copyButton.disabled, true, `${context}: copy is disabled`);
 }
 
-function pasteIntoProject(name, text) {
+function assertFieldClean(context) {
+  assert.equal(
+    field.attributes.has("aria-invalid"),
+    false,
+    `${context}: field is not marked invalid`,
+  );
+  assert.equal(fieldError.textContent, "", `${context}: no field error`);
+}
+
+function typeIntoField(value) {
+  field.value = value;
+  field.listeners.input({ target: field });
+}
+
+function commitField() {
+  field.listeners.change({ target: field });
+}
+
+function pasteIntoField(text) {
   let prevented = false;
-  fakeElements.get(`#${name}`).listeners.paste({
+  field.listeners.paste({
     clipboardData: { getData: () => text },
     preventDefault() {
       prevented = true;
@@ -545,6 +675,106 @@ function pasteIntoProject(name, text) {
   return prevented;
 }
 
+await import("../docs/app.mjs");
+
+// #448 pristine first load: empty field, no error, both actions disabled,
+// no status — and the runtime app-initialized marker is set.
+assert.equal(field.value, "", "pristine: the field starts empty");
+assertFieldClean("pristine");
+assertActionsDisabled("pristine");
+assert.equal(formStatus.textContent, "", "pristine: no status");
+assert.equal(
+  fakeDocumentElement.attributes.get("data-bqaa-app-initialized"),
+  "true",
+  "app.mjs writes the runtime app-initialized marker",
+);
+
+// Manual typing stays partial: no error while incomplete, but a value that
+// becomes valid enables the actions without waiting for blur.
+typeIntoField("my-pro");
+assertFieldClean("partial typing");
+assertActionsDisabled("partial typing");
+assert.equal(formStatus.textContent, "", "partial typing: no status");
+
+typeIntoField("my-project.my_dataset.my_table");
+assert.match(
+  formStatus.textContent,
+  /^Ready for my-project\.my_dataset\.my_table\./,
+  "a hand-typed valid ID reaches Ready",
+);
+assert.equal(formStatus.dataset.kind, "ready");
+assert.ok(createLink.href, "Ready enables the create link");
+assert.equal(copyButton.disabled, false, "Ready enables copy");
+assertFieldClean("valid");
+
+// #448 fail-closed mutation: editing the Ready value immediately revokes
+// the derived triple, both actions, and the Ready announcement — while the
+// error presentation stays deferred until blur (the field is untouched by
+// a validation trigger so far in this cycle).
+typeIntoField("my-project.my_dataset.");
+assertActionsDisabled("mutated away from valid");
+assert.equal(
+  formStatus.textContent,
+  "",
+  "mutation clears the prior Ready announcement",
+);
+assert.equal(formStatus.dataset.kind, "");
+assertFieldClean("mutated before blur");
+
+commitField();
+assert.equal(
+  field.attributes.get("aria-invalid"),
+  "true",
+  "blur reveals the deferred error",
+);
+assert.match(
+  fieldError.textContent,
+  /three dot-separated segments/,
+  "an incomplete ID is a whole-field error",
+);
+assertActionsDisabled("invalid after blur");
+
+// Corrected: once touched/invalid, revalidation happens on every input.
+typeIntoField("my-project.my_dataset.my_table");
+assert.match(formStatus.textContent, /^Ready for /, "corrected reaches Ready");
+assertFieldClean("corrected");
+assert.ok(createLink.href, "corrected re-enables the create link");
+
+// Segment-level error class: the offending segment is named inline.
+typeIntoField("BADPROJECT.dataset.table");
+assert.match(
+  fieldError.textContent,
+  /^Project segment: /,
+  "an invalid project segment is attributed inline",
+);
+assert.match(fieldError.textContent, /6–30 lowercase letters/);
+assertActionsDisabled("segment error");
+assert.equal(formStatus.textContent, "", "segment error keeps the status empty");
+
+// Sentinel collisions are segment-attributed and block Ready.
+typeIntoField("xsentinelbqaaevents.my_dataset.my_table");
+assert.match(
+  fieldError.textContent,
+  /^Project segment: .*reserved dashboard template value/,
+  "a sentinel collision reports as a segment-level error before Ready",
+);
+assertActionsDisabled("sentinel collision");
+
+// Whole-field error class for a link that names no single table.
+typeIntoField(
+  "https://console.cloud.google.com/bigquery?ws=" +
+    workspaceReference +
+    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843" +
+    "!2sbqaa_looker_demo!3sother_table",
+);
+assert.match(
+  fieldError.textContent,
+  /clearly name exactly one BigQuery table/,
+  "an ambiguous Console link is a whole-field error",
+);
+assertActionsDisabled("ambiguous link");
+
+// Every supported paste form normalizes into the field and reaches Ready.
 for (const [description, pastedId] of [
   ["normal dotted ID", "my-project.my_dataset.my_table"],
   ["backticked ID", "`my-project.my_dataset.my_table`"],
@@ -552,402 +782,167 @@ for (const [description, pastedId] of [
   ["semicolon-terminated ID", "my-project.my_dataset.my_table;"],
   ["comma-terminated ID", "my-project.my_dataset.my_table,"],
 ]) {
-  resetTableInputs();
-  assert.equal(pasteIntoProject("project", pastedId), true, `${description} is handled`);
-  assert.deepEqual(
-    {
-      project: fakeElements.get("#project").value,
-      dataset: fakeElements.get("#dataset").value,
-      table: fakeElements.get("#table").value,
-    },
-    qualifiedTableId,
-    `${description} fills all identifier fields`,
-  );
+  typeIntoField("");
+  assert.equal(pasteIntoField(pastedId), true, `${description} is handled`);
   assert.equal(
-    fakeElements.get("#form-status").textContent,
-    'Split "my-project.my_dataset.my_table" into the three fields.',
-    `${description} reports the split`,
+    field.value,
+    "my-project.my_dataset.my_table",
+    `${description} normalizes into the field`,
   );
-  assert.equal(fakeElements.get("#form-status").dataset.kind, "ready");
+  assert.match(
+    formStatus.textContent,
+    /^Ready for my-project\.my_dataset\.my_table\./,
+    `${description} reaches Ready`,
+  );
+  assert.equal(formStatus.dataset.kind, "ready");
+  assertFieldClean(description);
 }
 
-resetTableInputs();
-fakeElements.get("#dataset").value = "my-project.my_dataset.my_table";
-fakeElements.get("#dataset").listeners.change({
-  target: fakeElements.get("#dataset"),
-});
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  qualifiedTableId,
-  "the change fallback also splits a qualified ID",
-);
-assert.equal(
-  fakeElements.get("#form-status").textContent,
-  'Split "my-project.my_dataset.my_table" into the three fields.',
-);
-
-resetTableInputs();
-
-assert.equal(
-  pasteIntoProject("project", "BADPROJECT.dataset.table"),
-  true,
-  "a qualified identifier with an invalid project is still distributed",
-);
-
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  {
-    project: "BADPROJECT",
-    dataset: "dataset",
-    table: "table",
-  },
-  "the qualified identifier is distributed before validation",
-);
-
-assert.match(
-  fakeElements.get("#project-error").textContent,
-  /Use 6–30 lowercase letters, digits, or hyphens; start with a letter and end with a letter or digit/,
-  "the invalid project component is reported inline",
-);
-
-assert.equal(
-  fakeElements.get("#form-status").textContent,
-  "",
-  "an invalid split does not replace the inline field error with a success status",
-);
-
-assert.equal(
-  fakeElements.get("#form-status").dataset.kind,
-  "",
-  "an invalid split does not leave the form in a ready state",
-);
-
-resetTableInputs();
-assert.equal(
-  pasteIntoProject("project", "customers"),
-  false,
-  "an unqualified ID retains normal paste behavior",
-);
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  {
-    project: values.project,
-    dataset: values.dataset,
-    table: values.table,
-  },
-  "an unqualified paste does not distribute values to the other fields",
-);
-
-// Simulate the browser applying the unhandled paste and dispatching its input event.
-fakeElements.get("#project").value = "customers";
-fakeElements.get("#project").listeners.input({
-  target: fakeElements.get("#project"),
-});
-assert.equal(fakeElements.get("#project").value, "customers");
-assert.equal(fakeElements.get("#dataset").value, values.dataset);
-assert.equal(fakeElements.get("#table").value, values.table);
-
-fakeElements.get("#table").value = "table,other";
-fakeElements.get("#table").listeners.input({
-  target: fakeElements.get("#table"),
-});
-assert.match(
-  fakeElements.get("#table-error").textContent,
-  /letters, digits/,
-);
-assert.equal(
-  fakeElements.get("#form-status").textContent,
-  "",
-  "field validation must not repeat the inline error in the form status",
-);
-
-resetTableInputs();
-
-assert.equal(
-  pasteIntoProject("project", "a.b.c.d"),
-  false,
-  "extra-dot identifiers should not be parsed",
-);
-
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  {
-    project: values.project,
-    dataset: values.dataset,
-    table: values.table,
-  },
-);
-
-fakeElements.get("#project").value = "a.b.c.d";
-fakeElements.get("#project").listeners.input({
-  target: fakeElements.get("#project"),
-});
-
-assert.match(
-  fakeElements.get("#project-error").textContent,
-  /6–30 lowercase letters/,
-);
-
-resetTableInputs();
-
-assert.equal(
-  pasteIntoProject("project", "my-project.my_dataset.table$20260807"),
-  true,
-);
-
-assert.equal(
-  fakeElements.get("#project").value,
-  "my-project",
-);
-
-assert.equal(
-  fakeElements.get("#dataset").value,
-  "my_dataset",
-);
-
-assert.equal(
-  fakeElements.get("#table").value,
-  "table$20260807",
-);
-
-assert.match(
-  fakeElements.get("#table-error").textContent,
-  /letters, digits/,
-);
-
-assert.equal(
-  fakeElements.get("#form-status").textContent,
-  "",
-  "invalid table should keep the form status empty",
-);
-
-resetTableInputs();
-
-assert.equal(
-  pasteIntoProject("project", "my-project.my_dataset.table@1234"),
-  true,
-);
-
-assert.equal(
-  fakeElements.get("#table").value,
-  "table@1234",
-);
-
-assert.match(
-  fakeElements.get("#table-error").textContent,
-  /letters, digits/,
-);
-
-assert.equal(
-  fakeElements.get("#form-status").textContent,
-  "",
-);
-
-resetTableInputs();
-
-assert.equal(
-  pasteIntoProject("project", "my-project.my_dataset."),
-  false,
-  "identifiers with an empty part should not be parsed",
-);
-
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  {
-    project: values.project,
-    dataset: values.dataset,
-    table: values.table,
-  },
-);
-
-fakeElements.get("#project").value = "my-project.my_dataset.";
-fakeElements.get("#project").listeners.input({
-  target: fakeElements.get("#project"),
-});
-
-assert.match(
-  fakeElements.get("#project-error").textContent,
-  /6–30 lowercase letters/,
-);
-
-resetTableInputs();
-
-const typedQualifiedId = "my-project.my_dataset.my_table";
-
-for (let i = 1; i <= typedQualifiedId.length; i += 1) {
-  const prefix = typedQualifiedId.slice(0, i);
-
-  fakeElements.get("#project").value = prefix;
-  fakeElements.get("#project").listeners.input({
-    target: fakeElements.get("#project"),
-  });
-
-  assert.equal(
-    fakeElements.get("#project").value,
-    prefix,
-    `typing "${prefix}" must not distribute the qualified ID`,
-  );
-  assert.equal(
-    fakeElements.get("#dataset").value,
-    values.dataset,
-    `typing "${prefix}" must not change the dataset`,
-  );
-  assert.equal(
-    fakeElements.get("#table").value,
-    values.table,
-    `typing "${prefix}" must not change the table`,
-  );
-}
-
-fakeElements.get("#project").listeners.change({
-  target: fakeElements.get("#project"),
-});
-
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  qualifiedTableId,
-  "a committed qualified ID is distributed on change",
-);
-
-for (const field of ["project", "dataset", "table"]) {
-  resetTableInputs();
-
-  assert.equal(
-    pasteIntoProject(
-      field,
-      "my-project.my_dataset.my_table",
-    ),
-    true,
-    `qualified ID pasted into ${field} is handled`,
-  );
-
-  assert.deepEqual(
-    {
-      project: fakeElements.get("#project").value,
-      dataset: fakeElements.get("#dataset").value,
-      table: fakeElements.get("#table").value,
-    },
-    qualifiedTableId,
-    `qualified ID pasted into ${field} fills all identifier fields`,
-  );
-}
-
+// Both supported Console hosts parse through a paste into the single field.
 for (const [description, consoleUrl] of [
   ["Pantheon", pantheonTableUrl],
   ["public Console", publicConsoleTableUrl],
   ["clicked-table", clickedTableUrl],
+  ["encoded", encodedConsoleTableUrl],
 ]) {
-  for (const field of ["project", "dataset", "table"]) {
-    resetTableInputs();
-
-    assert.equal(
-      pasteIntoProject(field, consoleUrl),
-      true,
-      `${description} URL pasted into ${field} is handled`,
-    );
-    assert.deepEqual(
-      {
-        project: fakeElements.get("#project").value,
-        dataset: fakeElements.get("#dataset").value,
-        table: fakeElements.get("#table").value,
-      },
-      consoleTableId,
-      `${description} URL pasted into ${field} fills all identifier fields`,
-    );
-    assert.equal(
-      fakeElements.get("#form-status").textContent,
-      'Split "haiyuan-anarres-dev-806843.bqaa_looker_demo.agent_events" into the three fields.',
-      `${description} URL reports the extracted table`,
-    );
-    assert.equal(fakeElements.get("#form-status").dataset.kind, "ready");
-  }
+  typeIntoField("");
+  assert.equal(
+    pasteIntoField(consoleUrl),
+    true,
+    `${description} URL paste is handled`,
+  );
+  assert.equal(
+    field.value,
+    "haiyuan-anarres-dev-806843.bqaa_looker_demo.agent_events",
+    `${description} URL normalizes to the dotted ID`,
+  );
+  assert.match(formStatus.textContent, /^Ready for /);
 }
 
-resetTableInputs();
-fakeElements.get("#dataset").value = encodedConsoleTableUrl;
-fakeElements.get("#dataset").listeners.change({
-  target: fakeElements.get("#dataset"),
-});
-assert.deepEqual(
-  {
-    project: fakeElements.get("#project").value,
-    dataset: fakeElements.get("#dataset").value,
-    table: fakeElements.get("#table").value,
-  },
-  consoleTableId,
-  "the committed-input fallback recognizes an encoded Console URL",
+// A paste that parses but carries an invalid segment reports immediately:
+// paste is a validation trigger, no blur needed.
+typeIntoField("");
+assert.equal(pasteIntoField("BADPROJECT.dataset.table"), true);
+assert.equal(field.value, "BADPROJECT.dataset.table");
+assert.match(
+  fieldError.textContent,
+  /^Project segment: /,
+  "a pasted invalid segment reports without waiting for blur",
 );
+assertActionsDisabled("pasted segment error");
 
+// An unparseable paste lands as raw text; its input event validates it
+// immediately because paste is a validation trigger.
+typeIntoField("");
+assert.equal(
+  pasteIntoField("a.b.c.d"),
+  false,
+  "wrong-arity paste retains ordinary paste behavior",
+);
+typeIntoField("a.b.c.d");
+assert.match(
+  fieldError.textContent,
+  /three dot-separated segments/,
+  "the landed unparseable paste reports a whole-field error immediately",
+);
+assert.equal(field.value, "a.b.c.d", "the raw invalid text is retained");
+assertActionsDisabled("unparseable paste");
+
+// A rejected Console link lands as raw text and reports the link error.
 for (const rejectedUrl of [
   "https://evil.example/bigquery?ws=" + workspaceReference,
   "https://console.cloud.google.com/bigquery?ws=" +
-    "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events",
-  "https://console.cloud.google.com/bigquery?ws=" +
     "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
-  "https://console.cloud.google.com/bigquery?ws=" +
-    workspaceReference +
-    "!1m5!1m4!3m2!1shaiyuan-anarres-dev-806843" +
-    "!2sother_dataset!23sRESOURCE_LIST",
-  "https://console.cloud.google.com/bigquery?ws=" +
-    workspaceReference +
-    "!1m5!1m4!4m3!1shaiyuan-anarres-dev-806843!2sbqaa_looker_demo",
-  "https://console.cloud.google.com/bigquery?ws=" + workspaceReference + "!4m3",
   "https://",
   "https:evil.example",
 ]) {
-  resetTableInputs();
+  typeIntoField("");
   assert.equal(
-    pasteIntoProject("dataset", rejectedUrl),
+    pasteIntoField(rejectedUrl),
     false,
     "a rejected Console URL retains ordinary paste behavior",
   );
-  assert.equal(fakeElements.get("#project").value, values.project);
-  assert.equal(fakeElements.get("#dataset").value, values.dataset);
-  assert.equal(fakeElements.get("#table").value, values.table);
+  typeIntoField(rejectedUrl);
+  assert.match(
+    fieldError.textContent,
+    /clearly name exactly one BigQuery table/,
+    `${rejectedUrl} reports the whole-field link error`,
+  );
+  assert.equal(field.value, rejectedUrl, "the raw link text is retained");
+  assertActionsDisabled("rejected link");
+}
 
-  // Simulate the browser applying the unintercepted paste to its target.
-  fakeElements.get("#dataset").value = rejectedUrl;
-  fakeElements.get("#dataset").listeners.input({
-    target: fakeElements.get("#dataset"),
+// #448 decision 3: actionability requires the billing override too. An
+// invalid override keeps the parsed table triple (the field stays clean and
+// its value survives) while both actions disable; correcting the override
+// restores Ready without touching the table field.
+typeIntoField("my-project.my_dataset.my_table");
+assert.match(formStatus.textContent, /^Ready for /);
+billing.value = "UPPERCASE";
+billing.listeners.input({ target: billing });
+assertActionsDisabled("invalid billing override");
+assert.match(
+  billingErrorEl.textContent,
+  /6–30 lowercase letters/,
+  "the billing field shows its own error",
+);
+assert.equal(
+  billing.attributes.get("aria-invalid"),
+  "true",
+  "the billing field is marked invalid",
+);
+assertFieldClean("table field during billing error");
+assert.equal(
+  field.value,
+  "my-project.my_dataset.my_table",
+  "the parsed table value is retained during a billing error",
+);
+
+billing.value = "billing-project-123";
+billing.listeners.input({ target: billing });
+assert.match(formStatus.textContent, /^Ready for /, "corrected billing restores Ready");
+assert.equal(billingErrorEl.textContent, "", "the billing error clears");
+assert.equal(billing.attributes.has("aria-invalid"), false);
+assert.match(
+  createLink.href,
+  /billingProjectId%5D=billing-project-123|billingProjectId=billing-project-123|ds\.ds230\.billingProjectId/,
+  "the explicit override reaches the Linking API URL",
+);
+{
+  const linkParams = new URL(createLink.href).searchParams;
+  assert.equal(
+    linkParams.get("ds.ds230.billingProjectId"),
+    "billing-project-123",
+  );
+}
+billing.value = "";
+billing.listeners.input({ target: billing });
+{
+  const linkParams = new URL(createLink.href).searchParams;
+  assert.equal(
+    linkParams.get("ds.ds230.billingProjectId"),
+    "my-project",
+    "a blank override bills the project segment of the fully qualified ID",
+  );
+}
+
+// Copy produces the unchanged three-parameter setup link from the current
+// derived triple.
+copiedText = "";
+await copyButton.listeners.click();
+{
+  const copied = new URL(copiedText);
+  assert.deepEqual(Object.fromEntries(copied.searchParams), {
+    project: "my-project",
+    dataset: "my_dataset",
+    table: "my_table",
   });
-  assert.equal(fakeElements.get("#project").value, values.project);
-  assert.equal(fakeElements.get("#table").value, values.table);
 }
 
 // #398: clicking the enabled create link sets the provisioning expectation
 // without blocking navigation, and the message clears on the next change.
-resetTableInputs();
-fakeElements.get("#project").listeners.input({
-  target: fakeElements.get("#project"),
-});
-assert.match(fakeElements.get("#form-status").textContent, /^Ready for /);
-
 let navigationPrevented = false;
-fakeElements.get("#create-dashboard").listeners.click({
+createLink.listeners.click({
   preventDefault() {
     navigationPrevented = true;
   },
@@ -958,31 +953,31 @@ assert.equal(
   "an enabled create link must still navigate",
 );
 assert.match(
-  fakeElements.get("#form-status").textContent,
+  formStatus.textContent,
   /may briefly show an error page/,
   "clicking the enabled link warns about the provisioning delay",
 );
-assert.equal(fakeElements.get("#form-status").dataset.kind, "waiting");
+assert.equal(formStatus.dataset.kind, "waiting");
 
-fakeElements.get("#project").listeners.input({
-  target: fakeElements.get("#project"),
-});
+typeIntoField(field.value);
 assert.doesNotMatch(
-  fakeElements.get("#form-status").textContent,
+  formStatus.textContent,
   /error page/,
   "the waiting message clears on the next valid state change",
 );
 
 fakeElements.get("#configurator").listeners.submit({ preventDefault() {} });
 assert.equal(
-  fakeElements.get("#form-status").dataset.kind,
+  formStatus.dataset.kind,
   "waiting",
   "submitting the form sets the same provisioning expectation",
 );
 
-fakeElements.get("#create-dashboard").href = "";
+// A disabled create link must not navigate; the attempted action is a
+// validation trigger that reveals the field error.
+typeIntoField("a.b.c.d");
 navigationPrevented = false;
-fakeElements.get("#create-dashboard").listeners.click({
+createLink.listeners.click({
   preventDefault() {
     navigationPrevented = true;
   },
@@ -992,7 +987,36 @@ assert.equal(
   true,
   "a disabled create link must not navigate",
 );
+assert.match(
+  fieldError.textContent,
+  /three dot-separated segments/,
+  "the attempted action reveals the field error",
+);
+
+// #448: an existing three-parameter setup link prefills the single field
+// and validates immediately; the regenerated link is identical.
+window.location.search =
+  "?project=my-project&dataset=my_dataset&table=my_table";
+billing.value = "";
+await import("../docs/app.mjs?prefill=three-parameter");
+assert.equal(
+  field.value,
+  "my-project.my_dataset.my_table",
+  "a legacy setup link composes the fully qualified ID",
+);
+assert.match(
+  formStatus.textContent,
+  /^Ready for my-project\.my_dataset\.my_table\./,
+  "a prefilled link validates immediately",
+);
+copiedText = "";
+await copyButton.listeners.click();
+assert.equal(
+  new URL(copiedText).search,
+  "?project=my-project&dataset=my_dataset&table=my_table",
+  "the regenerated setup link retains the three-parameter format",
+);
 
 console.log(
-  "web configurator OK: identifiers and sentinels validated; Linking API URL deterministic",
+  "web configurator OK: single-field states, error classes, and Linking API URL deterministic",
 );
