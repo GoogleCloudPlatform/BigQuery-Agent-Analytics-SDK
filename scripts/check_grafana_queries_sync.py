@@ -6,6 +6,7 @@ from __future__ import annotations
 import difflib
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, NamedTuple
 
@@ -106,9 +107,13 @@ PUBLIC_DEMO_PROPERTIES = {
 # Panel 19 (Trace detail) renders a raw event timeline, so the public build
 # must not carry it at all, under any data source.
 PUBLIC_DEMO_EXCLUDED_PANEL = 19
-# The public build has no time picker, so each query bounds its own scan.
-PUBLIC_DEMO_TIME_PREDICATE = (
-    "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)"
+# The public build has no time picker, so each query freezes its own half-open
+# window. Both sides are required: with only the lower bound, a future-dated
+# event is reported before it happens and future partitions stay eligible for
+# the scan, so "Last 72 hours" would not be the truth.
+PUBLIC_DEMO_TIME_PREDICATES = (
+    "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)",
+    "timestamp < CURRENT_TIMESTAMP()",
 )
 # Grafana interpolation syntax: variables, macros and the legacy variable
 # form. The public build interpolates nothing, so its SQL must run as written.
@@ -116,6 +121,17 @@ PUBLIC_DEMO_FORBIDDEN_SYNTAX = ("${", "$__", "[[")
 # The public SQL ships with placeholders instead of a real table, and they must
 # stay inside a backticked path so no half-substituted identifier can leak.
 PUBLIC_DEMO_TABLE_PLACEHOLDER = "YOUR_PROJECT_ID.YOUR_DATASET_ID"
+# Backticks are optional in BigQuery whenever the identifiers need no escaping,
+# so `FROM project.dataset.table` names a real table without ever touching one.
+# Match the dotted path after FROM or JOIN so the foreign-path check below sees
+# the unquoted form too. Public demo queries are SELECT-only, so those two
+# keywords cover every table reference they can make. The capture starts at an
+# identifier character, so its caller strips backticks first: that is what makes
+# a mixed `project`.`dataset`.`table` — dots outside the quotes, invisible to a
+# search for a dotted path between two backticks — read as the bare form here.
+UNQUOTED_TABLE_PATH = re.compile(
+    r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*)+)", re.IGNORECASE
+)
 
 
 def normalize(query: str) -> str:
@@ -355,38 +371,40 @@ def check_bigquery_panels_mapped(
 
 
 def active_sql(query: str) -> str:
-  """Return the query with every inline `--` comment stripped.
+  """Return the query with `--` and `#` lines and `/* */` blocks stripped.
 
   A commented-out line still satisfies a plain substring search, so the public
   demo's SQL policy is checked against this comment-free view instead: a
   70-hour predicate with the required 72-hour one parked in a comment above it
-  must not pass.
+  must not pass. BigQuery honours `#` as a line comment alongside `--`, so a
+  bound parked behind either one is stripped the same way. Neither strip knows
+  about string literals, so a `/*`, `--` or `#` inside quotes would read as a
+  comment start; no shipped query has one.
   """
 
-  return "\n".join(line.split("--", 1)[0] for line in query.splitlines())
+  query = re.sub(r"/\*.*?\*/", " ", query, flags=re.DOTALL)
+  return "\n".join(
+      re.split(r"--|#", line, maxsplit=1)[0] for line in query.splitlines()
+  )
 
 
 def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
-  """Enforce the SQL policy every public demo query must satisfy.
+  """Lint the shipped public demo SQL against its documented conventions.
 
   These queries run for anonymous viewers with no time picker and no template
   variables, so each one has to bound its own scan, interpolate nothing, and
   name its table through the shipped placeholders only.
+
+  Works on comment-stripped text: it catches an edit that drops a bound, leaves
+  a variable in, or pastes a real table path, not SQL written to slip past it
+  (`WHERE <bound> OR TRUE` still reads as bounded). Review of these files, not
+  this script, clears the public dashboard.
   """
 
   errors = 0
   for filename, query in sorted(canonical_queries.items()):
     label = repository_path(PUBLIC_DEMO_QUERIES_DIRECTORY / filename)
     executable = active_sql(query)
-
-    if not any(
-        PUBLIC_DEMO_TIME_PREDICATE in line for line in executable.splitlines()
-    ):
-      fail(
-          f"public demo query {label} must carry the uncommented predicate "
-          f"{PUBLIC_DEMO_TIME_PREDICATE}"
-      )
-      errors += 1
 
     for syntax in PUBLIC_DEMO_FORBIDDEN_SYNTAX:
       if syntax in executable:
@@ -396,8 +414,12 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
         )
         errors += 1
 
-    backticked = executable.count("`" + PUBLIC_DEMO_TABLE_PLACEHOLDER + ".")
-    if not backticked or backticked != executable.count(
+    # Every file names exactly one backticked placeholder path per table it
+    # scans: tool_errors.sql UNIONs two, the other seventeen read one. That
+    # count is therefore the number of branches each time bound must appear in,
+    # which is what stops a new UNION arm from shipping unbounded.
+    table_scans = executable.count("`" + PUBLIC_DEMO_TABLE_PLACEHOLDER + ".")
+    if not table_scans or table_scans != executable.count(
         PUBLIC_DEMO_TABLE_PLACEHOLDER
     ):
       fail(
@@ -405,6 +427,39 @@ def check_public_demo_queries(canonical_queries: dict[str, str]) -> int:
           f"`{PUBLIC_DEMO_TABLE_PLACEHOLDER}.<table>`"
       )
       errors += 1
+      continue
+
+    # The count check above passes as long as the placeholders are backticked;
+    # it says nothing about a second path alongside them, quoted or not. A
+    # UNION arm naming a real project would otherwise ship in a query anonymous
+    # viewers run.
+    candidate_paths = re.findall(r"`([^`]*\.[^`]*)`", executable)
+    candidate_paths += UNQUOTED_TABLE_PATH.findall(executable.replace("`", ""))
+    foreign_paths = sorted(
+        {
+            path
+            for path in candidate_paths
+            if not path.startswith(PUBLIC_DEMO_TABLE_PLACEHOLDER + ".")
+        }
+    )
+    if foreign_paths:
+      fail(
+          f"public demo query {label} names {foreign_paths} as a table path: "
+          "every dotted path, backticked or not, must start with "
+          f"{PUBLIC_DEMO_TABLE_PLACEHOLDER + '.'!r}"
+      )
+      errors += 1
+      continue
+
+    for predicate in PUBLIC_DEMO_TIME_PREDICATES:
+      found = sum(predicate in line for line in executable.splitlines())
+      if found != table_scans:
+        fail(
+            f"public demo query {label} scans {table_scans} table(s) but "
+            f"carries {found} uncommented {predicate!r} predicate(s): every "
+            "table-scan branch must freeze the same half-open 72-hour window"
+        )
+        errors += 1
   return errors
 
 
@@ -743,11 +798,12 @@ def main() -> int:
   7. Public Demo Safety: The public build keeps the settings that bound an
      anonymous viewer's BigQuery scan, and declares and wires the BigQuery
      data source through its import input.
-  8. Public Demo SQL Policy: Every public query bounds its own scan with the
-     hard 72-hour predicate outside any comment, interpolates no Grafana
-     variable or macro, and names its tables through backticked placeholder
-     paths only. Its panels map onto interactive counterparts and exclude the
-     trace-detail panel.
+  8. Public Demo SQL Policy: Every public query bounds its own scan with both
+     sides of the hard half-open 72-hour window, outside any comment and as
+     many times over the file as it scans tables, interpolates no Grafana
+     variable or macro, and
+     names its tables through backticked placeholder paths only. Its panels map
+     onto interactive counterparts and exclude the trace-detail panel.
   """
   errors = check_main_dashboard()
   errors += check_public_demo_dashboard()

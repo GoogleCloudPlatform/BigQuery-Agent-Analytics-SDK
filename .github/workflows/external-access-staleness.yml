@@ -1,0 +1,88 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Wall-clock half of the external-access attestation contract (#445): the
+# unit tests enforce the attestation's internal consistency but never compare
+# its dates to today, so this scheduled run is what makes the monthly manual
+# canary recur. When next_due_date has passed it opens (or bumps) a tracking
+# issue and fails, making the staleness visible without touching any
+# credentialed API.
+#
+# Split into a read job and a write job on purpose: the check job holds only
+# contents: read and installs nothing (the script is stdlib-only), and the
+# issue-writing job that receives a token downloads no packages and performs
+# no checkout — so no freshly resolved dependency ever executes in a job
+# that holds write authority.
+
+name: External access attestation staleness
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: next_due_date has not passed
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      overdue: ${{ steps.staleness.outputs.overdue }}
+      message: ${{ steps.staleness.outputs.message }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check attestation staleness
+        id: staleness
+        run: |
+          if message=$(python3 scripts/check_external_access_staleness.py 2>&1); then
+            echo "$message"
+            echo "overdue=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$message"
+            printf 'message<<EOF\n%s\nEOF\n' "$message" >> "$GITHUB_OUTPUT"
+            echo "overdue=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  report:
+    name: Open or bump the tracking issue
+    needs: check
+    if: needs.check.outputs.overdue == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open or bump the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ needs.check.outputs.message }}
+        run: |
+          title="External access attestation overdue (report_template.yaml)"
+          body="$MESSAGE
+
+          Protocol: dashboard/looker_studio/bindings/report_template.yaml -> external_access_verification. Context: #445."
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "$body" --label bug
+          fi
+          exit 1

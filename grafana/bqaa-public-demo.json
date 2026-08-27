@@ -125,7 +125,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Sessions stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  COUNT(DISTINCT session_id) AS sessions\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: Sessions stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  COUNT(DISTINCT session_id) AS sessions\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -188,7 +188,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Events stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: Events stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -251,7 +251,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Error rate stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  SAFE_DIVIDE(\n    COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: Error rate stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  SAFE_DIVIDE(\n    COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR'),\n    COUNT(*)\n  ) AS error_rate\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -323,7 +323,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Avg LLM latency stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  AVG(total_ms) AS avg_llm_latency_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: Avg LLM latency stat (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  AVG(total_ms) AS avg_llm_latency_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -387,7 +387,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Events over time, one series per event_type (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  event_type,\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY time, event_type\nORDER BY time\n",
+          "rawSql": "-- Panel: Events over time, one series per event_type (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  event_type,\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY time, event_type\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -449,7 +449,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Errors over time, one series per event_type (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  event_type,\n  COUNT(*) AS errors\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND (ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nGROUP BY time, event_type\nORDER BY time\n",
+          "rawSql": "-- Panel: Errors over time, one series per event_type (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  event_type,\n  COUNT(*) AS errors\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\n  AND (ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nGROUP BY time, event_type\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -512,7 +512,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Events by agent (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  IFNULL(agent, 'unknown') AS agent_name,\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY agent_name\nHAVING COUNT(*) > 0\nORDER BY events DESC\n",
+          "rawSql": "-- Panel: Events by agent (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  IFNULL(agent, 'unknown') AS agent_name,\n  COUNT(*) AS events\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY agent_name\nHAVING COUNT(*) > 0\nORDER BY events DESC\n",
           "format": 1,
           "location": ""
         }
@@ -574,7 +574,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Top error messages (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  error_message,\n  COUNT(*) AS errors,\n  COUNT(DISTINCT session_id) AS sessions,\n  COUNT(DISTINCT agent) AS agents,\n  MAX(timestamp) AS last_seen\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND error_message IS NOT NULL\nGROUP BY error_message\nHAVING COUNT(*) > 0\nORDER BY errors DESC\nLIMIT 50\n",
+          "rawSql": "-- Panel: Top error messages (Overview row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  error_message,\n  COUNT(*) AS errors,\n  COUNT(DISTINCT session_id) AS sessions,\n  COUNT(DISTINCT agent) AS agents,\n  MAX(timestamp) AS last_seen\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\n  AND error_message IS NOT NULL\nGROUP BY error_message\nHAVING COUNT(*) > 0\nORDER BY errors DESC\nLIMIT 50\n",
           "format": 1,
           "location": ""
         }
@@ -659,7 +659,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Token usage over time (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY time\nORDER BY time\n",
+          "rawSql": "-- Panel: Token usage over time (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY time\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -717,7 +717,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms,\n  APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY time\nORDER BY time\n",
+          "rawSql": "-- Panel: LLM latency percentiles + time-to-first-token (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  TIMESTAMP_TRUNC(timestamp, HOUR) AS time,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_total_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_total_ms,\n  APPROX_QUANTILES(ttft_ms, 100)[OFFSET(50)] AS p50_ttft_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY time\nORDER BY time\n",
           "format": 0,
           "location": ""
         }
@@ -775,7 +775,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tokens by model (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  IFNULL(model_version, 'unknown') AS model,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens,\n  COUNT(*) AS responses\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY model\nORDER BY total_tokens DESC\n",
+          "rawSql": "-- Panel: Tokens by model (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  IFNULL(model_version, 'unknown') AS model,\n  IFNULL(SUM(usage_prompt_tokens), 0) AS prompt_tokens,\n  IFNULL(SUM(usage_completion_tokens), 0) AS completion_tokens,\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens,\n  COUNT(*) AS responses\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY model\nORDER BY total_tokens DESC\n",
           "format": 1,
           "location": ""
         }
@@ -869,7 +869,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Public-demo build; see README.md. The rates are the inlined USD-per-1M\n-- literals below, not dashboard variables — edit them to your models'.\nSELECT\n  IFNULL(SUM(usage_prompt_tokens), 0) / 1e6 * 1.25    -- $ / 1M input tokens\n    + IFNULL(SUM(usage_completion_tokens), 0) / 1e6 * 5.00  -- $ / 1M output tokens\n    AS estimated_cost_usd\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: \"Estimated Cost\" stat (LLM & FinOps row).\n-- Public-demo build; see README.md. The rates are the inlined USD-per-1M\n-- literals below, not dashboard variables — edit them to your models'.\nSELECT\n  IFNULL(SUM(usage_prompt_tokens), 0) / 1e6 * 1.25    -- $ / 1M input tokens\n    + IFNULL(SUM(usage_completion_tokens), 0) / 1e6 * 5.00  -- $ / 1M output tokens\n    AS estimated_cost_usd\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -933,7 +933,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Total tokens stat (LLM & FinOps row).\n-- Public-demo build; see README.md. Reports the provider's usage.total, so it\n-- can exceed prompt + completion when cached or reasoning tokens are billed.\nSELECT\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: Total tokens stat (LLM & FinOps row).\n-- Public-demo build; see README.md. Reports the provider's usage.total, so it\n-- can exceed prompt + completion when cached or reasoning tokens are billed.\nSELECT\n  IFNULL(SUM(usage_total_tokens), 0) AS total_tokens\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -982,7 +982,7 @@
         "x": 16,
         "y": 38
       },
-      "description": "Count of LLM_RESPONSE events in range — the number of completed model calls the rest of this row aggregates over. Read from adk_llm_responses, which holds exactly that one event type. Divide the token and cost panels by this to get a per-call average.",
+      "description": "Distinct LLM calls in range, counted by trace_id/span_id so a streaming installation's response chunks count as one call — the number of completed model calls the rest of this row aggregates over. Read from adk_llm_responses, which holds exactly that one event type. Divide the token and cost panels by this to get a per-call average.",
       "datasource": {
         "type": "grafana-bigquery-datasource",
         "uid": "${DS_BIGQUERY}"
@@ -996,7 +996,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: LLM calls (LLM & FinOps row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  COUNT(*) AS llm_calls\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nHAVING COUNT(*) > 0\n",
+          "rawSql": "-- Panel: LLM calls (LLM & FinOps row).\n-- Public-demo build; see README.md. Counted per span, not per row, so a\n-- streaming installation does not report chunks as calls; rows with no span key\n-- are added back one-per-row because CONCAT of a NULL is NULL.\nSELECT\n  COUNT(DISTINCT CONCAT(trace_id, '|', span_id))\n    + COUNTIF(trace_id IS NULL OR span_id IS NULL) AS llm_calls\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nHAVING COUNT(*) > 0\n",
           "format": 1,
           "location": ""
         }
@@ -1072,7 +1072,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool invocations by tool (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_starts`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY tool_name\nORDER BY invocations DESC\n",
+          "rawSql": "-- Panel: Tool invocations by tool (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  tool_name,\n  COUNT(*) AS invocations\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_starts`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY tool_name\nORDER BY invocations DESC\n",
           "format": 1,
           "location": ""
         }
@@ -1133,7 +1133,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool latency by tool (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  tool_name,\n  COUNT(*) AS completions,\n  AVG(total_ms) AS avg_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_completions`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\nGROUP BY tool_name\nORDER BY p95_ms DESC\n",
+          "rawSql": "-- Panel: Tool latency by tool (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  tool_name,\n  COUNT(*) AS completions,\n  AVG(total_ms) AS avg_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(50)] AS p50_ms,\n  APPROX_QUANTILES(total_ms, 100)[OFFSET(95)] AS p95_ms\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_completions`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\nGROUP BY tool_name\nORDER BY p95_ms DESC\n",
           "format": 1,
           "location": ""
         }
@@ -1217,7 +1217,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_errors`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_completions`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nORDER BY timestamp DESC\nLIMIT 100\n",
+          "rawSql": "-- Panel: Tool errors (Tools row).\n-- Public-demo build; conventions shared by every file here are in README.md.\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_errors`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\n\nUNION ALL\n\nSELECT\n  timestamp,\n  agent,\n  session_id,\n  tool_name,\n  error_message\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_completions`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\n  AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')\nORDER BY timestamp DESC\nLIMIT 100\n",
           "format": 1,
           "location": ""
         }
@@ -1296,7 +1296,7 @@
           },
           "editorMode": "code",
           "rawQuery": true,
-          "rawSql": "-- Panel: Recent sessions (Sessions row).\n-- Public-demo build; see README.md. Unlike the interactive build there are no\n-- HAVING LOGICAL_OR guards, so every rollup covers the session's whole window.\nSELECT\n  session_id,\n  STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id) AS session_users_in_window,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS session_agents_in_window,\n  COUNT(*) AS session_events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)\n    AS session_input_tokens_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)\n    AS session_output_tokens_in_window\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND session_id IS NOT NULL\nGROUP BY session_id\nORDER BY last_event_in_window_at DESC\nLIMIT 250\n",
+          "rawSql": "-- Panel: Recent sessions (Sessions row).\n-- Public-demo build; see README.md. Unlike the interactive build there are no\n-- HAVING LOGICAL_OR guards, so every rollup covers the session's whole window.\nSELECT\n  session_id,\n  STRING_AGG(DISTINCT user_id, ', ' ORDER BY user_id) AS session_users_in_window,\n  MIN(timestamp) AS started_in_window_at,\n  MAX(timestamp) AS last_event_in_window_at,\n  TIMESTAMP_DIFF(MAX(timestamp), MIN(timestamp), SECOND) AS duration_in_window_s,\n  COUNT(DISTINCT agent) AS session_agents_in_window,\n  COUNT(*) AS session_events_in_window,\n  COUNTIF(ENDS_WITH(event_type, '_ERROR') OR error_message IS NOT NULL OR UPPER(status) = 'ERROR') AS session_errors_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.prompt') AS INT64), NULL)), 0)\n    AS session_input_tokens_in_window,\n  IFNULL(SUM(IF(event_type = 'LLM_RESPONSE',\n    SAFE_CAST(JSON_VALUE(content, '$.usage.completion') AS INT64), NULL)), 0)\n    AS session_output_tokens_in_window\nFROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`\nWHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)\n  AND timestamp < CURRENT_TIMESTAMP()\n  AND session_id IS NOT NULL\nGROUP BY session_id\nORDER BY last_event_in_window_at DESC\nLIMIT 250\n",
           "format": 1,
           "location": ""
         }
