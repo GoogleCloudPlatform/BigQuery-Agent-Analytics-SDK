@@ -390,6 +390,23 @@ except ImportError as e:
       e,
   )
 
+# Evaluation Rubrics (canonical metric templates + interpreter)
+try:
+  from .evaluation_rubrics import build_metrics
+  from .evaluation_rubrics import builtin_metric_config
+
+  __all__.extend(
+      [
+          "build_metrics",
+          "builtin_metric_config",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import evaluation rubrics components: %s.",
+      e,
+  )
+
 # Categorical Views
 try:
   from .categorical_views import CategoricalViewManager
