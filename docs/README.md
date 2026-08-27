@@ -15,6 +15,7 @@ architecture, rationale, and implementation plans behind key SDK features.
 | Document | Description |
 |----------|-------------|
 | [hatteras_evaluation.md](hatteras_evaluation.md) | Hatteras-style categorical evaluation design |
+| [evalbench.md](evalbench.md) | EvalBench BigQuery run reader and synthetic BQAA event mapping (issue #97, reader phase) |
 
 ## Agent Context Graph
 
