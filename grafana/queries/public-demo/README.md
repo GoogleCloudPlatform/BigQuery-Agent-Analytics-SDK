@@ -15,18 +15,16 @@ Two reasons, both about keeping things simple:
   file with syntax highlighting — instead of as an escaped one-line string
   buried in a large JSON document.
 - **Straightforward CI check.** `scripts/check_grafana_queries_sync.py` compares
-  each file to the panel's query as **plain text**. Because the canonical form
-  is a file on disk, the check needs no SQL parser or fancy workarounds,
-  just a string comparison. Keeping that check trivial is a deliberate
-  design goal; do not add anything to these files that would require CI to
-  interpret them.
+  each file to the panel's query as **plain text**. Keep it that way: do not add
+  anything to these files that CI would have to interpret.
 
-> **CI scope.** The check guards three things: silent drift between a `.sql` file
-> and the dashboard JSON, SQL that would run unbounded or uninterpolated for an
+> **CI scope.** The lint checks three things: drift between a `.sql` file and
+> the dashboard JSON, SQL that would run unbounded or uninterpolated for an
 > anonymous viewer, and real project identifiers shipping in place of the
-> placeholders. Everything else, including formatting, style, and exhaustive
-> edge cases, is left to future review, not overengineered predictive
-> automation. Keeping the check trivial is worth more than catching every case.
+> placeholders. It compares strings, so it catches honest mistakes, not
+> deliberate ones — `WHERE <bound> OR TRUE` still reads as bounded. That is a
+> known gap: such a query must still fail review. Formatting, style, and edge
+> cases are review's job, not CI's.
 
 ## Conventions for every file in this directory
 
@@ -35,10 +33,14 @@ Two reasons, both about keeping things simple:
   expands them for an anonymous viewer, so they would reach BigQuery verbatim.
 - **Hourly buckets via `TIMESTAMP_TRUNC`.** BigQuery's native function, not a
   time-group macro.
-- **Hardcoded 72-hour bound.** Every file scans
-  `timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)`. The SQL is
-  the only thing capping what a public dashboard can bill — hiding the time
-  picker does not. Review every new file for it.
+- **Half-open 72-hour window in every table-scan branch.** `timestamp >=
+  TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR) AND timestamp <
+  CURRENT_TIMESTAMP()`. CI counts the uncommented lines carrying each half
+  across the whole file and requires that total to equal the number of
+  backticked placeholder table paths. That count is global, not positional: it
+  catches a new `UNION` arm that scans a table without adding a bound, but two
+  copies in one arm and none in another balance out. Keeping each bound in the
+  branch it belongs to is on review, not on CI.
 - **One standalone query per stat panel.** No panel reads another panel's result
   via the `-- Dashboard --` datasource; each stat pays for its own scan. See
   [`../../README.md`](../../README.md) on setting a BigQuery Custom Quota.
@@ -75,7 +77,7 @@ by message text.
 | `tokens_by_model.sql`          | Tokens by model (FinOps)        | `model_version` is response-side; missing → `unknown`.                    |
 | `estimated_cost.sql`           | Estimated cost (FinOps)         | Rates are inlined USD-per-1M literals; edit to match your models.         |
 | `total_tokens.sql`             | Total tokens (FinOps)           | Provider-reported `usage.total`, so it can exceed prompt + completion.    |
-| `llm_calls_total.sql`          | LLM calls (FinOps)              | The view holds one event type, so `COUNT(*)` *is* the LLM_RESPONSE count. |
+| `llm_calls_total.sql`          | LLM calls (FinOps)              | Distinct `trace_id`/`span_id`, so streaming chunks count as one call.     |
 | `tool_usage.sql`               | Tool invocations by tool        | Uses `adk_tool_starts` so failed invocations still count.                 |
 | `tool_latency.sql`             | Tool latency (Tools)            | No `IFNULL`, so averages are not skewed.                                  |
 | `tool_errors.sql`              | Tool errors (Tools)             | `UNION ALL` keeps both records when one failure logs two events.          |

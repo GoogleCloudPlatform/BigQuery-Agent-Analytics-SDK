@@ -63,8 +63,9 @@ diffs SQL text, so keep the restatements few.
   1. A view-backed query is already scoped (each typed view holds exactly one
      event type), so adding the filter would blank the panel for every selection
      that did not name that view's own event type. `llm_calls_total.sql` is the
-     limiting case: its `COUNT(*)` over `${view_prefix}llm_responses` *is* the
-     LLM_RESPONSE count, so the filter would only ever subtract from it.
+     limiting case: every row of `${view_prefix}llm_responses` is an
+     LLM_RESPONSE by construction, so the filter would only ever subtract from
+     its count.
   2. A query that counts *errors* is exempt even when it reads the raw
      `${table}`, because errors carry their own `*_ERROR` event types: honoring
      the filter would report zero errors (or a 0% error rate) whenever the
@@ -118,10 +119,10 @@ It is a separate set of files rather than a reuse of the ones above because the
 demo evaluates no variables. Every `${...}` placeholder is gone (the project and
 dataset are the literal `YOUR_PROJECT_ID` / `YOUR_DATASET_ID` the documented
 `sed` replaces), `$__timeGroup` becomes `TIMESTAMP_TRUNC`, `$__timeFilter`
-becomes a hardcoded 72-hour predicate, the cost rates are inlined literals, and
-the panels that read another panel's result through the `-- Dashboard --`
-datasource each carry their own query instead — which is why the four Overview
-stats and `Total tokens` have one file each rather than sharing
+becomes a hardcoded half-open 72-hour window, the cost rates are inlined
+literals, and the panels that read another panel's result through the
+`-- Dashboard --` datasource each carry their own query instead — which is why
+the four Overview stats and `Total tokens` have one file each rather than sharing
 `overview_totals.sql` and `estimated_cost.sql`. There is no `trace_detail.sql`:
 the public build deliberately exposes no per-session event timeline.
 

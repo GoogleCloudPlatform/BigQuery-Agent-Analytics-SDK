@@ -390,6 +390,23 @@ except ImportError as e:
       e,
   )
 
+# Evaluation Rubrics (canonical metric templates + interpreter)
+try:
+  from .evaluation_rubrics import build_metrics
+  from .evaluation_rubrics import builtin_metric_config
+
+  __all__.extend(
+      [
+          "build_metrics",
+          "builtin_metric_config",
+      ]
+  )
+except ImportError as e:
+  logger.debug(
+      "Could not import evaluation rubrics components: %s.",
+      e,
+  )
+
 # Golden Q&A matching (producer for GOLDEN_EXPECTED_ANSWER judge context)
 try:
   from .golden_matching import DEFAULT_GOLDEN_THRESHOLD

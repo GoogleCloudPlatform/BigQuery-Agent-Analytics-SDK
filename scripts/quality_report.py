@@ -530,11 +530,14 @@ def _load_eval_config(eval_config_path=None):
       _EVAL_CONFIG_CACHE[cache_key] = result
       return result
 
-  raise FileNotFoundError(
-      "No eval_config.json found. Expected at eval/eval_config.json "
-      "relative to the repo root or script directory, or pass "
-      "--eval-config <path> explicitly."
-  )
+  # No file anywhere: fall back to the SDK's canonical builtin rubrics
+  # (the same data this repo ships in scripts/eval/eval_config.json).
+  from bigquery_agent_analytics import builtin_metric_config
+
+  logger.info("No eval_config.json found; using the SDK builtin rubrics.")
+  result = builtin_metric_config()
+  _EVAL_CONFIG_CACHE[cache_key] = result
+  return result
 
 
 # ---------------------------------------------------------------------------
@@ -551,46 +554,18 @@ def get_eval_metrics(eval_spec=None, eval_config=None):
   also enables the ``declined`` category so the judge can credit correct
   out-of-scope refusals.
   """
-  from bigquery_agent_analytics import CategoricalMetricCategory
-  from bigquery_agent_analytics import CategoricalMetricDefinition
+  # The interpreter lives in the SDK core (evaluation_rubrics.build_metrics);
+  # this wrapper derives the scope inputs from the eval spec and delegates.
+  from bigquery_agent_analytics import build_metrics
 
   scope_context = _build_scope_context(eval_spec)
   has_scope = bool(eval_spec and eval_spec.get("scope"))
 
   if eval_config is None:
     eval_config = _load_eval_config()
-  ext_metrics = eval_config.get("metrics", [])
-  result = []
-  for m in ext_metrics:
-    cats = [
-        CategoricalMetricCategory(name=c["name"], definition=c["definition"])
-        for c in m["categories"]
-    ]
-    defn = m["definition"]
-    if m.get("scope_aware") and scope_context:
-      defn += scope_context
-    if has_scope and m.get("declined_category"):
-      dc = m["declined_category"]
-      declined_cat = CategoricalMetricCategory(
-          name=dc["name"], definition=dc["definition"]
-      )
-      insert_after = dc.get("insert_after")
-      if insert_after:
-        idx = next(
-            (i for i, c in enumerate(cats) if c.name == insert_after), -1
-        )
-        cats.insert(idx + 1, declined_cat)
-      else:
-        cats.append(declined_cat)
-      if m.get("scope_suffix"):
-        defn += m["scope_suffix"]
-    result.append(
-        CategoricalMetricDefinition(
-            name=m["name"], definition=defn, categories=cats
-        )
-    )
-  logger.info("Loaded %d metrics from eval config", len(result))
-  return result
+  return build_metrics(
+      eval_config, scope_context=scope_context, has_scope=has_scope
+  )
 
 
 # ---------------------------------------------------------------------------
