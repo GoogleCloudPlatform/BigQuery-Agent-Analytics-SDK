@@ -51,7 +51,15 @@ def embed_texts(texts, model=None, batch_size=50, max_attempts=5):
   Transient quota/availability errors (429/503) are retried per batch with
   exponential backoff — golden matching sits on the critical scoring path,
   and a single unretried burst error would otherwise abort a whole run.
+
+  Raises:
+    ValueError: if ``batch_size`` or ``max_attempts`` is not >= 1.
   """
+  if batch_size < 1:
+    raise ValueError(f"batch_size must be >= 1, got {batch_size!r}")
+  if max_attempts < 1:
+    raise ValueError(f"max_attempts must be >= 1, got {max_attempts!r}")
+
   from google import genai
   from google.genai import types
 
@@ -109,7 +117,14 @@ def match_golden_qa(
       - golden_metadata preserves each input key and maps it to match details
         (matched flag,
         matched question, expected answer, topic, out_of_scope, similarity).
+
+  Raises:
+    ValueError: if ``threshold`` is not a finite value in [0.0, 1.0].
   """
+  if not (math.isfinite(threshold) and 0.0 <= threshold <= 1.0):
+    raise ValueError(
+        f"threshold must be a finite value in [0.0, 1.0], got {threshold!r}"
+    )
   if not golden_qa or not question_by_sid:
     return {}, {}
 

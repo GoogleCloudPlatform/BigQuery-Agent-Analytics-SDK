@@ -14,6 +14,8 @@
 
 """Tests for golden Q&A matching (embedding retry + cosine matching)."""
 
+import math
+
 import pytest
 
 from bigquery_agent_analytics import golden_matching
@@ -78,6 +80,43 @@ class TestEmbedTextsRetry:
     assert calls["n"] == 5
 
 
+class TestEmbedTextsValidation:
+  """Invalid public controls raise ValueError before any API call."""
+
+  @pytest.mark.parametrize("batch_size", [0, -1])
+  def test_invalid_batch_size_raises(self, batch_size):
+    with pytest.raises(ValueError, match="batch_size"):
+      golden_matching.embed_texts(["q"], batch_size=batch_size)
+
+  @pytest.mark.parametrize("max_attempts", [0, -3])
+  def test_invalid_max_attempts_raises(self, max_attempts):
+    with pytest.raises(ValueError, match="max_attempts"):
+      golden_matching.embed_texts(["q"], max_attempts=max_attempts)
+
+  def test_boundary_values_accepted(self, monkeypatch):
+    # batch_size=1 and max_attempts=1 are the smallest valid controls.
+    class _Embedding:
+      values = [1.0, 0.0]
+
+    class _Models:
+
+      def embed_content(self, **_kwargs):
+        resp = type("R", (), {})()
+        resp.embeddings = [_Embedding()]
+        return resp
+
+    class _Client:
+
+      def __init__(self, **_kwargs):
+        self.models = _Models()
+
+    import google.genai
+
+    monkeypatch.setattr(google.genai, "Client", _Client)
+    vectors = golden_matching.embed_texts(["q"], batch_size=1, max_attempts=1)
+    assert vectors == [[1.0, 0.0]]
+
+
 class TestMatchGoldenQA:
 
   def _fake_embeddings(self, monkeypatch, mapping):
@@ -136,3 +175,28 @@ class TestMatchGoldenQA:
         {key: "question"}, [{"question": "golden", "expected_answer": "A"}]
     )
     assert key in ctx and key in meta
+
+  @pytest.mark.parametrize(
+      "threshold",
+      [-0.1, 1.1, math.inf, -math.inf, math.nan],
+  )
+  def test_invalid_threshold_raises(self, threshold):
+    with pytest.raises(ValueError, match="threshold"):
+      match_golden_qa({"s": "q"}, [{"question": "g"}], threshold=threshold)
+
+  def test_invalid_threshold_raises_even_for_empty_inputs(self):
+    # Validation precedes the empty-input early return: a bad threshold
+    # never silently succeeds just because there was nothing to match.
+    with pytest.raises(ValueError, match="threshold"):
+      match_golden_qa({}, [], threshold=math.nan)
+
+  def test_threshold_bounds_accepted(self, monkeypatch):
+    self._fake_embeddings(
+        monkeypatch, {"golden": [1.0, 0.0], "question": [1.0, 0.0]}
+    )
+    golden = [{"question": "golden", "expected_answer": "A"}]
+    # threshold=0.0 and threshold=1.0 are both valid; an exact-similarity
+    # pair matches at either bound (comparison is >=).
+    for bound in (0.0, 1.0):
+      ctx, meta = match_golden_qa({"s": "question"}, golden, threshold=bound)
+      assert meta["s"]["matched"] is True and "s" in ctx
