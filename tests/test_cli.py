@@ -1018,6 +1018,22 @@ class TestFormatFeedbackSnippet:
     )
     assert out == 'The agent added \\"(Design)\\" and used path\\\\to\\\\file.'
 
+  def test_quote_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet('"' * 120, max_chars=120)
+
+    assert len(out) <= 120
+    assert out.endswith("\u2026")
+
+  def test_backslash_only_feedback_respects_max_chars_after_escaping(self):
+    from bigquery_agent_analytics.cli import _format_feedback_snippet
+
+    out = _format_feedback_snippet("\\" * 120, max_chars=120)
+
+    assert len(out) <= 120
+    assert out.endswith("\u2026")
+
 
 # ------------------------------------------------------------------ #
 # env var fallback                                                     #

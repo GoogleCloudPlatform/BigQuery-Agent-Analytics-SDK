@@ -616,13 +616,25 @@ def _format_feedback_snippet(
   collapsed = " ".join(feedback.split())
   if not collapsed:
     return None
-  if len(collapsed) <= max_chars:
-    snippet = collapsed
-  else:
-    # Reserve one char for the ellipsis to keep the visual width capped.
-    snippet = collapsed[: max_chars - 1].rstrip() + "\u2026"
 
-  return snippet.replace("\\", "\\\\").replace('"', '\\"')
+  escaped = collapsed.replace("\\", "\\\\").replace('"', '\\"')
+
+  if len(escaped) <= max_chars:
+    return escaped
+
+  # Reserve one character for the ellipsis.
+  budget = max_chars - 1
+  parts = []
+  length = 0
+
+  for char in collapsed:
+    escaped_char = char.replace("\\", "\\\\").replace('"', '\\"')
+    if length + len(escaped_char) > budget:
+      break
+    parts.append(escaped_char)
+    length += len(escaped_char)
+
+  return "".join(parts).rstrip() + "\u2026"
 
 
 def _emit_evaluate_failures(
