@@ -19,8 +19,10 @@
 #                                 occupied port, a failing browser binary, a
 #                                 browser that writes healthy DOM then exits
 #                                 nonzero, a console error delayed past the
-#                                 marker's creation, and a page that never
-#                                 writes the app-initialized marker
+#                                 marker's creation, a page that never
+#                                 writes the app-initialized marker, and a
+#                                 page whose live field value is mutated
+#                                 without a serialized value attribute
 #
 # Every fixture except the missing-initialization one satisfies the full
 # healthy baseline (#448): the runtime data-bqaa-app-initialized marker (set
@@ -127,7 +129,7 @@ cat <<'DOM'
 <input id="table-id">
 <a id="create-dashboard" aria-disabled="true"></a>
 <button id="copy-link" disabled></button>
-<div id="smoke-result" data-errors="0" data-detail=""></div>
+<div id="smoke-result" data-errors="0" data-detail="" data-table-value="" data-create-aria-disabled="true" data-create-has-href="false" data-copy-disabled="true"></div>
 </body></html>
 DOM
 sleep 1
@@ -182,6 +184,29 @@ HTML
   fi
   echo "self-test 6 OK: missing app initialization is detected"
 
+  # 7. A page whose live table-id value PROPERTY is set to a non-empty
+  #    string (no value attribute ever appears in the markup). Serialized
+  #    tag checks false-pass this state; only the live-state snapshot on
+  #    the instrumentation marker can catch it.
+  MUTATED="$OUT_DIR/fixture-live-value"
+  mkdir -p "$MUTATED"
+  cat > "$MUTATED/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+document.getElementById("table-id").value = "not-pristine";
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$MUTATED" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 7 FAILED: a mutated live field value passed as pristine"
+  fi
+  echo "self-test 7 OK: non-pristine live field value is detected"
+
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
 fi
@@ -216,6 +241,28 @@ window.__smokeErrors = [];
     }
     marker.setAttribute("data-errors", String(window.__smokeErrors.length));
     marker.setAttribute("data-detail", window.__smokeErrors.join(" | ").slice(0, 500));
+    // Live-state snapshot (#449 review): dump-dom does not reflect the
+    // value PROPERTY into a value attribute, so the pristine assertions
+    // must read the live properties, not the serialized markup.
+    var table = document.querySelector("#table-id");
+    var create = document.querySelector("#create-dashboard");
+    var copy = document.querySelector("#copy-link");
+    marker.setAttribute(
+      "data-table-value",
+      table ? String(table.value) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-create-aria-disabled",
+      create ? String(create.getAttribute("aria-disabled")) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-create-has-href",
+      create ? String(create.hasAttribute("href")) : "MISSING"
+    );
+    marker.setAttribute(
+      "data-copy-disabled",
+      copy ? String(copy.disabled) : "MISSING"
+    );
   };
   var record = function (message) {
     window.__smokeErrors.push(String(message));
@@ -328,32 +375,27 @@ fi
 grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
   || fail "app-initialized marker missing — app.mjs did not execute in the browser"
 # With no query parameters the first load is the pristine state (#448):
-# assert the exact elements and states, not generic attribute greps — a
-# generic aria-disabled search is already satisfied by the static markup
-# and would prove nothing about the runtime state (#449 review).
+# assert the exact LIVE states via the instrumentation snapshot — Chrome's
+# dump-dom does not reflect the value property into a value attribute, so
+# serialized-markup checks cannot prove the field is empty (#449 review).
 FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
-TABLE_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<input[^>]*id="table-id"[^>]*>' | head -1)"
-[ -n "$TABLE_TAG" ] || fail "pristine first load must render the table-id field"
-case "$TABLE_TAG" in
-  *aria-invalid*) fail "pristine table-id field must not be marked invalid" ;;
+MARKER_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1)"
+[ -n "$MARKER_TAG" ] || fail "instrumentation marker tag not found"
+case "$MARKER_TAG" in
+  *'data-table-value=""'*) : ;;
+  *) fail "pristine table-id field must have an empty live value" ;;
 esac
-case "$TABLE_TAG" in
-  *value=*) fail "pristine table-id field must be empty" ;;
-esac
-CREATE_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<a[^>]*id="create-dashboard"[^>]*>' | head -1)"
-[ -n "$CREATE_TAG" ] || fail "pristine first load must render the create link"
-case "$CREATE_TAG" in
-  *'aria-disabled="true"'*) : ;;
+case "$MARKER_TAG" in
+  *'data-create-aria-disabled="true"'*) : ;;
   *) fail "pristine create link must be aria-disabled" ;;
 esac
-case "$CREATE_TAG" in
-  *href=*) fail "pristine create link must carry no URL" ;;
+case "$MARKER_TAG" in
+  *'data-create-has-href="false"'*) : ;;
+  *) fail "pristine create link must carry no URL" ;;
 esac
-COPY_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<button[^>]*id="copy-link"[^>]*>' | head -1)"
-[ -n "$COPY_TAG" ] || fail "pristine first load must render the copy button"
-case "$COPY_TAG" in
-  *disabled*) : ;;
-  *) fail "pristine copy button must be disabled" ;;
+case "$MARKER_TAG" in
+  *'data-copy-disabled="true"'*) : ;;
+  *) fail "pristine copy button must be disabled (live property)" ;;
 esac
 if printf '%s' "$FLAT_DOM" | grep -q 'aria-invalid='; then
   fail "pristine first load must not mark any field invalid"

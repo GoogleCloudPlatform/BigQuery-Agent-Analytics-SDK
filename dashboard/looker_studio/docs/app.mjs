@@ -157,23 +157,27 @@ tableIdInput.addEventListener("change", () => {
 tableIdInput.addEventListener("paste", (event) => {
   const text = event.clipboardData.getData("text");
   revealTableErrors = true;
-  // Normalize the displayed value only after FULL validation succeeds; any
-  // invalid paste — unparseable, bad segment, or sentinel collision — must
-  // land as the exact clipboard text so the raw invalid input is retained
-  // alongside its immediate error (#448 decision 2, #449 review).
+  // The default paste inserts at the selection, so an invalid fragment
+  // could merge with a previous Ready value into a DIFFERENT valid ID and
+  // silently retarget the dashboard (#449 review). Always take over: the
+  // field becomes either the normalized valid ID or the complete raw
+  // clipboard text — never a splice — and validates immediately.
+  event.preventDefault();
   let parsed = null;
   try {
     parsed = validateQualifiedTableId(text);
   } catch {
     parsed = null;
   }
-  if (parsed) {
-    event.preventDefault();
-    tableIdInput.value = `${parsed.project}.${parsed.dataset}.${parsed.table}`;
-    refresh();
+  tableIdInput.value = parsed
+    ? `${parsed.project}.${parsed.dataset}.${parsed.table}`
+    : text;
+  if (tableIdInput.value !== lastValidRaw) {
+    derived = null;
+    disableActions();
+    setStatus("");
   }
-  // An invalid paste lands in the field; its input event validates it
-  // immediately because revealTableErrors is already set.
+  refresh();
 });
 
 billingInput.addEventListener("input", refresh);
@@ -193,6 +197,10 @@ function attemptCreate() {
   revealTableErrors = true;
   refresh();
   if (createLink.href) {
+    // Invalidate any pending clipboard completion: the provisioning
+    // warning must not be overwritten by an older copy resolving late
+    // (#449 review).
+    statusEpoch += 1;
     setStatus(WAITING_MESSAGE, "waiting");
     window.open(createLink.href, "_blank", "noopener,noreferrer");
   }
@@ -205,10 +213,20 @@ form.addEventListener("submit", (event) => {
 
 for (const input of [tableIdInput, billingInput]) {
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      attemptCreate();
+    // Only a discrete, non-composing Enter is an attempted action: a held
+    // key repeat must not open tab after tab, and Enter committing an IME
+    // composition (isComposing, or legacy keyCode 229) is text entry, not
+    // activation (#449 review).
+    if (
+      event.key !== "Enter" ||
+      event.repeat ||
+      event.isComposing ||
+      event.keyCode === 229
+    ) {
+      return;
     }
+    event.preventDefault();
+    attemptCreate();
   });
 }
 
@@ -219,6 +237,7 @@ createLink.addEventListener("click", (event) => {
     refresh();
     return;
   }
+  statusEpoch += 1;
   setStatus(WAITING_MESSAGE, "waiting");
 });
 

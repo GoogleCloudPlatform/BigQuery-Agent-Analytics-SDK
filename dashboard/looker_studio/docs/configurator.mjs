@@ -162,11 +162,16 @@ export function buildSetupUrl(input, pageUrl) {
 }
 
 export function splitQualifiedTableId(value) {
+  // SQL-copy punctuation is one enclosing whole-ID backtick pair plus
+  // trailing statement/list punctuation. Only that pair is stripped: an
+  // embedded backtick stays in its segment and fails segment validation
+  // rather than being silently deleted into a different normalized ID
+  // (#449 review).
   const normalized = String(value ?? "")
   .trim()
-  .replace(/`/g, "")
-  .replace(/^([^.:]+):/, "$1.")
-  .replace(/[;,]+$/, "");
+  .replace(/[;,]+$/, "")
+  .replace(/^`(.*)`$/s, "$1")
+  .replace(/^([^.:]+):/, "$1.");
 
   const parts = normalized.split(".");
   if (parts.length !== 3 || parts.some((part) => part.length === 0)) {

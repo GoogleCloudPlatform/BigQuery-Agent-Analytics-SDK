@@ -494,6 +494,24 @@ assert.throws(
   (error) =>
     error.segment === "dataset" && /^Dataset segment: /.test(error.message),
 );
+// #449 review round 2: only one enclosing whole-ID backtick pair is
+// punctuation; an embedded backtick stays in its segment and fails there
+// instead of being silently deleted into a different normalized ID.
+assert.deepEqual(
+  splitQualifiedTableId("my-project.my_da`taset.my_table"),
+  { project: "my-project", dataset: "my_da`taset", table: "my_table" },
+  "an embedded backtick is preserved for segment validation",
+);
+assert.equal(
+  parseQualifiedTableIdForInput("my-project.my_da`taset.my_table"),
+  null,
+);
+assert.throws(
+  () => validateQualifiedTableId("my-project.my_da`taset.my_table"),
+  (error) =>
+    error.segment === "dataset" && /^Dataset segment: /.test(error.message),
+  "an embedded backtick is a dataset-segment error, not silently accepted",
+);
 assert.throws(
   () => validateQualifiedTableId("my-project.my_dataset.table$20260807"),
   (error) =>
@@ -870,10 +888,9 @@ for (const [description, consoleUrl] of [
 typeIntoField("");
 assert.equal(
   pasteIntoField("BADPROJECT.dataset.table"),
-  false,
-  "an invalid-segment paste retains ordinary paste behavior",
+  true,
+  "every paste is intercepted so it can never splice into the field",
 );
-typeIntoField("BADPROJECT.dataset.table");
 assert.equal(field.value, "BADPROJECT.dataset.table");
 assert.match(
   fieldError.textContent,
@@ -885,8 +902,7 @@ assertActionsDisabled("pasted segment error");
 // Normalization-changing invalid paste: the wrapped raw form is preserved
 // verbatim rather than rewritten to dotted form before rejection.
 typeIntoField("");
-assert.equal(pasteIntoField("`BADPROJECT.dataset.table`;"), false);
-typeIntoField("`BADPROJECT.dataset.table`;");
+assert.equal(pasteIntoField("`BADPROJECT.dataset.table`;"), true);
 assert.equal(
   field.value,
   "`BADPROJECT.dataset.table`;",
@@ -899,10 +915,10 @@ assertActionsDisabled("wrapped invalid paste");
 typeIntoField("");
 assert.equal(
   pasteIntoField("xsentinelbqaaevents.my_dataset.my_table"),
-  false,
-  "a sentinel-colliding paste retains ordinary paste behavior",
+  true,
+  "a sentinel-colliding paste is intercepted and lands raw",
 );
-typeIntoField("xsentinelbqaaevents.my_dataset.my_table");
+assert.equal(field.value, "xsentinelbqaaevents.my_dataset.my_table");
 assert.match(fieldError.textContent, /reserved dashboard template value/);
 
 // A supported-host Console link with an invalid identifier has three
@@ -912,8 +928,7 @@ typeIntoField("");
 const badProjectConsoleUrl =
   "https://console.cloud.google.com/bigquery?ws=" +
   "!1m5!1m4!4m3!1sBADPROJECT!2sbqaa_looker_demo!3sagent_events";
-assert.equal(pasteIntoField(badProjectConsoleUrl), false);
-typeIntoField(badProjectConsoleUrl);
+assert.equal(pasteIntoField(badProjectConsoleUrl), true);
 assert.match(
   fieldError.textContent,
   /^Project segment: /,
@@ -922,15 +937,39 @@ assert.match(
 assert.equal(field.value, badProjectConsoleUrl, "the raw link is retained");
 assertActionsDisabled("console segment error");
 
+// #449 review round 2 (P2): starting from Ready, an invalid pasted
+// fragment must REPLACE the field with the raw clipboard text — never
+// splice into the previous valid ID and silently retarget another table.
+typeIntoField("my-project.my_dataset.my_table");
+assert.match(formStatus.textContent, /^Ready for /);
+assert.equal(pasteIntoField("x"), true, "fragment paste is intercepted");
+assert.equal(
+  field.value,
+  "x",
+  "the raw clipboard text replaces the field instead of merging",
+);
+assertActionsDisabled("fragment paste over Ready");
+assert.equal(formStatus.textContent, "", "the stale Ready status is cleared");
+assert.match(fieldError.textContent, /project\.dataset\.table/);
+
+// Embedded backtick: manual entry and paste both land raw with the
+// dataset-segment error.
+typeIntoField("my-project.my_da`taset.my_table");
+assert.match(fieldError.textContent, /^Dataset segment: /);
+assertActionsDisabled("embedded backtick typed");
+typeIntoField("");
+assert.equal(pasteIntoField("my-project.my_da`taset.my_table"), true);
+assert.equal(field.value, "my-project.my_da`taset.my_table");
+assert.match(fieldError.textContent, /^Dataset segment: /);
+
 // An unparseable paste lands as raw text; its input event validates it
 // immediately because paste is a validation trigger.
 typeIntoField("");
 assert.equal(
   pasteIntoField("a.b.c.d"),
-  false,
-  "wrong-arity paste retains ordinary paste behavior",
+  true,
+  "wrong-arity paste is intercepted and lands raw",
 );
-typeIntoField("a.b.c.d");
 assert.match(
   fieldError.textContent,
   /three dot-separated segments/,
@@ -950,10 +989,9 @@ for (const rejectedUrl of [
   typeIntoField("");
   assert.equal(
     pasteIntoField(rejectedUrl),
-    false,
-    "a rejected Console URL retains ordinary paste behavior",
+    true,
+    "a rejected Console URL is intercepted and lands raw",
   );
-  typeIntoField(rejectedUrl);
   assert.match(
     fieldError.textContent,
     /clearly name exactly one BigQuery table/,
@@ -1119,6 +1157,20 @@ openedUrls = [];
 field.listeners.keydown({ key: "a", preventDefault() {} });
 assert.equal(openedUrls.length, 0, "other keys are not attempted actions");
 
+// #449 review round 2 (P3): held-key repeats and IME-composition commits
+// are not attempted actions.
+openedUrls = [];
+field.listeners.keydown({ key: "Enter", repeat: true, preventDefault() {} });
+assert.equal(openedUrls.length, 0, "a held Enter repeat opens nothing");
+field.listeners.keydown({
+  key: "Enter",
+  isComposing: true,
+  preventDefault() {},
+});
+assert.equal(openedUrls.length, 0, "a composing Enter opens nothing");
+field.listeners.keydown({ key: "Enter", keyCode: 229, preventDefault() {} });
+assert.equal(openedUrls.length, 0, "a legacy 229 Enter opens nothing");
+
 // #449 review (P2): a whitespace-only billing override behaves exactly
 // like blank input — same validity, same billed project.
 billing.value = "   ";
@@ -1188,6 +1240,31 @@ const laterChecklistCopy = fakeElements.get("#copy-checklist").listeners.click()
     "an out-of-order completion cannot overwrite the current status",
   );
 }
+// #449 review round 2 (P2): starting Create invalidates pending copy
+// completions, so the provisioning warning is never overwritten by an
+// older copy resolving late — for either copy path.
+typeIntoField("my-project.my_dataset.my_table");
+const copyBeforeCreate = copyButton.listeners.click();
+createLink.listeners.click({ preventDefault() {} });
+assert.equal(formStatus.dataset.kind, "waiting");
+pendingWrites.splice(0).forEach((complete) => complete());
+await copyBeforeCreate;
+assert.equal(
+  formStatus.dataset.kind,
+  "waiting",
+  "a held setup-link copy cannot overwrite the provisioning warning",
+);
+const checklistBeforeCreate =
+  fakeElements.get("#copy-checklist").listeners.click();
+fakeElements.get("#configurator").listeners.submit({ preventDefault() {} });
+assert.equal(formStatus.dataset.kind, "waiting");
+pendingWrites.splice(0).forEach((complete) => complete());
+await checklistBeforeCreate;
+assert.equal(
+  formStatus.dataset.kind,
+  "waiting",
+  "a held checklist copy cannot overwrite the provisioning warning",
+);
 holdClipboard = false;
 
 // #448: an existing three-parameter setup link prefills the single field
