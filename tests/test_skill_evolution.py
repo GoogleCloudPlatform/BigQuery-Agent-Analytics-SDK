@@ -943,6 +943,260 @@ def test_analyst_timeout_bounds_a_hung_host_analyst(caplog):
   assert any("failed" in r.message for r in caplog.records)
 
 
+def test_hung_analyst_does_not_starve_queued_analyst_one_worker(caplog):
+  # With max_workers=1, a hung host analyst must lose its slot on timeout so
+  # the queued healthy analyst still runs. Previously the queued future
+  # never started, both timed out, and collect_patches raised a FALSE
+  # all-host-failures RuntimeError.
+  import logging
+  import threading
+
+  release = threading.Event()
+
+  def hung_then_ok(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("unhelpful", question="ok"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=None,
+          model="unused",
+          analyst_mode="error-only",
+          error_analyst_fn=hung_then_ok,
+          analyst_timeout_s=0.3,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert len(patches) == 1
+  assert any("timed out" in r.message for r in caplog.records)
+
+
+def test_hung_host_does_not_drop_queued_builtin_success_analyst(
+    monkeypatch, caplog
+):
+  # analyst_mode="both" at max_workers=1: the queued built-in success
+  # analyst must still run after the hung host analyst is quarantined,
+  # not be silently omitted from the run.
+  import logging
+  import threading
+
+  import skill_evolution as _se
+
+  release = threading.Event()
+
+  def host_analyst(client, model, session, current_skill, tools):
+    if session["question"] == "hang":
+      release.wait(5)
+      return None
+    return (
+        "## Root Cause\nTOOL_USAGE: skipped the tool despite having it"
+        " available.\n## Proposed Patch\nContent: call the tool first."
+    )
+
+  builtin_calls = []
+
+  def fake_run_analyst(client, model, prompt, session, current_skill, *a, **k):
+    builtin_calls.append(session["question"])
+    return (
+        "## Pattern\nRESPONSE_PATTERN: kept the derived rate.\n"
+        "## Proposed Patch\nContent: keep deriving rates."
+    )
+
+  monkeypatch.setattr(_se, "run_analyst", fake_run_analyst)
+  report = {
+      "sessions": [
+          _session("unhelpful", question="hang"),
+          _session("unhelpful", question="fail-ok"),
+          _session("meaningful", question="win-1"),
+      ]
+  }
+  try:
+    with caplog.at_level(logging.WARNING):
+      patches = collect_patches(
+          report,
+          "BASE",
+          client=object(),
+          model="unused",
+          analyst_mode="both",
+          error_analyst_fn=host_analyst,
+          analyst_timeout_s=0.3,
+          max_workers=1,
+      )
+  finally:
+    release.set()
+  assert builtin_calls == ["win-1"]
+  assert len(patches) == 2  # healthy host patch + built-in success patch
+
+
+def test_falsy_non_string_host_results_trip_the_guard():
+  # False/0/[]/{} are NOT the no-patch sentinel: a host returning falsy
+  # non-strings for every session must raise like any all-failures host,
+  # not read as a healthy zero-patch run.
+  import pytest
+
+  falsy_by_question = {"q0": False, "q1": 0, "q2": [], "q3": {}}
+
+  def falsy_host(client, model, session, current_skill, tools):
+    return falsy_by_question[session["question"]]
+
+  report = {
+      "sessions": [_session("unhelpful", question=f"q{i}") for i in range(4)]
+  }
+  with pytest.raises(RuntimeError, match="every host error_analyst_fn"):
+    collect_patches(
+        report,
+        "BASE",
+        client=None,
+        model="unused",
+        analyst_mode="error-only",
+        error_analyst_fn=falsy_host,
+    )
+
+
+def test_all_none_host_results_stay_a_healthy_zero_patch_run():
+  # None remains the one valid empty sentinel: an all-None host is a
+  # healthy zero-patch run, not an all-host-failures error.
+  def quiet_host(client, model, session, current_skill, tools):
+    return None
+
+  report = {
+      "sessions": [
+          _session("unhelpful", question="q1"),
+          _session("unhelpful", question="q2"),
+      ]
+  }
+  patches = collect_patches(
+      report,
+      "BASE",
+      client=None,
+      model="unused",
+      analyst_mode="error-only",
+      error_analyst_fn=quiet_host,
+  )
+  assert patches == []
+
+
+def test_select_candidate_rejects_non_finite_candidate_score():
+  # An inf/NaN CANDIDATE score must not defeat the improvement gate that
+  # already rejects non-finite incumbent scores (inf would always win
+  # selection AND pass the margin check).
+  import pytest
+
+  for bad in (float("inf"), float("-inf"), float("nan")):
+
+    def scorer(text, _bad=bad):
+      return 1.0 if text == "BASE" else _bad
+
+    with pytest.raises(ValueError, match="non-finite candidate"):
+      select_candidate(["CAND"], "BASE", score_fn=scorer)
+
+
+def test_format_coerces_structured_segment_trace():
+  # A dict/list per-segment trace degrades to a readable dump instead of a
+  # TypeError inside the analyst future (parity with the full-session
+  # trace coercion).
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+              "trace": [{"event": "TOOL_STARTING", "tool": "lookup"}],
+          }
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Execution sub-trajectories ===" in out
+  assert "TOOL_STARTING" in out
+
+
+def test_format_filters_malformed_correction_boundaries():
+  # Non-dict boundary entries are filtered; optional malformed evidence
+  # must not discard an otherwise valid trajectory with AttributeError.
+  s = _session(
+      "unhelpful",
+      conversation=[{"role": "user", "text": "q"}],
+      correction_boundaries=[
+          None,
+          "not-a-dict",
+          {
+              "turn_index": 1,
+              "wrong_claim": "PTO is 20 days",
+              "correct_fact": "PTO is 25 days",
+              "agent_recovered": True,
+          },
+      ],
+  )
+  out = format_trajectory(s)
+  assert "=== Correction Evidence ===" in out
+  assert "PTO is 25 days" in out
+
+
+def test_single_turn_sessions_render_all_enrichment_sections():
+  # The question/response shape shares the enrichment renderer with the
+  # conversation shape -- it must not drop verifications, correction
+  # evidence, segment outcomes, or per-segment traces.
+  s = _session(
+      "unhelpful",
+      question="What is the meal limit?",
+      response="Ask HR.",
+      verifications=2,
+      correction_boundaries=[
+          {
+              "turn_index": 1,
+              "wrong_claim": "no limit",
+              "correct_fact": "$50 per day",
+              "agent_recovered": False,
+          }
+      ],
+      sub_trajectories=[
+          {
+              "label": "post_correction_1",
+              "outcome": "parroted",
+              "start_turn": 1,
+              "end_turn": 2,
+          }
+      ],
+      execution_sub_trajectories=[
+          {
+              "label": "post_correction_2",
+              "outcome": "recovered",
+              "start_turn": 3,
+              "end_turn": 4,
+              "trace": "agent->policy_agent (tool call)",
+          }
+      ],
+      execution_trace="invoke supervisor -> transfer policy_agent",
+  )
+  out = format_trajectory(s)
+  assert "User verification requests: 2" in out
+  assert "=== Correction Evidence ===" in out
+  assert "$50 per day" in out
+  assert "=== Execution sub-trajectories ===" in out
+  assert "agent->policy_agent (tool call)" in out
+  # The brief segment has no traced counterpart, so it still renders.
+  assert "post_correction_1" in out
+  assert "=== Execution trace ===" in out
+
+
 def test_legacy_sessions_render_without_new_sections():
   # Backward-compat parity: sessions without any of the new keys must not
   # gain new section headings, in either session shape.

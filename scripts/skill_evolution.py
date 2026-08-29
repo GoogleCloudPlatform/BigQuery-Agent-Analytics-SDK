@@ -47,6 +47,7 @@ import logging
 import math
 import os
 import re
+import threading
 from typing import Any, Callable, Optional
 
 # Host analyst signature: fn(client, model, session, current_skill, tools)
@@ -299,9 +300,30 @@ def _format_tool_calls(session: dict) -> str:
   return "\n".join(lines) + "\n"
 
 
+def _coerce_trace_text(trace) -> str:
+  """Degrade a structured (list/dict) trace value to a readable dump.
+
+  Trajectory rendering runs inside analyst futures; a host-supplied non-str
+  trace must not raise a per-session TypeError that gets swallowed as a
+  warning (which zeroes out the whole run).
+  """
+  if isinstance(trace, str):
+    return trace
+  try:
+    return json.dumps(trace, indent=1, default=str)
+  except (TypeError, ValueError):
+    return str(trace)
+
+
 def _format_correction_evidence(session) -> str:
   """Render turn-boundary correction evidence, or '' when absent."""
-  boundaries = session.get("correction_boundaries", []) or []
+  # Malformed (non-dict) boundary entries are filtered, not fatal: optional
+  # evidence must never discard an otherwise valid trajectory.
+  boundaries = [
+      b
+      for b in (session.get("correction_boundaries", []) or [])
+      if isinstance(b, dict)
+  ]
   if not boundaries:
     return ""
   result = "\n=== Correction Evidence ===\n"
@@ -333,7 +355,7 @@ def _format_execution_subtrajectories(exec_subtraj) -> str:
         f" {seg.get('start_turn')}-{seg.get('end_turn')}) ->"
         f" {outcome} ---\n"
     )
-    result += (seg.get("trace", "") or "") + "\n\n"
+    result += _coerce_trace_text(seg.get("trace", "") or "") + "\n\n"
   return result
 
 
@@ -342,19 +364,75 @@ def _format_execution_trace(session) -> str:
   exec_trace = session.get("execution_trace", "")
   if not exec_trace:
     return ""
-  if not isinstance(exec_trace, str):
-    # format_trajectory runs inside analyst futures; a structured (list/dict)
-    # trace from a host must degrade to a readable dump, not a per-session
-    # TypeError swallowed as a warning (which zeroes out the whole run).
-    try:
-      exec_trace = json.dumps(exec_trace, indent=1, default=str)
-    except (TypeError, ValueError):
-      exec_trace = str(exec_trace)
+  exec_trace = _coerce_trace_text(exec_trace)
   return (
       "\n=== Execution trace ===\n"
       "Shows agent routing, tool calls, and LLM requests. Look for:"
       " missing tool calls, wrong routing, tool errors.\n\n" + exec_trace + "\n"
   )
+
+
+def _format_session_enrichments(session) -> str:
+  """Render host-captured evidence shared by BOTH session shapes.
+
+  One renderer for the conversation and question/response branches of
+  ``format_trajectory``: corrections, verifications, turn-boundary
+  correction evidence, per-segment execution traces, brief segment
+  outcomes, and the full-session execution trace. Single-turn sessions
+  must not silently lose evidence the multi-turn branch renders.
+  """
+  result = ""
+  if session.get("corrections"):
+    result += f"User corrections: {session['corrections']}\n"
+  if session.get("verifications"):
+    result += f"User verification requests: {session['verifications']}\n"
+
+  # Turn-boundary correction evidence, when the host's tagger extracts it:
+  # the wrong claim, the user's correction, and whether the agent recovered.
+  result += _format_correction_evidence(session)
+
+  # Per-segment execution traces (hosts that capture routing/tool calls per
+  # correction segment). Preferred over the brief sub-trajectory outcome
+  # list because the analyst sees WHAT the agent executed in each segment.
+  exec_subtraj = [
+      seg
+      for seg in (session.get("execution_sub_trajectories", []) or [])
+      if isinstance(seg, dict)
+  ]
+  result += _format_execution_subtrajectories(exec_subtraj)
+
+  # Surface the per-segment correction outcomes the turn tagger emits
+  # (quality_report writes these as ``sub_trajectories``). A traced segment
+  # makes its brief entry redundant (same labels plus executed evidence),
+  # but ``execution_sub_trajectories`` can be PARTIAL -- the reference
+  # producer's ``_segment_trace_by_turns`` skips segments it cannot align
+  # to trace spans -- so brief entries with no traced counterpart (matched
+  # on start/end turns) still render: a parroted outcome must never
+  # disappear just because its segment lacked a trace.
+  covered_spans = {
+      (seg.get("start_turn"), seg.get("end_turn"))
+      for seg in exec_subtraj
+      if seg.get("start_turn") is not None or seg.get("end_turn") is not None
+  }
+  uncovered = [
+      seg
+      for seg in (session.get("sub_trajectories", []) or [])
+      if isinstance(seg, dict)
+      and (seg.get("start_turn"), seg.get("end_turn")) not in covered_spans
+  ]
+  if uncovered:
+    result += "\n=== Correction sub-trajectories ===\n"
+    for seg in uncovered:
+      outcome = seg.get("outcome", "")
+      icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
+      span = ""
+      if seg.get("start_turn") is not None and seg.get("end_turn") is not None:
+        span = f" (turns {seg['start_turn']}-{seg['end_turn']})"
+      result += f"[{icon}] {seg.get('label', '')}{span} -> {outcome}\n"
+
+  # Full-session execution trace (single undivided trace), when captured.
+  result += _format_execution_trace(session)
+  return result
 
 
 def format_trajectory(session: dict) -> str:
@@ -372,10 +450,6 @@ def format_trajectory(session: dict) -> str:
     result += f"Justification: {usefulness.get('justification', '')}\n"
     result += f"Grounding: {grounding.get('category', '')}\n"
     result += _format_tool_calls(session)
-    if session.get("corrections"):
-      result += f"User corrections: {session['corrections']}\n"
-    if session.get("verifications"):
-      result += f"User verification requests: {session['verifications']}\n"
     for dim in (
         "correctness",
         "tool_usage",
@@ -389,61 +463,14 @@ def format_trajectory(session: dict) -> str:
             f"{dim}: {score_data.get('score', '?')}/2 -"
             f" {score_data.get('reason', '')}\n"
         )
-    # Turn-boundary correction evidence, when the host's tagger extracts it:
-    # the wrong claim, the user's correction, and whether the agent recovered.
-    result += _format_correction_evidence(session)
-
-    # Per-segment execution traces (hosts that capture routing/tool calls per
-    # correction segment). Preferred over the brief sub-trajectory outcome
-    # list because the analyst sees WHAT the agent executed in each segment.
-    exec_subtraj = [
-        seg
-        for seg in (session.get("execution_sub_trajectories", []) or [])
-        if isinstance(seg, dict)
-    ]
-    result += _format_execution_subtrajectories(exec_subtraj)
-
-    # Surface the per-segment correction outcomes the turn tagger emits
-    # (quality_report writes these as ``sub_trajectories``). A traced segment
-    # makes its brief entry redundant (same labels plus executed evidence),
-    # but ``execution_sub_trajectories`` can be PARTIAL -- the reference
-    # producer's ``_segment_trace_by_turns`` skips segments it cannot align
-    # to trace spans -- so brief entries with no traced counterpart (matched
-    # on start/end turns) still render: a parroted outcome must never
-    # disappear just because its segment lacked a trace.
-    covered_spans = {
-        (seg.get("start_turn"), seg.get("end_turn"))
-        for seg in exec_subtraj
-        if seg.get("start_turn") is not None or seg.get("end_turn") is not None
-    }
-    uncovered = [
-        seg
-        for seg in (session.get("sub_trajectories", []) or [])
-        if isinstance(seg, dict)
-        and (seg.get("start_turn"), seg.get("end_turn")) not in covered_spans
-    ]
-    if uncovered:
-      result += "\n=== Correction sub-trajectories ===\n"
-      for seg in uncovered:
-        outcome = seg.get("outcome", "")
-        icon = _SEGMENT_OUTCOME_ICONS.get(outcome, "-")
-        span = ""
-        if (
-            seg.get("start_turn") is not None
-            and seg.get("end_turn") is not None
-        ):
-          span = f" (turns {seg['start_turn']}-{seg['end_turn']})"
-        result += f"[{icon}] {seg.get('label', '')}{span} -> {outcome}\n"
-
-    # Full-session execution trace (single undivided trace), when captured.
-    result += _format_execution_trace(session)
+    result += _format_session_enrichments(session)
     return result
 
   # Single-turn session shape (question/response, no conversation list). The
-  # execution trace renders here too: quality_report emits supported sessions
-  # with question + response + execution_trace, and the analyst needs the
-  # routing/tool evidence regardless of session shape.
-  return (
+  # enrichment sections render here too: quality_report emits supported
+  # sessions with question + response + evidence keys, and the analyst needs
+  # the correction/routing/tool evidence regardless of session shape.
+  base = (
       f"Question: {session.get('question', '')}\n"
       f"Response: {session.get('response', '')}\n"
       f"Agent: {session.get('answered_by', '')}\n"
@@ -451,7 +478,11 @@ def format_trajectory(session: dict) -> str:
       f"Justification: {usefulness.get('justification', '')}\n"
       f"Grounding: {grounding.get('category', '')}\n"
       f"{_format_tool_calls(session)}"
-  ).rstrip("\n") + _format_execution_trace(session).rstrip("\n")
+  )
+  enrichments = _format_session_enrichments(session)
+  if enrichments:
+    base = base.rstrip("\n") + "\n" + enrichments
+  return base.rstrip("\n")
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +836,64 @@ def _consolidate_once(
 # ---------------------------------------------------------------------------
 
 
+class _AnalystCall:
+  """One analyst invocation behind a quarantine-on-timeout boundary.
+
+  A ThreadPoolExecutor future that times out keeps occupying its pool
+  thread, so with ``max_workers=1`` a single hung analyst starves every
+  queued analyst behind it: they time out unstarted and a healthy fleet
+  reads as all-host-failures. Here each call runs on its own daemon
+  thread gated by a shared semaphore. ``wait`` returning False quarantines
+  the call: a RUNNING call hands its slot to the next queued analyst
+  (replacement capacity), and a still-QUEUED call is cancelled outright.
+  Quarantined threads are daemons -- they may run to completion in the
+  background but cannot delay process exit.
+  """
+
+  def __init__(self, fn, args, slots: threading.BoundedSemaphore):
+    self._fn = fn
+    self._args = args
+    self._slots = slots
+    self._lock = threading.Lock()
+    self._done = threading.Event()
+    self._running = False
+    self._abandoned = False
+    self.result = None
+    self.error: Optional[BaseException] = None
+    threading.Thread(target=self._run, daemon=True).start()
+
+  def _run(self):
+    self._slots.acquire()
+    with self._lock:
+      if self._abandoned:
+        # Timed out while still queued: never run; the slot goes straight
+        # back to the pool.
+        self._slots.release()
+        return
+      self._running = True
+    try:
+      self.result = self._fn(*self._args)
+    except BaseException as e:  # noqa: BLE001 - reported via self.error
+      self.error = e
+    with self._lock:
+      quarantined = self._abandoned  # waiter already released the slot
+      self._done.set()
+      if not quarantined:
+        self._slots.release()
+
+  def wait(self, timeout: Optional[float]) -> bool:
+    """True when finished; on timeout, quarantine the call (see class doc)."""
+    if self._done.wait(timeout):
+      return True
+    with self._lock:
+      if self._done.is_set():
+        return True  # finished in the race window between wait and lock
+      self._abandoned = True
+      if self._running:
+        self._slots.release()
+    return False
+
+
 def collect_patches(
     report,
     current_skill,
@@ -832,14 +921,18 @@ def collect_patches(
       ``ROOT_CAUSE_CATEGORIES`` tokens, a ``## Root Cause`` (or
       ``## Pattern``) section, and a ``## Proposed Patch`` (or ``Content:``)
       section -- the same shape ``ERROR_ANALYST_PROMPT`` instructs the
-      built-in analyst to produce. A truthy non-string return is dropped
-      with a warning. If EVERY host call fails, collect_patches raises
+      built-in analyst to produce. ``None`` is the ONLY valid no-patch
+      sentinel: any non-string return -- truthy or falsy (``False``, ``0``,
+      ``[]``, ``{}``) -- is dropped with a warning and counts as a host
+      failure. If EVERY host call fails, collect_patches raises
       RuntimeError instead of degrading a broken host analyst into a
       clean-looking zero-patch run (partial failures stay tolerated).
-    analyst_timeout_s: Optional per-analyst timeout in seconds. A future
+    analyst_timeout_s: Optional per-analyst timeout in seconds. A call
       exceeding it is treated like any other analyst failure (warning,
-      skipped); its worker thread may linger until the callable returns,
-      but collect_patches itself stops waiting. The bound is PER ANALYST,
+      skipped) and QUARANTINED: its daemon thread may linger until the
+      callable returns, but it immediately loses its concurrency slot to
+      the next queued analyst, so one hung analyst cannot starve the rest
+      of the fleet even at ``max_workers=1``. The bound is PER ANALYST,
       applied in submission order -- the worst-case total wait for a wholly
       hung fleet is N x analyst_timeout_s, not analyst_timeout_s overall.
       Default None (no timeout; see issue #397).
@@ -864,77 +957,82 @@ def collect_patches(
   successes = successes[:max_success_samples]
 
   patches = []
-  executor = ThreadPoolExecutor(max_workers=max_workers)
-  try:
-    futures = {}
-    for s in failures:
-      if error_analyst_fn is not None:
-        fut = executor.submit(
-            error_analyst_fn, client, model, s, current_skill, tools
-        )
-      else:
-        fut = executor.submit(
-            run_analyst,
-            client,
-            model,
-            ERROR_ANALYST_PROMPT,
-            s,
-            current_skill,
-            tools,
-        )
-      futures[fut] = ("error", (s.get("question", "") or "")[:60])
-    for s in successes:
-      fut = executor.submit(
-          run_analyst,
-          client,
-          model,
-          SUCCESS_ANALYST_PROMPT,
-          s,
-          current_skill,
-          tools,
+  # Dispatch goes through _AnalystCall (one daemon thread per call, gated by
+  # a shared semaphore) rather than a ThreadPoolExecutor: a timed-out call
+  # is quarantined and its slot handed to the next queued analyst, so one
+  # hung analyst cannot starve the fleet or fake an all-host-failures run.
+  slots = threading.BoundedSemaphore(max_workers)
+  calls: list[tuple[_AnalystCall, str, str]] = []
+  for s in failures:
+    if error_analyst_fn is not None:
+      call = _AnalystCall(
+          error_analyst_fn, (client, model, s, current_skill, tools), slots
       )
-      futures[fut] = ("success", (s.get("question", "") or "")[:60])
-    host_total = host_failed = 0
-    first_host_error: Optional[BaseException] = None
-    # Plain iteration (not as_completed) so the per-future timeout applies:
-    # a hung future must bound OUR wait, not just reorder completions.
-    for fut, (kind, question) in list(futures.items()):
-      is_host = error_analyst_fn is not None and kind == "error"
+    else:
+      call = _AnalystCall(
+          run_analyst,
+          (client, model, ERROR_ANALYST_PROMPT, s, current_skill, tools),
+          slots,
+      )
+    calls.append((call, "error", (s.get("question", "") or "")[:60]))
+  for s in successes:
+    call = _AnalystCall(
+        run_analyst,
+        (client, model, SUCCESS_ANALYST_PROMPT, s, current_skill, tools),
+        slots,
+    )
+    calls.append((call, "success", (s.get("question", "") or "")[:60]))
+
+  host_total = host_failed = 0
+  first_host_error: Optional[BaseException] = None
+  # Sequential waits in submission order so the per-analyst timeout bounds
+  # OUR wait; each quarantined call frees its slot, so a queued analyst
+  # behind a hung one always gets a fresh full timeout window.
+  for call, kind, question in calls:
+    is_host = error_analyst_fn is not None and kind == "error"
+    if is_host:
+      host_total += 1
+    error: Optional[BaseException] = None
+    if not call.wait(analyst_timeout_s):
+      error = TimeoutError(
+          f"timed out after {analyst_timeout_s}s (quarantined; the slot was"
+          " handed to the next queued analyst)"
+      )
+    elif call.error is not None:
+      error = call.error
+    if error is not None:
       if is_host:
-        host_total += 1
-      try:
-        result = fut.result(timeout=analyst_timeout_s)
-        if result and not isinstance(result, str):
-          # Contract violation, not a quality issue: counts toward the
-          # all-host-failures guard, so a host returning dicts for every
-          # session cannot masquerade as a healthy zero-patch run.
-          if is_host:
-            host_failed += 1
-            if first_host_error is None:
-              first_host_error = TypeError(
-                  f"error_analyst_fn returned {type(result).__name__},"
-                  " expected patch text or None"
-              )
-          logger.warning(
-              "analyst [%s] %s returned %s instead of patch text; dropping"
-              " (the analyst contract is 'patch text or None').",
-              kind,
-              question,
-              type(result).__name__,
+        host_failed += 1
+        if first_host_error is None:
+          first_host_error = error
+      logger.warning("analyst [%s] %s failed: %s", kind, question, error)
+      continue
+    result = call.result
+    if result is None:
+      # None is the ONLY valid no-patch sentinel.
+      continue
+    if not isinstance(result, str):
+      # Contract violation, not a quality issue -- and falsy non-strings
+      # (False, 0, [], {}) are violations too, not no-patch results. Counts
+      # toward the all-host-failures guard, so a host returning dicts for
+      # every session cannot masquerade as a healthy zero-patch run.
+      if is_host:
+        host_failed += 1
+        if first_host_error is None:
+          first_host_error = TypeError(
+              f"error_analyst_fn returned {type(result).__name__},"
+              " expected patch text or None"
           )
-          continue
-        if result:
-          patches.append(result)
-      except Exception as e:  # noqa: BLE001
-        if is_host:
-          host_failed += 1
-          if first_host_error is None:
-            first_host_error = e
-        logger.warning("analyst [%s] %s failed: %s", kind, question, e)
-  finally:
-    # wait=False + cancel_futures so a timed-out (hung) analyst cannot make
-    # this function hang again at executor shutdown.
-    executor.shutdown(wait=analyst_timeout_s is None, cancel_futures=True)
+      logger.warning(
+          "analyst [%s] %s returned %s instead of patch text; dropping"
+          " (the analyst contract is 'patch text or None').",
+          kind,
+          question,
+          type(result).__name__,
+      )
+      continue
+    if result:
+      patches.append(result)
 
   if error_analyst_fn is not None and host_total and host_failed == host_total:
     raise RuntimeError(
@@ -1022,7 +1120,8 @@ def select_candidate(
   re-scoring the incumbent on fresh, noisy traffic. It has effect ONLY when
   ``score_fn`` is also provided -- without one, selection is the ungated
   median-size candidate and a warning is logged. Raises ``ValueError`` for a
-  non-finite ``incumbent_score`` (NaN/inf would silently defeat the gate).
+  non-finite ``incumbent_score`` AND for a non-finite candidate score
+  (NaN/inf on either side would silently defeat the gate).
 
   The last rule is the restraint property of a self-modifying system: when
   nothing clearly improves, leave the already-good skill alone.
@@ -1052,6 +1151,12 @@ def select_candidate(
   best, best_score = None, float("-inf")
   for cand in viable:
     score = score_fn(cand)
+    if not math.isfinite(score):
+      raise ValueError(
+          f"score_fn returned a non-finite candidate score ({score!r}); an"
+          " inf/NaN candidate would defeat the same improvement gate that"
+          " already rejects non-finite incumbent scores."
+      )
     logger.info("Candidate scored %.3f (incumbent %.3f).", score, incumbent)
     if score > best_score:
       best, best_score = cand, score
