@@ -22,7 +22,10 @@
 #                                 marker's creation, a page that never
 #                                 writes the app-initialized marker, and a
 #                                 page whose live field value is mutated
-#                                 without a serialized value attribute
+#                                 without a serialized value attribute, a
+#                                 delayed live-value mutation after marker
+#                                 creation, and a decoy zero-error element
+#                                 beside a marker recording a real error
 #
 # Every fixture except the missing-initialization one satisfies the full
 # healthy baseline (#448): the runtime data-bqaa-app-initialized marker (set
@@ -207,6 +210,56 @@ HTML
   fi
   echo "self-test 7 OK: non-pristine live field value is detected"
 
+  # 8. A page that is pristine at marker creation (400 ms) but mutates the
+  #    live field value at 900 ms. Only a periodically restamped snapshot —
+  #    not a one-shot at creation — reflects the final state.
+  DELAYED_VALUE="$OUT_DIR/fixture-delayed-live-value"
+  mkdir -p "$DELAYED_VALUE"
+  cat > "$DELAYED_VALUE/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+window.addEventListener("load", function () {
+  setTimeout(function () {
+    document.getElementById("table-id").value = "late-mutation";
+  }, 900);
+});
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$DELAYED_VALUE" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 8 FAILED: a delayed live-value mutation passed as pristine"
+  fi
+  echo "self-test 8 OK: delayed live-value mutation is detected"
+
+  # 9. A page carrying an unrelated data-errors="0" element while the real
+  #    instrumentation marker records an error. An unscoped whole-DOM grep
+  #    would be satisfied by the decoy; only the marker-scoped assertion
+  #    catches the real count.
+  MASKING="$OUT_DIR/fixture-masking-element"
+  mkdir -p "$MASKING"
+  cat > "$MASKING/index.html" <<'HTML'
+<!doctype html>
+<html><body>
+<input id="table-id">
+<a id="create-dashboard" aria-disabled="true"></a>
+<button id="copy-link" disabled></button>
+<div data-errors="0" data-detail=""></div>
+<script>
+document.documentElement.setAttribute("data-bqaa-app-initialized", "true");
+console.error("masked boom");
+</script>
+</body></html>
+HTML
+  if SMOKE_DOCS_DIR="$MASKING" "$SCRIPT_PATH" >/dev/null 2>&1; then
+    fail "self-test 9 FAILED: a decoy data-errors element masked a real error"
+  fi
+  echo "self-test 9 OK: decoy zero-error element cannot mask the marker"
+
   echo "browser smoke self-test OK: all negative fixtures fail as required"
   exit 0
 fi
@@ -285,6 +338,10 @@ window.__smokeErrors = [];
       marker.id = "smoke-result";
       document.body.appendChild(marker);
       stamp();
+      // Restamp periodically until the DOM dump: a one-time snapshot would
+      // miss a live-state mutation after marker creation (#449 review), the
+      // same way the error count is kept live rather than one-shot.
+      setInterval(stamp, 100);
     }, 400);
   });
 })();
@@ -358,12 +415,20 @@ if [ -z "$TIMED_OUT_KILL" ] && [ "$CHROME_STATUS" -ne 0 ]; then
   fail "browser exited with status $CHROME_STATUS"
 fi
 
-grep -q 'id="smoke-result"' "$OUT_DIR/dom.html" \
+# Extract THE instrumentation marker first and scope every marker-borne
+# assertion to that one tag: an unrelated element carrying data-errors="0"
+# must never mask a nonzero count on the real marker (#449 review).
+FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
+MARKER_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1)"
+[ -n "$MARKER_TAG" ] \
   || fail "instrumentation marker missing — the page never finished loading"
-if ! grep -q 'data-errors="0"' "$OUT_DIR/dom.html"; then
-  DETAIL="$(grep -o 'data-detail="[^"]*"' "$OUT_DIR/dom.html" | head -1)"
-  fail "page-level errors recorded: ${DETAIL:-unknown}"
-fi
+case "$MARKER_TAG" in
+  *'data-errors="0"'*) : ;;
+  *)
+    DETAIL="$(printf '%s' "$MARKER_TAG" | grep -o 'data-detail="[^"]*"' | head -1)"
+    fail "page-level errors recorded: ${DETAIL:-unknown}"
+    ;;
+esac
 # The app-initialized marker is written only at runtime by the module, so
 # its presence in the live DOM — and its absence from the static source —
 # proves app.mjs executed (#448; replaces the pre-#448 initial-error proof).
@@ -378,9 +443,6 @@ grep -q 'data-bqaa-app-initialized="true"' "$OUT_DIR/dom.html" \
 # assert the exact LIVE states via the instrumentation snapshot — Chrome's
 # dump-dom does not reflect the value property into a value attribute, so
 # serialized-markup checks cannot prove the field is empty (#449 review).
-FLAT_DOM="$(tr '\n' ' ' < "$OUT_DIR/dom.html")"
-MARKER_TAG="$(printf '%s' "$FLAT_DOM" | grep -o '<div[^>]*id="smoke-result"[^>]*>' | head -1)"
-[ -n "$MARKER_TAG" ] || fail "instrumentation marker tag not found"
 case "$MARKER_TAG" in
   *'data-table-value=""'*) : ;;
   *) fail "pristine table-id field must have an empty live value" ;;
