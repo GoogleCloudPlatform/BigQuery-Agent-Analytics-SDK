@@ -8,6 +8,7 @@ SELECT
   MAX(timestamp) AS last_seen
 FROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.agent_events`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+  AND timestamp < CURRENT_TIMESTAMP()
   AND error_message IS NOT NULL
 GROUP BY error_message
 HAVING COUNT(*) > 0

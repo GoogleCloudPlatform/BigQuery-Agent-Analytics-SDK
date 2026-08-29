@@ -251,9 +251,14 @@ detail** panel. Not editable, no auto-refresh, fixed to UTC.
 
 Its queries are static — no variables to interpolate — and hardcode the 72-hour
 window in the SQL, not the time picker, so an anonymous viewer cannot widen the
-scan from a URL. They live in
+scan from a URL. The window is half-open: `timestamp >=
+TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR) AND timestamp <
+CURRENT_TIMESTAMP()`. They live in
 [`queries/public-demo/`](queries/README.md#the-public-demo-build) and are
-CI-checked against the panels, same as the interactive build.
+CI-checked against the panels, same as the interactive build. The check is a
+text-level lint: it catches a dropped bound or a real table path, not SQL
+written to slip past it. Read these queries yourself before you point a public
+dashboard at real data.
 
 **1. Point it at your data** — with no variables, the target is written into
 every panel's SQL:

@@ -121,12 +121,13 @@ own snapshot of the old geometry — create a fresh copy from the configurator
 to pick up the fix.
 
 For the standard BQAA layout, open the
-[three-field dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
-and enter only:
-
-1. GCP project ID;
-2. BigQuery dataset ID;
-3. BQAA table ID (normally `agent_events`).
+[dashboard configurator](https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/)
+and enter only the **fully qualified BQAA table ID** —
+`project.dataset.table`, one value naming all three identifiers (the
+standard table segment is `agent_events`). Paste it straight from the
+BigQuery console's copy-table-ID control or paste the console table link;
+backticks, a legacy colon after the project, and a trailing `;` or `,` are
+cleaned up automatically (#448).
 
 For portable Linking API substitution, table IDs may use ASCII letters, digits,
 underscores, and hyphens, such as `events_agent_cur-phenix`. Dataset IDs retain
@@ -144,6 +145,34 @@ https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/?project=PROJ
 The standard path queries the provided table and uses the source project for
 BigQuery billing. Teams with a separate billing project can set it under
 **Advanced settings**.
+
+If the new tab shows the terminal dialog **"This report isn't shared with
+you"** (offering *Reload* / *Return to report list* / *Go to report
+template*), do not wait it out: `/reporting/create` resolves the *template*
+report's ACL before any `ds.*` parameter is applied, so this failure is on the
+shared template's copy path, not the user's data, IAM, or identifiers.
+Confirm the browser's default Google account is the intended one, and note
+that the blockage is not necessarily owner-side: a recipient organization's
+Workspace sharing policy can prevent its members from receiving Looker
+Studio assets owned by external domains, so a managed account can hit this
+dialog against a fully public template — try a personal account if
+possible. If the dialog persists, report it on
+[#445](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445),
+saying only whether the signed-in account is personal or part of an
+organization — never post the account's email address (reporter identifiers
+are redacted per *Publication safety* below). The link role alone may not
+explain a denial — Looker Studio's "disable download, print, and copy for
+viewers" control also prevents copying and is invisible to the Permissions
+API, so it remains a candidate cause for this dialog until an end-to-end
+reproduction confirms it — which is why external access is attested in
+`bindings/report_template.yaml` → `external_access_verification` through two
+controls: an authenticated link-role read and a dated end-to-end copy canary
+from a signed-in, non-owner, out-of-domain account (anonymous HTTP cannot
+observe either). While the template is unavailable, the
+`tools/hydrate_dashboard.py` preflight below still validates the table — but
+its creation URL copies the same template, so it is not an outage workaround;
+the [Grafana dashboard](../../grafana/) and the Looker Agent Analytics block
+(below) remain available.
 
 Looker Studio report parameters are intentionally not used for these values:
 BigQuery query parameters represent scalar query values, not project, dataset,

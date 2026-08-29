@@ -29,18 +29,27 @@ credentials: Viewer**. This manual share gate cannot be encoded in a Linking
 API parameter.
 
 `docs/index.html` provides the standard-installation path without requiring a
-local CLI. It accepts project, dataset, and table IDs, assumes the standard
-`agent_events` table and uses the project as the billing project by default,
-with an optional billing-project override, then constructs the same Linking
-API URL entirely in the browser. URL query
-parameters can prefill the three inputs, but the page never opens the report
+local CLI. It accepts a single **fully qualified BQAA table ID**
+(`project.dataset.table` — one input naming all three identifiers, #448),
+uses the ID's project segment as the billing project by default with an
+optional billing-project override, then constructs the same Linking API URL
+entirely in the browser. Setup links keep the existing
+`?project=…&dataset=…&table=…` query-parameter contract: all three
+parameters compose the field's prefill, but the page never opens the report
 without a user click.
 
-Dataset and table IDs use separate validators. Dataset IDs allow the established
-ASCII letter/digit/underscore subset. Table IDs additionally allow hyphens,
-which BigQuery supports and which remain safe inside the report's backticked
-table path. Commas and backticks stay invalid because they would change the
-Linking API replacement list or SQL identifier boundary.
+The combined field reports two error classes: whole-field errors for input
+with no truthful segments to blame (unparseable text, an ambiguous or
+unsupported Console link, wrong arity), and segment-level errors — the
+project, dataset, or table segment named inline — when exactly three
+segments exist and one violates its rule or collides with a template
+sentinel. The segment validators are unchanged: dataset segments allow the
+established ASCII letter/digit/underscore subset; table segments
+additionally allow hyphens, which BigQuery supports and which remain safe
+inside the report's backticked table path. Commas and backticks stay invalid
+inside a segment because they would change the Linking API replacement list
+or SQL identifier boundary — as paste *punctuation* (backticks around the
+whole ID, a trailing `;` or `,`) they are stripped before parsing.
 
 Looker Studio report parameters are not the binding mechanism. They can pass
 scalar values to BigQuery custom SQL, but BigQuery query parameters cannot
@@ -127,6 +136,8 @@ them for the product default.
 The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
 timestamp dimension exceeded Looker Studio's chart row limit on the canonical
 fixture and rendered “Too Many Rows.”
+
+* **Time-Series Charts:** Must have "Show points" enabled in the Looker Studio Style panel to ensure single-day data points render visibly.
 
 ## Viewer rendering and viewport boundary
 

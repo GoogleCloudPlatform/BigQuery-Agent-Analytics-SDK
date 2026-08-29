@@ -194,6 +194,21 @@ evaluator = SystemEvaluator.cost_per_session(
 )
 ```
 
+`token_efficiency()` uses the session's `total_tokens`. The session query
+prefers an explicit provider total: Gemini
+`usage_metadata.total_token_count`, followed by `content.usage.total` from
+other telemetry shapes. Gemini's total can include
+`usage_metadata.thoughts_token_count`; it is therefore not guaranteed to equal
+`prompt_token_count + candidates_token_count`. If neither provider total
+exists, the query falls back specifically to the raw `attributes.input_tokens`
+plus `attributes.output_tokens` event fields. That fallback does not reuse all
+alternate paths recognized by the separate input and output counters.
+
+`cost_per_session()` is a separate estimate based only on `input_tokens` and
+`output_tokens` plus the configured rates. It does not consume a separate
+`thoughts_token_count` field, so do not treat it as provider invoice
+reconciliation when thinking tokens are present.
+
 `context_cache_hit_rate()` requires source telemetry that includes
 Gemini `usage_metadata.cached_content_token_count`. Older plugin data
 may not contain that field. When cache telemetry is absent, the
@@ -2476,6 +2491,33 @@ LangSmith data or provide a real-time streaming surface.
 
 ---
 
+## 24. EvalBench Import Reader
+
+The optional `bigquery_agent_analytics.evalbench` submodule reads one
+EvalBench `job_id` from its BigQuery `configs`, `results`, and `scores` tables
+and maps each scenario to BQAA-compatible synthetic trace rows. Source queries
+filter by a parameterized `job_id`; agentic and NL2SQL result aliases are both
+supported.
+
+```python
+from bigquery_agent_analytics.evalbench import EvalBenchRun
+
+run = EvalBenchRun.from_bigquery(
+    project_id="benchmark-project",
+    evalbench_dataset="evalbench",
+    job_id="abc123",
+    location="US",
+)
+rows = run.to_agent_event_rows()
+```
+
+This reader phase performs no writes. See
+[docs/evalbench.md](docs/evalbench.md) for the mapping contract, schema
+caveats, and the remaining materialization and CLI phases tracked by issue
+#97.
+
+---
+
 ## Module Architecture
 
 ```
@@ -2487,6 +2529,7 @@ bigquery_agent_analytics/
 │   └── evaluators.py          ← SystemEvaluator + LLMAsJudge + SQL templates
 │
 │   Evaluation Harness
+│   ├── evalbench.py           ← EvalBench BigQuery reader + event mapping
 │   ├── trace_evaluator.py     ← BigQueryTraceEvaluator, trajectory matching, replay
 │   ├── multi_trial.py         ← TrialRunner, pass@k, pass^k
 │   ├── grader_pipeline.py     ← GraderPipeline + scoring strategies

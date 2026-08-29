@@ -39,9 +39,9 @@
           <div class="eyebrow">BigQuery Agent Analytics</div>
           <h1>Your telemetry. Your dashboard.</h1>
           <p class="lede">
-            Enter three BigQuery identifiers. We’ll prepare a private copy of
-            the published Looker Studio dashboard, connected with your Google
-            credentials.
+            Enter your fully qualified BQAA table ID. We’ll prepare a private
+            copy of the published Looker Studio dashboard, connected with
+            your Google credentials.
           </p>
           <ul class="facts" aria-label="Dashboard facts">
             <li>37 parity charts</li>
@@ -57,56 +57,27 @@
             used.
           </p>
 
-          <label for="project">Project ID</label>
+          <label for="table-id">Fully qualified BQAA table ID</label>
           <input
-            id="project"
-            name="project"
+            id="table-id"
+            name="tableId"
             autocomplete="off"
-            placeholder="my-gcp-project"
-            aria-describedby="project-hint project-error"
+            placeholder="my-project.my_dataset.agent_events"
+            aria-describedby="table-id-hint table-id-error"
             required
           >
-          <span class="field-hint" id="project-hint">
-            6–30 characters: lowercase letters, digits, and hyphens. Start
-            with a letter and end with a letter or digit.
-            Paste a fully qualified table ID or BigQuery Console table link
-            into any identifier field to fill all three.
+          <span class="field-hint" id="table-id-hint">
+            <code>project.dataset.table</code> — one ID names all three.
+            The plugin’s standard table is <code>agent_events</code>. Paste
+            a fully qualified table ID or a BigQuery Console table link;
+            backticks, a legacy colon after the project, and a trailing
+            <code>;</code> or <code>,</code> are cleaned up automatically.
+            Charts read this table directly and extract reporting fields
+            from its JSON columns.
           </span>
-          <span class="field-error" id="project-error" aria-live="polite"></span>
+          <span class="field-error" id="table-id-error" aria-live="polite"></span>
 
-          <label for="dataset">Dataset ID</label>
-          <input
-            id="dataset"
-            name="dataset"
-            autocomplete="off"
-            placeholder="agent_analytics"
-            aria-describedby="dataset-hint dataset-error"
-            required
-          >
-          <span class="field-hint" id="dataset-hint">
-            Start with a letter or underscore; then use letters, digits, or
-            underscores.
-          </span>
-          <span class="field-error" id="dataset-error" aria-live="polite"></span>
-
-          <label for="table">BQAA table ID</label>
-          <input
-            id="table"
-            name="table"
-            autocomplete="off"
-            value="agent_events"
-            aria-describedby="table-hint table-error"
-            required
-          >
-          <span class="field-hint" id="table-hint">
-            Charts read this table directly and extract reporting fields from
-            its JSON columns. The standard BQAA table is
-            <code>agent_events</code>. Custom table IDs may use ASCII letters,
-            digits, underscores, and hyphens.
-          </span>
-          <span class="field-error" id="table-error" aria-live="polite"></span>
-
-          <details>
+          <details id="advanced-settings">
             <summary>Advanced settings</summary>
             <label for="billing-project">Billing project ID</label>
             <input
@@ -144,7 +115,10 @@
             Opens <code>lookerstudio.google.com</code> in a new tab. Building
             your private copy can take up to ~10 seconds, and the tab may
             briefly show an error page while Google provisions the report —
-            don’t close it.
+            don’t close it. One dialog is different: if the tab says
+            <strong>“This report isn’t shared with you”</strong>, waiting will
+            not fix it — see
+            <a href="#report-not-shared">the note below</a>.
           </p>
           <p class="privacy">
             This page has no backend. It sends no identifiers or credentials
@@ -159,10 +133,11 @@
       <section class="how" aria-label="How setup works">
         <article class="step">
           <span class="step-number">01</span>
-          <h3>Enter identifiers</h3>
+          <h3>Enter your table ID</h3>
           <p>
-            Use the project, dataset, and base table configured for the ADK
-            BigQuery Agent Analytics plugin.
+            Paste or type the fully qualified ID of the base table configured
+            for the ADK BigQuery Agent Analytics plugin —
+            <code>project.dataset.table</code>, one value naming all three.
           </p>
         </article>
         <article class="step">
@@ -170,7 +145,9 @@
           <h3>Review in Google</h3>
           <p>
             The new tab may briefly show a loading or “not found” page while
-            Google provisions your copy — don’t close it. Looker Studio then
+            Google provisions your copy — don’t close it. (A dialog quoting
+            <em>“This report isn’t shared with you”</em> is not that flicker;
+            see <a href="#report-not-shared">below</a>.) Looker Studio then
             shows an acknowledgement dialog. It appears because you’re about
             to create a data source that runs a SQL query this page supplied —
             <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/blob/main/dashboard/looker_studio/sql/events_v1.template.sql">
@@ -191,6 +168,30 @@
           </p>
         </article>
       </section>
+
+      <aside class="notice notice-warning" id="report-not-shared">
+        <strong>“This report isn’t shared with you” is not a setup error.</strong>
+        That dialog is terminal — it offers <em>Reload</em> / <em>Return to
+        report list</em> / <em>Go to report template</em> and does not resolve
+        by waiting. It means the shared dashboard template is unavailable to
+        the Google account signed in to that tab; nothing is wrong with your
+        project, dataset, table, IAM setup, or the identifiers you entered.
+        First confirm the tab is using the account you intend (Looker Studio
+        uses the browser’s default Google account). If you are signed in
+        with an organization-managed account, your own organization’s
+        sharing policy can also block receiving Looker Studio assets from
+        external domains — try a personal account if you can. If the dialog
+        still persists, the template’s copy path is blocked —
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/445">
+          report it on issue #445</a> — say only whether the signed-in
+        account is personal or part of an organization; do not post the
+        account’s email address. The repository’s CLI preflight can still
+        validate your table, but it copies the same template, so it is not
+        a workaround;
+        while the template is blocked, use the
+        <a href="https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/tree/main/grafana">
+          Grafana dashboard</a>.
+      </aside>
 
       <aside class="notice notice-warning">
         <strong>Keep the new report private until the credential check.</strong>
