@@ -13,9 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 An evaluation-focused wheel update and a rebuilt dashboard entrance. The
 wheel gains the EvalBench BigQuery run reader
-(`bigquery_agent_analytics.evalbench`) and the canonical evaluation rubrics
-(`bigquery_agent_analytics.evaluation_rubrics`), plus a CLI judge-feedback
-escaping fix. The published Looker Studio configurator (repo/live-template
+(`bigquery_agent_analytics.evalbench`), the canonical evaluation rubrics
+(`bigquery_agent_analytics.evaluation_rubrics`), and the golden Q&A
+matching producer (`bigquery_agent_analytics.golden_matching`), plus a CLI
+judge-feedback escaping fix. The published Looker Studio configurator (repo/live-template
 side) collapses its three identifier fields into a single fully qualified
 table-ID input, and the template's external accessibility is now an
 attested, monitored contract after a real external-user failure (#445).
@@ -34,6 +35,15 @@ attested, monitored contract after a real external-user failure (#445).
   attribution) and the interpreter (`builtin_metric_config()`,
   `build_metrics()`) from `quality_report`, which now consumes them.
   Rubric reference doc in `docs/evaluation_rubrics.md`.
+- **Golden Q&A matching in core (#428, #432)** — new
+  `bigquery_agent_analytics.golden_matching` module, the producer side of
+  answer-key grounding whose consumer landed in #378: `embed_texts()`
+  (L2-normalised vectors with bounded 429/503 retry),
+  `DEFAULT_GOLDEN_THRESHOLD` (0.92), and `match_golden_qa()` mapping
+  session questions to golden expected answers and out-of-scope decline
+  notes ready for `evaluate_categorical(per_session_context=...)` —
+  extracted verbatim from `quality_report`, which now consumes it, with
+  the three names exported at the package top level.
 
 ### Fixed
 
