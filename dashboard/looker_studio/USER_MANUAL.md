@@ -34,10 +34,9 @@ You need three things:
 3. **A desktop browser window at least 1280 pixels wide.** The dashboard is a
    desktop layout; phones and narrow tablets are not supported.
 
-You will be asked to know three identifiers: your **project ID**, **dataset
-ID**, and **table ID**. If you don't know them offhand, open your table in the
-BigQuery console — the breadcrumb at the top reads
-`project / dataset / table`, and the table header has a copy control for the
+You will be asked for one identifier: the **fully qualified table ID**,
+`project.dataset.table`. If you don't know it offhand, open your table in
+the BigQuery console — the table header has a copy control for exactly that
 full ID.
 
 ---
@@ -49,30 +48,31 @@ full ID.
 Open the configurator:
 **<https://googlecloudplatform.github.io/BigQuery-Agent-Analytics-SDK/>**
 
-You can fill the three fields by hand, or let one paste do it. Paste **any of
-these into any of the three fields** and all three fill at once:
+There is one field: the **fully qualified BQAA table ID**. Type it as
+`project.dataset.table`, or let one paste do it — paste **any of these**
+and the field fills itself:
 
 | What you paste | Example | Where to copy it |
 |---|---|---|
 | Fully qualified table ID | `my-project.my_dataset.agent_events` | BigQuery console table header → copy table ID |
-| The same, with backticks or a trailing `;` | `` `my-project.my_dataset.agent_events`; `` | Copied out of a SQL editor |
+| The same, with backticks or a trailing `;` or `,` | `` `my-project.my_dataset.agent_events`; `` | Copied out of a SQL editor or an ID list |
 | Legacy colon form | `my-project:my_dataset.agent_events` | Older tools and docs |
 | BigQuery Console table link | `https://console.cloud.google.com/bigquery?ws=…` | Your browser's address bar while viewing the table |
 
 For the console link: open your table in the BigQuery console so it is the
 table you're looking at, then copy the address-bar URL and paste it. The
-configurator reads the project, dataset, and table out of the link and fills
-the fields — you'll see a confirmation like *Split
-"my-project.my_dataset.agent_events" into the three fields.*
+configurator reads the project, dataset, and table out of the link and
+shows the clean dotted ID in the field.
 
 A link is only accepted when it clearly names exactly one table. If it
 doesn't — for example your workspace has several different tables open — the
-paste lands as ordinary text in the one field and shows a validation error.
-Nothing else is overwritten; close the extra tabs in the BigQuery console (or
-type the IDs by hand) and try again.
+pasted text stays in the field with an error explaining the problem, and
+the **Create** and **Copy** buttons stay disabled. Close the extra tabs in
+the BigQuery console (or type the dotted ID by hand) and try again.
 
-When every field is valid, the status line reads
-**Ready for `project.dataset.table`.**
+When the ID is valid, the status line reads
+**Ready for `project.dataset.table`.** Editing the value in any way switches
+the buttons off again until the new value validates.
 
 ### Step 2 — Click "Create my dashboard"
 
@@ -236,10 +236,10 @@ configurator produces.
 | Charts blank or trickling in after opening a page | Normal on a cold load — allow up to 90 seconds. If a chart is still empty after that, widen the date range: your table may have no events in the selected window. |
 | Layout looks cut off on the left | Collapse the Looker Studio navigation drawer, and make the window at least 1280 px wide. Phones and narrow tablets aren't supported. |
 | Bottom charts clipped on Token Consumption or Latency | You're on a copy created before 2026-07-29, which keeps the old page geometry. Create a fresh copy from the configurator. |
-| Pasted a console link but the fields didn't fill | The link must name exactly one table. Open the table itself in the BigQuery console (close other table tabs), copy the address-bar URL, and paste again — or just paste the dotted `project.dataset.table` ID from the table header's copy control. |
-| A field shows a red validation error | Fix just that field: project IDs are 6–30 lowercase characters; dataset IDs allow letters, digits, and underscores (no hyphens — that's a BigQuery rule); table IDs also allow hyphens. |
+| Pasted a console link but the field shows an error instead of the dotted ID | The link must name exactly one table. Open the table itself in the BigQuery console (close other table tabs), copy the address-bar URL, and paste again — or just paste the dotted `project.dataset.table` ID from the table header's copy control. |
+| The table-ID field shows a red validation error | The error names what to fix. A *segment* error points at one part of `project.dataset.table`: project segments are 6–30 lowercase characters; dataset segments allow letters, digits, and underscores (no hyphens — that's a BigQuery rule); table segments also allow hyphens. Otherwise the value isn't three dot-separated segments — check for a missing dot or an extra one. |
 | Looker Studio asks me to sign in or authorize | Expected. The dashboard uses your credentials to read your data. Authorize BigQuery access on your own account. |
-| "Not found: Table …" in Looker Studio | One of the three identifiers is wrong, or your account can't read the table. Open the table in the BigQuery console to confirm the exact IDs and your access, then re-create from the configurator. |
+| "Not found: Table …" in Looker Studio | One of the ID's three segments is wrong, or your account can't read the table. Open the table in the BigQuery console to confirm the exact ID and your access, then re-create from the configurator. |
 | Permission errors on charts | Your account needs to read the table *and* run BigQuery jobs in the billing project (see [Before you start](#before-you-start) for how to check each). If you set an Advanced billing project, you need the **BigQuery Job User** role there. |
 | Quota or reservation errors on charts | The billing project has hit a BigQuery limit — the error names which one, and the reset behavior depends on that specific limit (many daily quotas replenish at intervals throughout the day; custom query quotas reset at midnight Pacific). Shortening the date range reduces what each chart scans. If the limit keeps biting, ask the billing project's administrator to raise that quota; if the project uses reservations, capacity is the administrator's dial, not a quota reset. Granting more IAM access will not fix a quota error. |
 | Numbers look stale | Check the date range includes today, then use Looker Studio's refresh. Ignore the footer's "Data Last Updated" — it's a connector timestamp, not your latest event. |

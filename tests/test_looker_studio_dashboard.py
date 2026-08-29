@@ -1062,8 +1062,14 @@ def test_googlecloudplatform_pages_configuration():
   assert 'name="twitter:card"' in page
   assert "Copy security checklist" in page
   assert "billing-project-hint" in page
+  # #448: one fully-qualified-table-ID entrance, no separate project or
+  # dataset fields, and the paste affordance stays advertised.
+  assert 'id="table-id"' in page
+  assert 'id="project"' not in page
+  assert 'id="dataset"' not in page
   assert (
-      "Paste a fully qualified table ID or BigQuery Console table link" in page
+      "Paste a fully qualified table ID or a BigQuery Console table link"
+      in " ".join(page.split())
   )
   assert "Designed for desktop screens at least 1280 px wide" in page
   assert "allow up to 90 seconds" in page
