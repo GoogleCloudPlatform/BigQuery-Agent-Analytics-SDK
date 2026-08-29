@@ -128,6 +128,8 @@ The LLM Call Volume chart uses `event_date`, not raw `timestamp`. The raw
 timestamp dimension exceeded Looker Studio's chart row limit on the canonical
 fixture and rendered “Too Many Rows.”
 
+* **Time-Series Charts:** Must have "Show points" enabled in the Looker Studio Style panel to ensure single-day data points render visibly.
+
 ## Viewer rendering and viewport boundary
 
 The report uses native Looker Studio bar, time-series, scorecard, and table

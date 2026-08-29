@@ -8,5 +8,6 @@ SELECT
   COUNT(*) AS responses
 FROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_llm_responses`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+  AND timestamp < CURRENT_TIMESTAMP()
 GROUP BY model
 ORDER BY total_tokens DESC

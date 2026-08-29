@@ -8,6 +8,7 @@ SELECT
   error_message
 FROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_errors`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+  AND timestamp < CURRENT_TIMESTAMP()
 
 UNION ALL
 
@@ -19,6 +20,7 @@ SELECT
   error_message
 FROM `YOUR_PROJECT_ID.YOUR_DATASET_ID.adk_tool_completions`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 72 HOUR)
+  AND timestamp < CURRENT_TIMESTAMP()
   AND (error_message IS NOT NULL OR UPPER(status) = 'ERROR')
 ORDER BY timestamp DESC
 LIMIT 100
