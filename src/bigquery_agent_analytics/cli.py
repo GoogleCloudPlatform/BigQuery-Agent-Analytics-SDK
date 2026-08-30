@@ -33,6 +33,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Optional
@@ -2590,7 +2591,8 @@ def evalbench_score(
       0 — the scorecard was produced (failures included, without
           ``--exit-code``).
       1 — ``--exit-code`` and at least one session failed the threshold.
-      2 — invalid input (unknown ``--evaluator``, the reserved
+      2 — invalid input (unknown ``--evaluator``, a ``--threshold``
+          outside ``[0.0, 1.0]`` or non-finite, the reserved
           ``agent_events`` table, a job or version with no published
           import, a ``--table-id`` the version was not published to, a
           version with no sessions), or a BigQuery error.
@@ -2609,6 +2611,17 @@ def evalbench_score(
       raise typer.Exit(code=2)
     # Reject the reserved ADK plugin table before any BigQuery call.
     _validate_destination_table("table_id", table_id)
+    # Judge scores are 0-1; a NaN/inf or out-of-range threshold would
+    # otherwise reach the judge and, with --exit-code, green-gate CI.
+    if threshold is not None and not (
+        math.isfinite(threshold) and 0.0 <= threshold <= 1.0
+    ):
+      typer.echo(
+          "Error: --threshold must be a finite value in [0.0, 1.0], got"
+          f" {threshold!r}.",
+          err=True,
+      )
+      raise typer.Exit(code=2)
     with_t, without_t = entry
     judge = with_t(threshold) if threshold is not None else without_t()
 

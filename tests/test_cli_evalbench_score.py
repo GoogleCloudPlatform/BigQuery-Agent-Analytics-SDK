@@ -348,3 +348,58 @@ def test_without_exit_code_flag_failures_still_exit_0(
 
   assert result.exit_code == 0, result.output
   assert json.loads(result.output)["failed_sessions"] == 2
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf", "-inf"])
+def test_invalid_threshold_exits_2_before_any_client(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+  client, build_calls, pin_calls = _patch(monkeypatch)
+  judge_calls: list[float] = []
+  with_t, without_t = cli._LLM_JUDGES["correctness"]
+
+  def spy_with_t(t):
+    judge_calls.append(t)
+    return with_t(t)
+
+  monkeypatch.setitem(cli._LLM_JUDGES, "correctness", (spy_with_t, without_t))
+
+  result = runner.invoke(app, _BASE_ARGS + ["--threshold", value])
+
+  assert result.exit_code == 2, result.output
+  assert "Error: --threshold must be a finite value in [0.0, 1.0]" in (
+      result.output
+  )
+  assert judge_calls == []
+  assert build_calls == []
+  assert pin_calls == []
+  client.evaluate.assert_not_called()
+
+
+def test_invalid_threshold_with_exit_code_still_exits_2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  # A negative threshold must not turn ``--exit-code`` into a green gate.
+  client, build_calls, _ = _patch(monkeypatch, report=_report(0, 2))
+
+  result = runner.invoke(
+      app, _BASE_ARGS + ["--threshold", "-0.1", "--exit-code"]
+  )
+
+  assert result.exit_code == 2, result.output
+  assert "FAIL session=" not in result.output
+  assert build_calls == []
+  client.evaluate.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["0.0", "1.0"])
+def test_boundary_thresholds_are_accepted(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+  client, _, _ = _patch(monkeypatch)
+
+  result = runner.invoke(app, _BASE_ARGS + ["--threshold", value])
+
+  assert result.exit_code == 0, result.output
+  judge = client.evaluate.call_args.kwargs["evaluator"]
+  assert [c.threshold for c in judge._criteria] == [float(value)]
