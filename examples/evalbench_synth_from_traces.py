@@ -40,7 +40,10 @@ the demo, the LLM judge, is for.
 
 Mapping (one result per trace, keyed by the first eight characters of the
 session id; on collision the full session id; if session ids themselves are
-reused, ``session_id:user_id:root_agent_name``):
+reused, ``session_id:user_id:root_agent_name`` with each component
+percent-escaped -- ``:`` -> ``%3A``, ``%`` -> ``%25``, ``~`` -> ``%7E`` --
+and a NULL component written as ``~``, so distinct identities always get
+distinct ids):
 
   results.id / eval_id       scenario id
   results.prompt / nl_prompt first USER_MESSAGE_RECEIVED content.text_summary
@@ -236,8 +239,10 @@ def synthesize(
   ``user_id`` from the top-level column, ``root_agent_name`` from the
   top-level column when the reader selected it, else from
   ``attributes.root_agent_name`` -- and processed in timestamp order within
-  each trace. Traces without a usable ``USER_MESSAGE_RECEIVED`` text are
-  reported in ``skipped_sessions``.
+  each trace. Identity strings are taken exactly as stored, like the SDK's
+  ``TraceIdentity``: whitespace is kept and SQL ``NULL`` is distinct from
+  ``""``. Only content fields are trimmed. Traces without a usable
+  ``USER_MESSAGE_RECEIVED`` text are reported in ``skipped_sessions``.
   """
   sessions: dict[_TraceKey, _Session] = {}
   ordered = sorted(
@@ -250,7 +255,7 @@ def synthesize(
       ),
   )
   for row in ordered:
-    session_id = _text(row.get("session_id"))
+    session_id = _identity_text(row.get("session_id"))
     if session_id is None:
       continue
     user_id, root_agent_name = _identity(row)
@@ -352,20 +357,38 @@ def _identity(row: Mapping[str, Any]) -> tuple[Optional[str], Optional[str]]:
 
   ``root_agent_name`` is read from the top-level column the reader query
   projects, falling back to ``attributes.root_agent_name`` for rows handed
-  in without that projection (tests, other readers).
+  in without that projection (tests, other readers). Values are exact
+  strings (no stripping; ``""`` stays ``""``), never content-normalized.
   """
-  user_id = _text(row.get("user_id"))
-  root_agent_name = _text(row.get("root_agent_name"))
+  user_id = _identity_text(row.get("user_id"))
+  root_agent_name = _identity_text(row.get("root_agent_name"))
   if root_agent_name is None:
     attributes = _structured(row.get("attributes"))
     if isinstance(attributes, Mapping):
-      root_agent_name = _text(attributes.get("root_agent_name"))
+      root_agent_name = _identity_text(attributes.get("root_agent_name"))
   return user_id, root_agent_name
 
 
-def _identity_key(row: Mapping[str, Any]) -> tuple[str, str]:
+def _identity_text(value: Any) -> Optional[str]:
+  """Exact-string identity dimension: a ``str`` as stored, else ``None``.
+
+  Mirrors the SDK's ``TraceIdentity`` contract -- whitespace is preserved
+  and the empty string is a value, not ``NULL``. Non-strings are ``NULL``.
+  """
+  if isinstance(value, str):
+    return str(value)
+  return None
+
+
+def _identity_key(row: Mapping[str, Any]) -> tuple[bool, str, bool, str]:
+  """Sort key over the exact identity (``None`` orders before ``""``)."""
   user_id, root_agent_name = _identity(row)
-  return (user_id or "", root_agent_name or "")
+  return (
+      user_id is not None,
+      user_id or "",
+      root_agent_name is not None,
+      root_agent_name or "",
+  )
 
 
 def _fold_event(session: _Session, row: Mapping[str, Any]) -> None:
@@ -451,18 +474,40 @@ def _scenario_ids(keys: Sequence[_TraceKey]) -> dict[_TraceKey, str]:
   Short session-id prefixes when they are unique; full session ids when
   prefixes collide; the full ``session_id:user_id:root_agent_name``
   identity when session ids themselves are reused across users or root
-  agents. Deterministic, so re-runs reproduce the importer's fingerprints.
+  agents. That last form is injective (``_encode_identity``), so distinct
+  identities can never share an id. Blank ids are never used -- the
+  importer rejects them. Deterministic, so re-runs reproduce the
+  importer's fingerprints.
   """
   candidates = (
       lambda key: key[0][:_SHORT_ID_LENGTH],
       lambda key: key[0],
-      lambda key: ":".join(part if part is not None else "" for part in key),
+      _encode_identity,
   )
   for candidate in candidates:
     ids = {key: candidate(key) for key in keys}
-    if len(set(ids.values())) == len(keys):
+    if len(set(ids.values())) == len(keys) and all(
+        value.strip() for value in ids.values()
+    ):
       return ids
   raise ValueError("duplicate trace identities cannot be given scenario ids")
+
+
+def _encode_identity(key: _TraceKey) -> str:
+  """``session_id:user_id:root_agent_name`` with component boundaries kept.
+
+  Each component is percent-escaped (``%`` -> ``%25``, ``:`` -> ``%3A``,
+  ``~`` -> ``%7E``) and a ``None`` component is written as ``~``, so the
+  encoding is injective: ``("s", "a:b", "c")`` and ``("s", "a", "b:c")``
+  differ, as do ``None``, ``""``, and a literal ``"~"``. Always contains
+  two ``:`` separators, hence never blank.
+  """
+  return ":".join(
+      "~"
+      if part is None
+      else part.replace("%", "%25").replace(":", "%3A").replace("~", "%7E")
+      for part in key
+  )
 
 
 def _first_text(

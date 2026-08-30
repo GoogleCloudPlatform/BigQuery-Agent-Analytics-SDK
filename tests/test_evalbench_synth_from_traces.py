@@ -527,3 +527,161 @@ def test_qualify_accepts_plain_identifiers() -> None:
       "my-proj.bqaa_e2e_real.agent_events"
   )
   assert synth._qualify("p", "other-proj.d.t") == "other-proj.d.t"
+
+
+def _trace(session_id, user_id, root_agent_name, prompt, answer, offset):
+  """One prompt → LLM_RESPONSE → AGENT_COMPLETED trace with exact identity."""
+  attrs = {"adk": {"app_name": "bqaa-e2e"}, "root_agent_name": root_agent_name}
+  return [
+      _event(
+          session_id,
+          "USER_MESSAGE_RECEIVED",
+          {"text_summary": prompt},
+          offset=offset,
+          user_id=user_id,
+          root_agent_name=root_agent_name,
+          attributes=attrs,
+      ),
+      _event(
+          session_id,
+          "LLM_RESPONSE",
+          {"response": answer},
+          offset=offset + 1,
+          user_id=user_id,
+          root_agent_name=root_agent_name,
+          attributes=attrs,
+      ),
+      _event(
+          session_id,
+          "AGENT_COMPLETED",
+          None,
+          offset=offset + 2,
+          user_id=user_id,
+          root_agent_name=root_agent_name,
+          attributes=attrs,
+      ),
+  ]
+
+
+def _imported_sessions(tables):
+  run = EvalBenchRun(
+      project_id="p",
+      evalbench_dataset="d",
+      job_id="j",
+      results=tuple(tables.results),
+      scores=tuple(tables.scores),
+      config_rows=tuple(tables.configs),
+  )
+  return {r["session_id"] for r in run.to_agent_event_rows(import_version="v1")}
+
+
+def test_null_and_empty_identity_dimensions_are_distinct_traces() -> None:
+  # Codex P1 (round 2) on PR #455: the SDK's TraceIdentity distinguishes
+  # SQL NULL from the empty string. user_id=None and user_id="" on the
+  # same session/root agent are two traces; neither prompt may be paired
+  # with the other's answer.
+  events = _trace("shared", None, "support_agent", "prompt N", "answer N", 0)
+  events += _trace("shared", "", "support_agent", "prompt E", "answer E", 4)
+  events += _trace("shared", "user-a", None, "prompt R", "answer R", 8)
+  events += _trace("shared", "user-a", "", "prompt S", "answer S", 12)
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.skipped_sessions == []
+  by_id = {
+      r["id"]: (
+          r["prompt"],
+          r["final_response"],
+          r["source_user_id"],
+          r["source_root_agent_name"],
+      )
+      for r in tables.results
+  }
+  assert by_id == {
+      "shared:~:support_agent": ("prompt N", "answer N", None, "support_agent"),
+      "shared::support_agent": ("prompt E", "answer E", "", "support_agent"),
+      "shared:user-a:~": ("prompt R", "answer R", "user-a", None),
+      "shared:user-a:": ("prompt S", "answer S", "user-a", ""),
+  }
+  assert sorted(
+      (s["id"], s["source_user_id"], s["source_root_agent_name"])
+      for s in tables.scores
+  ) == sorted(
+      (r["id"], r["source_user_id"], r["source_root_agent_name"])
+      for r in tables.results
+  )
+  assert len(_imported_sessions(tables)) == 4
+
+
+def test_whitespace_distinct_identities_stay_separate() -> None:
+  # Exact strings: " user-a" / "user-a " / "user-a" are three users, and
+  # "sess" / "sess " are two sessions. Nothing in the identity is stripped.
+  events = _trace("sess", "user-a", "support_agent", "p1", "a1", 0)
+  events += _trace("sess", " user-a", "support_agent", "p2", "a2", 4)
+  events += _trace("sess", "user-a ", "support_agent", "p3", "a3", 8)
+  events += _trace("sess ", "user-a", "support_agent", "p4", "a4", 12)
+  events += _trace("sess", "user-a", " support_agent", "p5", "a5", 16)
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.skipped_sessions == []
+  assert sorted(
+      (r["source_session_id"], r["source_user_id"], r["source_root_agent_name"])
+      for r in tables.results
+  ) == [
+      ("sess", " user-a", "support_agent"),
+      ("sess", "user-a", " support_agent"),
+      ("sess", "user-a", "support_agent"),
+      ("sess", "user-a ", "support_agent"),
+      ("sess ", "user-a", "support_agent"),
+  ]
+  assert {(r["prompt"], r["final_response"]) for r in tables.results} == {
+      ("p1", "a1"),
+      ("p2", "a2"),
+      ("p3", "a3"),
+      ("p4", "a4"),
+      ("p5", "a5"),
+  }
+  assert len({r["id"] for r in tables.results}) == 5
+  assert len(_imported_sessions(tables)) == 5
+
+
+def test_scenario_ids_are_injective_for_delimiter_bearing_identities() -> None:
+  # Codex P1 (round 2) on PR #455: a raw ":" join mapped ("shared","a:b","c")
+  # and ("shared","a","b:c") to the same id and the synthesizer aborted.
+  # Components are percent-escaped, so boundaries survive and NULL ("~")
+  # differs from "" and from a literal "~".
+  events = _trace("shared", "a:b", "c", "p1", "a1", 0)
+  events += _trace("shared", "a", "b:c", "p2", "a2", 3)
+  events += _trace("shared", "a%3Ab", "c", "p3", "a3", 6)
+  events += _trace("shared", "~", "c", "p4", "a4", 9)
+  events += _trace("shared", None, "c", "p5", "a5", 12)
+  events += _trace("shared:a", "b", "c", "p6", "a6", 15)
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.skipped_sessions == []
+  by_id = {r["id"]: (r["prompt"], r["final_response"]) for r in tables.results}
+  assert by_id == {
+      "shared:a%3Ab:c": ("p1", "a1"),
+      "shared:a:b%3Ac": ("p2", "a2"),
+      "shared:a%253Ab:c": ("p3", "a3"),
+      "shared:%7E:c": ("p4", "a4"),
+      "shared:~:c": ("p5", "a5"),
+      "shared%3Aa:b:c": ("p6", "a6"),
+  }
+  assert len(_imported_sessions(tables)) == 6
+
+
+def test_scenario_id_encoding_is_deterministic_and_injective() -> None:
+  keys = [
+      ("s", "a:b", "c"),
+      ("s", "a", "b:c"),
+      ("s", None, ""),
+      ("s", "", None),
+      ("s", "~", "%"),
+      ("s", "%7E", "%25"),
+      ("", None, None),
+      (" ", None, None),
+  ]
+  ids = synth._scenario_ids(keys)
+  assert len(set(ids.values())) == len(keys)
+  assert ids == synth._scenario_ids(list(reversed(keys)))
+  assert ids[("s", None, "")] == "s:~:"
+  assert ids[("s", "", None)] == "s::~"
+  assert ids[("", None, None)] == ":~:~"
+  assert all(value.strip() for value in ids.values())

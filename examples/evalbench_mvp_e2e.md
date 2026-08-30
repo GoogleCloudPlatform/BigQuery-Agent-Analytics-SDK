@@ -98,7 +98,7 @@ and user B's answer:
 
 | EvalBench column | Taken from the trace's events |
 |------------------|--------------------------------|
-| `results.id` / `eval_id` | The first eight characters of the `session_id`; the full id if that would collide; `session_id:user_id:root_agent_name` if session ids themselves are reused. |
+| `results.id` / `eval_id` | The first eight characters of the `session_id`; the full id if that would collide; `session_id:user_id:root_agent_name` if session ids themselves are reused (components percent-escaped, `:` → `%3A`, `%` → `%25`, `~` → `%7E`; a NULL component is `~`, so distinct identities never share an id). |
 | `results.prompt` / `nl_prompt` | `USER_MESSAGE_RECEIVED` → `content.text_summary`. Required: a trace without one is **skipped**, never given an invented prompt. |
 | `results.final_response` / `stdout` | `AGENT_COMPLETED` text if the plugin logged any, else the last `LLM_RESPONSE` → `content.response` (the ADK plugin logs `AGENT_COMPLETED` without content; `AGENT_RESPONSE` is accepted as an alias). Omitted when the trace never answered. |
 | `results.returncode` | `0` if an `AGENT_COMPLETED` event exists, else `1` (*completed*, not *correct*). |

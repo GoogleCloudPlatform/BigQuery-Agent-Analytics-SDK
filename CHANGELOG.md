@@ -25,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `examples/evalbench_synth_from_traces.py`, which folds a real BQAA
   `agent_events` table into EvalBench-shaped `configs`/`results`/`scores`
   tables (one scenario per trace, grouped on the full
-  `(session_id, user_id, root_agent_name)` identity; prompts and
+  `(session_id, user_id, root_agent_name)` identity taken as exact strings
+  — whitespace kept, `NULL` distinct from `""` — with percent-escaped,
+  collision-proof scenario ids when session ids are reused; prompts and
   `LLM_RESPONSE` / `AGENT_COMPLETED` responses are the real trace text,
   never invented; `goal_completion` = 1.0 when the trace reached
   `AGENT_COMPLETED`, else 0.0; every source/target name is validated as a
