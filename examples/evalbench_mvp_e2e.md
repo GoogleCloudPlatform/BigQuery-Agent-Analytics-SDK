@@ -89,18 +89,23 @@ and then runs steps 1–3 unchanged on the job it produced:
 ```
 
 The synthesizer reads a real BQAA `agent_events` table (the ADK plugin's
-output for an agent that actually ran) and folds **each session into one
-EvalBench scenario**:
+output for an agent that actually ran) and folds **each trace into one
+EvalBench scenario**. A trace is the full BQAA identity
+`(session_id, user_id, root_agent_name)` — the grouping
+`Client.list_traces` uses — so a session id reused across users or root
+agents yields one scenario per trace, never one row with user A's prompt
+and user B's answer:
 
-| EvalBench column | Taken from the session's events |
-|------------------|----------------------------------|
-| `results.id` / `eval_id` | The first eight characters of the `session_id` (the full id if that would collide). |
-| `results.prompt` / `nl_prompt` | `USER_MESSAGE_RECEIVED` → `content.text_summary`. Required: a session without one is **skipped**, never given an invented prompt. |
-| `results.final_response` / `stdout` | `AGENT_COMPLETED` text if the plugin logged any, else the last `AGENT_RESPONSE` → `content.response`. Omitted when the session never answered. |
+| EvalBench column | Taken from the trace's events |
+|------------------|--------------------------------|
+| `results.id` / `eval_id` | The first eight characters of the `session_id`; the full id if that would collide; `session_id:user_id:root_agent_name` if session ids themselves are reused. |
+| `results.prompt` / `nl_prompt` | `USER_MESSAGE_RECEIVED` → `content.text_summary`. Required: a trace without one is **skipped**, never given an invented prompt. |
+| `results.final_response` / `stdout` | `AGENT_COMPLETED` text if the plugin logged any, else the last `LLM_RESPONSE` → `content.response` (the ADK plugin logs `AGENT_COMPLETED` without content; `AGENT_RESPONSE` is accepted as an alias). Omitted when the trace never answered. |
 | `results.returncode` | `0` if an `AGENT_COMPLETED` event exists, else `1` (*completed*, not *correct*). |
 | `results.run_time` | Timestamp of the `USER_MESSAGE_RECEIVED` event. |
 | `results.tool_calls` | `TOOL_STARTING` / `TOOL_COMPLETED` (or `TOOL_ERROR`) pairs, matched by `span_id`, as a JSON list of `{tool_name, args, result, error}`. |
-| `results.error_message` | The first `error_message` logged in the session. |
+| `results.error_message` | The first `error_message` logged in the trace. |
+| `results.source_session_id` / `source_user_id` / `source_root_agent_name` / `source_table` | The trace identity and table the row came from (also on `scores`). |
 | `scores` | One row per scenario, `comparator = goal_completion`, `score = 1.0` if the session reached `AGENT_COMPLETED`, else `0.0`. |
 | `configs` | `experiment_config.orchestrator` = the traces' agent name, `model_config.generator` = the ADK `app_name`, `bqaa.source_table` = the source table; `run_time` = the earliest prompt. |
 
@@ -112,7 +117,10 @@ traces reproduces the importer's source fingerprints and step 1 reports
 `status: unchanged` instead of minting a new version. The script creates
 both datasets when missing, overwrites the three tables on each run, and
 refuses to write into the source dataset or the ADK plugin's
-`agent_analytics` dataset. `--dry-run` prints the rows instead of writing.
+`agent_analytics` dataset, and validates every project / dataset / table
+name as a plain identifier (`^[A-Za-z0-9_-]+$`, the SDK's own policy)
+before creating a BigQuery client or building any SQL. `--dry-run` prints
+the rows instead of writing.
 
 Every variable has a default so the whole thing works with only `gcloud`
 configured (`BQ_AGENT_PROJECT` falls back to `gcloud config get-value

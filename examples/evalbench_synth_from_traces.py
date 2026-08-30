@@ -18,30 +18,40 @@
 The EvalBench MVP demo (`examples/evalbench_mvp_e2e.sh`, #435 slice 5, #97)
 needs an EvalBench job to import. When no EvalBench run is available this
 script builds one from traces an agent really produced: it reads a BQAA
-``agent_events`` table, folds each session into one EvalBench ``results``
+``agent_events`` table, folds each trace into one EvalBench ``results``
 row plus one ``scores`` row, and writes ``configs`` / ``results`` /
 ``scores`` tables that ``EvalBenchRun.from_bigquery`` reads unchanged.
 
-Nothing textual is invented. Every prompt is the session's real
+A trace is the full BQAA trace identity ``(session_id, user_id,
+root_agent_name)`` -- the same grouping ``Client.list_traces`` uses -- not
+the bare ``session_id``, so a session id reused across users or root agents
+never splices one trace's prompt onto another trace's response.
+
+Nothing textual is invented. Every prompt is the trace's real
 ``USER_MESSAGE_RECEIVED`` text, every final response is the real
-``AGENT_COMPLETED`` / ``AGENT_RESPONSE`` text, and sessions with no user
-prompt are skipped rather than given one. The only synthesized value is the
-``goal_completion`` score: ``1.0`` when the session reached
+``AGENT_COMPLETED`` text or, when the plugin logs ``AGENT_COMPLETED`` with
+no content (the ADK plugin does), the last ``LLM_RESPONSE`` text
+(``AGENT_RESPONSE`` is accepted as a compatibility alias), and traces with
+no user prompt are skipped rather than given one. The only synthesized
+value is the ``goal_completion`` score: ``1.0`` when the trace reached
 ``AGENT_COMPLETED``, ``0.0`` otherwise (``returncode`` mirrors this as
 ``0`` / ``1``). It says *completed*, not *correct* -- that is what step 3 of
 the demo, the LLM judge, is for.
 
-Mapping (one result per session, keyed by the first eight characters of the
-session id unless that would collide, then the full session id):
+Mapping (one result per trace, keyed by the first eight characters of the
+session id; on collision the full session id; if session ids themselves are
+reused, ``session_id:user_id:root_agent_name``):
 
   results.id / eval_id       scenario id
   results.prompt / nl_prompt first USER_MESSAGE_RECEIVED content.text_summary
-  results.final_response     AGENT_COMPLETED text, else last AGENT_RESPONSE
+  results.final_response     AGENT_COMPLETED text, else last LLM_RESPONSE
   results.stdout             same text (EvalBench's agentic field name)
   results.returncode         0 if AGENT_COMPLETED was logged, else 1
   results.run_time           timestamp of the USER_MESSAGE_RECEIVED event
   results.tool_calls         JSON list of TOOL_STARTING / TOOL_COMPLETED pairs
-  results.error_message      first error_message logged in the session
+  results.error_message      first error_message logged in the trace
+  results.source_session_id  the trace identity, alongside
+    / source_user_id         source_root_agent_name and source_table
   scores                     comparator=goal_completion, score=1.0|0.0
   configs                    experiment_config.orchestrator=<agent>,
                              model_config.generator=<adk app_name>
@@ -59,7 +69,9 @@ Usage (defaults are the demo's own names; only the project is required):
 
 The EvalBench-shaped dataset and the mirror dataset are created when
 missing. The script refuses to write into the source dataset or into the
-ADK plugin's ``agent_analytics`` dataset.
+ADK plugin's ``agent_analytics`` dataset, and every project / dataset /
+table name is validated as a plain identifier (ASCII letters, digits,
+``_`` or ``-``) before a BigQuery client is created or any SQL is built.
 """
 
 from __future__ import annotations
@@ -70,6 +82,7 @@ from datetime import datetime
 from datetime import timezone
 import json
 import os
+import re
 import sys
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -81,6 +94,14 @@ DEFAULT_LOCATION = "US"
 COMPARATOR = "goal_completion"
 _SHORT_ID_LENGTH = 8
 _RESERVED_TARGET_DATASETS = frozenset({"agent_analytics"})
+# Same fail-closed identifier policy as ``bigquery_agent_analytics.evalbench``:
+# names are interpolated into SQL between backticks, so anything else
+# (backticks, semicolons, comment markers, whitespace) is rejected up front.
+_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+# Event types carrying the model's answer text. ``LLM_RESPONSE`` is the SDK
+# contract (``event_semantics.RESPONSE_EVENT_TYPES``); ``AGENT_RESPONSE`` is
+# kept as a compatibility alias for producers that used that name.
+_RESPONSE_EVENT_TYPES = frozenset({"LLM_RESPONSE", "AGENT_RESPONSE"})
 
 _RESULT_SCHEMA = (
     ("job_id", "STRING", "REQUIRED"),
@@ -95,6 +116,8 @@ _RESULT_SCHEMA = (
     ("tool_calls", "STRING", "REQUIRED"),
     ("error_message", "STRING", "NULLABLE"),
     ("source_session_id", "STRING", "REQUIRED"),
+    ("source_user_id", "STRING", "NULLABLE"),
+    ("source_root_agent_name", "STRING", "NULLABLE"),
     ("source_table", "STRING", "REQUIRED"),
 )
 _SCORE_SCHEMA = (
@@ -105,6 +128,8 @@ _SCORE_SCHEMA = (
     ("score", "FLOAT64", "REQUIRED"),
     ("run_time", "TIMESTAMP", "REQUIRED"),
     ("source_session_id", "STRING", "REQUIRED"),
+    ("source_user_id", "STRING", "NULLABLE"),
+    ("source_root_agent_name", "STRING", "NULLABLE"),
 )
 _CONFIG_SCHEMA = (
     ("job_id", "STRING", "REQUIRED"),
@@ -113,19 +138,23 @@ _CONFIG_SCHEMA = (
     ("value", "STRING", "NULLABLE"),
 )
 
+# The identity columns match ``Client.list_traces``: a trace is
+# ``(session_id, user_id, root_agent_name)``, never ``session_id`` alone.
 _READ_EVENTS_QUERY = """\
 SELECT
   timestamp,
   event_type,
   agent,
   session_id,
+  user_id,
+  JSON_VALUE(attributes, '$.root_agent_name') AS root_agent_name,
   span_id,
   TO_JSON_STRING(content) AS content,
   TO_JSON_STRING(attributes) AS attributes,
   status,
   error_message
 FROM `{source_table}`
-ORDER BY session_id, timestamp, span_id
+ORDER BY session_id, user_id, root_agent_name, timestamp, span_id
 """
 
 
@@ -136,16 +165,22 @@ class SynthTables:
   results: list[dict[str, Any]]
   scores: list[dict[str, Any]]
   configs: list[dict[str, Any]]
-  skipped_sessions: list[str]
+  skipped_sessions: list[str]  # session ids of traces without a prompt
 
   @property
   def completed(self) -> int:
     return sum(1 for row in self.results if row["returncode"] == 0)
 
 
+# One BQAA trace: the full identity, not just the session id.
+_TraceKey = tuple[str, Optional[str], Optional[str]]
+
+
 @dataclasses.dataclass
 class _Session:
   session_id: str
+  user_id: Optional[str] = None
+  root_agent_name: Optional[str] = None
   prompt: Optional[str] = None
   run_time: Optional[datetime] = None
   agent: Optional[str] = None
@@ -158,6 +193,10 @@ class _Session:
   _open_by_span: dict[str, dict[str, Any]] = dataclasses.field(
       default_factory=dict
   )
+
+  @property
+  def key(self) -> _TraceKey:
+    return (self.session_id, self.user_id, self.root_agent_name)
 
 
 def check_targets(
@@ -192,15 +231,20 @@ def synthesize(
 
   ``events`` are plain mappings shaped like ``agent_events`` rows;
   ``content`` / ``attributes`` may be dicts, JSON strings (as
-  ``TO_JSON_STRING`` returns them), or ``None``. Rows are processed in
-  ``(session_id, timestamp)`` order. Sessions without a usable
-  ``USER_MESSAGE_RECEIVED`` text are reported in ``skipped_sessions``.
+  ``TO_JSON_STRING`` returns them), or ``None``. Rows are grouped by the
+  full BQAA trace identity ``(session_id, user_id, root_agent_name)`` --
+  ``user_id`` from the top-level column, ``root_agent_name`` from the
+  top-level column when the reader selected it, else from
+  ``attributes.root_agent_name`` -- and processed in timestamp order within
+  each trace. Traces without a usable ``USER_MESSAGE_RECEIVED`` text are
+  reported in ``skipped_sessions``.
   """
-  sessions: dict[str, _Session] = {}
+  sessions: dict[_TraceKey, _Session] = {}
   ordered = sorted(
       events,
       key=lambda row: (
           str(row.get("session_id") or ""),
+          _identity_key(row),
           _timestamp(row.get("timestamp"))
           or datetime.min.replace(tzinfo=timezone.utc),
       ),
@@ -209,22 +253,32 @@ def synthesize(
     session_id = _text(row.get("session_id"))
     if session_id is None:
       continue
-    session = sessions.setdefault(session_id, _Session(session_id=session_id))
+    user_id, root_agent_name = _identity(row)
+    key: _TraceKey = (session_id, user_id, root_agent_name)
+    session = sessions.get(key)
+    if session is None:
+      session = sessions[key] = _Session(
+          session_id=session_id,
+          user_id=user_id,
+          root_agent_name=root_agent_name,
+      )
     _fold_event(session, row)
 
   prompted = [s for s in sessions.values() if s.prompt is not None]
-  skipped = sorted(s.session_id for s in sessions.values() if s.prompt is None)
+  skipped = sorted(
+      {s.session_id for s in sessions.values() if s.prompt is None}
+  )
   if not prompted:
     raise ValueError(
-        f"no session in {source_table!r} has a USER_MESSAGE_RECEIVED text;"
+        f"no trace in {source_table!r} has a USER_MESSAGE_RECEIVED text;"
         " nothing to synthesize (prompts are never invented)"
     )
 
-  scenario_ids = _scenario_ids([s.session_id for s in prompted])
+  scenario_ids = _scenario_ids([s.key for s in prompted])
   results: list[dict[str, Any]] = []
   scores: list[dict[str, Any]] = []
   for session in prompted:
-    scenario_id = scenario_ids[session.session_id]
+    scenario_id = scenario_ids[session.key]
     final_text = session.completed_text or session.last_response
     result: dict[str, Any] = {
         "job_id": job_id,
@@ -243,6 +297,8 @@ def synthesize(
             "tool_calls": json.dumps(session.tool_calls, sort_keys=True),
             "error_message": session.error_message,
             "source_session_id": session.session_id,
+            "source_user_id": session.user_id,
+            "source_root_agent_name": session.root_agent_name,
             "source_table": source_table,
         }
     )
@@ -256,6 +312,8 @@ def synthesize(
             "score": 1.0 if session.completed else 0.0,
             "run_time": session.run_time,
             "source_session_id": session.session_id,
+            "source_user_id": session.user_id,
+            "source_root_agent_name": session.root_agent_name,
         }
     )
   results.sort(key=lambda row: row["id"])
@@ -287,6 +345,27 @@ def synthesize(
   return SynthTables(
       results=results, scores=scores, configs=configs, skipped_sessions=skipped
   )
+
+
+def _identity(row: Mapping[str, Any]) -> tuple[Optional[str], Optional[str]]:
+  """``(user_id, root_agent_name)`` of one ``agent_events`` row.
+
+  ``root_agent_name`` is read from the top-level column the reader query
+  projects, falling back to ``attributes.root_agent_name`` for rows handed
+  in without that projection (tests, other readers).
+  """
+  user_id = _text(row.get("user_id"))
+  root_agent_name = _text(row.get("root_agent_name"))
+  if root_agent_name is None:
+    attributes = _structured(row.get("attributes"))
+    if isinstance(attributes, Mapping):
+      root_agent_name = _text(attributes.get("root_agent_name"))
+  return user_id, root_agent_name
+
+
+def _identity_key(row: Mapping[str, Any]) -> tuple[str, str]:
+  user_id, root_agent_name = _identity(row)
+  return (user_id or "", root_agent_name or "")
 
 
 def _fold_event(session: _Session, row: Mapping[str, Any]) -> None:
@@ -323,8 +402,9 @@ def _fold_event(session: _Session, row: Mapping[str, Any]) -> None:
       text = _text(content)
     if text is not None:
       session.completed_text = text
-  elif event_type == "AGENT_RESPONSE":
-    text = _first_text(content_map, ("response", "text_summary", "text"))
+  elif event_type in _RESPONSE_EVENT_TYPES:
+    # Same key priority as ``event_semantics.extract_response_text``.
+    text = _first_text(content_map, ("response", "text_summary", "text", "raw"))
     if text is None and isinstance(content, str):
       text = _text(content)
     if text is not None:
@@ -365,11 +445,24 @@ def _match_tool_call(
   return None
 
 
-def _scenario_ids(session_ids: Sequence[str]) -> dict[str, str]:
-  short = {sid: sid[:_SHORT_ID_LENGTH] for sid in session_ids}
-  if len(set(short.values())) == len(session_ids):
-    return short
-  return {sid: sid for sid in session_ids}
+def _scenario_ids(keys: Sequence[_TraceKey]) -> dict[_TraceKey, str]:
+  """Collision-safe scenario id per trace identity.
+
+  Short session-id prefixes when they are unique; full session ids when
+  prefixes collide; the full ``session_id:user_id:root_agent_name``
+  identity when session ids themselves are reused across users or root
+  agents. Deterministic, so re-runs reproduce the importer's fingerprints.
+  """
+  candidates = (
+      lambda key: key[0][:_SHORT_ID_LENGTH],
+      lambda key: key[0],
+      lambda key: ":".join(part if part is not None else "" for part in key),
+  )
+  for candidate in candidates:
+    ids = {key: candidate(key) for key in keys}
+    if len(set(ids.values())) == len(keys):
+      return ids
+  raise ValueError("duplicate trace identities cannot be given scenario ids")
 
 
 def _first_text(
@@ -430,20 +523,48 @@ def _most_common(values: Iterable[Optional[str]]) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # BigQuery I/O (only reached from main()).
 # --------------------------------------------------------------------------- #
+def validate_identifier(name: str, value: Any) -> str:
+  """Fail closed on anything but a plain BigQuery identifier segment."""
+  if not isinstance(value, str) or not _IDENTIFIER_PATTERN.fullmatch(value):
+    raise ValueError(
+        f"{name} must contain only ASCII letters, digits, '_' or '-',"
+        f" got {value!r}"
+    )
+  return value
+
+
 def _qualify(project: str, table: str) -> str:
-  parts = table.split(".")
+  """Return ``project.dataset.table`` with every segment validated.
+
+  Runs before a BigQuery client exists and before any SQL is formatted,
+  so a hostile ``--source-table`` (backticks, semicolons, comments, ...)
+  can never reach ``client.query``.
+  """
+  validate_identifier("--project", project)
+  parts = table.split(".") if isinstance(table, str) else []
   if len(parts) == 2:
-    return f"{project}.{table}"
-  if len(parts) == 3:
-    return table
-  raise ValueError(
-      f"--source-table must be dataset.table or project.dataset.table, got {table!r}"
-  )
+    parts = [project, *parts]
+  elif len(parts) != 3:
+    raise ValueError(
+        "--source-table must be dataset.table or project.dataset.table,"
+        f" got {table!r}"
+    )
+  for label, segment in zip(("project", "dataset", "table"), parts):
+    validate_identifier(f"--source-table {label}", segment)
+  return ".".join(parts)
 
 
 def load_events(
     client: Any, *, source_table: str, location: str
 ) -> list[dict[str, Any]]:
+  # Re-validated here so the guard holds for direct callers, not only main().
+  parts = source_table.split(".")
+  if len(parts) != 3:
+    raise ValueError(
+        f"source_table must be project.dataset.table, got {source_table!r}"
+    )
+  for label, segment in zip(("project", "dataset", "table"), parts):
+    validate_identifier(f"source_table {label}", segment)
   query = _READ_EVENTS_QUERY.format(source_table=source_table)
   return [
       dict(row.items())
@@ -565,6 +686,8 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
   args = _parse_args(argv)
   source_table = _qualify(args.project, args.source_table)
+  validate_identifier("--evalbench-dataset", args.evalbench_dataset)
+  validate_identifier("--mirror-dataset", args.mirror_dataset)
   check_targets(
       source_table=source_table,
       evalbench_dataset=args.evalbench_dataset,

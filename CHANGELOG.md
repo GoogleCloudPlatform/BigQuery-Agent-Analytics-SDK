@@ -24,9 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without an EvalBench run: step 0 runs the new
   `examples/evalbench_synth_from_traces.py`, which folds a real BQAA
   `agent_events` table into EvalBench-shaped `configs`/`results`/`scores`
-  tables (one scenario per session; prompts and responses are the real
-  trace text, never invented; `goal_completion` = 1.0 when the session
-  reached `AGENT_COMPLETED`, else 0.0), then steps 1–3 run on that job
+  tables (one scenario per trace, grouped on the full
+  `(session_id, user_id, root_agent_name)` identity; prompts and
+  `LLM_RESPONSE` / `AGENT_COMPLETED` responses are the real trace text,
+  never invented; `goal_completion` = 1.0 when the trace reached
+  `AGENT_COMPLETED`, else 0.0; every source/target name is validated as a
+  plain identifier before any SQL is built), then steps 1–3 run on that job
   with the demo's default dataset names. Walkthrough in
   `examples/evalbench_mvp_e2e.md`; `tests/test_evalbench_mvp_e2e.py` runs
   the fixture path and the offline `--synth` guards, and

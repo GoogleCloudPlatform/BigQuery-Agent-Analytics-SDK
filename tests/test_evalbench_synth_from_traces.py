@@ -61,7 +61,8 @@ def _content(value):
 def _events():
   return [
       # A completed session with two tool calls; the final text lives on
-      # AGENT_RESPONSE because the plugin logs AGENT_COMPLETED with no content.
+      # LLM_RESPONSE (the SDK contract) because the ADK plugin logs
+      # AGENT_COMPLETED with no content.
       _event(
           _SESSION_DONE,
           "USER_MESSAGE_RECEIVED",
@@ -98,7 +99,7 @@ def _events():
       ),
       _event(
           _SESSION_DONE,
-          "AGENT_RESPONSE",
+          "LLM_RESPONSE",
           {"response": "text: 'There are 42 widgets in stock.'"},
           offset=4,
       ),
@@ -136,6 +137,8 @@ def test_one_result_per_prompted_session_with_real_text() -> None:
   assert done["returncode"] == 0
   assert done["run_time"] == _T0
   assert done["source_session_id"] == _SESSION_DONE
+  assert done["source_user_id"] is None
+  assert done["source_root_agent_name"] == "support_agent"
   assert done["source_table"] == "p.d.agent_events"
   assert done["error_message"] == "inventory backend timed out"
   tool_calls = json.loads(done["tool_calls"])
@@ -169,6 +172,8 @@ def test_scores_and_configs_follow_completion() -> None:
           "score": 1.0,
           "run_time": _T0,
           "source_session_id": _SESSION_DONE,
+          "source_user_id": None,
+          "source_root_agent_name": "support_agent",
       },
       {
           "job_id": "mvp-e2e-real-traces",
@@ -178,6 +183,8 @@ def test_scores_and_configs_follow_completion() -> None:
           "score": 0.0,
           "run_time": _T0,
           "source_session_id": _SESSION_STUCK,
+          "source_user_id": None,
+          "source_root_agent_name": "support_agent",
       },
   ]
   configs = {row["config"]: row["value"] for row in tables.configs}
@@ -264,7 +271,7 @@ def test_prompt_prefers_text_summary_then_text_and_rejects_blank() -> None:
 
 
 def test_no_prompted_sessions_is_an_error() -> None:
-  with pytest.raises(ValueError, match="no session"):
+  with pytest.raises(ValueError, match="no trace"):
     synth.synthesize(
         [_event("s1", "AGENT_STARTING", "x")], job_id="j", source_table="t"
     )
@@ -294,3 +301,229 @@ def test_target_dataset_must_differ_from_source() -> None:
       evalbench_dataset="bqaa_evalbench_mvp_demo",
       mirror_dataset="bqaa_evalbench_mvp_mirror",
   )
+
+
+def test_llm_response_is_the_final_response_when_completed_has_no_content() -> (
+    None
+):
+  # Codex P1 on PR #455: the ADK plugin emits USER_MESSAGE_RECEIVED ->
+  # LLM_RESPONSE -> AGENT_COMPLETED(no content). LLM_RESPONSE is the SDK's
+  # response event (event_semantics.RESPONSE_EVENT_TYPES), so its text must
+  # become final_response instead of a phantom "completed but never answered".
+  events = [
+      _event("s1", "USER_MESSAGE_RECEIVED", {"text_summary": "hi"}),
+      _event("s1", "LLM_RESPONSE", {"response": "first draft"}, offset=1),
+      _event("s1", "LLM_RESPONSE", {"response": "hello there"}, offset=2),
+      _event("s1", "AGENT_COMPLETED", None, offset=3),
+  ]
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  (row,) = tables.results
+  assert row["returncode"] == 0
+  assert row["final_response"] == "hello there"
+  assert row["stdout"] == "hello there"
+  run = EvalBenchRun(
+      project_id="p",
+      evalbench_dataset="d",
+      job_id="j",
+      results=tuple(tables.results),
+      scores=tuple(tables.scores),
+      config_rows=tuple(tables.configs),
+  )
+  event_types = [
+      r["event_type"] for r in run.to_agent_event_rows(import_version="v1")
+  ]
+  assert event_types == ["USER_MESSAGE_RECEIVED", "AGENT_COMPLETED"]
+
+
+def test_agent_response_remains_a_compatibility_alias() -> None:
+  events = [
+      _event("s1", "USER_MESSAGE_RECEIVED", {"text_summary": "hi"}),
+      _event("s1", "AGENT_RESPONSE", {"response": "legacy name"}, offset=1),
+  ]
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.results[0]["final_response"] == "legacy name"
+  assert tables.results[0]["returncode"] == 1
+
+
+def test_reused_session_id_across_identities_is_never_spliced() -> None:
+  # Codex P1 on PR #455: BQAA trace identity is (session_id, user_id,
+  # root_agent_name). Two traces sharing a session_id must become two
+  # scenarios, each with its own prompt and response, never one row with
+  # user A's prompt and user B's answer.
+  def trace(user_id, root_agent_name, prompt, answer, offset):
+    attrs = {
+        "adk": {"app_name": "bqaa-e2e"},
+        "root_agent_name": root_agent_name,
+    }
+    return [
+        _event(
+            "reused",
+            "USER_MESSAGE_RECEIVED",
+            {"text_summary": prompt},
+            offset=offset,
+            user_id=user_id,
+            attributes=attrs,
+        ),
+        _event(
+            "reused",
+            "LLM_RESPONSE",
+            {"response": answer},
+            offset=offset + 1,
+            user_id=user_id,
+            attributes=attrs,
+        ),
+        _event(
+            "reused",
+            "AGENT_COMPLETED",
+            None,
+            offset=offset + 2,
+            user_id=user_id,
+            attributes=attrs,
+        ),
+    ]
+
+  events = (
+      trace("user-a", "support_agent", "prompt A", "answer A", 0)
+      + trace("user-b", "support_agent", "prompt B", "answer B", 4)
+      # Same user, different root agent: still a distinct trace.
+      + trace("user-a", "billing_agent", "prompt C", "answer C", 8)
+  )
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.skipped_sessions == []
+  by_id = {
+      r["id"]: (
+          r["prompt"],
+          r["final_response"],
+          r["source_user_id"],
+          r["source_root_agent_name"],
+      )
+      for r in tables.results
+  }
+  assert by_id == {
+      "reused:user-a:support_agent": (
+          "prompt A",
+          "answer A",
+          "user-a",
+          "support_agent",
+      ),
+      "reused:user-b:support_agent": (
+          "prompt B",
+          "answer B",
+          "user-b",
+          "support_agent",
+      ),
+      "reused:user-a:billing_agent": (
+          "prompt C",
+          "answer C",
+          "user-a",
+          "billing_agent",
+      ),
+  }
+  assert {r["source_session_id"] for r in tables.results} == {"reused"}
+  # Scores carry the same identity as results, one per trace.
+  assert sorted(
+      (s["id"], s["source_user_id"], s["source_root_agent_name"])
+      for s in tables.scores
+  ) == sorted(
+      (r["id"], r["source_user_id"], r["source_root_agent_name"])
+      for r in tables.results
+  )
+  # The three traces stay distinct through the importer as well.
+  run = EvalBenchRun(
+      project_id="p",
+      evalbench_dataset="d",
+      job_id="j",
+      results=tuple(tables.results),
+      scores=tuple(tables.scores),
+      config_rows=tuple(tables.configs),
+  )
+  sessions = {
+      r["session_id"] for r in run.to_agent_event_rows(import_version="v1")
+  }
+  assert len(sessions) == 3
+
+
+def test_top_level_root_agent_name_column_wins_over_attributes() -> None:
+  # The reader query projects root_agent_name from attributes; rows that
+  # carry the column already use it as-is.
+  events = [
+      _event(
+          "s1",
+          "USER_MESSAGE_RECEIVED",
+          {"text_summary": "a"},
+          root_agent_name="from_column",
+      ),
+  ]
+  tables = synth.synthesize(events, job_id="j", source_table="t")
+  assert tables.results[0]["source_root_agent_name"] == "from_column"
+
+
+class _NeverQueriedClient:
+  """A fake BigQuery client that fails the test if any SQL reaches it."""
+
+  def __init__(self):
+    self.queries = []
+
+  def query(self, query, **kwargs):  # pragma: no cover - must not run
+    self.queries.append(query)
+    raise AssertionError(f"client.query must not be reached: {query!r}")
+
+
+_HOSTILE_TABLES = [
+    "d.t` WHERE FALSE; SELECT 1; --",
+    "d.t`; DROP TABLE x; --",
+    "d.t -- comment",
+    "d.`t`",
+    "d.t;",
+    "d. t",
+    "d.t\n",
+    "d.t.u.v",
+    "t",
+    "",
+]
+
+
+@pytest.mark.parametrize("table", _HOSTILE_TABLES)
+def test_hostile_source_table_fails_before_client_query(table) -> None:
+  # Codex P1 on PR #455: --source-table is interpolated into SQL between
+  # backticks, so every segment must satisfy the repository's identifier
+  # policy (^[A-Za-z0-9_-]+$) before any statement is formatted.
+  client = _NeverQueriedClient()
+  with pytest.raises(ValueError):
+    synth.load_events(client, source_table=table, location="US")
+  assert client.queries == []
+  with pytest.raises(ValueError):
+    synth._qualify("p", table)
+
+
+def test_hostile_identifiers_fail_before_the_client_is_created(
+    monkeypatch,
+) -> None:
+  from google.cloud import bigquery
+
+  def _no_client(*args, **kwargs):  # pragma: no cover - must not run
+    raise AssertionError("bigquery.Client must not be created")
+
+  monkeypatch.setattr(bigquery, "Client", _no_client)
+  base = ["--project", "p", "--dry-run"]
+  hostile = "d.t` WHERE FALSE; SELECT 1; --"
+  with pytest.raises(ValueError, match="--source-table table"):
+    synth.main(base + ["--source-table", hostile])
+  with pytest.raises(ValueError, match="--source-table dataset"):
+    synth.main(base + ["--source-table", "bad dataset.t"])
+  with pytest.raises(ValueError, match="--source-table project"):
+    synth.main(base + ["--source-table", "pro`ject.d.t"])
+  with pytest.raises(ValueError, match="--project"):
+    synth.main(["--project", "p;", "--dry-run", "--source-table", "d.t"])
+  with pytest.raises(ValueError, match="--evalbench-dataset"):
+    synth.main(base + ["--source-table", "d.t", "--evalbench-dataset", "x`y"])
+  with pytest.raises(ValueError, match="--mirror-dataset"):
+    synth.main(base + ["--source-table", "d.t", "--mirror-dataset", "x;y"])
+
+
+def test_qualify_accepts_plain_identifiers() -> None:
+  assert synth._qualify("p", "d.t") == "p.d.t"
+  assert synth._qualify("my-proj", "bqaa_e2e_real.agent_events") == (
+      "my-proj.bqaa_e2e_real.agent_events"
+  )
+  assert synth._qualify("p", "other-proj.d.t") == "other-proj.d.t"
