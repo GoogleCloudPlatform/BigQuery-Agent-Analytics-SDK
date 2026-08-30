@@ -12,7 +12,8 @@ and the MVP snapshot + failed-session denominator from
 [issue #435](https://github.com/GoogleCloudPlatform/BigQuery-Agent-Analytics-SDK/issues/435):
 the versioned writer (slice 1) and the queryable `evalbench_failed_sessions`
 view plus version-pinned consumer (slice 2). Localization, failure taxonomy,
-and other harnesses are later slices.
+and other harnesses are later slices; the sequencing and gates are in
+[`docs/agentforensics_mvp_plan.md`](agentforensics_mvp_plan.md).
 
 ## Data Flow
 
