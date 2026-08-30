@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Mechanical failure-taxonomy scaffold (#435 slice 8)** — new
+  `failure_taxonomy` module: a versioned scaffold config
+  (`taxonomy_version: 0.0.0-scaffold`, `g1_frozen: false`) in the #431
+  `{"metrics": [...]}` schema shape whose one core metric carries the three
+  mechanical categories of the landed failed-session contract
+  (`process_failed` / `missing_completion` / `score_failed`), an empty D2
+  `dialects` slot (per-benchmark extension categories on the same core), and
+  a pure `categorize_failed_session()` that maps one failed-session row
+  (dict or `SessionVerdict`) to the tripped categories — no BigQuery, no
+  LLM, no network. NOT the G1 taxonomy: names are unfrozen and the six-week
+  clock has not started.
 - **EvalBench MVP e2e demo tells one session's story (#435 slice 5, #97)**
   — the `--fixture` walkthrough of `examples/evalbench_mvp_e2e.sh` now
   follows `support_agent` session `7e352c34` ("How many widgets are in
