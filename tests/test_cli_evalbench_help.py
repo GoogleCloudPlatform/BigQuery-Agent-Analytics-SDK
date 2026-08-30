@@ -25,7 +25,6 @@ still resolve to :func:`bigquery_agent_analytics.cli.main`. Offline only.
 from __future__ import annotations
 
 from pathlib import Path
-import tomllib
 
 import click
 import pytest
@@ -79,6 +78,11 @@ def test_console_script_maps_bq_agent_sdk_to_cli_main() -> None:
   registered on — so this is the link between ``pip install`` and
   ``bq-agent-sdk --help`` listing them.
   """
+  try:
+    import tomllib
+  except ImportError:  # Python < 3.11 — pytest depends on tomli there
+    import tomli as tomllib
+
   pyproject = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
   scripts = pyproject["project"]["scripts"]
   assert scripts["bq-agent-sdk"] == "bigquery_agent_analytics.cli:main"
@@ -94,7 +98,22 @@ def test_module_usage_block_documents_evalbench_commands() -> None:
 
 @pytest.mark.parametrize("name", _EVALBENCH_COMMANDS)
 def test_evalbench_subcommand_help_exits_zero(name: str) -> None:
-  """``bq-agent-sdk <evalbench-cmd> --help`` works without BigQuery."""
+  """``bq-agent-sdk <evalbench-cmd> --help`` works without BigQuery.
+
+  Only the exit code is asserted: Rich wraps and box-draws help output on
+  CI, so option flags are not reliably greppable from the captured text.
+  ``test_evalbench_subcommand_accepts_project_id`` checks the flag instead.
+  """
   result = runner.invoke(app, [name, "--help"])
   assert result.exit_code == 0, result.output
-  assert "--project-id" in result.output
+
+
+@pytest.mark.parametrize("name", _EVALBENCH_COMMANDS)
+def test_evalbench_subcommand_accepts_project_id(name: str) -> None:
+  """Each evalbench-* command declares ``--project-id`` (Click registry)."""
+  root = typer.main.get_command(app)
+  ctx = click.Context(root)
+  command = root.get_command(ctx, name)
+  assert command is not None, name
+  flags = {opt for param in command.get_params(ctx) for opt in param.opts}
+  assert "--project-id" in flags, sorted(flags)
