@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **EvalBench failed-session view and version-pinned consumer (#435, slice 2)**
+  — `EvalBenchRun.materialize()` now keeps an `evalbench_failed_sessions`
+  view in the target dataset pinned (as literals) to the job's latest
+  successful import, so SQL consumers never scan another `import_version`;
+  `failed_sessions()` / `bq-agent-sdk evalbench-failed-sessions` list the
+  failed sessions of exactly one published version, resolving the version
+  from the manifest before reading events, and each row's versioned
+  `session_id`/`trace_id` (`EvalBenchSession.trace_selector()`) drills into
+  `Client.get_session_trace` without mixing versions. `failed_sessions_sql()`
+  accepts `job_id=`/`import_version=` to render the pin as literals.
+
 ## [0.5.1] - 2026-08-29
 
 ### Release highlights

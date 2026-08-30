@@ -107,6 +107,8 @@ def test_evalbench_import_reads_source_and_materializes_to_target(
   assert materialize["scores_table"] == "evalbench_scores_imported"
   assert materialize["import_version"] == "v1"
   assert materialize["replace"] is True
+  assert materialize["failed_sessions_view"] == "evalbench_failed_sessions"
+  assert materialize["policy"] is None
   payload = json.loads(result.output)
   assert payload["status"] == "imported"
   assert payload["import_version"] == "v1"
@@ -139,6 +141,93 @@ def test_evalbench_import_defaults_target_to_source_and_derived_version(
   assert materialize["target_project"] is None
   assert materialize["import_version"] is None
   assert materialize["replace"] is False
+  assert materialize["failed_sessions_view"] == "evalbench_failed_sessions"
+
+
+def test_evalbench_import_view_and_policy_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-import",
+          "--project-id",
+          "source-project",
+          "--evalbench-dataset",
+          "evalbench",
+          "--job-id",
+          "job-123",
+          "--target-dataset",
+          "bqaa",
+          "--failed-sessions-view",
+          "failed_sessions_job_123",
+          "--min-score",
+          "goal_completion=0.5",
+      ],
+  )
+
+  assert result.exit_code == 0, result.output
+  materialize = calls[1]["materialize"]
+  assert materialize["failed_sessions_view"] == "failed_sessions_job_123"
+  assert materialize["policy"] == evalbench.EvalScorePolicy(
+      {"goal_completion": 0.5}
+  )
+
+
+def test_evalbench_import_can_skip_the_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-import",
+          "--project-id",
+          "source-project",
+          "--evalbench-dataset",
+          "evalbench",
+          "--job-id",
+          "job-123",
+          "--target-dataset",
+          "bqaa",
+          "--skip-failed-sessions-view",
+      ],
+  )
+  assert result.exit_code == 0, result.output
+  assert calls[1]["materialize"]["failed_sessions_view"] is None
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--failed-sessions-view", "agent_events"),
+        ("--min-score", "goal_completion"),
+    ],
+)
+def test_evalbench_import_rejects_bad_view_or_policy_before_reading(
+    monkeypatch: pytest.MonkeyPatch, option: str, value: str
+) -> None:
+  calls = _patch_from_bigquery(monkeypatch)
+  result = runner.invoke(
+      app,
+      [
+          "evalbench-import",
+          "--project-id",
+          "source-project",
+          "--evalbench-dataset",
+          "evalbench",
+          "--job-id",
+          "job-123",
+          "--target-dataset",
+          "bqaa",
+          option,
+          value,
+      ],
+  )
+  assert result.exit_code == 2, result.output
+  assert calls == []
 
 
 def test_evalbench_import_rejects_bad_snapshot_timestamp(

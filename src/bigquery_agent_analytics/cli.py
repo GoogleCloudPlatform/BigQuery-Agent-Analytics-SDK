@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 
@@ -2245,6 +2245,42 @@ bqaa_app.command(
 )(materialize_window)
 
 
+_MIN_SCORE_HELP = (
+    "COMPARATOR=MIN_SCORE score gate (repeatable): a session fails when the"
+    " comparator scores below MIN_SCORE, or has no score."
+)
+_MISSING_SCORE_PASSES_HELP = (
+    "Treat a missing or NULL score for a --min-score comparator as passing"
+    " instead of failing."
+)
+
+
+def _evalbench_score_policy(
+    min_scores: Optional[list[str]], missing_score_passes: bool
+) -> Optional[Any]:
+  """Build the ``EvalScorePolicy`` behind ``--min-score`` options."""
+  from .evalbench import EvalScorePolicy
+
+  thresholds: dict[str, float] = {}
+  for item in min_scores or []:
+    comparator, separator, value = item.rpartition("=")
+    if not separator or not comparator:
+      raise ValueError(
+          f"--min-score must be COMPARATOR=MIN_SCORE, got {item!r}"
+      )
+    try:
+      thresholds[comparator] = float(value)
+    except ValueError:
+      raise ValueError(
+          f"--min-score {item!r}: MIN_SCORE must be a number"
+      ) from None
+  if not thresholds:
+    return None
+  return EvalScorePolicy(
+      thresholds, missing_score_fails=not missing_score_passes
+  )
+
+
 @app.command("evalbench-import")
 def evalbench_import(
     project_id: str = typer.Option(
@@ -2301,6 +2337,27 @@ def evalbench_import(
             " AS OF this instant so a still-running job cannot mix versions."
         ),
     ),
+    failed_sessions_view: str = typer.Option(
+        "evalbench_failed_sessions",
+        "--failed-sessions-view",
+        help=(
+            "Failed-session view name in --target-dataset, kept pinned to"
+            " this job's latest successful import."
+        ),
+    ),
+    skip_failed_sessions_view: bool = typer.Option(
+        False,
+        "--skip-failed-sessions-view",
+        help="Do not create or update the failed-session view.",
+    ),
+    min_score: Optional[list[str]] = typer.Option(
+        None,
+        "--min-score",
+        help=_MIN_SCORE_HELP + " Rendered into the failed-session view.",
+    ),
+    missing_score_passes: bool = typer.Option(
+        False, "--missing-score-passes", help=_MISSING_SCORE_PASSES_HELP
+    ),
     location: Optional[str] = typer.Option(
         None, "--location", help="BigQuery location."
     ),
@@ -2313,14 +2370,17 @@ def evalbench_import(
   Reads the job's configs/results/scores, maps them to synthetic agent
   events, and publishes events, scores, and a manifest row as one immutable
   import version via a single BigQuery transaction. The ADK plugin's
-  production ``agent_events`` table is never written.
+  production ``agent_events`` table is never written. Every successful run
+  also keeps the ``--failed-sessions-view`` pinned to the job's latest
+  successful import (see ``evalbench-failed-sessions``).
 
   Exit codes:
       0 — imported, replaced, or unchanged (see ``status`` in the output).
       2 — invalid input (including the reserved ``agent_events`` table
           name), a changed source under an explicit --import-version, a
-          version already bound to other destination tables, or a BigQuery
-          error.
+          version already bound to other destination tables, a
+          failed-session view at that name that belongs to another job, or
+          a BigQuery error.
   """
   try:
     from .evalbench import _parse_timestamp
@@ -2330,6 +2390,9 @@ def evalbench_import(
     # Reject the reserved ADK plugin table before any BigQuery read or write.
     _validate_destination_table("events_table", events_table)
     _validate_destination_table("scores_table", scores_table)
+    if not skip_failed_sessions_view:
+      _validate_destination_table("failed_sessions_view", failed_sessions_view)
+    policy = _evalbench_score_policy(min_score, missing_score_passes)
 
     parsed_snapshot = None
     if snapshot_at is not None:
@@ -2353,8 +2416,90 @@ def evalbench_import(
         scores_table=scores_table,
         import_version=import_version,
         replace=replace,
+        failed_sessions_view=(
+            None if skip_failed_sessions_view else failed_sessions_view
+        ),
+        policy=policy,
     )
     typer.echo(format_output(result.to_dict(), fmt))
+  except typer.Exit:
+    raise
+  except Exception as exc:  # noqa: BLE001
+    typer.echo(f"Error: {exc}", err=True)
+    raise typer.Exit(code=2)
+
+
+@app.command("evalbench-failed-sessions")
+def evalbench_failed_sessions(
+    project_id: str = typer.Option(
+        ...,
+        envvar="BQ_AGENT_PROJECT",
+        help="Project holding the BQAA-owned target dataset.",
+    ),
+    target_dataset: str = typer.Option(
+        ...,
+        "--target-dataset",
+        help="BQAA-owned dataset the EvalBench job was imported into.",
+    ),
+    job_id: str = typer.Option(
+        ..., "--job-id", help="EvalBench job_id whose failed sessions to list."
+    ),
+    import_version: Optional[str] = typer.Option(
+        None,
+        "--import-version",
+        help=(
+            "Pin one published import version. Defaults to the job's latest"
+            " successful import (the version the failed-session view tracks)."
+        ),
+    ),
+    min_score: Optional[list[str]] = typer.Option(
+        None, "--min-score", help=_MIN_SCORE_HELP
+    ),
+    missing_score_passes: bool = typer.Option(
+        False, "--missing-score-passes", help=_MISSING_SCORE_PASSES_HELP
+    ),
+    include_passed: bool = typer.Option(
+        False,
+        "--include-passed",
+        help="Also list the sessions that passed (failed = false).",
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="BigQuery location."
+    ),
+    fmt: str = typer.Option(
+        "json", "--format", help="Output format: json|text|table."
+    ),
+) -> None:
+  """List the failed sessions of one published EvalBench import version.
+
+  Runs the W0.4 failed-session contract (``failed_sessions_sql``) against
+  exactly one ``(job_id, import_version)`` recorded in the import manifest,
+  so sessions of different import versions are never mixed. Each row's
+  ``session_id``/``trace_id`` is the version-specific identity that
+  ``Client.get_session_trace`` drills into.
+
+  Exit codes:
+      0 — the listing was produced (possibly empty).
+      2 — invalid input (including a malformed --min-score), a job or
+          version with no published import, or a BigQuery error.
+  """
+  try:
+    from .evalbench import failed_sessions
+
+    policy = _evalbench_score_policy(min_score, missing_score_passes)
+    result = failed_sessions(
+        target_project=project_id,
+        target_dataset=target_dataset,
+        job_id=job_id,
+        import_version=import_version,
+        policy=policy,
+        include_passed=include_passed,
+        location=location,
+    )
+    if fmt == "table":
+      typer.echo(format_output(result.sessions, fmt))
+    else:
+      typer.echo(format_output(result.to_dict(), fmt))
   except typer.Exit:
     raise
   except Exception as exc:  # noqa: BLE001

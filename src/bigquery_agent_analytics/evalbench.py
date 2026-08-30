@@ -29,6 +29,13 @@ first-time imports of one version cannot both commit. ``failed_sessions_sql``
 reads one pinned ``import_version`` and implements the W0.4 contract:
 ``returncode == 0`` means *completed*, and only the per-benchmark score
 policy decides *passed*.
+
+Slice 2 of #435 makes that denominator queryable without mixing versions:
+``materialize`` also maintains one ``evalbench_failed_sessions`` VIEW per
+target dataset whose body is ``failed_sessions_sql`` with the job's latest
+successful import rendered as literals, and ``failed_sessions`` is the
+version-pinned Python consumer whose rows carry the versioned
+``session_id`` that ``Client.get_session_trace`` drills into.
 """
 
 from __future__ import annotations
@@ -48,6 +55,7 @@ import re
 from typing import Any, Optional
 import uuid
 
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery
 
 from ._telemetry import make_bq_client
@@ -88,6 +96,17 @@ MANIFEST_TABLE = "evalbench_import_manifest"
 # table is fixed per dataset and never caller-selectable.
 LOCK_TABLE = "evalbench_import_lock"
 _IMPORT_LOCK_ID = "evalbench-import"
+# The queryable failed-session denominator (#435 slice 2): one VIEW per
+# target dataset, pinned to the *latest successful import* of one job_id
+# (``_LATEST_IMPORT_QUERY`` over the manifest). Its body is
+# ``failed_sessions_sql`` with ``@job_id``/``@import_version`` rendered as
+# string literals, so the view never scans another version. The pin is
+# recorded in a leading SQL comment (``_VIEW_PIN_MARKER``) that
+# ``materialize`` reads back before publishing: a view bound to another job,
+# or any object at that name the importer did not create, is never replaced.
+DEFAULT_FAILED_SESSIONS_VIEW = "evalbench_failed_sessions"
+_VIEW_PIN_MARKER = "-- evalbench_failed_sessions pin: "
+_VIEW_FEATURE = "evalbench-failed-sessions"
 # The ADK plugin's production table. EvalBench imports publish only to
 # BQAA-owned mirror tables, so this name is rejected before any BigQuery call.
 _RESERVED_DESTINATION_TABLES = frozenset({"agent_events"})
@@ -174,6 +193,25 @@ SELECT *
 FROM `{manifest_table}`
 WHERE job_id = @job_id AND import_version = @import_version
 """
+
+# "Latest successful import" of one job: the manifest holds only committed
+# publishes, so the newest ``imported_at`` (ties broken by version label for
+# determinism) is the version the failed_sessions view tracks and the
+# version ``failed_sessions()`` resolves when none is pinned.
+_LATEST_IMPORT_QUERY = """\
+SELECT *
+FROM `{manifest_table}`
+WHERE job_id = @job_id
+ORDER BY imported_at DESC, import_version DESC
+LIMIT 1
+"""
+
+_CREATE_VIEW_DDL = """\
+CREATE OR REPLACE VIEW `{view_ref}`
+OPTIONS (description = {description})
+AS
+{pin_comment}
+{query}"""
 
 # Seeds the lock sentinel outside the publish transaction. Two importers that
 # both find the table empty may each insert a sentinel (INSERTs never
@@ -727,6 +765,8 @@ class EvalBenchRun:
       import_version: Optional[str] = None,
       replace: bool = False,
       imported_at: Optional[datetime] = None,
+      failed_sessions_view: Optional[str] = DEFAULT_FAILED_SESSIONS_VIEW,
+      policy: Optional["EvalScorePolicy"] = None,
       bq_client: Optional[Any] = None,
   ) -> "EvalBenchImportResult":
     """Publish this run as one immutable import version in BQAA-owned tables.
@@ -774,6 +814,19 @@ class EvalBenchRun:
     reporting a no-op against tables that were never written or orphaning
     the old rows; use a new ``import_version`` to publish elsewhere.
 
+    Every successful call (``imported``, ``replaced`` *and* ``unchanged``)
+    also keeps the dataset's failed-session VIEW (``failed_sessions_view``,
+    default ``evalbench_failed_sessions``) pinned to this job's latest
+    successful import: ``failed_sessions_sql`` rendered with the
+    ``(job_id, import_version)`` of the newest manifest row as literals, so
+    SQL consumers never scan another version. The view is only rewritten
+    when that pin (or ``policy``) changes, so a no-op re-import leaves it
+    untouched, and it is created on the next call for corpora published
+    before views existed. A view at that name pinned to *another* job, or
+    any object there the importer did not create, raises ``ValueError``
+    before anything is written -- pass a different ``failed_sessions_view``
+    per job, or ``None`` to manage no view.
+
     Args:
       target_dataset: BQAA-owned dataset that receives the mirror tables.
       target_project: Target project; defaults to the source ``project_id``.
@@ -785,6 +838,10 @@ class EvalBenchRun:
         (``status == "replaced"``), or when an explicit version's source
         fingerprints changed.
       imported_at: Manifest timestamp; defaults to now (UTC).
+      failed_sessions_view: Name of the failed-session view kept in
+        ``target_dataset`` (see above); ``None`` skips view maintenance.
+      policy: Optional ``EvalScorePolicy`` rendered into the view so that
+        score failures count alongside process failures.
       bq_client: Optional test-compatible or caller-configured BigQuery
         client for the target project.
 
@@ -796,6 +853,18 @@ class EvalBenchRun:
     _validate_source_segment("target_dataset", target_dataset)
     _validate_destination_table("events_table", events_table)
     _validate_destination_table("scores_table", scores_table)
+    if failed_sessions_view is not None:
+      _validate_destination_table("failed_sessions_view", failed_sessions_view)
+      if failed_sessions_view in (
+          events_table,
+          scores_table,
+          MANIFEST_TABLE,
+          LOCK_TABLE,
+      ):
+        raise ValueError(
+            f"failed_sessions_view {failed_sessions_view!r} must not name an"
+            " import table"
+        )
     if imported_at is None:
       imported_at = datetime.now(timezone.utc)
     elif imported_at.tzinfo is None:
@@ -811,6 +880,11 @@ class EvalBenchRun:
     scores_ref = f"{prefix}.{scores_table}"
     manifest_ref = f"{prefix}.{MANIFEST_TABLE}"
     lock_ref = f"{prefix}.{LOCK_TABLE}"
+    view_ref = (
+        f"{prefix}.{failed_sessions_view}"
+        if failed_sessions_view is not None
+        else None
+    )
 
     # Map before touching BigQuery so mapping errors never leave staging
     # tables behind or partially created targets.
@@ -847,6 +921,37 @@ class EvalBenchRun:
         lock_ref=lock_ref,
     )
 
+    # The view binding is checked before the manifest so a name clash with
+    # another job's view (or a foreign object) aborts before any write.
+    existing_pin: Optional[dict[str, str]] = None
+    if view_ref is not None:
+      existing_pin = _read_view_pin(client, view_ref=view_ref)
+      if existing_pin is not None and existing_pin["job_id"] != self.job_id:
+        raise ValueError(
+            f"failed_sessions view {view_ref!r} is pinned to EvalBench job "
+            f"{existing_pin['job_id']!r}, not {self.job_id!r}; pass a "
+            "different failed_sessions_view for this job, or None to skip"
+            " the view"
+        )
+
+    def finish(result: "EvalBenchImportResult") -> "EvalBenchImportResult":
+      if view_ref is None:
+        return result
+      return dataclasses.replace(
+          result,
+          failed_sessions_view=_sync_failed_sessions_view(
+              client,
+              view_ref=view_ref,
+              manifest_ref=manifest_ref,
+              job_id=self.job_id,
+              existing_pin=existing_pin,
+              policy=policy,
+              location=self.location,
+              status=result.status,
+              import_version=import_version,
+          ),
+      )
+
     existing = _read_manifest(
         client,
         manifest_ref=manifest_ref,
@@ -873,12 +978,14 @@ class EvalBenchRun:
             "overwrite it"
         )
       if not drift and not replace:
-        return self._unchanged_result(
-            existing,
-            import_version=import_version,
-            events_ref=events_ref,
-            scores_ref=scores_ref,
-            manifest_ref=manifest_ref,
+        return finish(
+            self._unchanged_result(
+                existing,
+                import_version=import_version,
+                events_ref=events_ref,
+                scores_ref=scores_ref,
+                manifest_ref=manifest_ref,
+            )
         )
       status = "replaced"
 
@@ -943,12 +1050,14 @@ class EvalBenchRun:
               import_version=import_version,
               location=self.location,
           )
-          return self._unchanged_result(
-              committed if committed is not None else manifest,
-              import_version=import_version,
-              events_ref=events_ref,
-              scores_ref=scores_ref,
-              manifest_ref=manifest_ref,
+          return finish(
+              self._unchanged_result(
+                  committed if committed is not None else manifest,
+                  import_version=import_version,
+                  events_ref=events_ref,
+                  scores_ref=scores_ref,
+                  manifest_ref=manifest_ref,
+              )
           )
         if _PUBLISH_CONFLICT_MESSAGE in str(exc):
           raise ValueError(
@@ -977,16 +1086,18 @@ class EvalBenchRun:
           client, (events_staging, scores_staging, manifest_staging)
       )
 
-    return EvalBenchImportResult(
-        job_id=self.job_id,
-        import_version=import_version,
-        status=status,
-        events_table=events_ref,
-        scores_table=scores_ref,
-        manifest_table=manifest_ref,
-        event_row_count=len(event_rows),
-        score_row_count=len(score_rows),
-        manifest=manifest,
+    return finish(
+        EvalBenchImportResult(
+            job_id=self.job_id,
+            import_version=import_version,
+            status=status,
+            events_table=events_ref,
+            scores_table=scores_ref,
+            manifest_table=manifest_ref,
+            event_row_count=len(event_rows),
+            score_row_count=len(score_rows),
+            manifest=manifest,
+        )
     )
 
   def _unchanged_result(
@@ -1020,6 +1131,10 @@ class EvalBenchImportResult:
   existing version was atomically overwritten, and ``"unchanged"`` when the
   manifest already recorded this version with identical fingerprints and
   nothing was written.
+
+  ``failed_sessions_view`` is the fully-qualified failed-session view the
+  call left pinned to this job's latest successful import, or ``None`` when
+  view maintenance was disabled.
   """
 
   job_id: str
@@ -1031,6 +1146,7 @@ class EvalBenchImportResult:
   event_row_count: int
   score_row_count: int
   manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
+  failed_sessions_view: Optional[str] = None
 
   def to_dict(self) -> dict[str, Any]:
     return _json_safe(dataclasses.asdict(self))
@@ -1176,40 +1292,450 @@ def failed_sessions_sql(
     events_table: str = DEFAULT_EVENTS_TABLE,
     scores_table: str = DEFAULT_SCORES_TABLE,
     policy: Optional[EvalScorePolicy] = None,
+    job_id: Optional[str] = None,
+    import_version: Optional[str] = None,
 ) -> str:
   """Return the failed-session denominator query for one pinned import.
 
-  The query takes two parameters, ``@job_id`` and ``@import_version``
-  (see ``import_query_parameters``), and returns one row per session with
-  ``process_failed``, ``missing_completion``, ``score_failed``, and the
-  combined ``failed`` flag plus the offending ``failing_scores``. Sessions
-  whose EvalBench process exited with ``returncode == 0`` are *completed*;
-  they count as passed only when ``policy`` is satisfied. Without a policy
-  only process failures and missing completions are counted.
+  By default the query takes two parameters, ``@job_id`` and
+  ``@import_version`` (see ``import_query_parameters``). Passing both
+  ``job_id`` and ``import_version`` renders them as string literals instead,
+  which is the form a BigQuery VIEW (no query parameters) needs; passing
+  only one of them is an error, so a query can never be half-pinned.
+
+  Each returned row is one session with ``process_failed``,
+  ``missing_completion``, ``score_failed``, and the combined ``failed``
+  flag plus the offending ``failing_scores``. Sessions whose EvalBench
+  process exited with ``returncode == 0`` are *completed*; they count as
+  passed only when ``policy`` is satisfied. Without a policy only process
+  failures and missing completions are counted.
   """
   _validate_source_segment("target_project", target_project)
   _validate_source_segment("target_dataset", target_dataset)
   _validate_source_segment("events_table", events_table)
   _validate_source_segment("scores_table", scores_table)
+  return _failed_sessions_sql_for_refs(
+      events_ref=f"{target_project}.{target_dataset}.{events_table}",
+      scores_ref=f"{target_project}.{target_dataset}.{scores_table}",
+      policy=policy,
+      job_id=job_id,
+      import_version=import_version,
+  )
+
+
+def _failed_sessions_sql_for_refs(
+    *,
+    events_ref: str,
+    scores_ref: str,
+    policy: Optional[EvalScorePolicy],
+    job_id: Optional[str] = None,
+    import_version: Optional[str] = None,
+) -> str:
+  """``failed_sessions_sql`` over fully-qualified (manifest-bound) refs."""
+  if (job_id is None) != (import_version is None):
+    raise ValueError(
+        "job_id and import_version must be pinned together (or both omitted"
+        " to use @job_id/@import_version query parameters)"
+    )
   policy = policy or EvalScorePolicy()
-  sql = _FAILED_SESSIONS_BASE.format(
-      events_table=f"{target_project}.{target_dataset}.{events_table}"
-  )
+  sql = _FAILED_SESSIONS_BASE.format(events_table=events_ref)
   if not policy.min_scores:
-    return sql + _FAILED_SESSIONS_NO_POLICY
-  policy_rows = ",\n".join(
-      f"    STRUCT('{comparator}' AS comparator, {min_score!r} AS min_score)"
-      for comparator, min_score in policy.min_scores.items()
-  )
-  if policy.missing_score_fails:
-    fail_predicate = "(sc.score IS NULL OR sc.score < p.min_score)"
+    sql += _FAILED_SESSIONS_NO_POLICY
   else:
-    fail_predicate = "(sc.score IS NOT NULL AND sc.score < p.min_score)"
-  return sql + _FAILED_SESSIONS_POLICY.format(
-      policy_rows=policy_rows,
-      fail_predicate=fail_predicate,
-      scores_table=f"{target_project}.{target_dataset}.{scores_table}",
+    policy_rows = ",\n".join(
+        f"    STRUCT('{comparator}' AS comparator, {min_score!r} AS min_score)"
+        for comparator, min_score in policy.min_scores.items()
+    )
+    if policy.missing_score_fails:
+      fail_predicate = "(sc.score IS NULL OR sc.score < p.min_score)"
+    else:
+      fail_predicate = "(sc.score IS NOT NULL AND sc.score < p.min_score)"
+    sql += _FAILED_SESSIONS_POLICY.format(
+        policy_rows=policy_rows,
+        fail_predicate=fail_predicate,
+        scores_table=scores_ref,
+    )
+  if job_id is None:
+    return sql
+  if not isinstance(job_id, str) or not job_id:
+    raise ValueError("job_id must be a non-empty string")
+  _validate_import_version(import_version)
+  return sql.replace("@job_id", _sql_string_literal(job_id)).replace(
+      "@import_version", _sql_string_literal(import_version)
   )
+
+
+def _sql_string_literal(value: str) -> str:
+  """Render ``value`` as a GoogleSQL double-quoted string literal.
+
+  JSON string escaping (backslash, double quote, newline, and ``\\u``
+  escapes for the other control characters) is a subset of GoogleSQL's,
+  and non-ASCII text is emitted verbatim rather than as ``\\u`` surrogate
+  pairs, which GoogleSQL rejects. The result is always a single line.
+  """
+  return json.dumps(value, ensure_ascii=False)
+
+
+# --- Failed-session view and version-pinned consumer (#435 slice 2) ---
+
+
+def _view_pin(job_id: str, import_version: str) -> dict[str, str]:
+  return {"job_id": job_id, "import_version": import_version}
+
+
+def _view_pin_comment(pin: Mapping[str, str]) -> str:
+  # ``ensure_ascii`` keeps the comment on one line whatever the job_id holds.
+  return _VIEW_PIN_MARKER + json.dumps(pin, sort_keys=True, ensure_ascii=True)
+
+
+def _parse_view_pin(view_query: str) -> Optional[dict[str, str]]:
+  for line in view_query.splitlines():
+    line = line.strip()
+    if not line:
+      continue
+    if not line.startswith(_VIEW_PIN_MARKER):
+      return None
+    try:
+      pin = json.loads(line[len(_VIEW_PIN_MARKER) :])
+    except json.JSONDecodeError:
+      return None
+    if (
+        isinstance(pin, dict)
+        and isinstance(pin.get("job_id"), str)
+        and isinstance(pin.get("import_version"), str)
+    ):
+      return _view_pin(pin["job_id"], pin["import_version"])
+    return None
+  return None
+
+
+def _read_view_pin(client: Any, *, view_ref: str) -> Optional[dict[str, str]]:
+  """Return the ``(job_id, import_version)`` a managed view is pinned to.
+
+  ``None`` means nothing exists at ``view_ref``. Anything else that is not a
+  view carrying the importer's pin comment (a table, or a view somebody else
+  wrote) raises: the importer only ever replaces views it created.
+  """
+  try:
+    table = client.get_table(view_ref)
+  except NotFound:
+    return None
+  view_query = getattr(table, "view_query", None)
+  pin = _parse_view_pin(view_query) if isinstance(view_query, str) else None
+  if pin is None:
+    raise ValueError(
+        f"{view_ref!r} exists but is not an evalbench failed_sessions view"
+        " created by materialize(); choose another failed_sessions_view"
+        " name (or None to skip the view) rather than replacing it"
+    )
+  return pin
+
+
+def _failed_sessions_view_ddl(
+    *,
+    view_ref: str,
+    manifest: Mapping[str, Any],
+    policy: Optional[EvalScorePolicy],
+) -> str:
+  """``CREATE OR REPLACE VIEW`` pinned to one manifest row's version."""
+  job_id = str(manifest["job_id"])
+  import_version = str(manifest["import_version"])
+  pin = _view_pin(job_id, import_version)
+  description = (
+      "EvalBench failed sessions (W0.4 contract) pinned to job_id "
+      f"{job_id!r} import_version {import_version!r}; maintained by"
+      " bigquery_agent_analytics.evalbench.EvalBenchRun.materialize"
+  )
+  return _CREATE_VIEW_DDL.format(
+      view_ref=view_ref,
+      description=_sql_string_literal(description),
+      pin_comment=_view_pin_comment(pin),
+      query=_failed_sessions_sql_for_refs(
+          events_ref=str(manifest["events_table"]),
+          scores_ref=str(manifest["scores_table"]),
+          policy=policy,
+          job_id=job_id,
+          import_version=import_version,
+      ),
+  )
+
+
+def _sync_failed_sessions_view(
+    client: Any,
+    *,
+    view_ref: str,
+    manifest_ref: str,
+    job_id: str,
+    existing_pin: Optional[Mapping[str, str]],
+    policy: Optional[EvalScorePolicy],
+    location: Optional[str],
+    status: str,
+    import_version: str,
+) -> str:
+  """Point ``view_ref`` at the job's latest successful import.
+
+  Runs after the publish decision. The latest manifest row (not the version
+  just handled) is the pin, so an ``unchanged`` no-op on an old version does
+  not move the view backwards, and a ``replace`` of an old version -- which
+  refreshes ``imported_at`` -- does. The DDL is skipped when the existing
+  pin already matches and no policy is requested, so a no-op re-import
+  never rewrites the view; a policy is re-rendered because it is not part
+  of the pin.
+  """
+  latest = _read_latest_manifest(
+      client, manifest_ref=manifest_ref, job_id=job_id, location=location
+  )
+  if latest is None:
+    raise ValueError(
+        f"EvalBench job {job_id!r} has no manifest row in {manifest_ref!r}"
+        " after publishing; cannot pin the failed_sessions view"
+    )
+  pin = _view_pin(str(latest["job_id"]), str(latest["import_version"]))
+  policy_requested = policy is not None and bool(policy.min_scores)
+  if existing_pin == pin and not policy_requested:
+    return view_ref
+  ddl = _failed_sessions_view_ddl(
+      view_ref=view_ref, manifest=latest, policy=policy
+  )
+  job_config = with_sdk_labels(bigquery.QueryJobConfig(), feature=_VIEW_FEATURE)
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  try:
+    client.query(ddl, **query_args).result()
+  except Exception as exc:  # noqa: BLE001
+    raise ValueError(
+        f"EvalBench job {job_id!r} import_version {import_version!r} is"
+        f" published (status {status!r}) but the failed_sessions view"
+        f" {view_ref!r} could not be created or updated: {exc}. Re-run"
+        " materialize() to retry the view; the import itself then reports"
+        " 'unchanged'"
+    ) from exc
+  return view_ref
+
+
+def _read_latest_manifest(
+    client: Any,
+    *,
+    manifest_ref: str,
+    job_id: str,
+    location: Optional[str],
+) -> Optional[dict[str, Any]]:
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=[
+          bigquery.ScalarQueryParameter("job_id", "STRING", job_id)
+      ]
+  )
+  job_config = with_sdk_labels(job_config, feature=_VIEW_FEATURE)
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  query = _LATEST_IMPORT_QUERY.format(manifest_table=manifest_ref)
+  rows = [_plain_row(row) for row in client.query(query, **query_args).result()]
+  return rows[0] if rows else None
+
+
+@dataclasses.dataclass(frozen=True)
+class EvalBenchSession:
+  """One session of a pinned EvalBench import, as ``failed_sessions`` returns.
+
+  The classification fields mirror ``SessionVerdict`` (and therefore
+  ``failed_sessions_sql``). ``session_id`` and ``trace_id`` are the
+  version-specific published identity
+  ``evalbench-import:{job_id}:{import_version}:{scenario_id}``, so handing
+  them to ``Client.get_session_trace`` (see ``trace_selector``) can only
+  ever return rows of this ``import_version``.
+  """
+
+  job_id: str
+  import_version: str
+  session_id: str
+  trace_id: str
+  scenario_id: Optional[str]
+  started_at: Optional[datetime]
+  process_failed: bool
+  missing_completion: bool
+  score_failed: bool
+  failed: bool
+  failing_scores: dict[str, Optional[float]] = dataclasses.field(
+      default_factory=dict
+  )
+
+  def trace_selector(self) -> dict[str, Any]:
+    """Keyword arguments that drill this session into ``get_session_trace``.
+
+    ``session_id`` alone already pins the import version (it is part of the
+    identity); ``experiment_id`` additionally pins the job scope, matching
+    ``attributes.experiment_id`` that every published row carries. Use with
+    a ``Client`` whose ``table_id`` is the mirror events table::
+
+        client.get_session_trace(**session.trace_selector())
+    """
+    return {"session_id": self.session_id, "experiment_id": self.job_id}
+
+  def get_trace(self, client: Any, **overrides: Any) -> Any:
+    """Thin wrapper: ``client.get_session_trace(**trace_selector())``."""
+    return client.get_session_trace(**{**self.trace_selector(), **overrides})
+
+  def verdict(self) -> SessionVerdict:
+    return SessionVerdict(
+        session_id=self.session_id,
+        scenario_id=self.scenario_id,
+        process_failed=self.process_failed,
+        missing_completion=self.missing_completion,
+        score_failed=self.score_failed,
+        failing_scores=dict(self.failing_scores),
+        failed=self.failed,
+    )
+
+  def to_dict(self) -> dict[str, Any]:
+    return _json_safe(dataclasses.asdict(self))
+
+
+@dataclasses.dataclass(frozen=True)
+class EvalBenchFailedSessions:
+  """Outcome of ``failed_sessions``: one pinned import and its session rows.
+
+  ``sessions`` holds the failed sessions only unless ``include_passed`` was
+  requested; ``failed_count``/``session_count`` are computed over the same
+  pinned version regardless.
+  """
+
+  job_id: str
+  import_version: str
+  events_table: str
+  scores_table: str
+  sessions: list[EvalBenchSession]
+  session_count: int
+  failed_count: int
+  manifest: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+  def to_dict(self) -> dict[str, Any]:
+    return _json_safe(dataclasses.asdict(self))
+
+
+def failed_sessions(
+    *,
+    target_project: str,
+    target_dataset: str,
+    job_id: str,
+    import_version: Optional[str] = None,
+    policy: Optional[EvalScorePolicy] = None,
+    include_passed: bool = False,
+    location: Optional[str] = None,
+    bq_client: Optional[Any] = None,
+) -> EvalBenchFailedSessions:
+  """List the failed sessions of exactly one published import version.
+
+  The version is pinned before any event row is read: an explicit
+  ``import_version`` must have a manifest row, and when omitted the job's
+  latest successful import (newest ``imported_at``, the same pin the
+  ``evalbench_failed_sessions`` view tracks) is used. The query is
+  ``failed_sessions_sql`` over the events/scores tables recorded in that
+  manifest row -- a version stays bound to the tables it was published to
+  -- executed with ``import_query_parameters``, so rows of another version
+  can never be mixed in. ``policy`` applies the per-benchmark score gate;
+  without it only process failures and missing completions count.
+
+  Returns an ``EvalBenchFailedSessions`` whose ``sessions`` are the failed
+  rows (all rows with ``include_passed=True``), each carrying the versioned
+  ``session_id``/``trace_id`` for ``Client.get_session_trace``.
+  """
+  _validate_source_segment("target_project", target_project)
+  _validate_source_segment("target_dataset", target_dataset)
+  if not isinstance(job_id, str) or not job_id:
+    raise ValueError("job_id must be a non-empty string")
+  manifest_ref = f"{target_project}.{target_dataset}.{MANIFEST_TABLE}"
+  client = bq_client or make_bq_client(target_project, location=location)
+  if import_version is None:
+    manifest = _read_latest_manifest(
+        client, manifest_ref=manifest_ref, job_id=job_id, location=location
+    )
+    if manifest is None:
+      raise ValueError(
+          f"EvalBench job {job_id!r} has no published import in"
+          f" {manifest_ref!r}; run materialize() first"
+      )
+    import_version = str(manifest["import_version"])
+  else:
+    _validate_import_version(import_version)
+    manifest = _read_manifest(
+        client,
+        manifest_ref=manifest_ref,
+        job_id=job_id,
+        import_version=import_version,
+        location=location,
+    )
+    if manifest is None:
+      raise ValueError(
+          f"EvalBench job {job_id!r} import_version {import_version!r} is not"
+          f" published in {manifest_ref!r}"
+      )
+  events_ref = str(manifest["events_table"])
+  scores_ref = str(manifest["scores_table"])
+  sql = _failed_sessions_sql_for_refs(
+      events_ref=events_ref, scores_ref=scores_ref, policy=policy
+  )
+  job_config = bigquery.QueryJobConfig(
+      query_parameters=import_query_parameters(job_id, import_version)
+  )
+  job_config = with_sdk_labels(job_config, feature=_VIEW_FEATURE)
+  query_args: dict[str, Any] = {"job_config": job_config}
+  if location is not None:
+    query_args["location"] = location
+  rows = [
+      _session_from_row(
+          _plain_row(row), job_id=job_id, import_version=import_version
+      )
+      for row in client.query(sql, **query_args).result()
+  ]
+  failed = [row for row in rows if row.failed]
+  return EvalBenchFailedSessions(
+      job_id=job_id,
+      import_version=import_version,
+      events_table=events_ref,
+      scores_table=scores_ref,
+      sessions=rows if include_passed else failed,
+      session_count=len(rows),
+      failed_count=len(failed),
+      manifest=dict(manifest),
+  )
+
+
+def _session_from_row(
+    row: Mapping[str, Any], *, job_id: str, import_version: str
+) -> EvalBenchSession:
+  """Build an ``EvalBenchSession`` from one ``failed_sessions_sql`` row."""
+  failing_scores: dict[str, Optional[float]] = {}
+  for item in row.get("failing_scores") or ():
+    entry = _as_mapping(item) if isinstance(item, Mapping) else _row_items(item)
+    comparator = entry.get("comparator")
+    if isinstance(comparator, str):
+      failing_scores[comparator] = _score_value(entry.get("score"))
+  started_at = row.get("started_at")
+  if started_at is not None and not isinstance(started_at, datetime):
+    started_at = _parse_timestamp(started_at)
+  session_id = str(row["session_id"])
+  return EvalBenchSession(
+      job_id=job_id,
+      import_version=import_version,
+      session_id=session_id,
+      trace_id=session_id,
+      scenario_id=_usable_text(row.get("scenario_id")),
+      started_at=started_at,
+      process_failed=bool(row.get("process_failed")),
+      missing_completion=bool(row.get("missing_completion")),
+      score_failed=bool(row.get("score_failed")),
+      failed=bool(row.get("failed")),
+      failing_scores=failing_scores,
+  )
+
+
+def _row_items(value: Any) -> dict[str, Any]:
+  """``bigquery.Row``-like STRUCT values expose ``items()`` without Mapping."""
+  if hasattr(value, "items"):
+    return {str(key): item for key, item in value.items()}
+  return {}
 
 
 def import_query_parameters(

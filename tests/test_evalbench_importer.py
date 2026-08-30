@@ -17,17 +17,22 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
+import inspect
 import json
 import math
 import re
 
+from google.api_core.exceptions import NotFound
 import pytest
 
 from bigquery_agent_analytics import evalbench
 from bigquery_agent_analytics.evalbench import classify_sessions
 from bigquery_agent_analytics.evalbench import EvalBenchRun
+from bigquery_agent_analytics.evalbench import EvalBenchSession
 from bigquery_agent_analytics.evalbench import EvalScorePolicy
+from bigquery_agent_analytics.evalbench import failed_sessions
 from bigquery_agent_analytics.evalbench import failed_sessions_sql
 
 _RUN_TIME = datetime(2026, 4, 29, 12, 30, tzinfo=timezone.utc)
@@ -498,6 +503,8 @@ class _FakeManifestStore:
     self.scores: list[dict] = []
     self.lock_rows = 0
     self.lock_claims = 0
+    # view ref -> view body (the DDL text after ``AS``), like ``view_query``.
+    self.views: dict[str, str] = {}
 
   def snapshot(self) -> _FakeSnapshot:
     return _FakeSnapshot(
@@ -521,6 +528,20 @@ def _same_version(row: dict, params: dict) -> bool:
       row["job_id"] == params["job_id"]
       and row["import_version"] == params["import_version"]
   )
+
+
+class _FakeView:
+  """What ``client.get_table`` returns for a view: its query text."""
+
+  table_type = "VIEW"
+
+  def __init__(self, view_query: str) -> None:
+    self.view_query = view_query
+
+
+_POLICY_ROW = re.compile(
+    r"STRUCT\('([^']+)' AS comparator, ([-+0-9.eE]+) AS min_score\)"
+)
 
 
 class _FakeWriteClient:
@@ -558,6 +579,8 @@ class _FakeWriteClient:
       load_error: Exception | None = None,
       transaction_error: Exception | None = None,
       delete_error: Exception | None = None,
+      view_error: Exception | None = None,
+      foreign_objects: dict[str, object] | None = None,
   ) -> None:
     self.store = store or _FakeManifestStore(manifest_rows)
     self.stale_manifest_reads = stale_manifest_reads
@@ -566,11 +589,15 @@ class _FakeWriteClient:
     self.load_error = load_error
     self.transaction_error = transaction_error
     self.delete_error = delete_error
+    self.view_error = view_error
+    # Objects that exist at a ref but were not created by the importer.
+    self.foreign_objects = dict(foreign_objects or {})
     self.loads: list[tuple[str, list[dict], object]] = []
     self.queries: list[tuple[str, dict]] = []
     self.created: list[str] = []
     self.created_tables: list[object] = []
     self.deleted: list[str] = []
+    self.get_table_calls: list[str] = []
 
   @property
   def manifest_rows(self) -> list[dict]:
@@ -582,6 +609,14 @@ class _FakeWriteClient:
     self.created_tables.append(table)
     return table
 
+  def get_table(self, table_ref: str):
+    self.get_table_calls.append(table_ref)
+    if table_ref in self.foreign_objects:
+      return self.foreign_objects[table_ref]
+    if table_ref in self.store.views:
+      return _FakeView(self.store.views[table_ref])
+    raise NotFound(table_ref)
+
   def query(self, query: str, **kwargs) -> _FakeJob:
     self.queries.append((query, kwargs))
     params = {p.name: p.value for p in kwargs["job_config"].query_parameters}
@@ -591,6 +626,27 @@ class _FakeWriteClient:
         return _FakeJob(error=self.transaction_error)
       snapshot = self.transaction_snapshot or self.store.snapshot()
       return self._publish(query, params, snapshot)
+    if query.startswith("CREATE OR REPLACE VIEW"):
+      # Views cannot take query parameters.
+      assert params == {}
+      if self.view_error is not None:
+        return _FakeJob(error=self.view_error)
+      view_ref = re.match(r"CREATE OR REPLACE VIEW `([^`]+)`", query).group(1)
+      self.store.views[view_ref] = query.split("\nAS\n", 1)[1]
+      return _FakeJob()
+    if query.startswith("WITH sessions AS"):
+      return _FakeJob(self._failed_sessions(query, params))
+    if (
+        ".evalbench_import_manifest`" in query
+        and "ORDER BY imported_at DESC" in query
+    ):
+      assert set(params) == {"job_id"}
+      latest = sorted(
+          (row for row in self.store.rows if row["job_id"] == params["job_id"]),
+          key=lambda row: (row["imported_at"], row["import_version"]),
+          reverse=True,
+      )
+      return _FakeJob([dict(row) for row in latest[:1]])
     if ".evalbench_import_lock`" in query and query.startswith("INSERT INTO"):
       # Seeding is INSERT-only, so it never conflicts and may run twice.
       assert params == {}
@@ -667,21 +723,74 @@ class _FakeWriteClient:
       return _FakeJob(error=RuntimeError(f"400 {identical_guard.group(1)}"))
 
     # 3. Commit: keyed DELETEs then INSERTs from staging, plus the claim.
+    #    The script names *this* publish's staging tables, so several
+    #    publishes through one fake (several versions) each insert their own
+    #    staged rows rather than the first load that matches a table name.
+    staging_refs = re.findall(
+        r"SELECT [^\n]+ FROM `([^`]+_staging_[0-9a-f]+)`", script
+    )
+    assert len(staging_refs) == 3, script
+
     def staged(table: str) -> list[dict]:
-      return next(rows for dest, rows, _ in self.loads if table in dest)
+      (ref,) = [
+          ref for ref in staging_refs if ref.startswith(table + "_staging_")
+      ]
+      return next(rows for dest, rows, _ in reversed(self.loads) if dest == ref)
 
     store = self.store
     store.lock_claims += 1
     store.events = [
         row for row in store.events if not _same_version(row, params)
-    ] + staged(params["events_table"] + "_staging_")
+    ] + staged(params["events_table"])
     store.scores = [
         row for row in store.scores if not _same_version(row, params)
-    ] + staged(params["scores_table"] + "_staging_")
+    ] + staged(params["scores_table"])
     store.rows = [
         row for row in store.rows if not _same_version(row, params)
-    ] + staged("evalbench_import_manifest")
+    ] + staged(lock_table.rsplit(".", 1)[0] + ".evalbench_import_manifest")
     return _FakeJob()
+
+  def _failed_sessions(self, query: str, params: dict) -> list[dict]:
+    """Emulate ``failed_sessions_sql`` with the reference implementation.
+
+    The policy is read back from the rendered SQL, and only the rows of the
+    parameterized ``(job_id, import_version)`` take part, which is exactly
+    the isolation the SQL's ``WHERE`` clauses provide.
+    """
+    assert set(params) == {"job_id", "import_version"}
+    thresholds = {
+        comparator: float(value)
+        for comparator, value in _POLICY_ROW.findall(query)
+    }
+    policy = EvalScorePolicy(
+        thresholds,
+        missing_score_fails=(
+            "sc.score IS NULL OR" in query if thresholds else True
+        ),
+    )
+    events = [row for row in self.store.events if _same_version(row, params)]
+    scores = [row for row in self.store.scores if _same_version(row, params)]
+    started_at: dict[str, str] = {}
+    for row in events:
+      started_at[row["session_id"]] = min(
+          started_at.get(row["session_id"], row["timestamp"]), row["timestamp"]
+      )
+    return [
+        {
+            "session_id": verdict.session_id,
+            "scenario_id": verdict.scenario_id,
+            "started_at": started_at[verdict.session_id],
+            "process_failed": verdict.process_failed,
+            "missing_completion": verdict.missing_completion,
+            "score_failed": verdict.score_failed,
+            "failed": verdict.failed,
+            "failing_scores": [
+                {"comparator": comparator, "score": score}
+                for comparator, score in sorted(verdict.failing_scores.items())
+            ],
+        }
+        for verdict in classify_sessions(events, scores, policy)
+    ]
 
   def load_table_from_json(self, rows, destination, job_config=None):
     self.loads.append((destination, list(rows), job_config))
@@ -1470,7 +1579,9 @@ def test_materialize_consults_canonical_registry_for_custom_tables() -> None:
   pre_reads = [
       sql
       for sql, _ in fake.queries
-      if "BEGIN TRANSACTION" not in sql and sql not in _lock_seed_queries(fake)
+      if "BEGIN TRANSACTION" not in sql
+      and sql not in _lock_seed_queries(fake)
+      and not sql.startswith("CREATE OR REPLACE VIEW")
   ]
   assert pre_reads and all(f"`{registry}`" in sql for sql in pre_reads)
   # The lock is the dataset's fixed lock table as well, never a custom one.
@@ -2071,3 +2182,447 @@ def test_failed_sessions_sql_without_policy_still_counts_process_failures() -> (
   sql = failed_sessions_sql(target_project="p", target_dataset="d")
   assert "status = 'ERROR'" in sql
   assert "min_score" not in sql
+
+
+# --- failed_sessions view and version-pinned consumer (#435 slice 2) ---
+
+_TARGET = {"target_project": "analytics-project", "target_dataset": "bqaa"}
+_VIEW_REF = "analytics-project.bqaa.evalbench_failed_sessions"
+_PIN_LINE = "-- evalbench_failed_sessions pin: "
+_T1 = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+_WRONG_RESULT = {
+    "eval_id": "wrong-1",
+    "prompt": "Completed but wrong answer",
+    "stdout": json.dumps({"response": "42"}),
+    "returncode": 0,
+}
+_WRONG_SCORES = (
+    {"eval_id": "ok-1", "comparator": "goal_completion", "score": 1},
+    {"eval_id": "crash-1", "comparator": "goal_completion", "score": 0},
+    {"eval_id": "wrong-1", "comparator": "goal_completion", "score": 0.2},
+)
+
+
+def _view_ddls(fake: _FakeWriteClient) -> list[str]:
+  return [
+      sql for sql, _ in fake.queries if sql.startswith("CREATE OR REPLACE VIEW")
+  ]
+
+
+def _view_pin(fake: _FakeWriteClient, view_ref: str = _VIEW_REF) -> dict:
+  first_line = fake.store.views[view_ref].splitlines()[0]
+  assert first_line.startswith(_PIN_LINE)
+  return json.loads(first_line[len(_PIN_LINE) :])
+
+
+def _listing_query(fake: _FakeWriteClient) -> tuple[str, dict]:
+  (query,) = [
+      (sql, kwargs)
+      for sql, kwargs in fake.queries
+      if sql.startswith("WITH sessions AS")
+  ]
+  sql, kwargs = query
+  return sql, {p.name: p.value for p in kwargs["job_config"].query_parameters}
+
+
+def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
+    None
+):
+  fake = _FakeWriteClient()
+
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", bq_client=fake
+  )
+
+  assert result.failed_sessions_view == _VIEW_REF
+  (ddl,) = _view_ddls(fake)
+  assert ddl.startswith(f"CREATE OR REPLACE VIEW `{_VIEW_REF}`")
+  assert "OPTIONS (description = " in ddl
+  # The view is created only after the publish transaction committed.
+  statements = [sql for sql, _ in fake.queries]
+  assert statements.index(ddl) > max(
+      i for i, sql in enumerate(statements) if "BEGIN TRANSACTION" in sql
+  )
+  body = fake.store.views[_VIEW_REF]
+  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+  # The body is failed_sessions_sql pinned as literals: no parameters, and
+  # no other version can be read.
+  assert body.endswith(
+      failed_sessions_sql(**_TARGET, job_id="job-123", import_version="v1")
+  )
+  assert "@job_id" not in body and "@import_version" not in body
+  assert 'job_id = "job-123" AND import_version = "v1"' in body
+  assert "`analytics-project.bqaa.evalbench_agent_events`" in body
+  assert "returncode" not in body
+
+
+def test_materialize_renders_policy_into_the_view() -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  body = fake.store.views[_VIEW_REF]
+  assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in body
+  assert "`analytics-project.bqaa.evalbench_scores_imported`" in body
+  assert body.count('import_version = "v1"') == 2
+
+
+def test_materialize_unchanged_reimport_leaves_view_untouched() -> None:
+  fake = _FakeWriteClient()
+  run = _scored_run()
+  run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert len(_view_ddls(fake)) == 1
+
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert result.failed_sessions_view == _VIEW_REF
+  assert len(_view_ddls(fake)) == 1
+
+  # A corpus published before views existed gets its view on the next no-op.
+  del fake.store.views[_VIEW_REF]
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert len(_view_ddls(fake)) == 2
+  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+
+
+def test_materialize_view_tracks_the_latest_successful_import() -> None:
+  fake = _FakeWriteClient()
+  run_v1 = _scored_run()
+  run_v2 = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+
+  run_v1.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  run_v2.materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert 'import_version = "v1"' not in fake.store.views[_VIEW_REF]
+
+  # A no-op re-import of the older version does not move the view back.
+  unchanged = run_v1.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  assert unchanged.status == "unchanged"
+  assert _view_pin(fake)["import_version"] == "v2"
+  assert len(_view_ddls(fake)) == 2
+
+  # Re-publishing the older version makes it the latest import again.
+  replaced = run_v1.materialize(
+      **_TARGET,
+      import_version="v1",
+      replace=True,
+      imported_at=_T1 + timedelta(hours=2),
+      bq_client=fake,
+  )
+  assert replaced.status == "replaced"
+  assert _view_pin(fake)["import_version"] == "v1"
+  assert len(_view_ddls(fake)) == 3
+
+
+def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
+  fake = _FakeWriteClient()
+  other = dataclasses.replace(_scored_run(), job_id="job-other")
+  other.materialize(**_TARGET, import_version="v1", bq_client=fake)
+
+  with pytest.raises(ValueError, match="pinned to EvalBench job 'job-other'"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  # Refused before staging or publishing anything for job-123.
+  assert all(row["job_id"] == "job-other" for row in fake.manifest_rows)
+  assert all("job-other" in dest for dest, _, _ in fake.loads) or all(
+      "job-123" not in json.dumps(rows) for _, rows, _ in fake.loads
+  )
+  assert _view_pin(fake)["job_id"] == "job-other"
+
+  # A per-job view name resolves the clash.
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      failed_sessions_view="evalbench_failed_sessions_job_123",
+      bq_client=fake,
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view == (
+      "analytics-project.bqaa.evalbench_failed_sessions_job_123"
+  )
+  assert _view_pin(fake, result.failed_sessions_view)["job_id"] == "job-123"
+  assert _view_pin(fake)["job_id"] == "job-other"
+
+
+@pytest.mark.parametrize(
+    "foreign",
+    [
+        type("Table", (), {"table_type": "TABLE", "view_query": None})(),
+        _FakeView("SELECT 1"),
+        _FakeView("-- evalbench_failed_sessions pin: not json\nSELECT 1"),
+    ],
+)
+def test_materialize_never_replaces_objects_it_did_not_create(
+    foreign: object,
+) -> None:
+  fake = _FakeWriteClient(foreign_objects={_VIEW_REF: foreign})
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.loads == []
+  assert fake.transaction_attempted is False
+  assert _view_ddls(fake) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "evalbench_agent_events",
+        "evalbench_scores_imported",
+        "evalbench_import_manifest",
+        "evalbench_import_lock",
+        "agent_events",
+        "bad name",
+    ],
+)
+def test_materialize_rejects_unsafe_view_names(name: str) -> None:
+  fake = _FakeWriteClient()
+  with pytest.raises(ValueError):
+    _scored_run().materialize(
+        **_TARGET, failed_sessions_view=name, bq_client=fake
+    )
+  assert fake.queries == []
+  assert fake.created == []
+
+
+def test_materialize_can_skip_the_view() -> None:
+  fake = _FakeWriteClient()
+  result = _scored_run().materialize(
+      **_TARGET, failed_sessions_view=None, bq_client=fake
+  )
+  assert result.status == "imported"
+  assert result.failed_sessions_view is None
+  assert fake.get_table_calls == []
+  assert _view_ddls(fake) == []
+
+
+def test_materialize_reports_a_view_failure_after_publishing() -> None:
+  fake = _FakeWriteClient(
+      view_error=RuntimeError("403 no bigquery.tables.update")
+  )
+  with pytest.raises(
+      ValueError, match="is published .status 'imported'."
+  ) as exc:
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert "403 no bigquery.tables.update" in str(exc.value)
+  assert len(fake.manifest_rows) == 1
+  # The retry path: the import is a no-op and the view gets created.
+  fake.view_error = None
+  result = _scored_run().materialize(
+      **_TARGET, import_version="v1", bq_client=fake
+  )
+  assert result.status == "unchanged"
+  assert _view_pin(fake) == {"job_id": "job-123", "import_version": "v1"}
+
+
+def test_failed_sessions_sql_pins_literals_with_escaping() -> None:
+  job_id = 'job "q" \\ x\nnew'
+  sql = failed_sessions_sql(
+      target_project="p", target_dataset="d", job_id=job_id, import_version="v1"
+  )
+  assert "@" not in sql
+  assert 'job_id = "job \\"q\\" \\\\ x\\nnew" AND import_version = "v1"' in sql
+  # The literal never breaks the line the pin is on.
+  assert "x\nnew" not in sql
+
+  with pytest.raises(ValueError, match="pinned together"):
+    failed_sessions_sql(target_project="p", target_dataset="d", job_id="j")
+  with pytest.raises(ValueError, match="pinned together"):
+    failed_sessions_sql(
+        target_project="p", target_dataset="d", import_version="v1"
+    )
+  with pytest.raises(ValueError, match="import_version"):
+    failed_sessions_sql(
+        target_project="p",
+        target_dataset="d",
+        job_id="j",
+        import_version="not a version!",
+    )
+
+
+def test_failed_sessions_matches_classify_sessions_for_the_pinned_version() -> (
+    None
+):
+  fake = _FakeWriteClient()
+  run = _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES)
+  policy = EvalScorePolicy({"goal_completion": 0.5})
+  run.materialize(**_TARGET, import_version="v1", policy=policy, bq_client=fake)
+
+  listing = failed_sessions(
+      **_TARGET, job_id="job-123", policy=policy, bq_client=fake
+  )
+
+  assert listing.import_version == "v1"
+  assert listing.events_table == "analytics-project.bqaa.evalbench_agent_events"
+  assert listing.session_count == 3
+  assert listing.failed_count == 2
+  verdicts = classify_sessions(
+      run.to_agent_event_rows(import_version="v1"),
+      run.to_score_rows(import_version="v1"),
+      policy,
+  )
+  assert [s.verdict() for s in listing.sessions] == [
+      v for v in verdicts if v.failed
+  ]
+  assert [s.session_id for s in listing.sessions] == [
+      "evalbench-import:job-123:v1:crash-1",
+      "evalbench-import:job-123:v1:wrong-1",
+  ]
+  for session in listing.sessions:
+    assert session.trace_id == session.session_id
+    assert (session.job_id, session.import_version) == ("job-123", "v1")
+    assert isinstance(session.started_at, datetime)
+  assert listing.sessions[1].failing_scores == {"goal_completion": 0.2}
+  assert listing.to_dict()["sessions"][1]["failing_scores"] == {
+      "goal_completion": 0.2
+  }
+
+  # The contract query ran parameterized against the pinned version.
+  sql, params = _listing_query(fake)
+  assert params == {"job_id": "job-123", "import_version": "v1"}
+  assert "`analytics-project.bqaa.evalbench_agent_events`" in sql
+  assert "STRUCT('goal_completion' AS comparator, 0.5 AS min_score)" in sql
+
+  everything = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      policy=policy,
+      include_passed=True,
+      bq_client=fake,
+  )
+  assert [s.verdict() for s in everything.sessions] == verdicts
+  assert (everything.session_count, everything.failed_count) == (3, 2)
+
+
+def test_failed_sessions_never_mixes_import_versions() -> None:
+  fake = _FakeWriteClient()
+  policy = EvalScorePolicy({"goal_completion": 0.5})
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _scored_run(extra_result=_WRONG_RESULT, scores=_WRONG_SCORES).materialize(
+      **_TARGET,
+      import_version="v2",
+      imported_at=_T1 + timedelta(hours=1),
+      bq_client=fake,
+  )
+
+  latest = failed_sessions(
+      **_TARGET, job_id="job-123", policy=policy, bq_client=fake
+  )
+  assert latest.import_version == "v2"
+  assert {s.session_id for s in latest.sessions} == {
+      "evalbench-import:job-123:v2:crash-1",
+      "evalbench-import:job-123:v2:wrong-1",
+  }
+
+  pinned = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      import_version="v1",
+      policy=policy,
+      bq_client=fake,
+  )
+  assert pinned.import_version == "v1"
+  assert {s.session_id for s in pinned.sessions} == {
+      "evalbench-import:job-123:v1:crash-1"
+  }
+  assert pinned.manifest["import_version"] == "v1"
+
+  with pytest.raises(ValueError, match="'v3' is not published"):
+    failed_sessions(
+        **_TARGET, job_id="job-123", import_version="v3", bq_client=fake
+    )
+  with pytest.raises(ValueError, match="no published import"):
+    failed_sessions(**_TARGET, job_id="job-none", bq_client=fake)
+  with pytest.raises(ValueError, match="import_version must match"):
+    failed_sessions(
+        **_TARGET,
+        job_id="job-123",
+        import_version="bad version!",
+        bq_client=fake,
+    )
+
+
+def test_failed_sessions_reads_the_tables_bound_in_the_manifest() -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET,
+      events_table="evalbench_events_custom",
+      scores_table="evalbench_scores_custom",
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert "`analytics-project.bqaa.evalbench_events_custom`" in (
+      fake.store.views[_VIEW_REF]
+  )
+  assert "`analytics-project.bqaa.evalbench_scores_custom`" in (
+      fake.store.views[_VIEW_REF]
+  )
+
+  listing = failed_sessions(
+      **_TARGET,
+      job_id="job-123",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake,
+  )
+  assert (
+      listing.events_table == "analytics-project.bqaa.evalbench_events_custom"
+  )
+  assert (
+      listing.scores_table == "analytics-project.bqaa.evalbench_scores_custom"
+  )
+  sql, _ = _listing_query(fake)
+  assert "`analytics-project.bqaa.evalbench_events_custom`" in sql
+  assert "`analytics-project.bqaa.evalbench_scores_custom`" in sql
+  assert "evalbench_agent_events" not in sql
+
+
+def test_session_trace_selector_pins_the_versioned_identity() -> None:
+  from bigquery_agent_analytics.client import Client
+
+  session = EvalBenchSession(
+      job_id="job-123",
+      import_version="v1",
+      session_id="evalbench-import:job-123:v1:crash-1",
+      trace_id="evalbench-import:job-123:v1:crash-1",
+      scenario_id="crash-1",
+      started_at=None,
+      process_failed=True,
+      missing_completion=True,
+      score_failed=False,
+      failed=True,
+  )
+  selector = session.trace_selector()
+  assert selector == {
+      "session_id": "evalbench-import:job-123:v1:crash-1",
+      "experiment_id": "job-123",
+  }
+  # Accepted verbatim by the existing reader (no new client surface).
+  inspect.signature(Client.get_session_trace).bind(None, **selector)
+
+  class _Recorder:
+
+    def get_session_trace(self, **kwargs):
+      self.kwargs = kwargs
+      return "trace"
+
+  recorder = _Recorder()
+  assert session.get_trace(recorder, event_types=["AGENT_COMPLETED"]) == "trace"
+  assert recorder.kwargs == {**selector, "event_types": ["AGENT_COMPLETED"]}
+  # Another version of the same scenario is a different identity.
+  assert selector["session_id"] != evalbench._session_identity(
+      "job-123", "crash-1", import_version="v2"
+  )
