@@ -98,6 +98,54 @@ def _run(*results: dict, config_rows: tuple[dict, ...] | None = None):
   )
 
 
+def test_evalbench_run_keeps_v051_positional_argument_order() -> None:
+  """``snapshot_at`` must not shift the v0.5.1 positional fields.
+
+  v0.5.1 callers construct ``EvalBenchRun(project, dataset, job, location,
+  results, scores, config_rows)``; inserting ``snapshot_at`` ahead of
+  ``results`` would silently swallow ``results`` into ``snapshot_at``.
+  """
+  results = ({"eval_id": "e-1", "scenario_id": "s-1"},)
+  scores = ({"eval_id": "e-1", "comparator": "goal_completion", "score": 1},)
+  config_rows = (
+      {"config": "experiment_config.orchestrator", "value": "geminicli"},
+  )
+
+  run = EvalBenchRun(
+      "source-project",
+      "evalbench",
+      "job-123",
+      "US",
+      results,
+      scores,
+      config_rows,
+  )
+
+  assert run.project_id == "source-project"
+  assert run.evalbench_dataset == "evalbench"
+  assert run.job_id == "job-123"
+  assert run.location == "US"
+  assert run.results == results
+  assert run.scores == scores
+  assert run.config_rows == config_rows
+  assert run.snapshot_at is None
+  assert not isinstance(run.snapshot_at, tuple)
+
+  snapshot_at = datetime(2026, 8, 29, tzinfo=timezone.utc)
+  pinned = EvalBenchRun(
+      "source-project",
+      "evalbench",
+      "job-123",
+      "US",
+      results,
+      scores,
+      config_rows,
+      snapshot_at,
+  )
+  assert pinned.results == results
+  assert pinned.snapshot_at == snapshot_at
+
+
 def test_from_bigquery_filters_every_source_query_by_job_id() -> None:
   fake = _FakeBigQueryClient(
       {

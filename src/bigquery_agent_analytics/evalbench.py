@@ -350,7 +350,6 @@ class EvalBenchRun:
   evalbench_dataset: str
   job_id: str
   location: Optional[str] = None
-  snapshot_at: Optional[datetime] = None
   results: tuple[dict[str, Any], ...] = dataclasses.field(
       default_factory=tuple, repr=False
   )
@@ -360,6 +359,9 @@ class EvalBenchRun:
   config_rows: tuple[dict[str, Any], ...] = dataclasses.field(
       default_factory=tuple, repr=False
   )
+  # Declared last so the v0.5.1 positional order
+  # (project, dataset, job, location, results, scores, config_rows) is stable.
+  snapshot_at: Optional[datetime] = None
 
   @classmethod
   def from_bigquery(
