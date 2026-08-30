@@ -2223,13 +2223,15 @@ class EvalBenchSession:
 
   @property
   def taxonomy_categories(self) -> tuple[str, ...]:
-    """Scaffold taxonomy ids tripped by this session's mechanical flags.
+    """G1-frozen taxonomy names tripped by this session's mechanical flags.
 
     Computed from the three flags via
     ``failure_taxonomy.categorize_failed_session`` (a property, not a stored
-    field, so it can never drift from the flags). Scaffold vocabulary only:
-    the ids equal the flag names and are NOT the G1 taxonomy. All flags
-    false (an ``include_passed`` row) yields ``()``.
+    field, so it can never drift from the flags). Frozen vocabulary
+    (taxonomy v0.1.0): each tripped flag maps to its frozen name and the
+    names come back in ``FROZEN_CATEGORY_NAMES`` order — assignment stays
+    mechanical until the labeler study. All flags false (an
+    ``include_passed`` row) yields ``()``, never ``("unknown",)``.
     """
     return categorize_failed_session(self)
 

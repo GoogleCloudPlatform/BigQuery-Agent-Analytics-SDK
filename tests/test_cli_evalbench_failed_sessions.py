@@ -103,12 +103,14 @@ def test_lists_latest_version_by_default(
   assert (
       payload["sessions"][0]["trace_id"] == payload["sessions"][0]["session_id"]
   )
-  # Slice 9: each session row carries the scaffold taxonomy categories
-  # computed from its mechanical flags (process_failed + missing_completion
-  # for this fixture) -- no extra field on the fixture, no BigQuery.
+  # Slice 9 + G1 freeze: each session row carries the frozen taxonomy
+  # names computed from its mechanical flags (process_failed +
+  # missing_completion for this fixture map to tool blockers +
+  # finalization, returned in frozen order) -- no extra field on the
+  # fixture, no BigQuery.
   assert payload["sessions"][0]["taxonomy_categories"] == [
-      "process_failed",
-      "missing_completion",
+      "finalization",
+      "tool blockers",
   ]
 
 

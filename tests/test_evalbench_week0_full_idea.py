@@ -14,11 +14,13 @@
 """Tests for ``examples/evalbench_week0_full_idea.sh`` (#435 slice 10).
 
 The EXAMPLE Week 0 scenario pack is ``--fixture`` only: nothing here
-reaches BigQuery or the network, and nothing here freezes anything —
-every asserted artifact says ``g1_frozen: false`` and that the six-week
-clock has not started. The tests also guard the boundary the pack must
-never cross: the SANA-seeded example mapping lives only in the fixtures,
-never in ``src/bigquery_agent_analytics/failure_taxonomy.py``.
+reaches BigQuery or the network, and every asserted artifact says
+``example: true`` / ``g1_frozen: false`` and that the six-week clock has
+not started. The pack itself freezes nothing — it stays illustrative even
+now that the Week 0 freeze landed for real: production
+``failure_taxonomy.py`` is G1-frozen at v0.1.0 and the real freeze
+artifacts live in ``examples/fixtures/week0_real_*.json``
+(``tests/test_week0_real_freeze.py``), distinct from this pack.
 """
 
 from __future__ import annotations
@@ -310,14 +312,16 @@ def test_taxonomy_seed_fixture_maps_this_session_without_freezing() -> None:
   data = _fixture("week0_example_taxonomy_seed.json")
   assert data["not_g1"] is True
   assert data["taxonomy_version"] == "0.1.0-example"
-  assert data["taxonomy_version"] != failure_taxonomy.SCAFFOLD_TAXONOMY_VERSION
+  assert data["taxonomy_version"] != failure_taxonomy.TAXONOMY_VERSION
   assert tuple(data["sana_categories"]) == _SANA_CATEGORIES
-  assert tuple(data["mechanical_flags"]) == failure_taxonomy.CORE_CATEGORY_IDS
+  assert tuple(data["mechanical_flags"]) == failure_taxonomy.MECHANICAL_FLAGS
   widget = data["widget_session"]
   assert widget["session_id"] == _SESSION_ID
   assert widget["eval_id"] == _EVAL_ID
+  # The EXAMPLE narrative predates the G1 freeze and hardcodes the
+  # mechanical flag ids as its categories — correct for an example pack.
   assert tuple(widget["taxonomy_categories"]) == (
-      failure_taxonomy.CORE_CATEGORY_IDS
+      failure_taxonomy.MECHANICAL_FLAGS
   )
   mapping = data["example_mapping"]
   assert mapping["missing_completion"] == "finalization"
@@ -327,32 +331,37 @@ def test_taxonomy_seed_fixture_maps_this_session_without_freezing() -> None:
     assert seeded in _SANA_CATEGORIES
 
 
-def test_example_mapping_never_touches_the_production_scaffold() -> None:
-  # The pack's SANA-seeded names must live only in the fixtures: the
-  # production scaffold module stays unfrozen and unchanged.
-  assert failure_taxonomy.SCAFFOLD_TAXONOMY_VERSION == "0.0.0-scaffold"
-  assert failure_taxonomy.CORE_CATEGORY_IDS == (
-      "process_failed",
-      "missing_completion",
-      "score_failed",
-  )
-  config = failure_taxonomy.scaffold_taxonomy_config()
-  assert config["g1_frozen"] is False
-  assert config["taxonomy_version"] == "0.0.0-scaffold"
+def test_example_pack_stays_example_while_production_is_frozen() -> None:
+  # The pack stays illustrative (example: true, g1_frozen: false — the
+  # _fixture helper asserts both) while production froze G1 at v0.1.0.
+  # The example fixtures are NOT the freeze artifacts; the real freeze
+  # lives in examples/fixtures/week0_real_*.json and failure_taxonomy.py.
+  for name in (
+      "week0_example_partner.json",
+      "week0_example_rubric.json",
+      "week0_example_d4_memo.json",
+      "week0_example_preregistration.json",
+      "week0_example_taxonomy_seed.json",
+  ):
+    _fixture(name)
+  assert failure_taxonomy.TAXONOMY_VERSION == "0.1.0"
+  config = failure_taxonomy.taxonomy_config()
+  assert config["g1_frozen"] is True
+  assert config["taxonomy_version"] == "0.1.0"
   assert config["dialects"] == []
   category_names = {
       category["name"]
       for metric in config["metrics"]
       for category in metric["categories"]
   }
-  assert category_names == set(failure_taxonomy.CORE_CATEGORY_IDS)
-  assert not category_names.intersection(_SANA_CATEGORIES)
-  # And as source text: g1_frozen stays False, no frozen SANA vocabulary.
+  assert category_names == set(_SANA_CATEGORIES) | {"unknown"}
+  # The example pack's mapping agrees with the frozen FLAG_TO_CATEGORY,
+  # so the story it tells matches what production now does.
+  seed = json.loads(
+      (_FIXTURE_DIR / "week0_example_taxonomy_seed.json").read_text()
+  )
+  assert seed["example_mapping"] == dict(failure_taxonomy.FLAG_TO_CATEGORY)
+  # And as source text: the freeze is in the production module.
   source = _TAXONOMY_SRC.read_text()
-  assert '"g1_frozen": False' in source
-  assert '"g1_frozen": True' not in source
-  assert 'SCAFFOLD_TAXONOMY_VERSION = "0.0.0-scaffold"' in source
-  # The module docstring's disclaimer mentions SANA only to say its
-  # categories "do not appear here" — no seeded name may appear at all.
-  for name in _SANA_CATEGORIES:
-    assert name not in source
+  assert '"g1_frozen": True' in source
+  assert 'TAXONOMY_VERSION = "0.1.0"' in source

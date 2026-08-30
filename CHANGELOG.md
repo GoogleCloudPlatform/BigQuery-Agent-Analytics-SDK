@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **REAL Week 0 freeze: partner, D4 boundary, G1 taxonomy v0.1 (#435)** —
+  the Week 0 gates are frozen for real, distinct from the EXAMPLE pack
+  below (which stays illustrative). `docs/week0_partner.md` records the
+  real pilot partner — Google Cloud BigQuery Agent Analytics (this SDK),
+  piloting the ADK `support_agent` traces as EvalBench job
+  `mvp-e2e-real-traces`; SANA-adjacent, not a SANA fork and not a named
+  collaboration with SANA authors, not duplicating LakeQA/KramaBench.
+  `docs/week0_d4_memo.md` lands the fail-closed D4 boundary for exactly
+  this pilot's datasets with one named report consumer (Hai-Yuan Cao) and
+  a text-only grants policy (no IAM API calls); fixtures/synthetic runs
+  validate ingestion, taxonomy mechanics, and stability ONLY and never
+  produce a Part II funding recommendation. `docs/week0_g1_taxonomy.md`
+  documents the G1 freeze (below) and `docs/week0_preregistration.md`
+  copies the v4 floors as the freeze-candidate. Machine-readable copies in
+  `examples/fixtures/week0_real_*.json` (`example: false`,
+  `clock_started: false`), guarded by `tests/test_week0_real_freeze.py`.
+  **The six-week clock has NOT started**: it starts only when the first
+  Week 1 snapshot job is kicked, not at merge of this freeze.
 - **EXAMPLE Week 0 scenario pack (#435 slice 10)** — new
   `examples/evalbench_week0_full_idea.md` / `.sh --fixture` walk all five
   Week 0 human gates of `docs/agentforensics_mvp_plan.md` (partner + SANA
@@ -123,6 +141,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ETag-conditional replace after re-reading the view and latest manifest,
   so concurrent imports cannot overwrite a newer pin or attach an older
   caller's policy to a newer generation.
+
+### Changed
+
+- **`failure_taxonomy` frozen at G1 v0.1.0 (#435)** — the scaffold era
+  ends: `taxonomy_version` is `0.1.0` and `g1_frozen` is `true`. The
+  frozen vocabulary (`FROZEN_CATEGORY_NAMES`, also exported as
+  `CORE_CATEGORY_IDS`) is the SANA-neighborhood seven plus `unknown` —
+  `task/planning`, `wrong source`, `execution/computation`,
+  `incomplete evidence`, `turn-waste`, `finalization`, `tool blockers`,
+  `unknown` — replacing the three flag ids, which live on as the mapper's
+  input contract `MECHANICAL_FLAGS`. `categorize_failed_session` now
+  returns frozen names in frozen order (`missing_completion` →
+  `finalization`, `process_failed` → `tool blockers`, `score_failed` →
+  `task/planning`; all flags false still returns `()`, never `unknown`),
+  so `EvalBenchSession.taxonomy_categories` and the
+  `evalbench-failed-sessions` CLI output carry frozen names. The config
+  accessor is renamed `taxonomy_config()`; `scaffold_taxonomy_config()`
+  remains as a compatibility wrapper returning the same frozen config.
+  Assignment stays mechanical until the labeler study; the six-week clock
+  has not started.
 
 ## [0.5.1] - 2026-08-29
 

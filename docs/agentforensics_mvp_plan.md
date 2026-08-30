@@ -23,16 +23,39 @@ three rounds of review; the issue body points here.
 Those slices build the Week 1–2 substrate; they do not start the clock and do
 not touch the partner job, the D4 boundary, taxonomy content, or live traces.
 
-A mechanical taxonomy *scaffold* also exists
-(`src/bigquery_agent_analytics/failure_taxonomy.py`): it maps the landed
-failed-session flags (`process_failed` / `missing_completion` /
-`score_failed`) to a versioned config (`0.0.0-scaffold`, `g1_frozen: false`)
-with an empty D2 dialects slot. The failed-session consumer now uses it:
+**G1 is frozen at v0.1.0 in `failure_taxonomy.py`**
+(`src/bigquery_agent_analytics/failure_taxonomy.py`, `g1_frozen: true`): the
+frozen vocabulary is the SANA-neighborhood seven plus `unknown`
+(`docs/week0_g1_taxonomy.md`). Assignment stays mechanical until the labeler
+study: the landed failed-session flags (`process_failed` /
+`missing_completion` / `score_failed`) map to `tool blockers` /
+`finalization` / `task/planning`, returned in frozen order, and the D2
+dialects slot stays empty. The failed-session consumer uses it:
 `failed_sessions` / `bq-agent-sdk evalbench-failed-sessions` attach the
-mechanical categories to each session row as `taxonomy_categories`, computed
-in Python from the row's flags. It is **not** G1 — no category names are
-frozen, the six-week clock has still not started, and the partner job, D4
-boundary, and live-trace ingestion remain parked.
+frozen names to each session row as `taxonomy_categories`, computed in
+Python from the row's flags.
+
+**Week 0 partner, D4 boundary, and G1 are frozen** by the Week 0 freeze PR:
+`docs/week0_partner.md` (real partner: Google Cloud BigQuery Agent
+Analytics — this SDK — piloting the ADK `support_agent` traces via EvalBench
+job `mvp-e2e-real-traces`), `docs/week0_d4_memo.md` (fail-closed, named
+consumer Hai-Yuan Cao only), and `docs/week0_g1_taxonomy.md`, with
+machine-readable copies in `examples/fixtures/week0_real_*.json`
+(`example: false`). The remaining Week 0 item is **preregistration
+execution**; `docs/week0_preregistration.md` carries the v4 floors as the
+freeze-candidate. **The six-week clock has still not started**: it starts
+only when the first Week 1 snapshot job is kicked, not at merge of the
+freeze.
+
+An **example scenario pack** also exists
+(`examples/evalbench_week0_full_idea.md`, run with
+`bash examples/evalbench_week0_full_idea.sh --fixture`): it demonstrates
+every Week 0 human gate below as one concrete story on the widget-stock
+failed session. Everything in it is labeled EXAMPLE / illustrative / not a
+freeze — its fixtures keep `example: true` / `g1_frozen: false` and its
+partner is the fictional "Acme Retail Support". The pack **remains
+illustrative** now that the real freeze landed; the real artifacts are the
+`week0_*.md` docs and `week0_real_*.json` fixtures above.
 
 ---
 
