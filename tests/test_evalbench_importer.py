@@ -2251,6 +2251,13 @@ _TARGET = {"target_project": "analytics-project", "target_dataset": "bqaa"}
 _VIEW_REF = "analytics-project.bqaa.evalbench_failed_sessions"
 _PIN_LINE = "-- evalbench_failed_sessions pin: "
 _T1 = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+
+
+def _pin_ts(moment: datetime) -> str:
+  """How the view pin records a manifest generation: UTC, microseconds."""
+  return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 _WRONG_RESULT = {
     "eval_id": "wrong-1",
     "prompt": "Completed but wrong answer",
@@ -2295,7 +2302,7 @@ def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
   fake = _FakeWriteClient()
 
   result = _scored_run().materialize(
-      **_TARGET, import_version="v1", bq_client=fake
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
   )
 
   assert result.failed_sessions_view == _VIEW_REF
@@ -2314,6 +2321,7 @@ def test_materialize_pins_failed_sessions_view_to_the_published_version() -> (
   assert _full_pin(fake) == {
       "job_id": "job-123",
       "import_version": "v1",
+      "imported_at": _pin_ts(_T1),
       "policy": None,
   }
   # The body is failed_sessions_sql pinned as literals: no parameters, and
@@ -2447,6 +2455,7 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
             + json.dumps(
                 {
                     "import_version": "v1",
+                    "imported_at": _pin_ts(_T1),
                     "job_id": "job-123",
                     "policy": None,
                     "query_sha256": "0" * 64,
@@ -2457,14 +2466,33 @@ def test_materialize_refuses_a_view_pinned_to_another_job() -> None:
         # A pin without a policy field over foreign SQL.
         _FakeView(
             _PIN_LINE
-            + json.dumps({"import_version": "v1", "job_id": "job-123"})
+            + json.dumps(
+                {
+                    "import_version": "v1",
+                    "imported_at": _pin_ts(_T1),
+                    "job_id": "job-123",
+                }
+            )
+            + "\nSELECT 1"
+        ),
+        # A pin without a generation over foreign SQL.
+        _FakeView(
+            _PIN_LINE
+            + json.dumps(
+                {"import_version": "v1", "job_id": "job-123", "policy": None}
+            )
             + "\nSELECT 1"
         ),
         # A pin comment and nothing else.
         _FakeView(
             _PIN_LINE
             + json.dumps(
-                {"import_version": "v1", "job_id": "job-123", "policy": None}
+                {
+                    "import_version": "v1",
+                    "imported_at": _pin_ts(_T1),
+                    "job_id": "job-123",
+                    "policy": None,
+                }
             )
         ),
     ],
@@ -2513,8 +2541,17 @@ def test_materialize_refuses_a_forged_marker_copied_from_a_managed_view() -> (
     _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
   assert fake.view_writes == before
 
-  # Only whitespace differs: still the importer's definition.
+  # Reformatted whitespace is not the importer's text either: BigQuery
+  # returns view_query verbatim, and whitespace inside a rendered literal
+  # is significant (see the literal-whitespace test below), so the check
+  # is byte-for-byte.
   fake.store.write_view(_VIEW_REF, pin_line + "\n  " + "  ".join(query.split()))
+  with pytest.raises(ValueError, match="definition was changed"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
+
+  # The genuine text is recognized, and a no-op re-import writes nothing.
+  fake.store.write_view(_VIEW_REF, genuine)
   result = _scored_run().materialize(
       **_TARGET, import_version="v1", bq_client=fake
   )
@@ -2846,7 +2883,7 @@ def test_materialize_refuses_a_pin_with_a_malformed_policy(policy) -> None:
   fake = _FakeWriteClient()
   _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
   _, query = fake.store.views[_VIEW_REF].split("\n", 1)
-  pin = {"import_version": "v1", "job_id": "job-123", "policy": policy}
+  pin = {**_full_pin(fake), "policy": policy}
   fake.store.write_view(_VIEW_REF, _PIN_LINE + json.dumps(pin) + "\n" + query)
   before = list(fake.view_writes)
   with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
@@ -2921,6 +2958,7 @@ def test_materialize_etag_retry_never_applies_a_stale_policy_to_a_newer_version(
   assert [kind for kind, _, _ in fake_v2.view_writes] == ["update"]
   assert _full_pin(fake_v1) == {
       "import_version": "v2",
+      "imported_at": _pin_ts(_T1 + timedelta(hours=2)),
       "job_id": "job-123",
       "policy": None,
   }
@@ -2962,6 +3000,7 @@ def test_materialize_older_version_advances_a_stale_view_without_its_policy() ->
   assert result.status == "unchanged"
   assert _full_pin(fake) == {
       "import_version": "v2",
+      "imported_at": _pin_ts(_T1 + timedelta(hours=1)),
       "job_id": "job-123",
       "policy": {
           "min_scores": {"goal_completion": 0.9},
@@ -3008,11 +3047,153 @@ def test_materialize_older_version_creates_a_missing_view_without_a_gate() -> (
   assert result.failed_sessions_view == _VIEW_REF
   assert _full_pin(fake) == {
       "import_version": "v2",
+      "imported_at": _pin_ts(_T1 + timedelta(hours=1)),
       "job_id": "job-123",
       "policy": None,
   }
   assert "min_score" not in fake.store.views[_VIEW_REF]
   assert [kind for kind, _, _ in _view_writes(fake)] == ["create"]
+
+
+def test_materialize_refuses_a_view_whose_literal_whitespace_changed() -> None:
+  """Whitespace inside a rendered literal is significant: ``job_id =
+  "job  x"`` and ``job_id = "job x"`` read different rows. A foreign view
+  that keeps the genuine pin but collapses the literal is not the
+  importer's definition; it must be refused (and never accepted as an
+  ``unchanged`` no-op that leaves the wrong literal in place)."""
+  run = dataclasses.replace(_scored_run(), job_id="job  x")
+  fake = _FakeWriteClient()
+  run.materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  genuine = fake.store.views[_VIEW_REF]
+  pin_line, query = genuine.split("\n", 1)
+  assert 'job_id = "job  x"' in query
+  before = list(fake.view_writes)
+
+  forged = pin_line + "\n" + query.replace('"job  x"', '"job x"')
+  assert forged != genuine
+  fake.store.write_view(_VIEW_REF, forged)
+  with pytest.raises(ValueError, match="definition was changed"):
+    run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  with pytest.raises(ValueError, match="definition was changed"):
+    run.materialize(**_TARGET, import_version="v2", bq_client=fake)
+  assert fake.store.views[_VIEW_REF] == forged
+  assert fake.view_writes == before
+  assert not any(row["import_version"] == "v2" for row in fake.manifest_rows)
+
+  # The genuine text is recognized, and the no-op writes nothing.
+  fake.store.write_view(_VIEW_REF, genuine)
+  result = run.materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert result.status == "unchanged"
+  assert fake.view_writes == before
+
+
+def test_materialize_same_version_replace_race_keeps_the_newer_generations_policy() -> (
+    None
+):
+  """Two ``replace=True`` calls of one version label publish two manifest
+  generations. The older generation's caller (gate 0.9) reads the view and
+  pauses before its replace; the newer generation's caller (no gate) lands
+  and re-pins the view. The version string is the same for both, so
+  authority must be decided by the generation: the delayed caller's
+  replace must neither land its gate over the newer generation nor be
+  accepted on retry."""
+  store = _FakeManifestStore()
+  setup = _FakeWriteClient(store=store)
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=setup
+  )
+  stale_etag = store.view_etags[_VIEW_REF]
+
+  fake_newer = _FakeWriteClient(store=store)
+
+  def newer_generation_lands_first() -> None:
+    result = _scored_run().materialize(
+        **_TARGET,
+        import_version="v1",
+        replace=True,
+        imported_at=_T1 + timedelta(hours=2),
+        bq_client=fake_newer,
+    )
+    assert result.status == "replaced"
+    # Same version, same (absent) gate, same SQL as the view already
+    # carried -- yet a new generation is a new pin, so the view was
+    # rewritten and its ETag moved under the delayed older caller. Without
+    # that, the older caller's conditional replace would land unchallenged.
+    assert [kind for kind, _, _ in fake_newer.view_writes] == ["update"]
+    assert store.view_etags[_VIEW_REF] != stale_etag
+
+  fake_older = _FakeWriteClient(
+      store=store, before_view_write=newer_generation_lands_first
+  )
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      replace=True,
+      imported_at=_T1 + timedelta(hours=1),
+      policy=EvalScorePolicy({"goal_completion": 0.9}),
+      bq_client=fake_older,
+  )
+
+  assert result.status == "replaced"
+  assert result.failed_sessions_view == _VIEW_REF
+  # The older caller's replace hit its ETag check; the retry found the view
+  # pinned to the generation the manifest holds and left it alone.
+  assert fake_older.view_writes == []
+  assert _full_pin(fake_older) == {
+      "import_version": "v1",
+      "imported_at": _pin_ts(_T1 + timedelta(hours=2)),
+      "job_id": "job-123",
+      "policy": None,
+  }
+  assert "0.9 AS min_score" not in store.views[_VIEW_REF]
+  (row,) = store.rows
+  assert row["imported_at"] == (_T1 + timedelta(hours=2)).isoformat()
+
+  # A later same-version call that finds this generation committed is its
+  # import and may set the gate; the delayed caller's gate stays gone.
+  result = _scored_run().materialize(
+      **_TARGET,
+      import_version="v1",
+      policy=EvalScorePolicy({"goal_completion": 0.5}),
+      bq_client=fake_older,
+  )
+  assert result.status == "unchanged"
+  assert _full_pin(fake_older)["imported_at"] == _pin_ts(
+      _T1 + timedelta(hours=2)
+  )
+  assert "0.5 AS min_score" in store.views[_VIEW_REF]
+
+
+@pytest.mark.parametrize(
+    "imported_at",
+    [
+        "not a timestamp",
+        # Canonical form only: UTC with microseconds.
+        "2026-05-01T08:00:00+00:00",
+        "2026-05-01T10:00:00.000000+02:00",
+        "2026-05-01T08:00:00.000000Z",
+        1777622400,
+        None,
+    ],
+)
+def test_materialize_refuses_a_pin_with_a_malformed_generation(
+    imported_at,
+) -> None:
+  fake = _FakeWriteClient()
+  _scored_run().materialize(
+      **_TARGET, import_version="v1", imported_at=_T1, bq_client=fake
+  )
+  _, query = fake.store.views[_VIEW_REF].split("\n", 1)
+  pin = {**_full_pin(fake), "imported_at": imported_at}
+  fake.store.write_view(
+      _VIEW_REF, _PIN_LINE + json.dumps(pin, sort_keys=True) + "\n" + query
+  )
+  before = list(fake.view_writes)
+  with pytest.raises(ValueError, match="not an evalbench failed_sessions view"):
+    _scored_run().materialize(**_TARGET, import_version="v1", bq_client=fake)
+  assert fake.view_writes == before
 
 
 def test_failed_sessions_sql_pins_literals_with_escaping() -> None:

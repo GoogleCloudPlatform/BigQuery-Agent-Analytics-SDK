@@ -367,7 +367,7 @@ the definition itself, and the view can never scan another version. The
 view's query text (its description names the pinned version too) is:
 
 ```sql
--- evalbench_failed_sessions pin: {"import_version": "v2", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
+-- evalbench_failed_sessions pin: {"import_version": "v2", "imported_at": "2026-08-30T17:04:11.512034+00:00", "job_id": "abc123", "policy": {"min_scores": {"goal_completion": 0.9}, "missing_score_fails": true}}
 WITH sessions AS (
   SELECT ...
   FROM `analytics-project.bqaa.evalbench_agent_events`
@@ -375,18 +375,23 @@ WITH sessions AS (
   ...
 ```
 
-The pin records the job, the version, and the score policy rendered into
+The pin records the job, the version, the manifest generation it renders
+(`imported_at`, in UTC with microseconds — a `replace=True` of the same
+version label is a new generation), and the score policy rendered into
 the view (`null` without one). Nothing the view says about itself proves
 ownership: the importer treats a view as its own only when the pin names
-a version that job committed to the manifest *and* the body is exactly
-(modulo whitespace) what the importer renders for that manifest row and
-policy. A pin copied or forged onto other SQL (however self-consistent), a
-contract-shaped body for an unpublished version or over other tables, or
-a managed view whose body somebody edited, is a foreign object and is
-refused. The importer never uses `CREATE OR REPLACE VIEW`; it creates the
-view with create-if-absent and replaces it with an ETag-conditional
-update, after re-reading both the view and the latest manifest row
-immediately before writing.
+a version that job committed to the manifest *and* the body is
+byte-for-byte what the importer renders for that manifest row, generation
+and policy. The comparison is exact — BigQuery returns a view's query text
+verbatim, and whitespace inside a rendered literal (`job_id = "job  x"`
+versus `"job x"`) changes which rows the view reads, so no whitespace
+normalization is applied. A pin copied or forged onto other SQL (however
+self-consistent), a contract-shaped body for an unpublished version or
+over other tables, or a managed view whose body somebody edited or
+reformatted, is a foreign object and is refused. The importer never uses
+`CREATE OR REPLACE VIEW`; it creates the view with create-if-absent and
+replaces it with an ETag-conditional update, after re-reading both the
+view and the latest manifest row immediately before writing.
 
 Pinning rules:
 
@@ -398,6 +403,7 @@ Pinning rules:
 | `replace=True` of an older version | re-pinned to it — the replace refreshed `imported_at`, so it *is* the latest successful import |
 | `policy=` / `--min-score` given, changed, or dropped | the score gate is part of the pin: the view is re-rendered whenever the policy differs from the one it carries (including a later same-version call *without* a policy, which removes the gate), and left alone when version and policy both match |
 | `policy=` on a call whose version is **not** the latest import | the gate is decided by the import of the version the view pins: a view already pinned to the latest version is left exactly as it is, and a view that is absent or behind is created or advanced carrying the gate it already had (none for a new view), never this call's |
+| `policy=` on a call whose *generation* is not the one the manifest holds (a concurrent `replace=True` of the same version committed a newer `imported_at`) | as above: the version label does not decide, the generation does. Every generation is rendered into the pin, so the newer replacement always rewrites the view (bumping its ETag) even when version, gate and SQL are otherwise identical; a delayed older caller's conditional replace then fails, re-reads, and leaves the newer generation's gate in place |
 | View at that name pinned to **another job** | `ValueError` before anything is written; use one `failed_sessions_view` name per job |
 | A table, a view the importer did not create, a copied pin over other SQL, or a managed view whose query was edited, at that name | `ValueError` before anything is written (before the import tables are even created); the importer never replaces objects whose definition it cannot vouch for — drop the object or pick another name |
 | Two imports of one job race on the view | the loser of the create race (`409`) or ETag check (`412`) re-reads the view and the latest manifest and re-decides, up to three times, so a delayed writer never overwrites a newer pin — nor re-renders it with its own (older) policy; a race against **another job's** view fails closed with the import already published |
